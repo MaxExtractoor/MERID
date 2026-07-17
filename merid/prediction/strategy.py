@@ -478,10 +478,12 @@ class KalshiStrategy:
             )
         _bankroll_cents = 0
         try:
-            from merid.event_venues.kalshi.position_sizer import get_position_sizer
-            sizer = get_position_sizer()
+            # CRITICAL FIX: Use unified_sizing instead of legacy PositionSizer
+            # Legacy PositionSizer is deprecated for Kalshi 15m crypto and does not enforce $1 cap correctly
+            # unified_sizing.compute_order_size is the production-approved sizing function
+            from merid.prediction.unified_sizing import compute_order_size
 
-            # Convert edge fields to sizer inputs (keep in FRACTION units - single source of truth)
+            # Convert edge fields to sizing inputs
             edge_pct = float(edge.net_edge)  # FRACTION units (0.0-1.0)
             market_prob = float(edge.market_prob)
             
@@ -582,18 +584,10 @@ class KalshiStrategy:
                 _current_band = None
                 _confidence_tier_multiplier = 1.0
             
-            # Apply confidence tier multiplier to size_factor for PositionSizer path
+            # Apply confidence tier multiplier to size_factor for unified_sizing
             size_factor = size_factor * _confidence_tier_multiplier
 
-            # Phase-based vol proxy: terminal contracts are noisier
-            local_vol_pct = {
-                ExpiryPhase.EARLY: 10.0,
-                ExpiryPhase.MID: 15.0,
-                ExpiryPhase.LATE: 20.0,
-                ExpiryPhase.TERMINAL: 35.0,
-            }.get(phase, 15.0)
-
-            logger.warning(
+            logger.debug(
                 "[KELLY_DEBUG] _kelly_size called: agent=%s edge_pct=%.2f phase=%s price_cents=%d",
                 self._agent_name, edge_pct, phase.value if phase else None, price_cents
             )
@@ -682,44 +676,28 @@ class KalshiStrategy:
                 
                 return 0  # Fail closed: no size when bankroll unavailable
 
-            # BUG-E fix: read per-underlying correlated notional to estimate
-            # current open contracts, so the hourly exposure cap actually fires.
-            _current_exposure = 0
-            try:
-                _underlying = (self._agent_name.split("_")[0].upper() if "_" in self._agent_name else self._agent_name.upper())
-                from merid.event_venues.kalshi.category_exposure import (
-                    get_category_exposure_tracker,
-                )
-                _corr_notional = (
-                    get_category_exposure_tracker()
-                    .get_snapshot()
-                    .corr_notional.get(_underlying, 0.0)
-                )
-                if price_cents > 0:
-                    _current_exposure = int(_corr_notional * 100 / price_cents)
-            except Exception:
-                pass
-
-            # BUG-L fix: wire PaperSession IntervalPnL stats and governance
-            # factor into sizer so _pf_scale() gets real data instead of
-            # always returning the minimum 0.125× floor.
-            _profit_factor = 0.0
-            _expectancy_cents = 0.0
-            _total_trades = 0
+            # CRITICAL FIX: unified_sizing enforces $1 global exposure cap via slot allocator
+            # Legacy PositionSizer multipliers (sentiment_vol, cycle_drawdown) are NOT integrated
+            # with window-based risk limits, which could bypass the $1 cap
+            #
+            # unified_sizing.compute_order_size parameters:
+            # - bankroll_usd: Convert from cents to USD
+            # - price_cents: Already in cents
+            # - asset: Extract from market_id (e.g., "KXBTC15M-26JUN24-50000" -> "BTC")
+            # - edge_pct: Edge percentage for Kelly filtering
+            # - model_prob: Market probability for Kelly calculation
+            # - side: Trade side (default "yes" for 15m crypto)
+            #
+            # The function returns (count, notional_usd, metadata_dict)
+            # It enforces the $1 global slot allocator cap internally
+            _asset = self._extract_asset_from_market_id(edge.market_id)
+            _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
+            
+            # Apply governance factor from paper session if available
+            # This propagates halt/downsize state into position sizing
             try:
                 from merid.prediction.paper_session import get_paper_session
                 _ps = get_paper_session()
-                _pil = _ps._intervals.get(self._agent_name)
-                if _pil:
-                    _pf = _pil.profit_factor
-                    _profit_factor = _pf if _pf != float("inf") else 5.0
-                    _expectancy_cents = _pil.expectancy_cents
-                    _total_trades = _pil.total_trades
-                # Governance factor (1.0 / 0.5 / 0.0) multiplied into the
-                # caller-supplied sentiment size_factor so the session halt/
-                # downsize state propagates all the way into position sizing.
-                # BASELINE OVERRIDE (2026-05-11): Allow disabling halt/downsize via env var
-                # for fire-and-forget baseline profile operation.
                 import os
                 if os.getenv("DISABLE_PAPER_SESSION_HALT", "").lower() in ("1", "true", "yes"):
                     _gov = 1.0  # Ignore halt/downsize state
@@ -729,27 +707,25 @@ class KalshiStrategy:
                 size_factor = size_factor * _gov
             except Exception:
                 pass
-
-            size = sizer.compute(
-                agent_name=self._agent_name,
-                edge_pct=edge_pct,
+            
+            # Call unified_sizing to compute order size with $1 cap enforcement
+            count, notional_usd, metadata = compute_order_size(
+                bankroll_usd=_bankroll_usd,
                 price_cents=price_cents,
-                bankroll_cents=_bankroll_cents,
-                local_vol_pct=local_vol_pct,
-                size_factor=max(0.0, min(1.0, size_factor)),
-                current_exposure_contracts=_current_exposure,
-                profit_factor=_profit_factor,
-                expectancy_cents=_expectancy_cents,
-                total_trades=_total_trades,
+                asset=_asset,
+                edge_pct=Decimal(str(edge_pct)),
+                model_prob=market_prob,
+                confidence=Decimal(str(max(0.0, min(1.0, size_factor)))),
+                side="yes",  # 15m crypto defaults to YES side
             )
-            # Apply cycle-level 1-3% bankroll cap across all winners
-            _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
-            # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
-            # FIX: Pass ticker (market_id) to fetch actual price from market state instead of using fallback
-            # _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
-            # _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
-            _hard_cap = self.config.max_contracts_per_order
-            return min(size, _hard_cap)
+            
+            # unified_sizing already enforces $1 cap via slot allocator
+            # No additional hard cap needed - the function returns 0 if no slot available
+            logger.debug(
+                "[UNIFIED-SIZING] agent=%s asset=%s edge=%.4f price=%dc count=%d notional=$%.2f",
+                self._agent_name, _asset, edge_pct, price_cents, count, notional_usd
+            )
+            return count
         except Exception as _sze:
             logger.warning(
                 "position sizer unavailable — falling back to un-gated Kelly "
