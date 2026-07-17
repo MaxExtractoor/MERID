@@ -779,29 +779,44 @@ class PositionMonitor:
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
             store = get_kalshi_market_state_store()
             state = store.get(position.market_id)
-            if state and state.minutes_to_expiry:
-                time_to_expiry = state.minutes_to_expiry * 60.0
+            if state and state.seconds_to_expiry:
+                time_to_expiry = state.seconds_to_expiry
         except Exception as e:
             logger.warning("[POSITION-MONITOR] Could not get time to expiry: %s", e)
         
         # Get recent candles for candle pattern detection
         candles = None
         try:
-            from merid.data.unified_spot_service import get_unified_spot_service
+            from data.unified_spot_service import get_unified_spot_service
             from merid.signals.ta_engine import TAEngine, IndicatorConfig
             
-            # Get asset from market_id
+            # Extract asset from series_ticker (more reliable than market_id string matching)
             asset = None
-            if "BTC" in position.market_id:
-                asset = "BTC"
-            elif "ETH" in position.market_id:
-                asset = "ETH"
-            elif "SOL" in position.market_id:
-                asset = "SOL"
-            elif "XRP" in position.market_id:
-                asset = "XRP"
-            elif "DOGE" in position.market_id:
-                asset = "DOGE"
+            if position.series_ticker:
+                # series_ticker format: KXBTC15M, KXETH15M, etc.
+                if "BTC" in position.series_ticker.upper():
+                    asset = "BTC"
+                elif "ETH" in position.series_ticker.upper():
+                    asset = "ETH"
+                elif "SOL" in position.series_ticker.upper():
+                    asset = "SOL"
+                elif "XRP" in position.series_ticker.upper():
+                    asset = "XRP"
+                elif "DOGE" in position.series_ticker.upper():
+                    asset = "DOGE"
+            
+            # Fallback to market_id if series_ticker not set
+            if not asset:
+                if "BTC" in position.market_id.upper():
+                    asset = "BTC"
+                elif "ETH" in position.market_id.upper():
+                    asset = "ETH"
+                elif "SOL" in position.market_id.upper():
+                    asset = "SOL"
+                elif "XRP" in position.market_id.upper():
+                    asset = "XRP"
+                elif "DOGE" in position.market_id.upper():
+                    asset = "DOGE"
             
             if asset:
                 spot_service = get_unified_spot_service()
@@ -855,18 +870,33 @@ class PositionMonitor:
         # This enables volatility-based hold time multipliers (LOW: 1.0x, NORMAL: 0.75x, HIGH: 0.5x, EXTREME: 0.33x)
         volatility_regime = None
         try:
-            # Extract asset from position
+            # Extract asset from series_ticker (more reliable than market_id string matching)
             asset = None
-            if "BTC" in position.market_id.upper():
-                asset = "BTC"
-            elif "ETH" in position.market_id.upper():
-                asset = "ETH"
-            elif "SOL" in position.market_id.upper():
-                asset = "SOL"
-            elif "XRP" in position.market_id.upper():
-                asset = "XRP"
-            elif "DOGE" in position.market_id.upper():
-                asset = "DOGE"
+            if position.series_ticker:
+                # series_ticker format: KXBTC15M, KXETH15M, etc.
+                if "BTC" in position.series_ticker.upper():
+                    asset = "BTC"
+                elif "ETH" in position.series_ticker.upper():
+                    asset = "ETH"
+                elif "SOL" in position.series_ticker.upper():
+                    asset = "SOL"
+                elif "XRP" in position.series_ticker.upper():
+                    asset = "XRP"
+                elif "DOGE" in position.series_ticker.upper():
+                    asset = "DOGE"
+            
+            # Fallback to market_id if series_ticker not set
+            if not asset:
+                if "BTC" in position.market_id.upper():
+                    asset = "BTC"
+                elif "ETH" in position.market_id.upper():
+                    asset = "ETH"
+                elif "SOL" in position.market_id.upper():
+                    asset = "SOL"
+                elif "XRP" in position.market_id.upper():
+                    asset = "XRP"
+                elif "DOGE" in position.market_id.upper():
+                    asset = "DOGE"
             
             if asset:
                 from data.unified_spot_service import get_unified_spot_service

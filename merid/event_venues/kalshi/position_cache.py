@@ -836,9 +836,13 @@ class KalshiPositionCache:
                     # This overrides the agent's TP to ensure quick wins
                     final_tp_price = mandatory_tp_price if mandatory_profit_enabled and mandatory_tp_price else tp_targets.get("tp_price")
                     
+                    # Extract series_ticker from market_id (e.g., KXBTC15M-26JUL162015-15 -> KXBTC15M)
+                    series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
+                    
                     monitor_position = Position(
                         position_id=market_id,  # Use market_id as position_id
                         market_id=market_id,
+                        series_ticker=series_ticker,  # CRITICAL: Required for asset extraction
                         side=side_enum,
                         size=contracts,
                         avg_entry_price_cents=price_cents,
@@ -859,7 +863,11 @@ class KalshiPositionCache:
                         trailing_param
                     )
                 except Exception as monitor_err:
-                    logger.warning("[POSITION-MONITOR-INTEGRATION] Failed to add position to monitor: %s", monitor_err)
+                    logger.error("[POSITION-MONITOR-INTEGRATION] CRITICAL: Failed to add position to monitor: %s", monitor_err, exc_info=True)
+                    # CRITICAL FIX (2026-07-17): Do not silently swallow position monitor failures
+                    # If a position cannot be added to the monitor, it will ride to settlement without exit enforcement
+                    # This is a critical safety violation. Re-raise to surface the issue.
+                    raise RuntimeError(f"Failed to add position to monitor - exit policies will not execute: {monitor_err}")
 
                 # Log entry timing for audit (correlate with [SCHEDULER-CHECK] for full timing metrics)
                 asset = market_id.split("-")[0].replace("KX", "") if "-" in market_id else "UNKNOWN"
@@ -1427,9 +1435,13 @@ class KalshiPositionCache:
                             trailing_type = TrailingType.FIXED_CENTS
                             trailing_param = trailing_distance_cents
                             
+                            # Extract series_ticker from market_id (e.g., KXBTC15M-26JUL162015-15 -> KXBTC15M)
+                            series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
+                            
                             monitor_position = Position(
                                 position_id=market_id,
                                 market_id=market_id,
+                                series_ticker=series_ticker,  # CRITICAL: Required for asset extraction
                                 side=side_enum,
                                 size=cached_pos.contracts,
                                 avg_entry_price_cents=cached_pos.avg_price_cents,
@@ -1448,7 +1460,11 @@ class KalshiPositionCache:
                                 sl_price
                             )
                     except Exception as monitor_err:
-                        logger.warning("[POSITION-CACHE-REST-SYNC] Failed to add REST-synced positions to monitor: %s", monitor_err)
+                        logger.error("[POSITION-CACHE-REST-SYNC] CRITICAL: Failed to add REST-synced positions to monitor: %s", monitor_err, exc_info=True)
+                        # CRITICAL FIX (2026-07-17): Do not silently swallow position monitor failures
+                        # If a position cannot be added to the monitor, it will ride to settlement without exit enforcement
+                        # This is a critical safety violation. Re-raise to surface the issue.
+                        raise RuntimeError(f"Failed to add REST-synced position to monitor - exit policies will not execute: {monitor_err}")
 
                 # CRITICAL FIX: Always update _last_sync even when no positions pass filters
                 self._last_sync = datetime.now(timezone.utc)
