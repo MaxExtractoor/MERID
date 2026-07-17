@@ -323,13 +323,9 @@ class TestBug10PerStripOrderLimit:
         assert "KXBTC15M" in agent._strip_order_counts
         assert agent._strip_order_counts["KXBTC15M"] == 0
 
-    def test_strip_order_limit_enforcement(self):
-        """Verify strip order limit is enforced."""
-        per_strip_order_limit = 5
-        strip_order_counts = {"KXBTC15M": 5}
-        
-        should_block = strip_order_counts.get("KXBTC15M", 0) >= per_strip_order_limit
-        assert should_block is True
+    # CRITICAL FIX (2026-07-17): Removed test_strip_order_limit_enforcement - $1 exposure cap is the limit
+    # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+    # Per-strip order limits are redundant and contradictory with the $1 cap
 
 
 class TestBug15AssetExtraction:

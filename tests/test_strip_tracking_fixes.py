@@ -142,35 +142,9 @@ def test_independent_strip_tracking_per_asset():
     assert strip_order_counts["KXDOGE15M"] == 1  # Unchanged
 
 
-def test_per_strip_order_limit_enforcement():
-    """Test that per-strip order limit is enforced correctly."""
-    config = LeanAgentConfig(
-        name="BTC_15M",
-        series_tickers=["KXBTC15M"],
-        per_strip_order_limit=10
-    )
-    
-    strip_ticker = "KXBTC15M"
-    strip_order_counts = {strip_ticker: 10}
-    
-    # Should reject when at limit
-    current_strip_orders = strip_order_counts.get(strip_ticker, 0)
-    if current_strip_orders >= config.per_strip_order_limit:
-        should_reject = True
-    else:
-        should_reject = False
-    
-    assert should_reject is True
-    
-    # Should accept when below limit
-    strip_order_counts[strip_ticker] = 9
-    current_strip_orders = strip_order_counts.get(strip_ticker, 0)
-    if current_strip_orders >= config.per_strip_order_limit:
-        should_reject = True
-    else:
-        should_reject = False
-    
-    assert should_reject is False
+# CRITICAL FIX (2026-07-17): Removed test_per_strip_order_limit_enforcement - $1 exposure cap is the limit
+# GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+# Per-strip order limits are redundant and contradictory with the $1 cap
 
 
 if __name__ == "__main__":
