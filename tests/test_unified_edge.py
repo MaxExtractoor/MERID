@@ -456,7 +456,7 @@ class TestPositionSizerCanonicalPath:
         
         edge_result = EdgeResult(
             edge=0.03,
-            edge_risk_adjusted=0.025,
+            edge_risk_adjusted=0.030,  # 2026-07-17: Updated from 0.025 to align with 3% industry standard
             edge_slippage_adjusted=0.022,
             edge_fee_adjusted=edge_fee_adjusted,
             model_prob=expected_q,
@@ -818,7 +818,7 @@ class TestTrapAvoidance:
         
         edge_result = computer.compute_edge("BTC", spot_ref, contract, order_size=1)
         # Manually set strong edge
-        edge_result.net_edge_cents = 2.5  # Above 2% threshold
+        edge_result.net_edge_cents = 3.0  # Above 3% threshold (2026-07-17: updated from 2.5% to align with industry standard)
         
         check_result = computer.check_edge(edge_result, contract, vol_regime="NORMAL")
         

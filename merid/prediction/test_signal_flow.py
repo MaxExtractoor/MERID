@@ -194,26 +194,26 @@ def test_regime_default_fallback():
 
 
 def test_edge_pct_validation():
-    """Test that edge_pct is validated in the flow (ALIGNED TO 2026 INDUSTRY STANDARD: 2% floor)."""
-    # Valid edge_pct (above 2% threshold)
+    """Test that edge_pct is validated in the flow (ALIGNED TO 2026 PROFILE EDGE_BANDS: 3% floor - industry standard)."""
+    # Valid edge_pct (above 3% threshold)
     candidate = {"edge_pct": 5.0}
-    assert candidate["edge_pct"] >= 0.02, "Edge should meet minimum threshold"
+    assert candidate["edge_pct"] >= 0.030, "Edge should meet minimum threshold"
     
-    # Valid edge_pct (at 2% threshold)
-    candidate = {"edge_pct": 0.02}
-    assert candidate["edge_pct"] >= 0.02, "Edge at threshold should be accepted"
+    # Valid edge_pct (at 3% threshold)
+    candidate = {"edge_pct": 0.030}
+    assert candidate["edge_pct"] >= 0.030, "Edge at threshold should be accepted"
     
-    # Invalid edge_pct (below 2% threshold)
-    candidate = {"edge_pct": 0.01}
-    assert candidate["edge_pct"] < 0.02, "Edge below threshold should be rejected"
+    # Invalid edge_pct (below 3% threshold)
+    candidate = {"edge_pct": 0.020}
+    assert candidate["edge_pct"] < 0.030, "Edge below threshold should be rejected"
     
-    # Test 4% upper bound for market entry
+    # Test 4% upper bound for market entry (EDGE_MARKET_ENTRY for taker orders)
     candidate = {"edge_pct": 0.04}
-    assert candidate["edge_pct"] >= 0.02, "Edge at 4% should be accepted for market entry"
+    assert candidate["edge_pct"] >= 0.030, "Edge at 4% should be accepted for market entry"
     
-    # Test edge in 2-4% range (industry standard)
-    candidate = {"edge_pct": 0.03}
-    assert 0.02 <= candidate["edge_pct"] <= 0.04, "Edge in 2-4% range should be accepted"
+    # Test edge in 3-5% range (profile edge_bands small band)
+    candidate = {"edge_pct": 0.04}
+    assert 0.030 <= candidate["edge_pct"] <= 0.05, "Edge in 3-5% range should be accepted"
 
 
 def test_confidence_validation():

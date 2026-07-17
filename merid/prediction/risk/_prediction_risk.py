@@ -855,8 +855,8 @@ class PredictionMarketRisk:
 
         # 10. Post-fee edge minimum (formula is side-aware for binary contracts)
         # BUG-FIX: Default price_cents to 50 if 0 or invalid to avoid post_fee_edge=0
-        # CRITICAL FIX 2026-07-14: Updated threshold from 0.5% to 2.5% to align with profile edge_bands (industry standard)
-        # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
+        # CRITICAL FIX 2026-07-17: Updated threshold from 2.5% to 3% to align with profile edge_bands (industry standard)
+        # Industry standard for Kalshi: 3% raw edge minimum (SimpleFunctions, Market Math, Claw Arbs)
         # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
         _effective_price_cents = price_cents if price_cents > 0 else Decimal("50")
         if edge > 0:
@@ -867,11 +867,11 @@ class PredictionMarketRisk:
             else:
                 payout_per = Decimal("100") - _effective_price_cents  # YES pays 100-price
             post_fee_edge = edge - (fee_per / payout_per) if payout_per > 0 else Decimal("0")
-            if post_fee_edge < Decimal("0.025"):  # ALIGNED TO 2026 PROFILE EDGE_BANDS: 2.5% post-fee edge (industry standard)
+            if post_fee_edge < Decimal("0.030"):  # ALIGNED TO 2026 PROFILE EDGE_BANDS: 3% post-fee edge (industry standard)
                 return PreTradeCheck(
                     allowed=False,
                     action=RiskAction.REJECT,
-                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.025",
+                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.030",
                     market_id=market_id,
                 )
 

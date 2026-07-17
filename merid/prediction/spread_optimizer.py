@@ -309,7 +309,8 @@ class SpreadOptimizer:
         min_edge = max(base_edge, spread_penalty + liquidity_penalty)
         
         # Clamp to reasonable bounds
-        min_edge = max(0.005, min(min_edge, 0.1))  # 0.5% to 10%
+        # 2026-07-17: Raised floor to 3% (industry standard for Kalshi - SimpleFunctions, Market Math, Claw Arbs)
+        min_edge = max(0.030, min(min_edge, 0.1))  # 3% to 10%
         
         return min_edge
     

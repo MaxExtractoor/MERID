@@ -135,11 +135,13 @@ catalog_staleness_enforced: false
 # Controls the signal generation mode for trading decisions.
 # - mean_reversion: Trade against overextensions (RSI overbought/oversold zones)
 # - momentum_fvg: Trade with trend using Fair Value Gaps and Order Book Imbalance
+# - volatility_reversion: Fade extreme panic moves (Turbine research winner - 93/96 profitable, +4.90% mean ROI)
 # - hybrid: Allow both modes (default for maximum opportunity capture)
 # - price_based: Turbine research winner - buy YES when price <= 0.50, sell when price >= 0.70
-# 2026-07-05: Switched to momentum_fvg based on Turbine research - momentum was the only profitable family (78 of 100 strategies)
+# 2026-07-17: Added volatility_reversion based on Turbine 5,000-strategy backtest - panic_fade was 93/96 profitable
 # Turbine research showed mean reversion failed completely (0 for 432 variants) on 15-minute markets
-signal_mode: hybrid  # Options: mean_reversion, momentum_fvg, hybrid, price_based, trend - 2026-07-15: Changed to hybrid to enable panic fade (price_based) as secondary strategy - Turbine research winner (+56.6% ROI)
+# Volatility reversion (panic_fade) is the current winning archetype on KXBTC15M
+signal_mode: volatility_reversion  # Options: mean_reversion, momentum_fvg, volatility_reversion, hybrid, price_based, trend - 2026-07-17: Switched to volatility_reversion (panic_fade) based on Turbine research - 93/96 profitable variants
 
 # ── Phase 1 Profitability Enhancements ─────────────────────────────────────────
 # YES/NO Sum Arbitrage, Market Making, and Correlation Tracking
@@ -977,26 +979,46 @@ confidence:
 # 4. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
 edge_bands:
   enabled: true  # Enable tiered edge band logic
-  # 2026-07-14: RAISED to 2.5% minimum based on industry research
-  # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
+  # 2026-07-17: RAISED to 3.0% minimum based on industry research (SimpleFunctions, Market Math, Claw Arbs)
+  # Industry standard for Kalshi: 3% net edge minimum after fees
   # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
   # Practical minimum: +2¢ to +3¢ per contract after fees
   # Reference: https://marketmath.io/blog/prediction-market-strategy
+  # 2026-07-17: Added per-asset edge thresholds based on MQL5 research (universal models fail across different statistical regimes)
+  # Higher volatility assets (DOGE, XRP) need wider thresholds to avoid noise-triggered trades
   watch_band:
-    min_edge_pct: 0.025  # 2.5% minimum edge for watch band (RAISED from 0.5% - industry standard)
-    max_edge_pct: 0.025  # 2.5% maximum edge for watch band (unified with min for consistency)
+    min_edge_pct: 0.030  # 3.0% minimum edge for watch band (RAISED from 2.5% - industry standard)
+    max_edge_pct: 0.030  # 3.0% maximum edge for watch band (unified with min for consistency)
     action: "log_only"  # Log candidates but don't trade
     kelly_multiplier: 0.0  # No sizing in watch band
   small_band:
-    min_edge_pct: 0.025  # 2.5% minimum edge for small band (RAISED from 0.5% - industry standard)
-    max_edge_pct: 0.05  # 5% maximum edge for small band (RAISED from 1% - better band separation)
+    min_edge_pct: 0.030  # 3.0% minimum edge for small band (RAISED from 2.5% - industry standard)
+    max_edge_pct: 0.05  # 5% maximum edge for small band
     action: "trade_small"  # Trade with reduced size
     kelly_multiplier: 0.25  # 0.25x Kelly for small band
   standard_band:
-    min_edge_pct: 0.025  # 2.5% minimum edge for standard band (RAISED from 0.5% - industry standard)
+    min_edge_pct: 0.030  # 3.0% minimum edge for standard band (RAISED from 2.5% - industry standard)
     max_edge_pct: 1.0  # No upper limit
     action: "trade_standard"  # Trade with standard size
     kelly_multiplier: 0.50  # 0.5x Kelly for standard band
+  # Per-asset edge thresholds (2026-07-17: Based on MQL5 research - asset-specific tuning required)
+  # Higher volatility assets need wider thresholds to avoid noise-triggered trades
+  per_asset:
+    BTC:
+      min_edge_pct: 0.030  # 3.0% - Lower volatility, tighter threshold
+      max_edge_pct: 1.0
+    ETH:
+      min_edge_pct: 0.030  # 3.0% - Medium volatility
+      max_edge_pct: 1.0
+    SOL:
+      min_edge_pct: 0.035  # 3.5% - Higher volatility, wider threshold
+      max_edge_pct: 1.0
+    XRP:
+      min_edge_pct: 0.040  # 4.0% - Higher volatility, wider threshold
+      max_edge_pct: 1.0
+    DOGE:
+      min_edge_pct: 0.045  # 4.5% - Highest volatility, widest threshold
+      max_edge_pct: 1.0
   
   # Optional: Override Kelly multipliers for this profile
   # If set, these override crypto_threshold_matrix.yaml

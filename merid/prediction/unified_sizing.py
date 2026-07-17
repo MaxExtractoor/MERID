@@ -1,14 +1,18 @@
 """Unified order sizing for Kalshi 15m crypto trading.
 
-This module provides a single source of truth for order size computation,
-replacing hardcoded sizing (e.g., $1.00) with bankroll-aware, profile-based sizing.
+This module provides a single source of truth for order size computation
+under the fixed $1 total exposure model (global slot allocator).
 
 The sizing function:
-- Reads bankroll from live Kalshi balance
-- Applies risk percentage from profile config
-- Respects per-asset caps from profile
-- Enforces global caps (max_single_order_pct, max_total_notional_pct)
+- Applies Kelly-criterion edge filtering (rejects no-edge trades)
+- Reads existing exposure from the global slot allocator ($1 cap authority)
+- Allows at most 1 contract per order when a slot is available
 - Returns integer contract count and computed notional
+
+2026-07-16: All percentage-based sizing (bankroll_cap_pct, per-asset
+max_notional_pct, max_single_order_pct, per_trade_risk_pct) has been PRUNED.
+The $1 global slot allocator (merid/risk/global_slot_allocator.py) is the
+single source of truth for exposure allocation.
 
 This is the ONLY place where order size is computed for 15m agents.
 All other code should use this function or validate against its output.
@@ -67,7 +71,7 @@ def _get_regime_position_size_multiplier() -> float:
     This prevents regime detection failures from silently blocking all trading
     
     CRITICAL FIX: 2026-07-06 - Added guard to prevent regime sizing from interfering with risk limits
-    Regime sizing is DISABLED to prevent interference with 3% per asset / 5% per 15m window limits.
+    Regime sizing is DISABLED to prevent interference with the $1 fixed exposure model.
     If re-enabled in the future, this guard ensures:
     1. Multiplier is never <= 0.0 (would block all trades)
     2. Multiplier is clamped to safe range [0.1, 1.0]
@@ -77,11 +81,11 @@ def _get_regime_position_size_multiplier() -> float:
         Multiplier between 0.0 and 1.0. Returns 1.0 if regime detection unavailable.
     """
     # CRITICAL: Regime sizing is DISABLED to prevent interference with risk limits
-    # DISABLED REASON: Regime-based multipliers could cause oversizing beyond 3% per asset / 5% per 15m window limits
+    # DISABLED REASON: Regime-based multipliers could cause oversizing beyond the $1 global slot allocator cap
     # RE-ENABLE RISKS: If re-enabled without updating risk envelope, positions could exceed hard risk limits
     # RE-ENABLE REQUIREMENTS:
     #   1. Update kalshi_crypto_15m_risk_envelope.py to apply regime_multiplier to risk limits
-    #   2. Ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+    #   2. Ensure the $1 fixed exposure cap (global slot allocator) is still respected after multiplier
     #   3. Add validation to prevent regime_multiplier > 1.0 from causing oversizing
     #   4. Test with various regime multipliers to verify limits are respected
     return 1.0
@@ -129,7 +133,7 @@ def _get_regime_position_size_multiplier() -> float:
 def _get_tte_position_size_multiplier(tte_seconds: Optional[float] = None) -> float:
     """Get position size multiplier from TTE regime.
     
-    DISABLED: TTE sizing interferes with 3% per asset / 5% per 15m window limits.
+    DISABLED: TTE sizing interferes with the $1 fixed exposure model (global slot allocator).
     Always returns 1.0 to prevent TTE-based scaling from interfering with risk limits.
     
     This reads from merid.risk.tte_regime.TTERegimeConfig size multipliers:
@@ -145,11 +149,11 @@ def _get_tte_position_size_multiplier(tte_seconds: Optional[float] = None) -> fl
         Multiplier between 0.0 and 1.0. Returns 1.0 if TTE regime unavailable or tte_seconds is None.
     """
     # CRITICAL: TTE sizing is DISABLED to prevent interference with risk limits
-    # DISABLED REASON: Time-to-expiry multipliers could cause oversizing beyond 3% per asset / 5% per 15m window limits
+    # DISABLED REASON: Time-to-expiry multipliers could cause oversizing beyond the $1 global slot allocator cap
     # RE-ENABLE RISKS: If re-enabled without updating risk envelope, positions could exceed hard risk limits
     # RE-ENABLE REQUIREMENTS:
     #   1. Update kalshi_crypto_15m_risk_envelope.py to apply tte_multiplier to risk limits
-    #   2. Ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+    #   2. Ensure the $1 fixed exposure cap (global slot allocator) is still respected after multiplier
     #   3. Add validation to prevent tte_multiplier > 1.0 from causing oversizing
     #   4. Test with various TTE values to verify limits are respected
     return 1.0
@@ -164,7 +168,7 @@ def _get_time_of_day_multiplier(asset: str) -> float:
     
     FUTURE RE-ENABLEMENT: When re-enabling, must:
       1. Update kalshi_crypto_15m_risk_envelope.py to apply time_of_day_multiplier to risk limits
-      2. Ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+      2. Ensure the $1 fixed exposure cap (global slot allocator) is still respected after multiplier
       3. Add validation to prevent time_of_day_multiplier > 1.0 from causing oversizing
       4. Test with various time-of-day multipliers to verify limits are respected
     
@@ -307,94 +311,9 @@ def compute_min_notional_for_venue(
 # Configuration Sources
 # =============================================================================
 
-def _get_bankroll_cap_pct() -> Decimal:
-    """Get bankroll cap percentage from profile config.
-    
-    This reads from kalshi_crypto_15m.yaml venue.bankroll_cap_pct.
-    
-    PRODUCTION: If profile is unavailable, this fails (no silent fallback).
-    """
-    if not _PROFILE_AVAILABLE:
-        logger.error(
-            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
-            "profile initialization failed, order sizing unavailable"
-        )
-        raise RuntimeError("Profile adapter required for production sizing")
-    
-    try:
-        if is_profile_active():
-            adapter = get_active_profile()
-            profile = adapter.profile
-            return Decimal(str(profile.venue_bankroll_cap_pct))
-        else:
-            logger.error(
-                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
-                "profile not activated, order sizing unavailable"
-            )
-            raise RuntimeError("Active profile required for production sizing")
-    except Exception as e:
-        logger.error(
-            "[UNIFIED-SIZING] Failed to read bankroll_cap_pct from profile: %s - "
-            "profile read failed, order sizing unavailable",
-            e
-        )
-        raise RuntimeError(f"Profile read failed: {e}") from e
-
-
-def _get_per_asset_risk_pct(asset: str) -> Optional[Decimal]:
-    """Get per-asset risk percentage from profile config.
-    
-    This reads from kalshi_crypto_15m.yaml per-asset max_notional_pct.
-    
-    Args:
-        asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE", or "BTC15M", "ETH15M", etc.)
-    
-    Returns:
-        Risk percentage as Decimal, or None to use global cap
-    
-    PRODUCTION: If profile is unavailable, this fails (no silent fallback).
-    """
-    if not _PROFILE_AVAILABLE:
-        logger.error(
-            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
-            "profile initialization failed, per-asset risk pct unavailable"
-        )
-        raise RuntimeError("Profile adapter required for production sizing")
-    
-    try:
-        if is_profile_active():
-            adapter = get_active_profile()
-            profile = adapter.profile
-            
-            # CRITICAL FIX: Normalize asset name by stripping "15M" suffix
-            # Profile config uses keys like "BTC", "ETH", "SOL", "XRP", "DOGE"
-            # But callers may pass "BTC15M", "ETH15M", etc.
-            asset_normalized = asset.replace("15M", "") if asset.endswith("15M") else asset
-            
-            asset_config = profile.asset_configs.get(asset_normalized)
-            if asset_config:
-                return Decimal(str(asset_config.max_notional_pct))
-            else:
-                logger.warning(
-                    "[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using global cap",
-                    asset, asset_normalized
-                )
-                return None
-        else:
-            logger.error(
-                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
-                "profile not activated, per-asset risk pct unavailable"
-            )
-            raise RuntimeError("Active profile required for production sizing")
-    except Exception as e:
-        logger.error(
-            "[UNIFIED-SIZING] Failed to read per-asset risk pct from profile: %s - "
-            "profile read failed, per-asset risk pct unavailable",
-            e
-        )
-        raise RuntimeError(f"Profile read failed: {e}") from e
-    
-    return None
+# 2026-07-16: _get_bankroll_cap_pct and _get_per_asset_risk_pct REMOVED.
+# Percentage-based sizing is PRUNED - the $1 global slot allocator
+# (merid/risk/global_slot_allocator.py) is the single source of truth.
 
 
 def _get_fractional_contract_override_threshold() -> float:
@@ -424,38 +343,7 @@ def _get_fractional_contract_override_threshold() -> float:
     return 0.0  # Default to disabled
 
 
-def _get_max_single_order_pct() -> Decimal:
-    """Get max single order percentage from profile config.
-    
-    This reads from kalshi_crypto_15m.yaml venue.max_single_order_pct.
-    
-    PRODUCTION: If profile is unavailable, this fails (no silent fallback).
-    """
-    if not _PROFILE_AVAILABLE:
-        logger.error(
-            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
-            "profile initialization failed, max single order pct unavailable"
-        )
-        raise RuntimeError("Profile adapter required for production sizing")
-    
-    try:
-        if is_profile_active():
-            adapter = get_active_profile()
-            profile = adapter.profile
-            return Decimal(str(profile.venue_max_single_order_pct))
-        else:
-            logger.error(
-                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
-                "profile not activated, max single order pct unavailable"
-            )
-            raise RuntimeError("Active profile required for production sizing")
-    except Exception as e:
-        logger.error(
-            "[UNIFIED-SIZING] Failed to read max_single_order_pct from profile: %s - "
-            "profile read failed, max single order pct unavailable",
-            e
-        )
-        raise RuntimeError(f"Profile read failed: {e}") from e
+# 2026-07-16: _get_max_single_order_pct REMOVED (percentage-based sizing PRUNED).
 
 
 def _get_max_contracts_per_asset(asset: str) -> int:
@@ -493,7 +381,7 @@ def _get_max_contracts_per_asset(asset: str) -> int:
                 return asset_config.max_contracts
             # If asset not in profile, use a conservative default
             logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=1", asset, asset_normalized)
-            return 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit
+            return 1  # Slot model: 1 contract per order ($1 global slot allocator)
         else:
             logger.error(
                 "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
@@ -509,17 +397,21 @@ def _get_max_contracts_per_asset(asset: str) -> int:
         raise RuntimeError(f"Profile read failed: {e}")
 
 
-def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None) -> float:
+def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None, asset: Optional[str] = None) -> float:
     """Get Kelly multiplier from profile config based on edge band.
     
-    This reads from kalshi_crypto_15m.yaml edge_bands configuration.
+    This reads from kalshi_crypto_15m_v2.yaml edge_bands configuration.
     Kelly multipliers are applied to reduce position size based on edge quality:
-    - watch band (0.5% edge): 0.0x Kelly (no trading)
-    - small band (0.5-1% edge): 0.25x Kelly (conservative)
-    - standard band (>1% edge): 0.5x Kelly (standard)
+    - watch band (3% edge): 0.0x Kelly (no trading)
+    - small band (3-5% edge): 0.25x Kelly (conservative)
+    - standard band (>5% edge): 0.5x Kelly (standard)
+    
+    2026-07-17: Updated to 3% minimum based on industry research (SimpleFunctions, Market Math, Claw Arbs)
+    2026-07-17: Added per-asset edge thresholds based on MQL5 research (asset-specific tuning required)
     
     Args:
         edge_pct: Edge percentage (e.g., 0.02 for 2%). If None, returns 0.5x (standard).
+        asset: Asset symbol (e.g., "BTC", "ETH"). If provided, uses per-asset thresholds.
     
     Returns:
         Kelly multiplier as float (e.g., 0.25 for quarter-Kelly).
@@ -545,12 +437,19 @@ def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None) -> float:
             
             edge_pct_float = float(edge_pct)
             
+            # Get per-asset minimum edge if asset is provided
+            min_edge_pct = 0.030  # Default 3% minimum
+            if asset and hasattr(profile, 'edge_bands_per_asset'):
+                per_asset = profile.edge_bands_per_asset
+                if asset in per_asset and hasattr(per_asset[asset], 'min_edge_pct'):
+                    min_edge_pct = float(per_asset[asset].min_edge_pct)
+            
             # Determine edge band based on edge_pct
-            # 2026-07-14: Updated to industry standard (2.5% minimum from Market Math, Beatpoly)
-            # Watch band: 2.5% edge (0.025) - log only
-            if edge_pct_float <= 0.025:
+            # 2026-07-17: Updated to industry standard (3% minimum from SimpleFunctions, Market Math, Claw Arbs)
+            # Watch band: 3% edge (0.030) - log only
+            if edge_pct_float <= min_edge_pct:
                 return 0.0  # No trading in watch band
-            # Small band: 2.5-5% edge (0.025-0.05) - trade with reduced size
+            # Small band: 3-5% edge (0.030-0.05) - trade with reduced size
             elif edge_pct_float <= 0.05:
                 return 0.25  # 0.25x Kelly for small band
             # Standard band: >5% edge (>0.05) - trade with standard size
@@ -564,39 +463,8 @@ def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None) -> float:
         return 0.5  # Default to 0.5x Kelly on error from e
 
 
-def _get_per_trade_risk_pct() -> Decimal:
-    """Get per-trade risk percentage from profile config.
-    
-    This reads from kalshi_crypto_15m.yaml guardrails.per_trade_risk_pct.
-    This is the dedicated per-trade risk control for sizing (not to be confused with edge thresholds).
-    
-    PRODUCTION: If profile is unavailable, this fails (no silent fallback).
-    """
-    if not _PROFILE_AVAILABLE:
-        logger.error(
-            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
-            "profile initialization failed, per-trade risk pct unavailable"
-        )
-        raise RuntimeError("Profile adapter required for production sizing")
-    
-    try:
-        if is_profile_active():
-            adapter = get_active_profile()
-            profile = adapter.profile
-            return Decimal(str(profile.guardrails_per_trade_risk_pct))
-        else:
-            logger.error(
-                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
-                "profile not activated, per-trade risk pct unavailable"
-            )
-            raise RuntimeError("Active profile required for production sizing")
-    except Exception as e:
-        logger.error(
-            "[UNIFIED-SIZING] Failed to read per_trade_risk_pct from profile: %s - "
-            "profile read failed, per-trade risk pct unavailable",
-            e
-        )
-        raise RuntimeError(f"Profile read failed: {e}") from e
+# 2026-07-16: _get_per_trade_risk_pct REMOVED (percentage-based sizing PRUNED).
+# The $1 global slot allocator enforces per-trade exposure (1 contract, 10-75c).
 
 
 def _is_dynamic_sizing_enabled() -> bool:
@@ -696,7 +564,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
         Max contracts as int.
     """
     if not _PROFILE_AVAILABLE:
-        return 1  # CRITICAL FIX (2026-07-08): Reduced from 3 to 1 to enforce 3% risk limit
+        return 1  # Slot model: 1 contract per order ($1 global slot allocator)
     
     try:
         if is_profile_active():
@@ -706,7 +574,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_max_contracts: %s", e)
     
-    return 1  # CRITICAL FIX (2026-07-08): Reduced from 3 to 1 to enforce 3% risk limit
+    return 1  # Slot model: 1 contract per order ($1 global slot allocator)
 
 
 def _get_dynamic_sizing_min_contracts() -> int:
@@ -794,7 +662,7 @@ def calculate_kelly_fraction(
     if kelly <= 0:
         logger.debug(
             "[KELLY] Negative edge: model_prob=%.2f side=%s price=%.2f b=%.2f kelly=%.4f",
-            model_prob, side_lower, price, b, kelly
+            model_prob, side, price, b, kelly
         )
         return 0.0
     
@@ -811,7 +679,7 @@ def calculate_kelly_fraction(
     logger.debug(
         "[KELLY] model_prob=%.2f side=%s price=%.2f b=%.2f kelly=%.4f "
         "fractional=%.4f confidence=%.2f multiplier=%.2f final=%.4f",
-        model_prob, side_lower, price, b, kelly, fractional, confidence, confidence_multiplier, final_kelly
+        model_prob, side, price, b, kelly, fractional, confidence, confidence_multiplier, final_kelly
     )
     
     return final_kelly
