@@ -8,10 +8,11 @@ import asyncio
 import logging
 import threading
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from merid.position_management.position import Position, PositionSide, TrailingType
 from merid.position_management.exit_policy import ExitAction, ExitReason
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver
+from merid.position_management.exit_decision import ExitDecision, ExitSourceLayer, get_priority_for_reason
 
 logger = logging.getLogger(__name__)
 
@@ -980,6 +981,51 @@ class PositionMonitor:
                 current_price_cents
             )
     
+    def _create_exit_decision(
+        self,
+        position: Position,
+        exit_reason: ExitReason,
+        exit_price_cents: int,
+        contracts_to_close: Optional[int] = None,
+        metadata: Optional[dict] = None
+    ) -> ExitDecision:
+        """
+        Create ExitDecision for position-level exit.
+        
+        Args:
+            position: Position to exit
+            exit_reason: Exit reason
+            exit_price_cents: Exit price in cents
+            contracts_to_close: Number of contracts to close (None = full position)
+            metadata: Additional context for debugging
+            
+        Returns:
+            ExitDecision object
+        """
+        if metadata is None:
+            metadata = {}
+        
+        # Add position context to metadata
+        metadata.update({
+            "position_id": position.position_id,
+            "market_id": position.market_id,
+            "side": position.side.value,
+            "entry_price_cents": position.avg_entry_price_cents,
+            "current_price_cents": exit_price_cents,
+            "unrealized_pnl_cents": position.unrealized_pnl_cents,
+            "r_multiple": position.r_multiple,
+            "size": position.size,
+        })
+        
+        return ExitDecision(
+            reason=exit_reason,
+            priority=get_priority_for_reason(exit_reason),
+            source_layer=ExitSourceLayer.POSITION_LEVEL,
+            exit_price_cents=exit_price_cents,
+            contracts_to_close=contracts_to_close,
+            metadata=metadata
+        )
+    
     def _emit_exit_intent(
         self,
         position: Position,
@@ -996,16 +1042,18 @@ class PositionMonitor:
             exit_price_cents: Exit price in cents
             contracts_to_close: Number of contracts to close (None = full position)
         """
-        # Log exit intent emission
+        # Log exit intent emission with structured schema
         if contracts_to_close is None:
             # Full position exit
             logger.info(
-                "[POSITION-MONITOR] EMITTING EXIT INTENT: position=%s market=%s side=%s reason=%s exit_price=%dc "
-                "entry_price=%dc pnl=%dc R=%.2f size=%d (FULL EXIT)",
+                "[EXIT-INTENT] position=%s market=%s side=%s reason=%s priority=%d source=%s "
+                "exit_price=%dc entry_price=%dc pnl=%dc R=%.2f size=%d type=FULL_EXIT",
                 position.position_id[:8],
                 position.market_id,
                 position.side.value,
                 exit_reason.value,
+                get_priority_for_reason(exit_reason).value,
+                "position_level",
                 exit_price_cents,
                 position.avg_entry_price_cents,
                 position.unrealized_pnl_cents,
@@ -1015,12 +1063,14 @@ class PositionMonitor:
         else:
             # Partial position exit (trim)
             logger.info(
-                "[POSITION-MONITOR] EMITTING EXIT INTENT: position=%s market=%s side=%s reason=%s exit_price=%dc "
-                "entry_price=%dc pnl=%dc R=%.2f size=%d -> close %d (PARTIAL TRIM)",
+                "[EXIT-INTENT] position=%s market=%s side=%s reason=%s priority=%d source=%s "
+                "exit_price=%dc entry_price=%dc pnl=%dc R=%.2f size=%d closing=%d type=PARTIAL_EXIT",
                 position.position_id[:8],
                 position.market_id,
                 position.side.value,
                 exit_reason.value,
+                get_priority_for_reason(exit_reason).value,
+                "position_level",
                 exit_price_cents,
                 position.avg_entry_price_cents,
                 position.unrealized_pnl_cents,
