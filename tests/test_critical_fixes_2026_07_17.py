@@ -566,6 +566,155 @@ class TestRiskEnvelopeLogMessageFix:
             "Risk envelope log should NOT use 'per_agent_limit=' (bug - this is misleading)"
 
 
+class TestPositionMonitorWhitelistFix:
+    """Test for position_monitor whitelist fix (2026-07-17)."""
+
+    def test_position_monitor_in_kalshi_15m_crypto_whitelist(self):
+        """Test that position_monitor is in the Kalshi 15m crypto agent whitelist."""
+        from merid.event_venues.kalshi.order_router import _KALSHI_15M_CRYPTO_AGENTS
+        
+        # Verify position_monitor is in the whitelist
+        assert "position_monitor" in _KALSHI_15M_CRYPTO_AGENTS, \
+            "position_monitor should be in _KALSHI_15M_CRYPTO_AGENTS whitelist"
+        
+        # Verify the standard agents are still there
+        assert "BTC_15M" in _KALSHI_15M_CRYPTO_AGENTS
+        assert "ETH_15M" in _KALSHI_15M_CRYPTO_AGENTS
+        assert "SOL_15M" in _KALSHI_15M_CRYPTO_AGENTS
+        assert "XRP_15M" in _KALSHI_15M_CRYPTO_AGENTS
+        assert "DOGE_15M" in _KALSHI_15M_CRYPTO_AGENTS
+
+    def test_is_kalshi_15m_crypto_agent_accepts_position_monitor(self):
+        """Test that _is_kalshi_15m_crypto_agent accepts position_monitor."""
+        from merid.event_venues.kalshi.order_router import _is_kalshi_15m_crypto_agent
+        
+        # Test position_monitor is accepted
+        assert _is_kalshi_15m_crypto_agent("position_monitor") is True, \
+            "position_monitor should be accepted as a valid Kalshi 15m crypto agent"
+        
+        # Test standard agents are still accepted
+        assert _is_kalshi_15m_crypto_agent("BTC_15M") is True
+        assert _is_kalshi_15m_crypto_agent("ETH_15M") is True
+        
+        # Test unauthorized agents are rejected
+        assert _is_kalshi_15m_crypto_agent("unauthorized_agent") is False
+
+
+class TestUnifiedEdgeComputerAPIFix:
+    """Test for UnifiedEdgeComputer API fix in edge_based_exit_evaluator (2026-07-17)."""
+
+    @patch('data.unified_spot_service.UnifiedSpotService.get')
+    @patch('merid.prediction.unified_edge.get_unified_edge_computer')
+    def test_edge_evaluator_uses_correct_api(self, mock_get_computer, mock_get):
+        """Test that edge_based_exit_evaluator uses correct UnifiedEdgeComputer API."""
+        from data.unified_spot_service import UnifiedSpotService, SpotPrice
+        from merid.position_management.edge_based_exit_evaluator import EdgeBasedExitEvaluator
+        from merid.prediction.unified_edge import EdgeResult
+        from datetime import datetime, timezone
+        import time
+        
+        # Mock spot data
+        mock_spot_price = SpotPrice(
+            price=50000.0,
+            timestamp=int(time.time() * 1000),
+            source="coinbase_ticker_hybrid",
+            open=49900.0,
+            high=50100.0,
+            low=49800.0,
+            volume=100.0
+        )
+        mock_get.return_value = mock_spot_price
+        
+        # Mock edge computer
+        mock_computer = Mock()
+        mock_edge_result = EdgeResult(
+            edge=0.05,
+            edge_fee_adjusted=0.03,
+            edge_risk_adjusted=0.04,
+            edge_slippage_adjusted=0.035,
+            model_prob=0.50,
+            market_implied_prob=0.47,
+            spot_ref=None,
+            confidence=0.8,
+            metadata={},
+            raw_edge_cents=5.0,
+            spread_cost_cents=1.0,
+            fee_cost_cents=1.0,
+            net_edge_cents=3.0,
+            ev_per_contract_cents=3.0
+        )
+        mock_computer.compute_edge.return_value = mock_edge_result
+        mock_get_computer.return_value = mock_computer
+        
+        # Create evaluator
+        evaluator = EdgeBasedExitEvaluator()
+        
+        # Create mock position
+        mock_position = Mock()
+        mock_position.market_id = "KXBTC15M-26JUL162015-15"
+        mock_position.series_ticker = "KXBTC15M"
+        mock_position.side = "yes"
+        mock_position.avg_entry_price_cents = 42
+        mock_position.position_id = "test_position_123"
+        
+        # Compute edge
+        edge_pct = evaluator.compute_current_edge(
+            position=mock_position,
+            current_price_cents=45,
+            time_to_expiry_seconds=900.0
+        )
+        
+        # Verify compute_edge was called with correct parameters
+        mock_computer.compute_edge.assert_called_once()
+        call_kwargs = mock_computer.compute_edge.call_args[1]
+        
+        # Verify it uses the correct API (asset, spot_ref, contract, order_size, order_side)
+        assert 'asset' in call_kwargs
+        assert 'spot_ref' in call_kwargs
+        assert 'contract' in call_kwargs
+        assert 'order_size' in call_kwargs
+        assert 'order_side' in call_kwargs
+        
+        # Verify it does NOT use the old API (spot_price, strike_price, yes_price, time_to_expiry)
+        assert 'spot_price' not in call_kwargs, "Should not use old spot_price parameter"
+        assert 'strike_price' not in call_kwargs, "Should not use old strike_price parameter"
+        assert 'yes_price' not in call_kwargs, "Should not use old yes_price parameter"
+        assert 'time_to_expiry' not in call_kwargs, "Should not use old time_to_expiry parameter"
+        
+        # Verify edge was computed
+        assert edge_pct == 0.03  # Should return edge_fee_adjusted
+
+    def test_edge_evaluator_source_code_uses_correct_api(self):
+        """Test that edge_based_exit_evaluator source code uses correct API."""
+        import inspect
+        from merid.position_management.edge_based_exit_evaluator import EdgeBasedExitEvaluator
+        
+        # Get the source code of compute_current_edge method
+        source = inspect.getsource(EdgeBasedExitEvaluator.compute_current_edge)
+        
+        # Verify that SpotReference and ContractState are imported/used
+        assert "SpotReference" in source, "Should use SpotReference"
+        assert "ContractState" in source, "Should use ContractState"
+        
+        # Verify that old API parameters are NOT used in compute_edge call
+        # (strike_price is used in ContractState construction, which is correct)
+        lines = source.split('\n')
+        compute_edge_call_found = False
+        for line in lines:
+            if 'compute_edge(' in line and not line.strip().startswith('#'):
+                compute_edge_call_found = True
+                # Check that old parameters are NOT in the compute_edge call
+                assert 'spot_price=' not in line, "Should not use spot_price= in compute_edge call"
+                assert 'yes_price=' not in line, "Should not use yes_price= in compute_edge call"
+                assert 'time_to_expiry=' not in line, "Should not use time_to_expiry= in compute_edge call"
+        
+        assert compute_edge_call_found, "compute_edge call should be found in source"
+        
+        # Verify new API is used
+        assert "spot_ref=" in source, "Should use spot_ref="
+        assert "contract=" in source, "Should use contract="
+
+
 class TestDuplicateStartupRaceConditionFix:
     """Test for duplicate startup race condition fix (2026-07-17)."""
 

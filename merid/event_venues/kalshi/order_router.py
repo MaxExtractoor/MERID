@@ -1137,6 +1137,7 @@ _KALSHI_15M_CRYPTO_AGENTS: set = {
     "SOL_15M",
     "XRP_15M",
     "DOGE_15M",
+    "position_monitor",  # CRITICAL FIX (2026-07-17): Allow position_monitor to route exit orders
 }
 
 
@@ -1699,6 +1700,13 @@ class OrderResult:
     fill: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
     latency_ms: float = 0.0
+    order_id: Optional[str] = None
+    error: Optional[str] = None
+
+    @property
+    def success(self) -> bool:
+        """Check if order was successful (filled, accepted, or submitted)."""
+        return self.status in ["filled_mock", "filled_paper", "filled_live", "partial_live", "accepted_live", "submitted_live"]
 
 
 # ── Paper fill simulation ─────────────────────────────────────────────────
@@ -7165,10 +7173,11 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         if profile_adapter and profile_adapter.profile:
             profile_name = getattr(profile_adapter.profile, 'profile_name', '')
             if profile_name == 'kalshi_crypto_15m_v2':
-                # Check source - allow agent_grid_15m, kalshi_tools, and offset_hedging for this profile
+                # Check source - allow agent_grid_15m, kalshi_tools, offset_hedging, and position_monitor_exit for this profile
                 # kalshi_tools is used by global allocator for execution (2026-07-10 fix)
                 # offset_hedging is used for hedge orders that reduce net exposure (2026-07-14 fix)
-                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools", "offset_hedging"]
+                # position_monitor_exit is used by position monitor for exit orders (2026-07-17 fix)
+                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools", "offset_hedging", "position_monitor_exit"]
                 if intent.source and not any(allowed in intent.source for allowed in allowed_sources):
                     latency = (_time.monotonic() - t0) * 1000
                     logger.error(

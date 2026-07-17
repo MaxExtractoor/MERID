@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from utils.logger import get_logger
 
@@ -68,17 +69,50 @@ class EdgeBasedExitEvaluator:
                 logger.warning("[EDGE-BASED-EXIT-EVALUATOR] Could not extract entry price from position")
                 return None
             
-            # Compute edge using UnifiedEdgeComputer
+            # CRITICAL FIX (2026-07-17): Use correct UnifiedEdgeComputer API
+            # The compute_edge method expects SpotReference and ContractState, not individual parameters
+            from merid.prediction.unified_edge import SpotReference, ContractState
+            
+            # Construct SpotReference from spot_data
+            spot_ref = SpotReference(
+                asset=asset,
+                price_usd=spot_data.price_usd,
+                timestamp=datetime.now(timezone.utc),
+                source=spot_data.source or "unified_spot_service",
+                is_rti_proxy=True
+            )
+            
+            # Construct ContractState from position data
+            # Extract market_id from position
+            market_id = getattr(position, 'market_id', 'unknown')
+            side = getattr(position, 'side', 'yes')
+            
+            contract_state = ContractState(
+                market_id=market_id,
+                asset=asset,
+                side=side,
+                strike_price=entry_price_cents / 100.0,  # Convert cents to USD
+                mid_price_cents=current_price_cents,
+                time_to_expiry_seconds=time_to_expiry_seconds,
+                ticker=getattr(position, 'series_ticker', '')
+            )
+            
+            # Compute edge using correct API
             edge_result = self._edge_computer.compute_edge(
-                spot_price=spot_data.price_usd,
-                strike_price=entry_price_cents / 100.0,
-                yes_price=current_price_cents / 100.0,
-                time_to_expiry=time_to_expiry_seconds,
-                asset=asset
+                asset=asset,
+                spot_ref=spot_ref,
+                contract=contract_state,
+                order_size=1,
+                order_side="taker"
             )
             
             if edge_result:
-                edge_pct = getattr(edge_result, 'edge_pct', None)
+                # Use edge_fee_adjusted as the final edge for trade decisions
+                edge_pct = getattr(edge_result, 'edge_fee_adjusted', None)
+                if edge_pct is None:
+                    # Fallback to raw edge if fee_adjusted not available
+                    edge_pct = getattr(edge_result, 'edge', None)
+                
                 logger.debug(
                     "[EDGE-BASED-EXIT-EVALUATOR] Computed edge=%.4f for asset=%s position=%s",
                     edge_pct,
