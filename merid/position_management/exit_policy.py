@@ -4,9 +4,9 @@ Exit policy model and resolver for swing trading.
 Defines exit conditions and policy evaluation logic.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict
 from merid.position_management.position import Position
 
 
@@ -18,46 +18,30 @@ class ExitAction(str, Enum):
 
 class ExitReason(str, Enum):
     """
-    Exit reason types.
+    Exit reason types for policy-layer exits.
     
-    CRITICAL FIX: 2026-07-07 - Documented exit precedence order to prevent confusion.
-    CRITICAL FIX: 2026-07-15 - Updated precedence to match actual check order in position_monitor.py
+    This enum contains ONLY the exit reasons handled by ExitPolicy.evaluate().
+    Position-level exits (EXTREME_PROFIT, RATCHET_FLOOR, DYNAMIC_TAKE_PROFIT, etc.)
+    are handled in position_monitor._check_position() before calling this class.
     
-    EXIT PRECEDENCE ORDER (highest to lowest priority):
-    This is the ACTUAL check order in position_monitor._check_position():
+    EXIT POLICY PRECEDENCE (evaluated in this order by ExitPolicy.evaluate()):
+    1. RISK - Global risk layer kill switch (highest priority)
+    2. STALE_DATA - Exit when market data becomes stale (P0 safety fix)
+    3. CANDLE_REVERSAL - Momentum reversal signal
+    4. ADAPTIVE_TIMING - Historical performance-based optimal exit timing
+    5. TIME_STOP - Volatility-adjusted time-based exit
+    6. EDGE_DECAY - Exit when computed edge drops below threshold
     
-    1. EXTREME_PROFIT - Exit at 99c YES / 1c NO (guaranteed win, highest priority)
-    2. DYNAMIC_TAKE_PROFIT - Laddered exit based on entry price zones (user strategy)
-    3. RATCHET_TRIM - Partial close to trim position when >1 contract and price >80c
-    4. RATCHET_FLOOR - Exit when price drops below ratchet floor (80-85c profit protection)
-    5. STOP_LOSS - Stop loss trigger
-    6. TAKE_PROFIT - Take profit trigger
-    7. BREAK_EVEN - Move SL to entry (not an exit, just SL adjustment)
-    8. SCALE_OUT - Partial exit at 1.5-2R (Pay Yourself strategy)
-    9. TRAILING_STOP - Trailing stop activation (not an exit, just activation)
-    10. STAGED-EXIT - Time-based staged partial exits (TIME_STOP variant)
-    11. EXIT_POLICY_EVALUATION - RISK, STALE_DATA, CANDLE_REVERSAL, ADAPTIVE_TIMING, TIME_STOP, EDGE_DECAY
-    
-    NOTE: RISK, STALE_DATA, CANDLE_REVERSAL, ADAPTIVE_TIMING, TIME_STOP, EDGE_DECAY are
-    evaluated via exit_policy.evaluate() in position_monitor._check_position() after the
-    position-level checks above. This is the documented precedence order.
+    NOTE: SCALE_OUT and MANUAL are supported but not evaluated by default policy logic.
     """
-    TAKE_PROFIT = "take_profit"
-    STOP_LOSS = "stop_loss"
-    TRAIL = "trail"
+    RISK = "risk"
+    STALE_DATA = "stale_data"
+    CANDLE_REVERSAL = "candle_reversal"
+    ADAPTIVE_TIMING = "adaptive_timing"
     TIME_STOP = "time_stop"
     EDGE_DECAY = "edge_decay"
-    RISK = "risk"
+    SCALE_OUT = "scale_out"
     MANUAL = "manual"
-    SCALE_OUT = "scale_out"  # Research: Partial exit at 1.5-2R (Pay Yourself strategy)
-    CANDLE_REVERSAL = "candle_reversal"  # Research: Exit on candle pattern reversal
-    LOSS_CAP = "loss_cap"  # 2026 FIX: Exit at 80% loss (PolyTrack research) - DEPRECATED
-    EXTREME_PROFIT = "extreme_profit"  # 2026 FIX: Exit at 99c YES / 1c NO (guaranteed win)
-    RATCHET_FLOOR = "ratchet_floor"  # 2026 FIX: Exit when price drops below ratchet floor (80-85c profit protection)
-    RATCHET_TRIM = "ratchet_trim"  # 2026-07-05: Partial close to trim position when >1 contract and price >80c
-    DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"  # 2026-07-06: Laddered exit based on entry price for consistent profits
-    STALE_DATA = "stale_data"  # 2026-07-11: Exit when market data becomes stale (P0 safety fix)
-    ADAPTIVE_TIMING = "adaptive_timing"  # 2026-07-11: Exit based on historical performance (distinct from generic time_stop)
 
 
 @dataclass
@@ -87,21 +71,17 @@ class ExitPolicy:
     
     # Volatility-based hold time adjustment
     # HIGH vol: shorter holds (300-600s), NORMAL: 600-900s, LOW: 900-1200s
-    volatility_hold_multipliers: dict = None  # Will be set in __post_init__
+    volatility_hold_multipliers: Dict[str, float] = field(default_factory=lambda: {
+        "LOW": 1.0,
+        "NORMAL": 0.75,
+        "HIGH": 0.5,
+        "EXTREME": 0.33,
+    })
     
-    # Outputs
+    # Outputs (deprecated - use evaluate() which returns ExitDecision)
     action: ExitAction = ExitAction.HOLD
     reason: Optional[ExitReason] = None
     
-    def __post_init__(self):
-        """Initialize volatility hold multipliers if not set."""
-        if self.volatility_hold_multipliers is None:
-            self.volatility_hold_multipliers = {
-                "LOW": 1.0,      # 100% of base max_hold (900s)
-                "NORMAL": 0.75,  # 75% of base max_hold (675s)
-                "HIGH": 0.5,     # 50% of base max_hold (450s)
-                "EXTREME": 0.33, # 33% of base max_hold (300s)
-            }
     
     def get_effective_max_hold(self) -> float:
         """
@@ -121,8 +101,10 @@ class ExitPolicy:
         
         Exit if:
         - time_since_entry >= effective_max_hold (volatility-adjusted) AND
-        - r_multiple < 0 (losing position) OR
-        - r_multiple between 0 and +0.5R (no progress)
+        - r_multiple < 0.5 (position not making meaningful progress)
+        
+        This preserves the "don't exit winners too early" principle while making
+        the threshold explicit and unambiguous.
         
         Returns:
             True if time stop should trigger
@@ -132,54 +114,9 @@ class ExitPolicy:
         if self.time_since_entry_seconds < effective_max_hold:
             return False
         
-        # Time stop only triggers if position is not making progress
-        if self.r_multiple < 0:
-            # Losing position - exit to avoid late noise
-            return True
-        elif 0 <= self.r_multiple < 0.5:
-            # No meaningful progress - exit to avoid late noise
-            return True
-        
-        return False
+        # Exit if position is not making meaningful progress (< 0.5R)
+        return self.r_multiple < 0.5
     
-    def evaluate_loss_cap(self) -> bool:
-        """
-        Evaluate loss cap exit condition (2026 best practice).
-        
-        Based on PolyTrack research: "If a trade goes against you and reaches 80% loss
-        (e.g., you bought YES at 50¢, it's now 10¢), consider exiting. The math says
-        you're unlikely to recover."
-        
-        Exit if:
-        - Unrealized PnL is >= 80% loss (current price <= 20% of entry price)
-        
-        Returns:
-            True if loss cap should trigger exit
-        """
-        if self.unrealized_pnl_cents >= 0:
-            # Not a losing position
-            return False
-        
-        # Calculate loss percentage
-        # For binary options: max loss = entry price * size (contracts * entry_price_cents)
-        # Loss percentage = abs(unrealized_pnl) / max_loss
-        try:
-            entry_price_cents = self.position.avg_entry_price_cents
-            if entry_price_cents <= 0:
-                return False
-            
-            max_loss_cents = entry_price_cents * self.position.size  # Total max loss for position
-            loss_pct = abs(self.unrealized_pnl_cents) / max_loss_cents
-            
-            # 2026 FIX: Exit at 80% loss (loss_pct >= 0.80)
-            if loss_pct >= 0.80:
-                return True
-            
-        except Exception as e:
-            # If calculation fails, don't exit based on loss cap
-            pass
-        
-        return False
     
     def evaluate_candle_reversal(self, candles: Optional[List] = None) -> bool:
         """
@@ -316,71 +253,120 @@ class ExitPolicy:
         
         return False
     
-    def evaluate(self, current_edge_pct: Optional[float] = None, candles: Optional[List] = None, md_age_ms: Optional[int] = None, max_age_ms: Optional[float] = None) -> None:
+    def evaluate(self, current_edge_pct: Optional[float] = None, candles: Optional[List] = None, md_age_ms: Optional[int] = None, max_age_ms: Optional[float] = None) -> Optional['ExitDecision']:
         """
-        Evaluate all exit policies and set action/reason.
+        Evaluate all exit policies and return ExitDecision.
         
-        CRITICAL FIX: 2026-07-06 - Documented exit precedence order
-        CRITICAL FIX: 2026-07-06 - Removed LOSS_CAP (counter-productive, break-even handles it)
-        CRITICAL FIX: 2026-07-11 - Added stale data check (P0 safety fix)
-        Priority order (highest to lowest):
-        1. RISK (highest priority - kill switch)
-        2. STALE_DATA (P0 - exit when MD becomes stale)
-        3. EXTREME_PROFIT (99c YES / 1c NO - guaranteed win, mandatory exit)
-        4. RATCHET_FLOOR (profit protection - exit when price drops below ratchet floor)
-        5. CANDLE_REVERSAL (momentum reversal)
-        6. ADAPTIVE_TIMING (historical performance-based)
-        7. TIME_STOP
-        8. EDGE_DECAY
+        This method handles ONLY policy-layer exits. Position-level exits
+        (EXTREME_PROFIT, RATCHET_FLOOR, DYNAMIC_TAKE_PROFIT, etc.) are handled
+        in position_monitor._check_position() before calling this class.
         
-        Note: EXTREME_PROFIT and RATCHET_FLOOR are handled in position_monitor/resolver, not here.
-        This method handles the core exit policy evaluation.
-        Note: LOSS_CAP removed - break-even mechanism in position.py handles capital preservation.
+        EXIT POLICY PRECEDENCE (evaluated in this order):
+        1. RISK - Global risk layer kill switch (highest priority)
+        2. STALE_DATA - Exit when market data becomes stale (P0 safety fix)
+        3. CANDLE_REVERSAL - Momentum reversal signal
+        4. ADAPTIVE_TIMING - Historical performance-based optimal exit timing
+        5. TIME_STOP - Volatility-adjusted time-based exit
+        6. EDGE_DECAY - Exit when computed edge drops below threshold
         
         Args:
             current_edge_pct: Current edge percentage (optional, for edge decay check)
             candles: Recent candle data (optional, for candle reversal check)
             md_age_ms: Current market data age in milliseconds (optional, for stale data check)
             max_age_ms: Maximum allowed age in milliseconds (optional, for stale data check)
+            
+        Returns:
+            ExitDecision if exit should occur, None if hold
         """
+        # Lazy import to avoid circular dependency
+        from merid.position_management.exit_decision import ExitDecision, ExitSourceLayer, get_priority_for_reason
+        
         # Check risk layer first (highest priority)
         if self.evaluate_risk():
             self.action = ExitAction.EXIT_MARKET
             self.reason = ExitReason.RISK
-            return
+            return ExitDecision(
+                reason=ExitReason.RISK,
+                priority=get_priority_for_reason(ExitReason.RISK),
+                source_layer=ExitSourceLayer.POLICY_LAYER,
+                exit_price_cents=self.current_price_cents,
+                metadata={"kill_switch": self.risk_kill_switch}
+            )
         
         # Check stale data (P0 safety fix - exit when MD becomes stale)
         if md_age_ms is not None and max_age_ms is not None:
             if self.evaluate_stale_data(md_age_ms, max_age_ms):
                 self.action = ExitAction.EXIT_MARKET
                 self.reason = ExitReason.STALE_DATA
-                return
+                return ExitDecision(
+                    reason=ExitReason.STALE_DATA,
+                    priority=get_priority_for_reason(ExitReason.STALE_DATA),
+                    source_layer=ExitSourceLayer.POLICY_LAYER,
+                    exit_price_cents=self.current_price_cents,
+                    metadata={
+                        "md_age_ms": md_age_ms,
+                        "max_age_ms": max_age_ms,
+                        "time_to_expiry_seconds": self.time_to_expiry_seconds
+                    }
+                )
         
         # Check candle reversal (momentum reversal signal)
         if self.evaluate_candle_reversal(candles):
             self.action = ExitAction.EXIT_MARKET
             self.reason = ExitReason.CANDLE_REVERSAL
-            return
+            return ExitDecision(
+                reason=ExitReason.CANDLE_REVERSAL,
+                priority=get_priority_for_reason(ExitReason.CANDLE_REVERSAL),
+                source_layer=ExitSourceLayer.POLICY_LAYER,
+                exit_price_cents=self.current_price_cents,
+                metadata={"candles_count": len(candles) if candles else 0}
+            )
         
         # Check adaptive timing (historical performance-based)
-        # CRITICAL FIX: 2026-07-11 - Use distinct ADAPTIVE_TIMING reason for better debuggability
         if self.evaluate_adaptive_timing():
             self.action = ExitAction.EXIT_MARKET
-            self.reason = ExitReason.ADAPTIVE_TIMING  # Distinct from generic TIME_STOP
-            return
+            self.reason = ExitReason.ADAPTIVE_TIMING
+            return ExitDecision(
+                reason=ExitReason.ADAPTIVE_TIMING,
+                priority=get_priority_for_reason(ExitReason.ADAPTIVE_TIMING),
+                source_layer=ExitSourceLayer.POLICY_LAYER,
+                exit_price_cents=self.current_price_cents,
+                metadata={"time_since_entry_seconds": self.time_since_entry_seconds}
+            )
         
         # Check time stop
         if self.evaluate_time_stop():
             self.action = ExitAction.EXIT_MARKET
             self.reason = ExitReason.TIME_STOP
-            return
+            return ExitDecision(
+                reason=ExitReason.TIME_STOP,
+                priority=get_priority_for_reason(ExitReason.TIME_STOP),
+                source_layer=ExitSourceLayer.POLICY_LAYER,
+                exit_price_cents=self.current_price_cents,
+                metadata={
+                    "time_since_entry_seconds": self.time_since_entry_seconds,
+                    "effective_max_hold": self.get_effective_max_hold(),
+                    "r_multiple": self.r_multiple,
+                    "volatility_regime": self.volatility_regime
+                }
+            )
         
         # Check edge decay (if edge provided)
         if current_edge_pct is not None and self.evaluate_edge_decay(current_edge_pct):
             self.action = ExitAction.EXIT_MARKET
             self.reason = ExitReason.EDGE_DECAY
-            return
+            return ExitDecision(
+                reason=ExitReason.EDGE_DECAY,
+                priority=get_priority_for_reason(ExitReason.EDGE_DECAY),
+                source_layer=ExitSourceLayer.POLICY_LAYER,
+                exit_price_cents=self.current_price_cents,
+                metadata={
+                    "current_edge_pct": current_edge_pct,
+                    "min_edge_threshold": self.min_edge_threshold
+                }
+            )
         
         # No exit condition met
         self.action = ExitAction.HOLD
         self.reason = None
+        return None
