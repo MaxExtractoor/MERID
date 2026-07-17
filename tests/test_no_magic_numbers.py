@@ -172,16 +172,35 @@ class TestDeepOTMPolicy:
         result = _validate_deep_otm_policy(intent)
         assert result is None, "Should allow ATM contracts"
     
-    def test_sell_order_bypass(self):
-        """Sell orders should bypass deep OTM check."""
+    def test_sell_order_not_bypass_deep_otm(self):
+        """Sell orders are subject to deep OTM check (only true exit orders bypass)."""
         intent = MockOrderIntent(
             ticker="KXBTC15M-26MAR2501",
             action="sell",
             side="yes",
-            price_cents=3,  # Even deep cheap, should pass
+            price_cents=3,  # Deep cheap - should be rejected
         )
         result = _validate_deep_otm_policy(intent)
-        assert result is None, "Sell orders should bypass"
+        assert result is not None, "Sell orders should be subject to deep OTM check"
+        assert "deep_otm_disallowed" in result
+
+    def test_deep_otm_policy_config_logs_at_info_level(self):
+        """Test that DEEP_OTM_POLICY_CONFIG logs at INFO level, not ERROR."""
+        # Verify by checking source code that logs use logger.info instead of logger.error
+        import inspect
+        from merid.event_venues.kalshi.order_router import _validate_deep_otm_policy
+        
+        source = inspect.getsource(_validate_deep_otm_policy)
+        
+        # Check that DEEP_OTM_POLICY_CONFIG uses logger.info
+        assert 'logger.info' in source and 'DEEP_OTM_POLICY_CONFIG' in source, \
+            "DEEP_OTM_POLICY_CONFIG should use logger.info"
+        
+        # Check that logger.error is NOT used for DEEP_OTM_POLICY_CONFIG
+        lines = source.split('\n')
+        for line in lines:
+            if 'DEEP_OTM_POLICY_CONFIG' in line and 'logger.error' in line:
+                raise AssertionError("DEEP_OTM_POLICY_CONFIG should NOT use logger.error")
 
 
 class TestUnderlyingPlausibility:

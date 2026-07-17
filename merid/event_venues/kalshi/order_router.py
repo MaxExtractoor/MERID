@@ -2785,13 +2785,13 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
             profile_version = getattr(profile_adapter.profile, 'profile_version', 'unknown')
             guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
             guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
-            logger.error(
+            logger.info(
                 "[DEEP_OTM_POLICY_CONFIG] profile_name=%s profile_version=%s "
                 "guardrails_min=%s guardrails_max=%s",
                 profile_name, profile_version, guardrails_min, guardrails_max
             )
     except Exception as e:
-        logger.error("[DEEP_OTM_POLICY_CONFIG] Failed to load profile: %s", e)
+        logger.info("[DEEP_OTM_POLICY_CONFIG] Failed to load profile: %s", e)
     
     # Skip if policy not enforced
     if not ENFORCE_DEEP_OTM_POLICY:
@@ -3260,7 +3260,7 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
         profile_adapter = get_active_profile()
         if profile_adapter and hasattr(profile_adapter, 'profile'):
-            ioc_threshold_seconds = profile_adapter.profile.venue_invariants.ioc_auto_below_seconds
+            ioc_threshold_seconds = profile_adapter.profile.venue_invariants_ioc_auto_below_seconds
             logger.debug(
                 "[DYNAMIC-ORDER-TYPE] Using IOC threshold from profile: %ds",
                 ioc_threshold_seconds

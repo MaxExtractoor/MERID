@@ -42,29 +42,17 @@ class TestPriceFilteringConsistency:
     
     def test_risk_parameters_deep_otm_cheap_is_10c(self):
         """Test that risk_parameters.py DEEP_OTM_CHEAP_CENTS is 10 (canonical range per commit c5ac4a18)."""
-        with open("merid/event_venues/kalshi/risk_parameters.py", "r", encoding="utf-8") as f:
-            content = f.read()
+        from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_CHEAP_CENTS
         
-        # Extract DEEP_OTM_CHEAP_CENTS value
-        match = re.search(r'DEEP_OTM_CHEAP_CENTS.*?=\s*(\d+)', content)
-        assert match, "DEEP_OTM_CHEAP_CENTS not found in risk_parameters.py"
-        
-        value = int(match.group(1))
-        assert value == 10, \
-            f"DEEP_OTM_CHEAP_CENTS should be 10, got {value}"
+        assert DEEP_OTM_CHEAP_CENTS == 10, \
+            f"DEEP_OTM_CHEAP_CENTS should be 10, got {DEEP_OTM_CHEAP_CENTS}"
     
     def test_risk_parameters_deep_otm_expensive_is_75c(self):
         """Test that risk_parameters.py DEEP_OTM_EXPENSIVE_CENTS is 75 (expanded range 2026-07-12)."""
-        with open("merid/event_venues/kalshi/risk_parameters.py", "r", encoding="utf-8") as f:
-            content = f.read()
+        from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_EXPENSIVE_CENTS
         
-        # Extract DEEP_OTM_EXPENSIVE_CENTS value
-        match = re.search(r'DEEP_OTM_EXPENSIVE_CENTS.*?=\s*(\d+)', content)
-        assert match, "DEEP_OTM_EXPENSIVE_CENTS not found in risk_parameters.py"
-        
-        value = int(match.group(1))
-        assert value == 75, \
-            f"DEEP_OTM_EXPENSIVE_CENTS should be 75, got {value}"
+        assert DEEP_OTM_EXPENSIVE_CENTS == 75, \
+            f"DEEP_OTM_EXPENSIVE_CENTS should be 75, got {DEEP_OTM_EXPENSIVE_CENTS}"
     
     def test_agent_grid_min_entry_prices_are_10c(self):
         """Test that agent_grid_15m.py min_entry_prices are all 10c (canonical range per commit c5ac4a18)."""
@@ -179,10 +167,8 @@ class TestPriceFilteringConsistency:
         profile_min = profile["guardrails"]["min_contract_price_cents"]
         
         # Risk parameters
-        with open("merid/event_venues/kalshi/risk_parameters.py", "r", encoding="utf-8") as f:
-            risk_content = f.read()
-        risk_match = re.search(r'DEEP_OTM_CHEAP_CENTS.*?=\s*(\d+)', risk_content)
-        risk_min = int(risk_match.group(1))
+        from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_CHEAP_CENTS
+        risk_min = DEEP_OTM_CHEAP_CENTS
         
         # Agent grid
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
@@ -207,10 +193,8 @@ class TestPriceFilteringConsistency:
         profile_max = profile["guardrails"]["max_contract_price_cents"]
         
         # Risk parameters
-        with open("merid/event_venues/kalshi/risk_parameters.py", "r", encoding="utf-8") as f:
-            risk_content = f.read()
-        risk_match = re.search(r'DEEP_OTM_EXPENSIVE_CENTS.*?=\s*(\d+)', risk_content)
-        risk_max = int(risk_match.group(1))
+        from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_EXPENSIVE_CENTS
+        risk_max = DEEP_OTM_EXPENSIVE_CENTS
         
         # Profile price_range
         price_range_max = profile["price_range"]["max_price_cents"]
