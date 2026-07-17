@@ -5048,19 +5048,23 @@ class LeanAgent15m:
 
                     best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
 
-                    logger.info("[PRICE-BASED-DEBUG] asset=%s ticker=%s best_bid_cents=%s best_ask_cents=%s", asset, ticker, best_bid, best_ask)
+                    # Calculate spread width for observability
+                    spread_width_cents = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0
 
+                    # Determine market price type for observability
+                    market_price_type = "none"
                     if best_bid > 0 and best_ask > 0:
-
                         market_price = (best_bid + best_ask) / 200.0  # Convert cents to price
-
+                        market_price_type = "mid"
                     elif best_bid > 0:
-
                         market_price = best_bid / 100.0
-
+                        market_price_type = "bid_only"
                     elif best_ask > 0:
-
                         market_price = best_ask / 100.0
+                        market_price_type = "ask_only"
+
+                    logger.info("[PRICE-BASED-DEBUG] asset=%s ticker=%s best_bid_cents=%s best_ask_cents=%s spread_width=%dc market_price_type=%s", 
+                                asset, ticker, best_bid, best_ask, spread_width_cents, market_price_type)
 
                     # CRITICAL FIX: Validate market price is in reasonable range [0.01, 0.99]
 
@@ -7443,14 +7447,18 @@ class LeanAgent15m:
 
         no_in_range = (10 <= no_price_cents <= 75)
 
-        
+        # Determine expiry bucket for observability
+        expiry_bucket = "unknown"
+        if minutes_to_expiry < 5:
+            expiry_bucket = "0-5min"
+        elif minutes_to_expiry < 10:
+            expiry_bucket = "5-10min"
+        else:
+            expiry_bucket = "10-15min"
 
         logger.info(
-
-            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc in_range=%s no_price=%dc in_range=%s",
-
-            asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range
-
+            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc in_range=%s no_price=%dc in_range=%s expiry_bucket=%s",
+            asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, expiry_bucket
         )
 
         
