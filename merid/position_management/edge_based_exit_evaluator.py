@@ -70,7 +70,7 @@ class EdgeBasedExitEvaluator:
             
             # Compute edge using UnifiedEdgeComputer
             edge_result = self._edge_computer.compute_edge(
-                spot_price=spot_data.price,
+                spot_price=spot_data.price_usd,
                 strike_price=entry_price_cents / 100.0,
                 yes_price=current_price_cents / 100.0,
                 time_to_expiry=time_to_expiry_seconds,
