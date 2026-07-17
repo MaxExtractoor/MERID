@@ -1249,7 +1249,7 @@ def get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd: Optional[float] = Non
             raise RuntimeError(f"Bankroll not ready: ${live_bankroll_usd}")
     
     envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd)
-    logger.info(f"[RISK-ENVELOPE] Computed envelope successfully: per_agent_limit={envelope.per_agent_window_limit_usd:.2f} total_venue_limit={envelope.total_venue_window_limit_usd:.2f}")
+    logger.info(f"[RISK-ENVELOPE] Computed envelope successfully: global_limit={envelope.per_agent_window_limit_usd:.2f} total_venue_limit={envelope.total_venue_window_limit_usd:.2f}")
     return envelope
 
 

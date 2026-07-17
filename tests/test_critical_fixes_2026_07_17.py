@@ -379,6 +379,193 @@ class TestIntegrationExitOrderFlow:
         assert mock_result.success is True
 
 
+class TestSpotSnapshotAttributeFix:
+    """Test for SpotSnapshot attribute error fix (2026-07-17)."""
+
+    @patch('data.unified_spot_service.UnifiedSpotService.get')
+    def test_edge_based_exit_evaluator_uses_price_usd(self, mock_get):
+        """Test that edge_based_exit_evaluator uses price_usd instead of price."""
+        from data.unified_spot_service import UnifiedSpotService, SpotPrice
+        from merid.position_management.edge_based_exit_evaluator import EdgeBasedExitEvaluator
+        import time
+        
+        # Mock spot data
+        mock_spot_price = SpotPrice(
+            price=50000.0,
+            timestamp=int(time.time() * 1000),
+            source="coinbase_ticker_hybrid",
+            open=49900.0,
+            high=50100.0,
+            low=49800.0,
+            volume=100.0
+        )
+        mock_get.return_value = mock_spot_price
+        
+        spot_service = UnifiedSpotService()
+        spot_data = spot_service.get_spot_data("BTC")
+        
+        # Verify spot_data has price_usd attribute
+        assert hasattr(spot_data, 'price_usd')
+        assert spot_data.price_usd == 50000.0
+        
+        # Verify spot_data does NOT have 'price' attribute (the bug)
+        assert not hasattr(spot_data, 'price'), "SpotSnapshot should not have 'price' attribute"
+
+    def test_edge_based_exit_evaluator_source_code_uses_price_usd(self):
+        """Test that edge_based_exit_evaluator source code uses price_usd."""
+        import inspect
+        from merid.position_management.edge_based_exit_evaluator import EdgeBasedExitEvaluator
+        
+        # Get the source code of compute_current_edge method
+        source = inspect.getsource(EdgeBasedExitEvaluator.compute_current_edge)
+        
+        # Verify that spot_data.price_usd IS used (the fix)
+        assert "spot_data.price_usd" in source, \
+            "edge_based_exit_evaluator should use spot_data.price_usd (fix)"
+        
+        # Verify that spot_data.price is NOT used as a standalone attribute
+        # (it should only appear as part of spot_data.price_usd)
+        lines = source.split('\n')
+        for line in lines:
+            # Skip lines that are comments or contain price_usd
+            if 'spot_data.price' in line and 'spot_data.price_usd' not in line and '#' not in line:
+                # Check if it's actually using spot_data.price as a standalone attribute
+                if 'spot_data.price' in line and not line.strip().startswith('#'):
+                    pytest.fail(f"Found standalone spot_data.price usage: {line}")
+
+
+class TestPositionCacheEntryPriceZeroFix:
+    """Test for entry_price=0c fix in position_cache.py (2026-07-17)."""
+
+    @patch('merid.event_venues.kalshi.position_cache._get_market_price_fallback')
+    async def test_position_cache_treats_zero_as_missing(self, mock_fallback):
+        """Test that position_cache treats avg_price_cents=0 as missing and uses fallback."""
+        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
+        from decimal import Decimal
+        
+        # Mock fallback to return 50 cents
+        mock_fallback.return_value = 50
+        
+        # Create position cache
+        cache = KalshiPositionCache()
+        
+        # Simulate REST sync with avg_price_cents=0
+        positions = [
+            {
+                "market_id": "KXBTC15M-26JUL162015-15",
+                "contracts": 1,
+                "side": "yes",
+                "avg_price_cents": 0,  # BUG: REST API returns 0
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0
+            }
+        ]
+        
+        # Sync from REST
+        await cache.sync_from_rest(positions, force=True)
+        
+        # Verify fallback was called for avg_price_cents=0
+        mock_fallback.assert_called()
+        
+        # Verify the cached position has fallback price (50c), not 0
+        cached_pos = cache.get_position("KXBTC15M-26JUL162015-15")
+        assert cached_pos is not None
+        assert cached_pos.avg_price_cents == 50, \
+            "Position should use fallback price when REST returns avg_price_cents=0"
+
+    @patch('merid.event_venues.kalshi.position_cache._get_market_price_fallback')
+    async def test_position_cache_uses_valid_price(self, mock_fallback):
+        """Test that position_cache uses valid price when REST returns non-zero."""
+        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
+        from decimal import Decimal
+        
+        # Mock fallback to return 50 cents
+        mock_fallback.return_value = 50
+        
+        # Create position cache
+        cache = KalshiPositionCache()
+        
+        # Simulate REST sync with valid avg_price_cents
+        positions = [
+            {
+                "market_id": "KXBTC15M-26JUL162015-15",
+                "contracts": 1,
+                "side": "yes",
+                "avg_price_cents": 42,  # Valid price
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0
+            }
+        ]
+        
+        # Sync from REST
+        await cache.sync_from_rest(positions, force=True)
+        
+        # Verify fallback was NOT called for valid price
+        mock_fallback.assert_not_called()
+        
+        # Verify the cached position has the actual price (42c)
+        cached_pos = cache.get_position("KXBTC15M-26JUL162015-15")
+        assert cached_pos is not None
+        assert cached_pos.avg_price_cents == 42, \
+            "Position should use actual price when REST returns valid avg_price_cents"
+
+    @patch('merid.event_venues.kalshi.position_cache._get_market_price_fallback')
+    async def test_position_cache_uses_fallback_for_missing_key(self, mock_fallback):
+        """Test that position_cache uses fallback when avg_price_cents key is missing."""
+        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
+        from decimal import Decimal
+        
+        # Mock fallback to return 50 cents
+        mock_fallback.return_value = 50
+        
+        # Create position cache
+        cache = KalshiPositionCache()
+        
+        # Simulate REST sync without avg_price_cents key
+        positions = [
+            {
+                "market_id": "KXBTC15M-26JUL162015-15",
+                "contracts": 1,
+                "side": "yes",
+                # avg_price_cents key is missing
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0
+            }
+        ]
+        
+        # Sync from REST
+        await cache.sync_from_rest(positions, force=True)
+        
+        # Verify fallback was called for missing key
+        mock_fallback.assert_called()
+        
+        # Verify the cached position has fallback price (50c)
+        cached_pos = cache.get_position("KXBTC15M-26JUL162015-15")
+        assert cached_pos is not None
+        assert cached_pos.avg_price_cents == 50, \
+            "Position should use fallback price when avg_price_cents key is missing"
+
+
+class TestRiskEnvelopeLogMessageFix:
+    """Test for per-agent limit display/logging fix (2026-07-17)."""
+
+    def test_risk_envelope_log_uses_global_limit_not_per_agent(self):
+        """Test that risk envelope log says 'global_limit' not 'per_agent_limit'."""
+        import inspect
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        
+        # Get the source code of the function
+        source = inspect.getsource(get_kalshi_crypto_15m_risk_envelope)
+        
+        # Verify that log message uses 'global_limit' not 'per_agent_limit'
+        assert "global_limit=" in source, \
+            "Risk envelope log should use 'global_limit=' (fix)"
+        
+        # Verify that old log message is NOT present
+        assert "per_agent_limit=" not in source, \
+            "Risk envelope log should NOT use 'per_agent_limit=' (bug - this is misleading)"
+
+
 class TestDuplicateStartupRaceConditionFix:
     """Test for duplicate startup race condition fix (2026-07-17)."""
 

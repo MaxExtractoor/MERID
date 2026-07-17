@@ -1365,12 +1365,24 @@ class KalshiPositionCache:
                         positions_filtered += 1
                         continue
 
+                    # CRITICAL FIX (2026-07-16): Treat avg_price_cents=0 as missing and use fallback
+                    # REST API may return 0 for avg_price_cents, which breaks PnL calculation
+                    # Use market state fallback when avg_price_cents is 0 or missing
+                    avg_price_from_rest = pos.get("avg_price_cents")
+                    if avg_price_from_rest is None or avg_price_from_rest == 0:
+                        avg_price_cents = _get_market_price_fallback(market_id)
+                        logger.warning(
+                            "[POSITION-CACHE] REST API returned avg_price_cents=0 or missing for %s, using fallback=%dc",
+                            market_id, avg_price_cents
+                        )
+                    else:
+                        avg_price_cents = int(avg_price_from_rest)
+                    
                     self._positions[market_id] = CachedPosition(
                         market_id=market_id,
                         contracts=contracts,
                         side=pos.get("side", "yes"),
-                        # PRODUCTION-FIX: Try to get avg_price_cents from market state if REST doesn't provide it
-                        avg_price_cents=int(pos.get("avg_price_cents", _get_market_price_fallback(market_id))),
+                        avg_price_cents=avg_price_cents,
                         realized_pnl_usd=Decimal(str(pos.get("realized_pnl", 0))),
                         unrealized_pnl_usd=Decimal(str(pos.get("unrealized_pnl", 0))),
                         # Preserve TP targets from OrderIntent if available
