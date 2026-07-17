@@ -710,7 +710,7 @@ class UnifiedEdgeComputer:
                 min_edge_by_distance = 1.5  # 1.5% edge
             else:
                 # Far OTM: require very strong edge (will likely fail max_dist_pct check anyway)
-                min_edge_by_distance = 2.5  # 2.5% edge
+                min_edge_by_distance = 3.0  # 3.0% edge (2026-07-17: updated from 2.5% to align with industry standard)
             
             # Adjust for time to expiry (less time = require stronger edge)
             if time_to_expiry_min < 5:

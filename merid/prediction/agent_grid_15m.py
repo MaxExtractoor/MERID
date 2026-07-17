@@ -7598,6 +7598,15 @@ class LeanAgent15m:
 
         
 
+        # VOLATILITY_REVERSION STRATEGY (Turbine research winner: 93/96 profitable, +4.90% mean ROI)
+        # 2026-07-17: Fade extreme panic moves - same as price_based (panic_fade)
+        # This is the current winning archetype on KXBTC15M
+        if self.config.signal_mode == "volatility_reversion":
+
+            return self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
+
+        
+
         # HYBRID STRATEGY: Combine momentum_fvg with price_based (panic fade)
         # 2026-07-15: Enable both strategies - prefer price_based when panic conditions met
         if self.config.signal_mode == "hybrid":
