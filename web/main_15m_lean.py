@@ -423,11 +423,20 @@ async def lifespan(app: FastAPI):
             profile_version = getattr(profile_adapter.profile, 'profile_version', 'unknown')
             guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
             guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
+            signal_mode = getattr(profile_adapter.profile, 'signal_mode', 'unknown')
+            price_based_buy = getattr(profile_adapter.profile, 'price_based_buy_threshold', 'N/A')
+            price_based_sell = getattr(profile_adapter.profile, 'price_based_sell_threshold', 'N/A')
+            
+            # Determine if price-based thresholds are active
+            price_based_active = (signal_mode in ['price_based', 'hybrid'])
+            
             logger.error(
                 "[STARTUP-CONTRACT] profile=%s version=%s guardrails=[min=%s,max=%s] "
-                "deep_otm=[cheap=%d,expensive=%d]",
+                "deep_otm=[cheap=%d,expensive=%d] signal_mode=%s price_based_active=%s "
+                "price_based_thresholds=[buy=%.2f,sell=%.2f]",
                 profile_name, profile_version, guardrails_min, guardrails_max,
-                DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS
+                DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS,
+                signal_mode, price_based_active, price_based_buy, price_based_sell
             )
     except Exception as e:
         logger.warning("[STARTUP-CONTRACT] Failed to log profile configuration: %s", e)
@@ -3395,24 +3404,17 @@ async def _run_startup_phases_v20260530(app):
         logger.warning(f"[STARTUP] P1.6.2: Failed to connect PositionCache to AgentGrid: {e}", exc_info=True)
     
     
-    # CRITICAL FIX (2026-07-16): Start PositionMonitor and register exit callback
-    # This ensures exit signals are generated before trading begins
-    logger.info("[STARTUP] P1.6.3: Starting PositionMonitor and registering exit callback")
+    # CRITICAL FIX (2026-07-17): PositionMonitor singleton retrieval only
+    # The loop_15m.py startup sequence handles callback registration and monitor start
+    # to prevent race condition where monitor starts without exit callback
+    logger.info("[STARTUP] P1.6.3: Retrieving PositionMonitor singleton (callback registration in loop_15m.py)")
     try:
         from merid.position_management.position_monitor import get_position_monitor
         
         position_monitor = get_position_monitor()
-        
-        # Define exit callback that will be used by the loop
-        # This is a placeholder - the actual callback will be registered by the loop
-        # during its warmup phase when it has access to order_router
-        logger.info("[STARTUP] P1.6.3: PositionMonitor singleton retrieved")
-        
-        # Start the monitor's polling loop
-        await position_monitor.start()
-        logger.info("[STARTUP] P1.6.3: PositionMonitor started successfully")
+        logger.info("[STARTUP] P1.6.3: PositionMonitor singleton retrieved successfully")
     except Exception as e:
-        logger.warning(f"[STARTUP] P1.6.3: Failed to start PositionMonitor: {e}", exc_info=True)
+        logger.warning(f"[STARTUP] P1.6.3: Failed to retrieve PositionMonitor: {e}", exc_info=True)
     
 
     # Phase 1: Bankroll service
