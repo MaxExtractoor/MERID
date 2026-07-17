@@ -727,7 +727,7 @@ async def _kalshi_place_order(
             elif "DOGE" in ticker_upper:
                 asset = "DOGE"
             
-            max_contracts_limit = 2  # Default fallback (per-asset limit)
+            max_contracts_limit = 1  # CRITICAL FIX: Default fallback to 1 to enforce $1 exposure cap (was 2, allowing >1 contract per order)
             if asset:
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -739,7 +739,7 @@ async def _kalshi_place_order(
                             if hasattr(asset_config, 'max_contracts'):
                                 max_contracts_limit = asset_config.max_contracts
                 except Exception as e:
-                    logger.debug("[kalshi_tools] Failed to load max_contracts from profile: %s, using default 2", e)
+                    logger.debug("[kalshi_tools] Failed to load max_contracts from profile: %s, using default 1", e)
             
             # Resolve risk contract fields for crypto 15m markets
             window_resolution_id = "15m"  # Default window resolution for 15m markets
@@ -812,17 +812,47 @@ async def _kalshi_place_order(
             # Route through order_router which enforces global rate limit and cooldown
             result = await route_order_async(intent)
 
+            # 2026-07-13: Wire up GlobalAllocator lifecycle callbacks
+            # Extract asset from ticker for position tracking
+            asset = None
+            if ticker:
+                # Extract asset from ticker (e.g., "KXBTC15M-..." -> "BTC")
+                for a in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                    if a in ticker.upper():
+                        asset = a
+                        break
+            
             # Handle all failure statuses from order_router
             if result.status == "rejected":
                 logger.warning(
                     "[kalshi_tools] Order rejected by router: %s reason=%s",
                     ticker, result.reason
                 )
+                # Record rejection in GlobalAllocator if asset identified
+                if asset:
+                    try:
+                        from merid.risk.profiles.global_allocator import get_global_allocator
+                        allocator = get_global_allocator()
+                        if allocator:
+                            allocator.record_order_rejected(asset, result.order_id or intent.intent_id)
+                    except Exception as cb_exc:
+                        logger.debug("[kalshi_tools] Failed to record rejection in GlobalAllocator: %s", cb_exc)
                 return ToolResult.fail(
                     ToolErrorCode.POLICY_BLOCKED,
                     f"Order rejected: {result.reason}",
                     tool_name="kalshi_place_order",
                 )
+            
+            # Record successful order submission in GlobalAllocator
+            if result.status in ("submitted", "filled_paper", "filled_live", "filled_mock") and asset:
+                try:
+                    from merid.risk.profiles.global_allocator import get_global_allocator
+                    allocator = get_global_allocator()
+                    if allocator:
+                        notional_usd = (count * _pc) / 100.0
+                        allocator.record_order_submitted(asset, result.order_id or intent.intent_id, notional_usd)
+                except Exception as cb_exc:
+                    logger.debug("[kalshi_tools] Failed to record submission in GlobalAllocator: %s", cb_exc)
             
             # Handle ambiguous or unknown statuses
             if result.status in ("duplicate_unknown",):
@@ -1212,7 +1242,7 @@ def build_live_route_order_intent(
     elif "DOGE" in ticker_upper:
         asset = "DOGE"
     
-    max_contracts_limit = 2  # Default fallback (per-asset limit)
+    max_contracts_limit = 1  # CRITICAL FIX: Default fallback to 1 to enforce $1 exposure cap (was 2, allowing >1 contract per order)
     if asset:
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
