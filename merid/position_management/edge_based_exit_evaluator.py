@@ -47,7 +47,7 @@ class EdgeBasedExitEvaluator:
                 self._edge_computer = get_unified_edge_computer()
             
             if self._spot_service is None:
-                from merid.prediction.unified_spot import get_unified_spot_service
+                from data.unified_spot_service import get_unified_spot_service
                 self._spot_service = get_unified_spot_service()
             
             # Extract asset from position
