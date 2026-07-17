@@ -28,18 +28,17 @@ class TestThrottlingProfileLoading:
         
         profile = profile_adapter.profile
         
+        # CRITICAL FIX (2026-07-17): Removed throttling_per_strip_order_limit - $1 exposure cap is the limit
         # Verify throttling fields are loaded
         assert hasattr(profile, 'throttling_global_orders_window_sec')
         assert hasattr(profile, 'throttling_global_orders_limit')
         assert hasattr(profile, 'throttling_per_asset_cooldown_sec')
-        assert hasattr(profile, 'throttling_per_strip_order_limit')
         assert hasattr(profile, 'throttling_per_strip_notional_usd')
         
         # Verify reasonable defaults
         assert profile.throttling_global_orders_window_sec > 0
         assert profile.throttling_global_orders_limit > 0
         assert profile.throttling_per_asset_cooldown_sec >= 0
-        assert profile.throttling_per_strip_order_limit >= 1
         assert profile.throttling_per_strip_notional_usd >= 0
 
 

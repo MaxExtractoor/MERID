@@ -178,18 +178,15 @@ market_making:
   description: "Market making: two-phase (poly15m-v3) - Phase 1 two-sided, Phase 2 directional"
 
 # Correlation Tracking Configuration
-# 2026-07-15: Re-enabled for BTC sentiment biasing (not exposure reduction)
-# Use BTC as leading indicator to bias ETH/SOL/XRP/DOGE signals
-# This is different from spot crypto correlation - it's about prediction market sentiment flow
+# CRITICAL FIX (2026-07-17): Removed BTC sentiment bias configuration - not implemented in code
+# The btc_sentiment_bias_enabled feature was documented but never implemented in agent_grid_15m.py
+# Removed to avoid confusion between documented features and actual implementation
 correlation_tracking:
-  enabled: true  # ENABLED: Use BTC sentiment to bias other assets
-  btc_sentiment_bias_enabled: true  # Use BTC as leading indicator for other assets
-  btc_bias_threshold: 0.60  # BTC confidence > 60% to bias other assets
-  btc_bias_multiplier: 0.30  # Boost other asset edge by 30% when BTC confident
+  enabled: false  # DISABLED: BTC sentiment bias not implemented
   threshold: 0.5  # Correlation threshold for exposure reduction
   max_reduction: 0.4  # Reduce to 40% of combined cap at perfect correlation
   window_days: 30  # Rolling window for correlation calculation
-  description: "Correlation tracking: BTC sentiment biasing for prediction market outcomes"
+  description: "Correlation tracking: placeholder for future implementation"
   # 2026 RESEARCH-BASED: Correlation-aware risk management
   real_time_monitoring: true  # Real-time correlation monitoring (not static intervals)
   threshold_high: 0.80  # Treat as ONE position when >0.80 correlation
@@ -559,15 +556,11 @@ universe:
 # BALANCED SETTINGS: Optimized based on industry comparison (Polymarket 15m bot uses 30s with 93% WR)
 throttling:
   global_orders_window_sec: 60  # Rolling window for global order limit (seconds)
-  global_orders_limit: 30  # INCREASED: Max 30 orders per minute globally (up from 15 - for more opportunities across 5 assets)
-  per_asset_cooldown_sec: 3  # OPTIMIZED: 3s cooldown per asset (aligned with Polymarket 15m industry standard - was 8s, now 3s)
+  global_orders_limit: 5  # CRITICAL FIX (2026-07-17): 5 orders per minute (behavioral throttle, not exposure limit)
+  # With $1 cap, realistic max is 0.2-0.3 orders per minute (1-2 positions total, 1-2 entries/exits per 15m cycle)
+  # 5/min is generous ceiling (20x realistic usage) to prevent spam while allowing legitimate re-submissions
+  per_asset_cooldown_sec: 3  # 3s cooldown per asset (behavioral throttle, not exposure limit)
   per_strip_notional_usd: 0.0  # Max notional per strip (0.0 = disabled, set if needed)
-  max_orders_per_15m_window: 24  # INCREASED: Max 24 orders per 15m window (up from 12 - allows 2.4 trades/asset/window for 15m opportunity capture)
-  
-  # REMOVED: Conflicting top-N limits - now handled by guardrails section (single source of truth)
-  # - per_strip_order_limit: replaced by guardrails.max_orders_per_cycle
-  # - max_trades_per_cycle_global: replaced by guardrails.max_orders_per_cycle
-  # - max_trades_per_cycle_asset: replaced by guardrails.max_orders_per_cycle
   
   cooldown_after_loss_cycles: 2  # No new entry for 2 cycles (30s) after a loss in that asset (relaxed from 4)
   consecutive_loss_pause: 3  # Pause after 3 consecutive losses (industry standard for behavioral risk control)
@@ -920,11 +913,11 @@ assets:
 # 2026-07-08 UPDATE: Percentage-based agent caps DISABLED in favor of fixed $1 exposure model
 # max_notional_pct DISABLED - using fixed $1 exposure cap instead
 agent_defaults:
-  # max_notional_pct DISABLED - using fixed $1 exposure cap instead
-  max_orders_per_window: 24  # Max orders per trading window (2026-07-11: increased to 24 for 15m opportunity capture)
-  max_yes_position: 1  # CRITICAL FIX (2026-07-14): Reduced from 5 to 1 to match max_single_order_contracts=1 and prevent position accumulation
-  max_no_position: 1  # CRITICAL FIX (2026-07-14): Reduced from 5 to 1 to match max_single_order_contracts=1 and prevent position accumulation
-  max_concurrent_trades: 8  # INCREASED: Max 8 concurrent trades (was 5, for more opportunities)
+  # CRITICAL FIX (2026-07-17): All order flow limits removed - $1 global exposure cap is single source of truth
+  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+  # These limits make order flow limits redundant or impossible
+  max_yes_position: 1  # Aligned with MAX_POSITIONS_PER_ASSET=1 in GlobalSlotAllocator
+  max_no_position: 1  # Aligned with MAX_POSITIONS_PER_ASSET=1 in GlobalSlotAllocator
   
   # Entry window (time before expiry to start trading)
   # Kalshi 15m markets only exist ~15 minutes before expiry
@@ -1130,7 +1123,7 @@ guardrails:
   min_contract_price_cents: 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
   max_contract_price_cents: 75  # 2026-07-12: Expanded from 50c to 75c - YES prices consistently 60-97c in current market conditions
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
-  # REMOVED: Duplicate max_orders_per_cycle - now handled by throttling.max_orders_per_15m_window (single source of truth)
+  # CRITICAL FIX (2026-07-17): Removed max_orders_per_cycle - $1 exposure cap is the single source of truth
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)
   # Time trap prevention (entry window narrowing)
   # Aligned with TTE regimes from risk.tte_regime:
@@ -1278,10 +1271,10 @@ kelly:
 # These are venue-level limits to prevent excessive position concentration
 # 2026-07-09: Reduced all caps to align with slot-based model and $1 exposure cap
 contract_caps:
-  max_contracts_total: 4  # Max total contracts across all assets (aligns with max_concurrent_positions=4)
-  max_contracts_per_asset: 1  # Max contracts per asset (slot-based: 1 contract per order)
-  max_contracts_per_cluster: 1  # Max contracts per asset/timeframe/overlap-window (slot-based)
-  max_single_order_contracts: 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit (10 contracts can exceed 3% at low prices)
+  # CRITICAL FIX (2026-07-17): All contract limits removed - $1 global exposure cap is single source of truth
+  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+  # These limits make contract limits redundant or impossible
+  max_single_order_contracts: 1  # Aligned with MAX_CONTRACTS_PER_ORDER=1 in GlobalSlotAllocator
 
 # ── Risk Policy ───────────────────────────────────────────────────────────
 # Risk limits that affect order acceptance and sizing

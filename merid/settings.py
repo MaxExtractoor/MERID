@@ -467,12 +467,13 @@ class Settings(BaseSettings):
         default="America/New_York",
         description="Timezone for Kalshi maintenance window (e.g., 'America/New_York')"
     )
-    # PM limits - ENV-DRIVEN percentages of bankroll (aligns with Top 3 / 3% / 15% strategy)
-    # Top 3 strategy: 3% total risk across 3 edges = ~1% per edge
-    # Daily drawdown: 15% max (from env MERID_MAX_DAILY_LOSS_PCT)
+    # PM limits - FIXED $1 EXPOSURE CAP MODEL (2026-07-17)
+    # CRITICAL: Percentage-based allocation caps are DISABLED for 15m crypto stack
+    # System uses fixed $1 global exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+    # via GlobalSlotAllocator. These settings are DEPRECATED for 15m crypto.
     MERID_MAX_RISK_FRACTION_PER_CYCLE: float = Field(
-        default=0.03,  # 3% cycle risk cap
-        description="Maximum risk fraction per cycle (3% for unified cycle risk)"
+        default=0.0,  # DISABLED - using fixed $1 exposure cap
+        description="DEPRECATED: Maximum risk fraction per cycle (DISABLED - using fixed $1 exposure cap)"
     )
     MERID_PM_RISK_PER_EDGE_PCT: float = Field(
         default=0.0,  # 0 = compute from MERID_MAX_RISK_FRACTION_PER_CYCLE / 3
@@ -958,10 +959,12 @@ class Settings(BaseSettings):
     # =============================================================================
     # KALSHI RATE LIMIT SETTINGS (prevents fallback warning)
     # =============================================================================
-    # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
-    # Profile specifies: global_orders_limit: 15/min, max_orders_per_15m_window: 5
-    KALSHI_MAX_ORDERS_PER_MINUTE: int = Field(default=15, description="Max orders per minute (self-throttle) - aligned with profile")
-    KALSHI_MAX_ORDERS_PER_HOUR: int = Field(default=20, description="Max orders per hour (self-throttle) - aligned with profile (5 per 15m ≈ 20 per hour)")
+    # CRITICAL FIX (2026-07-17): Aligned with kalshi_crypto_15m_v2.yaml profile
+    # Rate limits are behavioral throttles, not exposure limits ($1 cap is the limit)
+    # With $1 cap, realistic max is 0.67-1.33 orders per minute (1-2 positions total, 1-2 entries/exits per 15m cycle)
+    # 5/min is generous ceiling (4-7x realistic usage) to prevent spam while allowing legitimate re-submissions
+    KALSHI_MAX_ORDERS_PER_MINUTE: int = Field(default=5, description="Max orders per minute (self-throttle) - aligned with profile")
+    KALSHI_MAX_ORDERS_PER_HOUR: int = Field(default=50, description="Max orders per hour (self-throttle) - generous ceiling")
 
     # =============================================================================
     # WEB SERVER SETTINGS
@@ -1312,14 +1315,14 @@ class Settings(BaseSettings):
                     return caps
                 except Exception:
                     pass
-            # Fallback to 3% unified cycle risk if static mode but no override
-            # Legacy per-asset caps removed - use unified 3% across all assets
+            # Fallback to fixed $1 exposure cap if static mode but no override (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $1 exposure cap
             logger.warning(
-                "[STATIC_FALLBACK] Using 3% unified cycle risk caps (legacy per-asset caps removed)"
+                "[STATIC_FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED)"
             )
-            # Use a reasonable default bankroll for static mode fallback
-            static_bankroll = 100.0  # $100 default for static mode
-            unified_cap = static_bankroll * 0.03  # 3% unified cycle risk
+            # Use fixed $1 exposure cap from environment variable
+            import os
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1364,14 +1367,14 @@ class Settings(BaseSettings):
                 )
             
             # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # FIX: Changed from 3% to 0.5% to align with profile value
-            # No per-asset differentiation - 0.5% across top-3 edges is the single source of truth
+            # FIX: Changed to fixed $1 exposure cap (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $1 exposure cap
             logger.warning(
-                "[FALLBACK] Using 0.5% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
             )
-            # All assets get same cap: 0.5% of bankroll (the cycle risk cap)
-            # This aligns with the top-3 edge allocation system
-            unified_cap = bankroll_usd * 0.005  # 0.5% unified cycle risk
+            # Use fixed $1 exposure cap from environment variable
+            import os
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1458,14 +1461,14 @@ class Settings(BaseSettings):
                     return caps
                 except Exception:
                     pass
-            # Fallback to 3% unified cycle risk if static mode but no override
-            # Legacy per-asset caps removed - use unified 3% across all assets
+            # Fallback to fixed $1 exposure cap if static mode but no override (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $1 exposure cap
             logger.warning(
-                "[STATIC_FALLBACK] Using 3% unified cycle risk caps (legacy per-asset caps removed)"
+                "[STATIC_FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED)"
             )
-            # Use a reasonable default bankroll for static mode fallback
-            static_bankroll = 100.0  # $100 default for static mode
-            unified_cap = static_bankroll * 0.03  # 3% unified cycle risk
+            # Use fixed $1 exposure cap from environment variable
+            import os
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1510,14 +1513,14 @@ class Settings(BaseSettings):
                 )
             
             # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # FIX: Changed from 3% to 0.5% to align with profile value
-            # No per-asset differentiation - 0.5% across top-3 edges is the single source of truth
+            # FIX: Changed to fixed $1 exposure cap (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $1 exposure cap
             logger.warning(
-                "[FALLBACK] Using 0.5% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
             )
-            # All assets get same cap: 0.5% of bankroll (the cycle risk cap)
-            # This aligns with the top-3 edge allocation system
-            unified_cap = bankroll_usd * 0.005  # 0.5% unified cycle risk
+            # Use fixed $1 exposure cap from environment variable
+            import os
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
