@@ -770,6 +770,42 @@ class TestDynamicOrderTypeSelection:
         assert order_type == "limit"
         assert tif == "gtc"
 
+    def test_uses_flat_venue_invariants_field_for_ioc_threshold(self):
+        """Test that _determine_dynamic_order_type uses flat venue_invariants_ioc_auto_below_seconds field."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        from unittest.mock import patch, MagicMock
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="limit",
+        )
+        
+        # Create state near expiry (should trigger IOC based on profile threshold)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=100000,  # $1000 depth
+            seconds_to_expiry=100,  # Near expiry
+        )
+        
+        # Mock profile with flat venue_invariants_ioc_auto_below_seconds field
+        mock_profile = MagicMock()
+        mock_profile.venue_invariants_ioc_auto_below_seconds = 120  # 120 seconds
+        
+        mock_adapter = MagicMock()
+        mock_adapter.profile = mock_profile
+        
+        with patch('merid.event_venues.kalshi.order_router.get_active_profile', return_value=mock_adapter):
+            order_type, tif = _determine_dynamic_order_type(intent, state)
+        
+        # Should use market order due to expiry proximity (100s < 120s threshold)
+        assert order_type == "market"
+        assert tif == "gtc"
+
     def test_preserves_market_order_when_already_set(self):
         """Test that market orders are preserved when already set."""
         from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
