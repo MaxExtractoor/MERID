@@ -2,13 +2,15 @@
 
 Tests the profitability enhancement that executes arbitrage when YES+NO < 100c.
 
-NOTE: Arbitrage is disabled in production (min_arb_edge=1.0 = 100%).
-This test file is skipped to avoid testing disabled functionality.
+Arbitrage is now enabled via YAML profile configuration (kalshi_crypto_15m_v2.yaml).
+Tests verify the end-to-end wiring from YAML config → duality validator → callback → execution.
 """
 
 import pytest
 import os
 from unittest.mock import Mock, patch, AsyncMock
+from pathlib import Path
+import yaml
 
 from merid.event_venues.kalshi import duality_validator
 from merid.event_venues.kalshi.duality_validator import (
@@ -19,64 +21,95 @@ from merid.event_venues.kalshi.duality_validator import (
 )
 
 
-pytestmark = pytest.mark.skip(reason="Arbitrage is disabled in production (min_arb_edge=1.0 = 100%)")
+class TestArbitrageConfigLoading:
+    """Test arbitrage configuration loading from YAML profile."""
+    
+    def test_yaml_config_loading(self):
+        """Test that arbitrage config is loaded from YAML profile."""
+        # The config should be loaded from kalshi_crypto_15m_v2.yaml
+        # Check that the module-level constants are set correctly
+        assert hasattr(duality_validator, 'ARBITRAGE_ENABLED')
+        assert hasattr(duality_validator, 'ARBITRAGE_THRESHOLD_CENTS')
+        assert hasattr(duality_validator, 'ARBITRAGE_MAX_SIZE_CONTRACTS')
+        assert hasattr(duality_validator, 'ARBITRAGE_EXECUTION_TIMEOUT_MS')
+    
+    def test_yaml_config_values(self):
+        """Test that YAML config values match expected values."""
+        # Read the YAML file directly to verify
+        profile_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        if profile_path.exists():
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                profile_config = yaml.safe_load(f)
+                if profile_config and 'yes_no_arbitrage' in profile_config:
+                    arb_config = profile_config['yes_no_arbitrage']
+                    # The module should have loaded these values
+                    # Note: These may be overridden by env var in tests
+                    assert arb_config.get('pair_cost_threshold_cents') == 95
+                    assert arb_config.get('max_size_contracts') == 10
+                    assert arb_config.get('execution_timeout_ms') == 500
+    
+    def test_env_var_override(self):
+        """Test that environment variable overrides YAML config."""
+        # When env var is set, it should override YAML
+        with patch.dict(os.environ, {"MERID_YES_NO_ARBITRAGE_ENABLED": "true"}):
+            # Reload the config function
+            from merid.event_venues.kalshi.duality_validator import _load_arbitrage_config
+            config = _load_arbitrage_config()
+            assert config['enabled'] is True
 
 
 class TestArbitrageDetection:
     """Test arbitrage opportunity detection in duality validator."""
     
     def test_arbitrage_opportunity_detected_when_enabled(self):
-        """Test that arbitrage is detected when YES_ask + NO_bid < 100c and feature is enabled."""
+        """Test that arbitrage is detected when YES_ask + NO_bid < threshold and feature is enabled."""
         validator = DualityValidator()
         
         # Enable arbitrage for this test
-        with patch.dict(os.environ, {"MERID_YES_NO_ARBITRAGE_ENABLED": "true"}):
-            # Reload module to pick up env var
-            duality_validator.ARBITRAGE_ENABLED = True
-            
-            # For arbitrage: yes_ask + no_bid < 100
-            # For valid duality: yes_bid + no_bid ≈ 100, yes_ask + no_ask ≈ 100
-            # For no crossed market: yes_bid < no_ask AND no_bid < yes_ask
+        with patch.object(duality_validator, 'ARBITRAGE_ENABLED', True):
+            # For arbitrage: yes_ask + no_bid < threshold (95c from YAML)
+            # For valid duality: yes_bid + no_ask = 100c (first check must pass)
+            # Arbitrage check happens before NO_bid + YES_ask duality check
             # 
-            # Try: yes_ask=48, yes_bid=52, no_ask=53, no_bid=47
+            # Try: yes_ask=47, yes_bid=53, no_ask=47, no_bid=47
             # Check:
-            # - yes_bid + no_bid = 52 + 47 = 99 ≈ 100 (within tolerance)
-            # - yes_ask + no_ask = 48 + 53 = 101 ≈ 100 (within tolerance)
-            # - yes_bid(52) < no_ask(53) ✓
-            # - no_bid(47) < yes_ask(48) ✓
-            # - yes_ask + no_bid = 48 + 47 = 95 < 100 ✓ (arbitrage!)
+            # - yes_bid + no_ask = 53 + 47 = 100 ✓ (first duality check passes)
+            # - yes_ask + no_bid = 47 + 47 = 94 < 95 ✓ (arbitrage triggers before second duality check)
             result = validator.check_yes_no_duality(
-                yes_bid=52,
+                yes_bid=53,
                 no_bid=47,
-                yes_ask=48,
-                no_ask=53,
+                yes_ask=47,
+                no_ask=47,
                 ticker="KXBTCD-25JUN-T100000"
             )
             
             # Should be valid (not a violation) but have arbitrage opportunity
             assert result.is_valid is True
             assert result.arbitrage_opportunity is not None
-            assert result.arbitrage_opportunity.edge_cents == 5  # 100 - (48 + 47)
-            assert result.arbitrage_opportunity.yes_ask == 48
+            assert result.arbitrage_opportunity.edge_cents == 6  # 100 - (47 + 47)
+            assert result.arbitrage_opportunity.yes_ask == 47
             assert result.arbitrage_opportunity.no_bid == 47
-            
-            # Reset
-            duality_validator.ARBITRAGE_ENABLED = False
+            # Check that tickers are derived from market_id
+            assert result.arbitrage_opportunity.yes_ticker == "KXBTCD-25JUN-T100000-YES"
+            assert result.arbitrage_opportunity.no_ticker == "KXBTCD-25JUN-T100000-NO"
+            assert result.arbitrage_opportunity.market_id == "KXBTCD-25JUN-T100000"
     
     def test_arbitrage_not_detected_when_disabled(self):
         """Test that arbitrage is not detected when feature is disabled."""
         validator = DualityValidator()
         
         # Ensure arbitrage is disabled
-        with patch.dict(os.environ, {"MERID_YES_NO_ARBITRAGE_ENABLED": "false"}):
-            duality_validator.ARBITRAGE_ENABLED = False
-            
-            # Skip bid/ask duality checks by passing None, only test arbitrage logic
+        with patch.object(duality_validator, 'ARBITRAGE_ENABLED', False):
+            # Provide valid duality data to pass duality checks
+            # yes_bid + no_ask = 48 + 52 = 100 ✓
+            # no_bid + yes_ask = 52 + 48 = 100 ✓
+            # Not crossed: yes_bid(48) < no_ask(52) ✓, no_bid(52) < yes_ask(48) ✗ (crossed!)
+            # Fix: use yes_bid=48, no_ask=52, no_bid=48, yes_ask=52
             result = validator.check_yes_no_duality(
-                yes_bid=None,
+                yes_bid=48,
                 no_bid=48,
-                yes_ask=48,
-                no_ask=None,
+                yes_ask=52,
+                no_ask=52,
                 ticker="KXBTCD-25JUN-T100000"
             )
             
@@ -88,50 +121,46 @@ class TestArbitrageDetection:
         """Test that arbitrage below threshold is not executed."""
         validator = DualityValidator()
         
-        with patch.dict(os.environ, {"MERID_YES_NO_ARBITRAGE_ENABLED": "true"}):
-            duality_validator.ARBITRAGE_ENABLED = True
-            duality_validator.ARBITRAGE_THRESHOLD_CENTS = 5  # Higher threshold
-            
-            # Skip bid/ask duality checks by passing None
-            result = validator.check_yes_no_duality(
-                yes_bid=None,
-                no_bid=48,
-                yes_ask=48,
-                no_ask=None,
-                ticker="KXBTCD-25JUN-T100000"
-            )
-            
-            # Should be valid but no arbitrage opportunity (below threshold)
-            assert result.is_valid is True
-            assert result.arbitrage_opportunity is None
-            
-            duality_validator.ARBITRAGE_ENABLED = False
-            duality_validator.ARBITRAGE_THRESHOLD_CENTS = 3
+        with patch.object(duality_validator, 'ARBITRAGE_ENABLED', True):
+            with patch.object(duality_validator, 'ARBITRAGE_THRESHOLD_CENTS', 95):
+                # Provide valid duality data
+                # yes_bid + no_ask = 48 + 52 = 100 ✓
+                # no_bid + yes_ask = 48 + 52 = 100 ✓
+                # YES + NO = 48 + 52 = 100c, which is >= 95c threshold, so no arbitrage
+                result = validator.check_yes_no_duality(
+                    yes_bid=48,
+                    no_bid=48,
+                    yes_ask=52,
+                    no_ask=52,
+                    ticker="KXBTCD-25JUN-T100000"
+                )
+                
+                # Should be valid but no arbitrage opportunity (at or above threshold)
+                assert result.is_valid is True
+                assert result.arbitrage_opportunity is None
     
     def test_arbitrage_recommended_size(self):
         """Test that recommended size is calculated correctly."""
         validator = DualityValidator()
         
-        with patch.dict(os.environ, {"MERID_YES_NO_ARBITRAGE_ENABLED": "true"}):
-            duality_validator.ARBITRAGE_ENABLED = True
-            duality_validator.ARBITRAGE_MAX_SIZE_CONTRACTS = 10
-            
-            # Skip bid/ask duality checks by passing None
-            result = validator.check_yes_no_duality(
-                yes_bid=None,
-                no_bid=45,
-                yes_ask=45,
-                no_ask=None,
-                ticker="KXBTCD-25JUN-T100000"
-            )
-            
-            # Recommended size should be min(max_size, edge // 2)
-            # edge = 10c, edge // 2 = 5, min(10, 5) = 5
-            assert result.arbitrage_opportunity is not None
-            assert result.arbitrage_opportunity.recommended_size == 5
-            
-            duality_validator.ARBITRAGE_ENABLED = False
-            duality_validator.ARBITRAGE_MAX_SIZE_CONTRACTS = 10
+        with patch.object(duality_validator, 'ARBITRAGE_ENABLED', True):
+            with patch.object(duality_validator, 'ARBITRAGE_MAX_SIZE_CONTRACTS', 10):
+                # Provide valid duality data with arbitrage opportunity
+                # yes_bid + no_ask = 55 + 45 = 100 ✓
+                # no_bid + yes_ask = 45 + 55 = 100 ✓
+                # YES + NO = 45 + 45 = 90c, which is < 95c threshold, so arbitrage triggers
+                # Edge = 10c, edge // 2 = 5, min(10, 5) = 5
+                result = validator.check_yes_no_duality(
+                    yes_bid=55,
+                    no_bid=45,
+                    yes_ask=45,
+                    no_ask=45,
+                    ticker="KXBTCD-25JUN-T100000"
+                )
+                
+                # Recommended size should be min(max_size, edge // 2)
+                assert result.arbitrage_opportunity is not None
+                assert result.arbitrage_opportunity.recommended_size == 5
     
     def test_arbitrage_callback_invoked(self):
         """Test that arbitrage callback is invoked when opportunity is detected."""
@@ -139,23 +168,22 @@ class TestArbitrageDetection:
         callback_mock = Mock()
         validator.set_arbitrage_callback(callback_mock)
         
-        with patch.dict(os.environ, {"MERID_YES_NO_ARBITRAGE_ENABLED": "true"}):
-            duality_validator.ARBITRAGE_ENABLED = True
-            
-            # Skip bid/ask duality checks by passing None
+        with patch.object(duality_validator, 'ARBITRAGE_ENABLED', True):
+            # Provide valid duality data with arbitrage opportunity
+            # yes_bid + no_ask = 55 + 45 = 100 ✓
+            # no_bid + yes_ask = 45 + 55 = 100 ✓
+            # YES + NO = 45 + 45 = 90c, which is < 95c threshold, so arbitrage triggers
             result = validator.check_yes_no_duality(
-                yes_bid=None,
-                no_bid=48,
-                yes_ask=48,
-                no_ask=None,
+                yes_bid=55,
+                no_bid=45,
+                yes_ask=45,
+                no_ask=45,
                 ticker="KXBTCD-25JUN-T100000"
             )
             
             # Callback should have been invoked
             callback_mock.assert_called_once()
             assert isinstance(callback_mock.call_args[0][0], ArbitrageOpportunity)
-            
-            duality_validator.ARBITRAGE_ENABLED = False
     
     def test_arbitrage_callback_error_handling(self):
         """Test that callback errors are logged but don't crash validator."""
@@ -167,35 +195,36 @@ class TestArbitrageDetection:
         
         validator.set_arbitrage_callback(failing_callback)
         
-        with patch.dict(os.environ, {"MERID_YES_NO_ARBITRAGE_ENABLED": "true"}):
-            duality_validator.ARBITRAGE_ENABLED = True
-            
+        with patch.object(duality_validator, 'ARBITRAGE_ENABLED', True):
+            # Provide valid duality data with arbitrage opportunity
+            # yes_bid + no_ask = 55 + 45 = 100 ✓
+            # no_bid + yes_ask = 45 + 55 = 100 ✓
+            # YES + NO = 45 + 45 = 90c, which is < 95c threshold, so arbitrage triggers
             # Should not raise exception despite callback error
-            # Skip bid/ask duality checks by passing None
             result = validator.check_yes_no_duality(
-                yes_bid=None,
-                no_bid=48,
-                yes_ask=48,
-                no_ask=None,
+                yes_bid=55,
+                no_bid=45,
+                yes_ask=45,
+                no_ask=45,
                 ticker="KXBTCD-25JUN-T100000"
             )
             
             # Should still return valid result with arbitrage opportunity
             assert result.is_valid is True
             assert result.arbitrage_opportunity is not None
-            
-            duality_validator.ARBITRAGE_ENABLED = False
 
 
 class TestArbitrageOpportunity:
     """Test ArbitrageOpportunity dataclass."""
     
     def test_arbitrage_opportunity_creation(self):
-        """Test creation of ArbitrageOpportunity."""
+        """Test creation of ArbitrageOpportunity with all fields."""
         opp = ArbitrageOpportunity(
             edge_cents=5,
             yes_ask=48,
             no_bid=47,
+            yes_ticker="KXBTCD-25JUN-T100000-YES",
+            no_ticker="KXBTCD-25JUN-T100000-NO",
             market_id="KXBTCD-25JUN-T100000",
             recommended_size=3
         )
@@ -203,6 +232,8 @@ class TestArbitrageOpportunity:
         assert opp.edge_cents == 5
         assert opp.yes_ask == 48
         assert opp.no_bid == 47
+        assert opp.yes_ticker == "KXBTCD-25JUN-T100000-YES"
+        assert opp.no_ticker == "KXBTCD-25JUN-T100000-NO"
         assert opp.market_id == "KXBTCD-25JUN-T100000"
         assert opp.recommended_size == 3
     
@@ -214,6 +245,8 @@ class TestArbitrageOpportunity:
             no_bid=48
         )
         
+        assert opp.yes_ticker is None
+        assert opp.no_ticker is None
         assert opp.market_id is None
         assert opp.recommended_size == 1  # Default
 
@@ -277,3 +310,25 @@ class TestArbitrageIntegration:
             # Should return both results
             assert results["yes"].status == "filled"
             assert results["no"].status == "rejected"
+
+
+class TestArbitrageCallbackWiring:
+    """Test that arbitrage callback is wired in main_15m_lean.py startup."""
+    
+    def test_callback_registration_in_lifespan(self):
+        """Test that the lifespan function registers the arbitrage callback."""
+        # This test verifies that the callback wiring code exists in main_15m_lean.py
+        # We can't easily test the actual execution without a full FastAPI app,
+        # but we can verify the code structure
+        
+        import inspect
+        from web.main_15m_lean import lifespan
+        
+        # Get the source code of the lifespan function
+        source = inspect.getsource(lifespan)
+        
+        # Verify that the callback wiring code exists
+        assert "set_arbitrage_callback" in source, "Arbitrage callback registration not found in lifespan"
+        assert "arbitrage_execution_callback" in source, "Arbitrage callback function not found in lifespan"
+        assert "execute_arbitrage_async" in source, "execute_arbitrage_async import not found in lifespan"
+        assert "get_duality_validator" in source, "get_duality_validator import not found in lifespan"

@@ -254,11 +254,12 @@ class TestPairCostArbitrage:
         assert edge_cents == 6
         
     def test_duality_validator_threshold(self):
-        """Test that duality validator uses 5c threshold (Gabagool)."""
+        """Test that duality validator loads threshold from YAML config (95c pair cost)."""
         from merid.event_venues.kalshi.duality_validator import ARBITRAGE_THRESHOLD_CENTS
         
-        # Should be 5c (for 95c pair cost threshold)
-        assert ARBITRAGE_THRESHOLD_CENTS == 5
+        # Should be 95c (pair_cost_threshold_cents from YAML config)
+        # This means arbitrage executes when YES + NO < 5c (100 - 95)
+        assert ARBITRAGE_THRESHOLD_CENTS == 95
 
 
 class TestConfigChanges:

@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 import os
 import time
+import yaml
+from pathlib import Path
 
 # Import central severity classification
 from merid.event_venues.kalshi.severity import Severity, Alarm, create_p1_alarm
@@ -36,10 +38,52 @@ QUARANTINE_DURATION_SECONDS = 300  # 5 minutes quarantine per violation
 QUARANTINE_COOLDOWN_SECONDS = 600  # 10 minutes cooldown before re-quarantine
 SEQUENCE_ALIGNMENT_WINDOW = 3  # Number of messages to check for sequence alignment
 
-# Arbitrage constants
-ARBITRAGE_ENABLED = os.getenv("MERID_YES_NO_ARBITRAGE_ENABLED", "false").lower() == "true"
-ARBITRAGE_THRESHOLD_CENTS = 5  # Gabagool strategy: execute when YES + NO < 95c (pair-cost model)
-ARBITRAGE_MAX_SIZE_CONTRACTS = 10  # Max contracts per arbitrage trade
+# Arbitrage configuration - loaded from YAML profile (single source of truth)
+def _load_arbitrage_config() -> Dict[str, Any]:
+    """Load arbitrage configuration from kalshi_crypto_15m_v2.yaml profile.
+    
+    This is the single source of truth for arbitrage settings.
+    Falls back to environment variable for backward compatibility.
+    """
+    config = {
+        'enabled': False,
+        'pair_cost_threshold_cents': 5,
+        'max_size_contracts': 10,
+        'execution_timeout_ms': 500
+    }
+    
+    try:
+        # Try to load from profile YAML
+        profile_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        if profile_path.exists():
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                profile_config = yaml.safe_load(f)
+                if profile_config and 'yes_no_arbitrage' in profile_config:
+                    arb_config = profile_config['yes_no_arbitrage']
+                    config['enabled'] = arb_config.get('enabled', False)
+                    config['pair_cost_threshold_cents'] = arb_config.get('pair_cost_threshold_cents', 5)
+                    config['max_size_contracts'] = arb_config.get('max_size_contracts', 10)
+                    config['execution_timeout_ms'] = arb_config.get('execution_timeout_ms', 500)
+                    logger.info(
+                        "[ARBITRAGE-CONFIG] Loaded from YAML: enabled=%s threshold=%dc max_size=%d",
+                        config['enabled'], config['pair_cost_threshold_cents'], config['max_size_contracts']
+                    )
+    except Exception as e:
+        logger.warning(f"[ARBITRAGE-CONFIG] Failed to load from YAML: {e}, using defaults")
+    
+    # Environment variable override (backward compatibility)
+    env_enabled = os.getenv("MERID_YES_NO_ARBITRAGE_ENABLED", "false").lower() == "true"
+    if env_enabled:
+        config['enabled'] = True
+        logger.info("[ARBITRAGE-CONFIG] Enabled via MERID_YES_NO_ARBITRAGE_ENABLED env var")
+    
+    return config
+
+_arbitrage_config = _load_arbitrage_config()
+ARBITRAGE_ENABLED = _arbitrage_config['enabled']
+ARBITRAGE_THRESHOLD_CENTS = _arbitrage_config['pair_cost_threshold_cents']
+ARBITRAGE_MAX_SIZE_CONTRACTS = _arbitrage_config['max_size_contracts']
+ARBITRAGE_EXECUTION_TIMEOUT_MS = _arbitrage_config['execution_timeout_ms']
 
 @dataclass
 class ArbitrageOpportunity:
@@ -47,7 +91,9 @@ class ArbitrageOpportunity:
     edge_cents: int  # Profit in cents (100 - (yes_ask + no_bid))
     yes_ask: int
     no_bid: int
-    market_id: Optional[str] = None
+    yes_ticker: Optional[str] = None  # YES contract ticker (e.g., KXBTCD-25JUN-T100000-YES)
+    no_ticker: Optional[str] = None  # NO contract ticker (e.g., KXBTCD-25JUN-T100000-NO)
+    market_id: Optional[str] = None  # Base market ID (e.g., KXBTCD-25JUN-T100000)
     recommended_size: int = 1  # Recommended contract size
 
 @dataclass
@@ -126,7 +172,63 @@ class DualityValidator:
                 self._record_violation(ticker, result)
                 return result
         
+        # PROFITABILITY ENHANCEMENT: Check for arbitrage opportunity
+        # If YES ask + NO bid < pair_cost_threshold_cents, we can buy both for a guaranteed profit
+        # This check must happen BEFORE the NO_bid + YES_ask duality check because arbitrage
+        # opportunities are exactly when YES_ask + NO_bid < 100c (which would fail the duality check)
+        if ARBITRAGE_ENABLED and yes_ask is not None and no_bid is not None:
+            ask_bid_sum = yes_ask + no_bid
+            # ARBITRAGE_THRESHOLD_CENTS is the pair_cost_threshold from YAML (e.g., 95c)
+            # Execute when YES + NO < threshold (e.g., < 95c means edge > 5c)
+            if ask_bid_sum < ARBITRAGE_THRESHOLD_CENTS:
+                edge_cents = 100 - ask_bid_sum
+                # Derive tickers from ticker parameter if provided
+                # Kalshi market IDs follow pattern: KX{ASSET}15M-{DATE}-{STRIKE}
+                # YES ticker: KX{ASSET}15M-{DATE}-{STRIKE}-YES
+                # NO ticker: KX{ASSET}15M-{DATE}-{STRIKE}-NO
+                yes_ticker = None
+                no_ticker = None
+                market_id = None
+                if ticker:
+                    market_id = ticker
+                    yes_ticker = f"{ticker}-YES"
+                    no_ticker = f"{ticker}-NO"
+                
+                arbitrage_opp = ArbitrageOpportunity(
+                    edge_cents=edge_cents,
+                    yes_ask=yes_ask,
+                    no_bid=no_bid,
+                    yes_ticker=yes_ticker,
+                    no_ticker=no_ticker,
+                    market_id=market_id,
+                    recommended_size=min(ARBITRAGE_MAX_SIZE_CONTRACTS, max(1, edge_cents // 2))
+                )
+                logger.info(
+                    "[ARBITRAGE-OPPORTUNITY] ticker=%s edge=%dc yes_ask=%dc no_bid=%dc recommended_size=%d",
+                    ticker, edge_cents, yes_ask, no_bid, arbitrage_opp.recommended_size
+                )
+                # Trigger arbitrage execution callback if registered
+                if self._arbitrage_callback:
+                    try:
+                        self._arbitrage_callback(arbitrage_opp)
+                    except Exception as e:
+                        logger.error(f"[ARBITRAGE-EXECUTION] Failed to execute arbitrage: {e}")
+                # Return valid result with arbitrage opportunity attached
+                # Arbitrage takes precedence over duality violation
+                return DualityCheckResult(
+                    is_valid=True,
+                    error_cents=0,
+                    violation_type=None,
+                    raw_yes_bid=yes_bid,
+                    raw_no_bid=no_bid,
+                    raw_yes_ask=yes_ask,
+                    raw_no_ask=no_ask,
+                    ticker=ticker,
+                    arbitrage_opportunity=arbitrage_opp
+                )
+        
         # Check NO_bid + YES_ask = 100c
+        # This check happens AFTER arbitrage check to avoid blocking arbitrage opportunities
         if no_bid is not None and yes_ask is not None:
             ask_bid_sum = no_bid + yes_ask
             ask_bid_error = abs(ask_bid_sum - 100)
@@ -142,45 +244,6 @@ class DualityValidator:
                 )
                 self._record_violation(ticker, result)
                 return result
-        
-        # PROFITABILITY ENHANCEMENT: Check for arbitrage opportunity
-        # If YES ask + NO bid < 100c, we can buy both for a guaranteed profit
-        # This check must happen BEFORE crossed market check because arbitrage
-        # opportunities often appear as crossed markets (which is exactly why
-        # they're profitable)
-        if ARBITRAGE_ENABLED and yes_ask is not None and no_bid is not None:
-            ask_bid_sum = yes_ask + no_bid
-            if ask_bid_sum < 100 - ARBITRAGE_THRESHOLD_CENTS:
-                edge_cents = 100 - ask_bid_sum
-                arbitrage_opp = ArbitrageOpportunity(
-                    edge_cents=edge_cents,
-                    yes_ask=yes_ask,
-                    no_bid=no_bid,
-                    recommended_size=min(ARBITRAGE_MAX_SIZE_CONTRACTS, max(1, edge_cents // 2))
-                )
-                logger.info(
-                    "[ARBITRAGE-OPPORTUNITY] ticker=%s edge=%dc yes_ask=%dc no_bid=%dc recommended_size=%d",
-                    ticker, edge_cents, yes_ask, no_bid, arbitrage_opp.recommended_size
-                )
-                # Trigger arbitrage execution callback if registered
-                if self._arbitrage_callback:
-                    try:
-                        self._arbitrage_callback(arbitrage_opp)
-                    except Exception as e:
-                        logger.error(f"[ARBITRAGE-EXECUTION] Failed to execute arbitrage: {e}")
-                # Return valid result with arbitrage opportunity attached
-                # Arbitrage takes precedence over crossed market violation
-                return DualityCheckResult(
-                    is_valid=True,
-                    error_cents=0,
-                    violation_type=None,
-                    raw_yes_bid=yes_bid,
-                    raw_no_bid=no_bid,
-                    raw_yes_ask=yes_ask,
-                    raw_no_ask=no_ask,
-                    ticker=ticker,
-                    arbitrage_opportunity=arbitrage_opp
-                )
         
         # Check for crossed markets (YES bid >= NO ask or vice versa)
         # Only check when both sides are present - one-sided books are valid
