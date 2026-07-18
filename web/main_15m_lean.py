@@ -24,6 +24,9 @@ except ImportError:
 from utils.logger import get_logger
 logger = get_logger("web.main_15m_lean")
 
+# Import startup_state early for singleton reset during module import
+from web.startup_state import startup_state
+
 logger.debug("[MAIN-15M-LEAN] Module loaded and initialized")
 
 MERID_HTTP_PORT = 8011
@@ -83,6 +86,25 @@ except Exception as e:
 # Do NOT reset market_catalog singleton during startup
 # The reset causes the singleton to be None when components try to use it
 # The catalog will be properly initialized and set as singleton in the startup function
+
+# CRITICAL FIX: Reset agent grid singleton to force proper lifespan startup
+# If the agent grid persists from a previous run, the lifespan startup will be skipped
+# because get_agent_grid() returns the existing instance instead of building a new one
+try:
+    from merid.prediction.agent_grid_15m import reset_agent_grid
+    reset_agent_grid()
+    logger.info("[SINGLETON-RESET] agent_grid reset")
+except Exception as e:
+    logger.warning(f"[SINGLETON-RESET] Failed to reset agent_grid: {e}")
+
+# CRITICAL FIX: Reset startup_state singleton to force fresh startup
+# If startup_state persists from a previous run, the lifespan may be skipped
+# Note: startup_state is imported at module level (line 182), so we use it directly here
+try:
+    startup_state.reset()
+    logger.info("[SINGLETON-RESET] startup_state reset")
+except Exception as e:
+    logger.warning(f"[SINGLETON-RESET] Failed to reset startup_state: {e}")
 
 logger.info("[SINGLETON-RESET] All singletons reset complete")
 
@@ -370,165 +392,282 @@ logger.debug("[LIFESPAN-DEF] About to define lifespan function")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
+    print("=" * 80)
+    print("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT (PRINT)")
+    print("=" * 80)
     logger.info("=" * 80)
     logger.info("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT")
     logger.info("=" * 80)
     
-    # Mark startup as started immediately so health watcher can detect it
-    startup_state.started = True
-    startup_state.started_at = datetime.now(timezone.utc)
-    logger.info("[LIFESPAN] startup_state.started set to True")
-    
-    # Startup
-    logger.info("[STARTUP-EVENT] ENTER lifespan startup - RUNNING STARTUP")
-    
-    # CRITICAL FIX: Run startup directly in lifespan event loop
-    # This ensures proper event loop management and background task lifecycle
-    logger.info("[LIFESPAN] About to call _run_startup_phases_v20260530")
-    logger.info("[LIFESPAN] Calling _run_startup_phases_v20260530 NOW")
     try:
-        await _run_startup_phases_v20260530(app)
-        logger.info("[STARTUP-EVENT] P1.x startup completed successfully")
-    except Exception as e:
-        logger.exception(
-            "[STARTUP-EVENT] P1.x startup failed: %r - "
-            "critical infrastructure initialization failed, server cannot start",
-            e
-        )
-        raise
-    logger.info("[LIFESPAN] Completed _run_startup_phases_v20260530")
-    
-    # Start production audit harness
-    logger.info("[AUDIT-HARNESS] Starting production audit harness")
-    try:
-        from merid.audit import start_production_audit_harness
-        audit_harness = start_production_audit_harness()
-        app.state.audit_harness = audit_harness
-        logger.info("[AUDIT-HARNESS] Production audit harness started successfully")
-    except Exception as e:
-        logger.warning(f"[AUDIT-HARNESS] Failed to start production audit harness: {e}")
-        # Non-fatal - continue without audit harness
-    
-    # STARTUP CONTRACT: Log profile/guardrail agreement for debugging
-    logger.info("[STARTUP-CONTRACT] Logging profile and guardrail configuration")
-    try:
-        from merid.risk.profiles.crypto_15m_profile import get_active_profile
-        from merid.event_venues.kalshi.risk_parameters import (
-            DEEP_OTM_CHEAP_CENTS,
-            DEEP_OTM_EXPENSIVE_CENTS,
-        )
-        profile_adapter = get_active_profile()
-        if profile_adapter and hasattr(profile_adapter, 'profile'):
-            profile_name = getattr(profile_adapter.profile, 'profile_name', 'unknown')
-            profile_version = getattr(profile_adapter.profile, 'profile_version', 'unknown')
-            guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
-            guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
-            signal_mode = getattr(profile_adapter.profile, 'signal_mode', 'unknown')
-            price_based_buy = getattr(profile_adapter.profile, 'price_based_buy_threshold', 'N/A')
-            price_based_sell = getattr(profile_adapter.profile, 'price_based_sell_threshold', 'N/A')
-            
-            # Determine if price-based thresholds are active
-            price_based_active = (signal_mode in ['price_based', 'hybrid'])
-            
-            logger.error(
-                "[STARTUP-CONTRACT] profile=%s version=%s guardrails=[min=%s,max=%s] "
-                "deep_otm=[cheap=%d,expensive=%d] signal_mode=%s price_based_active=%s "
-                "price_based_thresholds=[buy=%.2f,sell=%.2f]",
-                profile_name, profile_version, guardrails_min, guardrails_max,
-                DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS,
-                signal_mode, price_based_active, price_based_buy, price_based_sell
+        # CRITICAL: Reset singletons at lifespan entry to force clean startup
+        # This ensures stale state from previous runs doesn't bypass lifespan startup
+        logger.info("[LIFESPAN] Step 1: Resetting singletons to force clean startup")
+        try:
+            from merid.prediction.agent_grid_15m import reset_agent_grid
+            reset_agent_grid()
+            logger.info("[LIFESPAN] Step 1a: agent_grid reset")
+        except Exception as e:
+            logger.warning(f"[LIFESPAN] Step 1a: Failed to reset agent_grid: {e}")
+        
+        try:
+            startup_state.reset()
+            logger.info("[LIFESPAN] Step 1b: startup_state reset")
+        except Exception as e:
+            logger.warning(f"[LIFESPAN] Step 1b: Failed to reset startup_state: {e}")
+        
+        # Mark startup as started immediately so health watcher can detect it
+        startup_state.started = True
+        startup_state.started_at = datetime.now(timezone.utc)
+        logger.info("[LIFESPAN] Step 1c: startup_state.started set to True")
+        
+        # Startup
+        logger.info("[LIFESPAN] Step 2: ENTER lifespan startup - RUNNING STARTUP")
+        
+        # CRITICAL FIX: Run startup directly in lifespan event loop
+        # This ensures proper event loop management and background task lifecycle
+        logger.info("[LIFESPAN] Step 3: About to call _run_startup_phases_v20260530")
+        try:
+            await _run_startup_phases_v20260530(app)
+            logger.info("[LIFESPAN] Step 3: P1.x startup completed successfully")
+        except Exception as e:
+            logger.exception(
+                "[LIFESPAN] Step 3: P1.x startup failed: %r - "
+                "critical infrastructure initialization failed, server cannot start",
+                e
             )
-    except Exception as e:
-        logger.warning("[STARTUP-CONTRACT] Failed to log profile configuration: %s", e)
-    
-    # Run P2.x (trading stack) in lifespan
-    logger.info("[LIFESPAN] Before _run_full_startup_in_lifespan")
-    
-    try:
-        await _run_full_startup_in_lifespan(app)
-        logger.info("[STARTUP-EVENT] P2.x startup completed successfully")
+            raise
+        
+        # Start production audit harness
+        logger.info("[LIFESPAN] Step 4: Starting production audit harness")
+        try:
+            from merid.audit import start_production_audit_harness
+            audit_harness = start_production_audit_harness()
+            app.state.audit_harness = audit_harness
+            logger.info("[LIFESPAN] Step 4: Production audit harness started successfully")
+        except Exception as e:
+            logger.warning(f"[LIFESPAN] Step 4: Failed to start production audit harness: {e}")
+            # Non-fatal - continue without audit harness
+        
+        # STARTUP CONTRACT: Log profile/guardrail agreement for debugging
+        logger.info("[LIFESPAN] Step 5: Logging profile and guardrail configuration")
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            from merid.event_venues.kalshi.risk_parameters import (
+                DEEP_OTM_CHEAP_CENTS,
+                DEEP_OTM_EXPENSIVE_CENTS,
+            )
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter, 'profile'):
+                profile_name = getattr(profile_adapter.profile, 'profile_name', 'unknown')
+                profile_version = getattr(profile_adapter.profile, 'profile_version', 'unknown')
+                guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
+                guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
+                signal_mode = getattr(profile_adapter.profile, 'signal_mode', 'unknown')
+                price_based_buy = getattr(profile_adapter.profile, 'price_based_buy_threshold', 'N/A')
+                price_based_sell = getattr(profile_adapter.profile, 'price_based_sell_threshold', 'N/A')
+                
+                # Determine if price-based thresholds are active
+                price_based_active = (signal_mode in ['price_based', 'hybrid'])
+                
+                logger.error(
+                    "[LIFESPAN] Step 5: profile=%s version=%s guardrails=[min=%s,max=%s] "
+                    "deep_otm=[cheap=%d,expensive=%d] signal_mode=%s price_based_active=%s "
+                    "price_based_thresholds=[buy=%.2f,sell=%.2f]",
+                    profile_name, profile_version, guardrails_min, guardrails_max,
+                    DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS,
+                    signal_mode, price_based_active, price_based_buy, price_based_sell
+                )
+        except Exception as e:
+            logger.warning("[LIFESPAN] Step 5: Failed to log profile configuration: %s", e)
+        
+        # Wire arbitrage execution callback
+        logger.info("[LIFESPAN] Step 5b: Wiring YES/NO arbitrage execution callback")
+        try:
+            from merid.event_venues.kalshi.duality_validator import get_duality_validator
+            from merid.event_venues.kalshi.order_router import execute_arbitrage_async
+            
+            validator = get_duality_validator()
+            
+            async def arbitrage_execution_callback(opportunity):
+                """Execute arbitrage opportunity via order router."""
+                try:
+                    # Use tickers from opportunity if provided, otherwise derive from market_id
+                    if opportunity.yes_ticker and opportunity.no_ticker:
+                        yes_ticker = opportunity.yes_ticker
+                        no_ticker = opportunity.no_ticker
+                    elif opportunity.market_id:
+                        # Fallback: derive tickers from market_id
+                        # Kalshi market IDs follow pattern: KX{ASSET}15M-{DATE}-{STRIKE}
+                        # YES ticker: KX{ASSET}15M-{DATE}-{STRIKE}-YES
+                        # NO ticker: KX{ASSET}15M-{DATE}-{STRIKE}-NO
+                        base_ticker = opportunity.market_id
+                        yes_ticker = f"{base_ticker}-YES"
+                        no_ticker = f"{base_ticker}-NO"
+                    else:
+                        logger.warning("[ARBITRAGE-CALLBACK] No ticker information in opportunity, skipping execution")
+                        return
+                    
+                    logger.info(
+                        "[ARBITRAGE-CALLBACK] Executing: yes_ticker=%s no_ticker=%s "
+                        "yes_ask=%dc no_bid=%dc size=%d edge=%dc",
+                        yes_ticker, no_ticker, opportunity.yes_ask, opportunity.no_bid,
+                        opportunity.recommended_size, opportunity.edge_cents
+                    )
+                    
+                    # Execute arbitrage
+                    results = await execute_arbitrage_async(
+                        yes_ticker=yes_ticker,
+                        no_ticker=no_ticker,
+                        yes_ask_cents=opportunity.yes_ask,
+                        no_bid_cents=opportunity.no_bid,
+                        size=opportunity.recommended_size,
+                        market_id=opportunity.market_id
+                    )
+                    
+                    logger.info(
+                        "[ARBITRAGE-CALLBACK] Execution complete: yes_status=%s no_status=%s",
+                        results.get('yes', {}).get('status', 'unknown'),
+                        results.get('no', {}).get('status', 'unknown')
+                    )
+                except Exception as e:
+                    logger.error(f"[ARBITRAGE-CALLBACK] Execution failed: {e}")
+            
+            # Register the callback
+            validator.set_arbitrage_callback(arbitrage_execution_callback)
+            logger.info("[LIFESPAN] Step 5b: Arbitrage execution callback registered successfully")
+        except Exception as e:
+            logger.warning(f"[LIFESPAN] Step 5b: Failed to wire arbitrage callback: {e}")
+        
+        # Run P2.x (trading stack) in lifespan
+        logger.info("[LIFESPAN] Step 6: Before _run_full_startup_in_lifespan")
+        
+        try:
+            await _run_full_startup_in_lifespan(app)
+            logger.info("[LIFESPAN] Step 6: P2.x startup completed successfully")
+        except Exception as e:
+            logger.exception(
+                "[LIFESPAN] Step 6: P2.x startup failed: %r - "
+                "trading stack initialization failed, server cannot start",
+                e
+            )
+            raise
+        
+        # CRITICAL FIX: 2026-07-07 - Position monitoring delegated to PositionMonitor
+        # PositionCache.start_monitoring() is now a no-op (delegated to PositionMonitor)
+        # PositionMonitor is started by Kalshi15mLoop.start() with proper callback routing
+        # This prevents duplicate monitoring loops and ensures all exits use the callback system
+        logger.info("[LIFESPAN] Step 7: Position monitoring delegated to PositionMonitor (started by Kalshi15mLoop)")
+        
+        logger.info("[LIFESPAN] Step 8: Startup complete, yielding to application")
         
     except Exception as e:
-        logger.exception(
-            "[STARTUP-EVENT] P2.x startup failed: %r - "
-            "trading stack initialization failed, server cannot start",
-            e
-        )
+        logger.exception("[LIFESPAN] CRITICAL ERROR during startup: %r", e)
         raise
-    logger.info("[LIFESPAN] After _run_full_startup_in_lifespan")
-    
-    # CRITICAL FIX: 2026-07-07 - Position monitoring delegated to PositionMonitor
-    # PositionCache.start_monitoring() is now a no-op (delegated to PositionMonitor)
-    # PositionMonitor is started by Kalshi15mLoop.start() with proper callback routing
-    # This prevents duplicate monitoring loops and ensures all exits use the callback system
-    logger.info("[LIFESPAN] Position monitoring delegated to PositionMonitor (started by Kalshi15mLoop)")
-    
-    # NOTE: Kalshi15mLoop background task is now created in _run_full_startup_in_lifespan()
-    # This avoids duplicate task creation since the health-trigger startup pattern
-    # runs P2.x (trading stack) in the lifespan, which creates the task.
-    # The lifespan only handles shutdown from this point forward.
     
     yield
+    
     # Shutdown
-    logger.info("[SHUTDOWN] Graceful shutdown started")
+    logger.info("[LIFESPAN] Step 9: Graceful shutdown started")
     
-    # Stop unified spot service refresh loop
-    from data.unified_spot_service import get_unified_spot_service
-    unified_spot = get_unified_spot_service()
-    logger.info("[SHUTDOWN] Stopping unified spot service refresh loop")
-    await unified_spot.stop_refresh_loop()
-    logger.info("[SHUTDOWN] Unified spot service stopped")
+    try:
+        # Stop unified spot service refresh loop
+        from data.unified_spot_service import get_unified_spot_service
+        unified_spot = get_unified_spot_service()
+        logger.info("[LIFESPAN] Step 9a: Stopping unified spot service refresh loop")
+        await unified_spot.stop_refresh_loop()
+        logger.info("[LIFESPAN] Step 9a: Unified spot service stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9a: Failed to stop unified spot service: {e}")
     
-    # Stop trailing stop monitoring
-    from merid.event_venues.kalshi.position_cache import get_position_cache
-    position_cache = get_position_cache()
-    logger.info("[SHUTDOWN] Stopping trailing stop monitoring")
-    position_cache.stop_monitoring()
-    logger.info("[SHUTDOWN] Trailing stop monitoring stopped")
+    try:
+        # Stop trailing stop monitoring
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        position_cache = get_position_cache()
+        logger.info("[LIFESPAN] Step 9b: Stopping trailing stop monitoring")
+        position_cache.stop_monitoring()
+        logger.info("[LIFESPAN] Step 9b: Trailing stop monitoring stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9b: Failed to stop trailing stop monitoring: {e}")
     
-    # Cancel Kalshi15mLoop background task
-    kalshi_task = getattr(app.state, "kalshi_15m_task", None)
-    if kalshi_task is not None:
-        logger.info("[SHUTDOWN] Cancelling Kalshi15mLoop background task")
-        kalshi_task.cancel()
-        try:
-            await kalshi_task
-        except asyncio.CancelledError:
-            logger.info("[SHUTDOWN] Kalshi15mLoop task cancelled successfully")
-        logger.info("[SHUTDOWN] Kalshi15mLoop background task stopped")
+    try:
+        # Cancel Kalshi15mLoop background task
+        kalshi_task = getattr(app.state, "kalshi_15m_task", None)
+        if kalshi_task is not None:
+            logger.info("[LIFESPAN] Step 9c: Cancelling Kalshi15mLoop background task")
+            kalshi_task.cancel()
+            try:
+                await kalshi_task
+            except asyncio.CancelledError:
+                logger.info("[LIFESPAN] Step 9c: Kalshi15mLoop task cancelled successfully")
+            logger.info("[LIFESPAN] Step 9c: Kalshi15mLoop background task stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9c: Failed to cancel Kalshi15mLoop task: {e}")
     
-    # Stop 15m loop if running (legacy support)
-    loop = getattr(app.state, "loop_15m", None)
-    if loop is not None:
-        logger.info("[SHUTDOWN] Stopping 15m loop")
-        if hasattr(loop, "stop"):
-            await loop.stop()
-        logger.info("[SHUTDOWN] 15m loop stopped")
+    try:
+        # Stop 15m loop if running (legacy support)
+        loop = getattr(app.state, "loop_15m", None)
+        if loop is not None:
+            logger.info("[LIFESPAN] Step 9d: Stopping 15m loop")
+            if hasattr(loop, "stop"):
+                await loop.stop()
+            logger.info("[LIFESPAN] Step 9d: 15m loop stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9d: Failed to stop 15m loop: {e}")
     
-    # Close WebSocket bridge
-    ws = getattr(app.state, "ws_bridge", None)
-    if ws is not None:
-        logger.info("[SHUTDOWN] Closing WebSocket bridge")
-        if hasattr(ws, "close"):
-            await ws.close()
-        logger.info("[SHUTDOWN] WebSocket bridge closed")
+    try:
+        # Close WebSocket bridge
+        ws = getattr(app.state, "ws_bridge", None)
+        if ws is not None:
+            logger.info("[LIFESPAN] Step 9e: Closing WebSocket bridge")
+            if hasattr(ws, "close"):
+                await ws.close()
+            logger.info("[LIFESPAN] Step 9e: WebSocket bridge closed")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9e: Failed to close WebSocket bridge: {e}")
     
-    # Stop WS refresh supervisor
-    global ws_refresh_stop
-    if ws_refresh_stop is not None:
-        logger.info("[SHUTDOWN] Stopping WS refresh supervisor")
-        ws_refresh_stop.set()
-        logger.info("[SHUTDOWN] WS refresh supervisor stopped")
+    try:
+        # Stop WS refresh supervisor
+        global ws_refresh_stop
+        if ws_refresh_stop is not None:
+            logger.info("[LIFESPAN] Step 9f: Stopping WS refresh supervisor")
+            ws_refresh_stop.set()
+            logger.info("[LIFESPAN] Step 9f: WS refresh supervisor stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9f: Failed to stop WS refresh supervisor: {e}")
     
-    # Stop production audit harness
-    audit_harness = getattr(app.state, "audit_harness", None)
-    if audit_harness is not None:
-        logger.info("[AUDIT-HARNESS] Stopping production audit harness")
-        from merid.audit import stop_production_audit_harness
-        stop_production_audit_harness()
-        logger.info("[AUDIT-HARNESS] Production audit harness stopped")
+    try:
+        # Stop production audit harness
+        audit_harness = getattr(app.state, "audit_harness", None)
+        if audit_harness is not None:
+            logger.info("[LIFESPAN] Step 9g: Stopping production audit harness")
+            from merid.audit import stop_production_audit_harness
+            stop_production_audit_harness()
+            logger.info("[LIFESPAN] Step 9g: Production audit harness stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9g: Failed to stop audit harness: {e}")
     
-    logger.info("[SHUTDOWN] Graceful shutdown complete")
+    # CRITICAL FIX (2026-07-17): Stop continuous position reconciler
+    try:
+        continuous_reconciler = getattr(app.state, "continuous_reconciler", None)
+        if continuous_reconciler is not None:
+            logger.info("[LIFESPAN] Step 9h: Stopping continuous position reconciler")
+            await continuous_reconciler.stop()
+            logger.info("[LIFESPAN] Step 9h: Continuous position reconciler stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9h: Failed to stop continuous reconciler: {e}")
+    
+    # CRITICAL FIX (2026-07-17): Stop heartbeat monitor
+    try:
+        heartbeat_monitor = getattr(app.state, "heartbeat_monitor", None)
+        if heartbeat_monitor is not None:
+            logger.info("[LIFESPAN] Step 9i: Stopping heartbeat monitor")
+            await heartbeat_monitor.stop()
+            logger.info("[LIFESPAN] Step 9i: Heartbeat monitor stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9i: Failed to stop heartbeat monitor: {e}")
+    
+    logger.info("[LIFESPAN] Step 10: Graceful shutdown complete")
 
 # P0-12 DIAGNOSTIC: Log app creation
 logger.info("[APP-CREATION] Creating FastAPI app with lifespan")
@@ -542,6 +681,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+print(f"[APP-CREATED] FastAPI app instance created, lifespan={app.router.lifespan_context}")
 logger.info("[APP-CREATED] FastAPI app instance created")
 
 # Phase 4.4: Include only production API routers (no legacy contamination)
@@ -676,8 +816,22 @@ def reset_startup():
 @app.get("/api/v1/health")
 async def health_check():
     """
-    Health check endpoint.
-    Startup is now handled by FastAPI lifespan events only.
+    Liveness probe - is the process alive?
+    CRITICAL FIX (2026-07-17): Split from readiness probe per Kubernetes best practices.
+    This should be fast and reliable - no external dependencies.
+    """
+    return {
+        "status": "alive",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/v1/ready")
+async def readiness_check():
+    """
+    Readiness probe - can the application handle traffic?
+    CRITICAL FIX (2026-07-17): Checks if startup completed and loop is running.
+    Returns 503 if not ready to receive traffic.
     """
     # Check loop task status
     kalshi_task = getattr(app.state, "kalshi_15m_task", None)
@@ -686,17 +840,35 @@ async def health_check():
     # Check if lifespan startup completed
     startup_completed = getattr(app.state, "startup_completed", False)
     
+    ready = startup_completed and loop_alive
+    
     return {
-        "status": "ok" if startup_completed and loop_alive else "initializing",
+        "status": "ready" if ready else "not_ready",
         "api_version": "15m_v2",
-        "health_impl": "health_v5_20260610_lifespan_only",
-        "health_debug": "main_15m_lean_v6_lifespan_fix",
+        "health_impl": "health_v6_20260717_split_probes",
         "startup_started": startup_state.started,
         "startup_completed": startup_completed,
         "loop_task_alive": loop_alive,
         "error": startup_state.error,
         "started_at": startup_state.started_at.isoformat() if startup_state.started_at else None,
         "completed_at": startup_state.completed_at.isoformat() if startup_state.completed_at else None,
+    }
+
+
+@app.get("/api/v1/startup")
+async def startup_check():
+    """
+    Startup probe - has the application finished initializing?
+    CRITICAL FIX (2026-07-17): Separate probe for startup completion.
+    Kubernetes waits for this before other probes.
+    """
+    startup_completed = getattr(app.state, "startup_completed", False)
+    
+    return {
+        "status": "complete" if startup_completed else "in_progress",
+        "startup_started": startup_state.started,
+        "startup_completed": startup_completed,
+        "error": startup_state.error,
     }
 
 @app.get("/api/v1/ws-bridge-status")
@@ -2623,6 +2795,28 @@ async def _run_full_startup_in_lifespan(app):
                     logger.warning("[STARTUP-STACK] P2.7: Settlement poller NOT started (Kalshi credentials unavailable)")
             except Exception as e:
                 logger.warning("[STARTUP-STACK] P2.7: Settlement poller start failed (non-fatal): %s", e)
+
+            # CRITICAL FIX (2026-07-17): Start continuous position reconciliation
+            # This ensures position drift is detected and corrected in real-time (60s interval)
+            try:
+                from merid.event_venues.kalshi.continuous_reconciliation import get_continuous_reconciler
+                reconciler = get_continuous_reconciler()
+                await reconciler.start()
+                app.state.continuous_reconciler = reconciler
+                logger.info("[STARTUP-STACK] P2.7: ContinuousReconciler started (60s position reconciliation)")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.7: ContinuousReconciler start failed (non-fatal): %s", e)
+
+            # CRITICAL FIX (2026-07-17): Start heartbeat monitoring with alerting
+            # This ensures silent deaths are detected and operators are notified
+            try:
+                from merid.monitoring.heartbeat_monitor import get_heartbeat_monitor
+                heartbeat = get_heartbeat_monitor()
+                await heartbeat.start()
+                app.state.heartbeat_monitor = heartbeat
+                logger.info("[STARTUP-STACK] P2.7: HeartbeatMonitor started (30s heartbeat interval)")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.7: HeartbeatMonitor start failed (non-fatal): %s", e)
 
             # CRITICAL FIX: PositionMonitor startup moved to Kalshi15mLoop.start()
             # This prevents duplicate startup and callback overwriting
