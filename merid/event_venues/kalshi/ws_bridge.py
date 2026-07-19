@@ -2616,12 +2616,43 @@ class KalshiWebSocketBridge:
         # Extract action from "msg" first, fallback to top-level
         action = raw.get("msg", {}).get("action", "") if isinstance(raw.get("msg"), dict) else raw.get("action", "")
         
+        # CRITICAL FIX: Kalshi quotes everything from YES side - do NOT trust raw.get("side")
+        # Kalshi's "side" field always reports "yes" because they quote from YES side perspective
+        # We must derive the correct side from the original intent using client_order_id
+        client_order_id = raw.get("client_order_id")
+        derived_side = raw.get("side", "")  # Fallback to Kalshi's reported side
+        
+        if client_order_id:
+            try:
+                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                ledger = get_fills_ledger()
+                intent = ledger.get_intent(client_order_id) if hasattr(ledger, 'get_intent') else None
+                if intent and intent.side:
+                    # Extract side from Kalshi-formatted intent.side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+                    if "YES" in intent.side:
+                        derived_side = "yes"
+                    elif "NO" in intent.side:
+                        derived_side = "no"
+                    else:
+                        # Fallback to intent.side if not in Kalshi format
+                        derived_side = intent.side.lower() if intent.side else derived_side
+                    logger.debug(
+                        "[WS-FILL-SIDE-FIX] fill_id=%s client_order_id=%s | "
+                        "Kalshi reported side=%s | Derived from intent.side=%s -> %s",
+                        fill_id, client_order_id, raw.get("side", ""), intent.side, derived_side
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[WS-FILL-SIDE-FIX] Failed to derive side from intent for fill_id=%s client_order_id=%s: %s",
+                    fill_id, client_order_id, e
+                )
+        
         ws_fill: Dict[str, Any] = {
             "fill_id": str(fill_id),
             "trade_id": raw.get("trade_id"),
             "order_id": raw.get("order_id"),
             "market_ticker": raw.get("ticker") or raw.get("market_ticker") or "",
-            "side": raw.get("side", ""),
+            "side": derived_side,  # CRITICAL FIX: Use derived side from intent, not Kalshi's reported side
             "action": action,
             "count": count,
             "yes_price": raw.get("yes_price"),
@@ -2629,7 +2660,7 @@ class KalshiWebSocketBridge:
             "price": raw.get("price"),
             "fee": raw.get("fee"),
             "created_at": raw.get("created_time") or raw.get("created_at") or raw.get("ts"),
-            "client_order_id": raw.get("client_order_id"),
+            "client_order_id": client_order_id,
         }
         
         # Log order fill for lifecycle traceability
