@@ -218,7 +218,7 @@ def test_kalshi_v2_side_conversion_no_orders():
     # Test the actual mapping logic by creating VenueOrder objects
     # and verifying the expected API format would be computed correctly
     
-    # Test BUY_YES -> side="yes", action="buy"
+    # Test BUY_YES -> side="bid", action="buy" (FIXED 2026-07-19)
     order_yes_buy = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="buy",
@@ -226,9 +226,9 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="yes"
     )
-    # The fix ensures: outcome="yes" + action="buy" -> API: side="yes", action="buy"
+    # The fix ensures: outcome="yes" + action="buy" -> API: side="bid", action="buy"
     
-    # Test SELL_YES -> side="yes", action="sell"
+    # Test SELL_YES -> side="ask", action="sell" (FIXED 2026-07-19)
     order_yes_sell = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="sell",
@@ -236,9 +236,9 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="yes"
     )
-    # The fix ensures: outcome="yes" + action="sell" -> API: side="yes", action="sell"
+    # The fix ensures: outcome="yes" + action="sell" -> API: side="ask", action="sell"
     
-    # Test BUY_NO -> side="no", action="buy"
+    # Test BUY_NO -> side="bid", action="buy" (FIXED 2026-07-19)
     order_no_buy = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="buy",
@@ -246,10 +246,10 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="no"
     )
-    # The fix ensures: outcome="no" + action="buy" -> API: side="no", action="buy"
-    # This was the bug: old logic converted this to sell YES
+    # The fix ensures: outcome="no" + action="buy" -> API: side="bid", action="buy"
+    # This was the bug: old logic converted this to sell YES (ask side)
     
-    # Test SELL_NO -> side="no", action="sell"
+    # Test SELL_NO -> side="ask", action="sell" (FIXED 2026-07-19)
     order_no_sell = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="sell",
@@ -257,7 +257,7 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="no"
     )
-    # The fix ensures: outcome="no" + action="sell" -> API: side="no", action="sell"
+    # The fix ensures: outcome="no" + action="sell" -> API: side="ask", action="sell"
 
 
 if __name__ == "__main__":
