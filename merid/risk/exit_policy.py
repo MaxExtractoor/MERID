@@ -65,7 +65,8 @@ class ExitReason(str, Enum):
     MANUAL = "manual"
     SCALE_OUT = "scale_out"
     CANDLE_REVERSAL = "candle_reversal"
-    EXTREME_PROFIT = "extreme_profit"
+    AUTO_EXIT_99C = "auto_exit_99c"  # Cash out at 99c (near-settlement)
+    EXTREME_PROFIT = "extreme_profit"  # Deprecated - use AUTO_EXIT_99C
     RATCHET_FLOOR = "ratchet_floor"
     RATCHET_TRIM = "ratchet_trim"
     DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"

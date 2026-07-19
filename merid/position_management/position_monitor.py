@@ -97,56 +97,68 @@ class PositionMonitor:
                     position_id
                 )
                 return
-            
+
             position = self._open_positions[position_id]
+
+            # FIX 9: Atomic window capacity release - release BEFORE removing position
+            # This ensures atomicity: if capacity release fails, position is not removed
+            # preventing capacity leaks. Both operations must succeed or both fail.
+            try:
+                # Calculate notional to release
+                notional_usd = (position.size * position.avg_entry_price_cents) / 100.0
+
+                # Release exposure using risk envelope (which has window tracking)
+                try:
+                    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                    envelope = get_kalshi_crypto_15m_risk_envelope()
+                    envelope.record_position_closure(position.market_id, notional_usd)
+                except RuntimeError as e:
+                    # Bankroll not ready - log warning but don't crash
+                    logger.warning(
+                        "[POSITION-MONITOR] Failed to release window exposure: %s (bankroll service unavailable)",
+                        e
+                    )
+                    # FIX 9: If capacity release fails, do NOT remove position to prevent capacity leak
+                    logger.error(
+                        "[POSITION-MONITOR] Atomicity violation: capacity release failed, keeping position to prevent leak: %s",
+                        position_id[:8]
+                    )
+                    return
+
+                logger.info(
+                    "[POSITION-MONITOR] Released window capacity: market=%s notional=$%.2f exit_reason=%s",
+                    position.market_id,
+                    notional_usd,
+                    position.exit_reason,
+                )
+            except RuntimeError as e:
+                # Risk envelope not ready (bankroll not available) - log warning but don't fail
+                # FIX 9: If capacity release fails, do NOT remove position to prevent capacity leak
+                logger.warning(
+                    "[POSITION-MONITOR] Risk envelope not ready, keeping position to prevent capacity leak: %s",
+                    e
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    "[POSITION-MONITOR] Failed to release window capacity, keeping position to prevent leak: %s",
+                    e,
+                    exc_info=True
+                )
+                # FIX 9: If capacity release fails, do NOT remove position to prevent capacity leak
+                return
+
+            # Capacity release succeeded - now remove position from tracking
             del self._open_positions[position_id]
             if position.market_id in self._market_to_position:
                 del self._market_to_position[position.market_id]
-        
+
         logger.info(
             "[POSITION-MONITOR] Removed position: %s (exit_reason=%s, exit_price=%dc)",
             position_id[:8],
             position.exit_reason,
             position.exit_price_cents,
         )
-        
-        # CRITICAL: Release window capacity in risk envelope when position closes
-        # This allows re-entry after position exit (trailing stop, ratchet, 99c exit)
-        try:
-            # Calculate notional to release
-            notional_usd = (position.size * position.avg_entry_price_cents) / 100.0
-            
-            # Release exposure using risk envelope (which has window tracking)
-            try:
-                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                envelope = get_kalshi_crypto_15m_risk_envelope()
-                envelope.record_position_closure(position.market_id, notional_usd)
-            except RuntimeError as e:
-                # Bankroll not ready - log warning but don't crash
-                logger.warning(
-                    "[POSITION-MONITOR] Failed to release window exposure: %s (bankroll service unavailable)",
-                    e
-                )
-            
-            logger.info(
-                "[POSITION-MONITOR] Released window capacity: market=%s notional=$%.2f exit_reason=%s",
-                position.market_id,
-                notional_usd,
-                position.exit_reason,
-            )
-        except RuntimeError as e:
-            # Risk envelope not ready (bankroll not available) - log warning but don't fail
-            # This can happen during startup or in test environments
-            logger.warning(
-                "[POSITION-MONITOR] Risk envelope not ready, skipping window capacity release: %s",
-                e
-            )
-        except Exception as e:
-            logger.error(
-                "[POSITION-MONITOR] Failed to release window capacity: %s",
-                e,
-                exc_info=True
-            )
     
     def get_position(self, position_id: str) -> Optional[Position]:
         """
@@ -225,13 +237,18 @@ class PositionMonitor:
         # Pass bid/ask to prevent false triggers at extreme prices due to spread
         # Note: bid/ask not available in current _check_position signature, using mid price
         # Future enhancement: pass bid/ask from market state to improve accuracy
-        if position.should_trigger_extreme_profit(current_price_cents) and not position.exit_triggered:
+        
+        # AUTO_EXIT_99C: Cash out at 99c (near-settlement) - highest priority after RISK
+        # Per Kalshi semantics, contracts settle at exactly $1 if correct and $0 if not
+        # Selling early at 99c locks in almost all of the payoff
+        if position.should_trigger_auto_exit_99c(current_price_cents) and not position.exit_triggered:
             logger.info(
-                "[POSITION-MONITOR] EXTREME-PROFIT triggered: position=%s price=%dc (99c YES / 1c NO) - locking guaranteed win",
+                "[POSITION-MONITOR] AUTO-EXIT-99C triggered: position=%s price=%dc side=%s - cashing out at near-settlement",
                 position.position_id[:8],
                 current_price_cents,
+                position.side.value,
             )
-            self._emit_exit_intent(position, ExitReason.EXTREME_PROFIT, current_price_cents)
+            self._emit_exit_intent(position, ExitReason.AUTO_EXIT_99C, current_price_cents)
             return
         
         # DYNAMIC TAKE PROFIT: Laddered exits based on entry price for consistent profits

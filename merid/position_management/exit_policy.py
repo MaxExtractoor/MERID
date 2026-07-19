@@ -18,11 +18,11 @@ class ExitAction(str, Enum):
 
 class ExitReason(str, Enum):
     """
-    Exit reason types for policy-layer exits.
+    Exit reason types for both policy-layer and position-level exits.
     
-    This enum contains ONLY the exit reasons handled by ExitPolicy.evaluate().
-    Position-level exits (EXTREME_PROFIT, RATCHET_FLOOR, DYNAMIC_TAKE_PROFIT, etc.)
-    are handled in position_monitor._check_position() before calling this class.
+    This enum contains ALL exit reasons used across the system:
+    - Policy-layer exits: Evaluated by ExitPolicy.evaluate()
+    - Position-level exits: Handled in position_monitor._check_position()
     
     EXIT POLICY PRECEDENCE (evaluated in this order by ExitPolicy.evaluate()):
     1. RISK - Global risk layer kill switch (highest priority)
@@ -31,6 +31,15 @@ class ExitReason(str, Enum):
     4. ADAPTIVE_TIMING - Historical performance-based optimal exit timing
     5. TIME_STOP - Volatility-adjusted time-based exit
     6. EDGE_DECAY - Exit when computed edge drops below threshold
+    
+    POSITION-LEVEL EXITS (handled in position_monitor before policy evaluation):
+    - AUTO_EXIT_99C - 99c YES / 99c NO (cash out at near-settlement, highest priority after RISK)
+    - EXTREME_PROFIT - 99c YES / 1c NO (extreme profit take, deprecated - use AUTO_EXIT_99C)
+    - DYNAMIC_TAKE_PROFIT - Laddered exits
+    - RATCHET_TRIM - Partial close at >80c
+    - RATCHET_FLOOR - Profit protection
+    - STOP_LOSS - Stop loss trigger
+    - TAKE_PROFIT - Take profit trigger
     
     NOTE: SCALE_OUT and MANUAL are supported but not evaluated by default policy logic.
     """
@@ -42,6 +51,14 @@ class ExitReason(str, Enum):
     EDGE_DECAY = "edge_decay"
     SCALE_OUT = "scale_out"
     MANUAL = "manual"
+    STOP_LOSS = "stop_loss"
+    TAKE_PROFIT = "take_profit"
+    AUTO_EXIT_99C = "auto_exit_99c"  # Cash out at 99c (near-settlement)
+    EXTREME_PROFIT = "extreme_profit"  # Deprecated - use AUTO_EXIT_99C
+    DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"
+    RATCHET_TRIM = "ratchet_trim"
+    RATCHET_FLOOR = "ratchet_floor"
+    TRAIL = "trail"
 
 
 @dataclass
@@ -369,4 +386,5 @@ class ExitPolicy:
         # No exit condition met
         self.action = ExitAction.HOLD
         self.reason = None
+        return None
         return None
