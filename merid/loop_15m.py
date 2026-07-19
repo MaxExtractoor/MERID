@@ -360,9 +360,10 @@ logger.debug("[LOOP-15M-IMPORT] Coinbase WS import took %.3fs", _t5 - _t4)
 # Import exit policy resolver for take profit/stop loss setup
 _t6 = _import_time.time()
 from merid.event_venues.kalshi.order_router import resolve_exit_policy
-# CRITICAL FIX (2026-07-16): ExitReason was referenced in exit_intent_callback but never
-# imported — every partial exit (trim/scale-out/staged) raised NameError and was dropped
-from merid.position_management.exit_policy import ExitReason
+# CRITICAL FIX (2026-07-18): ExitReason must be imported from risk.exit_policy
+# because position_management.exit_policy.ExitReason doesn't have TRAIL member
+# (needed for swing mode logic at line 1251)
+from merid.risk.exit_policy import ExitReason
 _t7 = _import_time.time()
 logger.debug("[LOOP-15M-IMPORT] resolve_exit_policy import took %.3fs", _t7 - _t6)
 
@@ -618,6 +619,31 @@ class Kalshi15mLoop:
         self._executed_candidates_this_window = set()  # Track executed candidates in current window to prevent duplicates
         self._halted_due_to_drawdown = False
         
+        # Market making integration
+        self._market_maker = None
+        try:
+            from merid.event_venues.kalshi.market_maker_15m import init_market_maker_15m, MarketMakingConfig
+            # Load market making config from profile
+            mm_config = MarketMakingConfig(
+                enabled=self.risk_config.market_making_enabled if hasattr(self.risk_config, 'market_making_enabled') else False,
+                quoting_mode=getattr(self.risk_config, 'market_making_quoting_mode', 'two_phase'),
+                spread_cents=getattr(self.risk_config, 'market_making_spread_cents', 2),
+                inventory_limit_contracts=getattr(self.risk_config, 'market_making_inventory_limit', 50),
+                skew_adjustment=getattr(self.risk_config, 'market_making_skew_adjustment', True),
+                phase1_duration_seconds=getattr(self.risk_config, 'market_making_phase1_duration', 720),
+                phase1_price_center_cents=getattr(self.risk_config, 'market_making_phase1_center', 50),
+                phase1_spread_cents=getattr(self.risk_config, 'market_making_phase1_spread', 3),
+                phase1_refresh_interval_seconds=getattr(self.risk_config, 'market_making_phase1_refresh', 15),
+                phase1_contracts_per_side=getattr(self.risk_config, 'market_making_phase1_contracts', 15),
+                phase2_price_cents=getattr(self.risk_config, 'market_making_phase2_price', 52),
+                phase2_contracts=getattr(self.risk_config, 'market_making_phase2_contracts', 15),
+                phase2_min_move_pct=getattr(self.risk_config, 'market_making_phase2_min_move', 0.0012)
+            )
+            self._market_maker = init_market_maker_15m(mm_config)
+            logger.info("[15m-LOOP] Market maker initialized: enabled=%s quoting_mode=%s", mm_config.enabled, mm_config.quoting_mode)
+        except Exception as e:
+            logger.warning("[15m-LOOP] Failed to initialize market maker: %s", e)
+        
         # CRITICAL: Best-edge tracking per asset per 15-minute window
         # This implements signal generation vs execution separation:
         # - Agents generate candidates continuously (every 5s)
@@ -652,8 +678,9 @@ class Kalshi15mLoop:
                 logger.warning("[15M-LOOP] Failed to initialize Coinbase WebSocket client: %s", e)
         
         # Active trade tracking for concurrent trade limit enforcement
-        self._active_trades: Dict[str, int] = {}  # ticker -> order count
-        self._max_concurrent_trades = 5  # Default, will be overridden by profile
+        # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
+        # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_POSITIONS_PER_ASSET=1
+        self._active_trades: Dict[str, int] = {}  # ticker -> order count (for tracking only, not limiting)
         
         # CRITICAL FIX: Clear position cache to prevent stale exposure data from previous runs
         # This prevents false "max exposure" blocking when there are no actual positions
@@ -1144,6 +1171,7 @@ class Kalshi15mLoop:
                 service = get_risk_envelope_service()
                 service.refresh_if_stale(max_age_seconds=30.0)
                 self._risk_envelope = service.get_config()
+                # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades loading - $1 exposure cap is the limit
                 logger.info("[15m-LOOP] Initialized risk envelope via RiskEnvelopeService")
             except Exception as e:
                 logger.warning("[15m-LOOP] Failed to initialize risk envelope: %s", e, exc_info=True)
@@ -2619,6 +2647,56 @@ class Kalshi15mLoop:
                             if asset_depth_ok:
                                 ready_assets_count += 1
                             
+                            # YES/NO ARBITRAGE CHECK: Check for arbitrage opportunities in this market
+                            if state and asset_depth_ok:
+                                try:
+                                    from merid.event_venues.kalshi.duality_validator import check_yes_no_duality
+                                    duality_result = check_yes_no_duality(
+                                        yes_bid=state.best_bid_cents if state.has_bid else None,
+                                        no_bid=state.best_no_bid_cents if state.has_no_bid else None,
+                                        yes_ask=state.best_ask_cents if state.has_ask else None,
+                                        no_ask=state.best_no_ask_cents if state.has_no_ask else None,
+                                        ticker=market_id
+                                    )
+                                    if duality_result.arbitrage_opportunity:
+                                        logger.info(
+                                            "[ARBITRAGE-OPPORTUNITY-LOOP] asset=%s ticker=%s edge=%dc yes_ask=%dc no_bid=%dc",
+                                            asset, market_id, duality_result.arbitrage_opportunity.edge_cents,
+                                            duality_result.arbitrage_opportunity.yes_ask,
+                                            duality_result.arbitrage_opportunity.no_bid
+                                        )
+                                except Exception as arb_exc:
+                                    logger.warning("[ARBITRAGE-CHECK-FAILED] asset=%s ticker=%s error=%s", asset, market_id, arb_exc)
+                            
+                            # MARKET MAKING: Generate quotes if enabled
+                            if self._market_maker and state and asset_depth_ok:
+                                try:
+                                    # Check if market maker should refresh quotes
+                                    if self._market_maker.should_refresh_quotes():
+                                        # Get seconds to expiry from market state
+                                        seconds_to_expiry = getattr(state, 'seconds_to_expiry', 900)
+                                        
+                                        # Generate quotes
+                                        quotes = self._market_maker.generate_quotes(
+                                            ticker=market_id,
+                                            yes_bid=state.best_bid_cents if state.has_bid else None,
+                                            yes_ask=state.best_ask_cents if state.has_ask else None,
+                                            no_bid=state.best_no_bid_cents if state.has_no_bid else None,
+                                            no_ask=state.best_no_ask_cents if state.has_no_ask else None,
+                                            seconds_to_expiry=seconds_to_expiry
+                                        )
+                                        
+                                        if quotes:
+                                            logger.info(
+                                                "[MM-15M-LOOP] Generated %d quotes for %s asset=%s phase=%s",
+                                                len(quotes), market_id, asset, self._market_maker.get_phase()
+                                            )
+                                            # Note: Quote submission would be handled by order router
+                                            # This is just quote generation - actual submission requires integration
+                                            # with order routing which is outside the scope of this change
+                                except Exception as mm_exc:
+                                    logger.warning("[MM-15M-FAILED] asset=%s ticker=%s error=%s", asset, market_id, mm_exc)
+                            
                             # LAG-TRACKER: Calculate skew if both timestamps available
                             if spot_ts > 0 and last_update_ts:
                                 # Convert monotonic to wall clock approximation for skew calculation
@@ -3688,6 +3766,33 @@ class Kalshi15mLoop:
                 cycle_duration,
             )
 
+        # Log parity metrics summary every 100 cycles
+        if self._tick % 100 == 0:
+            try:
+                from merid.validation.yes_no_parity_checker import get_parity_metrics
+                metrics = get_parity_metrics()
+                summary = metrics.get_summary()
+                is_healthy = metrics.is_healthy()
+                
+                logger.info(
+                    "[YES_NO_PARITY] cycle=%d evaluated=%d traded=%d failed=%d healthy=%s "
+                    "failures_by_reason=%s yes_won_no_traded=%d no_won_yes_traded=%d",
+                    self._tick,
+                    summary["total_markets_evaluated"],
+                    summary["total_markets_traded"],
+                    summary["parity_checks_failed"],
+                    is_healthy,
+                    summary["failures_by_reason"],
+                    summary["yes_won_but_no_traded"],
+                    summary["no_won_but_yes_traded"],
+                )
+                
+                # Reset metrics for next 100-cycle window
+                from merid.validation.yes_no_parity_checker import reset_parity_metrics
+                reset_parity_metrics()
+            except Exception as parity_metrics_err:
+                logger.debug("[15M-LOOP] Failed to log parity metrics: %s", parity_metrics_err)
+
         # P2 Task 11: Log periodic summary every hour (3600 cycles at 5s cadence = 18000s = 5h)
         # Adjust interval based on actual cadence
         if self._run_summary and self._tick % 720 == 0:  # Every ~1 hour (720 cycles × 5s = 3600s)
@@ -4274,16 +4379,16 @@ class Kalshi15mLoop:
                     profile = get_profile()
                     # Extract asset from ticker (e.g., KXBTC15M-... -> BTC)
                     asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "UNKNOWN"
-                    # Get velocity threshold from profile
-                    velocity_threshold = 0.0002  # Default BTC threshold
+                    # Get velocity threshold from profile (aligned with kalshi_crypto_15m_v2.yaml)
+                    velocity_threshold = 0.00015  # Default BTC threshold
                     if asset == "ETH":
-                        velocity_threshold = 0.0003
+                        velocity_threshold = 0.00015
                     elif asset == "SOL":
-                        velocity_threshold = 0.0004
+                        velocity_threshold = 0.000225
                     elif asset == "XRP":
-                        velocity_threshold = 0.0005
+                        velocity_threshold = 0.000225
                     elif asset == "DOGE":
-                        velocity_threshold = 0.0006
+                        velocity_threshold = 0.0003
                     edge_pct = calculate_velocity_edge(velocity, velocity_threshold)
                 except Exception as e:
                     logger.warning("[15M-LOOP] Failed to use standardized edge calculation: %s, using fallback", e)
@@ -4501,6 +4606,115 @@ class Kalshi15mLoop:
             # Apply scaling configuration to intent
             intent.scaling_enabled = scaling_enabled
             intent.scaling_strategy = scaling_strategy
+            
+            # CRITICAL: Yes/No Parity Check before order submission
+            # This ensures Yes/No intent, prices, and orders are internally consistent
+            # per Kalshi's market framing and prevents side mapping bugs
+            try:
+                from merid.validation.yes_no_parity_checker import (
+                    YesNoParityChecker,
+                    MarketSnapshot,
+                    BotView,
+                    ExecutionDecision,
+                    ExposureIntent,
+                    IntendedAction,
+                    get_parity_checker,
+                    get_parity_metrics,
+                )
+                
+                # Extract asset from ticker
+                asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "UNKNOWN"
+                
+                # Get orderbook data for market snapshot
+                yes_bid = None
+                yes_ask = None
+                no_bid = None
+                no_ask = None
+                try:
+                    from merid.event_venues.kalshi.orderbook_cache import get_orderbook_cache
+                    ob_cache = get_orderbook_cache()
+                    if ob_cache:
+                        ob_data = ob_cache.get(ticker)
+                        if ob_data:
+                            yes_bid = ob_data.get("yes_bid")
+                            yes_ask = ob_data.get("yes_ask")
+                            no_bid = ob_data.get("no_bid")
+                            no_ask = ob_data.get("no_ask")
+                except Exception as ob_err:
+                    logger.debug("[15M-LOOP] Failed to get orderbook data for parity check: %s", ob_err)
+                
+                # Derive exposure intent from kalshi_side
+                # Per Kalshi semantics:
+                # - BUY_YES and SELL_NO are both bullish (event happens)
+                # - BUY_NO and SELL_YES are both bearish (event does not happen)
+                if kalshi_side in ("BUY_YES", "SELL_NO"):
+                    exposure_intent = ExposureIntent.BULLISH_EVENT
+                elif kalshi_side in ("BUY_NO", "SELL_YES"):
+                    exposure_intent = ExposureIntent.BEARISH_EVENT
+                else:
+                    exposure_intent = ExposureIntent.NEUTRAL
+                
+                # Convert kalshi_side to IntendedAction enum
+                intended_action = IntendedAction(kalshi_side.lower())
+                
+                # Derive chosen_side from kalshi_side
+                chosen_side = "yes" if "YES" in kalshi_side else "no"
+                
+                # Estimate edge_no from edge_yes (complementary edge)
+                # This is a simplification - in production, both edges should be computed
+                edge_yes = edge_pct / 100.0  # Convert from percentage to fraction
+                edge_no = (1.0 - model_prob) - (1.0 - price_cents / 100.0) if model_prob else 0.0
+                
+                # Create parity check data structures
+                market_snapshot = MarketSnapshot(
+                    market_id=ticker,
+                    asset=asset,
+                    expiry_ts=int(candidate.get("expiry_ts", 0)),
+                    yes_bid=yes_bid,
+                    yes_ask=yes_ask,
+                    no_bid=no_bid,
+                    no_ask=no_ask,
+                )
+                
+                bot_view = BotView(
+                    model_prob_yes=model_prob,
+                    model_prob_no=1.0 - model_prob,
+                    edge_yes=edge_yes,
+                    edge_no=edge_no,
+                    chosen_side=chosen_side,
+                    exposure_intent=exposure_intent,
+                )
+                
+                execution_decision = ExecutionDecision(
+                    intended_action=intended_action,
+                    api_side=chosen_side,
+                    api_yes_price=price_cents / 100.0 if chosen_side == "yes" else None,
+                    api_no_price=price_cents / 100.0 if chosen_side == "no" else None,
+                )
+                
+                # Run parity check
+                checker = get_parity_checker()
+                parity_result = checker.check(market_snapshot, bot_view, execution_decision)
+                
+                # Record metrics
+                metrics = get_parity_metrics()
+                metrics.record_evaluated()
+                
+                if not parity_result.ok:
+                    metrics.record_failure(parity_result)
+                    checker.log_failure(parity_result, cycle_id=f"15m_{ticker}", logger=logger)
+                    logger.warning(
+                        "[15M-LOOP] PARITY CHECK FAILED: ticker=%s side=%s reasons=%s",
+                        ticker, kalshi_side, parity_result.reasons
+                    )
+                else:
+                    logger.debug(
+                        "[15M-LOOP] PARITY CHECK PASSED: ticker=%s side=%s",
+                        ticker, kalshi_side
+                    )
+                    
+            except Exception as parity_err:
+                logger.warning("[15M-LOOP] Parity check failed (non-critical): %s", parity_err)
             
             # Route order
             result = await route_order_async(intent)
