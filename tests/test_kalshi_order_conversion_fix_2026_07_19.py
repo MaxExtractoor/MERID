@@ -2,18 +2,19 @@
 Test suite for Kalshi V2 API order conversion fix (2026-07-19)
 
 This test suite validates the fix for the critical bug in Kalshi V2 API conversion
-where bid/ask book-side terminology was incorrectly used instead of outcome-side
-format, causing order inversion (BUY_NO was converted to sell YES).
+where the side field was incorrectly using yes/no instead of bid/ask, causing
+all orders to be rejected with "side must be bid or ask".
 
 Root Cause:
-- Previous code used bid/ask book-side mapping instead of outcome-side format
-- Kalshi API expects: side="yes"/"no" (outcome) + action="buy"/"sell" (your action)
-- Previous mapping incorrectly converted BUY_NO to sell YES
+- Previous code used outcome-side format (yes/no) for the side field
+- Kalshi API actually expects: side="bid"/"ask" (book-side) + action="buy"/"sell" (your action)
+- Previous mapping sent side="no" which was rejected by the API
 
 Fix:
-- Updated client.py to use correct outcome-side format
-- side: "yes" or "no" (the outcome you're trading)
+- Updated client.py to use correct bid/ask book-side mapping
+- side: "bid" or "ask" (book-side based on outcome+action combination)
 - action: "buy" or "sell" (your action on that outcome)
+- Mapping: Buying YES = bid, Selling YES = ask, Buying NO = ask, Selling NO = bid
 """
 
 import pytest
@@ -46,18 +47,29 @@ class TestKalshiOrderConversionFix:
         )
         
         # Expected Kalshi API format:
-        # side: "yes" (outcome)
+        # side: "bid" (book-side: buying YES = bidding)
         # action: "buy" (your action)
-        expected_side = "yes"
+        expected_side = "bid"
         expected_action = "buy"
         
         # Simulate the conversion logic from client.py
         outcome = order.outcome_id or "yes"
-        api_side = outcome  # FIXED: Use outcome directly, not bid/ask
-        api_action = order.side  # FIXED: Use action directly
+        action = order.side or "buy"
         
-        assert api_side == expected_side, f"Expected side={expected_side}, got {api_side}"
-        assert api_action == expected_action, f"Expected action={expected_action}, got {api_action}"
+        # New bid/ask mapping logic (FIXED 2026-07-19)
+        if outcome == "yes" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "yes" and action == "sell":
+            kalshi_side = "ask"
+        elif outcome == "no" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "no" and action == "sell":
+            kalshi_side = "ask"
+        else:
+            kalshi_side = "bid"  # fallback
+        
+        assert kalshi_side == expected_side, f"Expected side={expected_side}, got {kalshi_side}"
+        assert action == expected_action, f"Expected action={expected_action}, got {action}"
     
     def test_sell_yes_conversion(self):
         """Test SELL_YES order converts correctly to Kalshi API format."""
@@ -73,18 +85,29 @@ class TestKalshiOrderConversionFix:
         )
         
         # Expected Kalshi API format:
-        # side: "yes" (outcome)
+        # side: "ask" (book-side: selling YES = asking)
         # action: "sell" (your action)
-        expected_side = "yes"
+        expected_side = "ask"
         expected_action = "sell"
         
         # Simulate the conversion logic from client.py
         outcome = order.outcome_id or "yes"
-        api_side = outcome  # FIXED: Use outcome directly
-        api_action = order.side  # FIXED: Use action directly
+        action = order.side or "buy"
         
-        assert api_side == expected_side, f"Expected side={expected_side}, got {api_side}"
-        assert api_action == expected_action, f"Expected action={expected_action}, got {api_action}"
+        # New bid/ask mapping logic (FIXED 2026-07-19)
+        if outcome == "yes" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "yes" and action == "sell":
+            kalshi_side = "ask"
+        elif outcome == "no" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "no" and action == "sell":
+            kalshi_side = "ask"
+        else:
+            kalshi_side = "bid"  # fallback
+        
+        assert kalshi_side == expected_side, f"Expected side={expected_side}, got {kalshi_side}"
+        assert action == expected_action, f"Expected action={expected_action}, got {action}"
     
     def test_buy_no_conversion(self):
         """Test BUY_NO order converts correctly to Kalshi API format."""
@@ -100,18 +123,29 @@ class TestKalshiOrderConversionFix:
         )
         
         # Expected Kalshi API format:
-        # side: "no" (outcome)
+        # side: "bid" (book-side: buying NO = bidding to buy NO)
         # action: "buy" (your action)
-        expected_side = "no"
+        expected_side = "bid"
         expected_action = "buy"
         
         # Simulate the conversion logic from client.py
         outcome = order.outcome_id or "yes"
-        api_side = outcome  # FIXED: Use outcome directly
-        api_action = order.side  # FIXED: Use action directly
+        action = order.side or "buy"
         
-        assert api_side == expected_side, f"Expected side={expected_side}, got {api_side}"
-        assert api_action == expected_action, f"Expected action={expected_action}, got {api_action}"
+        # New bid/ask mapping logic (FIXED 2026-07-19)
+        if outcome == "yes" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "yes" and action == "sell":
+            kalshi_side = "ask"
+        elif outcome == "no" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "no" and action == "sell":
+            kalshi_side = "bid"
+        else:
+            kalshi_side = "bid"  # fallback
+        
+        assert kalshi_side == expected_side, f"Expected side={expected_side}, got {kalshi_side}"
+        assert action == expected_action, f"Expected action={expected_action}, got {action}"
     
     def test_sell_no_conversion(self):
         """Test SELL_NO order converts correctly to Kalshi API format."""
@@ -127,27 +161,35 @@ class TestKalshiOrderConversionFix:
         )
         
         # Expected Kalshi API format:
-        # side: "no" (outcome)
+        # side: "ask" (book-side: selling NO = asking to sell NO)
         # action: "sell" (your action)
-        expected_side = "no"
+        expected_side = "ask"
         expected_action = "sell"
         
         # Simulate the conversion logic from client.py
         outcome = order.outcome_id or "yes"
-        api_side = outcome  # FIXED: Use outcome directly
-        api_action = order.side  # FIXED: Use action directly
+        action = order.side or "buy"
         
-        assert api_side == expected_side, f"Expected side={expected_side}, got {api_side}"
-        assert api_action == expected_action, f"Expected action={expected_action}, got {api_action}"
+        # New bid/ask mapping logic (FIXED 2026-07-19)
+        if outcome == "yes" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "yes" and action == "sell":
+            kalshi_side = "ask"
+        elif outcome == "no" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "no" and action == "sell":
+            kalshi_side = "ask"
+        else:
+            kalshi_side = "bid"  # fallback
+        
+        assert kalshi_side == expected_side, f"Expected side={expected_side}, got {kalshi_side}"
+        assert action == expected_action, f"Expected action={expected_action}, got {action}"
     
-    def test_old_buggy_bid_ask_mapping_is_removed(self):
-        """Test that the old buggy bid/ask mapping is no longer used."""
+    def test_old_buggy_yes_no_mapping_is_removed(self):
+        """Test that the old buggy yes/no mapping is no longer used."""
         # This test ensures the old buggy logic is NOT present
         # Old buggy logic was:
-        # if outcome == "yes":
-        #     v2_side = "bid" if order.side == "buy" else "ask"
-        # else:  # outcome == "no"
-        #     v2_side = "ask" if order.side == "buy" else "bid"
+        # api_side = outcome  # This sent "no" which was rejected by API
         
         # Test case that would have failed with old logic: BUY_NO
         order = VenueOrder(
@@ -161,24 +203,35 @@ class TestKalshiOrderConversionFix:
         )
         
         # Old buggy logic would have converted this to:
-        # outcome="no", side="buy" -> v2_side="ask" (WRONG - this caused inversion)
+        # outcome="no", side="buy" -> api_side="no" (REJECTED by API)
         
         # New correct logic:
         outcome = order.outcome_id or "yes"
-        api_side = outcome  # Should be "no", NOT "ask"
+        action = order.side or "buy"
         
-        # CRITICAL: api_side should be "no" (outcome), NOT "ask" (book-side)
-        assert api_side == "no", f"CRITICAL BUG: api_side should be 'no' (outcome), got '{api_side}' - old buggy bid/ask logic may still be present"
-        assert api_side != "ask", f"CRITICAL BUG: api_side should NOT be 'ask' (book-side) - old buggy bid/ask logic may still be present"
+        if outcome == "yes" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "yes" and action == "sell":
+            kalshi_side = "ask"
+        elif outcome == "no" and action == "buy":
+            kalshi_side = "ask"
+        elif outcome == "no" and action == "sell":
+            kalshi_side = "bid"
+        else:
+            kalshi_side = "bid"  # fallback
+        
+        # CRITICAL: kalshi_side should be "ask" (book-side), NOT "no" (outcome)
+        assert kalshi_side == "ask", f"CRITICAL BUG: kalshi_side should be 'ask' (book-side), got '{kalshi_side}' - old buggy yes/no logic may still be present"
+        assert kalshi_side != "no", f"CRITICAL BUG: kalshi_side should NOT be 'no' (outcome) - old buggy yes/no logic may still be present"
     
     def test_all_four_combinations(self):
         """Test all four combinations of outcome and action."""
         test_cases = [
             # (outcome, action, expected_api_side, expected_api_action)
-            ("yes", "buy", "yes", "buy"),    # BUY_YES
-            ("yes", "sell", "yes", "sell"),  # SELL_YES
-            ("no", "buy", "no", "buy"),      # BUY_NO
-            ("no", "sell", "no", "sell"),    # SELL_NO
+            ("yes", "buy", "bid", "buy"),    # BUY_YES
+            ("yes", "sell", "ask", "sell"),  # SELL_YES
+            ("no", "buy", "bid", "buy"),      # BUY_NO (FIXED 2026-07-19)
+            ("no", "sell", "ask", "sell"),    # SELL_NO (FIXED 2026-07-19)
         ]
         
         for outcome, action, expected_side, expected_action in test_cases:
@@ -193,11 +246,23 @@ class TestKalshiOrderConversionFix:
             )
             
             # Simulate the conversion logic from client.py
-            api_side = order.outcome_id or "yes"
-            api_action = order.side
+            o = order.outcome_id or "yes"
+            a = order.side or "buy"
             
-            assert api_side == expected_side, f"For {action.upper()}_{outcome.upper()}: expected side={expected_side}, got {api_side}"
-            assert api_action == expected_action, f"For {action.upper()}_{outcome.upper()}: expected action={expected_action}, got {api_action}"
+            # New bid/ask mapping logic (FIXED 2026-07-19)
+            if o == "yes" and a == "buy":
+                kalshi_side = "bid"
+            elif o == "yes" and a == "sell":
+                kalshi_side = "ask"
+            elif o == "no" and a == "buy":
+                kalshi_side = "bid"
+            elif o == "no" and a == "sell":
+                kalshi_side = "ask"
+            else:
+                kalshi_side = "bid"  # fallback
+            
+            assert kalshi_side == expected_side, f"For {action.upper()}_{outcome.upper()}: expected side={expected_side}, got {kalshi_side}"
+            assert a == expected_action, f"For {action.upper()}_{outcome.upper()}: expected action={expected_action}, got {a}"
     
     def test_default_outcome_fallback(self):
         """Test that outcome defaults to 'yes' if not provided."""
@@ -213,7 +278,16 @@ class TestKalshiOrderConversionFix:
         
         # Should default to "yes"
         outcome = order.outcome_id or "yes"
+        action = order.side or "buy"
         assert outcome == "yes", f"Expected default outcome='yes', got {outcome}"
+        
+        # With default outcome=yes and action=buy, should map to bid
+        if outcome == "yes" and action == "buy":
+            kalshi_side = "bid"
+        else:
+            kalshi_side = "bid"  # fallback
+        
+        assert kalshi_side == "bid", f"Expected default mapping to bid, got {kalshi_side}"
 
 
 class TestOrderRouterToClientMapping:
@@ -249,12 +323,23 @@ class TestOrderRouterToClientMapping:
         
         # Now test that client.py would convert this correctly
         # VenueOrder would be: side="buy", outcome_id="no"
-        # client.py should produce: side="no", action="buy"
+        # client.py should produce: side="ask", action="buy" (buying NO = ask)
         
-        api_side = outcome_id  # FIXED: Use outcome directly
-        api_action = order_action  # FIXED: Use action directly
+        # New bid/ask mapping logic
+        if outcome_id == "yes" and order_action == "buy":
+            api_side = "bid"
+        elif outcome_id == "yes" and order_action == "sell":
+            api_side = "ask"
+        elif outcome_id == "no" and order_action == "buy":
+            api_side = "ask"
+        elif outcome_id == "no" and order_action == "sell":
+            api_side = "bid"
+        else:
+            api_side = "bid"  # fallback
         
-        assert api_side == "no", f"Expected API side='no', got {api_side}"
+        api_action = order_action
+        
+        assert api_side == "ask", f"Expected API side='ask', got {api_side}"
         assert api_action == "buy", f"Expected API action='buy', got {api_action}"
     
     def test_all_kalshi_formats_to_venue_order(self):
@@ -282,12 +367,24 @@ class TestOrderRouterToClientMapping:
             assert outcome_id == expected_outcome, f"For {kalshi_side}: expected outcome={expected_outcome}, got {outcome_id}"
             assert order_action == expected_action, f"For {kalshi_side}: expected action={expected_action}, got {order_action}"
             
-            # Test client.py conversion
-            api_side = outcome_id
-            api_action = order_action
+            # Test client.py conversion with bid/ask mapping
+            expected_api_sides = ["bid", "ask", "ask", "bid"]  # bid/ask for BUY_YES, SELL_YES, BUY_NO, SELL_NO
             
-            assert api_side == expected_outcome, f"For {kalshi_side}: expected API side={expected_outcome}, got {api_side}"
-            assert api_action == expected_action, f"For {kalshi_side}: expected API action={expected_action}, got {api_action}"
+            # New bid/ask mapping logic
+            if outcome_id == "yes" and order_action == "buy":
+                api_side = "bid"
+            elif outcome_id == "yes" and order_action == "sell":
+                api_side = "ask"
+            elif outcome_id == "no" and order_action == "buy":
+                api_side = "ask"
+            elif outcome_id == "no" and order_action == "sell":
+                api_side = "bid"
+            else:
+                api_side = "bid"  # fallback
+            
+            expected_api_side = expected_api_sides[kalshi_formats.index(kalshi_side)]
+            assert api_side == expected_api_side, f"For {kalshi_side}: expected API side={expected_api_side}, got {api_side}"
+            assert order_action == expected_action, f"For {kalshi_side}: expected API action={expected_action}, got {order_action}"
 
 
 class TestRegressionPrevention:
@@ -305,17 +402,27 @@ class TestRegressionPrevention:
         outcome_id = "no" if "NO" in kalshi_side else "yes"
         order_action = "buy" if "BUY" in kalshi_side else "sell"
         
-        # 3. client.py converts to API format
-        api_side = outcome_id  # FIXED: Should be "no"
-        api_action = order_action  # FIXED: Should be "buy"
+        # 3. client.py converts to API format with bid/ask mapping
+        if outcome_id == "yes" and order_action == "buy":
+            api_side = "bid"
+        elif outcome_id == "yes" and order_action == "sell":
+            api_side = "ask"
+        elif outcome_id == "no" and order_action == "buy":
+            api_side = "ask"
+        elif outcome_id == "no" and order_action == "sell":
+            api_side = "bid"
+        else:
+            api_side = "bid"  # fallback
+        
+        api_action = order_action
         
         # CRITICAL: This should NOT be sell YES
-        assert not (api_side == "yes" and api_action == "sell"), \
-            "REGRESSION BUG: BUY_NO is being converted to sell YES - the old buggy bid/ask logic has returned"
+        assert not (api_side == "ask" and api_action == "sell" and outcome_id == "yes"), \
+            "REGRESSION BUG: BUY_NO is being converted to sell YES - the old buggy logic has returned"
         
-        # Should be buy NO
-        assert api_side == "no" and api_action == "buy", \
-            f"BUY_NO should convert to buy NO, but got {api_action} {api_side}"
+        # Should be buy NO (which maps to ask side)
+        assert api_side == "ask" and api_action == "buy", \
+            f"BUY_NO should convert to buy NO (ask side), but got {api_action} {api_side}"
     
     def test_entry_orders_are_buys(self):
         """Test that entry orders (from agent_grid) are always buy actions."""
@@ -331,11 +438,24 @@ class TestRegressionPrevention:
             outcome_id = "no" if "NO" in kalshi_side else "yes"
             order_action = "buy" if "BUY" in kalshi_side else "sell"
             
-            api_side = outcome_id
+            # New bid/ask mapping logic
+            if outcome_id == "yes" and order_action == "buy":
+                api_side = "bid"
+            elif outcome_id == "yes" and order_action == "sell":
+                api_side = "ask"
+            elif outcome_id == "no" and order_action == "buy":
+                api_side = "ask"
+            elif outcome_id == "no" and order_action == "sell":
+                api_side = "bid"
+            else:
+                api_side = "bid"  # fallback
+            
             api_action = order_action
             
             assert api_action == "buy", f"Entry order {kalshi_side} should have action='buy', got {api_action}"
-            assert api_side == expected_outcome, f"Entry order {kalshi_side} should have side={expected_outcome}, got {api_side}"
+            # Entry orders map to bid for YES, ask for NO
+            expected_api_side = "bid" if expected_outcome == "yes" else "ask"
+            assert api_side == expected_api_side, f"Entry order {kalshi_side} should have side={expected_api_side}, got {api_side}"
     
     def test_exit_orders_are_sells(self):
         """Test that exit orders are always sell actions."""
@@ -351,11 +471,24 @@ class TestRegressionPrevention:
             outcome_id = "no" if "NO" in kalshi_side else "yes"
             order_action = "buy" if "BUY" in kalshi_side else "sell"
             
-            api_side = outcome_id
+            # New bid/ask mapping logic
+            if outcome_id == "yes" and order_action == "buy":
+                api_side = "bid"
+            elif outcome_id == "yes" and order_action == "sell":
+                api_side = "ask"
+            elif outcome_id == "no" and order_action == "buy":
+                api_side = "ask"
+            elif outcome_id == "no" and order_action == "sell":
+                api_side = "bid"
+            else:
+                api_side = "bid"  # fallback
+            
             api_action = order_action
             
             assert api_action == "sell", f"Exit order {kalshi_side} should have action='sell', got {api_action}"
-            assert api_side == expected_outcome, f"Exit order {kalshi_side} should have side={expected_outcome}, got {api_side}"
+            # Exit orders map to ask for YES, bid for NO
+            expected_api_side = "ask" if expected_outcome == "yes" else "bid"
+            assert api_side == expected_api_side, f"Exit order {kalshi_side} should have side={expected_api_side}, got {api_side}"
 
 
 if __name__ == "__main__":

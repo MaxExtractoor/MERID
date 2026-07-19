@@ -2010,15 +2010,37 @@ class KalshiVenueClient(EventVenueClient):
             )
 
         outcome = order.outcome_id or "yes"
-        # CRITICAL FIX (2026-07-19): Kalshi V2 API uses outcome-side format, NOT bid/ask book-side
-        # According to Kalshi API documentation:
-        # - side: "yes" or "no" (the outcome you're trading)
-        # - action: "buy" or "sell" (your action on that outcome)
-        # Previous bid/ask mapping was incorrect and caused order inversion
+        action = order.side or "buy"
+        
+        # CRITICAL FIX (2026-07-19): Kalshi API uses bid/ask side, NOT yes/no outcome
+        # Map outcome + action to bid/ask:
+        # - Buying YES = bid (bidding to buy YES)
+        # - Selling YES = ask (asking to sell YES)
+        # - Buying NO = bid (bidding to buy NO)
+        # - Selling NO = ask (asking to sell NO)
+        # The side field indicates which side of the orderbook we're on:
+        # - "bid" = we're a buyer (bidding)
+        # - "ask" = we're a seller (asking)
+        if outcome == "yes" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "yes" and action == "sell":
+            kalshi_side = "ask"
+        elif outcome == "no" and action == "buy":
+            kalshi_side = "bid"
+        elif outcome == "no" and action == "sell":
+            kalshi_side = "ask"
+        else:
+            # Fallback for unexpected combinations
+            logger.warning(
+                "[KALSHI-SIDE-MAPPING] Unexpected outcome/action combination: outcome=%s action=%s, defaulting to bid",
+                outcome, action
+            )
+            kalshi_side = "bid"
+        
         kalshi_order: Dict[str, Any] = {
             "ticker": ticker,
-            "side": outcome,               # "yes" or "no" (the outcome)
-            "action": order.side,          # "buy" or "sell" (your action)
+            "side": kalshi_side,           # "bid" or "ask" (book side)
+            "action": action,              # "buy" or "sell" (your action)
             "count": str(int(order.size)),  # V2 API requires count as string
             "type": order.order_type,       # "limit" or "market"
             "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
