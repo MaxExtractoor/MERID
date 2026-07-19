@@ -632,14 +632,32 @@ def parse_expiry_from_ticker(ticker: str, market: Optional[dict] = None) -> floa
     if match:
         date_str = match.group(1)
         try:
-            # Try various formats
-            formats = [
-                "%d%b%y%H%M",      # 26MAR250115
+            # CRITICAL FIX (2026-07-19): Kalshi ticker dates are YEAR-FIRST in
+            # US Eastern time: YYMMMDDHHMM (e.g., 26JUL190030 = 2026-JUL-19 00:30 ET).
+            # Previous day-first (%d%b%y...) parsing decoded 26JUL190030 as
+            # 2019-07-26, making ALL live markets appear expired and settled
+            # markets appear live - corrupting expiry validation, group IDs,
+            # and position/settlement detection end-to-end.
+            from zoneinfo import ZoneInfo
+            _ET = ZoneInfo("America/New_York")
+            year_first_formats = [
+                ("%y%b%d%H%M", _ET),   # 26JUL190030 -> 2026-07-19 00:30 ET
+                ("%y%b%d%H", _ET),     # 26MAR2501   -> 2026-03-25 01:00 ET
+                ("%y%b%d", _ET),       # 26MAR25     -> 2026-03-25 ET
+            ]
+            for fmt, tz in year_first_formats:
+                try:
+                    dt = datetime.strptime(date_str, fmt)
+                    dt = dt.replace(tzinfo=tz)
+                    return dt.timestamp()
+                except ValueError:
+                    continue
+            # Legacy fallback: day-first UTC formats (non-standard tickers)
+            legacy_formats = [
                 "%d%b%Y%H%M",      # 26MAR20250115
-                "%d%b%y",          # 26MAR25
                 "%d%b%Y",          # 26MAR2025
             ]
-            for fmt in formats:
+            for fmt in legacy_formats:
                 try:
                     dt = datetime.strptime(date_str, fmt)
                     dt = dt.replace(tzinfo=timezone.utc)

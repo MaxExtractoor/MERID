@@ -891,6 +891,7 @@ class KalshiVenueClient(EventVenueClient):
         params: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None,
         operation_name: str = "request",
+        headers: Optional[Dict[str, str]] = None,
     ) -> OperationResult[Dict[str, Any]]:
         """
         Execute HTTP request with circuit breaker and retry logic.
@@ -903,6 +904,7 @@ class KalshiVenueClient(EventVenueClient):
             params: Query parameters
             json_data: JSON body for POST/PUT
             operation_name: Human-readable name for logging
+            headers: Optional additional headers (e.g., Idempotency-Key)
             
         Returns:
             OperationResult with parsed JSON data or error
@@ -965,12 +967,17 @@ class KalshiVenueClient(EventVenueClient):
                             full_path = f"/trade-api/v2{path}"
                             extra_headers = self._sign_headers(method.upper(), full_path)
 
+                        # Merge extra headers with custom headers (e.g., Idempotency-Key)
+                        merged_headers = extra_headers.copy() if extra_headers else {}
+                        if headers:
+                            merged_headers.update(headers)
+                        
                         response = await client.request(
                             method=method,
                             url=url,
                             params=params,
                             json=json_data,
-                            headers=extra_headers if extra_headers else None,
+                            headers=merged_headers if merged_headers else None,
                         )
                     
                     latency_ms = (_time.time() - start_time) * 1000
@@ -2003,15 +2010,21 @@ class KalshiVenueClient(EventVenueClient):
             )
 
         outcome = order.outcome_id or "yes"
-        # V2 API uses bid/ask instead of yes/no
-        # bid = buy YES = sell NO, ask = sell YES = buy NO (everything quoted from YES side)
-        # CRITICAL FIX: Must consider both outcome AND action for correct mapping
-        if outcome == "yes":
-            # BUY_YES = bid, SELL_YES = ask
-            v2_side = "bid" if order.side == "buy" else "ask"
-        else:  # outcome == "no"
-            # BUY_NO = ask (equivalent to sell YES), SELL_NO = bid (equivalent to buy YES)
-            v2_side = "ask" if order.side == "buy" else "bid"
+        # CRITICAL FIX (2026-07-19): Kalshi V2 API uses outcome-side format, NOT bid/ask book-side
+        # According to Kalshi API documentation:
+        # - side: "yes" or "no" (the outcome you're trading)
+        # - action: "buy" or "sell" (your action on that outcome)
+        # Previous bid/ask mapping was incorrect and caused order inversion
+        kalshi_order: Dict[str, Any] = {
+            "ticker": ticker,
+            "side": outcome,               # "yes" or "no" (the outcome)
+            "action": order.side,          # "buy" or "sell" (your action)
+            "count": str(int(order.size)),  # V2 API requires count as string
+            "type": order.order_type,       # "limit" or "market"
+            "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
+            "self_trade_prevention_type": "taker_at_cross",  # V2 API required field (valid values: taker_at_cross, maker)
+        }
+        
         # CRITICAL FIX: Format count_fp as fixed-point decimal with 0-2 decimal places
         # Kalshi API requires: "must be a fixed-point decimal string with 0-2 decimal places"
         # Use 0 decimal places for whole numbers (e.g., "1"), 2 for fractional (e.g., "1.50")
@@ -2020,16 +2033,7 @@ class KalshiVenueClient(EventVenueClient):
         else:
             count_fp_str = f"{order.size:.2f}"
         
-        kalshi_order: Dict[str, Any] = {
-            "ticker": ticker,
-            "action": order.side,           # "buy" or "sell"
-            "side": v2_side,                # "bid" or "ask" (V2 API)
-            "count": str(int(order.size)),  # V2 API requires count as string
-            "count_fp": count_fp_str,       # CRITICAL FIX: Use count_fp for fractional contracts (0-2 decimal places, no trailing zeros)
-            "type": order.order_type,       # "limit" or "market"
-            "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
-            "self_trade_prevention_type": "taker_at_cross",  # V2 API required field (valid values: taker_at_cross, maker)
-        }
+        kalshi_order["count_fp"] = count_fp_str
 
         # CRITICAL: Kalshi V2 API requires price as string in fixed-point dollars (e.g., "0.5600")
         # (including market orders - the price is accepted but ignored for market orders)
@@ -2116,8 +2120,14 @@ class KalshiVenueClient(EventVenueClient):
             kalshi_order.get("type", "N/A")
         )
 
+        # CRITICAL FIX (2026-07-17): Add Idempotency-Key header to prevent duplicate orders on retry
+        headers = {}
+        if hasattr(order, "idempotency_key") and order.idempotency_key:
+            headers["Idempotency-Key"] = order.idempotency_key
+            logger.info(f"[IDEMPOTENCY-KEY] Using idempotency_key={order.idempotency_key} for order")
+        
         result = await self._request_with_resilience(
-            "POST", "/portfolio/events/orders", json_data=kalshi_order, operation_name="place_order"
+            "POST", "/portfolio/events/orders", json_data=kalshi_order, operation_name="place_order", headers=headers
         )
         
         if not result.success:

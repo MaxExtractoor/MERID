@@ -70,6 +70,10 @@ typer==0.24.1
 anyio==4.7.0
 asyncio-throttle==1.0.2
 
+# ── Database ─────────────────────────────────────────────────────
+asyncpg==0.30.0                     # PostgreSQL async driver (replaces SQLite for fills ledger)
+aiosqlite==0.20.0                   # SQLite async driver (fallback)
+
 # ── Serialization ──────────────────────────────────────────────
 jsonschema==4.23.0
 ormsgpack==1.12.2
