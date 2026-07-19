@@ -2948,6 +2948,75 @@ class KalshiFillsLedger:
         if position is None:
             position = self._create_new_position(fill)
             self._open_positions[instrument_key] = position
+            
+            # CRITICAL FIX: Add position to PositionMonitor for exit policy enforcement
+            # This ensures fills_ledger-tracked positions have TP/SL/trailing stop coverage
+            # Previously, fills_ledger maintained separate position state without exit monitoring
+            try:
+                from merid.position_management.position_monitor import get_position_monitor
+                from merid.position_management.position import Position, PositionSide, TrailingType
+                
+                monitor = get_position_monitor()
+                
+                # Read profile configuration for trailing stops
+                trailing_enabled = False
+                trailing_distance_cents = 5
+                min_profit_cents = 12
+                activation_delay_sec = 30
+                
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                    if is_profile_active():
+                        adapter = get_active_profile()
+                        profile = adapter.profile
+                        trailing_enabled = profile.trailing_stop_enabled
+                        trailing_distance_cents = profile.trailing_stop_trailing_distance_cents
+                        min_profit_cents = profile.trailing_stop_min_profit_cents
+                        activation_delay_sec = profile.trailing_stop_activation_delay_sec
+                except Exception as ts_err:
+                    logger.debug("[FILLS-LEDGER] Could not read trailing stop config: %s", ts_err)
+                
+                # Assign default SL if missing
+                sl_price = position.get("avg_price_cents", 0)
+                if sl_price:
+                    sl_price = max(1, sl_price - 5)
+                
+                # Calculate risk for trailing stop
+                risk_cents = abs(position.get("avg_price_cents", 0) - sl_price) if sl_price else 5
+                
+                # Mandatory trailing stop (FIXED_CENTS mode)
+                trailing_type = TrailingType.FIXED_CENTS
+                trailing_param = trailing_distance_cents
+                
+                # Extract series_ticker from market_id
+                market_id = fill.market_ticker
+                series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
+                
+                side_enum = PositionSide.YES if position.get("side") == "yes" else PositionSide.NO
+                
+                monitor_position = Position(
+                    position_id=market_id,
+                    market_id=market_id,
+                    series_ticker=series_ticker,
+                    side=side_enum,
+                    size=position.get("total_contracts", 1),
+                    avg_entry_price_cents=position.get("avg_price_cents", 0),
+                    take_profit_price_cents=None,  # fills_ledger doesn't track TP
+                    stop_loss_price_cents=sl_price,
+                    trailing_type=trailing_type,
+                    trailing_param=trailing_param,
+                    exit_policy_id="fills_ledger",
+                )
+                
+                monitor.add_position(monitor_position)
+                logger.info(
+                    "[FILLS-LEDGER-POSITION-MONITOR] Added position to monitor: market=%s side=%s size=%d SL=%dc",
+                    market_id, position.get("side"), position.get("total_contracts"), sl_price
+                )
+            except Exception as monitor_err:
+                logger.error("[FILLS-LEDGER] CRITICAL: Failed to add position to monitor: %s", monitor_err, exc_info=True)
+                # CRITICAL: Do not silently swallow - this means exit policies won't execute
+                raise RuntimeError(f"Failed to add fills_ledger position to monitor - exit policies will not execute: {monitor_err}")
         else:
             # Calculate PnL for partial exit before updating position
             old_contracts = position["total_contracts"]
@@ -3003,6 +3072,19 @@ class KalshiFillsLedger:
                 "Position closed: %s pnl=%s session_realized=%s cumulative_realized=%s",
                 instrument_key, trade_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
             )
+            
+            # CRITICAL FIX: Remove position from PositionMonitor when closed
+            # This ensures the monitor doesn't track closed positions
+            try:
+                from merid.position_management.position_monitor import get_position_monitor
+                monitor = get_position_monitor()
+                monitor.remove_position(fill.market_ticker)
+                logger.info(
+                    "[FILLS-LEDGER-POSITION-MONITOR] Removed position from monitor: market=%s",
+                    fill.market_ticker
+                )
+            except Exception as monitor_err:
+                logger.warning("[FILLS-LEDGER] Failed to remove position from monitor: %s", monitor_err)
             
             # CRITICAL FIX: Notify agent_performance_tracker of position close
             if fill.agent_id:
@@ -3630,10 +3712,32 @@ class KalshiFillsLedger:
         yes_price_dollars = normalize_price(yes_price) if yes_price else None
         no_price_dollars = normalize_price(no_price) if no_price else None
         
+        # CRITICAL FIX: Kalshi quotes everything from YES side - do NOT trust raw.get("side")
+        # Kalshi's "side" field always reports "yes" because they quote from YES side perspective
+        # We must derive the correct side from the original intent using client_order_id
+        client_order_id = raw.get("client_order_id")
+        derived_side = raw.get("side", "yes")  # Fallback to Kalshi's reported side
+        
+        if client_order_id and client_order_id in self._intents:
+            intent = self._intents[client_order_id]
+            if intent and intent.side:
+                # Extract side from Kalshi-formatted intent.side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+                if "YES" in intent.side:
+                    derived_side = "yes"
+                elif "NO" in intent.side:
+                    derived_side = "no"
+                else:
+                    # Fallback to intent.side if not in Kalshi format
+                    derived_side = intent.side.lower() if intent.side else derived_side
+                logger.debug(
+                    "[HTTP-FILL-SIDE-FIX] fill_id=%s client_order_id=%s | "
+                    "Kalshi reported side=%s | Derived from intent.side=%s -> %s",
+                    fill_id, client_order_id, raw.get("side", ""), intent.side, derived_side
+                )
+        
         # If we only have generic price, assign to side
         if price and not yes_price_dollars and not no_price_dollars:
-            side = raw.get("side", "yes")
-            if side == "yes":
+            if derived_side == "yes":
                 yes_price_dollars = normalize_price(price)
             else:
                 no_price_dollars = normalize_price(price)
@@ -3761,7 +3865,7 @@ class KalshiFillsLedger:
             trade_id=raw.get("trade_id"),
             order_id=raw.get("order_id"),
             market_ticker=ticker,
-            side=raw.get("side", ""),
+            side=derived_side,  # CRITICAL FIX: Use derived side from intent, not Kalshi's reported side
             action=_action,
             count_fp=_count_fp,
             yes_price_dollars=yes_price_dollars,
