@@ -2986,8 +2986,38 @@ class KalshiFillsLedger:
             try:
                 from merid.position_management.position_monitor import get_position_monitor
                 from merid.position_management.position import Position, PositionSide, TrailingType
+                from merid.event_venues.kalshi.market_filter import parse_expiry_from_ticker
+                import time
                 
                 monitor = get_position_monitor()
+                
+                # CRITICAL FIX (2026-07-19): Validate position age before adding to PositionMonitor
+                # Only add positions from current or recent 15-minute windows to prevent
+                # premature exit orders for stale positions from previous sessions
+                market_id = fill.market_ticker
+                try:
+                    expiry_ts = parse_expiry_from_ticker(market_id)
+                    now_ts = time.time()
+                    
+                    # Allow positions from last 30 minutes (current + previous window)
+                    # This prevents stale positions from hours ago from triggering exits
+                    if expiry_ts > 0 and now_ts > expiry_ts + 1800:  # 30 minutes = 1800 seconds
+                        logger.warning(
+                            "[FILLS-LEDGER-POSITION-MONITOR] Skipping stale position for monitor: "
+                            "market=%s expired %d seconds ago (>30m threshold) - "
+                            "preventing premature exit orders for old positions",
+                            market_id,
+                            int(now_ts - expiry_ts)
+                        )
+                        # Skip adding to monitor - position is too old
+                        return
+                except Exception as age_err:
+                    logger.debug(
+                        "[FILLS-LEDGER-POSITION-MONITOR] Could not validate position age for %s: %s",
+                        market_id, age_err
+                    )
+                    # If age check fails, conservative approach: add to monitor
+                    # This ensures we don't miss valid positions due to parsing errors
                 
                 # Read profile configuration for trailing stops
                 trailing_enabled = False
@@ -4192,6 +4222,22 @@ class KalshiFillsLedger:
                     )
                 """)
                 logger.info("Created PostgreSQL kalshi_fills table")
+            else:
+                # Table exists - check for missing columns and migrate
+                existing_cols = await conn.fetch("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'kalshi_fills'
+                """)
+                existing_col_names = {row['column_name'] for row in existing_cols}
+                
+                # Migrate: created_at column if missing
+                if "created_at" not in existing_col_names:
+                    try:
+                        logger.info("Migrating kalshi_fills: adding created_at column")
+                        await conn.execute("ALTER TABLE kalshi_fills ADD COLUMN created_at TIMESTAMP WITH TIME ZONE")
+                        logger.info("Migration complete: created_at column added")
+                    except Exception as migrate_exc:
+                        logger.error(f"Failed to add created_at column: {migrate_exc}")
         
         self._db_initialized = True
         logger.info("PostgreSQL initialized")

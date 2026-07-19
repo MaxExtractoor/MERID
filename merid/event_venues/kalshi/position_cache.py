@@ -1402,8 +1402,16 @@ class KalshiPositionCache:
                     try:
                         from merid.position_management.position_monitor import get_position_monitor
                         from merid.position_management.position import Position, PositionSide, TrailingType
+                        from merid.event_venues.kalshi.market_filter import parse_expiry_from_ticker
+                        import time
                         
                         monitor = get_position_monitor()
+                        
+                        # CRITICAL FIX (2026-07-19): Validate position age before adding to PositionMonitor
+                        # Only add positions from current or recent 15-minute windows to prevent
+                        # premature exit orders for stale positions from previous sessions
+                        import time
+                        now_ts = time.time()
                         
                         # Read profile configuration for trailing stops
                         trailing_enabled = False
@@ -1427,6 +1435,28 @@ class KalshiPositionCache:
                         for market_id, cached_pos in self._positions.items():
                             if cached_pos.contracts <= 0:
                                 continue
+                            
+                            # CRITICAL FIX (2026-07-19): Validate position age before adding to PositionMonitor
+                            # Only add positions from current or recent 15-minute windows to prevent
+                            # premature exit orders for stale positions from previous sessions
+                            try:
+                                expiry_ts = parse_expiry_from_ticker(market_id)
+                                if expiry_ts > 0 and now_ts > expiry_ts + 1800:  # 30 minutes = 1800 seconds
+                                    logger.warning(
+                                        "[POSITION-CACHE-REST-SYNC] Skipping stale position for monitor: "
+                                        "market=%s expired %d seconds ago (>30m threshold) - "
+                                        "preventing premature exit orders for old positions",
+                                        market_id,
+                                        int(now_ts - expiry_ts)
+                                    )
+                                    # Skip adding to monitor - position is too old
+                                    continue
+                            except Exception as age_err:
+                                logger.debug(
+                                    "[POSITION-CACHE-REST-SYNC] Could not validate position age for %s: %s",
+                                    market_id, age_err
+                                )
+                                # If age check fails, conservative approach: add to monitor
                             
                             side_enum = PositionSide.YES if cached_pos.side.lower() == "yes" else PositionSide.NO
                             
