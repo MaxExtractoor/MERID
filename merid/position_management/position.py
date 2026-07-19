@@ -394,6 +394,33 @@ class Position:
         # Previous NO branch fired at 1c own-side price, which is a TOTAL LOSS for NO.
         return check_price >= 99
     
+    def should_trigger_auto_exit_99c(self, current_price_cents: int, bid_cents: Optional[int] = None) -> bool:
+        """
+        Check if 99c auto-exit should trigger (own side at 99c+).
+
+        Per Kalshi semantics, contracts settle at exactly $1 if correct and $0 if not.
+        Selling early at 99c locks in almost all of the payoff. This is a high-priority
+        exit that overrides other policies to prevent "riding it" from 99c back down to 0.
+
+        CRITICAL: Side-space semantics - all prices are in the position's own side cents.
+        For YES positions: exit when yes_bid ≥ 99c
+        For NO positions: exit when no_bid ≥ 99c (NO at 99c means YES at 1c, guaranteed win)
+
+        Args:
+            current_price_cents: Current own-side price in cents (mid price)
+            bid_cents: Current own-side bid price in cents (optional, preferred)
+            
+        Returns:
+            True if own-side bid is at 99c+ (cash out at near-settlement)
+        """
+        # Use conservative own-side bid if available (what we can actually sell at)
+        check_price = current_price_cents
+        if bid_cents is not None:
+            check_price = bid_cents
+        
+        # Cash out at 99c to lock in near-settlement value
+        return check_price >= 99
+    
     def should_trigger_break_even(self, current_price_cents: int) -> bool:
         """
         Check if break-even should trigger (move SL to entry at 1R).

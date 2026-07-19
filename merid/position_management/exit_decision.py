@@ -25,21 +25,23 @@ class ExitPriority(int, Enum):
     
     EXIT PRECEDENCE ORDER (highest to lowest priority):
     1. RISK (kill switch) - 100
-    2. EXTREME_PROFIT (99c YES / 1c NO) - 90
-    3. STALE_DATA (market data staleness) - 85
-    4. DYNAMIC_TAKE_PROFIT (laddered exits) - 80
-    5. RATCHET_TRIM (partial close at >80c) - 75
-    6. RATCHET_FLOOR (profit protection) - 70
-    7. STOP_LOSS - 60
-    8. TAKE_PROFIT - 55
-    9. CANDLE_REVERSAL (momentum reversal) - 50
-    10. ADAPTIVE_TIMING (historical performance) - 45
-    11. TIME_STOP (volatility-adjusted time-based) - 40
-    12. EDGE_DECAY (edge threshold) - 35
-    13. SCALE_OUT (partial exit at 1.5-2R) - 30
-    14. TRAIL (trailing stop) - 25
-    15. MANUAL - 20
+    2. AUTO_EXIT_99C (99c YES / 99c NO - cash out at near-settlement) - 95
+    3. EXTREME_PROFIT (99c YES / 1c NO - deprecated, use AUTO_EXIT_99C) - 90
+    4. STALE_DATA (market data staleness) - 85
+    5. DYNAMIC_TAKE_PROFIT (laddered exits) - 80
+    6. RATCHET_TRIM (partial close at >80c) - 75
+    7. RATCHET_FLOOR (profit protection) - 70
+    8. STOP_LOSS - 60
+    9. TAKE_PROFIT - 55
+    10. CANDLE_REVERSAL (momentum reversal) - 50
+    11. ADAPTIVE_TIMING (historical performance) - 45
+    12. TIME_STOP (volatility-adjusted time-based) - 40
+    13. EDGE_DECAY (edge threshold) - 35
+    14. SCALE_OUT (partial exit at 1.5-2R) - 30
+    15. TRAIL (trailing stop) - 25
+    16. MANUAL - 20
     """
+    AUTO_EXIT_99C = 95
     RISK = 100
     EXTREME_PROFIT = 90
     STALE_DATA = 85
@@ -103,7 +105,7 @@ def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
     Get priority for a given exit reason.
     
     This maps ExitReason enum values to ExitPriority constants.
-    Only includes exits that exist in the ExitReason enum.
+    Includes all exits that exist in the ExitReason enum.
     
     Args:
         reason: Exit reason
@@ -111,9 +113,11 @@ def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
     Returns:
         Exit priority value
     """
-    # Map only the exits that exist in ExitReason enum
+    # Map all exits that exist in ExitReason enum
     priority_map = {
         ExitReason.RISK: ExitPriority.RISK,
+        ExitReason.AUTO_EXIT_99C: ExitPriority.AUTO_EXIT_99C,
+        ExitReason.EXTREME_PROFIT: ExitPriority.EXTREME_PROFIT,
         ExitReason.STALE_DATA: ExitPriority.STALE_DATA,
         ExitReason.CANDLE_REVERSAL: ExitPriority.CANDLE_REVERSAL,
         ExitReason.ADAPTIVE_TIMING: ExitPriority.ADAPTIVE_TIMING,
@@ -121,6 +125,12 @@ def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
         ExitReason.EDGE_DECAY: ExitPriority.EDGE_DECAY,
         ExitReason.SCALE_OUT: ExitPriority.SCALE_OUT,
         ExitReason.MANUAL: ExitPriority.MANUAL,
+        ExitReason.STOP_LOSS: ExitPriority.STOP_LOSS,
+        ExitReason.TAKE_PROFIT: ExitPriority.TAKE_PROFIT,
+        ExitReason.DYNAMIC_TAKE_PROFIT: ExitPriority.DYNAMIC_TAKE_PROFIT,
+        ExitReason.RATCHET_TRIM: ExitPriority.RATCHET_TRIM,
+        ExitReason.RATCHET_FLOOR: ExitPriority.RATCHET_FLOOR,
+        ExitReason.TRAIL: ExitPriority.TRAIL,
     }
     
     return priority_map.get(reason, ExitPriority.MANUAL)
