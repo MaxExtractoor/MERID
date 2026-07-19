@@ -23,8 +23,14 @@ from merid.event_venues.kalshi.fills_ledger import (
 
 
 @pytest.fixture
-async def ledger(monkeypatch) -> AsyncGenerator[KalshiFillsLedger, None]:
+async def ledger(monkeypatch, tmp_path) -> AsyncGenerator[KalshiFillsLedger, None]:
     """Provide a fresh fills ledger for each test."""
+    # TEST-ISOLATION FIX (2026-07-19): Redirect DB writes away from production.
+    # Without this, test fills are persisted to data/kalshi_fills.db (or
+    # PostgreSQL) and pollute real position tracking.
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(tmp_path / "test_fills.db"))
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    
     # Reset all singleton state
     KalshiFillsLedger._initialized = False
     KalshiFillsLedger._instance = None

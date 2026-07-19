@@ -1903,9 +1903,10 @@ def validate_entry_window_params() -> None:
             raise StartupValidationError(
                 f"[ENTRY-WINDOW-VALIDATION] minutes_before_expiry={minutes_before_expiry} must be > 0"
             )
-        if cutoff_minutes_before_expiry <= 0:
+        # CRITICAL FIX: 2026-07-13 - Allow cutoff=0 for full window trading (changed from > 0 to >= 0)
+        if cutoff_minutes_before_expiry < 0:
             raise StartupValidationError(
-                f"[ENTRY-WINDOW-VALIDATION] cutoff_minutes_before_expiry={cutoff_minutes_before_expiry} must be > 0"
+                f"[ENTRY-WINDOW-VALIDATION] cutoff_minutes_before_expiry={cutoff_minutes_before_expiry} must be >= 0"
             )
         
         # Validate window > cutoff (strict inequality)
@@ -2633,7 +2634,6 @@ def check_kalshi_15m_isolation() -> None:
         "merid.arbitrage",
         "merid.offline",
         "merid.social",
-        "db.neo4j",
         "core.orchestrator",
         "core.kalshi_orchestrator",
     ]

@@ -63,6 +63,7 @@ def test_global_rate_limit_reduced():
 
 
 # Test 4: Velocity threshold reduction
+@pytest.mark.skip(reason="2026-07-18: Panic fade disabled - causing losses by betting against trend")
 def test_velocity_threshold_reduced():
     """Test that velocity thresholds were reduced by 35%."""
     from merid.prediction.agent_grid_15m import LeanAgentConfig
@@ -176,17 +177,19 @@ def test_microstructure_check_allows_10c_spread():
 
 # Test 10: Kalshi V2 API side conversion fix for NO orders
 def test_kalshi_v2_side_conversion_no_orders():
-    """Test that V2 API side conversion correctly handles NO orders.
+    """Test that V2 API side conversion correctly uses outcome-side format.
     
-    This test validates the fix for the critical bug where SELL_NO orders
-    were incorrectly mapped to "ask" instead of "bid", causing 5c limit
-    orders to be interpreted as 95c by Kalshi.
+    CRITICAL FIX (2026-07-19): This test was updated to reflect the correct
+    outcome-side format instead of the buggy bid/ask book-side mapping.
     
-    The correct mapping is:
-    - BUY_YES = bid
-    - SELL_YES = ask
-    - BUY_NO = ask (equivalent to sell YES)
-    - SELL_NO = bid (equivalent to buy YES)
+    The previous implementation used bid/ask book-side terminology which
+    caused order inversion (BUY_NO was converted to sell YES).
+    
+    The CORRECT mapping is:
+    - side: "yes" or "no" (the outcome you're trading)
+    - action: "buy" or "sell" (your action on that outcome)
+    
+    Kalshi API expects outcome-side format, NOT bid/ask book-side.
     """
     from decimal import Decimal
     from merid.event_venues.base import VenueOrder
@@ -196,30 +199,26 @@ def test_kalshi_v2_side_conversion_no_orders():
     # Get the source code of place_order_result to verify the fix
     source = inspect.getsource(KalshiVenueClient.place_order_result)
     
-    # Verify the fix is present: must consider both outcome AND action
-    assert "outcome == \"yes\"" in source, "Should check outcome for yes"
-    assert "outcome == \"no\"" in source, "Should check outcome for no"
-    assert "order.side == \"buy\"" in source, "Should check action (buy)"
-    # The sell case is handled by else clause, not explicit check
-    assert "else:" in source, "Should have else clause for sell action"
+    # Verify the OLD BUGGY bid/ask logic is REMOVED
+    assert 'v2_side = "bid" if order.side == "buy" else "ask"' not in source, \
+        "OLD BUGGY bid/ask logic should be removed"
+    assert 'v2_side = "ask" if order.side == "buy" else "bid"' not in source, \
+        "OLD BUGGY bid/ask logic should be removed"
     
-    # Verify the correct mapping logic is present
-    # BUY_YES = bid, SELL_YES = ask
-    assert 'v2_side = "bid" if order.side == "buy" else "ask"' in source, \
-        "YES side should map: buy->bid, sell->ask"
-    
-    # BUY_NO = ask, SELL_NO = bid
-    assert 'v2_side = "ask" if order.side == "buy" else "bid"' in source, \
-        "NO side should map: buy->ask, sell->bid"
+    # Verify the CORRECT outcome-side format is present
+    assert '"side": outcome' in source or 'side: outcome' in source, \
+        "Should use outcome-side format: side=outcome"
+    assert '"action": order.side' in source or 'action: order.side' in source, \
+        "Should use action directly: action=order.side"
     
     # Verify the fix comment is present
-    assert "CRITICAL FIX: Must consider both outcome AND action" in source, \
+    assert "CRITICAL FIX (2026-07-19)" in source or "Kalshi V2 API uses outcome-side format" in source, \
         "Fix comment should be present"
     
     # Test the actual mapping logic by creating VenueOrder objects
-    # and verifying the expected v2_side would be computed correctly
+    # and verifying the expected API format would be computed correctly
     
-    # Test BUY_YES -> bid
+    # Test BUY_YES -> side="yes", action="buy"
     order_yes_buy = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="buy",
@@ -227,9 +226,9 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="yes"
     )
-    # The fix ensures: outcome="yes" + side="buy" -> v2_side="bid"
+    # The fix ensures: outcome="yes" + action="buy" -> API: side="yes", action="buy"
     
-    # Test SELL_YES -> ask
+    # Test SELL_YES -> side="yes", action="sell"
     order_yes_sell = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="sell",
@@ -237,9 +236,9 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="yes"
     )
-    # The fix ensures: outcome="yes" + side="sell" -> v2_side="ask"
+    # The fix ensures: outcome="yes" + action="sell" -> API: side="yes", action="sell"
     
-    # Test BUY_NO -> ask (equivalent to sell YES)
+    # Test BUY_NO -> side="no", action="buy"
     order_no_buy = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="buy",
@@ -247,10 +246,10 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="no"
     )
-    # The fix ensures: outcome="no" + side="buy" -> v2_side="ask"
+    # The fix ensures: outcome="no" + action="buy" -> API: side="no", action="buy"
+    # This was the bug: old logic converted this to sell YES
     
-    # Test SELL_NO -> bid (equivalent to buy YES)
-    # This was the bug: it was incorrectly mapped to "ask"
+    # Test SELL_NO -> side="no", action="sell"
     order_no_sell = VenueOrder(
         market_id="KXBTC15M-26JUL021900-00",
         side="sell",
@@ -258,13 +257,7 @@ def test_kalshi_v2_side_conversion_no_orders():
         price=Decimal("0.50"),
         outcome_id="no"
     )
-    # The fix ensures: outcome="no" + side="sell" -> v2_side="bid"
-    
-    # Verify the Kalshi duality comment is present
-    assert "bid = buy YES = sell NO" in source, \
-        "Kalshi duality comment should be present"
-    assert "ask = sell YES = buy NO" in source, \
-        "Kalshi duality comment should be present"
+    # The fix ensures: outcome="no" + action="sell" -> API: side="no", action="sell"
 
 
 if __name__ == "__main__":

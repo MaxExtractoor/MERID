@@ -16,7 +16,6 @@ Design principles:
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
 import time as _time
 import hashlib
@@ -24,6 +23,14 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Tuple
+
+# PostgreSQL support (replaces SQLite)
+try:
+    import asyncpg
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
+    asyncpg = None
 
 from utils.logger import get_logger
 from merid.event_venues.kalshi.portfolio_models import (
@@ -48,6 +55,7 @@ _EVENT_LOG_DB_PATH: str = os.getenv(
     os.path.join(os.path.dirname(__file__), "portfolio_event_log.db")
 )
 
+_DB_TIMEOUT: int = int(os.getenv("MERID_EVENT_LOG_DB_TIMEOUT_MS", "30000"))
 _DB_BUSY_TIMEOUT_MS: int = int(os.getenv("MERID_EVENT_LOG_DB_BUSY_TIMEOUT_MS", "30000"))
 _DB_RETRY_ATTEMPTS: int = int(os.getenv("MERID_EVENT_LOG_DB_RETRY_ATTEMPTS", "3"))
 _DB_RETRY_DELAY_INITIAL: float = float(os.getenv("MERID_EVENT_LOG_DB_RETRY_DELAY_INITIAL", "0.05"))
@@ -82,21 +90,51 @@ class PortfolioEventLog:
         
         self._db_path = _EVENT_LOG_DB_PATH
         self._local_lock = threading.Lock()
+        self._use_postgres = POSTGRES_AVAILABLE and os.getenv("POSTGRES_PASSWORD")
+        self._postgres_pool = None
         self._initialized = True
         self._init_db()
         
         logger.info(
-            "PortfolioEventLog initialized at %s",
+            "PortfolioEventLog initialized (PostgreSQL=%s) at %s",
+            self._use_postgres,
             self._db_path
         )
     
+    async def _ensure_postgres_pool(self) -> asyncpg.Pool:
+        """Ensure PostgreSQL connection pool is initialized."""
+        if self._postgres_pool is None and self._use_postgres:
+            try:
+                from merid.settings import get_settings
+                settings = get_settings()
+                
+                self._postgres_pool = await asyncpg.create_pool(
+                    host=settings.POSTGRES_HOST,
+                    port=settings.POSTGRES_PORT,
+                    user=settings.POSTGRES_USER,
+                    password=settings.POSTGRES_PASSWORD,
+                    database=settings.POSTGRES_DB,
+                    min_size=2,
+                    max_size=10,
+                    command_timeout=30.0
+                )
+                logger.info("PortfolioEventLog PostgreSQL connection pool established")
+            except Exception as e:
+                logger.error(f"Failed to create PostgreSQL pool: {e}")
+                self._use_postgres = False
+                logger.warning("PortfolioEventLog falling back to SQLite")
+        
+        return self._postgres_pool
+    
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with retry logic."""
+        """Get a SQLite database connection with retry logic (fallback)."""
+        import sqlite3
+        
         for attempt in range(_DB_RETRY_ATTEMPTS):
             try:
                 return sqlite3.connect(
                     self._db_path,
-                    timeout=_DB_TIMEOUT,
+                    timeout=_DB_BUSY_TIMEOUT_MS / 1000,
                     check_same_thread=False,
                 )
             except sqlite3.OperationalError as e:
@@ -113,25 +151,23 @@ class PortfolioEventLog:
                     delay,
                     e
                 )
-                # BUG-FIX (2026-05-12): Use asyncio.sleep if in async context, else time.sleep
-                # This prevents blocking the event loop when called from async code
-                try:
-                    loop = asyncio.get_running_loop()
-                    import asyncio
-                    # Create a task to sleep without blocking
-                    # Since we're in sync context, we need to run the async sleep in executor
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(asyncio.run, asyncio.sleep(delay))
-                        future.result(timeout=delay + 1.0)
-                except RuntimeError:
-                    # No running loop, use blocking sleep
-                    _time.sleep(delay)
+                _time.sleep(delay)
         
         raise RuntimeError("Failed to acquire database connection after retries")
     
     def _init_db(self) -> None:
-        """Initialize database schema."""
+        """Initialize database schema (PostgreSQL or SQLite)."""
+        if self._use_postgres:
+            # PostgreSQL initialization is handled by init_postgres_schema.py
+            # Just log that we're using PostgreSQL
+            logger.info("PortfolioEventLog using PostgreSQL (schema initialized by init_postgres_schema.py)")
+        else:
+            self._init_sqlite()
+    
+    def _init_sqlite(self) -> None:
+        """Initialize SQLite schema (fallback)."""
+        import sqlite3
+        
         conn = self._get_connection()
         try:
             # Events table - append-only with sequence ID
@@ -178,26 +214,32 @@ class PortfolioEventLog:
                 conn.execute("INSERT INTO sequence_counter (counter) VALUES (0)")
             
             conn.commit()
-            logger.debug("PortfolioEventLog database schema initialized")
+            logger.debug("PortfolioEventLog SQLite schema initialized")
         finally:
             conn.close()
     
-    def _get_next_sequence_id(self, conn: sqlite3.Connection) -> int:
+    def _get_next_sequence_id(self, conn) -> int:
         """Get the next sequence ID atomically."""
-        cursor = conn.execute(
-            "UPDATE sequence_counter SET counter = counter + 1 RETURNING counter"
-        )
-        result = cursor.fetchone()
-        if result is None:
-            # Fallback: get current and increment
-            cursor = conn.execute("SELECT counter FROM sequence_counter")
-            current = cursor.fetchone()[0]
-            new_id = current + 1
-            conn.execute("UPDATE sequence_counter SET counter = ?", (new_id,))
-            return new_id
-        return result[0]
+        if self._use_postgres:
+            # PostgreSQL uses SERIAL for auto-increment
+            # This is handled by the database schema
+            return 0  # Placeholder, actual sequence ID generated by DB
+        else:
+            # SQLite manual sequence counter
+            cursor = conn.execute(
+                "UPDATE sequence_counter SET counter = counter + 1 RETURNING counter"
+            )
+            result = cursor.fetchone()
+            if result is None:
+                # Fallback: get current and increment
+                cursor = conn.execute("SELECT counter FROM sequence_counter")
+                current = cursor.fetchone()[0]
+                new_id = current + 1
+                conn.execute("UPDATE sequence_counter SET counter = ?", (new_id,))
+                return new_id
+            return result[0]
     
-    def append_event(self, event: PortfolioEvent) -> bool:
+    async def append_event(self, event: PortfolioEvent) -> bool:
         """Append an event to the log (idempotent).
         
         Args:
@@ -206,6 +248,65 @@ class PortfolioEventLog:
         Returns:
             True if event was appended, False if duplicate (event_id already exists)
         """
+        if self._use_postgres:
+            return await self._append_event_postgres(event)
+        else:
+            return self._append_event_sqlite(event)
+    
+    async def _append_event_postgres(self, event: PortfolioEvent) -> bool:
+        """Append event to PostgreSQL."""
+        pool = await self._ensure_postgres_pool()
+        if not pool:
+            logger.error("PostgreSQL pool not available, cannot append event")
+            return False
+        
+        async with pool.acquire() as conn:
+            try:
+                # Check for duplicate event_id
+                exists = await conn.fetchval(
+                    "SELECT event_id FROM portfolio_events WHERE event_id = $1",
+                    event.event_id
+                )
+                if exists:
+                    logger.debug(
+                        "EventLog: duplicate event_id %s, skipping",
+                        event.event_id
+                    )
+                    return False
+                
+                # Insert event (PostgreSQL uses SERIAL for sequence_id)
+                await conn.execute("""
+                    INSERT INTO portfolio_events 
+                    (event_type, market_ticker, side, contracts, price_cents, timestamp, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """, (
+                    event.event_type.value,
+                    getattr(event, 'market_ticker', None),
+                    getattr(event, 'side', None),
+                    getattr(event, 'contracts', None),
+                    getattr(event, 'price_cents', None),
+                    event.timestamp,
+                    json.dumps(event.data) if isinstance(event.data, dict) else str(event.data)
+                ))
+                
+                logger.debug(
+                    "EventLog: appended event_id=%s type=%s",
+                    event.event_id,
+                    event.event_type.value
+                )
+                return True
+            except Exception as e:
+                logger.warning(
+                    "EventLog: error appending event %s: %s",
+                    event.event_id,
+                    e
+                )
+                return False
+    
+    def _append_event_sqlite(self, event: PortfolioEvent) -> bool:
+        """Append event to SQLite (fallback)."""
+        import sqlite3
+        
         with self._local_lock:
             conn = self._get_connection()
             try:

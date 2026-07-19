@@ -87,9 +87,12 @@ class Settings(BaseSettings):
     # =============================================================================
     # DATABASE SETTINGS
     # =============================================================================
-    NEO4J_URI: str = Field(default=os.getenv("NEO4J_URI", "bolt://localhost:7687"), description="Neo4j connection URI")
-    NEO4J_USER: str = Field(default="neo4j", description="Neo4j username")
-    NEO4J_PASSWORD: Optional[str] = Field(default=None, description="Neo4j password")
+    # PostgreSQL for fills ledger and position tracking (replaces SQLite)
+    POSTGRES_HOST: str = Field(default=os.getenv("POSTGRES_HOST", "localhost"), description="PostgreSQL host")
+    POSTGRES_PORT: int = Field(default=int(os.getenv("POSTGRES_PORT", "5432")), description="PostgreSQL port")
+    POSTGRES_USER: str = Field(default=os.getenv("POSTGRES_USER", "merid"), description="PostgreSQL username")
+    POSTGRES_PASSWORD: Optional[str] = Field(default=os.getenv("POSTGRES_PASSWORD"), description="PostgreSQL password")
+    POSTGRES_DB: str = Field(default=os.getenv("POSTGRES_DB", "merid"), description="PostgreSQL database name")
     
     # =============================================================================
     # SUPABASE SETTINGS
@@ -1212,7 +1215,7 @@ class Settings(BaseSettings):
         missing = []
         required_vars = [
             "SECRET_KEY",
-            "NEO4J_PASSWORD",
+            "POSTGRES_PASSWORD",
             "SUPABASE_URL",
             "SUPABASE_ANON_KEY",
         ]
