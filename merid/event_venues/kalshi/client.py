@@ -2012,23 +2012,21 @@ class KalshiVenueClient(EventVenueClient):
         outcome = order.outcome_id or "yes"
         action = order.side or "buy"
         
-        # CRITICAL FIX (2026-07-19): Kalshi API uses bid/ask side, NOT yes/no outcome
-        # Map outcome + action to bid/ask:
-        # - Buying YES = bid (bidding to buy YES)
-        # - Selling YES = ask (asking to sell YES)
-        # - Buying NO = bid (bidding to buy NO)
-        # - Selling NO = ask (asking to sell NO)
-        # The side field indicates which side of the orderbook we're on:
-        # - "bid" = we're a buyer (bidding)
-        # - "ask" = we're a seller (asking)
+        # Kalshi V2 API uses bid/ask side for orderbook placement
+        # Map outcome + action to bid/ask per Kalshi semantics:
+        # - BUY_YES = bid (bidding to buy YES)
+        # - SELL_YES = ask (asking to sell YES)
+        # - BUY_NO = ask (equivalent to SELL_YES, both are long NO)
+        # - SELL_NO = bid (equivalent to BUY_YES, both are long YES)
+        # Reference: Kalshi quotes everything from YES side
         if outcome == "yes" and action == "buy":
             kalshi_side = "bid"
         elif outcome == "yes" and action == "sell":
             kalshi_side = "ask"
         elif outcome == "no" and action == "buy":
-            kalshi_side = "bid"
-        elif outcome == "no" and action == "sell":
             kalshi_side = "ask"
+        elif outcome == "no" and action == "sell":
+            kalshi_side = "bid"
         else:
             # Fallback for unexpected combinations
             logger.warning(
