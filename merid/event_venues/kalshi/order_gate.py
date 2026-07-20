@@ -381,29 +381,10 @@ class IdempotentOrderStore:
                     rec.updated_at = _time.time()
                     self._metrics.filled += 1
 
-                    # CRITICAL FIX: 2026-07-08 - Record window exposure on fill
-                    # This ensures window exposure is tracked regardless of which path calls mark_filled
-                    # (order_router.py, reconciliation, or other paths)
-                    try:
-                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                        from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
-                        envelope = get_kalshi_crypto_15m_risk_envelope()
-                        if envelope:
-                            # Use actual filled notional for accurate exposure tracking
-                            filled_notional_usd = (filled_count * rec.price_cents) / 100.0
-                            # CRITICAL FIX 2026-07-08: Extract asset for per-asset exposure tracking
-                            asset = extract_asset_from_ticker(rec.contract_id) if rec.contract_id else None
-                            envelope.record_order_execution(
-                                agent_id=rec.agent_id,
-                                order_notional_usd=filled_notional_usd,
-                                asset=asset
-                            )
-                            logger.info(
-                                "[order-gate-WINDOW-RECORD] Recorded window exposure on fill: coid=%s agent=%s notional=$%.2f filled=%d price=%dc",
-                                client_order_id[:16], rec.agent_id, filled_notional_usd, filled_count, rec.price_cents
-                            )
-                    except Exception as e:
-                        logger.warning("[order-gate-WINDOW-RECORD] Failed to record window exposure: %s", e)
+                    # FIX 2: Window exposure recording centralized in position_cache.on_fill()
+                    # Removed from here to prevent duplicate recording and ensure consistency
+                    # across all fill paths (WebSocket and HTTP). All fills now go through
+                    # position_cache.on_fill() which records window exposure once.
 
     def mark_canceled(self, client_order_id: str) -> None:
         with self._lock:
@@ -823,6 +804,8 @@ class PreTradeGate:
         window_resolution_id: Optional[str] = None,
         risk_tier: Optional[str] = None,
         max_hold_seconds: Optional[int] = None,
+        # CRITICAL FIX: Entry/exit direction classification (2026-07-20)
+        entry_or_exit: Optional[str] = None,
     ) -> GateVerdict:
         """Run pre-trade gate checks.
 
@@ -843,6 +826,7 @@ class PreTradeGate:
             window_resolution_id: Optional window resolution ID for crypto 15m markets.
             risk_tier:       Optional risk tier for crypto 15m markets.
             max_hold_seconds: Optional max hold seconds for crypto 15m markets.
+            entry_or_exit:   Optional "entry" or "exit" direction classification.
 
         Returns:
             :class:`GateVerdict` with ``allowed``, ``client_order_id``, and
@@ -1102,11 +1086,14 @@ class PreTradeGate:
         
         # - High YES price (e.g., 85¢) = low-profit trade (risk more than profit potential)
         # - High NO price (e.g., 85¢) = low-profit trade (risk more than profit potential)
-        if price_cents > max_price_cents:
+        # CRITICAL FIX: Skip this check for exit orders (2026-07-20)
+        # Exit orders need to close positions even at high prices to realize PnL
+        if entry_or_exit != "exit" and price_cents > max_price_cents:
             self._store._metrics.blocked_price_guard += 1
             logger.warning(
-                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold (poor risk/reward rejected)",
-                coid, contract_id, side, price_cents, max_price_cents,
+                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold "
+                "(poor risk/reward rejected) entry_or_exit=%s",
+                coid, contract_id, side, price_cents, max_price_cents, entry_or_exit or "entry",
             )
             return GateVerdict(
                 allowed=False,
@@ -1115,23 +1102,24 @@ class PreTradeGate:
             )
 
         # 4. Fill-awareness: is the target already satisfied?
-        if action == "buy":
-            already_filled = (
-                existing_filled
-                if existing_filled is not None
-                else self._store.filled_count_for_contract(contract_id, side, strategy_group)
+        # CRITICAL FIX (2026-07-20): Apply to both buy and sell actions
+        # Exit orders (sell) should also check if already satisfied to prevent duplicate exits
+        already_filled = (
+            existing_filled
+            if existing_filled is not None
+            else self._store.filled_count_for_contract(contract_id, side, strategy_group)
+        )
+        if already_filled >= target_count:
+            self._store._metrics.blocked_already_satisfied += 1
+            logger.info(
+                "[GATE] already_satisfied coid=%s contract=%s filled=%d target=%d action=%s",
+                coid, contract_id, already_filled, target_count, action,
             )
-            if already_filled >= target_count:
-                self._store._metrics.blocked_already_satisfied += 1
-                logger.info(
-                    "[GATE] already_satisfied coid=%s contract=%s filled=%d target=%d",
-                    coid, contract_id, already_filled, target_count,
-                )
-                return GateVerdict(
-                    allowed=False,
-                    client_order_id=coid,
-                    reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
-                )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
+            )
 
         # 4b. CRYPTO15M Timeframe Budget + Expiry Cap Check (hard gate)
         # NOTE: This gate is DISABLED for lean 15m mode because the allocator (crypto15mallocator.py)
@@ -1427,11 +1415,14 @@ class PreTradeGate:
         
         # - High YES price (e.g., 85¢) = low-profit trade (risk more than profit potential)
         # - High NO price (e.g., 85¢) = low-profit trade (risk more than profit potential)
-        if price_cents > max_price_cents:
+        # CRITICAL FIX: Skip this check for exit orders (2026-07-20)
+        # Exit orders need to close positions even at high prices to realize PnL
+        if entry_or_exit != "exit" and price_cents > max_price_cents:
             self._store._metrics.blocked_price_guard += 1
             logger.warning(
-                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold (poor risk/reward rejected)",
-                coid, contract_id, side, price_cents, max_price_cents,
+                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold "
+                "(poor risk/reward rejected) entry_or_exit=%s",
+                coid, contract_id, side, price_cents, max_price_cents, entry_or_exit or "entry",
             )
             return GateVerdict(
                 allowed=False,
@@ -1440,23 +1431,24 @@ class PreTradeGate:
             )
 
         # 4. Fill-awareness: is the target already satisfied?
-        if action == "buy":
-            already_filled = (
-                existing_filled
-                if existing_filled is not None
-                else self._store.filled_count_for_contract(contract_id, side, strategy_group)
+        # CRITICAL FIX (2026-07-20): Apply to both buy and sell actions
+        # Exit orders (sell) should also check if already satisfied to prevent duplicate exits
+        already_filled = (
+            existing_filled
+            if existing_filled is not None
+            else self._store.filled_count_for_contract(contract_id, side, strategy_group)
+        )
+        if already_filled >= target_count:
+            self._store._metrics.blocked_already_satisfied += 1
+            logger.info(
+                "[GATE] already_satisfied coid=%s contract=%s filled=%d target=%d action=%s",
+                coid, contract_id, already_filled, target_count, action,
             )
-            if already_filled >= target_count:
-                self._store._metrics.blocked_already_satisfied += 1
-                logger.info(
-                    "[GATE] already_satisfied coid=%s contract=%s filled=%d target=%d",
-                    coid, contract_id, already_filled, target_count,
-                )
-                return GateVerdict(
-                    allowed=False,
-                    client_order_id=coid,
-                    reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
-                )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
+            )
 
         # 5. Insert new record (PENDING) using async lock
         record = OrderRecord(

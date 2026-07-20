@@ -7131,6 +7131,8 @@ def _run_pre_trade_gate(
             window_resolution_id=intent.window_resolution_id,
             risk_tier=intent.risk_tier,
             max_hold_seconds=intent.max_hold_seconds,
+            # CRITICAL FIX: Pass entry_or_exit direction to gate for exit order bypass (2026-07-20)
+            entry_or_exit=intent.entry_or_exit,
         )
         if not verdict.allowed:
             latency = (_time.monotonic() - t0) * 1000
@@ -7541,8 +7543,10 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         )
     
     # AUDIT #4: Execution path tracking
+    exec_path = "EXIT" if intent.entry_or_exit == "exit" else "ENTRY"
     logger.info(
-        "[EXEC-PATH] ENTRY intent_id=%s ticker=%s side=%s count=%d source=%s",
+        "[EXEC-PATH] %s intent_id=%s ticker=%s side=%s count=%d source=%s",
+        exec_path,
         intent.intent_id,
         intent.ticker,
         intent.side,
