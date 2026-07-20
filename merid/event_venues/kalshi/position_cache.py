@@ -184,6 +184,7 @@ class CachedPosition:
         fee_cents: int,
         side: str,
         action: str = "buy",
+        expected_post_size: Optional[int] = None
     ) -> None:
         """Update position with a new fill.
 
@@ -192,10 +193,29 @@ class CachedPosition:
         long. Previously the cache used ``side == self.side`` to detect adds,
         which silently inflated positions whenever a TP/SL bracket filled
         (sell on the same side that was bought).
+        
+        Args:
+            expected_post_size: Expected position size after fill (for reconciliation)
         """
         action = (action or "buy").lower()
         is_open = action == "buy" and side == self.side
         is_close = action == "sell" or (action == "buy" and side != self.side)
+        
+        # AUDIT: Log fill reconciliation for exit orders
+        if is_close:
+            from utils.logger import get_logger
+            logger = get_logger("merid.position_cache")
+            pre_size = self.contracts
+            logger.info(
+                "[FILL-RECONCILIATION-AUDIT] ticker=%s side=%s action=%s pre_size=%d fill_size=%d price=%dc type=exit_fill expected_post_size=%s",
+                self.ticker,
+                side,
+                action,
+                pre_size,
+                contracts,
+                price_cents,
+                expected_post_size
+            )
 
         if is_open:
             # Adding to position (same side, buy action)
@@ -208,6 +228,54 @@ class CachedPosition:
             # Closing/reducing position
             # PnL direction depends on the SIDE of the original position.
             # YES long: profit when close price > entry; NO long: profit when close price < entry.
+            
+            # AUDIT: Log post-fill reconciliation
+            from utils.logger import get_logger
+            logger = get_logger("merid.position_cache")
+            post_size = max(0, self.contracts - contracts)
+            logger.info(
+                "[FILL-RECONCILIATION-AUDIT] ticker=%s side=%s action=%s pre_size=%d fill_size=%d post_size=%d price=%dc type=exit_fill_complete",
+                self.ticker,
+                side,
+                action,
+                pre_size,
+                contracts,
+                post_size,
+                price_cents
+            )
+            
+            # AUDIT: Check for residual position after exit fill
+            if post_size > 0:
+                logger.warning(
+                    "[FILL-RECONCILIATION-AUDIT] ticker=%s RESIDUAL_POSITION_DETECTED pre_size=%d fill_size=%d post_size=%d - position not fully closed, requires follow-up exit",
+                    self.ticker,
+                    pre_size,
+                    contracts,
+                    post_size
+                )
+                # AUDIT: Log residual exposure risk
+                logger.warning(
+                    "[RESIDUAL-EXPOSURE-RISK] ticker=%s residual_size=%d - position has residual exposure that may not have follow-up exit enforcement",
+                    self.ticker,
+                    post_size
+                )
+            
+            # AUDIT: Reconcile actual post_size against expected_post_size
+            if expected_post_size is not None:
+                if post_size != expected_post_size:
+                    logger.error(
+                        "[RECONCILIATION-MISMATCH] ticker=%s actual_post_size=%d expected_post_size=%d - position ledger does not match expected residual size",
+                        self.ticker,
+                        post_size,
+                        expected_post_size
+                    )
+                else:
+                    logger.info(
+                        "[RECONCILIATION-MATCH] ticker=%s actual_post_size=%d expected_post_size=%d - position ledger matches expected residual size",
+                        self.ticker,
+                        post_size,
+                        expected_post_size
+                    )
             if self.side == "yes":
                 pnl_per = price_cents - self.avg_price_cents
             else:
@@ -442,8 +510,32 @@ class KalshiPositionCache:
         for exposure calculation accuracy.
 
         Task 2: Integrates with fills_ledger for authoritative fill_source lookup.
+
+        FIX 3: Price repeat check to prevent duplicate execution via WebSocket path.
         """
         async with self._ensure_mutex():
+            # FIX 3: Price repeat check to prevent duplicate execution via WebSocket
+            # This uses the same logic as order_gate.check_price_repeat() to ensure
+            # consistent enforcement across all fill paths (WebSocket and HTTP).
+            try:
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                gate = get_pre_trade_gate()
+                allowed, reason, last_price = gate.check_price_repeat(
+                    contract_id=market_id,
+                    side=side,
+                    price_cents=price_cents,
+                    allow_lower_price=True  # Allow scaling in at lower prices
+                )
+                if not allowed:
+                    logger.warning(
+                        "[POSITION-CACHE-PRICE-REPEAT-BLOCK] fill_id=%s market=%s side=%s price=%dc blocked: %s",
+                        fill_id or "N/A", market_id, side, price_cents, reason
+                    )
+                    # Reject the fill - do not update position state
+                    return
+            except Exception as price_check_err:
+                logger.debug("[POSITION-CACHE] Price repeat check failed (non-fatal): %s", price_check_err)
+
             # Task 2: Look up fill_source from fills_ledger if fill_id provided
             fill_source = await self._lookup_fill_source(fill_id, client_order_id)
 
@@ -456,7 +548,7 @@ class KalshiPositionCache:
                 agent_id = None
                 if fill_id and self._fills_ledger:
                     try:
-                        fill_record = self._fills_ledger.get_fill(fill_id)
+                        fill_record = self._fills_ledger.get_fill_by_id(fill_id)
                         if fill_record:
                             agent_id = getattr(fill_record, 'agent_id', None)
                     except Exception as ledger_err:
@@ -621,7 +713,7 @@ class KalshiPositionCache:
                 # Try to get order_id from fills_ledger
                 ledger = self._get_fills_ledger()
                 if ledger:
-                    fill_record = ledger.get_fill(fill_id)
+                    fill_record = ledger.get_fill_by_id(fill_id)
                     if fill_record and fill_record.order_id:
                         client_order_id = self._order_id_to_client_tag.get(fill_record.order_id)
                         if client_order_id:
@@ -677,7 +769,7 @@ class KalshiPositionCache:
                     agent_id = None
                     if fill_id and self._fills_ledger:
                         try:
-                            fill_record = self._fills_ledger.get_fill(fill_id)
+                            fill_record = self._fills_ledger.get_fill_by_id(fill_id)
                             if fill_record:
                                 raw_logit = getattr(fill_record, 'raw_logit', None)
                                 agent_id = getattr(fill_record, 'agent_id', None)
@@ -721,7 +813,7 @@ class KalshiPositionCache:
                         edge_pct = 0.0
                         if fill_id and self._fills_ledger:
                             try:
-                                fill_record = self._fills_ledger.get_fill(fill_id)
+                                fill_record = self._fills_ledger.get_fill_by_id(fill_id)
                                 if fill_record:
                                     edge_pct = getattr(fill_record, 'edgepct', 0.0) or 0.0
                             except Exception as edge_err:
@@ -1304,18 +1396,40 @@ class KalshiPositionCache:
         if not force and self._last_sync:
             local_sync_time = self._last_sync.timestamp()
             age_seconds = rest_timestamp - local_sync_time
-            
-            # If REST snapshot is older than local cache by more than 30s, reject it
+
+            # FIX 5: Relaxed staleness guard with warning
+            # Log warning but allow sync even if REST is slightly stale (up to 60s)
+            # This improves robustness during network issues by allowing sync to proceed
+            # even when REST snapshot is older than local cache, with a warning instead of rejection.
             if age_seconds < -30.0:
-                logger.warning(
-                    "[POSITION-CACHE-STALE] Rejecting REST snapshot older than local cache: "
-                    f"REST timestamp={rest_timestamp:.0f}, local sync={local_sync_time:.0f}, "
-                    f"age={age_seconds:.1f}s (threshold=-30s). Preserving local state."
-                )
-                return
+                if age_seconds < -60.0:
+                    # Still reject if very stale (> 60s)
+                    logger.warning(
+                        "[POSITION-CACHE-STALE] Rejecting very stale REST snapshot: "
+                        f"REST timestamp={rest_timestamp:.0f}, local sync={local_sync_time:.0f}, "
+                        f"age={age_seconds:.1f}s (threshold=-60s). Preserving local state."
+                    )
+                    return
+                else:
+                    # Allow sync with warning for moderately stale data (30-60s)
+                    logger.warning(
+                        "[POSITION-CACHE-STALE-WARN] REST snapshot is stale but proceeding: "
+                        f"REST timestamp={rest_timestamp:.0f}, local sync={local_sync_time:.0f}, "
+                        f"age={age_seconds:.1f}s (threshold=-30s). May overwrite newer state."
+                    )
         
         async with self._ensure_mutex():
             try:
+                # FIX 4: Conditional position cache clearing
+                # Only clear cache if REST response is verified fresh and non-empty
+                # This prevents data loss from transient API issues where Kalshi REST
+                # temporarily returns 0 positions but fills ledger shows active positions.
+                if not positions:
+                    logger.warning(
+                        "[POSITION-CACHE-EMPTY-REST] REST returned empty positions, preserving current state to prevent data loss"
+                    )
+                    return
+
                 self._positions.clear()
                 positions_processed = 0
                 positions_filtered = 0

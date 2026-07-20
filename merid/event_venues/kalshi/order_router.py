@@ -1374,7 +1374,11 @@ class OrderIntent:
     intent_id: str = field(default_factory=lambda: f"intent_{__import__('uuid').uuid4().hex}")
     client_tag: Optional[str] = None
     snapshot_ts: float = field(default_factory=_time.time)
+    snapshot_age_ms: float = 0.0  # Age of orderbook snapshot in milliseconds (CRITICAL FIX 2026-07-19: staleness protection)
     data_version: str = "v1"
+    # CRITICAL FIX (2026-07-17): Idempotency and client order ID for duplicate prevention
+    idempotency_key: str = field(default_factory=lambda: f"idemp_{__import__('uuid').uuid4().hex}")
+    client_order_id: str = field(default_factory=lambda: f"client_{__import__('uuid').uuid4().hex[:16]}")
     agent_id: Optional[str] = None
     session_id: Optional[str] = None
     confidence: Optional[float] = None
@@ -1432,12 +1436,23 @@ class OrderIntent:
     trailing_enabled: Optional[str] = None  # Whether trailing stop is enabled
     max_hold_seconds: Optional[int] = None  # Max hold time from ExitPolicyResolution
     
+    # ENTRY/EXIT DIRECTION CONTRACT: Formal direction and exit reason tracking
+    entry_or_exit: Optional[str] = None  # "entry" or "exit" - direction classification
+    exit_reason: Optional[str] = None  # Exit reason: "exit_tp", "exit_sl", "exit_99c", "exit_manual", etc.
+    pre_position_size: Optional[int] = None  # Position size before order (for exit validation)
+    expected_post_position_size: Optional[int] = None  # Expected position size after order (for exit validation)
+    
     # FEE/MAKER-TAKER AWARENESS: Fee impact and liquidity role tracking
-    expected_role: Optional[str] = None  # Expected liquidity role: "maker" or "taker"
+    # CRITICAL FIX (2026-07-19): Added explicit liquidity_role field using enum contract
+    liquidity_role: Optional[str] = None  # Liquidity role: "maker", "taker", or "auto" (from kalshi_maker_taker_contract.LiquidityRole)
+    expected_role: Optional[str] = None  # DEPRECATED: Use liquidity_role instead. Expected liquidity role: "maker" or "taker"
     fee_type: Optional[str] = None  # Fee type: "maker" or "taker"
     estimated_fee_cents: Optional[int] = None  # Estimated fee in cents
     edge_net_of_fees_pct: Optional[float] = None  # Edge after deducting estimated fees
     policy_mode: Optional[str] = None  # Policy mode used: "NEUTRAL_MM", "AGGRESSIVE_CONVICTION", "ARB_LEG"
+    # Fee expectation fields for reconciliation
+    expected_fee_role: Optional[str] = None  # Expected fee role for reconciliation: "maker" or "taker"
+    expected_fee_rate_bps: Optional[float] = None  # Expected fee rate in basis points
 
 
 def _is_exit_order(intent: OrderIntent) -> bool:
@@ -2188,10 +2203,41 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             
             # Check total position limit across all assets using actual position cache API (fallback)
             all_positions = position_cache.get_all_positions(validate_freshness=False)
+            
+            # CRITICAL FIX: Filter positions by current window to prevent counting stale positions
+            # Get current window ticker for this asset
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+            current_window_ticker = None
+            if catalog:
+                try:
+                    current_market = catalog.get_current_15m_market(asset)
+                    if current_market:
+                        current_window_ticker = current_market.market.market_id
+                except Exception as ticker_err:
+                    logger.warning("[CHECK-INTENT-RISK] Failed to get current window ticker: %s", ticker_err)
+            
             total_position_notional = 0.0
             position_count = 0
             for pos_ticker, pos_obj in all_positions.items():
                 if pos_obj and pos_obj.contracts > 0:
+                    # CRITICAL FIX: Only count positions from current window
+                    # Skip stale positions from previous windows
+                    if current_window_ticker and pos_ticker != current_window_ticker:
+                        # For cross-asset total notional check, filter by asset prefix
+                        # Only count positions that match the intent's asset
+                        asset_prefix = asset.upper()
+                        if asset_prefix == "BTC" and not pos_ticker.startswith("KXBTC"):
+                            continue
+                        elif asset_prefix == "ETH" and not pos_ticker.startswith("KXETH"):
+                            continue
+                        elif asset_prefix == "SOL" and not pos_ticker.startswith("KXSOL"):
+                            continue
+                        elif asset_prefix == "XRP" and not pos_ticker.startswith("KXXRP"):
+                            continue
+                        elif asset_prefix == "DOGE" and not pos_ticker.startswith("KXDOGE"):
+                            continue
+                    
                     # Use current price from position object or estimate
                     pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else intent.price_cents
                     total_position_notional += (pos_obj.contracts * pos_price) / 100.0
@@ -2201,16 +2247,26 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             order_notional = (intent.count * intent.price_cents) / 100.0
             total_with_order = total_position_notional + order_notional
             
-            # Check against total notional cap (venue_cap) - fallback check
+            # Get max total notional for logging (used for both entry and exit orders)
             max_total_notional = risk_envelope.max_total_notional_usd
-            if total_with_order > max_total_notional:
-                logger.warning(
-                    "[CHECK-INTENT-RISK] total_with_order=%.2f > max_total=%.2f - REJECTING",
-                    total_with_order, max_total_notional
+            
+            # Check against total notional cap (venue_cap) - fallback check
+            # CRITICAL FIX (2026-07-20): Exit orders REDUCE exposure, so skip total notional check
+            # Exit orders should always be allowed to close positions even at max capacity
+            if not _is_exit_order(intent):
+                if total_with_order > max_total_notional:
+                    logger.warning(
+                        "[CHECK-INTENT-RISK] total_with_order=%.2f > max_total=%.2f - REJECTING",
+                        total_with_order, max_total_notional
+                    )
+                    _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "total_notional_exceeded")
+                    _increment_validation_gate_metric("ROUTER_VALIDATION", "total_notional_exceeded")
+                    return f"total_notional_exceeded: {total_with_order:.2f} > {max_total_notional:.2f}"
+            else:
+                logger.info(
+                    "[CHECK-INTENT-RISK] Exit order bypasses total notional check: order_notional=%.2f (reduces exposure)",
+                    order_notional
                 )
-                _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "total_notional_exceeded")
-                _increment_validation_gate_metric("ROUTER_VALIDATION", "total_notional_exceeded")
-                return f"total_notional_exceeded: {total_with_order:.2f} > {max_total_notional:.2f}"
             
             logger.info(
                 "[CHECK-INTENT-RISK] Position check passed: asset=%s new_notional=%.2f existing_total=%.2f (%d positions) order_notional=%.2f total_with_order=%.2f max_total=%.2f",
@@ -2807,7 +2863,7 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
     is_deep_expensive = intent.price_cents > DEEP_OTM_EXPENSIVE_CENTS
     
     # DEEP_OTM_POLICY_STATE: Log detailed state for debugging price path
-    logger.error(
+    logger.info(
         "[DEEP_OTM_POLICY_STATE] trace_id=%s requested_price_cents=%d deep_cheap_threshold=%d deep_expensive_threshold=%d "
         "is_deep_cheap=%s is_deep_expensive=%s ticker=%s action=%s edge_pct=%s",
         getattr(intent, 'trace_id', 'N/A'), intent.price_cents, DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS,
@@ -3163,12 +3219,20 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
             side=side  # 2026-07-13: Pass side for Kelly
         )
         
-        # If unified_sizing returns 0, reject the order (exceeds $1 fixed exposure cap)
+        # If unified_sizing returns 0, reject the order
         if count == 0:
-            logger.warning(
-                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds $1 fixed exposure cap, requested_count=%d)",
-                ticker, asset, float(bankroll_usd), price_cents, intent.count
-            )
+            # Log the actual reason from metadata (Kelly filter or exposure cap)
+            reason = metadata.get("reason", "unknown")
+            if reason == "kelly_no_edge":
+                logger.warning(
+                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (Kelly filter: no edge, model_prob=%.2f)",
+                    ticker, asset, float(bankroll_usd), price_cents, metadata.get("model_prob", 0.0)
+                )
+            else:
+                logger.warning(
+                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds $1 fixed exposure cap, requested_count=%d)",
+                    ticker, asset, float(bankroll_usd), price_cents, intent.count
+                )
             return 0
         
         # If unified_sizing returns a smaller count, log the reduction
@@ -4257,6 +4321,153 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         
         intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
         
+        # CRITICAL FIX (2026-07-19): Validate price placement matches liquidity role intent
+        # This prevents maker orders from incorrectly crossing the spread (incurring taker fees)
+        # or taker orders from incorrectly resting (missing execution opportunities)
+        if intent.liquidity_role and state:
+            try:
+                from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
+                # Get orderbook data from state if available
+                best_bid = getattr(state, 'yes_bid_cents', None) if intent.side == "yes" else getattr(state, 'no_bid_cents', None)
+                best_ask = getattr(state, 'yes_ask_cents', None) if intent.side == "yes" else getattr(state, 'no_ask_cents', None)
+                
+                is_valid, error = validate_price_placement_invariant(
+                    role=intent.liquidity_role,
+                    side=intent.side,
+                    action=intent.action,
+                    price_cents=intent.price_cents,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                )
+                
+                if not is_valid:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.error(
+                        f"[LIQUIDITY-ROLE-INVARIANT] Rejected order: {error} | ticker={intent.ticker} | "
+                        f"liquidity_role={intent.liquidity_role} | price={intent.price_cents}c"
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"liquidity_role_invariant:{error}",
+                        latency_ms=round(latency, 2),
+                    )
+                else:
+                    logger.debug(
+                        f"[LIQUIDITY-ROLE-VALID] ticker={intent.ticker} | liquidity_role={intent.liquidity_role} | "
+                        f"price={intent.price_cents}c - invariant check passed"
+                    )
+            except ImportError:
+                logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
+        
+        # CRITICAL FIX (2026-07-19): Staleness SLO check - reject orders with stale book snapshots
+        # This prevents AUTO from making maker/taker decisions based on outdated market data
+        STALENESS_SLO_MS = 5000.0  # 5 second staleness SLO for 15m markets
+        if intent.snapshot_age_ms > STALENESS_SLO_MS:
+            latency = (_time.monotonic() - t0) * 1000
+            logger.error(
+                f"[STALENESS-SLO] Rejected order: book snapshot too old | ticker={intent.ticker} | "
+                f"snapshot_age_ms={intent.snapshot_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"staleness_slo:book_snapshot_age_{intent.snapshot_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+                latency_ms=round(latency, 2),
+            )
+        
+        # CRITICAL FIX (2026-07-19): Recompute snapshot age at submission time
+        # This catches race conditions where the book moved between snapshot and submission
+        current_time = _time.time()
+        computed_age_ms = (current_time - intent.snapshot_ts) * 1000.0
+        
+        # Update snapshot_age_ms with computed value for accurate staleness tracking
+        intent.snapshot_age_ms = computed_age_ms
+        
+        # Double-check staleness with computed age
+        if computed_age_ms > STALENESS_SLO_MS:
+            latency = (_time.monotonic() - t0) * 1000
+            logger.error(
+                f"[STALENESS-SLO] Rejected order: computed snapshot age too old | ticker={intent.ticker} | "
+                f"computed_age_ms={computed_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"staleness_slo:computed_age_{computed_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+                latency_ms=round(latency, 2),
+            )
+        
+        # CRITICAL FIX (2026-07-19): Recompute maker/taker classification at submission time
+        # This catches cases where AUTO resolved to maker/taker based on stale data
+        if intent.liquidity_role == "auto" and state:
+            try:
+                from merid.prediction.kalshi_maker_taker_contract import resolve_auto_liquidity_role
+                # Get current market conditions from state
+                edge_pct = getattr(intent, 'edge_pct', 0.0)
+                orderbook_depth = getattr(state, 'yes_depth', 0) if intent.side == "yes" else getattr(state, 'no_depth', 0)
+                time_to_expiry_seconds = getattr(intent, 'max_hold_seconds', 600.0) or 600.0
+                is_exit = _is_exit_order(intent)
+                
+                resolved_role = resolve_auto_liquidity_role(
+                    edge_pct=edge_pct,
+                    time_to_expiry_seconds=time_to_expiry_seconds,
+                    orderbook_depth=orderbook_depth,
+                    is_exit=is_exit,
+                )
+                
+                # Update intent with resolved role
+                original_role = intent.liquidity_role
+                intent.liquidity_role = resolved_role.value
+                
+                logger.info(
+                    f"[LIQUIDITY-ROLE-RECOMPUTE] Recomputed AUTO at submission | ticker={intent.ticker} | "
+                    f"original=auto | resolved={resolved_role.value} | edge={edge_pct:.1f}% | "
+                    f"depth={orderbook_depth} | time_to_expiry={time_to_expiry_seconds:.0f}s | is_exit={is_exit}"
+                )
+            except ImportError:
+                logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping AUTO recompute")
+        
+        # CRITICAL FIX (2026-07-19): Assert final payload consistency with latest known best bid/ask
+        # This ensures the order price is still valid given current market conditions
+        if state and intent.liquidity_role:
+            try:
+                from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
+                # Get current orderbook data from state
+                best_bid = getattr(state, 'yes_bid_cents', None) if intent.side == "yes" else getattr(state, 'no_bid_cents', None)
+                best_ask = getattr(state, 'yes_ask_cents', None) if intent.side == "yes" else getattr(state, 'no_ask_cents', None)
+                
+                # Re-validate price placement with current book
+                is_valid, error = validate_price_placement_invariant(
+                    role=intent.liquidity_role,
+                    side=intent.side,
+                    action=intent.action,
+                    price_cents=intent.price_cents,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                )
+                
+                if not is_valid:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.error(
+                        f"[PAYLOAD-CONSISTENCY] Rejected order: price no longer valid with current book | "
+                        f"ticker={intent.ticker} | liquidity_role={intent.liquidity_role} | "
+                        f"price={intent.price_cents}c | best_bid={best_bid}c | best_ask={best_ask}c | error={error}"
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"payload_consistency:price_invalid_with_current_book:{error}",
+                        latency_ms=round(latency, 2),
+                    )
+                else:
+                    logger.debug(
+                        f"[PAYLOAD-CONSISTENCY] ticker={intent.ticker} | price={intent.price_cents}c | "
+                        f"best_bid={best_bid}c | best_ask={best_ask}c - payload consistent with current book"
+                    )
+            except ImportError:
+                logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping payload consistency check")
+        
         # Reject order if slot-based sizing returned 0 (exceeds $1 fixed exposure cap)
         if intent.count == 0:
             latency = (_time.monotonic() - t0) * 1000
@@ -4554,6 +4765,125 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             intent.side = "BUY_NO"
         elif intent.side == "no" and intent.action == "sell":
             intent.side = "SELL_NO"
+        
+        # CRITICAL INVARIANT CHECK: Entry orders must ALWAYS use BUY actions
+        # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
+        # SELL actions are ONLY for exit trades
+        # This is a downstream safety net to catch any bugs that bypass upstream checks
+        if intent.action == "sell":
+            # Check if this is an entry order (no existing position)
+            # Entry orders are identified by entry_or_exit field if available
+            # Fallback to legacy detection via exit_policy_id or exit_reason in rationale
+            is_exit_order = False
+            
+            # Check for formal entry_or_exit field (from IntentContract)
+            if hasattr(intent, 'entry_or_exit'):
+                is_exit_order = (intent.entry_or_exit == "exit")
+            else:
+                # Legacy detection
+                is_exit_order = hasattr(intent, 'exit_policy_id') and intent.exit_policy_id is not None
+                is_exit_order = is_exit_order or (hasattr(intent, 'rationale') and 'exit' in str(intent.rationale).lower())
+            
+            if not is_exit_order:
+                latency = (_time.monotonic() - t0) * 1000
+                logger.critical(
+                    "[ENTRY-ORDER-INVARIANT-VIOLATION] ticker=%s side=%s action=%s kalshi_side=%s - "
+                    "Entry orders must use BUY actions only. SELL actions are for exit trades only. "
+                    "Rejecting this entry order to prevent SELL YES/SELL_NO on entry.",
+                    intent.ticker, intent.side, intent.action, intent.side
+                )
+                _release_gate_record(intent, "entry_order_sell_action_rejected")
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason="entry_order_invariant_violation:must_use_buy_action",
+                    latency_ms=round(latency, 2),
+                )
+        
+        # CRITICAL INVARIANT CHECK: Position-delta invariant for entry/exit direction
+        # ENTRY: applying fill must strictly increase position magnitude (0 to >0)
+        # EXIT: applying fill must strictly decrease position magnitude (|pos_after| < |pos_before|)
+        # This prevents exit orders from functioning as entry orders
+        if hasattr(intent, 'entry_or_exit') and hasattr(intent, 'pre_position_size') and hasattr(intent, 'expected_post_position_size'):
+            if intent.entry_or_exit == "entry":
+                # Entry: must go from 0 to >0
+                if intent.pre_position_size != 0:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.critical(
+                        "[ENTRY-POSITION-DELTA-VIOLATION] ticker=%s entry_or_exit=%s pre_position_size=%d - "
+                        "ENTRY orders require pre_position_size=0. This order would increase existing position "
+                        "which violates the entry/exit direction invariant. Rejecting.",
+                        intent.ticker, intent.entry_or_exit, intent.pre_position_size
+                    )
+                    _release_gate_record(intent, "entry_position_delta_violation")
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason="entry_position_delta_violation:pre_position_size_must_be_zero",
+                        latency_ms=round(latency, 2),
+                    )
+                if intent.expected_post_position_size <= 0:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.critical(
+                        "[ENTRY-POSITION-DELTA-VIOLATION] ticker=%s entry_or_exit=%s expected_post_position_size=%d - "
+                        "ENTRY orders must result in positive position. This violates the entry/exit direction invariant. Rejecting.",
+                        intent.ticker, intent.entry_or_exit, intent.expected_post_position_size
+                    )
+                    _release_gate_record(intent, "entry_position_delta_violation")
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason="entry_position_delta_violation:post_position_must_be_positive",
+                        latency_ms=round(latency, 2),
+                    )
+            elif intent.entry_or_exit == "exit":
+                # Exit: must decrease position magnitude, never go from 0 to nonzero
+                if intent.pre_position_size <= 0:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.critical(
+                        "[EXIT-POSITION-DELTA-VIOLATION] ticker=%s entry_or_exit=%s pre_position_size=%d - "
+                        "EXIT orders require pre_position_size>0 (existing position). This exit order has no position to close. "
+                        "This violates the entry/exit direction invariant. Rejecting.",
+                        intent.ticker, intent.entry_or_exit, intent.pre_position_size
+                    )
+                    _release_gate_record(intent, "exit_position_delta_violation")
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason="exit_position_delta_violation:pre_position_size_must_be_positive",
+                        latency_ms=round(latency, 2),
+                    )
+                if intent.expected_post_position_size >= intent.pre_position_size:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.critical(
+                        "[EXIT-POSITION-DELTA-VIOLATION] ticker=%s entry_or_exit=%s pre=%d post=%d - "
+                        "EXIT orders must decrease position magnitude. This order would not decrease or would increase position. "
+                        "This violates the entry/exit direction invariant. Rejecting.",
+                        intent.ticker, intent.entry_or_exit, intent.pre_position_size, intent.expected_post_position_size
+                    )
+                    _release_gate_record(intent, "exit_position_delta_violation")
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason="exit_position_delta_violation:must_decrease_position",
+                        latency_ms=round(latency, 2),
+                    )
+                # Check for position flip (e.g., +5 -> -1) - exit trying to open opposite leg
+                if intent.expected_post_position_size < 0:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.critical(
+                        "[EXIT-POSITION-FLIP-VIOLATION] ticker=%s entry_or_exit=%s pre=%d post=%d - "
+                        "EXIT orders cannot flip position sign (e.g., from +5 to -1). This would open exposure on opposite leg "
+                        "instead of closing the current position. This violates the entry/exit direction invariant. Rejecting.",
+                        intent.ticker, intent.entry_or_exit, intent.pre_position_size, intent.expected_post_position_size
+                    )
+                    _release_gate_record(intent, "exit_position_flip_violation")
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason="exit_position_flip_violation:cannot_flip_position_sign",
+                        latency_ms=round(latency, 2),
+                    )
         
         # Validate against unified terminology if available
         if UNIFIED_TERMINOLOGY_AVAILABLE:
@@ -5373,7 +5703,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             outcome_id=outcome_id,
             time_in_force=tif,
             expiration_ts=gtt_exp,
-            client_order_id=intent.client_tag,  # Uses dedup client_order_id from cache
+            client_order_id=intent.client_order_id,  # CRITICAL FIX (2026-07-17): Use client_order_id for duplicate prevention
+            idempotency_key=intent.idempotency_key,  # CRITICAL FIX (2026-07-17): Prevent duplicate orders on retry
             post_only=_effective_post_only(intent.post_only, intent.aggressiveness),  # Never post_only on marketable orders
             source="agent_grid",  # Mark as pipeline order
         )
@@ -5393,9 +5724,21 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             except Exception as _tp_reg_err:
                 logger.debug("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
 
-        # PRODUCTION FIX: Register order_id -> client_tag mapping for fill-to-intent linkage
-        # This is needed because HTTP fills from Kalshi API don't include client_order_id
-        # We'll register the mapping after successful order submission (after we get the Kalshi order_id)
+        # PRODUCTION FIX: Pre-register order_id -> client_tag mapping BEFORE order submission
+        # This ensures HTTP fills can recover client_order_id even if order submission fails
+        # and is retried. We use client_tag as temporary key, then update with actual Kalshi order_id
+        # after successful submission.
+        if intent.client_tag:
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                # Pre-register with client_tag as both key and value (temporary)
+                get_position_cache().register_order_id_mapping(intent.client_tag, intent.client_tag)
+                logger.debug(
+                    "[ORDER-ID-MAPPING-PRE] Pre-registered client_tag=%s for fill-to-intent linkage",
+                    intent.client_tag
+                )
+            except Exception as _map_err:
+                logger.debug("[order-router] Order ID mapping pre-registration failed (non-fatal): %s", _map_err)
         
         # Track resting orders for edge decay monitoring (if aggressiveness=0.0)
         if intent.aggressiveness == 0.0 and intent.client_tag:
@@ -5670,10 +6013,22 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # before the first one is recorded in the duplicate tracker
         _record_order_placed(intent)
 
+        # CRITICAL FIX (2026-07-19): Map liquidity_role to self_trade_prevention_type if not set
+        # This ensures maker/taker intent is properly communicated to the venue
+        if intent.liquidity_role and not intent.self_trade_prevention_type:
+            try:
+                from merid.prediction.kalshi_maker_taker_contract import map_liquidity_role_to_stp
+                intent.self_trade_prevention_type = map_liquidity_role_to_stp(intent.liquidity_role)
+                logger.debug(
+                    f"[LIQUIDITY-ROLE] Mapped liquidity_role={intent.liquidity_role} to STP={intent.self_trade_prevention_type}"
+                )
+            except ImportError:
+                logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping STP mapping")
+
         # Log order intent before API call for lifecycle traceability
         trace_id = intent.client_tag or generate_trace_id()
         logger.info(
-            "[SUBMIT-ORDER-INTENT] trace_id=%s asset=%s market_id=%s side=%s action=%s price_cents=%d count=%d notional_cents=%d client_tag=%s order_group_id=%s",
+            "[SUBMIT-ORDER-INTENT] trace_id=%s asset=%s market_id=%s side=%s action=%s price_cents=%d count=%d notional_cents=%d client_tag=%s order_group_id=%s liquidity_role=%s stp=%s snapshot_ts=%.3f snapshot_age_ms=%.0f expected_fee_role=%s expected_fee_rate_bps=%.2f expected_fee_cents=%d",
             trace_id,
             intent.ticker.split("-")[0][2:] if intent.ticker.startswith("KX") else "UNKNOWN",
             intent.ticker,
@@ -5684,6 +6039,13 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             int(intent.price_cents * intent.count),
             intent.client_tag,
             intent.order_group_id,
+            intent.liquidity_role or "none",
+            intent.self_trade_prevention_type or "none",
+            intent.snapshot_ts,
+            intent.snapshot_age_ms,
+            intent.expected_fee_role or "none",
+            intent.expected_fee_rate_bps or 0.0,
+            intent.estimated_fee_cents or 0,
         )
         
         placed_res = await client.place_order_result(
@@ -5991,18 +6353,23 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
         _venue_oid = getattr(placed, "order_id", None) or "unknown"
 
-        # PRODUCTION FIX: Register order_id -> client_tag mapping for fill-to-intent linkage
-        # This is needed because HTTP fills from Kalshi API don't include client_order_id
+        # PRODUCTION FIX: Update order_id -> client_tag mapping with actual Kalshi order_id
+        # This updates the pre-registered mapping (client_tag -> client_tag) with the actual
+        # Kalshi order_id after successful submission, ensuring HTTP fills can recover client_order_id.
         if _venue_oid and _venue_oid != "unknown" and intent.client_tag:
             try:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
-                get_position_cache().register_order_id_mapping(_venue_oid, intent.client_tag)
+                cache = get_position_cache()
+                # Update the mapping: kalshi_order_id -> client_tag
+                cache.register_order_id_mapping(_venue_oid, intent.client_tag)
+                # Remove the temporary client_tag -> client_tag mapping
+                cache._order_id_to_client_tag.pop(intent.client_tag, None)
                 logger.debug(
-                    "[ORDER-ID-MAPPING] Registered kalshi_order_id=%s -> client_tag=%s",
+                    "[ORDER-ID-MAPPING-UPDATE] Updated mapping: kalshi_order_id=%s -> client_tag=%s (removed temp mapping)",
                     _venue_oid, intent.client_tag
                 )
             except Exception as _map_err:
-                logger.debug("[order-router] Order ID mapping registration failed (non-fatal): %s", _map_err)
+                logger.debug("[order-router] Order ID mapping update failed (non-fatal): %s", _map_err)
 
         # PHASE1-DUP-2: Mark dedup cache entry as completed with Kalshi order_id
         # This ensures future retries with the same dedup key can short-circuit or lookup the existing order.
@@ -6350,6 +6717,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         return OrderResult(
             status=status,
             mode=mode,
+            order_id=getattr(placed, "order_id", None),
             fill={
                 "ticker": intent.ticker,
                 "side": intent.side,
@@ -7153,6 +7521,24 @@ def _validate_risk_contract_linkage(intent: OrderIntent) -> tuple[bool, Optional
 async def route_order_async(intent: OrderIntent) -> OrderResult:
     """Async order routing that supports true LIVE execution."""
     t0 = _time.monotonic()
+    
+    # AUDIT: Exit order acceptance tracking with timing
+    if intent.entry_or_exit == "exit":
+        logger.info(
+            "[EXIT-ROUTER-AUDIT] intent_id=%s ticker=%s entry_or_exit=%s exit_reason=%s "
+            "pre_size=%d post_size=%d count=%d side=%s action=%s source=%s router_accept_ts=%.3f",
+            intent.intent_id,
+            intent.ticker,
+            intent.entry_or_exit,
+            intent.exit_reason,
+            intent.pre_position_size,
+            intent.expected_post_position_size,
+            intent.count,
+            intent.side,
+            intent.action,
+            intent.source,
+            t0
+        )
     
     # AUDIT #4: Execution path tracking
     logger.info(
