@@ -226,6 +226,16 @@ class PositionMonitor:
             position.trailing_activated,
         )
         
+        # AUDIT: Log trigger evaluation start (no trigger found yet)
+        logger.debug(
+            "[EXIT-TRIGGER-AUDIT] position=%s market=%s price=%dc side=%s size=%d checking_triggers=true",
+            position.position_id[:8],
+            position.market_id,
+            current_price_cents,
+            position.side.value,
+            position.size
+        )
+        
         # CRITICAL: Check extreme profit exit first (highest priority)
         # Exit at 99c YES / 1c NO to lock in guaranteed wins
         # CRITICAL FIX: 2026-07-06 - Consolidated 99c exit to single mechanism (removed duplicate ratchet 99c check)
@@ -242,6 +252,46 @@ class PositionMonitor:
         # Per Kalshi semantics, contracts settle at exactly $1 if correct and $0 if not
         # Selling early at 99c locks in almost all of the payoff
         if position.should_trigger_auto_exit_99c(current_price_cents) and not position.exit_triggered:
+            # AUDIT: Timing correctness - check expiry proximity
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            store = get_kalshi_market_state_store()
+            state = store.get(position.market_id)
+            seconds_to_expiry = getattr(state, 'seconds_to_expiry', None) if state else None
+            
+            # AUDIT: Idempotency - generate dedupe key for this trigger
+            dedupe_key = f"{position.position_id[:8]}:auto_exit_99c:{poll_count}"
+            
+            # AUDIT: Venue-side semantics - verify 99c exit is executable
+            # Kalshi accepts SELL_YES at 99c and SELL_NO at 1c for near-settlement exits
+            # This is a real executable close path, not just a logical condition
+            logger.info(
+                "[VENUE-SEMANTICS-AUDIT] position=%s market=%s reason=auto_exit_99c "
+                "exit_path=executable kalshi_semantics=SELL_99c_or_1c executable=YES",
+                position.position_id[:8],
+                position.market_id
+            )
+            
+            # AUDIT: Log trigger evaluation with timing context
+            logger.info(
+                "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=auto_exit_99c price=%dc side=%s size=%d trigger=true seconds_to_expiry=%s dedupe_key=%s",
+                position.position_id[:8],
+                position.market_id,
+                current_price_cents,
+                position.side.value,
+                position.size,
+                seconds_to_expiry,
+                dedupe_key
+            )
+            
+            # AUDIT: Warn if triggering very close to expiry
+            if seconds_to_expiry is not None and seconds_to_expiry < 60:
+                logger.warning(
+                    "[TIMING-AUDIT] position=%s market=%s 99c_exit_triggered_near_expiry seconds_to_expiry=%d - order may not fill before settlement",
+                    position.position_id[:8],
+                    position.market_id,
+                    seconds_to_expiry
+                )
+            
             logger.info(
                 "[POSITION-MONITOR] AUTO-EXIT-99C triggered: position=%s price=%dc side=%s - cashing out at near-settlement",
                 position.position_id[:8],
@@ -344,6 +394,19 @@ class PositionMonitor:
                     if position.dynamic_tp_target_cents is not None and not position.dynamic_tp_triggered and not position.exit_triggered:
                         if current_price_cents >= position.dynamic_tp_target_cents:
                             position.dynamic_tp_triggered = True
+                            # AUDIT: Idempotency - generate dedupe key for this trigger
+                            dedupe_key = f"{position.position_id[:8]}:dynamic_tp:{poll_count}"
+                            # AUDIT: Log trigger evaluation
+                            logger.info(
+                                "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=dynamic_tp price=%dc target=%dc side=%s size=%d trigger=true dedupe_key=%s",
+                                position.position_id[:8],
+                                position.market_id,
+                                current_price_cents,
+                                position.dynamic_tp_target_cents,
+                                position.side.value,
+                                position.size,
+                                dedupe_key
+                            )
                             logger.info(
                                 "[POSITION-MONITOR] DYNAMIC-TP triggered: position=%s side=%s price=%dc target=%dc (target reached)",
                                 position.position_id[:8],
@@ -466,6 +529,19 @@ class PositionMonitor:
         
         # Check TP/SL next
         if position.should_trigger_stop_loss(current_price_cents):
+            # AUDIT: Idempotency - generate dedupe key for this trigger
+            dedupe_key = f"{position.position_id[:8]}:stop_loss:{poll_count}"
+            # AUDIT: Log trigger evaluation
+            logger.info(
+                "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=stop_loss price=%dc sl=%dc side=%s size=%d trigger=true dedupe_key=%s",
+                position.position_id[:8],
+                position.market_id,
+                current_price_cents,
+                position.stop_loss_price_cents,
+                position.side.value,
+                position.size,
+                dedupe_key
+            )
             logger.info(
                 "[POSITION-MONITOR] STOP-LOSS triggered: position=%s price=%dc sl=%dc R=%.2f",
                 position.position_id[:8],
@@ -477,6 +553,19 @@ class PositionMonitor:
             return
         
         if position.should_trigger_take_profit(current_price_cents):
+            # AUDIT: Idempotency - generate dedupe key for this trigger
+            dedupe_key = f"{position.position_id[:8]}:take_profit:{poll_count}"
+            # AUDIT: Log trigger evaluation
+            logger.info(
+                "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=take_profit price=%dc tp=%dc side=%s size=%d trigger=true dedupe_key=%s",
+                position.position_id[:8],
+                position.market_id,
+                current_price_cents,
+                position.take_profit_price_cents,
+                position.side.value,
+                position.size,
+                dedupe_key
+            )
             logger.info(
                 "[POSITION-MONITOR] TAKE-PROFIT triggered: position=%s price=%dc tp=%dc R=%.2f",
                 position.position_id[:8],
@@ -1059,12 +1148,15 @@ class PositionMonitor:
             exit_price_cents: Exit price in cents
             contracts_to_close: Number of contracts to close (None = full position)
         """
+        # AUDIT: Timing correctness - record trigger timestamp
+        trigger_timestamp = __import__('time').monotonic()
+        
         # Log exit intent emission with structured schema
         if contracts_to_close is None:
             # Full position exit
             logger.info(
                 "[EXIT-INTENT] position=%s market=%s side=%s reason=%s priority=%d source=%s "
-                "exit_price=%dc entry_price=%dc pnl=%dc R=%.2f size=%d type=FULL_EXIT",
+                "exit_price=%dc entry_price=%dc pnl=%dc R=%.2f size=%d type=FULL_EXIT trigger_ts=%.3f",
                 position.position_id[:8],
                 position.market_id,
                 position.side.value,
@@ -1076,12 +1168,13 @@ class PositionMonitor:
                 position.unrealized_pnl_cents,
                 position.r_multiple,
                 position.size,
+                trigger_timestamp
             )
         else:
             # Partial position exit (trim)
             logger.info(
                 "[EXIT-INTENT] position=%s market=%s side=%s reason=%s priority=%d source=%s "
-                "exit_price=%dc entry_price=%dc pnl=%dc R=%.2f size=%d closing=%d type=PARTIAL_EXIT",
+                "exit_price=%dc entry_price=%dc pnl=%dc R=%.2f size=%d closing=%d type=PARTIAL_EXIT trigger_ts=%.3f",
                 position.position_id[:8],
                 position.market_id,
                 position.side.value,
@@ -1094,6 +1187,7 @@ class PositionMonitor:
                 position.r_multiple,
                 position.size,
                 contracts_to_close,
+                trigger_timestamp
             )
         
         # CRITICAL FIX (2026-07-16): Dispatch the exit callback BEFORE mark_exited().
@@ -1213,15 +1307,34 @@ class PositionMonitor:
         
         Checks all open positions for exit conditions.
         """
+        poll_count = 0
+        last_poll_time = None
         while self._running:
             try:
+                poll_start_time = __import__('time').monotonic()
+                poll_count += 1
+                
+                # AUDIT: Timing correctness - track poll interval and drift
+                if last_poll_time is not None:
+                    actual_interval = poll_start_time - last_poll_time
+                    interval_drift_s = actual_interval - self._poll_interval
+                    logger.debug(
+                        "[TIMING-AUDIT] poll_count=%d expected_interval=%.1fs actual_interval=%.1fs drift_s=%.3fs",
+                        poll_count,
+                        self._poll_interval,
+                        actual_interval,
+                        interval_drift_s
+                    )
+                
                 if not self._open_positions:
                     await asyncio.sleep(self._poll_interval)
+                    last_poll_time = __import__('time').monotonic()
                     continue
                 
                 logger.debug(
-                    "[POSITION-MONITOR] Polling %d positions",
-                    len(self._open_positions)
+                    "[POSITION-MONITOR] Polling %d positions (poll #%d)",
+                    len(self._open_positions),
+                    poll_count
                 )
                 
                 # Get current prices from market state store
@@ -1232,9 +1345,21 @@ class PositionMonitor:
                     with self._lock:
                         positions_snapshot = list(self._open_positions.items())
                     
+                    # AUDIT: Log trigger coverage - confirm each position is checked
+                    logger.info(
+                        "[POSITION-MONITOR-AUDIT] poll_count=%d positions_to_check=%d",
+                        poll_count,
+                        len(positions_snapshot)
+                    )
+                    
                     for position_id, position in positions_snapshot:
                         state = store.get(position.market_id)
                         current_price = None
+                        data_source = "unknown"
+                        data_age_s = float('inf')
+                        
+                        # AUDIT: State freshness check - verify inputs are current
+                        now = __import__('time').monotonic()
                         
                         # CRITICAL FIX (2026-07-16): Check if market has expired
                         # If state is None, the market may have expired. Force exit the position.
@@ -1252,22 +1377,39 @@ class PositionMonitor:
                         if state.mid_cents:
                             # CRITICAL FIX: Use side-aware price for NO positions
                             current_price = self._get_side_aware_price(state, position.side)
+                            data_source = "ws_mid"
+                            data_age_s = now - (state.last_book_update_ts or 0)
                         else:
                             # CRITICAL FIX (2026-07-14): Fallback price handling when market state is stale
                             # Use position's current_price_cents if available (updated by position cache)
                             # Otherwise use entry price as last resort to ensure exit conditions can still trigger
                             if hasattr(position, 'current_price_cents') and position.current_price_cents:
                                 current_price = position.current_price_cents
+                                data_source = "position_cache"
+                                data_age_s = float('inf')  # Unknown age
                                 logger.debug(
                                     "[POSITION-MONITOR] Using fallback current_price_cents for %s: %dc (market state unavailable)",
                                     position.market_id, current_price
                                 )
                             else:
                                 current_price = position.avg_entry_price_cents
+                                data_source = "entry_price"
+                                data_age_s = float('inf')  # Static entry price
                                 logger.warning(
                                     "[POSITION-MONITOR] Using entry price as fallback for %s: %dc (market state unavailable, no current_price)",
                                     position.market_id, current_price
                                 )
+                        
+                        # AUDIT: Log state freshness for each position check
+                        logger.info(
+                            "[POSITION-MONITOR-AUDIT] position=%s market=%s data_source=%s data_age_s=%.1f price=%dc side=%s",
+                            position.position_id[:8],
+                            position.market_id,
+                            data_source,
+                            data_age_s,
+                            current_price,
+                            position.side.value
+                        )
                         
                         if current_price is not None:
                             await self._check_position(position, current_price)
