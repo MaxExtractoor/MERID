@@ -48,6 +48,49 @@ from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 # PHASE1-DUP-2: Order deduplication cache integration
 from merid.event_venues.kalshi.order_deduplication import get_order_cache
 
+# INTENT VERIFICATION: Hash computation for intent-to-execution audit trail
+import json
+
+
+def compute_intent_hash(
+    ticker: str,
+    side: str,
+    action: str,
+    price_cents: int,
+    count: int,
+    order_type: str,
+    time_in_force: str,
+) -> str:
+    """Compute deterministic hash over intent's core executable fields.
+    
+    This hash is used to verify intent-to-execution consistency and detect
+    any drift between the approved intent and what was actually executed.
+    
+    Args:
+        ticker: Market ticker
+        side: "yes" or "no"
+        action: "buy" or "sell"
+        price_cents: Limit price in cents
+        count: Number of contracts
+        order_type: "limit" or "market"
+        time_in_force: "fill_or_kill", "gtc", or "ioc"
+    
+    Returns:
+        SHA256 hash string (hex digest)
+    """
+    hash_preimage = {
+        "ticker": ticker,
+        "side": side,
+        "action": action,
+        "price_cents": price_cents,
+        "count": count,
+        "order_type": order_type,
+        "time_in_force": time_in_force,
+    }
+    
+    hash_string = json.dumps(hash_preimage, sort_keys=True)
+    return hashlib.sha256(hash_string.encode()).hexdigest()
+
 # Import unified signal terminology for consistent side/action handling
 try:
     from merid.prediction.signal_terminology import Side as UnifiedSide, Action as UnifiedAction
@@ -322,6 +365,44 @@ def _effective_post_only(post_only: bool, aggressiveness: float) -> bool:
     post_only is therefore only honored for resting orders (aggressiveness == 0).
     """
     return bool(post_only) and float(aggressiveness or 0.0) == 0.0
+
+
+def _check_strip_cooldown(intent: OrderIntent) -> Optional[str]:
+    """Reject entry orders when a strip is in cooldown after a problematic exit.
+    
+    This guard prevents re-entries after exits due to:
+    - Stale data
+    - Risk limit breaches
+    - Low liquidity
+    - Regime halts
+    
+    Exits (sell actions) are never blocked so positions can always be closed.
+    
+    2026 BEST PRACTICE: Fail-closed on StripOrderState errors for cooldown guard.
+    """
+    action_lower = (intent.action or "").lower()
+    if action_lower != "buy":
+        return None
+
+    try:
+        from merid.prediction.strip_order_state import get_strip_order_state
+        strip_state = get_strip_order_state()
+        
+        # Check if cooldown is active for this ticker
+        if strip_state._is_cooldown_active(intent.ticker):
+            cooldown = strip_state._cooldowns[intent.ticker]
+            logger.warning(
+                "[STRIP-COOLDOWN-GUARD] ticker=%s blocked by cooldown (reason=%s, remaining=%.1fs)",
+                intent.ticker, cooldown.exit_reason.value, cooldown.remaining_seconds
+            )
+            return f"strip_cooldown:{cooldown.exit_reason.value}"
+    except Exception as _guard_err:
+        # 2026 BEST PRACTICE: Fail-closed for cooldown guard
+        # If StripOrderState is down, reject new orders to prevent re-entry risk
+        logger.warning("[STRIP-COOLDOWN-GUARD] StripOrderState lookup failed (fail-closed): %s - rejecting new order", _guard_err)
+        return "strip_state_unavailable:cooldown_guard"
+
+    return None
 
 
 def _check_open_resting_order(intent: OrderIntent) -> Optional[str]:
@@ -1453,6 +1534,12 @@ class OrderIntent:
     # Fee expectation fields for reconciliation
     expected_fee_role: Optional[str] = None  # Expected fee role for reconciliation: "maker" or "taker"
     expected_fee_rate_bps: Optional[float] = None  # Expected fee rate in basis points
+    
+    # INTENT VERIFICATION: Hash chain for signal-to-intent-to-execution audit trail
+    source_signal_id: Optional[str] = None  # Signal ID from AgentSignal/SignalSnapshot
+    source_signal_hash: Optional[str] = None  # Hash of original signal from SignalSnapshot
+    intent_hash: Optional[str] = None  # Deterministic hash over intent's core executable fields
+    intent_stage: str = "constructed"  # Stage: "constructed", "validated", "submitted", "executed"
 
 
 def _is_exit_order(intent: OrderIntent) -> bool:
@@ -1648,6 +1735,9 @@ def _resolve_tif(intent: OrderIntent) -> tuple[str, Optional[int]]:
 
     Uses ``KalshiMarketState.seconds_to_expiry`` when near expiry forces IOC.
     Public helper (imported by tests); keep signature stable.
+    
+    CRITICAL FIX (2026-07-17): For 15m crypto entry orders, use short-lived TIF (60s GTT)
+    to reduce resting-order spam. Exit orders keep GTC to ensure fills.
     """
     from merid.event_venues.kalshi.market_state import (
         get_kalshi_market_state_store,
@@ -1695,6 +1785,21 @@ def _resolve_tif(intent: OrderIntent) -> tuple[str, Optional[int]]:
         return "IOC", None
     if exp_ts is not None:
         return "GTT", int(exp_ts)
+    
+    # CRITICAL FIX (2026-07-17): Short-lived TIF for 15m crypto entry orders
+    # Detect 15m crypto markets by ticker pattern (KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M)
+    is_15m_crypto = any(
+        intent.ticker.startswith(prefix)
+        for prefix in ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]
+    )
+    
+    # Apply short-lived TIF (60s GTT) for entry orders on 15m crypto markets
+    # Exit orders (entry_or_exit="exit") keep GTC to ensure fills
+    if is_15m_crypto and intent.entry_or_exit != "exit":
+        # Use 60-second GTT for entry orders to reduce resting-order spam
+        # This prevents stale GTC orders from accumulating on the book
+        return "GTT", 60
+    
     return "GTC", None
 
 
@@ -2057,6 +2162,15 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _increment_validation_gate_metric("ROUTER_VALIDATION", "duplicate_order")
         return duplicate_rejection
 
+    # CRITICAL FIX (2026-07-17): Exit-aware cooldown guard.
+    # Prevents re-entries after problematic exits (stale data, risk limit, low liquidity, regime halt).
+    # This guard blocks new BUY orders when a strip is in cooldown.
+    cooldown_rejection = _check_strip_cooldown(intent)
+    if cooldown_rejection:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "strip_cooldown")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "strip_cooldown")
+        return cooldown_rejection
+
     # CRITICAL FIX (2026-07-12): Structural anti-stacking guard.
     # The 5s duplicate window above only suppresses rapid identical re-submissions;
     # without this guard the 15m loop (5s cadence) stacks a NEW resting GTC order
@@ -2198,8 +2312,15 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             current_notional = (current_contracts * intent.price_cents) / 100.0
             
             # Calculate new position notional after this order
-            new_contracts = current_contracts + intent.count
-            new_notional = (new_contracts * intent.price_cents) / 100.0
+            # CRITICAL FIX (2026-07-20): Exit orders REDUCE exposure
+            # For exit orders, intent.count is positive (e.g., "sell 5 contracts"), so we subtract it
+            # For entry orders, intent.count is positive (e.g., "buy 5 contracts"), so we add it
+            if _is_exit_order(intent):
+                new_contracts = current_contracts - intent.count  # Reduce position for exit
+                new_notional = (new_contracts * intent.price_cents) / 100.0
+            else:
+                new_contracts = current_contracts + intent.count  # Increase position for entry
+                new_notional = (new_contracts * intent.price_cents) / 100.0
             
             # Check total position limit across all assets using actual position cache API (fallback)
             all_positions = position_cache.get_all_positions(validate_freshness=False)
@@ -2245,7 +2366,11 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             
             # Add this order's notional
             order_notional = (intent.count * intent.price_cents) / 100.0
-            total_with_order = total_position_notional + order_notional
+            # CRITICAL FIX (2026-07-20): Exit orders REDUCE exposure, so subtract order_notional
+            if _is_exit_order(intent):
+                total_with_order = total_position_notional - order_notional
+            else:
+                total_with_order = total_position_notional + order_notional
             
             # Get max total notional for logging (used for both entry and exit orders)
             max_total_notional = risk_envelope.max_total_notional_usd
@@ -2894,6 +3019,10 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     - SAFETY: Only adjust by 25% of distance to mid (reduced from 50%) to prevent crossing spread
     - This improves fill rates by reducing the spread crossing distance
     
+    CRITICAL FIX (2026-07-20): Exit orders bypass price adjustment since they need
+    to execute immediately at the specified exit price to close positions. Price
+    adjustments could cause exit orders to miss fills or execute at unfavorable prices.
+    
     Args:
         intent: Order intent with price_cents
         state: KalshiMarketState with current market data
@@ -2901,6 +3030,15 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     Returns:
         Adjusted price in cents
     """
+    # CRITICAL FIX (2026-07-20): Exit orders bypass price adjustment
+    # Exit orders need to execute at the specified exit price without modification
+    if _is_exit_order(intent):
+        logger.debug(
+            "[PRICE-ADJUSTMENT] Exit order bypasses price adjustment: ticker=%s price=%dc (exits use specified price)",
+            intent.ticker, intent.price_cents
+        )
+        return intent.price_cents
+    
     # Only adjust limit orders
     if intent.order_type != "limit":
         return intent.price_cents
@@ -3094,6 +3232,10 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
     should never increase count beyond 1. It can only reduce count if
     requested_count > 1 (which shouldn't happen in slot-based model).
     
+    CRITICAL FIX (2026-07-20): Exit orders bypass depth-based sizing since they
+    need to close the full position regardless of available liquidity. Exit orders
+    use marketable IOC behavior to secure immediate fills.
+    
     Args:
         intent: Order intent with requested count
         state: KalshiMarketState with depth information
@@ -3101,6 +3243,15 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
     Returns:
         Adjusted count (capped at available liquidity, never exceeds 1)
     """
+    # CRITICAL FIX (2026-07-20): Exit orders bypass depth-based sizing
+    # Exit orders need to close the full position regardless of available liquidity
+    if _is_exit_order(intent):
+        logger.debug(
+            "[DEPTH-BASED-SIZING] Exit order bypasses depth sizing: ticker=%s count=%d (exits close full position)",
+            intent.ticker, intent.count
+        )
+        return intent.count
+    
     requested_count = intent.count
     
     # CRITICAL FIX: Slot-based model enforces 1 contract per order
@@ -3157,6 +3308,10 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
     computes slot-based counts from the $1 global exposure cap (the global slot
     allocator is the single source of truth for exposure).
     
+    CRITICAL FIX (2026-07-20): Exit orders REDUCE exposure and bypass sizing logic.
+    Exit orders should not be subject to the $1 exposure cap since they close
+    positions rather than open new ones.
+    
     Args:
         intent: Order intent with requested count, price_cents, and ticker
         bankroll_usd: Optional bankroll value (if None, will fetch from service)
@@ -3164,6 +3319,15 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
     Returns:
         Adjusted count under the $1 fixed exposure cap (or 0 if no slot available)
     """
+    # CRITICAL FIX (2026-07-20): Exit orders bypass risk-based sizing
+    # Exit orders reduce exposure and should not be constrained by the $1 cap
+    if _is_exit_order(intent):
+        logger.debug(
+            "[RISK-BASED-SIZING] Exit order bypasses sizing: ticker=%s count=%d (exits reduce exposure)",
+            intent.ticker, intent.count
+        )
+        return intent.count
+    
     try:
         from merid.prediction.unified_sizing import compute_order_size
         from decimal import Decimal
@@ -5010,15 +5174,13 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 elif "DOGE" in ticker_upper:
                     asset = "DOGE"
                 
-                # CRITICAL FIX (2026-07-18): Enforce 1 entry per asset per 15-minute window
-                # This applies to ALL order paths (agent_grid, execution_subscriber, etc.)
-                # Uses window-based approach (e.g., 12:00-12:15, 12:15-12:30) not rolling cooldown
-                # CRITICAL FIX (2026-07-18): Set window BEFORE submission to prevent race conditions
-                # If order fails later, we clear the window to allow retry
+                # CRITICAL FIX (2026-07-21): Enforce 1 entry per asset per 15-minute window based on EXPOSURE STATE
+                # Window is set only when we have an open position or resting working order, not on submission attempt
+                # This allows retry attempts for IOC orders that don't fill
+                # Check if asset already has exposure in current window
                 if asset and intent.action.lower() == "buy":
                     import time
                     now = time.time()
-                    # Calculate current 15-minute window (Kalshi 15m markets align to :00, :15, :30, :45)
                     window_start = int(now // 900) * 900  # Floor to nearest 15-minute boundary
                     
                     with _asset_entry_windows_lock:
@@ -5026,22 +5188,16 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                         
                         if last_window == window_start:
                             logger.warning(
-                                f"[ORDER-ROUTER] Per-asset entry limit: {asset} already entered in current 15m window "
+                                f"[ORDER-ROUTER] Per-asset entry limit: {asset} already has exposure in current 15m window "
                                 f"(window={window_start}), rejecting new entry (ticker={intent.ticker}, side={intent.side})"
                             )
                             return OrderResult(
                                 status="rejected",
                                 mode=intent.mode,
                                 fill=None,
-                                reason=f"Per-asset entry limit: {asset} already entered in current 15m window",
+                                reason=f"Per-asset entry limit: {asset} already has exposure in current 15m window",
                                 latency_ms=0.0
                             )
-                        
-                        # Set window now to prevent race conditions
-                        _asset_entry_windows[asset] = window_start
-                        logger.info(
-                            f"[ORDER-ROUTER] Per-asset entry window set before submission: {asset} window={window_start}"
-                        )
                 
                 # Get all positions for this asset across all markets
                 from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -6223,17 +6379,17 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             )
         
         if not placed_res.success or placed_res.data is None:
-            # CRITICAL FIX (2026-07-18): Clear entry window on order rejection
-            # Since we set the window BEFORE submission, we must clear it on rejection to allow retry
+            # CRITICAL FIX (2026-07-21): Clear entry window on exchange rejection
+            # Since we don't set window until we have exposure, clearing here is defensive
+            # to handle any edge cases where window was set
             if asset and intent.action.lower() == "buy":
                 try:
                     with _asset_entry_windows_lock:
-                        # Only clear if the window matches what we set (prevents clearing stale entries)
                         current_window = int(_time.time() // 900) * 900
                         if _asset_entry_windows.get(asset) == current_window:
                             del _asset_entry_windows[asset]
                             logger.info(
-                                f"[ORDER-ROUTER] Per-asset entry window cleared on rejection: {asset} window={current_window}"
+                                f"[ORDER-ROUTER] Per-asset entry window cleared on exchange rejection: {asset} window={current_window}"
                             )
                 except Exception as window_clear_err:
                     logger.warning("[ORDER-ROUTER] Failed to clear entry window on rejection: %s", window_clear_err)
@@ -6254,21 +6410,38 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             
             # CRITICAL FIX (2026-07-13): Notify global_allocator of order rejection for pending order tracking
             # This removes the asset from pending orders when order is rejected
+            # CRITICAL FIX (2026-07-20): Fix asset scoping bug - use robust asset extraction logic
+            # Previous logic was fragile and could fail for certain ticker formats, desyncing allocator state
             try:
                 from merid.risk.profiles.global_allocator import get_global_allocator
                 allocator = get_global_allocator()
                 if allocator:
-                    # Extract asset from ticker
-                    asset = intent.ticker.split("-")[0][2:] if intent.ticker.startswith("KX") else "UNKNOWN"
-                    # Remove timeframe suffix
-                    import re
-                    asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
-                    # Use a placeholder order_id since we don't have one for rejected orders
-                    allocator.record_order_rejected(asset, intent.client_tag or "unknown")
-                    logger.info(
-                        "[GLOBAL-ALLOCATOR-NOTIFY] Order rejected: asset=%s client_tag=%s",
-                        asset, intent.client_tag
-                    )
+                    # Extract asset from ticker using robust logic (matches _apply_risk_based_order_sizing)
+                    ticker = intent.ticker
+                    asset = None
+                    if "BTC" in ticker.upper():
+                        asset = "BTC"
+                    elif "ETH" in ticker.upper():
+                        asset = "ETH"
+                    elif "SOL" in ticker.upper():
+                        asset = "SOL"
+                    elif "XRP" in ticker.upper():
+                        asset = "XRP"
+                    elif "DOGE" in ticker.upper():
+                        asset = "DOGE"
+                    
+                    if not asset:
+                        logger.warning(
+                            "[GLOBAL-ALLOCATOR-NOTIFY] Could not extract asset from ticker=%s for rejection notification",
+                            ticker
+                        )
+                    else:
+                        # Use a placeholder order_id since we don't have one for rejected orders
+                        allocator.record_order_rejected(asset, intent.client_tag or "unknown")
+                        logger.info(
+                            "[GLOBAL-ALLOCATOR-NOTIFY] Order rejected: asset=%s client_tag=%s",
+                            asset, intent.client_tag
+                        )
             except Exception as alloc_err:
                 logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator of rejection: %s", alloc_err)
 
@@ -6402,6 +6575,37 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             fill_price_cents,
             latency,
         )
+
+        # CRITICAL FIX (2026-07-21): Set entry window based on actual exposure state
+        # Window is set only when we have a fill or resting order, not on submission
+        # This allows retry attempts for IOC orders that don't fill
+        if asset and intent.action.lower() == "buy":
+            has_exposure = filled_count > 0 or remaining_count > 0
+            if has_exposure:
+                try:
+                    import time
+                    current_window = int(time.time() // 900) * 900
+                    with _asset_entry_windows_lock:
+                        _asset_entry_windows[asset] = current_window
+                        logger.info(
+                            f"[ORDER-ROUTER] Per-asset entry window set on exposure: {asset} window={current_window} "
+                            f"filled={filled_count} remaining={remaining_count}"
+                        )
+                except Exception as window_set_err:
+                    logger.warning("[ORDER-ROUTER] Failed to set entry window on exposure: %s", window_set_err)
+            else:
+                # IOC no-fill - clear window if it was set (defensive)
+                try:
+                    import time
+                    current_window = int(time.time() // 900) * 900
+                    with _asset_entry_windows_lock:
+                        if _asset_entry_windows.get(asset) == current_window:
+                            del _asset_entry_windows[asset]
+                            logger.info(
+                                f"[ORDER-ROUTER] Per-asset entry window cleared on IOC no-fill: {asset} window={current_window}"
+                            )
+                except Exception as window_clear_err:
+                    logger.warning("[ORDER-ROUTER] Failed to clear entry window on IOC no-fill: %s", window_clear_err)
 
         # Register order intent with position sanity checker for duplicate fill detection
         try:
@@ -6827,6 +7031,34 @@ def route_order(intent: OrderIntent) -> OrderResult:
             reason=f"unauthorized_agent:{agent_id}",
             latency_ms=0.0,
         )
+
+    # ── INTENT VERIFICATION: Validate intent against source signal (Step 2 of audit plan) ───────────────
+    if intent.source_signal_id and intent.source_signal_hash:
+        try:
+            from merid.validation.intent_validator import get_intent_validator
+            validator = get_intent_validator()
+            validation_result = validator.validate_intent(intent)
+            
+            if not validation_result.is_valid:
+                logger.error(
+                    "[INTENT-VALIDATION-FAILED] intent_id=%s signal_id=%s errors=%s - REJECTING ORDER",
+                    intent.intent_id, intent.source_signal_id, validation_result.errors
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=_resolve_mode(intent.mode),
+                    reason=f"intent_validation_failed:{'; '.join(validation_result.errors)}",
+                    latency_ms=0.0,
+                )
+            else:
+                logger.info(
+                    "[INTENT-VALIDATION-PASSED] intent_id=%s signal_id=%s stage=%s",
+                    intent.intent_id, intent.source_signal_id, intent.intent_stage
+                )
+        except ImportError:
+            logger.debug("[INTENT-VALIDATION] Intent validator not available - skipping validation")
+        except Exception as exc:
+            logger.warning("[INTENT-VALIDATION] Intent validation error: %s - proceeding with caution", exc)
 
     # ── Production scope validation (Step 1 of audit plan) ───────────────
     if TRADING_SCOPE_AVAILABLE:
@@ -7588,6 +7820,35 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     except Exception as e:
         # If profile check fails, log warning but don't block the order
         logger.warning("[PROFILE_CHECK] Failed to check profile for source whitelist: %s", e)
+
+    # ── INTENT VERIFICATION: Validate intent against source signal (Step 2 of audit plan) ───────────────
+    if intent.source_signal_id and intent.source_signal_hash:
+        try:
+            from merid.validation.intent_validator import get_intent_validator
+            validator = get_intent_validator()
+            validation_result = validator.validate_intent(intent)
+            
+            if not validation_result.is_valid:
+                logger.error(
+                    "[INTENT-VALIDATION-FAILED] intent_id=%s signal_id=%s errors=%s - REJECTING ORDER",
+                    intent.intent_id, intent.source_signal_id, validation_result.errors
+                )
+                latency = (_time.monotonic() - t0) * 1000
+                return OrderResult(
+                    status="rejected",
+                    mode=get_venue_gate().mode,
+                    reason=f"intent_validation_failed:{'; '.join(validation_result.errors)}",
+                    latency_ms=round(latency, 2),
+                )
+            else:
+                logger.info(
+                    "[INTENT-VALIDATION-PASSED] intent_id=%s signal_id=%s stage=%s",
+                    intent.intent_id, intent.source_signal_id, intent.intent_stage
+                )
+        except ImportError:
+            logger.debug("[INTENT-VALIDATION] Intent validator not available - skipping validation")
+        except Exception as exc:
+            logger.warning("[INTENT-VALIDATION] Intent validation error: %s - proceeding with caution", exc)
     
     # ALERT THRESHOLDS MONITORING: Track order submission
     try:
@@ -7901,6 +8162,30 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         )
 
     mode = _resolve_mode(intent.mode)
+
+    # ── EXIT CLASSIFICATION INVARIANT (2026-07-20) ─────────────────────────────
+    # Assert that exit intents are consistently classified and cannot regress to entry path
+    # This prevents future bugs where exit orders accidentally flow through entry sizing/risk
+    if intent.entry_or_exit == "exit" or intent.source == "position_monitor_exit":
+        # Verify exit classification is consistent
+        if not _is_exit_order(intent):
+            logger.error(
+                "[EXIT-INVARIANT-BREACH] Intent marked as exit but _is_exit_order() returned False: "
+                "intent_id=%s ticker=%s entry_or_exit=%s source=%s - CRITICAL BUG",
+                intent.intent_id, intent.ticker, intent.entry_or_exit, intent.source
+            )
+            # This is a critical invariant breach - reject to prevent inconsistent behavior
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="exit_invariant_breach:exit_intent_not_recognized_by_classifier",
+                latency_ms=0.0,
+            )
+        logger.debug(
+            "[EXIT-INVARIANT] Exit intent classification verified: intent_id=%s ticker=%s "
+            "entry_or_exit=%s source=%s",
+            intent.intent_id, intent.ticker, intent.entry_or_exit, intent.source
+        )
 
     # ── FEE/MAKER-TAKER AWARENESS: Apply policy engine for optimal role selection ─────
     from merid.event_venues.kalshi.maker_taker_integration import apply_maker_taker_policy

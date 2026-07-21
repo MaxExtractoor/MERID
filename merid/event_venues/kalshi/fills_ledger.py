@@ -406,6 +406,13 @@ class OrderIntent:
     # Phase 5.4: Raw logit for probability calibration
     raw_logit: Optional[float] = None  # Raw model logit for Platt scaling calibration
     
+    # INTENT VERIFICATION: Hash chain for signal-to-intent-to-execution audit trail
+    source_signal_id: Optional[str] = None  # Signal ID from AgentSignal/SignalSnapshot
+    source_signal_hash: Optional[str] = None  # Hash of original signal from SignalSnapshot
+    intent_hash: Optional[str] = None  # Deterministic hash over intent's core executable fields
+    broker_order_id: Optional[str] = None  # Kalshi order ID for reconciliation
+    execution_report_hash: Optional[str] = None  # Hash of execution report from venue
+    
     def add_fill(self, fill_id: str, fill_count: int) -> None:
         """Add a fill to this intent and update status.
         
@@ -1098,13 +1105,18 @@ class KalshiFillsLedger:
                 intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None
                 logger.info(
                     "[FILL-INGEST] fill_id=%s ticker=%s side=%s count=%d price_cents=%d notional_usd=%.2f "
-                    "edgepct=%.4f netedgecents=%.2f band=%s regime=%s source=%s",
+                    "edgepct=%.4f netedgecents=%.2f band=%s regime=%s source=%s "
+                    "liquidity_role=%s expected_fee_role=%s expected_fee_cents=%d snapshot_age_ms=%.0f",
                     fill.fill_id, fill.market_ticker, fill.side, fill.count_fp, fill.price_cents, float(fill.notional_usd),
                     intent.edgepct if intent else 0.0,
                     intent.netedgecents if intent else 0.0,
                     intent.band if intent else "",
                     intent.regime if intent else "",
-                    fill.fill_source
+                    fill.fill_source,
+                    intent.liquidity_role if intent else "none",
+                    intent.expected_fee_role if intent else "none",
+                    (intent.estimated_fee_cents or 0) if intent else 0,
+                    intent.snapshot_age_ms if intent else 0.0,
                 )
                 
                 # CRITICAL FIX: Call on_fill to update position state for HTTP fills
@@ -2204,7 +2216,7 @@ class KalshiFillsLedger:
         
         self._last_reconciliation = datetime.now(timezone.utc)
         self._reconciliation_issues = divergences  # Store for API access
-        
+
         # Determine status based ONLY on existence of divergences (not severity)
         # OK = perfect match, DEGRADED = any divergence exists, BROKEN = ghost trades suspected
         if ghost_trade_candidates > 0:
@@ -2213,6 +2225,39 @@ class KalshiFillsLedger:
             self._reconciliation_status = ReconciliationStatus.DEGRADED
         else:
             self._reconciliation_status = ReconciliationStatus.OK
+
+        # FIX 6: Auto-corrective reconciliation
+        # When divergence is detected and within threshold (< 5 contracts), auto-correct
+        # position cache to match Kalshi REST positions. This reduces manual intervention
+        # and ensures cache stays synchronized with actual Kalshi state.
+        auto_corrected = False
+        if len(divergences) > 0 and len(divergences) <= 5:  # Only auto-correct small divergences
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                cache = get_position_cache()
+
+                # Build corrected positions from Kalshi REST data
+                corrected_positions = [
+                    {
+                        "market_id": kp.get("market_ticker") or kp.get("ticker"),
+                        "contracts": kp.get("contracts", 0),
+                        "side": kp.get("side", "yes"),
+                        "avg_price_cents": kp.get("avg_price_cents", 0) or kp.get("avg_price", 0),
+                    }
+                    for kp in kalshi_positions
+                    if kp.get("contracts", 0) > 0  # Only include open positions
+                ]
+
+                if corrected_positions:
+                    # Sync corrected positions to cache with force=True
+                    await cache.sync_from_rest(corrected_positions, rest_timestamp=_time.time(), force=True)
+                    auto_corrected = True
+                    logger.info(
+                        "[RECONCILIATION-AUTO-CORRECT] Auto-corrected position cache with %d positions from Kalshi REST",
+                        len(corrected_positions)
+                    )
+            except Exception as auto_correct_err:
+                logger.warning("[RECONCILIATION-AUTO-CORRECT] Failed to auto-correct position cache: %s", auto_correct_err)
         
         # Purely diagnostic report - all facts, no judgments
         report = {
@@ -3133,6 +3178,37 @@ class KalshiFillsLedger:
                 "Position closed: %s pnl=%s session_realized=%s cumulative_realized=%s",
                 instrument_key, trade_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
             )
+            
+            # CRITICAL FIX (2026-07-21): Clear entry window when position is closed
+            # This allows re-entry in the same 15m window after position exit
+            try:
+                # Extract asset from market ticker (BTC, ETH, SOL, XRP, DOGE)
+                asset = None
+                ticker_upper = fill.market_ticker.upper()
+                if "BTC" in ticker_upper:
+                    asset = "BTC"
+                elif "ETH" in ticker_upper:
+                    asset = "ETH"
+                elif "SOL" in ticker_upper:
+                    asset = "SOL"
+                elif "XRP" in ticker_upper:
+                    asset = "XRP"
+                elif "DOGE" in ticker_upper:
+                    asset = "DOGE"
+                
+                if asset:
+                    # Import and clear the entry window from order_router
+                    from merid.event_venues.kalshi.order_router import _asset_entry_windows, _asset_entry_windows_lock
+                    import time
+                    current_window = int(time.time() // 900) * 900
+                    with _asset_entry_windows_lock:
+                        if _asset_entry_windows.get(asset) == current_window:
+                            del _asset_entry_windows[asset]
+                            logger.info(
+                                f"[FILLS-LEDGER] Per-asset entry window cleared on position close: {asset} window={current_window}"
+                            )
+            except Exception as window_clear_err:
+                logger.warning("[FILLS-LEDGER] Failed to clear entry window on position close: %s", window_clear_err)
             
             # CRITICAL FIX: Remove position from PositionMonitor when closed
             # This ensures the monitor doesn't track closed positions
@@ -4277,6 +4353,20 @@ class KalshiFillsLedger:
                 related_alpha_fill_id TEXT
             )
         """)
+        
+        # Check for missing columns and migrate (similar to PostgreSQL)
+        cursor = await db.execute("PRAGMA table_info(kalshi_fills)")
+        existing_cols = await cursor.fetchall()
+        existing_col_names = {row[1] for row in existing_cols}  # row[1] is column_name
+        
+        # Migrate: created_at column if missing
+        if "created_at" not in existing_col_names:
+            try:
+                logger.info("Migrating kalshi_fills (SQLite): adding created_at column")
+                await db.execute("ALTER TABLE kalshi_fills ADD COLUMN created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'")
+                logger.info("Migration complete: created_at column added to SQLite")
+            except Exception as migrate_exc:
+                logger.error(f"Failed to add created_at column to SQLite: {migrate_exc}")
         
         # Create indexes
         await db.execute("CREATE INDEX IF NOT EXISTS idx_fills_market ON kalshi_fills(market_ticker)")
