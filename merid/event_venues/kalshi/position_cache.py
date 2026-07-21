@@ -208,7 +208,7 @@ class CachedPosition:
             pre_size = self.contracts
             logger.info(
                 "[FILL-RECONCILIATION-AUDIT] ticker=%s side=%s action=%s pre_size=%d fill_size=%d price=%dc type=exit_fill expected_post_size=%s",
-                self.ticker,
+                self.market_id,
                 side,
                 action,
                 pre_size,
@@ -219,15 +219,43 @@ class CachedPosition:
 
         if is_open:
             # Adding to position (same side, buy action)
+            pre_size = self.contracts
             total_cost_old = self.contracts * self.avg_price_cents
             total_cost_new = contracts * price_cents
             self.contracts += contracts
             # P0-2 FIX: Use proper rounding instead of integer division to prevent PnL drift
             self.avg_price_cents = round((total_cost_old + total_cost_new) / self.contracts) if self.contracts > 0 else price_cents
+            
+            # AUDIT: Detect wrong-direction position change (entry fill that reduces position)
+            if self.contracts < pre_size:
+                logger.critical(
+                    "[WRONG-DIRECTION-POSITION-CHANGE] ticker=%s side=%s action=%s pre_size=%d fill_size=%d post_size=%d - ENTRY fill REDUCED position instead of increasing. This indicates a critical bug in position ledger logic. Operator review required.",
+                    self.market_id,
+                    side,
+                    action,
+                    pre_size,
+                    contracts,
+                    self.contracts
+                )
         elif is_close:
             # Closing/reducing position
             # PnL direction depends on the SIDE of the original position.
-            # YES long: profit when close price > entry; NO long: profit when close price < entry.
+            # YES long: profit when close price > entry; NO long: profit when close price < entry
+            
+            pre_size = self.contracts
+            post_size = max(0, self.contracts - contracts)
+            
+            # AUDIT: Detect wrong-direction position change (exit fill that increases position)
+            if post_size > pre_size:
+                logger.critical(
+                    "[WRONG-DIRECTION-POSITION-CHANGE] ticker=%s side=%s action=%s pre_size=%d fill_size=%d post_size=%d - EXIT fill INCREASED position instead of reducing. This indicates a critical bug in position ledger logic. Operator review required.",
+                    self.market_id,
+                    side,
+                    action,
+                    pre_size,
+                    contracts,
+                    post_size
+                )
             
             # AUDIT: Log post-fill reconciliation
             from utils.logger import get_logger
@@ -235,7 +263,7 @@ class CachedPosition:
             post_size = max(0, self.contracts - contracts)
             logger.info(
                 "[FILL-RECONCILIATION-AUDIT] ticker=%s side=%s action=%s pre_size=%d fill_size=%d post_size=%d price=%dc type=exit_fill_complete",
-                self.ticker,
+                self.market_id,
                 side,
                 action,
                 pre_size,
@@ -248,7 +276,7 @@ class CachedPosition:
             if post_size > 0:
                 logger.warning(
                     "[FILL-RECONCILIATION-AUDIT] ticker=%s RESIDUAL_POSITION_DETECTED pre_size=%d fill_size=%d post_size=%d - position not fully closed, requires follow-up exit",
-                    self.ticker,
+                    self.market_id,
                     pre_size,
                     contracts,
                     post_size
@@ -256,7 +284,7 @@ class CachedPosition:
                 # AUDIT: Log residual exposure risk
                 logger.warning(
                     "[RESIDUAL-EXPOSURE-RISK] ticker=%s residual_size=%d - position has residual exposure that may not have follow-up exit enforcement",
-                    self.ticker,
+                    self.market_id,
                     post_size
                 )
             
@@ -265,14 +293,14 @@ class CachedPosition:
                 if post_size != expected_post_size:
                     logger.error(
                         "[RECONCILIATION-MISMATCH] ticker=%s actual_post_size=%d expected_post_size=%d - position ledger does not match expected residual size",
-                        self.ticker,
+                        self.market_id,
                         post_size,
                         expected_post_size
                     )
                 else:
                     logger.info(
                         "[RECONCILIATION-MATCH] ticker=%s actual_post_size=%d expected_post_size=%d - position ledger matches expected residual size",
-                        self.ticker,
+                        self.market_id,
                         post_size,
                         expected_post_size
                     )
@@ -740,6 +768,49 @@ class KalshiPositionCache:
             )
 
             if position is None:
+                # CRITICAL FIX (2026-07-21): Check if this is an exit order before creating new position
+                # Exit orders should NOT create new positions - they close existing ones.
+                # If an exit fill arrives with no existing position, it indicates a desynchronized state
+                # (e.g., position was deleted prematurely, cache was reset, or race condition).
+                # Creating a new position from an exit fill causes side inversion bugs where
+                # SELL_NO exit orders are treated as BUY_NO entry orders, opening negative positions.
+                from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_action
+                is_exit_fill = is_exit_order_from_action(action, source=client_order_id)
+                
+                if is_exit_fill:
+                    # Exit fill without existing position - this is a desynchronized state
+                    # Log critical error and reject the fill to prevent creating phantom positions
+                    # CRITICAL: Include correlation IDs for tracing through router and upstream agent logic
+                    correlation_id = client_order_id or fill_id or "unknown"
+                    logger.critical(
+                        "[POSITION-CACHE-EXIT-FILL-ERROR] market=%s side=%s action=%s contracts=%d price=%dc "
+                        "client_order_id=%s fill_id=%s correlation_id=%s - EXIT FILL WITHOUT EXISTING POSITION. "
+                        "This indicates a desynchronized state (position deleted prematurely, cache reset, or race condition). "
+                        "Rejecting fill to prevent creating phantom position and side inversion bug. "
+                        "Operator review required: upstream intent/position mismatch detected.",
+                        market_id, side, action, contracts, price_cents,
+                        client_order_id or "N/A", fill_id or "N/A", correlation_id
+                    )
+                    
+                    # CRITICAL FIX (2026-07-21): Send alert to Slack/PagerDuty/SMS for immediate operator awareness
+                    try:
+                        from utils.alerting import send_alert, AlertSeverity, AlertContext
+                        send_alert(
+                            condition="exit_fill_without_position",
+                            severity=AlertSeverity.CRITICAL,
+                            message=f"Exit fill without existing position rejected for {market_id}. Upstream intent/position mismatch detected.",
+                            context=AlertContext(
+                                current_value=contracts,
+                                threshold_value=0,
+                                correlation_id=correlation_id
+                            )
+                        )
+                    except Exception as alert_err:
+                        logger.warning("[POSITION-CACHE] Failed to send alert for exit fill without position: %s", alert_err)
+                    
+                    # Do NOT create a new position - return early to prevent the bug
+                    return
+                
                 # New position - capture TP targets from the opening order
                 # Task 1: Store fill_source in position for hedge/alpha distinction
                 new_position = CachedPosition(
