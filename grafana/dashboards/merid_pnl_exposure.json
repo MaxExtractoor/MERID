@@ -283,6 +283,102 @@
           "x": 0,
           "y": 36
         }
+      },
+      {
+        "id": 13,
+        "title": "Open Position Count (Exit Invariant)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_open_position_count",
+            "legendFormat": "Open Positions"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 3
+                }
+              ]
+            }
+          }
+        },
+        "description": "Shows current number of open positions. Should be 0 (flat) after all exits complete. Non-zero indicates positioned state.",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 36
+        }
+      },
+      {
+        "id": 14,
+        "title": "Position State (Flat vs Positioned)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_position_state",
+            "legendFormat": "State"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "string",
+            "mappings": [
+              {
+                "options": {
+                  "0": "FLAT",
+                  "type": "value"
+                },
+                "type": "value"
+              },
+              {
+                "options": {
+                  "1": "POSITIONED",
+                  "type": "value"
+                },
+                "type": "value"
+              }
+            ],
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                }
+              ]
+            }
+          }
+        },
+        "description": "Shows whether system is FLAT (0 positions) or POSITIONED (1+ positions). Critical for verifying exit invariant holds.",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 18,
+          "y": 36
+        }
       }
     ]
   }
