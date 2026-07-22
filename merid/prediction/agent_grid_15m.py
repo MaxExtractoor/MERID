@@ -20,7 +20,13 @@ from dataclasses import dataclass, field
 
 from utils.logger import get_logger
 
-
+# INTENT VERIFICATION: Signal snapshot integration
+try:
+    from merid.validation.signal_snapshot import create_signal_snapshot
+    SIGNAL_SNAPSHOT_AVAILABLE = True
+except ImportError:
+    SIGNAL_SNAPSHOT_AVAILABLE = False
+    logger.warning("signal_snapshot module not available - intent verification disabled")
 
 logger = get_logger("merid.prediction.agent_grid_15m")
 
@@ -30,7 +36,7 @@ logger = get_logger("merid.prediction.agent_grid_15m")
 try:
     from merid.prediction.signal_terminology import (
         Side, Action, StrategyMode, Direction, Momentum, Velocity,
-        TradingSignal, SignalMetadata
+        TradingSignal, SignalMetadata, StrategyIntent
     )
     UNIFIED_TERMINOLOGY_AVAILABLE = True
 except ImportError:
@@ -62,6 +68,20 @@ except ImportError:
     REJECTION_MONITOR_ENABLED = False
 
     logger.debug("[REJECTION-MONITOR] Not available - rejection tracking disabled")
+
+
+# Import BTC sentiment bias for correlation tracking
+try:
+    from merid.prediction.btc_sentiment_bias import (
+        get_btc_sentiment_bias,
+        init_btc_sentiment_bias,
+        SentimentBiasConfig,
+        calculate_internal_btc_sentiment
+    )
+    BTC_SENTIMENT_BIAS_ENABLED = True
+except ImportError:
+    BTC_SENTIMENT_BIAS_ENABLED = False
+    logger.debug("[BTC-SENTIMENT-BIAS] Not available - BTC sentiment bias disabled")
 
 
 
@@ -372,6 +392,111 @@ def set_agent_grid_instance(grid: 'LeanAgentGrid15m') -> None:
     logger.info("[AGENT-GRID-INSTANCE] Global instance set")
 
 
+def get_agent_grid() -> Optional['LeanAgentGrid15m']:
+
+    """Get the global agent grid instance."""
+
+    return _agent_grid_instance
+
+
+def set_agent_grid(grid: 'LeanAgentGrid15m') -> None:
+
+    """Set the global agent grid instance (alias for set_agent_grid_instance)."""
+
+    set_agent_grid_instance(grid)
+
+
+async def build_15m_agent_grid(
+    catalog: Any,
+    bankroll: Any,
+    spot_provider: Any,
+    order_router: Any,
+    unified_edge_config: Any,
+    ws_bridge: Any = None,
+) -> 'LeanAgentGrid15m':
+
+    """Build the 15m crypto agent grid with all 5 agents (BTC, ETH, SOL, XRP, DOGE)."""
+
+    from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+
+    # Get the profile for configuration
+    profile = get_crypto_15m_profile()
+
+    # CRITICAL FIX: Use signal_mode from profile instead of hardcoded "trend"
+    # This allows the profile YAML to control the trading strategy
+    signal_mode = profile.signal_mode if hasattr(profile, 'signal_mode') else 'momentum_fvg'
+    logger.info("[AGENT-GRID-BUILD] Using signal_mode from profile: %s", signal_mode)
+
+    # Create agent configurations for all 5 crypto assets
+    agent_configs = [
+        LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+            signal_mode=signal_mode,
+            max_spread_cents=100,
+            velocity_threshold_btc=0.00015,
+            alpha_0=0.0,
+            alpha_1=200.0,
+        ),
+        LeanAgentConfig(
+            name="ETH_15M",
+            series_tickers=["KXETH15M"],
+            signal_mode=signal_mode,
+            max_spread_cents=100,
+            velocity_threshold_eth=0.00015,
+            alpha_0=0.0,
+            alpha_1=200.0,
+        ),
+        LeanAgentConfig(
+            name="SOL_15M",
+            series_tickers=["KXSOL15M"],
+            signal_mode=signal_mode,
+            max_spread_cents=100,
+            velocity_threshold_sol=0.000225,
+            alpha_0=0.0,
+            alpha_1=200.0,
+        ),
+        LeanAgentConfig(
+            name="XRP_15M",
+            series_tickers=["KXXRP15M"],
+            signal_mode=signal_mode,
+            max_spread_cents=100,
+            velocity_threshold_xrp=0.000225,
+            alpha_0=0.0,
+            alpha_1=200.0,
+        ),
+        LeanAgentConfig(
+            name="DOGE_15M",
+            series_tickers=["KXDOGE15M"],
+            signal_mode=signal_mode,
+            max_spread_cents=100,
+            velocity_threshold_doge=0.0003,
+            alpha_0=0.0,
+            alpha_1=200.0,
+        ),
+    ]
+
+    # Create agents
+    agents = []
+    for config in agent_configs:
+        agent = LeanAgent15m(
+            config=config,
+            catalog=catalog,
+            market_state_store=None,  # Will be set later
+            spot_provider=spot_provider,
+            order_router=order_router,
+            risk_config=profile,
+        )
+        agents.append(agent)
+        logger.info("[AGENT-GRID-BUILD] Created agent: %s", config.name)
+
+    # Create the agent grid
+    agent_grid = LeanAgentGrid15m(agents=agents)
+    logger.info("[AGENT-GRID-BUILD] Built LeanAgentGrid15m with %d agents", len(agents))
+
+    return agent_grid
+
+
 
 def reset_strip_order_counts() -> None:
 
@@ -503,11 +628,10 @@ class LeanAgentConfig:
 
     max_time_to_expiry_s: int = 900  # Maximum time to expiry in seconds
 
-    per_strip_order_limit: int = 200  # Maximum orders per 15m strip (increased from 50 to 200 for 2026 high-frequency standards)
+    # CRITICAL FIX (2026-07-17): Removed per_strip_order_limit and max_orders_per_15m_window - $1 exposure cap is the limit
+    # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
 
     per_asset_cooldown_s: int = 3  # Cooldown period in seconds after trade (2026-07-11: reduced to 3s for 15m alignment)
-
-    max_orders_per_15m_window: int = 24  # CRITICAL FIX: 24 (2026-07-11: increased to 24 for 15m opportunity capture)
 
     consecutive_loss_pause: int = 3  # 2026 research: Pause after N consecutive losses
 
@@ -690,10 +814,14 @@ class LeanAgentConfig:
     calibration_min_samples: int = 100  # Minimum samples required to fit calibration
 
     # Phase 5.3: Price-based strategy (Turbine research winner)
+    # CRITICAL FIX (2026-07-22): Fixed inverted thresholds causing YES-side bias
+    # Previous: buy_threshold=0.70, sell_threshold=0.95 created 25c dead zone and bought YES at expensive prices
+    # Correct: buy_threshold=0.30 (buy YES when cheap), sell_threshold=0.70 (buy NO when expensive)
+    # Economic rationale: Buy YES when probability is LOW (cheap YES), buy NO when probability is HIGH (cheap NO)
+    # This creates symmetric trading around 0.50 with no dead zone
+    price_based_buy_threshold: float = 0.30  # Buy YES when price <= 30c (cheap YES contracts)
 
-    price_based_buy_threshold: float = 0.70  # Buy YES in sweet spot (60-70c range per Polymarket data)
-
-    price_based_sell_threshold: float = 0.95  # Sell when price >= 0.95 (raised from 0.90 to prevent bad NO trades at 70-90c)
+    price_based_sell_threshold: float = 0.70  # Buy NO when price >= 70c (cheap NO contracts)
 
     calibration_max_samples: int = 1000  # Maximum samples to keep for calibration
 
@@ -776,6 +904,21 @@ class LeanAgent15m:
         logger.info("[AGENT-INIT] %s velocity coefficients: alpha_0=%.2f, alpha_1=%.2f", 
 
                     config.name, self._alpha_0, self._alpha_1)
+
+        
+
+        # CRITICAL FIX (2026-07-17): Optional RollingBuffer integration for bias prevention
+        self._rolling_buffer_enabled = getattr(config, 'rolling_buffer_enabled', False)
+        self._signal_generator = None
+        
+        if self._rolling_buffer_enabled:
+            try:
+                from merid.prediction import create_crypto_signal_generator
+                self._signal_generator = create_crypto_signal_generator()
+                logger.info("[AGENT-INIT] %s RollingBuffer enabled for bias prevention", config.name)
+            except ImportError:
+                logger.warning("[AGENT-INIT] RollingBuffer requested but module not available, proceeding without")
+                self._rolling_buffer_enabled = False
 
         
 
@@ -867,8 +1010,8 @@ class LeanAgent15m:
         
 
         # Phase 7: Initialize panic fade (volatility reversion) configuration
-
-        self._panic_fade_enabled = getattr(config, 'panic_fade_enabled', True)
+        # 2026-07-18: DISABLED by default - causing losses by betting against trend
+        self._panic_fade_enabled = getattr(config, 'panic_fade_enabled', False)
 
         self._panic_fade_threshold = getattr(config, 'panic_fade_threshold', 0.0002)
 
@@ -891,6 +1034,29 @@ class LeanAgent15m:
         self._calibration_max_samples = getattr(config, 'calibration_max_samples', 1000)
 
         self._calibration_regularization = getattr(config, 'calibration_regularization', 0.0001)
+        
+        
+        # Phase 8: Initialize BTC sentiment bias for correlation tracking
+        self._btc_sentiment_bias_enabled = getattr(config, 'btc_sentiment_bias_enabled', False)
+        if self._btc_sentiment_bias_enabled and BTC_SENTIMENT_BIAS_ENABLED:
+            try:
+                btc_bias_config = SentimentBiasConfig(
+                    enabled=True,
+                    btc_sentiment_threshold=getattr(config, 'btc_sentiment_threshold', 0.7),
+                    bias_strength=getattr(config, 'btc_sentiment_bias_strength', 0.05),
+                    correlated_assets=getattr(config, 'btc_sentiment_correlated_assets', ["ETH", "SOL", "XRP", "DOGE"]),
+                    correlation_threshold=getattr(config, 'btc_sentiment_correlation_threshold', 0.8),
+                    sentiment_window_seconds=getattr(config, 'btc_sentiment_window_seconds', 300)
+                )
+                self._btc_sentiment_bias = init_btc_sentiment_bias(btc_bias_config)
+                logger.info("[AGENT-INIT] %s BTC sentiment bias enabled", config.name)
+            except Exception as e:
+                logger.warning("[AGENT-INIT] Failed to initialize BTC sentiment bias: %s", e)
+                self._btc_sentiment_bias = None
+                self._btc_sentiment_bias_enabled = False
+        else:
+            self._btc_sentiment_bias = None
+            logger.info("[AGENT-INIT] %s BTC sentiment bias disabled", config.name)
 
         
 
@@ -2039,7 +2205,31 @@ class LeanAgent15m:
 
             all_positions = position_cache.get_all_positions(validate_freshness=False)
 
-            open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+            # CRITICAL FIX: Filter positions by current window to prevent counting stale positions
+            # Extract asset from agent name (e.g., BTC_15M -> BTC)
+            asset = self.config.name.split('_')[0].upper() if '_' in self.config.name else self.config.name.upper()
+            
+            # Get current window ticker from market catalog
+            current_window_ticker = None
+            try:
+                from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                catalog = get_market_catalog()
+                if catalog:
+                    current_market = catalog.get_current_15m_market(asset)
+                    if current_market:
+                        current_window_ticker = current_market.market.market_id
+            except Exception as ticker_err:
+                logger.warning("[HEAT-CHECK] Failed to get current window ticker: %s", ticker_err)
+            
+            # Filter to only current window positions
+            if current_window_ticker:
+                open_positions = {k: v for k, v in all_positions.items() 
+                                if v.contracts > 0 and k == current_window_ticker}
+            else:
+                # Fallback: filter by asset if we can't get the exact ticker
+                open_positions = {k: v for k, v in all_positions.items() 
+                                if v.contracts > 0 and asset in k.upper()}
+                logger.warning("[HEAT-CHECK] Using asset-based filtering (fallback) for %s", asset)
 
             
 
@@ -3146,6 +3336,31 @@ class LeanAgent15m:
                        asset, rsi, zscore, velocity)
 
         
+        # CRITICAL FIX (2026-07-19): Add upstream invariant check for panic_fade
+        # Validate that the derived side/action matches the strategy intent
+        # Panic fade is a mean reversion strategy: oversold → expect up (BULLISH_EVENT), overbought → expect down (BEARISH_EVENT)
+        try:
+            from merid.prediction.intent_contract import validate_intent_exposure_consistency, StrategyIntent
+            strategy_intent = StrategyIntent.BULLISH_EVENT if is_oversold else StrategyIntent.BEARISH_EVENT
+            is_valid, error = validate_intent_exposure_consistency(
+                intent=strategy_intent,
+                kalshi_side=signal_side,
+                kalshi_action=signal_action,
+                current_position=None,  # Entry signal (flat position)
+            )
+            if not is_valid:
+                logger.error(
+                    "[INTENT-EXPOSURE-MISMATCH] asset=%s panic_fade intent=%s side=%s action=%s - %s - BLOCKING ORDER",
+                    asset, strategy_intent.value, signal_side, signal_action, error
+                )
+                return None
+            else:
+                logger.debug(
+                    "[INTENT-EXPOSURE-VALID] asset=%s panic_fade intent=%s side=%s action=%s - invariant check passed",
+                    asset, strategy_intent.value, signal_side, signal_action
+                )
+        except ImportError:
+            logger.warning("[INTENT-CONTRACT] Not available - skipping upstream invariant check for panic_fade")
 
         return {
 
@@ -4607,25 +4822,99 @@ class LeanAgent15m:
 
         
 
-        # Apply midpoint bonus to edges
-
-        side_edges_with_bonus = {}
-
-        if yes_in_range and edge_yes_pct is not None:
-
-            side_edges_with_bonus["yes"] = edge_yes_pct + midpoint_bonus(yes_price_cents)
-
-        if no_in_range and edge_no_pct is not None:
-
-            side_edges_with_bonus["no"] = edge_no_pct + midpoint_bonus(no_price_cents)
-
+        # CRITICAL FIX: 2026-07-19 - Only select sides with positive original edges
+        # Midpoint bonus should break ties, not override negative edges
+        # Filter to only sides with positive original edges before applying bonus
+        positive_sides = {}
+        for side, edge in side_edges.items():
+            if edge is not None and edge > 0:
+                positive_sides[side] = edge
         
-
+        if not positive_sides:
+            logger.info(
+                "[MOMENTUM-FVG-NO-POSITIVE-EDGE] asset=%s edge_yes=%.4f edge_no=%.4f -> NO TRADE (no positive edges)",
+                asset, edge_yes_pct, edge_no_pct
+            )
+            return None
+        
+        # Apply midpoint bonus only to positive edges
+        side_edges_with_bonus = {}
+        for side, edge in positive_sides.items():
+            if side == "yes" and yes_in_range:
+                side_edges_with_bonus["yes"] = edge + midpoint_bonus(yes_price_cents)
+            elif side == "no" and no_in_range:
+                side_edges_with_bonus["no"] = edge + midpoint_bonus(no_price_cents)
+        
         # Select side with maximum edge (with midpoint bonus)
-
-        signal_side = max(side_edges_with_bonus, key=side_edges_with_bonus.get)
-
+        # CRITICAL FIX: 2026-07-22 - Break ties by preferring NO to counteract YES bias
+        # When edges are equal after midpoint bonus, prefer NO to balance execution
+        max_edge = max(side_edges_with_bonus.values())
+        tied_sides = [side for side, edge in side_edges_with_bonus.items() if edge == max_edge]
+        if len(tied_sides) == 2:
+            # Tie: prefer NO to balance YES bias
+            signal_side = "no"
+        else:
+            signal_side = max(side_edges_with_bonus, key=side_edges_with_bonus.get)
         selected_edge = side_edges[signal_side]  # Use original edge (without bonus) for reporting
+
+        # PHASE 1: Shadow dual-side evaluation for momentum_fvg path
+        # Determine expected side from velocity and strategy mode to measure structural bias
+        try:
+            from merid.prediction.signal_terminology import Side
+            UNIFIED_TERMINOLOGY_AVAILABLE = True
+        except ImportError:
+            UNIFIED_TERMINOLOGY_AVAILABLE = False
+
+        if UNIFIED_TERMINOLOGY_AVAILABLE:
+            expected_side = Side.from_velocity_and_mode(velocity, "trend_following").value
+        else:
+            expected_side = "yes" if velocity > 0 else "no"
+
+        expected_side_edge = side_edges.get(expected_side, 0.0)
+        opposite_side = "no" if expected_side == "yes" else "yes"
+        opposite_side_edge = side_edges.get(opposite_side, 0.0)
+
+        # Determine hypothetical best side (unconstrained dual-side selection)
+        if expected_side_edge > opposite_side_edge:
+            hypothetical_best_side = expected_side
+            hypothetical_best_edge = expected_side_edge
+        elif opposite_side_edge > expected_side_edge:
+            hypothetical_best_side = opposite_side
+            hypothetical_best_edge = opposite_side_edge
+        else:
+            hypothetical_best_side = "no"  # Prefer NO for bias correction
+            hypothetical_best_edge = expected_side_edge
+
+        # Log shadow dual-side evaluation for analysis
+        logger.info(
+            "[SHADOW-DUAL-SIDE-MOMENTUM-FVG] asset=%s velocity=%.6f expected_side=%s expected_edge=%.4f "
+            "opposite_side=%s opposite_edge=%.4f selected_side=%s selected_edge=%.4f hypothetical_best=%s hypothetical_edge=%.4f "
+            "yes_in_range=%s no_in_range=%s",
+            asset, velocity, expected_side, expected_side_edge,
+            opposite_side, opposite_side_edge, signal_side, selected_edge,
+            hypothetical_best_side, hypothetical_best_edge,
+            yes_in_range, no_in_range
+        )
+
+        # Log to shadow dual-side metrics monitor
+        try:
+            from merid.metrics.shadow_dual_side_metrics import get_shadow_dual_side_monitor
+            monitor = get_shadow_dual_side_monitor()
+            monitor.log_shadow_evaluation(
+                asset=asset,
+                velocity=velocity,
+                strategy_mode="momentum_fvg",
+                expected_side=expected_side,
+                expected_edge=expected_side_edge,
+                opposite_side=opposite_side,
+                opposite_edge=opposite_side_edge,
+                hypothetical_best_side=hypothetical_best_side,
+                hypothetical_best_edge=hypothetical_best_edge,
+                yes_in_range=yes_in_range,
+                no_in_range=no_in_range
+            )
+        except Exception as metrics_err:
+            logger.warning("[SHADOW-DUAL-SIDE-METRICS] Failed to log to metrics monitor: %s", metrics_err)
 
         
 
@@ -4666,6 +4955,23 @@ class LeanAgent15m:
         # Use selected_edge from dual-side evaluation (already computed)
 
         edge_pct = selected_edge
+        
+        # BTC SENTIMENT BIAS: Apply correlation-based bias adjustment for non-BTC assets
+        if self._btc_sentiment_bias_enabled and self._btc_sentiment_bias and asset != "BTC":
+            try:
+                bias_adjustment = self._btc_sentiment_bias.get_bias_adjustment(
+                    asset=asset,
+                    base_edge=edge_pct,
+                    current_side=signal_side
+                )
+                if bias_adjustment != 0.0:
+                    edge_pct += bias_adjustment
+                    logger.info(
+                        "[BTC-SENTIMENT-BIAS-APPLIED] asset=%s original_edge=%.4f bias_adjustment=%.4f adjusted_edge=%.4f side=%s",
+                        asset, selected_edge, bias_adjustment, edge_pct, signal_side
+                    )
+            except Exception as bias_exc:
+                logger.warning("[BTC-SENTIMENT-BIAS-ERROR] asset=%s error=%s", asset, bias_exc)
 
         
 
@@ -4689,10 +4995,10 @@ class LeanAgent15m:
         
 
         # Calculate model probability from selected edge
-        # CRITICAL FIX: 2026-07-13 - Anchor model_prob to market price to avoid deployment safety rejections
-        # Previous velocity-based calculation (0.5 + edge_pct) always returned ~0.5, causing massive
-        # distance from market prices (e.g., 74c = 0.74, distance = 0.69 > 0.50 threshold)
-        # New calculation anchors model_prob to market-implied probability, adjusted by edge
+        # CRITICAL FIX: 2026-07-19 - Fix model_prob for Kelly criterion
+        # Kelly needs probability of TRADE WINNING, not probability of YES outcome
+        # For YES: trade wins if event happens → model_prob = probability of YES outcome
+        # For NO: trade wins if event doesn't happen → model_prob = probability of NO outcome = 1 - market_prob
         
         # Get market-implied probability from price_cents
         market_prob = price_cents / 100.0 if price_cents > 0 else 0.5
@@ -4701,11 +5007,16 @@ class LeanAgent15m:
         edge_adjustment = min(edge_pct, 0.20)
         
         if signal_side == "yes":
-            # For YES: model_prob should be higher than market_prob (we think outcome is more likely)
+            # For YES: model_prob is probability of YES outcome (trade wins if event happens)
+            # We think YES is more likely than market, so add edge
             model_prob = min(0.95, market_prob + edge_adjustment)
         else:
-            # For NO: model_prob should be lower than market_prob (we think outcome is less likely)
-            model_prob = max(0.05, market_prob - edge_adjustment)
+            # For NO: model_prob is probability of NO outcome (trade wins if event doesn't happen)
+            # price_cents here is the NO price (dual_side_no_price), so market_prob is ALREADY
+            # the market-implied NO probability. Do NOT invert it again (double inversion made
+            # model_prob = P(YES)+edge, causing Kelly to reject every NO order at price > ~50c).
+            # We think NO is more likely than market, so add edge to NO probability
+            model_prob = min(0.95, market_prob + edge_adjustment)
 
         
 
@@ -4878,15 +5189,94 @@ class LeanAgent15m:
 
         
 
-        # CRITICAL FIX: 2026-07-16 - Add SignalFusion microstructure signals to signal output
+        # CRITICAL FIX: 2026-07-19 - Add SignalFusion microstructure signals to signal output
         # These signals provide additional confirmation for trades via orderflow and on-chain activity
         # Currently set to 0.0 as stubs - future integration will pull from SignalFusionAgent
         orderflow_bias = 0.0  # Positive = buying pressure, negative = selling pressure
         onchain_velocity = 0.0  # Positive = elevated on-chain activity, negative = muted
 
+        # CRITICAL FIX: 2026-07-19 - Determine strategy intent from selected side
+        # YES side = BULLISH_EVENT (betting on event occurring)
+        # NO side = BEARISH_EVENT (betting against event occurring)
+        strategy_intent = None
+        if UNIFIED_TERMINOLOGY_AVAILABLE:
+            try:
+                from merid.prediction.intent_contract import StrategyIntent, validate_intent_exposure_consistency
+                strategy_intent = StrategyIntent.BULLISH_EVENT if signal_side == "yes" else StrategyIntent.BEARISH_EVENT
+                
+                # CRITICAL FIX: 2026-07-19 - Add upstream invariant check for momentum_fvg
+                # Validate that the derived side/action matches the strategy intent
+                is_valid, error = validate_intent_exposure_consistency(
+                    intent=strategy_intent,
+                    kalshi_side=signal_side,
+                    kalshi_action=signal_action,
+                    current_position=None,  # Entry signal (flat position)
+                )
+                if not is_valid:
+                    logger.error(
+                        "[INTENT-EXPOSURE-MISMATCH] asset=%s momentum_fvg intent=%s side=%s action=%s - %s - BLOCKING ORDER",
+                        asset, strategy_intent.value, signal_side, signal_action, error
+                    )
+                    return None
+                else:
+                    logger.debug(
+                        "[INTENT-EXPOSURE-VALID] asset=%s momentum_fvg intent=%s side=%s action=%s - invariant check passed",
+                        asset, strategy_intent.value, signal_side, signal_action
+                    )
+            except ImportError:
+                pass
+
         # Return signal
 
-        return {
+        # INTENT VERIFICATION: Generate signal_id and create snapshot
+        signal_id = f"sig-{int(time.time())}-{asset}"
+        signal_hash = None
+        
+        if SIGNAL_SNAPSHOT_AVAILABLE:
+            try:
+                # Collect raw features for snapshot
+                raw_features = {
+                    "velocity": velocity,
+                    "velocity_threshold": velocity_threshold,
+                    "macd_histogram": macd_histogram,
+                    "macd_slope": macd_slope,
+                    "rsi": rsi,
+                    "rsi_zone": rsi_zone,
+                    "obi": obi,
+                    "fvg_direction": fvg_direction,
+                    "fvg_confidence": fvg_confidence,
+                    "long_score": long_score,
+                    "short_score": short_score,
+                    "orderflow_bias": orderflow_bias,
+                    "onchain_velocity": onchain_velocity,
+                }
+                
+                # Get market_id from market
+                market_id = market.market.market_id if hasattr(market, 'market') else market.market_id
+                
+                # Create signal snapshot
+                snapshot = create_signal_snapshot(
+                    signal_id=signal_id,
+                    market_id=market_id,
+                    side=signal_side,
+                    action=signal_action,
+                    intent="open",  # Entry signal
+                    edge=edge_pct,
+                    confidence=confidence,
+                    origin_agent=self.config.name,
+                    origin_strategy="momentum_fvg",
+                    timeframe_label="15m",
+                    raw_features=raw_features,
+                )
+                signal_hash = snapshot.signal_hash
+                logger.info(
+                    f"[SIGNAL-SNAPSHOT] Created snapshot: signal_id={signal_id} "
+                    f"signal_hash={signal_hash[:16]}... market={market_id}"
+                )
+            except Exception as snap_exc:
+                logger.warning(f"[SIGNAL-SNAPSHOT] Failed to create snapshot: {snap_exc}")
+        
+        signal_dict = {
 
             "side": signal_side,
 
@@ -4924,6 +5314,10 @@ class LeanAgent15m:
 
             "price_cents": price_cents,  # CRITICAL: Include price_cents for order execution
 
+            # CRITICAL FIX: 2026-07-19 - Include both edge_yes and edge_no for parity checker
+            "edge_yes": side_edges.get("yes", 0.0),  # YES edge for downstream parity checks
+            "edge_no": side_edges.get("no", 0.0),    # NO edge for downstream parity checks
+
             # CRITICAL FIX: 2026-07-16 - SignalFusion microstructure signals
             "orderflow_bias": orderflow_bias,  # Order book imbalance signal
             "onchain_velocity": onchain_velocity,  # On-chain activity signal
@@ -4932,7 +5326,17 @@ class LeanAgent15m:
 
             "rationale": f"momentum_fvg: velocity={velocity:.6f} (threshold={velocity_threshold:.6f}) macd_hist={macd_histogram:.4f} rsi={rsi:.1f} ({rsi_zone}) obi={obi:.2f} fvg_dir={fvg_direction} fvg_conf={fvg_confidence:.2f} edge={edge_pct:.2f}%",
 
+            # INTENT VERIFICATION: Add signal_id and signal_hash for audit chain
+            "signal_id": signal_id,
+            "signal_hash": signal_hash,
+
         }
+
+        # CRITICAL FIX: 2026-07-19 - Add strategy_intent to signal if available
+        if strategy_intent:
+            signal_dict["strategy_intent"] = strategy_intent.value
+
+        return signal_dict
 
 
 
@@ -5111,72 +5515,130 @@ class LeanAgent15m:
         )
 
         
-
+        # CRITICAL FIX: 2026-07-20 - Calculate edges for BOTH sides before selecting
+        # This prevents selecting a side with negative edge when the other side has positive edge
+        # Root cause of WINNER_MISMATCH: side selection based on price thresholds without checking edge sign
+        
+        # Calculate edge for YES side
+        yes_edge_pct = 0.0
         if market_price <= buy_threshold:
-
-            # Buy YES when price is cheap
-
-            signal_side = "yes"
-
-            signal_action = "buy"
-
+            yes_edge_pct = (buy_threshold - market_price) / buy_threshold
+            yes_edge_pct = max(yes_edge_pct, 0.02)  # Minimum 2% edge
+        
+        # Calculate edge for NO side
+        no_edge_pct = 0.0
+        if market_price >= sell_threshold:
+            no_edge_pct = (market_price - sell_threshold) / (1.0 - sell_threshold)
+            no_edge_pct = max(no_edge_pct, 0.02)  # Minimum 2% edge
+        
+        # CRITICAL: Only select sides with POSITIVE edges
+        # This is the root cause fix for WINNER_MISMATCH parity failures
+        if yes_edge_pct <= 0 and no_edge_pct <= 0:
             logger.info(
-
-                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f <= buy_threshold=%.2f -> BUY YES",
-
-                asset, market_price, buy_threshold
-
+                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f no positive edges (yes_edge=%.4f no_edge=%.4f) -> NO TRADE",
+                asset, market_price, yes_edge_pct, no_edge_pct
             )
-
-        elif market_price >= sell_threshold:
-
-            # Buy NO when price is high (betting against the outcome)
-
-            signal_side = "no"
-
-            signal_action = "buy"
-
-            logger.info(
-
-                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f >= sell_threshold=%.2f -> BUY NO",
-
-                asset, market_price, sell_threshold
-
-            )
-
-        else:
-
-            # Price in middle range - no trade
-
-            logger.info(
-
-                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f in range (%.2f, %.2f) -> NO TRADE",
-
-                asset, market_price, buy_threshold, sell_threshold
-
-            )
-
             return None
+        
+        # Select side with maximum positive edge
+        if yes_edge_pct > no_edge_pct:
+            signal_side = "yes"
+            signal_action = "buy"
+            edge_pct = yes_edge_pct
+            strategy_intent = StrategyIntent.BULLISH_EVENT if UNIFIED_TERMINOLOGY_AVAILABLE else None
+            logger.info(
+                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f YES edge=%.4f > NO edge=%.4f -> BUY YES",
+                asset, market_price, yes_edge_pct, no_edge_pct
+            )
+        elif no_edge_pct > yes_edge_pct:
+            signal_side = "no"
+            signal_action = "buy"
+            edge_pct = no_edge_pct
+            strategy_intent = StrategyIntent.BEARISH_EVENT if UNIFIED_TERMINOLOGY_AVAILABLE else None
+            logger.info(
+                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f NO edge=%.4f > YES edge=%.4f -> BUY NO",
+                asset, market_price, no_edge_pct, yes_edge_pct
+            )
+        else:
+            # Equal edges - prefer NO side to counteract YES bias
+            signal_side = "no"
+            signal_action = "buy"
+            edge_pct = no_edge_pct
+            strategy_intent = StrategyIntent.BEARISH_EVENT if UNIFIED_TERMINOLOGY_AVAILABLE else None
+            logger.info(
+                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f equal edges (yes=%.4f no=%.4f) -> BUY NO (tie-break)",
+                asset, market_price, yes_edge_pct, no_edge_pct
+            )
+
+        # PHASE 1: Shadow dual-side evaluation for price_based path
+        # Log side selection for bias analysis
+        logger.info(
+            "[SHADOW-DUAL-SIDE-PRICE-BASED] asset=%s market_price=%.2f yes_edge=%.4f no_edge=%.4f selected_side=%s selected_edge=%.4f",
+            asset, market_price, yes_edge_pct, no_edge_pct, signal_side, edge_pct
+        )
+
+        # Log to shadow dual-side metrics monitor
+        try:
+            from merid.metrics.shadow_dual_side_metrics import get_shadow_dual_side_monitor
+            monitor = get_shadow_dual_side_monitor()
+            # For price_based, expected side is based on price thresholds
+            expected_side = "yes" if market_price <= buy_threshold else "no"
+            expected_side_edge = yes_edge_pct if expected_side == "yes" else no_edge_pct
+            opposite_side = "no" if expected_side == "yes" else "yes"
+            opposite_side_edge = no_edge_pct if expected_side == "yes" else yes_edge_pct
+
+            monitor.log_shadow_evaluation(
+                asset=asset,
+                velocity=0.0,  # price_based doesn't use velocity
+                strategy_mode="price_based",
+                expected_side=expected_side,
+                expected_edge=expected_side_edge,
+                opposite_side=opposite_side,
+                opposite_edge=opposite_side_edge,
+                hypothetical_best_side=signal_side,
+                hypothetical_best_edge=edge_pct,
+                yes_in_range=True,  # price_based doesn't check range
+                no_in_range=True
+            )
+        except Exception as metrics_err:
+            logger.warning("[SHADOW-DUAL-SIDE-METRICS] Failed to log to metrics monitor: %s", metrics_err)
+        
+        # CRITICAL FIX (2026-07-19): Add upstream invariant check
+        # Validate that the derived side/action matches the strategy intent
+        if UNIFIED_TERMINOLOGY_AVAILABLE and strategy_intent:
+            try:
+                from merid.prediction.intent_contract import validate_intent_exposure_consistency
+                is_valid, error = validate_intent_exposure_consistency(
+                    intent=strategy_intent,
+                    kalshi_side=signal_side,
+                    kalshi_action=signal_action,
+                    current_position=None,  # Entry signal (flat position)
+                )
+                if not is_valid:
+                    logger.error(
+                        "[INTENT-EXPOSURE-MISMATCH] asset=%s intent=%s side=%s action=%s - %s - BLOCKING ORDER",
+                        asset, strategy_intent.value, signal_side, signal_action, error
+                    )
+                    return None
+                else:
+                    logger.debug(
+                        "[INTENT-EXPOSURE-VALID] asset=%s intent=%s side=%s action=%s - invariant check passed",
+                        asset, strategy_intent.value, signal_side, signal_action
+                    )
+            except ImportError:
+                logger.warning("[INTENT-CONTRACT] Not available - skipping upstream invariant check")
 
         
 
         # Return signal
 
-        # Calculate edge for price-based strategy (distance from threshold)
+        # CRITICAL FIX: 2026-07-20 - Use pre-calculated edges from side selection
+        # Set edge_yes and edge_no for parity checker with actual calculated values
+        edge_yes = yes_edge_pct
+        edge_no = no_edge_pct
 
-        # For YES buy: edge = (buy_threshold - market_price) / buy_threshold
-
-        # For NO buy: edge = (market_price - sell_threshold) / (1.0 - sell_threshold)
-
-        # Add minimum base edge when threshold is crossed to ensure meaningful edge
-
+        # Calculate confidence and model_prob based on selected side
         if signal_side == "yes" and signal_action == "buy":
-
-            edge_pct = (buy_threshold - market_price) / buy_threshold  # FRACTION units
-
-            # Add 2% base edge at threshold crossing (minimum edge for valid trade)
-
-            edge_pct = max(edge_pct, 0.02)  # 2% = 0.02 in FRACTION
 
             # Dynamic confidence: increases as price moves further below buy_threshold
 
@@ -5198,12 +5660,6 @@ class LeanAgent15m:
 
         elif signal_side == "no" and signal_action == "buy":
 
-            edge_pct = (market_price - sell_threshold) / (1.0 - sell_threshold)  # FRACTION units
-
-            # Add 2% base edge at threshold crossing (minimum edge for valid trade)
-
-            edge_pct = max(edge_pct, 0.02)  # 2% = 0.02 in FRACTION
-
             # Dynamic confidence: increases as price moves further above sell_threshold
 
             # At sell_threshold: confidence = 0.50 (neutral)
@@ -5214,13 +5670,16 @@ class LeanAgent15m:
 
             confidence = min(0.99, 0.50 + 2.0 * distance_from_threshold)
 
-            # For buy NO: model_prob should be lower than market_price (we think outcome is less likely)
+            # For buy NO: model_prob should be probability of NO outcome (trade wins if event doesn't happen)
+            # Market thinks YES has probability market_price, so NO has probability (1 - market_price)
+            # We think NO is more likely than market, so add edge to NO probability
 
             # Convert edge_pct to probability adjustment (capped at reasonable range)
 
             edge_prob_adjustment = min(edge_pct, 0.20)  # Cap at 20% adjustment (edge_pct already in FRACTION)
 
-            model_prob = max(0.05, market_price - edge_prob_adjustment)
+            no_market_prob = 1.0 - market_price
+            model_prob = min(0.95, no_market_prob + edge_prob_adjustment)
 
         
 
@@ -5393,25 +5852,25 @@ class LeanAgent15m:
 
         
 
-        return {
-
+        # CRITICAL FIX (2026-07-19): Include strategy_intent in signal for exposure validation
+        signal_dict = {
             "side": signal_side,
-
             "action": signal_action,
-
             "price_cents": clamped_price_cents,  # CRITICAL: Use selected price
-
             "confidence": confidence,  # Dynamic edge-based confidence (not hardcoded)
-
             "model_prob": model_prob,  # Clamped to valid range [0.05, 0.95]
-
             "edge_pct": edge_pct,  # CRITICAL: Calculate edge for price-based strategy
-
+            # CRITICAL FIX: 2026-07-19 - Include both edge_yes and edge_no for parity checker
+            "edge_yes": edge_yes,  # YES edge for downstream parity checks
+            "edge_no": edge_no,    # NO edge for downstream parity checks
             "rationale": f"price_based: price={market_price:.2f} vs thresholds (buy={buy_threshold:.2f}, sell={sell_threshold:.2f}) edge={edge_pct:.2f}% conf={confidence:.2f}",
-
             "velocity": 0.0,  # Price-based strategy doesn't use velocity
-
         }
+        
+        if UNIFIED_TERMINOLOGY_AVAILABLE:
+            signal_dict["strategy_intent"] = strategy_intent.value
+        
+        return signal_dict
 
     
 
@@ -7103,6 +7562,16 @@ class LeanAgent15m:
 
         
 
+        # CRITICAL FIX (2026-07-17): Update RollingBuffer with spot_price for bias prevention
+        if self._rolling_buffer_enabled and self._signal_generator is not None:
+            try:
+                self._signal_generator.update_input("spot_price", spot_price)
+                logger.debug("[ROLLING-BUFFER] Updated spot_price=%s", spot_price)
+            except Exception as exc:
+                logger.warning("[ROLLING-BUFFER] Failed to update spot_price: %s", exc)
+
+        
+
         # Phase 6: Check if trading session is active
 
         if not self._is_trading_session_active():
@@ -8612,9 +9081,7 @@ class LeanAgent15m:
             
 
             # Model probabilities with direction bias
-
             p_model_yes = max(0.05, min(0.95, base_prob + direction_bias))
-
             p_model_no = 1.0 - p_model_yes  # Symmetry: p_model_no = 1 - p_model_yes
 
             
@@ -8673,43 +9140,98 @@ class LeanAgent15m:
 
             
 
-            # Apply midpoint bonus to edges
-
-            side_edges_with_bonus = {}
-
-            if yes_in_range and "yes" in side_edges:
-
-                side_edges_with_bonus["yes"] = side_edges["yes"] + midpoint_bonus(yes_price_cents)
-
-            if no_in_range and "no" in side_edges:
-
-                side_edges_with_bonus["no"] = side_edges["no"] + midpoint_bonus(no_price_cents)
-
+            # CRITICAL FIX: 2026-07-19 - Only select sides with positive original edges
+            # Midpoint bonus should break ties, not override negative edges
+            # Filter to only sides with positive original edges before applying bonus
+            positive_sides = {}
+            for side, edge in side_edges.items():
+                if edge is not None and edge > 0:
+                    positive_sides[side] = edge
             
-
-            # Select side with best edge
-
-            if not side_edges_with_bonus:
-
+            if not positive_sides:
                 logger.info(
-
-                    "[EDGE-SELECTION] asset=%s no valid edges (sides out of range) -> NO TRADE",
-
-                    asset
-
+                    "[EDGE-SELECTION] asset=%s no positive edges (edge_yes=%.4f edge_no=%.4f) -> NO TRADE",
+                    asset, side_edges.get("yes", 0), side_edges.get("no", 0)
                 )
-
                 return None
-
             
-
-            # Select side with maximum edge (with midpoint bonus)
-
-            signal_side = max(side_edges_with_bonus, key=side_edges_with_bonus.get)
-
+            # CRITICAL FIX: Determine expected side from velocity and strategy_mode BEFORE edge selection
+            # This prevents YES/NO inversion where edge-based selection picks wrong side
+            if UNIFIED_TERMINOLOGY_AVAILABLE:
+                expected_side = Side.from_velocity_and_mode(velocity, strategy_mode).value
+            else:
+                # Fallback for legacy code path
+                if strategy_mode == "trend_following":
+                    expected_side = "yes" if velocity > 0 else "no"
+                else:  # mean_reversion
+                    expected_side = "no" if velocity > 0 else "yes"
+            
+            # PHASE 1: Shadow dual-side evaluation for missed opportunity analysis
+            # Log both sides' edges to measure structural bias from expected_side gating
+            # This allows us to quantify the opportunity cost of single-side evaluation
+            expected_side_edge = side_edges.get(expected_side, 0.0)
+            opposite_side = "no" if expected_side == "yes" else "yes"
+            opposite_side_edge = side_edges.get(opposite_side, 0.0)
+            
+            # Determine hypothetical best side (unconstrained dual-side selection)
+            # Use tie-breaking favoring NO to match the momentum_fvg fix
+            if expected_side_edge > opposite_side_edge:
+                hypothetical_best_side = expected_side
+                hypothetical_best_edge = expected_side_edge
+            elif opposite_side_edge > expected_side_edge:
+                hypothetical_best_side = opposite_side
+                hypothetical_best_edge = opposite_side_edge
+            else:
+                # Equal edges - prefer NO for bias correction
+                hypothetical_best_side = "no"
+                hypothetical_best_edge = expected_side_edge
+            
+            # Log shadow dual-side evaluation for analysis
+            logger.info(
+                "[SHADOW-DUAL-SIDE] asset=%s velocity=%.6f mode=%s expected_side=%s expected_edge=%.4f "
+                "opposite_side=%s opposite_edge=%.4f hypothetical_best=%s hypothetical_edge=%.4f "
+                "yes_in_range=%s no_in_range=%s",
+                asset, velocity, strategy_mode, expected_side, expected_side_edge,
+                opposite_side, opposite_side_edge, hypothetical_best_side, hypothetical_best_edge,
+                yes_in_range, no_in_range
+            )
+            
+            # Log to shadow dual-side metrics monitor for analysis
+            try:
+                from merid.metrics.shadow_dual_side_metrics import get_shadow_dual_side_monitor
+                monitor = get_shadow_dual_side_monitor()
+                monitor.log_shadow_evaluation(
+                    asset=asset,
+                    velocity=velocity,
+                    strategy_mode=strategy_mode,
+                    expected_side=expected_side,
+                    expected_edge=expected_side_edge,
+                    opposite_side=opposite_side,
+                    opposite_edge=opposite_side_edge,
+                    hypothetical_best_side=hypothetical_best_side,
+                    hypothetical_best_edge=hypothetical_best_edge,
+                    yes_in_range=yes_in_range,
+                    no_in_range=no_in_range
+                )
+            except Exception as metrics_err:
+                logger.warning("[SHADOW-DUAL-SIDE-METRICS] Failed to log to metrics monitor: %s", metrics_err)
+            
+            # Only evaluate edges for the expected side to prevent inversion
+            if expected_side == "yes" and yes_in_range and "yes" in positive_sides:
+                signal_side = "yes"
+                selected_edge = side_edges["yes"]
+            elif expected_side == "no" and no_in_range and "no" in positive_sides:
+                signal_side = "no"
+                selected_edge = side_edges["no"]
+            else:
+                # Expected side not available or no positive edge
+                logger.info(
+                    "[EDGE-SELECTION] asset=%s expected_side=%s not available or no positive edge (edge_yes=%.4f edge_no=%.4f) -> NO TRADE",
+                    asset, expected_side, side_edges.get("yes", 0), side_edges.get("no", 0)
+                )
+                return None
+            
             signal_action = "buy"
-
-            selected_edge = side_edges[signal_side]  # Use original edge (without bonus) for reporting
 
             
 
@@ -9924,8 +10446,10 @@ class LeanAgent15m:
         
 
         # For backward compatibility, set model_prob to p_model
-
-        model_prob = p_model
+        # p_model is the probability of the YES (up) outcome. Downstream consumers
+        # (Kelly filter, deployment-safety distance) compare model_prob against the
+        # side-specific price_cents, so for NO signals pass the NO win probability.
+        model_prob = p_model if signal_side == "yes" else (1.0 - p_model)
 
         
 
@@ -10662,17 +11186,8 @@ class LeanAgent15m:
 
             
 
-            if self._session_order_count >= self.config.max_orders_per_15m_window:
-
-                logger.info(
-
-                    "[SESSION-LIMIT] agent=%s session_orders=%d >= max_orders_per_15m_window=%d -> SKIP (session limit reached)",
-
-                    self.config.name, self._session_order_count, self.config.max_orders_per_15m_window
-
-                )
-
-                return None
+            # CRITICAL FIX (2026-07-17): Removed max_orders_per_15m_window check - $1 exposure cap is the limit
+            # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
 
             
 
@@ -10794,9 +11309,35 @@ class LeanAgent15m:
 
                     all_positions = position_cache.get_all_positions(validate_freshness=False)
 
-                    # 2026 FIX: Only count open positions (contracts > 0)
-
-                    open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+                    # CRITICAL FIX: Filter positions by current window ticker to prevent counting stale positions
+                    # Each 15m window has a unique ticker (e.g., KXBTC15M-26JUL191645-45)
+                    # Positions from previous windows should not count against current window limits
+                    # Extract asset from agent name (e.g., BTC_15M -> BTC)
+                    asset = self.config.name.split('_')[0].upper() if '_' in self.config.name else self.config.name.upper()
+                    
+                    # Get current window ticker from market catalog
+                    current_window_ticker = None
+                    try:
+                        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                        catalog = get_market_catalog()
+                        if catalog:
+                            current_market = catalog.get_current_15m_market(asset)
+                            if current_market:
+                                current_window_ticker = current_market.market.market_id
+                    except Exception as ticker_err:
+                        logger.warning("[POSITION-LIMIT] Failed to get current window ticker: %s", ticker_err)
+                    
+                    # Filter positions: only count those matching current window ticker
+                    if current_window_ticker:
+                        # Filter to only positions from the current window
+                        open_positions = {k: v for k, v in all_positions.items() 
+                                        if v.contracts > 0 and k == current_window_ticker}
+                    else:
+                        # Fallback: filter by asset if we can't get the exact ticker
+                        # This is less precise but prevents complete failure
+                        open_positions = {k: v for k, v in all_positions.items() 
+                                        if v.contracts > 0 and asset in k.upper()}
+                        logger.warning("[POSITION-LIMIT] Using asset-based filtering (fallback) for %s", asset)
 
                     position_count = len(open_positions)
 
@@ -10804,9 +11345,9 @@ class LeanAgent15m:
 
                     logger.info(
 
-                        "[POSITION-LIMIT] agent=%s total_positions=%d open_positions=%d",
+                        "[POSITION-LIMIT] agent=%s total_positions=%d open_positions=%d current_window=%s",
 
-                        self.config.name, len(all_positions), position_count
+                        self.config.name, len(all_positions), position_count, current_window_ticker or "N/A"
 
                     )
 
@@ -11536,17 +12077,8 @@ class LeanAgent15m:
 
                 current_strip_orders = self._strip_order_counts.get(strip_ticker, 0)
 
-                if current_strip_orders >= self.config.per_strip_order_limit:
-
-                    logger.info(
-
-                        "[STRIP-LIMIT-CHECK] asset=%s strip=%s orders=%d >= max=%d, skipping",
-
-                        asset, strip_ticker, current_strip_orders, self.config.per_strip_order_limit
-
-                    )
-
-                    return None
+                # CRITICAL FIX (2026-07-17): Removed per_strip_order_limit check - $1 exposure cap is the limit
+                # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
 
             
 
@@ -11848,7 +12380,8 @@ class LeanAgent15m:
 
             
 
-            logger.info("[CANDIDATE-GENERATED] asset=%s side=%s", self.config.name, signal["side"])
+            logger.info("[CANDIDATE-GENERATED] asset=%s side=%s strategy_intent=%s", 
+                       self.config.name, signal["side"], signal.get("strategy_intent", "N/A"))
 
             
 
@@ -11989,6 +12522,11 @@ class LeanAgentGrid15m:
 
         logger.info("[AGENT-GRID] Position cache set for global allocator")
 
+    def _get_candidate_key(self, ticker: str, side: str, price_cents: int) -> str:
+        # Generate a unique key for a candidate to prevent duplicate executions
+        # Used in global allocator to track which candidates have been executed
+        return f"{ticker}_{side}_{price_cents}c"
+
     
 
     async def start(self) -> None:
@@ -12065,6 +12603,76 @@ class LeanAgentGrid15m:
             "recent_activations_5m": recent_fallbacks,
             "timestamp": now,
         }
+
+    def _select_best_edge_per_asset(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Select the best edge candidate per asset.
+        
+        This ensures only 1 contract per asset per 15-minute window is executed,
+        selecting the optimal combination of edge quality and price efficiency.
+        
+        Based on prediction market execution research:
+        - Edge is the primary signal (model probability vs market probability)
+        - Among similar edges, cheaper contracts provide better risk-adjusted returns
+        - Lower capital exposure improves Kelly criterion sizing and reduces tail risk
+        
+        Args:
+            candidates: List of candidate dictionaries with keys including:
+                - agent_id: Agent identifier (e.g., "BTC_15M")
+                - asset: Asset symbol (e.g., "BTC")
+                - edge_pct: Edge percentage (e.g., 0.05 for 5%)
+                - price_cents: Contract price in cents
+        
+        Returns:
+            Filtered list with at most 1 candidate per asset
+        """
+        if not candidates:
+            return []
+        
+        # Group candidates by asset
+        asset_candidates: Dict[str, List[Dict[str, Any]]] = {}
+        valid_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+        
+        for candidate in candidates:
+            # Extract asset from agent_id or asset field
+            asset = candidate.get('asset')
+            if not asset:
+                agent_id = candidate.get('agent_id', '')
+                if agent_id:
+                    # Handle common formats: "BTC_15M", "ETH_15m", "SOL_15M", etc.
+                    asset = agent_id.split('_')[0].upper() if '_' in agent_id else agent_id.upper()
+            
+            # Only process valid crypto assets
+            if asset and asset in valid_assets:
+                if asset not in asset_candidates:
+                    asset_candidates[asset] = []
+                asset_candidates[asset].append(candidate)
+        
+        # Select best candidate for each asset
+        filtered_candidates = []
+        edge_similarity_threshold = 0.01  # 1% threshold
+        
+        for asset, asset_cands in asset_candidates.items():
+            if not asset_cands:
+                continue
+            
+            # Sort by edge_pct descending (higher edge is better)
+            asset_cands.sort(key=lambda c: c.get('edge_pct', 0), reverse=True)
+            
+            # Get the best edge
+            best_edge = asset_cands[0]
+            best_edge_pct = best_edge.get('edge_pct', 0)
+            
+            # Find candidates with similar edges (within threshold)
+            similar_edges = [c for c in asset_cands if abs(c.get('edge_pct', 0) - best_edge_pct) <= edge_similarity_threshold]
+            
+            # Among similar edges, select the cheapest (lowest price_cents)
+            if len(similar_edges) > 1:
+                similar_edges.sort(key=lambda c: c.get('price_cents', 999))
+                filtered_candidates.append(similar_edges[0])
+            else:
+                filtered_candidates.append(best_edge)
+        
+        return filtered_candidates
 
     
 
@@ -12196,7 +12804,11 @@ class LeanAgentGrid15m:
 
         try:
 
+            logger.info("[AGENT-GRID-INDICATOR-UPDATE-START] tick=%d num_agents=%d", tick, len(self._agents))
+
             for agent in self._agents:
+
+                logger.info("[AGENT-GRID-INDICATOR-AGENT] agent=%s has_indicator_stacks=%s", agent.config.name, hasattr(agent, '_indicator_stacks'))
 
                 if hasattr(agent, '_indicator_stacks') and agent._indicator_stacks:
 
@@ -12295,6 +12907,8 @@ class LeanAgentGrid15m:
                     except Exception as e:
 
                         logger.warning("[AGENT-GRID-INDICATOR-UPDATE] agent=%s failed to update indicator stacks: %s", agent.config.name, e)
+                else:
+                    logger.warning("[AGENT-GRID-INDICATOR-NO-STACKS] agent=%s does not have _indicator_stacks or it is empty", agent.config.name)
 
         except Exception as e:
 
@@ -12490,11 +13104,28 @@ class LeanAgentGrid15m:
                         try:
 
                             positions = self.position_cache.get_all_positions(validate_freshness=False)
+                            
+                            # CRITICAL FIX: Filter positions by current window to prevent counting stale positions
+                            # Get current window ticker for this asset
+                            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                            catalog = get_market_catalog()
+                            current_window_ticker = None
+                            if catalog:
+                                try:
+                                    current_market = catalog.get_current_15m_market(asset)
+                                    if current_market:
+                                        current_window_ticker = current_market.market.market_id
+                                except Exception as ticker_err:
+                                    logger.warning("[GLOBAL-ALLOCATOR] Failed to get current window ticker: %s", ticker_err)
 
                             for pos_ticker, pos_obj in positions.items():
 
                                 if pos_obj and pos_obj.contracts > 0:
-
+                                    # CRITICAL FIX: Only count positions from current window
+                                    # Skip stale positions from previous windows
+                                    if current_window_ticker and pos_ticker != current_window_ticker:
+                                        continue
+                                    
                                     # Check if position belongs to this asset
 
                                     if asset.lower() in pos_ticker.lower():
@@ -12593,778 +13224,164 @@ class LeanAgentGrid15m:
 
                 # Phase 3: Execute only chosen orders
 
-                executed_count = 0
+                try:
 
-                for order in chosen_orders:
+                    executed_count = 0
 
-                    try:
+                    for order in chosen_orders:
 
-                        # Find the original candidate for this order
+                        try:
 
-                        original_candidate = None
+                            # Find the original candidate for this order
 
-                        for candidate in candidates:
+                            original_candidate = None
 
-                            if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
+                            for candidate in candidates:
 
-                                original_candidate = candidate
+                                if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
 
-                                break
+                                    original_candidate = candidate
 
-                        
-
-                        if original_candidate:
-
-                            # CRITICAL FIX (2026-07-12): Remove slot allocation from agent_grid_15m
-                            # Slot allocation is now handled exclusively in order_router.route_order_async
-                            # This prevents double allocation (agent_grid_15m → kalshi_tools → order_router)
-                            # which was causing exposure cap exhaustion and slot state corruption
-                            #
-                            # Execution flow is now:
-                            # agent_grid_15m → kalshi_tools._kalshi_place_order → order_router.route_order_async
-                            #                                                    → slot_allocator.request_allocation (SINGLE POINT)
-                            
-                            # Execute via kalshi_tools which routes to order_router for slot allocation
-                            from merid.prediction.kalshi_tools import _kalshi_place_order
+                                    break
 
                             
 
-                            # Extract order parameters
+                            if original_candidate:
 
-                            ticker = order.ticker
-
-                            side = order.side
-
-                            action = order.action
-
-                            price_cents = order.price_cents
-
-                            count = order.count
-
-                            agent_name = order.agent_name
-
-                            
-
-                            # Extract signal metadata
-
-                            model_prob = original_candidate.get('model_prob')
-
-                            edge_pct = original_candidate.get('edge_pct')
-
-                            confidence = original_candidate.get('confidence')
-
-                            
-
-                            logger.info(
-
-                                "[GLOBAL-ALLOCATOR-EXECUTE] asset=%s ticker=%s side=%s price=%dc count=%d edge=%.1f%%",
-
-                                order.asset, ticker, side, price_cents, count, order.edge_pct
-
-                            )
-
-                            
-
-                            # CRITICAL FIX (2026-07-13): Check if this candidate was already executed
-                            # This prevents duplicate executions across consecutive cycles
-                            candidate_key = self._get_candidate_key(ticker, side, price_cents)
-                            if candidate_key in self._executed_candidates:
-                                logger.warning(
-                                    "[GLOBAL-ALLOCATOR] SKIP duplicate execution: ticker=%s side=%s price=%dc (already executed)",
-                                    ticker, side, price_cents
-                                )
-                                continue
-
-                            
-
-                            # CRITICAL FIX (2026-07-10): Session order count and cooldown are updated on FILL, not submission
-
-                            # This prevents perpetual cooldown blocks when orders don't fill (e.g., resting limit orders)
-
-                            # The update_cooldown_on_fill method handles both session count and cooldown on successful fills
-
-                            
-
-                            # Set default TP/SL
-                            # CRITICAL FIX (2026-07-12): Compute TP price from R-multiple to enable exit policy
-                            stop_loss_price_cents = max(1, price_cents - 5)
-                            take_profit_r_multiple = 1.0
-                            risk_cents = abs(price_cents - stop_loss_price_cents)
-                            take_profit_price_cents = price_cents + int(risk_cents * take_profit_r_multiple)
-
-                            order_result = await _kalshi_place_order(
-
-                                ticker=ticker,
-
-                                side=side,
-
-                                action=action,
-
-                                price_cents=price_cents,
-
-                                count=count,
-
-                                agent_name=agent_name,
-
-                                stop_loss_price_cents=stop_loss_price_cents,
-
-                                take_profit_r_multiple=take_profit_r_multiple,
-
-                                model_prob=model_prob,
-
-                                edge_pct=edge_pct,
-
-                                confidence=confidence
-
-                            )
-
-                            
-
-                            if order_result and order_result.success:
-
-                                executed_count += 1
-
-                                # Handle both ToolResult (duplicate/idempotent) and OrderResult objects
-
-                                order_id = getattr(order_result, 'order_id', 'duplicate/idempotent')
-
-                                logger.info("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS] asset=%s order_id=%s", order.asset, order_id)
-
-                                # CRITICAL FIX (2026-07-13): Mark candidate as executed to prevent duplicate executions
-                                candidate_key = self._get_candidate_key(ticker, side, price_cents)
-                                self._executed_candidates.add(candidate_key)
-                                logger.info(
-                                    "[GLOBAL-ALLOCATOR] Marked candidate as executed: ticker=%s side=%s price=%dc (total executed=%d)",
-                                    ticker, side, price_cents, len(self._executed_candidates)
-                                )
-
-                                # CRITICAL FIX (2026-07-12): Increment strip order count only on successful execution
-                                # Previously this was incremented on candidate generation, causing misleading counts
-                                strip_ticker = order.asset + "15M"  # Construct strip ticker
-                                if strip_ticker:
-                                    self._strip_order_counts[strip_ticker] = self._strip_order_counts.get(strip_ticker, 0) + 1
-                                    logger.info(
-                                        "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d",
-                                        order.asset, strip_ticker, self._strip_order_counts[strip_ticker]
-                                    )
-
-                            else:
-
-                                # Handle both ToolResult and OrderResult objects
-
-                                reason = "Unknown"
-
-                                if order_result:
-
-                                    # ToolResult uses error_message attribute
-                                    if hasattr(order_result, 'error_message') and order_result.error_message:
-                                        reason = order_result.error_message
-                                    # OrderResult uses reason attribute
-                                    elif hasattr(order_result, 'reason') and order_result.reason:
-                                        reason = order_result.reason
-                                    # Fallback to message attribute
-                                    elif hasattr(order_result, 'message') and order_result.message:
-                                        reason = order_result.message
-                                    # Last resort: check payload for reason
-                                    elif hasattr(order_result, 'payload') and isinstance(order_result.payload, dict):
-                                        reason = order_result.payload.get('reason', 'Unknown')
-
-                                logger.warning("[GLOBAL-ALLOCATOR-EXECUTE-FAILED] asset=%s reason=%s", order.asset, reason)
+                                # CRITICAL FIX (2026-07-12): Remove slot allocation from agent_grid_15m
+                                # Slot allocation is now handled exclusively in order_router.route_order_async
+                                # This prevents double allocation (agent_grid_15m → kalshi_tools → order_router)
+                                # which was causing exposure cap exhaustion and slot state corruption
+                                #
+                                # Execution flow is now:
+                                # agent_grid_15m → kalshi_tools._kalshi_place_order → order_router.route_order_async
+                                #                                                    → slot_allocator.request_allocation (SINGLE POINT)
                                 
-                                # CRITICAL FIX (2026-07-12): Slot release is now handled in order_router
-                                # Since slot allocation is now in order_router, slot release is also there
-                                # This prevents double-release bugs and ensures consistent slot state
+                                # Execute via kalshi_tools which routes to order_router for slot allocation
+                                from merid.prediction.kalshi_tools import _kalshi_place_order
 
-                    
+                                
 
-                    except Exception as e:
+                                # Extract order parameters
 
-                        logger.error("[GLOBAL-ALLOCATOR-EXECUTE-ERROR] asset=%s error=%s", order.asset, str(e), exc_info=True)
-                        
-                        # CRITICAL FIX (2026-07-12): Slot release is now handled in order_router
-                        # Since slot allocation is now in order_router, slot release is also there
-                        # This prevents double-release bugs and ensures consistent slot state
+                                ticker = order.ticker
 
-                
+                                side = order.side
 
-                logger.info("[GLOBAL-ALLOCATOR-CYCLE] Executed %d/%d chosen orders", executed_count, len(chosen_orders))
+                                action = order.action
 
-                
+                                price_cents = order.price_cents
 
-                # Return only executed candidates
+                                count = order.count
 
-                return [c for c in candidates if any(
+                                agent_name = order.agent_name
 
-                    c.get('ticker') == order.ticker and c.get('side') == order.side
+                                
 
-                    for order in chosen_orders
+                                # Extract signal metadata
 
-                )]
+                                model_prob = original_candidate.get('model_prob')
 
-            
+                                edge_pct = original_candidate.get('edge_pct')
+
+                                confidence = original_candidate.get('confidence')
+
+                                
+
+                                logger.info(
+
+                                    "[GLOBAL-ALLOCATOR-EXECUTE] asset=%s ticker=%s side=%s price=%dc count=%d edge=%.1f%%",
+
+                                    order.asset, ticker, side, price_cents, count, order.edge_pct
+
+                                )
+
+                                
+
+                                # CRITICAL FIX (2026-07-13): Check if this candidate was already executed
+                                # This prevents duplicate executions across consecutive cycles
+                                candidate_key = self._get_candidate_key(ticker, side, price_cents)
+                                if candidate_key in self._executed_candidates:
+                                    logger.warning(
+                                        "[GLOBAL-ALLOCATOR] SKIP duplicate execution: ticker=%s side=%s price=%dc (already executed)",
+                                        ticker, side, price_cents
+                                    )
+                                    continue
+
+                                
+
+                                # CRITICAL FIX (2026-07-10): Session order count and cooldown are updated on FILL, not submission
+
+                                # This prevents perpetual cooldown blocks when orders don't fill (e.g., resting limit orders)
+
+                                # The update_cooldown_on_fill method handles both session count and cooldown on successful fills
+
+                                
+
+                                # Set default TP/SL
+                                # CRITICAL FIX (2026-07-19): Compute TP price from R-multiple to enable exit policy
+                                # Previously only set take_profit_r_multiple but never computed take_profit_price_cents,
+                                # causing positions to have no TP target and exit policies to fail
+                                stop_loss_price_cents = max(1, price_cents - 5)
+                                take_profit_r_multiple = 1.0
+                                risk_cents = abs(price_cents - stop_loss_price_cents)
+                                take_profit_price_cents = price_cents + int(risk_cents * take_profit_r_multiple)
+                                
+                                # Execute the order
+                                result = await _kalshi_place_order(
+                                    ticker=ticker,
+                                    side=side,
+                                    action=action,
+                                    price_cents=price_cents,
+                                    count=count,
+                                    agent_name=agent_name,
+                                    model_prob=model_prob,
+                                    edge_pct=edge_pct,
+                                    confidence=confidence,
+                                    stop_loss_price_cents=stop_loss_price_cents,
+                                    take_profit_price_cents=take_profit_price_cents,
+                                    take_profit_r_multiple=take_profit_r_multiple
+                                )
+                                
+                                # CRITICAL FIX (2026-07-19): Only count as executed if order succeeded
+                                # Previously, rejected orders were counted as executed, causing incorrect
+                                # execution statistics (e.g., "executed=3/3" when only 1 actually executed)
+                                if result and result.success:
+                                    executed_count += 1
+                                else:
+                                    logger.warning(
+                                        "[GLOBAL-ALLOCATOR] Order rejected by venue: ticker=%s side=%s price=%dc reason=%s",
+                                        ticker, side, price_cents,
+                                        result.error_message if result and hasattr(result, 'error_message') else "unknown"
+                                    )
+                            else:
+                                logger.warning(
+                                    "[GLOBAL-ALLOCATOR] Original candidate not found for order: ticker=%s side=%s",
+                                    order.ticker, order.side
+                                )
+                        except Exception as e:
+                            logger.error(
+                                "[GLOBAL-ALLOCATOR] ERROR executing order: ticker=%s side=%s price=%dc error=%s",
+                                order.ticker, order.side, order.price_cents, str(e), exc_info=True
+                            )
+
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR] Execution complete: executed=%d/%d orders",
+                        executed_count, len(chosen_orders)
+                    )
+
+                except Exception as e:
+                    logger.error(
+                        "[GLOBAL-ALLOCATOR] CRITICAL ERROR in order execution phase: %s",
+                        str(e), exc_info=True
+                    )
 
             except Exception as e:
-
-                logger.error("[GLOBAL-ALLOCATOR-ERROR] Failed to run global allocator: %s", str(e), exc_info=True)
-
-                # Fallback: return all candidates (original behavior)
-
-                return candidates
-
+                logger.error(
+                    "[GLOBAL-ALLOCATOR] CRITICAL ERROR in global allocator phase: %s",
+                    str(e), exc_info=True
+                )
         
-
+        # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
+        # loop_15m expects run_cycle to return a list, not None
         return candidates
-
-    
-
-    def get_agent(self, name: str) -> Optional[LeanAgent15m]:
-
-        # Get agent by name.
-
-        for agent in self._agents:
-
-            if agent.config.name == name:
-
-                return agent
-
-        return None
-
-    
-
-    def get_all_agents(self) -> list[LeanAgent15m]:
-
-        # Get all agents.
-
-        return self._agents
-
-    def _get_candidate_key(self, ticker: str, side: str, price_cents: int) -> str:
-        """Generate a unique key for a candidate to detect duplicates.
-        
-        CRITICAL FIX (2026-07-13): This key is used to prevent duplicate executions
-        of the same order across consecutive cycles.
-        
-        Args:
-            ticker: Market ticker
-            side: Order side (yes/no)
-            price_cents: Order price in cents
-        
-        Returns:
-            Unique key string
-        """
-        return f"{ticker}:{side}:{price_cents}"
-
-    def _select_best_edge_per_asset(self, candidates: List[Dict]) -> List[Dict]:
-        """Select the cheapest contract with the best edge per asset.
-        
-        CRITICAL FIX (2026-07-16): Implements per-asset best-edge selection to ensure
-        only 1 contract per asset per 15-minute window is executed. This prevents
-        multiple executions for the same asset at different prices, which can exceed
-        the $1 global exposure cap even though each individual order is within limits.
-        
-        Algorithm:
-        1. Group candidates by asset (BTC, ETH, SOL, XRP, DOGE)
-        2. For each asset, find the candidate with the highest edge_pct
-        3. If multiple candidates have similar edge (within 1% threshold), select the cheapest
-        4. Return at most 1 candidate per asset
-        
-        This approach is based on prediction market execution research:
-        - Edge is the primary signal (model probability vs market probability)
-        - Among similar edges, cheaper contracts provide better risk-adjusted returns
-        - Lower capital exposure improves Kelly criterion sizing and reduces tail risk
-        
-        Args:
-            candidates: List of candidate dictionaries from agent signals
-            
-        Returns:
-            Filtered list with at most 1 candidate per asset
-        """
-        if not candidates:
-            return []
-        
-        # Group candidates by asset
-        candidates_by_asset = {}
-        for candidate in candidates:
-            # Extract asset from agent_id or asset field
-            agent_id = candidate.get('agent_id', '')
-            if agent_id and '_' in agent_id:
-                asset = agent_id.split('_')[0].upper()
-            else:
-                asset = candidate.get('asset', 'UNKNOWN')
-            
-            # Validate it's one of the 5 crypto assets
-            if asset not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
-                continue
-            
-            if asset not in candidates_by_asset:
-                candidates_by_asset[asset] = []
-            candidates_by_asset[asset].append(candidate)
-        
-        # Select best candidate per asset
-        filtered_candidates = []
-        edge_similarity_threshold = 0.01  # 1% threshold for edge similarity
-        
-        for asset, asset_candidates in candidates_by_asset.items():
-            if not asset_candidates:
-                continue
-            
-            # Sort by edge_pct descending (best edge first)
-            asset_candidates.sort(key=lambda c: c.get('edge_pct', 0.0), reverse=True)
-            
-            # Get the best edge
-            best_edge = asset_candidates[0].get('edge_pct', 0.0)
-            
-            # Find all candidates with edge within threshold of best
-            similar_edge_candidates = [
-                c for c in asset_candidates
-                if abs(c.get('edge_pct', 0.0) - best_edge) <= edge_similarity_threshold
-            ]
-            
-            # Among similar edges, select the cheapest (lowest price_cents)
-            if len(similar_edge_candidates) > 1:
-                similar_edge_candidates.sort(key=lambda c: c.get('price_cents', 100))
-                selected = similar_edge_candidates[0]
-                logger.info(
-                    "[BEST-EDGE-SELECTION] asset=%s selected_cheapest: edge=%.2f%% price=%dc (had %d similar edges)",
-                    asset, selected.get('edge_pct', 0.0) * 100, selected.get('price_cents', 0), len(similar_edge_candidates)
-                )
-            else:
-                selected = asset_candidates[0]
-                logger.info(
-                    "[BEST-EDGE-SELECTION] asset=%s selected_best: edge=%.2f%% price=%dc",
-                    asset, selected.get('edge_pct', 0.0) * 100, selected.get('price_cents', 0)
-                )
-            
-            filtered_candidates.append(selected)
-        
-        return filtered_candidates
-
-
-
-# Build function for agent grid
-
-async def build_15m_agent_grid(
-
-    catalog: Any,
-
-    bankroll: Any,
-
-    spot_provider: Any,
-
-    order_router: Any,
-
-    loop: Optional[Any] = None,
-
-    unified_edge_config: Any = None,
-
-    ws_bridge: Optional[Any] = None,
-
-) -> LeanAgentGrid15m:
-
-    # Build the 5 crypto 15m agents for Kalshi trading
-
-    # This function:
-
-    # - Imports only essential agent classes
-
-    # - Creates 5 agent instances (BTC, ETH, SOL, XRP, DOGE)
-
-    # - Returns a LeanAgentGrid15m instance
-
-    # NO imports from:
-
-    # - merid.prediction.agent_grid (old generic grid)
-
-    # - merid.pm_runtime
-
-    # - trading.paper_trading
-
-    # - merid.reconciliation.venue
-
-    # - reflection.*
-
-    # - social broadcasters
-
-    
-
-    print("[AGENT-GRID-15M VERSION v20260529a-cache-fix] build_15m_agent_grid() called - agent grid initialization", flush=True)
-
-    logger.info("[AGENT-GRID-15M VERSION v20260529a-cache-fix] build_15m_agent_grid() called - agent grid initialization")
-
-    logger.info("[AGENT-GRID-15M] Building 5 crypto 15m agents...")
-
-    print("[AGENT-GRID-15M] About to start agent creation loop", flush=True)
-
-    
-
-    # Get market state store and risk config
-
-    # CRITICAL FIX: Get market_state_store directly from singleton
-
-    # The ws_bridge and loop aren't available during P1.10 startup
-
-    market_state_store = None
-
-    risk_config = None
-
-    
-
-    try:
-
-        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-
-        market_state_store = get_kalshi_market_state_store()
-
-        logger.info("[AGENT-GRID-15M] Got market_state_store from singleton")
-
-    except Exception as e:
-
-        logger.warning("[AGENT-GRID-15M] Failed to get market_state_store from singleton: %s", e)
-
-    
-
-    # Risk config will be set later by the loop (created in P2.3)
-
-    # For now, agents will use None and validation will be skipped until risk is ready
-
-    
-
-    # Phase 1: Load velocity model coefficients from profile
-
-    velocity_coefficients = {}
-
-    velocity_thresholds = {}
-
-    momentum_weights_windows = [10, 30, 60]
-
-    momentum_weights_values = [0.2, 0.3, 0.5]
-
-    logit_fusion_velocity_weight = 0.7
-
-    logit_fusion_mean_reversion_weight = 0.3
-
-    near_expiry_guard_sec = 300
-
-    calibration_enabled = False
-
-    calibration_auto_fit = True
-
-    calibration_min_samples = 100
-
-    calibration_max_samples = 1000
-
-    calibration_regularization = 0.0001
-
-    calibration_fit_interval_hours = 24
-
-    per_asset_cooldown_s = 3  # CRITICAL FIX: 2026-07-12 - Aligned to 3s (was 10s) to match profile YAML and code default
-
-    signal_mode = "trend"  # Default signal mode
-
-    price_based_buy_threshold = 0.60  # Buy YES in sweet spot (60-70c range per Polymarket data)
-
-    price_based_sell_threshold = 0.90  # Sell when price >= 0.90 (profit taking)
-
-    # Phase 4.1: Multi-window velocity configuration defaults
-
-    velocity_ema_period = 5  # Default EMA smoothing period
-
-    atr_period = 3  # Default ATR period (reduced from 7 for faster warmup)
-
-    zscore_period = 20  # Default Z-score period
-
-    try:
-
-        from merid.risk.profiles.crypto_15m_profile import get_active_profile
-
-        profile_adapter = get_active_profile()
-
-        logger.info("[AGENT-GRID-15M] Profile loaded: %s", profile_adapter is not None)
-
-        if profile_adapter and profile_adapter._profile:
-
-            profile = profile_adapter._profile
-
-            velocity_coefficients = {
-
-                "BTC": (profile.velocity_model_alpha_0_btc, profile.velocity_model_alpha_1_btc),
-
-                "ETH": (profile.velocity_model_alpha_0_eth, profile.velocity_model_alpha_1_eth),
-
-                "SOL": (profile.velocity_model_alpha_0_sol, profile.velocity_model_alpha_1_sol),
-
-                "XRP": (profile.velocity_model_alpha_0_xrp, profile.velocity_model_alpha_1_xrp),
-
-                "DOGE": (profile.velocity_model_alpha_0_doge, profile.velocity_model_alpha_1_doge),
-
-            }
-
-            # Load per-asset velocity thresholds from profile
-
-            velocity_thresholds = {
-
-                "BTC": profile.velocity_threshold_btc,
-
-                "ETH": profile.velocity_threshold_eth,
-
-                "SOL": profile.velocity_threshold_sol,
-
-                "XRP": profile.velocity_threshold_xrp,
-
-                "DOGE": profile.velocity_threshold_doge,
-
-            }
-
-            # Phase 4.1: Load momentum weights from profile
-
-            momentum_weights_windows = profile.momentum_weights_windows
-
-            momentum_weights_values = profile.momentum_weights_values
-
-            # Phase 4.1: Load multi-window velocity configuration from profile
-
-            if hasattr(profile, 'velocity_ema_period'):
-
-                velocity_ema_period = profile.velocity_ema_period
-
-            if hasattr(profile, 'atr_period'):
-
-                atr_period = profile.atr_period
-
-            if hasattr(profile, 'zscore_period'):
-
-                zscore_period = profile.zscore_period
-
-            # Phase 4.4: Load logit fusion weights from profile
-
-            logit_fusion_velocity_weight = profile.logit_fusion_velocity_weight
-
-            logit_fusion_mean_reversion_weight = profile.logit_fusion_mean_reversion_weight
-
-            # Phase 4.5: Load near expiry guard from profile
-
-            near_expiry_guard_sec = profile.near_expiry_guard_sec
-
-            # Phase 5.2: Load calibration config from profile
-
-            calibration_enabled = profile.calibration_enabled
-
-            calibration_auto_fit = profile.calibration_auto_fit
-
-            calibration_min_samples = profile.calibration_min_samples
-
-            calibration_max_samples = profile.calibration_max_samples
-
-            calibration_regularization = profile.calibration_regularization
-
-            calibration_fit_interval_hours = profile.calibration_fit_interval_hours
-
-            # Load throttling config from profile
-
-            per_asset_cooldown_s = int(profile.throttling_per_asset_cooldown_sec)
-
-            # 2026 Research-Based Risk Management: Load new throttling parameters
-
-            max_orders_per_15m_window = int(profile.throttling_max_orders_per_15m_window)
-
-            consecutive_loss_pause = int(profile.throttling_consecutive_loss_pause)
-
-            max_session_risk_pct = float(profile.throttling_max_session_risk_pct)
-
-            # Phase 5.3: Load signal mode and price-based strategy config from profile
-
-            signal_mode = profile.signal_mode
-
-            price_based_buy_threshold = profile.price_based_buy_threshold
-
-            price_based_sell_threshold = profile.price_based_sell_threshold
-
-            logger.info("[AGENT-GRID-15M] Loaded throttling_per_asset_cooldown_sec=%s from profile", per_asset_cooldown_s)
-
-            logger.info("[AGENT-GRID-15M] Loaded signal_mode=%s from profile", signal_mode)
-
-            logger.info("[AGENT-GRID-15M] Loaded velocity coefficients, velocity thresholds, momentum weights, logit fusion config, calibration config, throttling config, and price-based strategy config from profile")
-
-        else:
-
-            logger.warning("[AGENT-GRID-15M] Failed to load profile, using default coefficients and weights")
-
-    except Exception as e:
-
-        logger.warning("[AGENT-GRID-15M] Failed to load velocity coefficients from profile: %s", e)
-
-    
-
-    logger.info("[AGENT-GRID-15M] Final per_asset_cooldown_s=%s", per_asset_cooldown_s)
-
-    
-
-    # CRITICAL FIX: Provide default values in case profile loading fails
-
-    if 'max_orders_per_15m_window' not in locals():
-
-        max_orders_per_15m_window = 12  # Default: 12 orders per 15m window
-
-        logger.warning("[AGENT-GRID-15M] Profile loading failed, using default max_orders_per_15m_window=12")
-
-    if 'consecutive_loss_pause' not in locals():
-
-        consecutive_loss_pause = 3  # Default: pause after 3 consecutive losses
-
-        logger.warning("[AGENT-GRID-15M] Profile loading failed, using default consecutive_loss_pause=3")
-
-    if 'max_session_risk_pct' not in locals():
-
-        max_session_risk_pct = 0.10  # Default: 10% session risk cap
-
-        logger.warning("[AGENT-GRID-15M] Profile loading failed, using default max_session_risk_pct=0.10")
-
-    
-
-    # Create 5 agents for BTC, ETH, SOL, XRP, DOGE
-
-    agents = []
-
-    
-
-    asset_configs = [
-
-        ("BTC", ["KXBTC15M"]),
-
-        ("ETH", ["KXETH15M"]),
-
-        ("SOL", ["KXSOL15M"]),
-
-        ("XRP", ["KXXRP15M"]),
-
-        ("DOGE", ["KXDOGE15M"]),
-
-    ]
-
-    
-
-    for asset, series_tickers in asset_configs:
-
-        # Phase 1: Get velocity coefficients for this asset
-
-        alpha_0, alpha_1 = velocity_coefficients.get(asset, (0.0, 1000.0))
-
-        # Get per-asset velocity threshold
-
-        velocity_threshold = velocity_thresholds.get(asset, 0.002)  # Default to 0.002 (0.2%)
-
-        
-
-        config = LeanAgentConfig(
-
-            name=f"{asset}_15M",
-
-            series_tickers=series_tickers,
-
-            alpha_0=alpha_0,
-
-            alpha_1=alpha_1,
-
-            velocity_threshold=velocity_threshold,
-
-            velocity_windows=momentum_weights_windows,
-
-            momentum_weights=momentum_weights_values,
-
-            velocity_ema_period=velocity_ema_period,
-
-            atr_period=atr_period,
-
-            zscore_period=zscore_period,
-
-            logit_fusion_velocity_weight=logit_fusion_velocity_weight,
-
-            logit_fusion_mean_reversion_weight=logit_fusion_mean_reversion_weight,
-
-            near_expiry_guard_sec=near_expiry_guard_sec,
-
-            calibration_enabled=calibration_enabled,
-
-            calibration_auto_fit=calibration_auto_fit,
-
-            calibration_min_samples=calibration_min_samples,
-
-            calibration_max_samples=calibration_max_samples,
-
-            calibration_regularization=calibration_regularization,
-
-            calibration_fit_interval_hours=calibration_fit_interval_hours,
-
-            per_asset_cooldown_s=per_asset_cooldown_s,
-
-            # 2026 Research-Based Risk Management: Pass new throttling parameters
-
-            max_orders_per_15m_window=max_orders_per_15m_window,
-
-            consecutive_loss_pause=consecutive_loss_pause,
-
-            max_session_risk_pct=max_session_risk_pct,
-
-            signal_mode=signal_mode,
-
-            price_based_buy_threshold=price_based_buy_threshold,
-
-            price_based_sell_threshold=price_based_sell_threshold,
-
-        )
-
-        
-
-        agent = LeanAgent15m(
-
-            config=config,
-
-            catalog=catalog,
-
-            market_state_store=market_state_store,
-
-            spot_provider=spot_provider,
-
-            order_router=order_router,
-
-            risk_config=risk_config,
-
-        )
-
-        
-
-        agents.append(agent)
-
-        logger.info("[AGENT-CREATED] asset=%s name=%s alpha_0=%.2f alpha_1=%.2f", asset, config.name, alpha_0, alpha_1)
-
-    
-
-    grid = LeanAgentGrid15m(agents=agents)
-
-    logger.info("[AGENT-GRID-BUILT] LeanAgentGrid15m built with %d agents", len(agents))
-
-    
-
-    return grid
-
-
-
-# Global agent grid instance
-
-# CRITICAL FIX (2026-07-18): Remove duplicate _agent_grid definitions
-# There were two identical definitions causing potential state management issues
-# Keep only one clean definition
-_agent_grid: Optional[LeanAgentGrid15m] = None
-
-
-def get_agent_grid() -> Optional[LeanAgentGrid15m]:
-    """Get the global agent grid instance."""
-    global _agent_grid
-    return _agent_grid
-
-
-def set_agent_grid(grid: LeanAgentGrid15m) -> None:
-    """Set the global agent grid instance."""
-    global _agent_grid
-    _agent_grid = grid
-    logger.info("[AGENT-GRID-SET] Global agent grid instance set")
-

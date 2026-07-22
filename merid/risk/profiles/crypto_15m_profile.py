@@ -150,7 +150,7 @@ class Crypto15mProfile:
     agent_max_orders_per_window: int
     agent_max_yes_position: int
     agent_max_no_position: int
-    agent_max_concurrent_trades: int
+    # CRITICAL FIX (2026-07-17): Removed agent_max_concurrent_trades - $1 exposure cap is the limit
     agent_minutes_before_expiry: int
     agent_cutoff_minutes_before_expiry: int
     
@@ -250,9 +250,8 @@ class Crypto15mProfile:
     throttling_global_orders_window_sec: float
     throttling_global_orders_limit: int
     throttling_per_asset_cooldown_sec: float
-    throttling_per_strip_order_limit: int
+    # CRITICAL FIX (2026-07-17): Removed throttling_per_strip_order_limit and throttling_max_orders_per_15m_window - $1 exposure cap is the limit
     throttling_per_strip_notional_usd: float
-    throttling_max_orders_per_15m_window: int  # 2026 research: Max 5 trades per session
     throttling_consecutive_loss_pause: int  # 2026 research: Pause after N consecutive losses
     throttling_max_session_risk_pct: float  # 2026 research: Max session risk as % of capital
     
@@ -965,8 +964,12 @@ class Crypto15mProfileAdapter:
                 signal_mode=raw.get('signal_mode', 'hybrid'),  # Default: hybrid for maximum opportunity capture
                 
                 # Price-based strategy parameters
-                price_based_buy_threshold=raw.get('price_based', {}).get('buy_threshold', 0.70),
-                price_based_sell_threshold=raw.get('price_based', {}).get('sell_threshold', 0.90),
+                # CRITICAL FIX (2026-07-22): Fixed inverted thresholds causing YES-side bias
+                # Previous defaults: 0.70/0.90 created 20c dead zone and bought YES at expensive prices
+                # Correct defaults: 0.30/0.70 for symmetric trading around 0.50
+                # These defaults are used if YAML values are not present
+                price_based_buy_threshold=raw.get('price_based', {}).get('buy_threshold', 0.30),
+                price_based_sell_threshold=raw.get('price_based', {}).get('sell_threshold', 0.70),
                 
                 # Price range configuration for entry band restrictions
                 # CRITICAL FIX: max_price_cents default 75 to match guardrails_max_contract_price_cents (75c expanded range)
@@ -1067,7 +1070,7 @@ class Crypto15mProfileAdapter:
                 agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 24),  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
                 agent_max_yes_position=agent_defaults.get('max_yes_position', 1),  # FIXED: Default 1 to match YAML (2026-07-14 fix)
                 agent_max_no_position=agent_defaults.get('max_no_position', 1),  # FIXED: Default 1 to match YAML (2026-07-14 fix)
-                agent_max_concurrent_trades=agent_defaults.get('max_concurrent_trades', 5),  # FIXED: Default 5 to match YAML (was 3),
+                # CRITICAL FIX (2026-07-17): Removed agent_max_concurrent_trades - $1 exposure cap is the limit
                 agent_minutes_before_expiry=agent_defaults.get('minutes_before_expiry', 15),  # FIXED: Default 15 to match YAML (2026-07-16 fix)
                 agent_cutoff_minutes_before_expiry=agent_defaults.get('cutoff_minutes_before_expiry', 0),  # FIXED: Default 0 to match YAML (2026-07-16 fix)
                 
@@ -1172,9 +1175,8 @@ class Crypto15mProfileAdapter:
                 throttling_global_orders_window_sec=float(throttling.get('global_orders_window_sec', 60.0)),
                 throttling_global_orders_limit=int(throttling.get('global_orders_limit', 30)),  # FIXED: Default 30 to match YAML (2026-07-16 fix)
                 throttling_per_asset_cooldown_sec=float(throttling.get('per_asset_cooldown_sec', 3.0)),  # 2026-07-11: updated to 3s for 15m alignment
-                throttling_per_strip_order_limit=int(throttling.get('per_strip_order_limit', 1)),
+                # CRITICAL FIX (2026-07-17): Removed throttling_per_strip_order_limit and throttling_max_orders_per_15m_window - $1 exposure cap is the limit
                 throttling_per_strip_notional_usd=float(throttling.get('per_strip_notional_usd', 0.0)),
-                throttling_max_orders_per_15m_window=int(throttling.get('max_orders_per_15m_window', 24)),  # 2026-07-11: updated to 24 for 15m alignment
                 throttling_consecutive_loss_pause=int(throttling.get('consecutive_loss_pause', 3)),
                 throttling_max_session_risk_pct=self._normalize_percentage_value(throttling.get('max_session_risk_pct', 0.10)),
                 
