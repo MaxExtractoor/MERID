@@ -138,10 +138,11 @@ catalog_staleness_enforced: false
 # - volatility_reversion: Fade extreme panic moves (Turbine research winner - 93/96 profitable, +4.90% mean ROI)
 # - hybrid: Allow both modes (default for maximum opportunity capture)
 # - price_based: Turbine research winner - buy YES when price <= 0.50, sell when price >= 0.70
-# 2026-07-17: Added volatility_reversion based on Turbine 5,000-strategy backtest - panic_fade was 93/96 profitable
+# 2026-07-18: DISABLED volatility_reversion (panic_fade) - causing losses by betting against trend
+# System was consistently betting NO for 100+ trades, losing $184.32 on $1.6k volume
+# Panic fade was fading the wrong way - buying high expecting reversion down, selling low expecting reversion up
 # Turbine research showed mean reversion failed completely (0 for 432 variants) on 15-minute markets
-# Volatility reversion (panic_fade) is the current winning archetype on KXBTC15M
-signal_mode: volatility_reversion  # Options: mean_reversion, momentum_fvg, volatility_reversion, hybrid, price_based, trend - 2026-07-17: Switched to volatility_reversion (panic_fade) based on Turbine research - 93/96 profitable variants
+signal_mode: momentum_fvg  # Options: mean_reversion, momentum_fvg, volatility_reversion, hybrid, price_based, trend - 2026-07-19: Switched to momentum_fvg to enable trading within 10-75c price range
 
 # ── Phase 1 Profitability Enhancements ─────────────────────────────────────────
 # YES/NO Sum Arbitrage, Market Making, and Correlation Tracking
@@ -438,14 +439,14 @@ momentum_fvg:
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
 
 # ── Price-Based Strategy Parameters (2026 Optimized for Swing Trading) ───────────
-# Optimized for swing trading: wider entry range to capture YES/NO reversals
-# 2026 findings: swing trading requires wider entry zones to maximize reversal opportunities
-# Previous 0.52/0.68 range (16¢ no-trade zone) was too restrictive for swing mode
-# OPTIMIZED: 0.48/0.72 range (12¢ no-trade zone) for better swing opportunity capture
-# This allows entering YES at 48¢ and NO at 72¢, maximizing swing potential
+# CRITICAL FIX (2026-07-22): Fixed inverted thresholds causing YES-side bias
+# Previous: buy_threshold=0.70, sell_threshold=0.95 created 25c dead zone and bought YES at expensive prices
+# Correct: buy_threshold=0.30 (buy YES when cheap), sell_threshold=0.70 (buy NO when expensive)
+# This creates symmetric trading around 0.50 and eliminates the YES bias
+# Economic rationale: Buy YES when probability is low (cheap YES), buy NO when probability is high (cheap NO)
 price_based:
-  buy_threshold: 0.48  # Buy YES when price <= 0.48 (lowered from 0.52 for swing mode)
-  sell_threshold: 0.72  # Buy NO when price >= 0.72 (raised from 0.68 for swing mode)
+  buy_threshold: 0.30  # Buy YES when price <= 30c (cheap YES contracts)
+  sell_threshold: 0.70  # Buy NO when price >= 70c (cheap NO contracts)
 
 # ── Hybrid Mode Price Caps (2026 Optimized) ───────────────────────────────
 # Hybrid mode combines momentum signals with price discipline
