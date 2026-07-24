@@ -5,6 +5,8 @@ This script scans live logs for bias and exit health issues:
 - Markets where signal.side=NO but no NO orders were ever sent
 - Any [EXIT-INVARIANT-VIOLATION]
 - Any case where post_size >= pre_size on an EXIT path
+- Any [PRICE-SIDE-CHECK-VIOLATION] (price/side mismatch)
+- Count of cheap_wrong_side_candidates (cheapness on wrong side correctly ignored)
 
 Usage:
     python scripts/scan_bias_and_exit_health.py <log_file_path> [--output json|csv] [--output-file <path>]
@@ -20,7 +22,9 @@ Output Schema (JSON):
         "total_issues": 0,
         "exit_invariant_violations": 0,
         "exit_post_size_issues": 0,
-        "bias_issues": 0
+        "bias_issues": 0,
+        "price_side_mismatches": 0,
+        "cheap_wrong_side_candidates": 0
     },
     "assets": {
         "BTC": {
@@ -30,7 +34,9 @@ Output Schema (JSON):
             "yes_orders_sent": 5,
             "exit_invariant_violations": 0,
             "exit_post_size_issues": 0,
-            "bias_issues": 0
+            "bias_issues": 0,
+            "price_side_mismatches": 0,
+            "cheap_wrong_side_candidates": 0
         },
         "ETH": { ... },
         "SOL": { ... },
@@ -45,14 +51,24 @@ Output Schema (JSON):
             "market_id": "KXBTC15M-26JUL211745-45",
             "position_id": "abc123",
             "details": "..."
+        },
+        {
+            "type": "PRICE-SIDE-CHECK-VIOLATION",
+            "timestamp": "2026-07-24T12:00:00Z",
+            "line_num": 5678,
+            "market_id": "KXBTC15M-26JUL211745-45",
+            "asset": "BTC",
+            "thesis_side": "no",
+            "order_side": "BUY_YES",
+            "details": "Order side does not match thesis_side from intent"
         }
     ]
 }
 
 Output Schema (CSV):
-timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues
-2026-07-24T12:00:00Z,BTC,10,10,5,5,0,0,0
-2026-07-24T12:00:00Z,ETH,8,8,6,6,0,0,0
+timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues,price_side_mismatches,cheap_wrong_side_candidates
+2026-07-24T12:00:00Z,BTC,10,10,5,5,0,0,0,0,0
+2026-07-24T12:00:00Z,ETH,8,8,6,6,0,0,0,0,0
 ...
 """
 
@@ -90,6 +106,10 @@ class BiasAndExitHealthScanner:
         self.exit_invariant_violations: List[Dict] = []
         self.exit_post_size_issues: List[Dict] = []
         
+        # Track price-side invariants
+        self.price_side_mismatches: List[Dict] = []
+        self.cheap_wrong_side_candidates: List[Dict] = []
+        
         # Per-asset metrics
         self.asset_metrics: Dict[str, Dict] = {
             "BTC": {
@@ -99,7 +119,9 @@ class BiasAndExitHealthScanner:
                 "yes_orders_sent": 0,
                 "exit_invariant_violations": 0,
                 "exit_post_size_issues": 0,
-                "bias_issues": 0
+                "bias_issues": 0,
+                "price_side_mismatches": 0,
+                "cheap_wrong_side_candidates": 0
             },
             "ETH": {
                 "no_signals_seen": 0,
@@ -108,7 +130,9 @@ class BiasAndExitHealthScanner:
                 "yes_orders_sent": 0,
                 "exit_invariant_violations": 0,
                 "exit_post_size_issues": 0,
-                "bias_issues": 0
+                "bias_issues": 0,
+                "price_side_mismatches": 0,
+                "cheap_wrong_side_candidates": 0
             },
             "SOL": {
                 "no_signals_seen": 0,
@@ -117,7 +141,9 @@ class BiasAndExitHealthScanner:
                 "yes_orders_sent": 0,
                 "exit_invariant_violations": 0,
                 "exit_post_size_issues": 0,
-                "bias_issues": 0
+                "bias_issues": 0,
+                "price_side_mismatches": 0,
+                "cheap_wrong_side_candidates": 0
             },
             "XRP": {
                 "no_signals_seen": 0,
@@ -126,7 +152,9 @@ class BiasAndExitHealthScanner:
                 "yes_orders_sent": 0,
                 "exit_invariant_violations": 0,
                 "exit_post_size_issues": 0,
-                "bias_issues": 0
+                "bias_issues": 0,
+                "price_side_mismatches": 0,
+                "cheap_wrong_side_candidates": 0
             },
             "DOGE": {
                 "no_signals_seen": 0,
@@ -135,7 +163,9 @@ class BiasAndExitHealthScanner:
                 "yes_orders_sent": 0,
                 "exit_invariant_violations": 0,
                 "exit_post_size_issues": 0,
-                "bias_issues": 0
+                "bias_issues": 0,
+                "price_side_mismatches": 0,
+                "cheap_wrong_side_candidates": 0
             }
         }
         
@@ -176,6 +206,14 @@ class BiasAndExitHealthScanner:
         # Check for exit post_size >= pre_size
         if "entry_or_exit=exit" in line and "pre_position_size" in line and "expected_post_position_size" in line:
             self._parse_exit_post_size(line, line_num)
+        
+        # Check for PRICE-SIDE-CHECK-VIOLATION
+        if "[PRICE-SIDE-CHECK-VIOLATION]" in line:
+            self._parse_price_side_violation(line, line_num)
+        
+        # Check for PRICE-SIDE-CHECK-REJECT (cheap wrong side correctly ignored)
+        if "[PRICE-SIDE-CHECK-REJECT]" in line:
+            self._parse_price_side_reject(line, line_num)
         
         # Check for signal side
         if "signal_side=" in line:
@@ -276,6 +314,54 @@ class BiasAndExitHealthScanner:
                 elif outcome_side == "yes":
                     self.asset_metrics[asset]["yes_orders_sent"] += 1
     
+    def _parse_price_side_violation(self, line: str, line_num: int):
+        """Parse PRICE-SIDE-CHECK-VIOLATION log entry."""
+        market_id = self._extract_field(line, "ticker=")
+        asset = self._get_asset_from_market_id(market_id)
+        thesis_side = self._extract_field(line, "thesis_side=")
+        order_side = self._extract_field(line, "order_side=")
+        strike_target = self._extract_field(line, "strike_target=")
+        
+        violation = {
+            "line_num": line_num,
+            "line": line.strip(),
+            "timestamp": self._extract_timestamp(line),
+            "market_id": market_id,
+            "asset": asset,
+            "thesis_side": thesis_side,
+            "order_side": order_side,
+            "strike_target": strike_target,
+            "type": "PRICE-SIDE-CHECK-VIOLATION"
+        }
+        self.price_side_mismatches.append(violation)
+        
+        # Update asset metrics
+        if asset in self.asset_metrics:
+            self.asset_metrics[asset]["price_side_mismatches"] += 1
+    
+    def _parse_price_side_reject(self, line: str, line_num: int):
+        """Parse PRICE-SIDE-CHECK-REJECT log entry (cheap wrong side correctly ignored)."""
+        market_id = self._extract_field(line, "asset=")
+        if not market_id:
+            market_id = self._extract_field(line, "ticker=")
+        asset = self._get_asset_from_market_id(market_id)
+        thesis_side = self._extract_field(line, "thesis_side=")
+        
+        reject = {
+            "line_num": line_num,
+            "line": line.strip(),
+            "timestamp": self._extract_timestamp(line),
+            "market_id": market_id,
+            "asset": asset,
+            "thesis_side": thesis_side,
+            "type": "PRICE-SIDE-CHECK-REJECT"
+        }
+        self.cheap_wrong_side_candidates.append(reject)
+        
+        # Update asset metrics
+        if asset in self.asset_metrics:
+            self.asset_metrics[asset]["cheap_wrong_side_candidates"] += 1
+    
     def _extract_field(self, line: str, field: str) -> str:
         """Extract a field value from a log line."""
         pattern = rf"{field}(\S+)"
@@ -349,18 +435,45 @@ class BiasAndExitHealthScanner:
         else:
             print("\n✅ No bias issues found (signal=NO markets have NO orders)")
         
+        # Report price-side mismatches
+        if self.price_side_mismatches:
+            print(f"\n❌ CRITICAL: Found {len(self.price_side_mismatches)} PRICE-SIDE-CHECK-VIOLATION entries")
+            print("-" * 80)
+            for violation in self.price_side_mismatches:
+                print(f"  Line {violation['line_num']}: {violation['timestamp']}")
+                print(f"    Market: {violation['market_id']} ({violation['asset']})")
+                print(f"    Thesis side: {violation['thesis_side']}, Order side: {violation['order_side']}")
+                print(f"    {violation['line'][:100]}...")
+        else:
+            print("\n✅ No PRICE-SIDE-CHECK-VIOLATION entries found")
+        
+        # Report cheap wrong side candidates (correctly ignored)
+        if self.cheap_wrong_side_candidates:
+            print(f"\nℹ️  INFO: Found {len(self.cheap_wrong_side_candidates)} cheap wrong side candidates (correctly ignored)")
+            print("-" * 80)
+            for reject in self.cheap_wrong_side_candidates[:5]:  # Show first 5
+                print(f"  Line {reject['line_num']}: {reject['timestamp']}")
+                print(f"    Market: {reject['market_id']} ({reject['asset']})")
+                print(f"    Thesis side: {reject['thesis_side']}")
+            if len(self.cheap_wrong_side_candidates) > 5:
+                print(f"  ... and {len(self.cheap_wrong_side_candidates) - 5} more")
+        else:
+            print("\n✅ No cheap wrong side candidates found")
+        
         # Summary
         print("\n" + "=" * 80)
         print("SUMMARY")
         print("=" * 80)
-        total_issues = len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + len(bias_issues)
+        total_issues = len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + len(bias_issues) + len(self.price_side_mismatches)
         if total_issues == 0:
-            print("✅ ALL CHECKS PASSED - No bias or exit health issues detected")
+            print("✅ ALL CHECKS PASSED - No bias, exit health, or price-side issues detected")
         else:
             print(f"❌ {total_issues} ISSUES DETECTED")
             print(f"   - EXIT-INVARIANT-VIOLATION: {len(self.exit_invariant_violations)}")
             print(f"   - Exit post_size issues: {len(self.exit_post_size_issues)}")
             print(f"   - Bias issues: {len(bias_issues)}")
+            print(f"   - PRICE-SIDE-CHECK-VIOLATION: {len(self.price_side_mismatches)}")
+            print(f"   - Cheap wrong side candidates (correctly ignored): {len(self.cheap_wrong_side_candidates)}")
     
     def _check_bias_issues(self) -> List[str]:
         """Check for markets where signal=NO but no NO orders were sent."""
@@ -382,13 +495,15 @@ class BiasAndExitHealthScanner:
             "scan_timestamp": datetime.utcnow().isoformat() + "Z",
             "log_file": str(self.log_file_path),
             "summary": {
-                "total_issues": len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + len(bias_issues),
+                "total_issues": len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + len(bias_issues) + len(self.price_side_mismatches),
                 "exit_invariant_violations": len(self.exit_invariant_violations),
                 "exit_post_size_issues": len(self.exit_post_size_issues),
-                "bias_issues": len(bias_issues)
+                "bias_issues": len(bias_issues),
+                "price_side_mismatches": len(self.price_side_mismatches),
+                "cheap_wrong_side_candidates": len(self.cheap_wrong_side_candidates)
             },
             "assets": self.asset_metrics,
-            "issues": self.exit_invariant_violations + self.exit_post_size_issues
+            "issues": self.exit_invariant_violations + self.exit_post_size_issues + self.price_side_mismatches
         }
         
         return json.dumps(result, indent=2)
@@ -396,7 +511,7 @@ class BiasAndExitHealthScanner:
     def to_csv(self) -> str:
         """Convert scan results to CSV format."""
         output = []
-        output.append("timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues")
+        output.append("timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues,price_side_mismatches,cheap_wrong_side_candidates")
         
         scan_timestamp = datetime.utcnow().isoformat() + "Z"
         
@@ -410,7 +525,9 @@ class BiasAndExitHealthScanner:
                 str(metrics["yes_orders_sent"]),
                 str(metrics["exit_invariant_violations"]),
                 str(metrics["exit_post_size_issues"]),
-                str(metrics["bias_issues"])
+                str(metrics["bias_issues"]),
+                str(metrics["price_side_mismatches"]),
+                str(metrics["cheap_wrong_side_candidates"])
             ]
             output.append(",".join(row))
         
