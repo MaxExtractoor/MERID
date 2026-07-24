@@ -558,7 +558,7 @@ class TestLoop15mExitReasonParameterFix:
         """
         from merid.event_venues.kalshi.order_router import OrderIntent
         from merid.position_management.position import Position, PositionSide
-        from merid.position_management.exit_policy import ExitReason
+        from merid.risk.exit_policy import ExitReason
         
         # Create a position
         position = Position(
@@ -611,15 +611,14 @@ class TestLoop15mExitReasonParameterFix:
         assert intent.aggressiveness == 1.0
     
     def test_exit_order_with_exit_reason_parameter_would_fail(self):
-        """Test that passing exit_reason parameter causes TypeError.
+        """Test that exit_reason parameter is now accepted by OrderIntent.
         
-        This test demonstrates the bug: passing exit_reason to OrderIntent
-        causes TypeError because the field doesn't exist in the class.
-        This prevented orders from reaching guardrails.
+        This test verifies the fix: OrderIntent now accepts exit_reason parameter.
+        Previously, this caused TypeError because the field didn't exist.
         """
         from merid.event_venues.kalshi.order_router import OrderIntent
         from merid.position_management.position import Position, PositionSide
-        from merid.position_management.exit_policy import ExitReason
+        from merid.risk.exit_policy import ExitReason
         
         # Create a position
         position = Position(
@@ -633,23 +632,24 @@ class TestLoop15mExitReasonParameterFix:
         
         exit_reason = ExitReason.STOP_LOSS
         
-        # Attempting to create OrderIntent with exit_reason parameter (the bug)
-        # This should raise TypeError
-        with pytest.raises(TypeError, match="unexpected keyword argument 'exit_reason'"):
-            intent = OrderIntent(
-                ticker=position.market_id,
-                side="SELL_YES",
-                action="sell",
-                price_cents=45,
-                count=position.size,
-                order_type="limit",
-                time_in_force="gtc",
-                source="position_monitor_exit",
-                agent_id="merid.position_management.position_monitor",
-                exit_reason=exit_reason,  # BUG: This parameter doesn't exist
-                exit_policy_id=position.exit_policy_id,
-                aggressiveness=1.0,
-            )
+        # Creating OrderIntent with exit_reason parameter should now work (FIXED)
+        intent = OrderIntent(
+            ticker=position.market_id,
+            side="SELL_YES",
+            action="sell",
+            price_cents=45,
+            count=position.size,
+            order_type="limit",
+            time_in_force="gtc",
+            source="position_monitor_exit",
+            agent_id="merid.position_management.position_monitor",
+            exit_reason=exit_reason,  # FIXED: This parameter now exists
+            exit_policy_id=position.exit_policy_id,
+            aggressiveness=1.0,
+        )
+        
+        # Verify exit_reason was set correctly
+        assert intent.exit_reason == exit_reason
     
     def test_rationale_field_tracks_exit_reason(self):
         """Test that rationale field properly tracks exit reason.
@@ -659,7 +659,7 @@ class TestLoop15mExitReasonParameterFix:
         """
         from merid.event_venues.kalshi.order_router import OrderIntent
         from merid.position_management.position import Position, PositionSide
-        from merid.position_management.exit_policy import ExitReason
+        from merid.risk.exit_policy import ExitReason
         
         # Test different exit reasons
         exit_reasons = [
