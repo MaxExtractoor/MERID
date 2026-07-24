@@ -1353,8 +1353,9 @@ class TestPositionMonitorPositionCacheIntegration:
             del cache._positions["KXBTC15M-TEST"]
     
     @patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope')
+    @patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk')
     @pytest.mark.asyncio
-    async def test_position_cache_removes_from_monitor_on_close(self, mock_get_envelope):
+    async def test_position_cache_removes_from_monitor_on_close(self, mock_get_kalshi_risk, mock_get_envelope):
         """Test that position_cache.on_fill() removes positions from PositionMonitor when closed.
         
         This test verifies the fix for the bug where closed positions were not being
@@ -1368,6 +1369,10 @@ class TestPositionMonitorPositionCacheIntegration:
         # Mock risk envelope to allow capacity release
         mock_envelope = Mock()
         mock_get_envelope.return_value = mock_envelope
+        
+        # Mock get_kalshi_risk to avoid deprecation warning
+        mock_risk_mgr = Mock()
+        mock_get_kalshi_risk.return_value = mock_risk_mgr
         
         # Get monitor and cache
         monitor = get_position_monitor()
@@ -1449,7 +1454,6 @@ class TestPositionMonitorPositionCacheIntegration:
         """
         from merid.position_management.position_monitor import get_position_monitor
         from merid.event_venues.kalshi.position_cache import get_position_cache
-        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
         from merid.position_management.position import Position, PositionSide
         from unittest.mock import Mock, patch
         
@@ -1457,17 +1461,27 @@ class TestPositionMonitorPositionCacheIntegration:
         mock_envelope = Mock()
         mock_get_envelope.return_value = mock_envelope
         
-        # Get monitor, cache, and risk manager
+        # Get monitor and cache
         monitor = get_position_monitor()
         cache = get_position_cache()
-        risk_mgr = get_kalshi_risk()
+        
+        # Mock risk manager instead of using deprecated KalshiRiskManager
+        mock_risk_mgr = Mock()
+        mock_risk_mgr._state = Mock()
+        mock_risk_mgr._state.asset_notional = {"BTC": 5.0}
+        # Track record_close calls and actually update asset_notional
+        record_close_calls = []
+        def mock_record_close(category, contracts, price_cents, asset):
+            record_close_calls.append({"category": category, "contracts": contracts, "price_cents": price_cents, "asset": asset})
+            # Simulate the actual behavior: decrement asset_notional
+            notional_to_decrement = (contracts * price_cents) / 100.0
+            if asset in mock_risk_mgr._state.asset_notional:
+                mock_risk_mgr._state.asset_notional[asset] -= notional_to_decrement
+        mock_risk_mgr.record_close = mock_record_close
         
         # Clear any existing test position from cache to avoid KeyError
         if hasattr(cache, '_positions') and "KXBTC15M-TEST" in cache._positions:
             del cache._positions["KXBTC15M-TEST"]
-        
-        # Set initial asset_notional for BTC
-        risk_mgr._state.asset_notional["BTC"] = 5.0
         
         # CRITICAL: Register TP targets before fill (required for position monitoring)
         cache.register_tp_targets(
@@ -1481,7 +1495,9 @@ class TestPositionMonitorPositionCacheIntegration:
         mock_ledger = Mock()
         mock_ledger.get_fill.return_value = None
         
-        with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger):
+        # Mock get_kalshi_risk to return our mock risk manager
+        with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger), \
+             patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk', return_value=mock_risk_mgr):
             # First, create a position in cache
             await cache.on_fill(
                 market_id="KXBTC15M-TEST",
@@ -1510,12 +1526,12 @@ class TestPositionMonitorPositionCacheIntegration:
         # Note: The actual decrement uses the pre-fill contracts (5) and the close price (55)
         # So it should be 5.0 - (5 * 55 / 100) = 5.0 - 2.75 = 2.25
         expected_notional = 5.0 - (5 * 55 / 100)
-        assert risk_mgr._state.asset_notional.get("BTC", 0.0) == expected_notional
+        assert mock_risk_mgr._state.asset_notional.get("BTC", 0.0) == expected_notional
         
         # Clean up
         if hasattr(cache, '_positions') and "KXBTC15M-TEST" in cache._positions:
             del cache._positions["KXBTC15M-TEST"]
-        risk_mgr._state.asset_notional["BTC"] = 0.0
+        mock_risk_mgr._state.asset_notional["BTC"] = 0.0
     
     @pytest.mark.asyncio
     async def test_exit_intent_callback_places_market_order_for_extreme_profit(self):
