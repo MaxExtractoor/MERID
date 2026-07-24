@@ -463,9 +463,18 @@ class CatalogSnapshot:
         logger.info("[GET-CURRENT-15M] asset=%s window.end_utc=%s window.suffix=%s", asset, window.end_utc, window.suffix)
 
         # Filter to 15m markets for this asset that are NOT settled or finalized
+        # CRITICAL FIX: Don't filter by timeframe field - Kalshi API returns N/A for this field
+        # Instead, rely on series ticker filtering (e.g., KXBTC15M) which identifies 15m markets
+        ALLOWED_15M_CRYPTO_SERIES = {
+            "KXBTC15M",
+            "KXETH15M",
+            "KXSOL15M",
+            "KXXRP15M",
+            "KXDOGE15M",
+        }
         asset_markets = []
         for m in self.markets:
-            if m.asset == asset and m.timeframe == "15m":
+            if m.asset == asset and m.series_ticker in ALLOWED_15M_CRYPTO_SERIES:
                 # Status is in raw_data for EventMarket objects
                 raw_data = m.market.raw_data or {}
                 market_status = raw_data.get("status", "").lower()
@@ -1658,19 +1667,11 @@ class KalshiMarketCatalog:
                         (current_window_start.replace(minute=(current_window_start.minute + 15) % 60, second=0, microsecond=0)).isoformat()
                     )
                     
-                    # Reset strip order counts when ticker changes (new 15m strip)
-                    # This prevents stale strip limits from blocking new markets
-                    try:
-                        from merid.prediction.agent_grid_15m import reset_strip_order_counts
-                        reset_strip_order_counts()
-                        logger.info(
-                            "[CATALOG-STRIP-RESET] Ticker changed for %s from %s to %s - reset strip order counts",
-                            series_ticker, last_ticker, best_ticker
-                        )
-                    except ImportError:
-                        logger.debug("[CATALOG-STRIP-RESET] agent_grid_15m not available, skipping strip reset")
-                    except Exception as e:
-                        logger.warning("[CATALOG-STRIP-RESET] Failed to reset strip order counts: %s", e)
+                    # CRITICAL FIX (2026-07-17): Removed blanket strip reset
+                    # The per-strip reset logic in agent_grid_15m.py already correctly resets
+                    # only when the market ID changes for that specific strip (line 11908-11920).
+                    # Calling reset_strip_order_counts() here would reset ALL strips whenever
+                    # ANY ticker changes, which is too aggressive and causes unnecessary resets.
                     
                     # Sync WS bridge subscriptions to new front ticker with cooldown protection
                     # This fixes the roll-over bug where WS stays subscribed to expired contracts
@@ -2620,11 +2621,27 @@ class KalshiMarketCatalog:
         if max_minutes_to_expiry is not None:
             markets = [m for m in markets if m.minutes_to_expiry and m.minutes_to_expiry <= max_minutes_to_expiry]
         
-        # CRITICAL: Log venue down state when no tradeable 15m markets found for all 5 assets
-        if timeframe == "15m" and not markets:
-            logger.warning(
-                "KALSHI-15M-UNIVERSE No tradeable 15m BTC/ETH/SOL/XRP/DOGE markets within 0-30 min; treating venue as unavailable."
-            )
+        # CRITICAL: Compute per-asset availability instead of aggregate universe
+        # This allows exits on assets that DO have active tickers even when others don't
+        if timeframe == "15m":
+            # Check availability per asset
+            assets_with_markets = set(m.asset for m in markets)
+            all_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+            assets_without_markets = all_assets - assets_with_markets
+            
+            if assets_without_markets:
+                logger.warning(
+                    "KALSHI-15M-UNIVERSE Per-asset availability: %s have active 15m markets, %s do NOT. "
+                    "Exits allowed on available assets only.",
+                    sorted(assets_with_markets),
+                    sorted(assets_without_markets)
+                )
+            
+            # Only log venue-unavailable if ALL 5 assets have no markets
+            if not markets:
+                logger.warning(
+                    "KALSHI-15M-UNIVERSE CRITICAL: No tradeable 15m markets for ANY asset (BTC/ETH/SOL/XRP/DOGE) within 0-30 min; treating venue as unavailable."
+                )
         
         # CRITICAL: Assert max one tradeable 15m market per asset at a time
         # If Kalshi lists overlapping 15m strips, log and choose the nearest-expiry one deterministically

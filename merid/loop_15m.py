@@ -1629,6 +1629,61 @@ class Kalshi15mLoop:
         
         assert side_str in ("yes", "no", "YES", "NO"), f"EXIT-ORDER: Invalid side_str={side_str} for {position.market_id}"
         
+        # CRITICAL: Check venue availability before attempting exit order
+        # This prevents exit orders from failing silently when venue is unavailable
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+            asset_markets = catalog.get_active_markets(asset=position.asset, timeframe="15m")
+            
+            if not asset_markets:
+                logger.error(
+                    "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=VENUE_UNAVAILABLE - "
+                    "No active 15m market found for asset, exit order cannot execute. "
+                    "Position will remain open until venue recovers.",
+                    position.asset,
+                    position.market_id
+                )
+                return
+        except Exception as venue_check_err:
+            logger.warning(
+                "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=VENUE_CHECK_FAILED - "
+                "Failed to check venue availability (non-critical): %s. "
+                "Proceeding with exit order attempt.",
+                position.asset,
+                position.market_id,
+                venue_check_err
+            )
+        
+        # CRITICAL: Check for circuit breaker cooldown on REST series fetches
+        # This prevents exit orders from failing when series data is throttled
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            client = get_kalshi_client()
+            
+            # Check if client is in circuit breaker cooldown
+            if hasattr(client, '_circuit_breaker_cooldown_until'):
+                import time
+                now = time.time()
+                if now < client._circuit_breaker_cooldown_until:
+                    cooldown_remaining = client._circuit_breaker_cooldown_until - now
+                    logger.error(
+                        "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=CIRCUIT_BREAKER_COOLDOWN - "
+                        "REST client in circuit breaker cooldown for %.1fs, exit order may fail. "
+                        "Proceeding with exit order attempt (may use stale data).",
+                        position.asset,
+                        position.market_id,
+                        cooldown_remaining
+                    )
+        except Exception as circuit_check_err:
+            logger.debug(
+                "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=CIRCUIT_CHECK_FAILED - "
+                "Failed to check circuit breaker status (non-critical): %s",
+                position.asset,
+                position.market_id,
+                circuit_check_err
+            )
+        
         try:
             logger.info(
                 "[EXIT-ORDER] Starting exit order execution: position=%s market=%s side=%s reason=%s exit_price=%dc "

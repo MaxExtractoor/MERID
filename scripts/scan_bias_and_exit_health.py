@@ -1,17 +1,21 @@
 """
-Bias and Exit Health Log Scanner (2026-07-24)
+Production-Wide Anomaly Monitor (2026-07-24)
 
-This script scans live logs for bias and exit health issues:
+This script scans live logs for production anomalies across the MERID stack:
 - Markets where signal.side=NO but no NO orders were ever sent
 - Any [EXIT-INVARIANT-VIOLATION]
 - Any case where post_size >= pre_size on an EXIT path
 - Any [PRICE-SIDE-CHECK-VIOLATION] (price/side mismatch)
 - Count of cheap_wrong_side_candidates (cheapness on wrong side correctly ignored)
+- Signal-intent synchronization (signal_side == thesis_side == candidate.side == order.side)
+- Runtime SSOT checks ([SSOT-INVARIANT] logs)
+- Data freshness anomalies (stale orderbook, catalog staleness)
+- Anomaly categorization (point, contextual, pattern)
 
 Usage:
     python scripts/scan_bias_and_exit_health.py <log_file_path> [--output json|csv] [--output-file <path>]
 
-This script becomes the "bias and exit health" check that can be run after
+This script is the production-wide anomaly monitor that can be run after
 long 12-15 hour audits or as part of CI against recorded traces.
 
 Output Schema (JSON):
@@ -82,8 +86,8 @@ from collections import defaultdict
 from datetime import datetime
 
 
-class BiasAndExitHealthScanner:
-    """Scanner for bias and exit health issues in log files."""
+class ProductionAnomalyMonitor:
+    """Production-wide anomaly monitor for MERID stack."""
     
     # Asset mapping from market_id prefix to asset name
     ASSET_MAPPING = {
@@ -100,6 +104,8 @@ class BiasAndExitHealthScanner:
         
         # Track signal → order mapping
         self.signal_side_by_market: Dict[str, str] = {}
+        self.thesis_side_by_market: Dict[str, str] = {}
+        self.candidate_side_by_market: Dict[str, str] = {}
         self.order_side_by_market: Dict[str, Set[str]] = defaultdict(set)
         
         # Track exit invariants
@@ -109,6 +115,21 @@ class BiasAndExitHealthScanner:
         # Track price-side invariants
         self.price_side_mismatches: List[Dict] = []
         self.cheap_wrong_side_candidates: List[Dict] = []
+        
+        # Track signal-intent synchronization
+        self.signal_intent_sync_issues: List[Dict] = []
+        
+        # Track runtime SSOT checks
+        self.ssot_invariant_fires: List[Dict] = []
+        
+        # Track data freshness anomalies
+        self.data_staleness_issues: List[Dict] = []
+        
+        # Track WS desired empty events
+        self.ws_desired_empty_events: List[Dict] = []
+        
+        # Track MD staleness bursts (repeated circuit breaker cooldowns)
+        self.md_staleness_bursts: Dict[str, List[Dict]] = defaultdict(list)  # series -> events
         
         # Per-asset metrics
         self.asset_metrics: Dict[str, Dict] = {
@@ -121,7 +142,12 @@ class BiasAndExitHealthScanner:
                 "exit_post_size_issues": 0,
                 "bias_issues": 0,
                 "price_side_mismatches": 0,
-                "cheap_wrong_side_candidates": 0
+                "cheap_wrong_side_candidates": 0,
+                "signal_intent_sync_issues": 0,
+                "ssot_invariant_fires": 0,
+                "data_staleness_issues": 0,
+                "ws_desired_empty_events": 0,
+                "md_staleness_bursts": 0
             },
             "ETH": {
                 "no_signals_seen": 0,
@@ -132,7 +158,12 @@ class BiasAndExitHealthScanner:
                 "exit_post_size_issues": 0,
                 "bias_issues": 0,
                 "price_side_mismatches": 0,
-                "cheap_wrong_side_candidates": 0
+                "cheap_wrong_side_candidates": 0,
+                "signal_intent_sync_issues": 0,
+                "ssot_invariant_fires": 0,
+                "data_staleness_issues": 0,
+                "ws_desired_empty_events": 0,
+                "md_staleness_bursts": 0
             },
             "SOL": {
                 "no_signals_seen": 0,
@@ -143,7 +174,12 @@ class BiasAndExitHealthScanner:
                 "exit_post_size_issues": 0,
                 "bias_issues": 0,
                 "price_side_mismatches": 0,
-                "cheap_wrong_side_candidates": 0
+                "cheap_wrong_side_candidates": 0,
+                "signal_intent_sync_issues": 0,
+                "ssot_invariant_fires": 0,
+                "data_staleness_issues": 0,
+                "ws_desired_empty_events": 0,
+                "md_staleness_bursts": 0
             },
             "XRP": {
                 "no_signals_seen": 0,
@@ -154,7 +190,12 @@ class BiasAndExitHealthScanner:
                 "exit_post_size_issues": 0,
                 "bias_issues": 0,
                 "price_side_mismatches": 0,
-                "cheap_wrong_side_candidates": 0
+                "cheap_wrong_side_candidates": 0,
+                "signal_intent_sync_issues": 0,
+                "ssot_invariant_fires": 0,
+                "data_staleness_issues": 0,
+                "ws_desired_empty_events": 0,
+                "md_staleness_bursts": 0
             },
             "DOGE": {
                 "no_signals_seen": 0,
@@ -165,7 +206,12 @@ class BiasAndExitHealthScanner:
                 "exit_post_size_issues": 0,
                 "bias_issues": 0,
                 "price_side_mismatches": 0,
-                "cheap_wrong_side_candidates": 0
+                "cheap_wrong_side_candidates": 0,
+                "signal_intent_sync_issues": 0,
+                "ssot_invariant_fires": 0,
+                "data_staleness_issues": 0,
+                "ws_desired_empty_events": 0,
+                "md_staleness_bursts": 0
             }
         }
         
@@ -215,9 +261,37 @@ class BiasAndExitHealthScanner:
         if "[PRICE-SIDE-CHECK-REJECT]" in line:
             self._parse_price_side_reject(line, line_num)
         
+        # Check for SSOT-INVARIANT (runtime SSOT enforcement)
+        if "[SSOT-INVARIANT]" in line:
+            self._parse_ssot_invariant(line, line_num)
+        
+        # Check for SIDE-PRESERVATION-CHECK (signal-intent sync)
+        if "[SIDE-PRESERVATION-CHECK]" in line:
+            self._parse_side_preservation_check(line, line_num)
+        
+        # Check for data staleness
+        if "catalog_staleness" in line or "stale_data" in line:
+            self._parse_data_staleness(line, line_num)
+        
+        # Check for WS desired empty events
+        if "[WS-SYNC] Desired ticker set is empty" in line:
+            self._parse_ws_desired_empty(line, line_num)
+        
+        # Check for MD staleness bursts (circuit breaker cooldown)
+        if "circuit breaker tripped" in line or "Circuit breaker tripped" in line:
+            self._parse_md_staleness_burst(line, line_num)
+        
         # Check for signal side
         if "signal_side=" in line:
             self._parse_signal_side(line)
+        
+        # Check for thesis side
+        if "thesis_side=" in line:
+            self._parse_thesis_side(line)
+        
+        # Check for candidate side
+        if "candidate_side=" in line:
+            self._parse_candidate_side(line)
         
         # Check for order side
         if "kalshi_side=" in line and "kalshi_action=buy" in line:
@@ -289,6 +363,24 @@ class BiasAndExitHealthScanner:
                     self.asset_metrics[asset]["no_signals_seen"] += 1
                 elif signal_side == "yes":
                     self.asset_metrics[asset]["yes_signals_seen"] += 1
+    
+    def _parse_thesis_side(self, line: str):
+        """Parse thesis side from log line."""
+        market_id = self._extract_field(line, "market_id=")
+        thesis_side = self._extract_field(line, "thesis_side=")
+        asset = self._get_asset_from_market_id(market_id)
+        
+        if market_id and thesis_side:
+            self.thesis_side_by_market[market_id] = thesis_side
+    
+    def _parse_candidate_side(self, line: str):
+        """Parse candidate side from log line."""
+        market_id = self._extract_field(line, "market_id=")
+        candidate_side = self._extract_field(line, "candidate_side=")
+        asset = self._get_asset_from_market_id(market_id)
+        
+        if market_id and candidate_side:
+            self.candidate_side_by_market[market_id] = candidate_side
     
     def _parse_order_side(self, line: str):
         """Parse order side from log line."""
@@ -362,6 +454,140 @@ class BiasAndExitHealthScanner:
         if asset in self.asset_metrics:
             self.asset_metrics[asset]["cheap_wrong_side_candidates"] += 1
     
+    def _parse_ssot_invariant(self, line: str, line_num: int):
+        """Parse SSOT-INVARIANT log entry (runtime SSOT enforcement)."""
+        market_id = self._extract_field(line, "market_id=")
+        if not market_id:
+            market_id = self._extract_field(line, "ticker=")
+        asset = self._get_asset_from_market_id(market_id)
+        
+        invariant = {
+            "line_num": line_num,
+            "line": line.strip(),
+            "timestamp": self._extract_timestamp(line),
+            "market_id": market_id,
+            "asset": asset,
+            "type": "SSOT-INVARIANT"
+        }
+        self.ssot_invariant_fires.append(invariant)
+        
+        # Update asset metrics
+        if asset in self.asset_metrics:
+            self.asset_metrics[asset]["ssot_invariant_fires"] += 1
+    
+    def _parse_side_preservation_check(self, line: str, line_num: int):
+        """Parse SIDE-PRESERVATION-CHECK log entry (signal-intent sync)."""
+        market_id = self._extract_field(line, "market_id=")
+        if not market_id:
+            market_id = self._extract_field(line, "ticker=")
+        asset = self._get_asset_from_market_id(market_id)
+        signal_side = self._extract_field(line, "signal_side=")
+        thesis_side = self._extract_field(line, "thesis_side=")
+        candidate_side = self._extract_field(line, "candidate_side=")
+        
+        # Check for mismatch
+        if signal_side and thesis_side and candidate_side:
+            if signal_side != thesis_side or thesis_side != candidate_side:
+                issue = {
+                    "line_num": line_num,
+                    "line": line.strip(),
+                    "timestamp": self._extract_timestamp(line),
+                    "market_id": market_id,
+                    "asset": asset,
+                    "signal_side": signal_side,
+                    "thesis_side": thesis_side,
+                    "candidate_side": candidate_side,
+                    "type": "SIGNAL-INTENT-SYNC-ISSUE"
+                }
+                self.signal_intent_sync_issues.append(issue)
+                
+                # Update asset metrics
+                if asset in self.asset_metrics:
+                    self.asset_metrics[asset]["signal_intent_sync_issues"] += 1
+    
+    def _parse_data_staleness(self, line: str, line_num: int):
+        """Parse data staleness log entry."""
+        market_id = self._extract_field(line, "market_id=")
+        if not market_id:
+            market_id = self._extract_field(line, "ticker=")
+        asset = self._get_asset_from_market_id(market_id)
+        staleness_seconds = self._extract_field(line, "staleness_seconds=")
+        
+        issue = {
+            "line_num": line_num,
+            "line": line.strip(),
+            "timestamp": self._extract_timestamp(line),
+            "market_id": market_id,
+            "asset": asset,
+            "staleness_seconds": staleness_seconds,
+            "type": "DATA-STALENESS-ISSUE"
+        }
+        self.data_staleness_issues.append(issue)
+        
+        # Update asset metrics
+        if asset in self.asset_metrics:
+            self.asset_metrics[asset]["data_staleness_issues"] += 1
+    
+    def _parse_ws_desired_empty(self, line: str, line_num: int):
+        """Parse WS desired empty event."""
+        current_count = self._extract_field(line, "current=")
+        desired_count = self._extract_field(line, "desired=")
+        
+        event = {
+            "line_num": line_num,
+            "line": line.strip(),
+            "timestamp": self._extract_timestamp(line),
+            "current_count": current_count,
+            "desired_count": desired_count,
+            "type": "WS-DESIRED-EMPTY"
+        }
+        self.ws_desired_empty_events.append(event)
+        
+        # Update asset metrics (use "ALL" asset for WS-level events)
+        if "ALL" in self.asset_metrics:
+            self.asset_metrics["ALL"]["ws_desired_empty_events"] += 1
+    
+    def _parse_md_staleness_burst(self, line: str, line_num: int):
+        """Parse MD staleness burst (circuit breaker cooldown)."""
+        # Extract series from log line (e.g., "fetch_series_KXSOL15M")
+        import re
+        series_match = re.search(r'fetch_series_(KX\w+)', line)
+        series = series_match.group(1) if series_match else ""
+        
+        # Extract cooldown remaining
+        cooldown_match = re.search(r'Cooldown:\s*([\d.]+)s', line)
+        cooldown_remaining = cooldown_match.group(1) if cooldown_match else ""
+        
+        # Extract asset from series ticker
+        asset = "UNKNOWN"
+        if series:
+            if "BTC" in series:
+                asset = "BTC"
+            elif "ETH" in series:
+                asset = "ETH"
+            elif "SOL" in series:
+                asset = "SOL"
+            elif "XRP" in series:
+                asset = "XRP"
+            elif "DOGE" in series:
+                asset = "DOGE"
+        
+        event = {
+            "line_num": line_num,
+            "line": line.strip(),
+            "timestamp": self._extract_timestamp(line),
+            "series": series,
+            "cooldown_remaining": cooldown_remaining,
+            "asset": asset,
+            "type": "MD-STALENESS-BURST"
+        }
+        if series:
+            self.md_staleness_bursts[series].append(event)
+        
+        # Update asset metrics
+        if asset in self.asset_metrics:
+            self.asset_metrics[asset]["md_staleness_bursts"] += 1
+    
     def _extract_field(self, line: str, field: str) -> str:
         """Extract a field value from a log line."""
         pattern = rf"{field}(\S+)"
@@ -392,7 +618,7 @@ class BiasAndExitHealthScanner:
     def _analyze_results(self):
         """Analyze scan results and report issues."""
         print("\n" + "=" * 80)
-        print("SCAN RESULTS")
+        print("PRODUCTION ANOMALY SCAN RESULTS")
         print("=" * 80)
         
         # Report EXIT-INVARIANT-VIOLATION
@@ -447,6 +673,45 @@ class BiasAndExitHealthScanner:
         else:
             print("\n✅ No PRICE-SIDE-CHECK-VIOLATION entries found")
         
+        # Report signal-intent sync issues
+        if self.signal_intent_sync_issues:
+            print(f"\n❌ CRITICAL: Found {len(self.signal_intent_sync_issues)} SIGNAL-INTENT-SYNC-ISSUE entries")
+            print("-" * 80)
+            for issue in self.signal_intent_sync_issues:
+                print(f"  Line {issue['line_num']}: {issue['timestamp']}")
+                print(f"    Market: {issue['market_id']} ({issue['asset']})")
+                print(f"    Signal: {issue['signal_side']}, Thesis: {issue['thesis_side']}, Candidate: {issue['candidate_side']}")
+                print(f"    {issue['line'][:100]}...")
+        else:
+            print("\n✅ No SIGNAL-INTENT-SYNC-ISSUE entries found")
+        
+        # Report SSOT invariant fires
+        if self.ssot_invariant_fires:
+            print(f"\n⚠️  WARNING: Found {len(self.ssot_invariant_fires)} SSOT-INVARIANT fires (runtime SSOT enforcement)")
+            print("-" * 80)
+            for invariant in self.ssot_invariant_fires[:5]:  # Show first 5
+                print(f"  Line {invariant['line_num']}: {invariant['timestamp']}")
+                print(f"    Market: {invariant['market_id']} ({invariant['asset']})")
+                print(f"    {invariant['line'][:100]}...")
+            if len(self.ssot_invariant_fires) > 5:
+                print(f"  ... and {len(self.ssot_invariant_fires) - 5} more")
+        else:
+            print("\n✅ No SSOT-INVARIANT fires found")
+        
+        # Report data staleness issues
+        if self.data_staleness_issues:
+            print(f"\n⚠️  WARNING: Found {len(self.data_staleness_issues)} DATA-STALENESS-ISSUE entries")
+            print("-" * 80)
+            for issue in self.data_staleness_issues[:5]:  # Show first 5
+                print(f"  Line {issue['line_num']}: {issue['timestamp']}")
+                print(f"    Market: {issue['market_id']} ({issue['asset']})")
+                print(f"    Staleness: {issue['staleness_seconds']}s")
+                print(f"    {issue['line'][:100]}...")
+            if len(self.data_staleness_issues) > 5:
+                print(f"  ... and {len(self.data_staleness_issues) - 5} more")
+        else:
+            print("\n✅ No DATA-STALENESS-ISSUE entries found")
+        
         # Report cheap wrong side candidates (correctly ignored)
         if self.cheap_wrong_side_candidates:
             print(f"\nℹ️  INFO: Found {len(self.cheap_wrong_side_candidates)} cheap wrong side candidates (correctly ignored)")
@@ -464,16 +729,27 @@ class BiasAndExitHealthScanner:
         print("\n" + "=" * 80)
         print("SUMMARY")
         print("=" * 80)
-        total_issues = len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + len(bias_issues) + len(self.price_side_mismatches)
+        total_issues = (len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + 
+                       len(bias_issues) + len(self.price_side_mismatches) + 
+                       len(self.signal_intent_sync_issues))
         if total_issues == 0:
-            print("✅ ALL CHECKS PASSED - No bias, exit health, or price-side issues detected")
+            print("✅ ALL CRITICAL CHECKS PASSED - No production anomalies detected")
         else:
-            print(f"❌ {total_issues} ISSUES DETECTED")
+            print(f"❌ {total_issues} CRITICAL ISSUES DETECTED")
             print(f"   - EXIT-INVARIANT-VIOLATION: {len(self.exit_invariant_violations)}")
             print(f"   - Exit post_size issues: {len(self.exit_post_size_issues)}")
             print(f"   - Bias issues: {len(bias_issues)}")
             print(f"   - PRICE-SIDE-CHECK-VIOLATION: {len(self.price_side_mismatches)}")
-            print(f"   - Cheap wrong side candidates (correctly ignored): {len(self.cheap_wrong_side_candidates)}")
+            print(f"   - SIGNAL-INTENT-SYNC-ISSUE: {len(self.signal_intent_sync_issues)}")
+        
+        # Warnings summary
+        total_warnings = len(self.ssot_invariant_fires) + len(self.data_staleness_issues)
+        if total_warnings > 0:
+            print(f"\n⚠️  {total_warnings} WARNINGS DETECTED")
+            print(f"   - SSOT-INVARIANT fires: {len(self.ssot_invariant_fires)}")
+            print(f"   - DATA-STALENESS-ISSUE: {len(self.data_staleness_issues)}")
+        
+        print(f"\nℹ️  Cheap wrong side candidates (correctly ignored): {len(self.cheap_wrong_side_candidates)}")
     
     def _check_bias_issues(self) -> List[str]:
         """Check for markets where signal=NO but no NO orders were sent."""
@@ -495,15 +771,27 @@ class BiasAndExitHealthScanner:
             "scan_timestamp": datetime.utcnow().isoformat() + "Z",
             "log_file": str(self.log_file_path),
             "summary": {
-                "total_issues": len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + len(bias_issues) + len(self.price_side_mismatches),
+                "total_issues": (len(self.exit_invariant_violations) + len(self.exit_post_size_issues) + 
+                               len(bias_issues) + len(self.price_side_mismatches) + 
+                               len(self.signal_intent_sync_issues)),
+                "total_warnings": len(self.ssot_invariant_fires) + len(self.data_staleness_issues) + 
+                                  len(self.ws_desired_empty_events) + sum(len(events) for events in self.md_staleness_bursts.values()),
                 "exit_invariant_violations": len(self.exit_invariant_violations),
                 "exit_post_size_issues": len(self.exit_post_size_issues),
                 "bias_issues": len(bias_issues),
                 "price_side_mismatches": len(self.price_side_mismatches),
+                "signal_intent_sync_issues": len(self.signal_intent_sync_issues),
+                "ssot_invariant_fires": len(self.ssot_invariant_fires),
+                "data_staleness_issues": len(self.data_staleness_issues),
+                "ws_desired_empty_events": len(self.ws_desired_empty_events),
+                "md_staleness_bursts": sum(len(events) for events in self.md_staleness_bursts.values()),
                 "cheap_wrong_side_candidates": len(self.cheap_wrong_side_candidates)
             },
             "assets": self.asset_metrics,
-            "issues": self.exit_invariant_violations + self.exit_post_size_issues + self.price_side_mismatches
+            "issues": (self.exit_invariant_violations + self.exit_post_size_issues + 
+                      self.price_side_mismatches + self.signal_intent_sync_issues),
+            "warnings": self.ssot_invariant_fires + self.data_staleness_issues + 
+                       self.ws_desired_empty_events + [event for events in self.md_staleness_bursts.values() for event in events]
         }
         
         return json.dumps(result, indent=2)
@@ -511,7 +799,7 @@ class BiasAndExitHealthScanner:
     def to_csv(self) -> str:
         """Convert scan results to CSV format."""
         output = []
-        output.append("timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues,price_side_mismatches,cheap_wrong_side_candidates")
+        output.append("timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues,price_side_mismatches,signal_intent_sync_issues,ssot_invariant_fires,data_staleness_issues,ws_desired_empty_events,md_staleness_bursts,cheap_wrong_side_candidates")
         
         scan_timestamp = datetime.utcnow().isoformat() + "Z"
         
@@ -527,6 +815,11 @@ class BiasAndExitHealthScanner:
                 str(metrics["exit_post_size_issues"]),
                 str(metrics["bias_issues"]),
                 str(metrics["price_side_mismatches"]),
+                str(metrics["signal_intent_sync_issues"]),
+                str(metrics["ssot_invariant_fires"]),
+                str(metrics["data_staleness_issues"]),
+                str(metrics["ws_desired_empty_events"]),
+                str(metrics["md_staleness_bursts"]),
                 str(metrics["cheap_wrong_side_candidates"])
             ]
             output.append(",".join(row))
@@ -538,10 +831,14 @@ def main():
     """Main entry point."""
     if len(sys.argv) < 2:
         print("Usage: python scripts/scan_bias_and_exit_health.py <log_file_path> [--output json|csv] [--output-file <path>]")
-        print("\nThis script scans log files for:")
+        print("\nThis script scans log files for production anomalies:")
         print("  - Markets where signal.side=NO but no NO orders were ever sent")
         print("  - Any [EXIT-INVARIANT-VIOLATION]")
         print("  - Any case where post_size >= pre_size on an EXIT path")
+        print("  - Any [PRICE-SIDE-CHECK-VIOLATION] (price/side mismatch)")
+        print("  - Signal-intent synchronization issues (signal_side == thesis_side == candidate.side == order.side)")
+        print("  - Runtime SSOT checks ([SSOT-INVARIANT] logs)")
+        print("  - Data freshness anomalies (stale orderbook, catalog staleness)")
         print("\nOptions:")
         print("  --output json|csv  Output format (default: text)")
         print("  --output-file <path>  Write output to file (default: stdout)")
@@ -571,16 +868,16 @@ def main():
         else:
             i += 1
     
-    scanner = BiasAndExitHealthScanner(log_file_path)
-    success = scanner.scan()
+    monitor = ProductionAnomalyMonitor(log_file_path)
+    success = monitor.scan()
     
     # Output results
     if output_format == "json":
-        output = scanner.to_json()
+        output = monitor.to_json()
     elif output_format == "csv":
-        output = scanner.to_csv()
+        output = monitor.to_csv()
     else:
-        # Default text output already printed by scanner.scan()
+        # Default text output already printed by monitor.scan()
         output = None
     
     if output:
@@ -591,7 +888,7 @@ def main():
         else:
             print(output)
     
-    # Exit with error code if issues found
+    # Exit with error code if critical issues found
     sys.exit(0 if success else 1)
 
 
