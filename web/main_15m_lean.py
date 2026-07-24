@@ -539,6 +539,26 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[LIFESPAN] Step 5b: Failed to wire arbitrage callback: {e}")
         
+        # Initialize thesis_side_monitor for production monitoring
+        logger.info("[LIFESPAN] Step 5c: Initializing thesis_side_monitor")
+        try:
+            from merid.event_venues.kalshi.thesis_side_monitor import get_thesis_side_monitor
+            monitor = get_thesis_side_monitor()
+            app.state.thesis_side_monitor = monitor
+            logger.info("[LIFESPAN] Step 5c: ThesisSideMonitor initialized and stored in app.state")
+        except Exception as e:
+            logger.warning(f"[LIFESPAN] Step 5c: Failed to initialize thesis_side_monitor: {e}")
+        
+        # CRITICAL FIX (2026-07-21): Cleanup stale per-asset entry windows on startup
+        # This prevents stale windows from permanently blocking trading after server restart
+        logger.info("[LIFESPAN] Step 5d: Cleaning up stale per-asset entry windows")
+        try:
+            from merid.event_venues.kalshi.order_router import cleanup_stale_entry_windows
+            cleanup_stale_entry_windows()
+            logger.info("[LIFESPAN] Step 5d: Stale entry windows cleaned up successfully")
+        except Exception as e:
+            logger.warning(f"[LIFESPAN] Step 5d: Failed to cleanup stale entry windows: {e}")
+        
         # Run P2.x (trading stack) in lifespan
         logger.info("[LIFESPAN] Step 6: Before _run_full_startup_in_lifespan")
         
@@ -2318,6 +2338,15 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                 if hasattr(ws_bridge, '_sync_requested'):
                     ws_bridge._sync_requested = True
                     logger.info("[WS-REFRESH] Set sync_requested flag for WS bridge")
+                    
+                    # WS-INVARIANT: Check if desired tickers is empty despite active_tickers
+                    # This indicates a race condition where sync_requested is set but loop hasn't populated desired yet
+                    if hasattr(ws_bridge, '_desired_tickers') and not ws_bridge._desired_tickers:
+                        logger.warning(
+                            "[WS-INVARIANT] sync_requested set but _desired_tickers is empty despite active_tickers=%s. "
+                            "This indicates a race condition - loop must populate _desired_tickers before sync.",
+                            list(active_tickers)
+                        )
                 # Also try direct sync if available
                 if hasattr(ws_bridge, 'sync_to_catalog'):
                     import asyncio
@@ -3826,6 +3855,13 @@ async def _run_startup_phases_v20260530(app):
     position_cache = get_position_cache()
     agent_grid.set_position_cache(position_cache)
     logger.info("[STARTUP] P1.10: Position cache set on agent grid for global allocator")
+    
+    # CRITICAL FIX: Set market_state_store on agent grid for market data access
+    # Agents need market_state_store to get bid/ask prices for signal generation
+    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+    market_state_store = get_kalshi_market_state_store()
+    agent_grid.set_market_state_store(market_state_store)
+    logger.info("[STARTUP] P1.10: Market state store wired to agent grid")
     
     # Start agent grid to enable market subscriptions
     logger.info("[STARTUP] P1.10: Calling agent_grid.start()")

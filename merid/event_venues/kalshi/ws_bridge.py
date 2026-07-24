@@ -2137,13 +2137,21 @@ class KalshiWebSocketBridge:
             sorted(current), sorted(desired)
         )
         
-        # GUARD: If desired set is empty, skip resync to avoid unsubscribing all tickers
-        # This can happen during startup before loop calls set_markets()
+        # GUARD: If desired set is empty, keep current subscriptions instead of skipping
+        # This prevents losing live orderbook events during ticker roll-over when desired is temporarily empty
+        # Only skip if we have no current subscriptions (startup case)
         if not desired:
-            logger.warning(
-                "[WS-SYNC] Desired ticker set is empty - skipping resync (waiting for loop to call set_markets)"
-            )
-            return False
+            if current:
+                logger.warning(
+                    "[WS-SYNC] Desired ticker set is empty but current=%d subscriptions active - keeping current subscriptions (waiting for loop to call set_markets)",
+                    len(current)
+                )
+                return False  # Skip resync but keep current subscriptions
+            else:
+                logger.warning(
+                    "[WS-SYNC] Desired ticker set is empty and no current subscriptions - skipping resync (waiting for loop to call set_markets)"
+                )
+                return False
         
         # Check if already in sync
         if desired == current:
