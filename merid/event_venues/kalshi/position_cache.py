@@ -1504,8 +1504,13 @@ class KalshiPositionCache:
                         market_id, position.side, realized_r
                     )
 
-                    del self._positions[market_id]
-                    logger.debug(f"Position cache: closed position on {market_id}")
+                    # CRITICAL FIX: Check if position exists before deleting to avoid KeyError
+                    # This can happen if the position was already deleted by another code path
+                    if market_id in self._positions:
+                        del self._positions[market_id]
+                        logger.debug(f"Position cache: closed position on {market_id}")
+                    else:
+                        logger.warning(f"Position cache: position {market_id} not found for deletion (may have been already deleted)")
                 # P0 Task 3: resize bracket when position grows.
                 # If a buy added contracts and we have an existing TP bracket
                 # whose count was set when the position was smaller, cancel and
