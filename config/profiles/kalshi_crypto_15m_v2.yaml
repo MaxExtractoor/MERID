@@ -1626,6 +1626,15 @@ market_microstructure:
   min_depth_usd: 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold
+  # 2026-07-24: Edge-aware microstructure gate (NEW)
+  # Replaces fixed spread threshold with spread/edge ratio logic
+  # Allows wide spreads when edge is huge, blocks when spread eats edge
+  use_edge_aware_gate: false  # Set to true to enable edge-aware gate (requires p_hat_yes_cents in OrderIntent)
+  min_executable_edge_cents: 3.0  # Minimum executable edge threshold (default 3c)
+  max_spread_to_edge_ratio: 0.4  # Maximum spread/edge ratio (default 40% - industry standard)
+  # 2026-07-24: Liquidity sanity checks (NEW)
+  # Check depth near inside, price sanity, and exit feasibility
+  enable_liquidity_sanity_checks: false  # Set to true to enable liquidity sanity checks
 
 # ── Volume Filter Configuration (2026 Best Practices) ───────────────────────────────
 # 2026-07-05: Fixed broken volume filter implementation
