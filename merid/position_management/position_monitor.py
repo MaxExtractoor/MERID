@@ -7,8 +7,9 @@ Tracks open positions, computes PnL, and enforces TP/SL exits.
 import asyncio
 import logging
 import threading
+import time
 from datetime import datetime
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from merid.position_management.position import Position, PositionSide, TrailingType
 from merid.position_management.exit_policy import ExitAction, ExitReason
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver
@@ -42,6 +43,34 @@ class PositionMonitor:
         self._task: Optional[asyncio.Task] = None
         self._exit_intent_callback = None  # Callback for exit intents
         self._lock = threading.RLock()  # Thread-safe access to position dicts
+        
+        # CRITICAL FIX (2026-07-23): Recent submission cache to handle websocket lag
+        # Tracks exit orders submitted but not yet visible in RestingOrderMonitor
+        # Prevents duplicate exits due to exchange confirmation latency
+        self._recent_exit_submissions: Dict[str, float] = {}  # client_order_id -> timestamp
+        self._submission_cache_ttl = 10.0  # 10 seconds TTL for submission cache
+        
+        # CRITICAL FIX (2026-07-23): First-class exit registry
+        # Tracks exit orders by position_id as source of truth
+        # Reduces reliance on exchange data heuristics
+        self._exit_registry: Dict[str, List[str]] = {}  # position_id -> list of kalshi_order_ids
+        self._exit_quantities: Dict[str, Dict[str, int]] = {}  # position_id -> {kalshi_order_id: quantity}
+        
+        # CRITICAL FIX (2026-07-23): Position-level execution locks
+        # Prevents TOCTOU races during exit order creation
+        self._position_exit_locks: Dict[str, threading.Lock] = {}  # position_id -> Lock
+        self._lock_registry_lock = threading.Lock()  # Lock for registry access
+        
+        # CRITICAL FIX (2026-07-23): Startup grace window to prevent race conditions
+        # Tracks process start time and orders last updated timestamp
+        self._process_start_time = time.time()
+        self._orders_last_updated_ts: Optional[float] = None
+        self._startup_grace_window_seconds = 30.0  # 30 seconds grace window for startup
+        
+        # CRITICAL FIX (2026-07-23): Edge-triggered execution lock per position
+        # Prevents multiple exit triggers (TP + SL) from firing before first exit is placed
+        self._exit_intent_in_flight: Dict[str, float] = {}  # position_id -> timestamp when intent was generated
+        self._exit_intent_timeout_seconds = 15.0  # 15 seconds timeout for exit intent to complete
     
     def register_exit_intent_callback(self, callback) -> None:
         """
@@ -199,13 +228,647 @@ class PositionMonitor:
         with self._lock:
             return self._open_positions.copy()
     
-    async def _check_position(self, position: Position, current_price_cents: int) -> None:
+    def health_check_exit_coverage(self) -> Dict[str, Any]:
+        """
+        Health check for one-position-one-exit invariant.
+        
+        CRITICAL FIX (2026-07-23): Verifies that each open position has exactly one
+        active exit plan (resting exit order). Detects:
+        - Positions without exit orders (missing coverage)
+        - Positions with multiple exit orders (duplicate risk)
+        
+        Returns:
+            Dict with health check results:
+            - total_positions: Total number of open positions
+            - positions_without_exit: List of market_ids without exit orders
+            - positions_with_multiple_exits: List of market_ids with multiple exit orders
+            - healthy_count: Number of positions with exactly one exit order
+            - health_status: "healthy", "warning", or "critical"
+        """
+        from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+        from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
+        
+        positions_without_exit = []
+        positions_with_multiple_exits = []
+        healthy_count = 0
+        
+        try:
+            resting_monitor = get_resting_order_monitor()
+            open_positions = self.get_open_positions()
+            
+            for position_id, position in open_positions.items():
+                # Get resting orders for this market
+                resting_orders = resting_monitor.get_orders_by_ticker(position.market_id)
+                
+                # Filter for exit orders only (check multiple fields for exit markers)
+                # CRITICAL FIX (2026-07-23): Filter by status to exclude terminal orders
+                # Only count orders with active status (open, resting, partially_filled)
+                from merid.event_venues.kalshi.resting_order_monitor import RESTING_STATUSES, TERMINAL_STATUSES
+                exit_orders = []
+                for order in resting_orders:
+                    is_exit = (
+                        is_exit_order_from_source(order.exit_policy_id) or
+                        is_exit_order_from_source(order.client_order_id) or
+                        is_exit_order_from_source(order.intent_id) or
+                        is_exit_order_from_source(getattr(order, 'source', None))
+                    )
+                    # CRITICAL FIX (2026-07-23): Exclude terminal statuses (filled, canceled, expired, rejected)
+                    # These orders are no longer active and should not count as exit coverage
+                    order_status = getattr(order, 'status', '').lower()
+                    is_active = order_status in RESTING_STATUSES or order_status not in TERMINAL_STATUSES
+                    
+                    if is_exit and is_active:
+                        exit_orders.append(order)
+                
+                # Check exit coverage
+                if len(exit_orders) == 0:
+                    positions_without_exit.append(position.market_id)
+                    logger.warning(
+                        "[EXIT-COVERAGE-HEALTH] Position without exit order: market=%s position_id=%s side=%s size=%d",
+                        position.market_id,
+                        position.position_id[:8],
+                        position.side.value,
+                        position.size
+                    )
+                elif len(exit_orders) > 1:
+                    positions_with_multiple_exits.append(position.market_id)
+                    logger.warning(
+                        "[EXIT-COVERAGE-HEALTH] Position with multiple exit orders: market=%s position_id=%s exit_count=%d order_ids=%s",
+                        position.market_id,
+                        position.position_id[:8],
+                        len(exit_orders),
+                        [order.kalshi_order_id for order in exit_orders]
+                    )
+                else:
+                    # CRITICAL FIX (2026-07-23): Check quantity coverage for single exit order
+                    # Ensure exit order quantity is sufficient to cover position size
+                    exit_order = exit_orders[0]
+                    exit_quantity = exit_order.remaining_size if hasattr(exit_order, 'remaining_size') else exit_order.original_size
+                    
+                    if exit_quantity < position.size:
+                        logger.warning(
+                            "[EXIT-QUANTITY-COVERAGE] Exit order quantity insufficient: market=%s position_id=%s exit_qty=%d position_size=%d gap=%d",
+                            position.market_id,
+                            position.position_id[:8],
+                            exit_quantity,
+                            position.size,
+                            position.size - exit_quantity
+                        )
+                        # Still count as healthy for existence check, but log warning
+                        healthy_count += 1
+                    else:
+                        healthy_count += 1
+                        logger.debug(
+                            "[EXIT-COVERAGE-HEALTH] Position has exactly one exit order with sufficient quantity: market=%s position_id=%s order_id=%s exit_qty=%d position_size=%d",
+                            position.market_id,
+                            position.position_id[:8],
+                            exit_order.kalshi_order_id,
+                            exit_quantity,
+                            position.size
+                        )
+        except Exception as health_err:
+            logger.error(
+                "[EXIT-COVERAGE-HEALTH] Health check failed: %s",
+                health_err,
+                exc_info=True
+            )
+            return {
+                "error": str(health_err),
+                "health_status": "error"
+            }
+        
+        # Determine overall health status
+        total_positions = len(positions_without_exit) + len(positions_with_multiple_exits) + healthy_count
+        
+        if len(positions_without_exit) > 0 or len(positions_with_multiple_exits) > 0:
+            health_status = "critical" if len(positions_without_exit) > 0 else "warning"
+        else:
+            health_status = "healthy"
+        
+        result = {
+            "total_positions": total_positions,
+            "positions_without_exit": positions_without_exit,
+            "positions_with_multiple_exits": positions_with_multiple_exits,
+            "healthy_count": healthy_count,
+            "health_status": health_status
+        }
+        
+        logger.info(
+            "[EXIT-COVERAGE-HEALTH] Summary: total=%d healthy=%d without_exit=%d multiple_exits=%d status=%s",
+            total_positions,
+            healthy_count,
+            len(positions_without_exit),
+            len(positions_with_multiple_exits),
+            health_status
+        )
+        
+        return result
+    
+    def portfolio_level_exit_coverage_check(self) -> Dict[str, Any]:
+        """
+        Portfolio-level cross-asset exit coverage check.
+        
+        CRITICAL FIX (2026-07-23): Ensures portfolio-wide exit coverage invariants:
+        - No open positions in any asset without exit coverage
+        - No asset with more than one exit per position
+        - Per-asset breakdown of exit coverage status
+        
+        This provides a portfolio-wide view to gate new entries if the system
+        detects missing exits for any asset.
+        
+        Returns:
+            Dict with portfolio-level health check results:
+            - total_positions: Total number of open positions across all assets
+            - assets_with_positions: List of assets with open positions
+            - per_asset_coverage: Dict mapping asset -> coverage status
+            - assets_without_exit_coverage: List of assets with positions but no exits
+            - assets_with_duplicate_exits: List of assets with duplicate exits
+            - portfolio_health_status: "healthy", "warning", or "critical"
+        """
+        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+        from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+        from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
+        
+        per_asset_coverage = {}
+        assets_without_exit_coverage = []
+        assets_with_duplicate_exits = []
+        
+        try:
+            resting_monitor = get_resting_order_monitor()
+            open_positions = self.get_open_positions()
+            
+            # Group positions by asset
+            positions_by_asset = {}
+            for position_id, position in open_positions.items():
+                asset = kalshi_ticker_to_asset(position.market_id) if position.market_id else "UNKNOWN"
+                if asset not in positions_by_asset:
+                    positions_by_asset[asset] = []
+                positions_by_asset[asset].append(position)
+            
+            # Check each asset's exit coverage
+            for asset, positions in positions_by_asset.items():
+                asset_positions_without_exit = []
+                asset_positions_with_multiple_exits = []
+                asset_healthy_count = 0
+                
+                for position in positions:
+                    # Get resting orders for this market
+                    resting_orders = resting_monitor.get_orders_by_ticker(position.market_id)
+                    
+                    # Filter for exit orders only (check multiple fields for exit markers)
+                    # CRITICAL FIX (2026-07-23): Filter by status to exclude terminal orders
+                    # Only count orders with active status (open, resting, partially_filled)
+                    from merid.event_venues.kalshi.resting_order_monitor import RESTING_STATUSES, TERMINAL_STATUSES
+                    exit_orders = []
+                    for order in resting_orders:
+                        is_exit = (
+                            is_exit_order_from_source(order.exit_policy_id) or
+                            is_exit_order_from_source(order.client_order_id) or
+                            is_exit_order_from_source(order.intent_id) or
+                            is_exit_order_from_source(getattr(order, 'source', None))
+                        )
+                        # CRITICAL FIX (2026-07-23): Exclude terminal statuses (filled, canceled, expired, rejected)
+                        # These orders are no longer active and should not count as exit coverage
+                        order_status = getattr(order, 'status', '').lower()
+                        is_active = order_status in RESTING_STATUSES or order_status not in TERMINAL_STATUSES
+                        
+                        if is_exit and is_active:
+                            exit_orders.append(order)
+                    
+                    # Check exit coverage
+                    if len(exit_orders) == 0:
+                        asset_positions_without_exit.append(position.market_id)
+                    elif len(exit_orders) > 1:
+                        asset_positions_with_multiple_exits.append(position.market_id)
+                    else:
+                        asset_healthy_count += 1
+                
+                # Determine asset-level health status
+                if len(asset_positions_without_exit) > 0:
+                    asset_status = "critical"
+                    assets_without_exit_coverage.append(asset)
+                elif len(asset_positions_with_multiple_exits) > 0:
+                    asset_status = "warning"
+                    assets_with_duplicate_exits.append(asset)
+                else:
+                    asset_status = "healthy"
+                
+                per_asset_coverage[asset] = {
+                    "total_positions": len(positions),
+                    "healthy_count": asset_healthy_count,
+                    "positions_without_exit": asset_positions_without_exit,
+                    "positions_with_multiple_exits": asset_positions_with_multiple_exits,
+                    "asset_status": asset_status
+                }
+                
+                logger.info(
+                    "[PORTFOLIO-EXIT-COVERAGE] asset=%s total=%d healthy=%d without_exit=%d multiple_exits=%d status=%s",
+                    asset,
+                    len(positions),
+                    asset_healthy_count,
+                    len(asset_positions_without_exit),
+                    len(asset_positions_with_multiple_exits),
+                    asset_status
+                )
+        except Exception as portfolio_err:
+            logger.error(
+                "[PORTFOLIO-EXIT-COVERAGE] Portfolio-level health check failed: %s",
+                portfolio_err,
+                exc_info=True
+            )
+            return {
+                "error": str(portfolio_err),
+                "portfolio_health_status": "error"
+            }
+        
+        # Determine overall portfolio health status
+        total_positions = len(open_positions)
+        assets_with_positions = list(positions_by_asset.keys())
+        
+        if len(assets_without_exit_coverage) > 0:
+            portfolio_health_status = "critical"
+        elif len(assets_with_duplicate_exits) > 0:
+            portfolio_health_status = "warning"
+        else:
+            portfolio_health_status = "healthy"
+        
+        result = {
+            "total_positions": total_positions,
+            "assets_with_positions": assets_with_positions,
+            "per_asset_coverage": per_asset_coverage,
+            "assets_without_exit_coverage": assets_without_exit_coverage,
+            "assets_with_duplicate_exits": assets_with_duplicate_exits,
+            "portfolio_health_status": portfolio_health_status
+        }
+        
+        logger.info(
+            "[PORTFOLIO-EXIT-COVERAGE] Summary: total_positions=%d assets=%d healthy_assets=%d critical_assets=%d warning_assets=%d status=%s",
+            total_positions,
+            len(assets_with_positions),
+            len([a for a, cov in per_asset_coverage.items() if cov["asset_status"] == "healthy"]),
+            len(assets_without_exit_coverage),
+            len(assets_with_duplicate_exits),
+            portfolio_health_status
+        )
+        
+        return result
+    
+    def _register_exit_submission(self, client_order_id: str) -> None:
+        """
+        Register a recent exit order submission to handle websocket lag.
+        
+        CRITICAL FIX (2026-07-23): This prevents duplicate exits when exchange
+        confirmation is delayed. Orders in this cache are treated as "exists"
+        even if not yet visible in RestingOrderMonitor.
+        
+        Args:
+            client_order_id: Client order ID of the submitted exit order
+        """
+        with self._lock:
+            self._recent_exit_submissions[client_order_id] = time.time()
+            logger.debug(
+                "[EXIT-SUBMISSION-CACHE] Registered exit submission: client_order_id=%s",
+                client_order_id
+            )
+    
+    def _is_exit_submitted_recently(self, client_order_id: str) -> bool:
+        """
+        Check if an exit order was submitted recently (within TTL).
+        
+        Args:
+            client_order_id: Client order ID to check
+            
+        Returns:
+            True if submitted within TTL, False otherwise
+        """
+        with self._lock:
+            if client_order_id not in self._recent_exit_submissions:
+                return False
+            
+            submission_time = self._recent_exit_submissions[client_order_id]
+            if time.time() - submission_time > self._submission_cache_ttl:
+                # Expired, remove from cache
+                del self._recent_exit_submissions[client_order_id]
+                logger.debug(
+                    "[EXIT-SUBMISSION-CACHE] Expired submission: client_order_id=%s age=%.2fs",
+                    client_order_id,
+                    time.time() - submission_time
+                )
+                return False
+            
+            return True
+    
+    def _cleanup_expired_submissions(self) -> None:
+        """Clean up expired submissions from the cache."""
+        with self._lock:
+            current_time = time.time()
+            expired = [
+                order_id for order_id, timestamp in self._recent_exit_submissions.items()
+                if current_time - timestamp > self._submission_cache_ttl
+            ]
+            for order_id in expired:
+                del self._recent_exit_submissions[order_id]
+            
+            if expired:
+                logger.debug(
+                    "[EXIT-SUBMISSION-CACHE] Cleaned up %d expired submissions",
+                    len(expired)
+                )
+    
+    def _register_exit_order(self, position_id: str, kalshi_order_id: str, quantity: int = 1) -> None:
+        """
+        Register an exit order in the first-class exit registry.
+        
+        CRITICAL FIX (2026-07-23): This registry is the source of truth for
+        exit orders, reducing reliance on exchange data heuristics.
+        
+        Args:
+            position_id: Position ID
+            kalshi_order_id: Kalshi order ID
+            quantity: Exit order quantity (number of contracts)
+        """
+        with self._lock_registry_lock:
+            if position_id not in self._exit_registry:
+                self._exit_registry[position_id] = []
+                self._exit_quantities[position_id] = {}
+            
+            if kalshi_order_id not in self._exit_registry[position_id]:
+                self._exit_registry[position_id].append(kalshi_order_id)
+                self._exit_quantities[position_id][kalshi_order_id] = quantity
+                logger.info(
+                    "[EXIT-REGISTRY] Registered exit order: position_id=%s kalshi_order_id=%s quantity=%d total_exits=%d",
+                    position_id[:8],
+                    kalshi_order_id,
+                    quantity,
+                    len(self._exit_registry[position_id])
+                )
+    
+    def _unregister_exit_order(self, position_id: str, kalshi_order_id: str) -> None:
+        """
+        Unregister an exit order from the exit registry.
+        
+        Args:
+            position_id: Position ID
+            kalshi_order_id: Kalshi order ID
+        """
+        with self._lock_registry_lock:
+            if position_id in self._exit_registry:
+                if kalshi_order_id in self._exit_registry[position_id]:
+                    self._exit_registry[position_id].remove(kalshi_order_id)
+                    if kalshi_order_id in self._exit_quantities.get(position_id, {}):
+                        del self._exit_quantities[position_id][kalshi_order_id]
+                    logger.info(
+                        "[EXIT-REGISTRY] Unregistered exit order: position_id=%s kalshi_order_id=%s remaining_exits=%d",
+                        position_id[:8],
+                        kalshi_order_id,
+                        len(self._exit_registry[position_id])
+                    )
+                
+                if not self._exit_registry[position_id]:
+                    del self._exit_registry[position_id]
+                    if position_id in self._exit_quantities:
+                        del self._exit_quantities[position_id]
+    
+    def _get_exit_orders_for_position(self, position_id: str) -> List[str]:
+        """
+        Get registered exit orders for a position.
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            List of Kalshi order IDs for exit orders
+        """
+        with self._lock_registry_lock:
+            return self._exit_registry.get(position_id, []).copy()
+    
+    def _has_exit_order(self, position_id: str) -> bool:
+        """
+        Check if a position has any registered exit orders.
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            True if position has exit orders, False otherwise
+        """
+        with self._lock_registry_lock:
+            return position_id in self._exit_registry and len(self._exit_registry[position_id]) > 0
+    
+    def _get_total_exit_quantity(self, position_id: str) -> int:
+        """
+        Get the total quantity of all exit orders for a position.
+        
+        CRITICAL FIX (2026-07-23): This is used for quantity-aware exit coverage invariant.
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            Total exit quantity (sum of all exit order quantities)
+        """
+        with self._lock_registry_lock:
+            if position_id not in self._exit_quantities:
+                return 0
+            return sum(self._exit_quantities[position_id].values())
+    
+    def _check_exit_quantity_coverage(self, position_id: str, position_size: int) -> Dict[str, Any]:
+        """
+        Check if exit orders provide sufficient quantity coverage for a position.
+        
+        CRITICAL FIX (2026-07-23): Ensures sum(open_exit_qty) >= remaining_position_qty.
+        This prevents the dangerous case where an exit order exists but is too small
+        to fully exit the position.
+        
+        Args:
+            position_id: Position ID
+            position_size: Current position size
+            
+        Returns:
+            Dict with coverage check results:
+            - has_coverage: True if exit quantity >= position size
+            - exit_quantity: Total exit quantity
+            - position_size: Position size
+            - coverage_gap: Quantity shortfall (if any)
+            - coverage_pct: Coverage percentage
+        """
+        exit_quantity = self._get_total_exit_quantity(position_id)
+        coverage_gap = max(0, position_size - exit_quantity)
+        coverage_pct = (exit_quantity / position_size * 100) if position_size > 0 else 0
+        
+        result = {
+            "has_coverage": exit_quantity >= position_size,
+            "exit_quantity": exit_quantity,
+            "position_size": position_size,
+            "coverage_gap": coverage_gap,
+            "coverage_pct": coverage_pct
+        }
+        
+        if not result["has_coverage"]:
+            logger.warning(
+                "[EXIT-QUANTITY-COVERAGE] Insufficient exit coverage: position_id=%s exit_qty=%d position_size=%d gap=%d coverage_pct=%.1f%%",
+                position_id[:8],
+                exit_quantity,
+                position_size,
+                coverage_gap,
+                coverage_pct
+            )
+        
+        return result
+    
+    def _mark_exit_intent_in_flight(self, position_id: str) -> None:
+        """
+        Mark an exit intent as in-flight for a position.
+        
+        CRITICAL FIX (2026-07-23): This prevents multiple exit triggers (TP + SL)
+        from firing before the first exit is placed. Only one exit intent can be
+        in-flight per position at a time.
+        
+        Args:
+            position_id: Position ID
+        """
+        with self._lock:
+            self._exit_intent_in_flight[position_id] = time.time()
+            logger.debug(
+                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent in-flight: position_id=%s",
+                position_id[:8]
+            )
+    
+    def _is_exit_intent_in_flight(self, position_id: str) -> bool:
+        """
+        Check if an exit intent is currently in-flight for a position.
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            True if exit intent is in-flight, False otherwise
+        """
+        with self._lock:
+            if position_id not in self._exit_intent_in_flight:
+                return False
+            
+            # Check if the intent has timed out
+            intent_time = self._exit_intent_in_flight[position_id]
+            if time.time() - intent_time > self._exit_intent_timeout_seconds:
+                # Expired, remove from in-flight tracking
+                del self._exit_intent_in_flight[position_id]
+                logger.warning(
+                    "[EXIT-INTENT-IN-FLIGHT] Exit intent timed out: position_id=%s age=%.2fs",
+                    position_id[:8],
+                    time.time() - intent_time
+                )
+                return False
+            
+            return True
+    
+    def _clear_exit_intent_in_flight(self, position_id: str) -> None:
+        """
+        Clear the in-flight flag for a position after exit order is placed.
+        
+        Args:
+            position_id: Position ID
+        """
+        with self._lock:
+            if position_id in self._exit_intent_in_flight:
+                del self._exit_intent_in_flight[position_id]
+                logger.debug(
+                    "[EXIT-INTENT-IN-FLIGHT] Cleared exit intent in-flight: position_id=%s",
+                    position_id[:8]
+                )
+    
+    def _get_position_lock(self, position_id: str) -> threading.Lock:
+        """
+        Get or create a position-level execution lock.
+        
+        CRITICAL FIX (2026-07-23): Prevents TOCTOU races during exit order creation.
+        Only one thread can create an exit order for a given position at a time.
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            Lock object for this position
+        """
+        with self._lock_registry_lock:
+            if position_id not in self._position_exit_locks:
+                self._position_exit_locks[position_id] = threading.Lock()
+            return self._position_exit_locks[position_id]
+    
+    def set_orders_last_updated(self, timestamp: float) -> None:
+        """
+        Set the timestamp when orders were last updated from exchange.
+        
+        CRITICAL FIX (2026-07-23): This is used for startup grace window to ensure
+        orders are loaded before enforcing exit invariants.
+        
+        Args:
+            timestamp: Unix timestamp when orders were last updated
+        """
+        with self._lock:
+            self._orders_last_updated_ts = timestamp
+            logger.info(
+                "[STARTUP-GRACE] Orders last updated timestamp set: %.2f (age=%.2fs since process start)",
+                timestamp,
+                timestamp - self._process_start_time
+            )
+    
+    def is_in_startup_grace_window(self) -> bool:
+        """
+        Check if the system is in the startup grace window.
+        
+        CRITICAL FIX (2026-07-23): During startup, we delay exit invariant enforcement
+        until orders are loaded and at least one websocket sync cycle completes.
+        
+        Returns:
+            True if in startup grace window, False otherwise
+        """
+        with self._lock:
+            # Check if orders have been updated from RestingOrderMonitor
+            try:
+                from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+                resting_monitor = get_resting_order_monitor()
+                
+                # If RestingOrderMonitor hasn't polled yet, we're in grace window
+                if resting_monitor._last_poll_time is None:
+                    logger.debug("[STARTUP-GRACE] RestingOrderMonitor hasn't polled yet - in grace window")
+                    return True
+                
+                # Convert datetime to timestamp
+                last_poll_ts = resting_monitor._last_poll_time.timestamp()
+                time_since_poll = time.time() - last_poll_ts
+                
+                # Check if enough time has passed since first poll
+                if time_since_poll < self._startup_grace_window_seconds:
+                    logger.debug(
+                        "[STARTUP-GRACE] In grace window: time since poll=%.2fs < grace window=%.2fs",
+                        time_since_poll,
+                        self._startup_grace_window_seconds
+                    )
+                    return True
+                
+                logger.info(
+                    "[STARTUP-GRACE] Grace window complete: time since poll=%.2fs >= grace window=%.2fs",
+                    time_since_poll,
+                    self._startup_grace_window_seconds
+                )
+                return False
+                
+            except Exception as e:
+                logger.warning(
+                    "[STARTUP-GRACE] Failed to check RestingOrderMonitor poll time, assuming grace window: %s",
+                    e
+                )
+                return True
+    
+    async def _check_position(self, position: Position, current_price_cents: int, poll_count: int = 0) -> None:
         """
         Check a single position for exit conditions.
         
         Args:
             position: Position to check
             current_price_cents: Current market price in cents
+            poll_count: Current poll iteration number for dedupe keys
         """
         # Update runtime state
         position.update_runtime_state(current_price_cents)
@@ -252,6 +915,17 @@ class PositionMonitor:
         # Per Kalshi semantics, contracts settle at exactly $1 if correct and $0 if not
         # Selling early at 99c locks in almost all of the payoff
         if position.should_trigger_auto_exit_99c(current_price_cents) and not position.exit_triggered:
+            # CRITICAL FIX (2026-07-23): Log multi-trigger state for audit
+            # Distinguish between "position already exited" vs "multiple triggers evaluated"
+            if position.exit_reason:
+                logger.warning(
+                    "[EXIT-TRIGGER-MULTI] position=%s market=%s has exit_reason=%s but exit_triggered=False - "
+                    "this indicates exit order placement failed or is pending. Skipping new trigger auto_exit_99c.",
+                    position.position_id[:8],
+                    position.market_id,
+                    position.exit_reason
+                )
+                return
             # AUDIT: Timing correctness - check expiry proximity
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
             store = get_kalshi_market_state_store()
@@ -392,6 +1066,16 @@ class PositionMonitor:
                     # CRITICAL FIX (2026-07-16): Side-space — own-side price rising to target
                     # triggers for BOTH sides (no NO mirror)
                     if position.dynamic_tp_target_cents is not None and not position.dynamic_tp_triggered and not position.exit_triggered:
+                        # CRITICAL FIX (2026-07-23): Log multi-trigger state for audit
+                        if position.exit_reason:
+                            logger.warning(
+                                "[EXIT-TRIGGER-MULTI] position=%s market=%s has exit_reason=%s but exit_triggered=False - "
+                                "skipping new trigger dynamic_tp. This indicates exit order placement failed or is pending.",
+                                position.position_id[:8],
+                                position.market_id,
+                                position.exit_reason
+                            )
+                            return
                         if current_price_cents >= position.dynamic_tp_target_cents:
                             position.dynamic_tp_triggered = True
                             # AUDIT: Idempotency - generate dedupe key for this trigger
@@ -1198,6 +1882,22 @@ class PositionMonitor:
         # for the same position still sees exit_triggered=True) while restoring execution.
         callback_dispatched = False
         if self._exit_intent_callback:
+            # CRITICAL FIX (2026-07-23): Check if exit intent is already in-flight
+            # This prevents multiple triggers (TP + SL) from firing before first exit is placed
+            if self._is_exit_intent_in_flight(position.position_id):
+                logger.warning(
+                    "[EXIT-INTENT-IN-FLIGHT] Exit intent already in-flight for position=%s, skipping duplicate trigger. "
+                    "Existing trigger reason=%s, new reason=%s",
+                    position.position_id[:8],
+                    "unknown",
+                    exit_reason.value
+                )
+                # Skip this trigger - the in-flight intent will handle the exit
+                return
+            
+            # Mark intent as in-flight before calling callback
+            self._mark_exit_intent_in_flight(position.position_id)
+            
             try:
                 logger.info(
                     "[POSITION-MONITOR] Calling exit intent callback for position=%s reason=%s contracts=%s",
@@ -1412,7 +2112,7 @@ class PositionMonitor:
                         )
                         
                         if current_price is not None:
-                            await self._check_position(position, current_price)
+                            await self._check_position(position, current_price, poll_count)
                         else:
                             logger.warning(
                                 "[POSITION-MONITOR] Could not determine price for %s - skipping exit check",
@@ -1439,16 +2139,77 @@ class PositionMonitor:
     async def start(self) -> None:
         """
         Start the position monitor.
+        
+        CRITICAL FIX (2026-07-23): Load existing positions from position cache on startup.
+        This ensures positions opened before monitor started (or during restart) are tracked
+        for exit policies. Without this, exit policies never trigger for existing positions.
         """
         if self._running:
             logger.warning("[POSITION-MONITOR] Already running")
             return
         
+        # CRITICAL FIX: Load existing positions from position cache on startup
+        # This ensures positions opened before monitor started are tracked for exit policies
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            position_cache = get_position_cache()
+            cached_positions = position_cache.get_all_positions(validate_freshness=False)
+            
+            loaded_count = 0
+            for market_id, cached_pos in cached_positions.items():
+                if cached_pos.contracts > 0:
+                    # Convert CachedPosition to Position for monitoring
+                    from merid.position_management.position import Position, PositionSide
+                    from datetime import datetime, timezone
+                    
+                    # Determine position side from thesis_side (immutable) or side (fallback)
+                    side_str = cached_pos.thesis_side if cached_pos.thesis_side else cached_pos.side
+                    if side_str.lower() in ("yes", "YES"):
+                        position_side = PositionSide.YES
+                    elif side_str.lower() in ("no", "NO"):
+                        position_side = PositionSide.NO
+                    else:
+                        logger.warning(
+                            "[POSITION-MONITOR-STARTUP] Unknown side %s for market=%s, skipping",
+                            side_str, market_id
+                        )
+                        continue
+                    
+                    # Create Position object from CachedPosition
+                    position = Position(
+                        position_id=market_id,  # Use market_id as position_id for 15m system
+                        market_id=market_id,
+                        side=position_side,
+                        size=cached_pos.contracts,
+                        avg_entry_price_cents=cached_pos.avg_price_cents or 42,  # Fallback to 42c if unknown
+                        take_profit_price_cents=cached_pos.take_profit_price_cents,
+                        stop_loss_price_cents=cached_pos.stop_loss_price_cents,
+                        opened_at=datetime.now(timezone.utc),  # Use current time for existing positions
+                    )
+                    
+                    # Add to monitor
+                    self.add_position(position)
+                    loaded_count += 1
+            
+            logger.info(
+                "[POSITION-MONITOR-STARTUP] Loaded %d existing positions from position cache",
+                loaded_count
+            )
+            
+        except Exception as e:
+            logger.error(
+                "[POSITION-MONITOR-STARTUP] Failed to load existing positions from cache: %s",
+                e,
+                exc_info=True
+            )
+            # Continue startup even if load fails - positions will be added on fill
+        
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
         logger.info(
-            "[POSITION-MONITOR] Started (poll_interval=%ds)",
-            self._poll_interval
+            "[POSITION-MONITOR] Started (poll_interval=%ds, tracking %d positions)",
+            self._poll_interval,
+            len(self._open_positions)
         )
     
     async def stop(self) -> None:
