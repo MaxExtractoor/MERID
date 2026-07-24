@@ -16,7 +16,9 @@ The log scanner can output structured JSON with the following schema:
     "total_issues": 0,
     "exit_invariant_violations": 0,
     "exit_post_size_issues": 0,
-    "bias_issues": 0
+    "bias_issues": 0,
+    "price_side_mismatches": 0,
+    "cheap_wrong_side_candidates": 0
   },
   "assets": {
     "BTC": {
@@ -26,7 +28,9 @@ The log scanner can output structured JSON with the following schema:
       "yes_orders_sent": 5,
       "exit_invariant_violations": 0,
       "exit_post_size_issues": 0,
-      "bias_issues": 0
+      "bias_issues": 0,
+      "price_side_mismatches": 0,
+      "cheap_wrong_side_candidates": 0
     },
     "ETH": { ... },
     "SOL": { ... },
@@ -42,6 +46,16 @@ The log scanner can output structured JSON with the following schema:
       "asset": "BTC",
       "position_id": "abc123",
       "details": "..."
+    },
+    {
+      "type": "PRICE-SIDE-CHECK-VIOLATION",
+      "timestamp": "2026-07-24T12:00:00Z",
+      "line_num": 5678,
+      "market_id": "KXBTC15M-26JUL211745-45",
+      "asset": "BTC",
+      "thesis_side": "no",
+      "order_side": "BUY_YES",
+      "details": "Order side does not match thesis_side from intent"
     }
   ]
 }
@@ -52,12 +66,12 @@ The log scanner can output structured JSON with the following schema:
 The log scanner can output CSV with the following schema:
 
 ```csv
-timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues
-2026-07-24T12:00:00Z,BTC,10,10,5,5,0,0,0
-2026-07-24T12:00:00Z,ETH,8,8,6,6,0,0,0
-2026-07-24T12:00:00Z,SOL,12,12,4,4,0,0,0
-2026-07-24T12:00:00Z,XRP,6,6,7,7,0,0,0
-2026-07-24T12:00:00Z,DOGE,9,9,5,5,0,0,0
+timestamp,asset,no_signals_seen,no_orders_sent,yes_signals_seen,yes_orders_sent,exit_invariant_violations,exit_post_size_issues,bias_issues,price_side_mismatches,cheap_wrong_side_candidates
+2026-07-24T12:00:00Z,BTC,10,10,5,5,0,0,0,0,0
+2026-07-24T12:00:00Z,ETH,8,8,6,6,0,0,0,0,0
+2026-07-24T12:00:00Z,SOL,12,12,4,4,0,0,0,0,0
+2026-07-24T12:00:00Z,XRP,6,6,7,7,0,0,0,0,0
+2026-07-24T12:00:00Z,DOGE,9,9,5,5,0,0,0,0,0
 ```
 
 ## Usage
@@ -144,6 +158,24 @@ python scripts/scan_bias_and_exit_health.py path/to/log.txt
   - `total_issues`: Value
 - **Alert**: If `total_issues` > 0
 
+#### Panel 7: Price-Side Discipline (Cheap Wrong Side Rejections)
+
+- **Panel Type**: Stat Panel or Table
+- **Query**: Sum `cheap_wrong_side_candidates` by `asset`
+- **Field Mappings**:
+  - `asset`: Label
+  - `cheap_wrong_side_candidates`: Value
+- **Interpretation**: Higher values indicate the invariant is working (cheapness on wrong side is correctly ignored). This is a positive metric showing the system is protecting against "cheap but wrong" trades.
+
+#### Panel 8: Price-Side Mismatches (Critical)
+
+- **Panel Type**: Stat Panel or Table
+- **Query**: Sum `price_side_mismatches` by `asset`
+- **Field Mappings**:
+  - `asset`: Label
+  - `price_side_mismatches`: Value
+- **Alert**: If `price_side_mismatches` > 0 for any asset (CRITICAL - indicates invariant violation)
+
 ### Grafana Alert Thresholds
 
 | Metric | Warning | Critical |
@@ -152,6 +184,8 @@ python scripts/scan_bias_and_exit_health.py path/to/log.txt
 | `exit_post_size_issues` | > 0 | > 0 |
 | `bias_issues` | > 0 | > 0 |
 | `no_orders_sent` / `no_signals_seen` | < 0.8 | < 0.5 |
+| `price_side_mismatches` | > 0 | > 0 |
+| `cheap_wrong_side_candidates` | N/A | N/A (positive metric - higher is better) |
 
 ### Example Panel: NO-Order Share vs Expected NO-Signal Share (BTC 15m)
 

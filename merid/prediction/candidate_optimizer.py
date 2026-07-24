@@ -53,6 +53,10 @@ class MarketCandidate:
     errors: List[str] = field(default_factory=list)
     size: int = 1  # Position size in contracts (default 1)
     ticker: str = ""  # Alias for series_ticker for compatibility
+    strike_target: Optional[float] = None  # Strike/target level for the market (e.g., BTC price target)
+    thesis_side: Optional[str] = None  # YES/NO thesis side from signal
+    yes_price_cents: Optional[int] = None  # YES leg price at candidate time
+    no_price_cents: Optional[int] = None  # NO leg price at candidate time
 
 
 @dataclass

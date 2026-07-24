@@ -48,6 +48,11 @@ from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 # PHASE1-DUP-2: Order deduplication cache integration
 from merid.event_venues.kalshi.order_deduplication import get_order_cache
 
+# Import invariant checker for production logging
+from merid.validation.canonical_mapping_invariants import (
+    CanonicalMappingTable,
+)
+
 # INTENT VERIFICATION: Hash computation for intent-to-execution audit trail
 import json
 
@@ -172,6 +177,35 @@ _asset_entry_windows: Dict[str, int] = {}
 _asset_entry_windows_lock = threading.Lock()
 
 
+def cleanup_stale_entry_windows() -> None:
+    """Remove entry windows that are older than the current 15-minute period.
+    
+    This prevents stale windows from permanently blocking trading due to:
+    - Server restarts without proper position close callbacks
+    - Errors during position close that prevented window clearing
+    - Any state inconsistency between window tracking and actual positions
+    
+    Should be called periodically and on startup.
+    """
+    import time
+    try:
+        current_window = int(time.time() // 900) * 900
+        with _asset_entry_windows_lock:
+            stale_assets = [
+                asset for asset, window in _asset_entry_windows.items()
+                if window < current_window
+            ]
+            for asset in stale_assets:
+                del _asset_entry_windows[asset]
+            if stale_assets:
+                logger.info(
+                    f"[ORDER-ROUTER] Cleaned up {len(stale_assets)} stale entry windows: {stale_assets} "
+                    f"(current_window={current_window})"
+                )
+    except Exception as e:
+        logger.warning("[ORDER-ROUTER] Failed to cleanup stale entry windows: %s", e)
+
+
 # =============================================================================
 # Fee-Aware Edge Calculation (Phase 1)
 # =============================================================================
@@ -248,7 +282,8 @@ def check_market_microstructure(
     max_spread_cents: float = 20.0,  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
-    min_no_depth: int = 1
+    min_no_depth: int = 1,
+    min_total_depth: int = 25  # CRITICAL FIX (2026-07-23): OBI depth gating - minimum total depth (yes + no) to prevent trading in illiquid markets
 ) -> tuple[bool, str]:
     """
     Check if market microstructure meets quality thresholds.
@@ -297,6 +332,15 @@ def check_market_microstructure(
         return (
             False,
             f"no_depth_too_low: {no_depth} < {min_no_depth}"
+        )
+    
+    # CRITICAL FIX (2026-07-23): OBI depth gating - check total depth (yes + no)
+    # Prevent trading in illiquid markets where total depth is too low
+    total_depth = yes_depth + no_depth
+    if total_depth < min_total_depth:
+        return (
+            False,
+            f"total_depth_too_low: {total_depth} < {min_total_depth}"
         )
     
     # Check depth in USD (depth * price * contract_value)
@@ -456,6 +500,13 @@ def _check_toxicity_kill_switch(intent: OrderIntent) -> Optional[str]:
     Returns:
         Rejection reason string if kill switch active, None if OK
     """
+    # CRITICAL FIX (2026-07-22): Exit orders bypass toxicity kill switch.
+    # Toxicity kill switches are designed to halt NEW risk, not prevent
+    # risk REDUCTION. Blocking exits traps positions exactly when flattening
+    # them matters most (standard practice: halt entries, allow exits).
+    if _is_exit_order(intent):
+        return None
+    
     try:
         kill_switch = get_entropy_kill_switch()
         is_allowed, reason = kill_switch.is_trading_allowed(intent.ticker)
@@ -1990,16 +2041,22 @@ _MIN_STARTUP_GRACE_PERIOD = 5.0  # Minimum 5 seconds before allowing any orders 
 _e2e_latency_samples: List[float] = []
 _MAX_E2E_SAMPLES = 1000
 
-def _check_global_rate_limit() -> Optional[str]:
+def _check_global_rate_limit(intent: OrderIntent) -> Optional[str]:
     """Check global rate limit to prevent rapid-fire execution.
-    
+
     Returns rejection reason string, or None if OK.
     NOTE: This is a pure validation function - it does NOT record timestamps.
     Timestamps are recorded only after successful order submission via _record_successful_order().
     """
+    # CRITICAL FIX (2026-07-22): Exit orders bypass global rate limit.
+    # Rate limits are designed to prevent rapid-fire ENTRY orders, not block
+    # urgent exit orders. Blocking an exit for rate limiting traps positions.
+    if _is_exit_order(intent):
+        return None
+
     global _global_order_timestamps
     current_time = _time.time()
-    
+
     # CRITICAL: Check startup grace period to prevent immediate orders after restart
     time_since_startup = current_time - _startup_time
     if time_since_startup < _MIN_STARTUP_GRACE_PERIOD:
@@ -2104,7 +2161,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         return kill_switch_rejection
     
     # CRITICAL: Check global rate limit to prevent rapid-fire
-    rate_limit_rejection = _check_global_rate_limit()
+    rate_limit_rejection = _check_global_rate_limit(intent)
     if rate_limit_rejection:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "global_rate_limit")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "global_rate_limit")
@@ -2143,6 +2200,42 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                 # Continue with conversion for backward compatibility
     
     logger.info("[CHECK-INTENT-RISK] After conversion: side=%s action=%s", intent.side, intent.action)
+    
+    # CRITICAL FIX: 2026-07-24 - Add PRICE-SIDE-CHECK invariant in router
+    # Validate that order side matches thesis_side from intent metadata
+    # This prevents "cheap but wrong side" orders from reaching execution
+    thesis_side = getattr(intent, 'thesis_side', None)
+    strike_target = getattr(intent, 'strike_target', None)
+    if thesis_side:
+        # Extract outcome_side from converted side (BUY_YES -> yes, SELL_NO -> no, etc.)
+        order_outcome_side = None
+        if "YES" in intent.side:
+            order_outcome_side = "yes"
+        elif "NO" in intent.side:
+            order_outcome_side = "no"
+        
+        # Extract asset from ticker
+        asset = intent.ticker[:3] if intent.ticker and len(intent.ticker) >= 3 else "UNKNOWN"
+        
+        if order_outcome_side and order_outcome_side != thesis_side.lower():
+            logger.critical(
+                "[PRICE-SIDE-CHECK-ROUTER] timestamp=%s asset=%s market_id=%s strike_target=%s thesis_side=%s "
+                "order_side=%s order_price=%dc price_side_mismatch=true "
+                "CRITICAL invariant violation: order side does not match thesis_side from intent. "
+                "This indicates cheapness on wrong side overrode directional signal.",
+                datetime.utcnow().isoformat(), asset, intent.ticker, strike_target or "N/A",
+                thesis_side, intent.side, getattr(intent, 'price_cents', 0)
+            )
+            _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "price_side_mismatch")
+            _increment_validation_gate_metric("ROUTER_VALIDATION", "price_side_mismatch")
+            return "price_side_mismatch:thesis_side_mismatch"
+        else:
+            logger.info(
+                "[PRICE-SIDE-CHECK-ROUTER] timestamp=%s asset=%s market_id=%s strike_target=%s thesis_side=%s "
+                "order_side=%s order_price=%dc price_side_mismatch=false INVARIANT_OK",
+                datetime.utcnow().isoformat(), asset, intent.ticker, strike_target or "N/A",
+                thesis_side, intent.side, getattr(intent, 'price_cents', 0)
+            )
     
     if intent.count <= 0:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "non_positive_size")
@@ -2783,7 +2876,8 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                         max_spread_cents=profile.market_microstructure_max_spread_cents,
                         min_depth_usd=profile.market_microstructure_min_depth_usd,
                         min_yes_depth=profile.market_microstructure_min_yes_depth,
-                        min_no_depth=profile.market_microstructure_min_no_depth
+                        min_no_depth=profile.market_microstructure_min_no_depth,
+                        min_total_depth=profile.momentum_fvg_liquidity_min_threshold  # CRITICAL FIX (2026-07-23): Use profile threshold for total depth gating
                     )
                     if not passes:
                         logger.warning(
@@ -3104,6 +3198,13 @@ def _check_market_liquidity(intent: OrderIntent, state: Optional[Any]) -> Option
     Returns:
         Error string if liquidity check fails, None if OK
     """
+    # CRITICAL FIX (2026-07-22): Exit orders bypass liquidity check.
+    # Exits must be able to close positions in thin/dying books (end of 15m window
+    # is exactly when books thin out and exits are most urgent). Blocking an exit
+    # for low depth traps the position to settlement.
+    if _is_exit_order(intent):
+        return None
+    
     # If no state available, skip check
     if state is None:
         return None
@@ -3157,6 +3258,17 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any])
     """
     # Only validate limit orders
     if intent.order_type != "limit":
+        return None
+    
+    # CRITICAL FIX (2026-07-22): Exit orders bypass orderbook price validation.
+    # 1) Marketable exits (aggressiveness=1.0) intentionally cross the spread
+    #    (sell at/below bid) to guarantee immediate fills - the sell_below_bid
+    #    check rejects exactly the exits that are doing the right thing.
+    # 2) The mid-deviation check is computed in YES-space for SELL_NO exits
+    #    (side='SELL_NO' does not match the 'BUY_NO'/'no' branch), so valid
+    #    NO-space exit prices get rejected at extremes (e.g. 89c NO vs 11c YES mid).
+    # 3) 99c auto-exits and deep stop-loss exits legitimately sit far from mid.
+    if _is_exit_order(intent):
         return None
     
     # If no state available, skip validation
@@ -3674,7 +3786,11 @@ def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
     Returns error string if safety check fails, None if OK.
     """
     # Skip for sell orders (closes)
-    if intent.action == "sell":
+    # CRITICAL FIX (2026-07-22): Case-insensitive action check + exit-order exemption.
+    # Legacy exit path passes action="SELL" (uppercase) which failed the lowercase
+    # comparison, so 99c auto-exits were rejected as deep ITM and deep stop-loss
+    # exits as deep OTM (exits carry no edge_pct to qualify for the exception).
+    if (intent.action or "").lower() == "sell" or _is_exit_order(intent):
         return None
     
     # Check 1: Deep OTM/ITM detection
@@ -3776,6 +3892,18 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
 
     Returns OrderResult if cap exceeded or bankroll unavailable, None if OK.
     """
+    # CRITICAL FIX (2026-07-22): Exit orders bypass the bankroll notional cap.
+    # Exit orders REDUCE exposure - blocking them traps positions that can never
+    # be closed (e.g., 3 contracts @ 45c = $1.35 exit > $1.00 cap -> infinite
+    # retry loop while the position rides to settlement). Mirrors the slot
+    # allocator exit bypass (is_exit_order=True).
+    if _is_exit_order(intent) or intent.entry_or_exit == "exit":
+        logger.info(
+            "[BANKROLL-CAP] Exit order bypasses notional cap: ticker=%s count=%d price=%dc (exposure-reducing)",
+            intent.ticker, intent.count, intent.price_cents
+        )
+        return None
+
     # Get effective equity from intent or derive from live Kalshi balance
     effective_equity_usd = intent.effective_equity_usd
     if effective_equity_usd is None or effective_equity_usd <= 0:
@@ -4383,8 +4511,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     # 2026 best practices use graceful degradation: allow orders if book is initialized and reasonably fresh
     # This prevents rejecting valid trades during WebSocket warmup or temporary data gaps
     try:
+        # CRITICAL FIX (2026-07-22): Exit orders bypass market-state freshness gates.
+        # The stale_data exit reason fires precisely BECAUSE market data is stale;
+        # rejecting the resulting exit for the same staleness (state_not_found /
+        # book_not_initialized / book_stale / stale_market_data) is a circular trap
+        # that leaves positions unclosable (e.g. after window rollover the old
+        # market's state is pruned while the position still needs exiting).
+        _is_exit_gate = _is_exit_order(intent)
         state = store.get(intent.ticker)
-        if state is None:
+        if state is None and _is_exit_gate:
+            logger.warning(
+                "[order-router] EXIT ORDER: market state missing for %s - proceeding without state gates (exit must not be trapped)",
+                intent.ticker,
+            )
+        elif state is None:
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
                 "[order-router] Live order rejected — market state not found: ticker=%s",
@@ -4407,7 +4547,12 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # 2026-06-29: Relaxed executable check - allow orders if book is initialized and reasonably fresh
         # Previous: reject if not state.executable (requires both bid and ask)
         # New: allow if book_initialized=True and book_age_s < 30s (graceful degradation)
-        if not state.book_initialized:
+        if state is not None and not state.book_initialized and _is_exit_gate:
+            logger.warning(
+                "[order-router] EXIT ORDER: book not initialized for %s - proceeding (exit must not be trapped)",
+                intent.ticker,
+            )
+        elif state is not None and not state.book_initialized:
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
                 "[order-router] Live order rejected — book not initialized: ticker=%s book_initialized=%s",
@@ -4429,15 +4574,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         
         # Check book freshness - allow up to 30s staleness (2026 best practice)
         # 2026-06-29: Handle missing timestamps gracefully - if book_age is infinite, assume fresh
-        book_age = state.book_age_s if hasattr(state, 'book_age_s') else float('inf')
-        if book_age == float('inf'):
+        book_age = state.book_age_s if (state is not None and hasattr(state, 'book_age_s')) else float('inf')
+        if state is not None and book_age > 30.0 and _is_exit_gate:
+            logger.warning(
+                "[order-router] EXIT ORDER: book stale (%.1fs) for %s - proceeding (stale data is often WHY we are exiting)",
+                book_age, intent.ticker,
+            )
+        elif book_age == float('inf'):
             # Missing timestamp - assume book is fresh (graceful degradation)
             # This prevents rejecting orders when book_initialized=True but timestamp is missing
             logger.info(
                 "[order-router] Book timestamp missing, assuming fresh (graceful degradation): ticker=%s book_initialized=%s",
-                intent.ticker, state.book_initialized,
+                intent.ticker, state.book_initialized if state is not None else None,
             )
-        elif book_age > 30.0:
+        elif book_age > 30.0 and not _is_exit_gate:
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
                 "[order-router] Live order rejected — book too stale: ticker=%s book_age=%.1fs",
@@ -4461,7 +4611,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # Log that order passed executable gate with relaxed check
         logger.info(
             "[order-router] Order passed executable gate (relaxed): ticker=%s book_initialized=%s book_age=%.1fs executable=%s",
-            intent.ticker, state.book_initialized, book_age, state.executable if hasattr(state, 'executable') else None,
+            intent.ticker,
+            state.book_initialized if state is not None else None,
+            book_age,
+            state.executable if (state is not None and hasattr(state, 'executable')) else None,
         )
 
         # Dynamic order type selection based on market conditions
@@ -4489,45 +4642,51 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # This prevents maker orders from incorrectly crossing the spread (incurring taker fees)
         # or taker orders from incorrectly resting (missing execution opportunities)
         if intent.liquidity_role and state:
-            try:
-                from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
-                # Get orderbook data from state if available
-                best_bid = getattr(state, 'yes_bid_cents', None) if intent.side == "yes" else getattr(state, 'no_bid_cents', None)
-                best_ask = getattr(state, 'yes_ask_cents', None) if intent.side == "yes" else getattr(state, 'no_ask_cents', None)
-                
-                is_valid, error = validate_price_placement_invariant(
-                    role=intent.liquidity_role,
-                    side=intent.side,
-                    action=intent.action,
-                    price_cents=intent.price_cents,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                )
-                
-                if not is_valid:
-                    latency = (_time.monotonic() - t0) * 1000
-                    logger.error(
-                        f"[LIQUIDITY-ROLE-INVARIANT] Rejected order: {error} | ticker={intent.ticker} | "
-                        f"liquidity_role={intent.liquidity_role} | price={intent.price_cents}c"
+            # CRITICAL FIX (2026-07-22): Exit orders bypass liquidity role invariant.
+            # Exits may legitimately violate maker/taker placement rules (e.g., marketable
+            # exits crossing the spread, stop-losses far from mid). Blocking them traps positions.
+            if not _is_exit_order(intent):
+                try:
+                    from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
+                    # Get orderbook data from state if available
+                    best_bid = getattr(state, 'yes_bid_cents', None) if intent.side == "yes" else getattr(state, 'no_bid_cents', None)
+                    best_ask = getattr(state, 'yes_ask_cents', None) if intent.side == "yes" else getattr(state, 'no_ask_cents', None)
+                    
+                    is_valid, error = validate_price_placement_invariant(
+                        role=intent.liquidity_role,
+                        side=intent.side,
+                        action=intent.action,
+                        price_cents=intent.price_cents,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
                     )
-                    return OrderResult(
-                        status="rejected",
-                        mode=mode,
-                        reason=f"liquidity_role_invariant:{error}",
-                        latency_ms=round(latency, 2),
-                    )
-                else:
-                    logger.debug(
-                        f"[LIQUIDITY-ROLE-VALID] ticker={intent.ticker} | liquidity_role={intent.liquidity_role} | "
-                        f"price={intent.price_cents}c - invariant check passed"
-                    )
-            except ImportError:
-                logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
+                    
+                    if not is_valid:
+                        latency = (_time.monotonic() - t0) * 1000
+                        logger.error(
+                            f"[LIQUIDITY-ROLE-INVARIANT] Rejected order: {error} | ticker={intent.ticker} | "
+                            f"liquidity_role={intent.liquidity_role} | price={intent.price_cents}c"
+                        )
+                        return OrderResult(
+                            status="rejected",
+                            mode=mode,
+                            reason=f"liquidity_role_invariant:{error}",
+                            latency_ms=round(latency, 2),
+                        )
+                    else:
+                        logger.debug(
+                            f"[LIQUIDITY-ROLE-VALID] ticker={intent.ticker} | liquidity_role={intent.liquidity_role} | "
+                            f"price={intent.price_cents}c - invariant check passed"
+                        )
+                except ImportError:
+                    logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
         
         # CRITICAL FIX (2026-07-19): Staleness SLO check - reject orders with stale book snapshots
         # This prevents AUTO from making maker/taker decisions based on outdated market data
+        # CRITICAL FIX (2026-07-22): Exit orders bypass staleness SLO - stale snapshots are
+        # often WHY exits fire (stale_data exit reason). Blocking them here is circular.
         STALENESS_SLO_MS = 5000.0  # 5 second staleness SLO for 15m markets
-        if intent.snapshot_age_ms > STALENESS_SLO_MS:
+        if intent.snapshot_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
             latency = (_time.monotonic() - t0) * 1000
             logger.error(
                 f"[STALENESS-SLO] Rejected order: book snapshot too old | ticker={intent.ticker} | "
@@ -4549,7 +4708,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         intent.snapshot_age_ms = computed_age_ms
         
         # Double-check staleness with computed age
-        if computed_age_ms > STALENESS_SLO_MS:
+        # CRITICAL FIX (2026-07-22): Exit orders bypass recomputed staleness SLO.
+        # Stale snapshots are often WHY exits fire - blocking them here is circular.
+        if computed_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
             latency = (_time.monotonic() - t0) * 1000
             logger.error(
                 f"[STALENESS-SLO] Rejected order: computed snapshot age too old | ticker={intent.ticker} | "
@@ -4594,7 +4755,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         
         # CRITICAL FIX (2026-07-19): Assert final payload consistency with latest known best bid/ask
         # This ensures the order price is still valid given current market conditions
-        if state and intent.liquidity_role:
+        # CRITICAL FIX (2026-07-22): Exit orders bypass payload consistency check.
+        # Exits must be able to execute even if the book has moved significantly since
+        # snapshot (e.g., marketable exits crossing the spread, stop-losses far from mid).
+        if state and intent.liquidity_role and not _is_exit_order(intent):
             try:
                 from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
                 # Get current orderbook data from state
@@ -4633,7 +4797,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping payload consistency check")
         
         # Reject order if slot-based sizing returned 0 (exceeds $1 fixed exposure cap)
-        if intent.count == 0:
+        # CRITICAL FIX (2026-07-22): Exit orders bypass the $1 fixed exposure cap.
+        # Exits REDUCE exposure - blocking them for exceeding the cap traps positions
+        # that can never be closed. The slot allocator already exempts exits (is_exit_order=True).
+        if intent.count == 0 and not _is_exit_order(intent):
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
                 "[order-router] Live order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count=%d price=%dc",
@@ -4695,10 +4862,17 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             logger.error(f"[DEBUG] NameError at line 1924: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
             raise
         now = _time.monotonic()
-        last_update = state.last_book_update_ts or state.last_rest_update_ts or 0
+        last_update = ((state.last_book_update_ts or state.last_rest_update_ts) if state is not None else 0) or 0
         market_data_age = now - last_update if last_update > 0 else float('inf')
 
-        if market_data_age > _MARKET_DATA_MAX_STALENESS_S:
+        # CRITICAL FIX (2026-07-22): Exit orders bypass the stale-market-data gate.
+        # stale_data exits fire BECAUSE data is stale - rejecting them here is circular.
+        if market_data_age > _MARKET_DATA_MAX_STALENESS_S and _is_exit_gate:
+            logger.warning(
+                "[order-router] EXIT ORDER: market data stale (%.1fs) for %s - proceeding (exit must not be trapped)",
+                market_data_age, intent.ticker,
+            )
+        elif market_data_age > _MARKET_DATA_MAX_STALENESS_S:
             latency = (_time.monotonic() - t0) * 1000
             # DIAGNOSTIC: Expand stale-data guard logging with both book and rest timestamps
             last_book_ts = state.last_book_update_ts or 0.0
@@ -4763,19 +4937,29 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         )
 
     # Kill switch hard gate — must be checked before any live execution
+    # CRITICAL FIX (2026-07-22): Exit orders pass the kill switch gate.
+    # Kill switches (daily loss, circuit breaker) must halt NEW risk, not risk
+    # REDUCTION. Blocking exits under a kill switch traps open positions exactly
+    # when flattening them matters most (standard practice: halt entries, allow exits).
     try:
         from merid.risk.kill_switches import risk_controller
         if not risk_controller.can_trade():
             latency = (_time.monotonic() - t0) * 1000
             reason = risk_controller.get_kill_reason() or "kill_switch_active"
-            logger.warning(f"[order-router] Live order blocked by kill switch: {reason}")
-            _release_gate_record(intent, f"kill_switch:{reason}")
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"kill_switch:{reason}",
-                latency_ms=round(latency, 2),
-            )
+            if _is_exit_order(intent):
+                logger.warning(
+                    "[order-router] EXIT ORDER allowed through kill switch (%s): %s - exits reduce risk",
+                    reason, intent.ticker,
+                )
+            else:
+                logger.warning(f"[order-router] Live order blocked by kill switch: {reason}")
+                _release_gate_record(intent, f"kill_switch:{reason}")
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"kill_switch:{reason}",
+                    latency_ms=round(latency, 2),
+                )
     except ImportError as exc:
         # Fail-closed: if risk_controller unavailable, block live orders for safety
         latency = (_time.monotonic() - t0) * 1000
@@ -4800,7 +4984,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         )
 
     gate = get_venue_gate()
-    if not gate.live_enabled:
+    # CRITICAL FIX (2026-07-22): Exit orders bypass the live_not_enabled venue gate.
+    # If live trading is disabled, we still need to allow exits to close positions
+    # to reduce risk. This is standard practice: halt entries, allow exits.
+    if not gate.live_enabled and not _is_exit_order(intent):
         latency = (_time.monotonic() - t0) * 1000
         gate.log_order_decision(
             decision="deny",
@@ -4882,7 +5069,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     # Prices < 5¢ or > 99¢ are indicative of bad market data or illiquid markets
     # This prevents 1¢ orders while allowing valid near-expiry trading (up to 99¢)
     # Note: 95¢ is a valid price for profit-taking (price_based_sell_threshold=0.95)
-    if intent.price_cents < 5:
+    # CRITICAL FIX (2026-07-22): Exit orders are exempt from the 5c floor - a deep
+    # stop-loss exit below 5c is a legitimate risk-reducing order (position tanked);
+    # blocking it forces the position to ride to 0. The 1-99c hard invariant above
+    # still applies to exits.
+    if intent.price_cents < 5 and not _is_exit_order(intent):
         logger.error(
             "[PRICE-REJECT] EXTREME LOW PRICE: ticker=%s price_cents=%d side=%s action=%s "
             "Price < 5¢ indicates bad market data or illiquid market - REJECTING ORDER",
@@ -5182,6 +5373,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     import time
                     now = time.time()
                     window_start = int(now // 900) * 900  # Floor to nearest 15-minute boundary
+                    
+                    # CRITICAL FIX (2026-07-21): Cleanup stale windows before checking
+                    # This prevents stale entries from permanently blocking trading
+                    cleanup_stale_entry_windows()
                     
                     with _asset_entry_windows_lock:
                         last_window = _asset_entry_windows.get(asset, 0)
@@ -5876,6 +6071,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     take_profit_price_cents=intent.take_profit_price_cents,
                     take_profit_r_multiple=intent.take_profit_r_multiple,
                     stop_loss_price_cents=intent.stop_loss_price_cents,
+                    entry_price_cents=intent.price_cents,  # CRITICAL FIX (2026-07-23): Persist entry price
                 )
             except Exception as _tp_reg_err:
                 logger.debug("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
@@ -6493,11 +6689,22 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
 
         # Order successfully submitted to exchange - record in rate limiter
         _record_successful_order()
-        
+
         # Note: _record_order_placed(intent) already called BEFORE submission to prevent race condition
+
+        placed = placed_res.data
+        # CRITICAL FIX (2026-07-12): Kalshi's create-order response may omit/zero `size`.
+        # Fall back to the intent count so fill-pct and filled/partial status logic stay correct.
+        requested_count = _resolve_requested_count(placed.size, intent.count)
+        filled_count = int(placed.filled_size)
+        remaining_count = int(placed.remaining_size) if placed.remaining_size is not None else max(0, requested_count - filled_count)
+        fill_price_cents = int((placed.price or Decimal(intent.price_cents) / Decimal("100")) * 100)
+        fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
+        _venue_oid = getattr(placed, "order_id", None) or "unknown"
 
         # CRITICAL FIX (2026-07-13): Notify global_allocator of order submission for pending order tracking
         # This prevents the global_allocator from allowing duplicate orders for the same asset
+        # Moved here after _venue_oid is assigned to fix UnboundLocalError
         try:
             from merid.risk.profiles.global_allocator import get_global_allocator
             allocator = get_global_allocator()
@@ -6515,16 +6722,6 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 )
         except Exception as alloc_err:
             logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator: %s", alloc_err)
-
-        placed = placed_res.data
-        # CRITICAL FIX (2026-07-12): Kalshi's create-order response may omit/zero `size`.
-        # Fall back to the intent count so fill-pct and filled/partial status logic stay correct.
-        requested_count = _resolve_requested_count(placed.size, intent.count)
-        filled_count = int(placed.filled_size)
-        remaining_count = int(placed.remaining_size) if placed.remaining_size is not None else max(0, requested_count - filled_count)
-        fill_price_cents = int((placed.price or Decimal(intent.price_cents) / Decimal("100")) * 100)
-        fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
-        _venue_oid = getattr(placed, "order_id", None) or "unknown"
 
         # PRODUCTION FIX: Update order_id -> client_tag mapping with actual Kalshi order_id
         # This updates the pre-registered mapping (client_tag -> client_tag) with the actual
@@ -7059,6 +7256,26 @@ def route_order(intent: OrderIntent) -> OrderResult:
             logger.debug("[INTENT-VALIDATION] Intent validator not available - skipping validation")
         except Exception as exc:
             logger.warning("[INTENT-VALIDATION] Intent validation error: %s - proceeding with caution", exc)
+    
+    # ── CANONICAL MAPPING INVARIANT LOGGING (for production suite parsing) ───────────────
+    # Determine thesis_side from side (yes/no)
+    thesis_side = intent.side  # "yes" or "no"
+    # Determine contract_type from side
+    contract_type = intent.side  # "yes" or "no"
+    # Determine position_type from action + side
+    if intent.action == "buy":
+        position_type = f"long_{intent.side}"  # "long_yes" or "long_no"
+    else:
+        position_type = f"short_{intent.side}"  # "short_yes" or "short_no"
+    # Determine order_action (Kalshi format)
+    order_action = f"{intent.action}_{intent.side}"  # "buy_yes", "sell_no", etc.
+    # Determine if entry (buy = entry, sell = exit for 15m crypto)
+    is_entry = intent.action == "buy"
+    
+    logger.info(
+        "CANONICAL-MAPPING: thesis=%s contract=%s position=%s action=%s entry=%s market=%s",
+        thesis_side, contract_type, position_type, order_action, str(is_entry).lower(), intent.ticker
+    )
 
     # ── Production scope validation (Step 1 of audit plan) ───────────────
     if TRADING_SCOPE_AVAILABLE:
@@ -7262,27 +7479,36 @@ def _run_pre_trade_gate(
         _strategy = intent.group_id or intent.source or "default"
 
         # ── 1. Lease acquisition ──────────────────────────────────────
-        registry = get_contract_lease_registry()
-        lease_key = LeaseKey(
-            venue="kalshi",
-            contract_id=intent.ticker,
-            side=intent.side,
-            strategy_group=_strategy,
-        )
-        lease = registry.acquire(lease_key, owner_agent_id=_agent)
-        if lease is None:
-            latency = (_time.monotonic() - t0) * 1000
-            logger.warning(
-                "[order-router] LEASE CONFLICT: %s tried to trade %s %s but "
-                "another agent owns it",
-                _agent, intent.ticker, intent.side,
+        # CRITICAL FIX (2026-07-22): Exit orders bypass lease conflict check.
+        # If an exit order is blocked by a lease conflict, the position cannot
+        # be closed and is trapped. Exits must always be allowed to proceed.
+        if _is_exit_order(intent):
+            logger.info(
+                "[order-router] EXIT ORDER bypassing lease acquisition: ticker=%s side=%s (exit must not be trapped by lease)",
+                intent.ticker, intent.side,
             )
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"lease_conflict:{intent.ticker}:{intent.side}",
-                latency_ms=round(latency, 2),
+        else:
+            registry = get_contract_lease_registry()
+            lease_key = LeaseKey(
+                venue="kalshi",
+                contract_id=intent.ticker,
+                side=intent.side,
+                strategy_group=_strategy,
             )
+            lease = registry.acquire(lease_key, owner_agent_id=_agent)
+            if lease is None:
+                latency = (_time.monotonic() - t0) * 1000
+                logger.warning(
+                    "[order-router] LEASE CONFLICT: %s tried to trade %s %s but "
+                    "another agent owns it",
+                    _agent, intent.ticker, intent.side,
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"lease_conflict:{intent.ticker}:{intent.side}",
+                    latency_ms=round(latency, 2),
+                )
 
         # ── 2. Pre-trade gate (dedup + fill-awareness) ────────────────
         gate = get_pre_trade_gate()
@@ -8305,6 +8531,114 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     _risk_cap_rejection = _check_bankroll_risk_cap(intent)
     if _risk_cap_rejection:
         return _risk_cap_rejection
+
+    # CRITICAL FIX (2026-07-24): Enforce per-side position limits (max_yes_position/max_no_position)
+    # This prevents unlimited position accumulation despite max_contracts=1 per-order limit
+    # CRITICAL FIX (2026-07-24): Use asset-level aggregation instead of market-specific lookup
+    # Kalshi creates new markets every 15 minutes with different tickers (e.g., KXBTC15M-26JUL022230-30)
+    # Market-specific lookup allows bypass by buying on different tickers for same asset
+    # Asset-level aggregation ensures total position across all markets respects limits
+    # CRITICAL FIX (2026-07-24): Enforce 1 entry per asset per 15-minute window
+    # This prevents multiple entries for the same asset within a single 15m timeframe
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile_adapter = get_active_profile()
+        if profile_adapter:
+            max_yes = profile_adapter.profile.agent_max_yes_position
+            max_no = profile_adapter.profile.agent_max_no_position
+            
+            # Extract asset from ticker (BTC, ETH, SOL, XRP, DOGE)
+            asset = None
+            ticker_upper = intent.ticker.upper()
+            if "BTC" in ticker_upper:
+                asset = "BTC"
+            elif "ETH" in ticker_upper:
+                asset = "ETH"
+            elif "SOL" in ticker_upper:
+                asset = "SOL"
+            elif "XRP" in ticker_upper:
+                asset = "XRP"
+            elif "DOGE" in ticker_upper:
+                asset = "DOGE"
+            
+            # CRITICAL FIX (2026-07-24): Enforce 1 entry per asset per 15-minute window based on EXPOSURE STATE
+            # Window is set only when we have an open position or resting working order, not on submission attempt
+            # This allows retry attempts for IOC orders that don't fill
+            # Check if asset already has exposure in current window
+            if asset and intent.action.lower() == "buy":
+                import time
+                now = time.time()
+                window_start = int(now // 900) * 900  # Floor to nearest 15-minute boundary
+                
+                # CRITICAL FIX (2026-07-24): Cleanup stale windows before checking
+                # This prevents stale entries from permanently blocking trading
+                cleanup_stale_entry_windows()
+                
+                with _asset_entry_windows_lock:
+                    last_window = _asset_entry_windows.get(asset, 0)
+                    
+                    if last_window == window_start:
+                        logger.warning(
+                            f"[ORDER-ROUTER-ASYNC] Per-asset entry limit: {asset} already has exposure in current 15m window "
+                            f"(window={window_start}), rejecting new entry (ticker={intent.ticker}, side={intent.side})"
+                        )
+                        latency = (_time.monotonic() - t0) * 1000
+                        return OrderResult(
+                            status="rejected",
+                            mode=mode,
+                            reason=f"Per-asset entry limit: {asset} already has exposure in current 15m window",
+                            latency_ms=round(latency, 2),
+                        )
+            
+            # Get all positions for this asset across all markets
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            existing_yes = 0
+            existing_no = 0
+            
+            if asset:
+                asset_positions = get_position_cache().get_positions_by_asset(asset)
+                for pos in asset_positions:
+                    if pos.side.lower() == "yes" and pos.contracts > 0:
+                        existing_yes += pos.contracts
+                    elif pos.side.lower() == "no" and pos.contracts < 0:
+                        existing_no += abs(pos.contracts)
+            
+            # Check per-side limit
+            if intent.side.lower() == "yes":
+                new_yes_total = existing_yes + intent.count
+                if new_yes_total > max_yes:
+                    logger.warning(
+                        f"[ORDER-ROUTER-ASYNC] Per-side YES limit exceeded for {asset}: {new_yes_total} > {max_yes} (existing={existing_yes}, new={intent.count}, ticker={intent.ticker})"
+                    )
+                    latency = (_time.monotonic() - t0) * 1000
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"Max YES position: {new_yes_total} > {max_yes}",
+                        latency_ms=round(latency, 2),
+                    )
+            elif intent.side.lower() == "no":
+                new_no_total = existing_no + intent.count
+                if new_no_total > max_no:
+                    logger.warning(
+                        f"[ORDER-ROUTER-ASYNC] Per-side NO limit exceeded for {asset}: {new_no_total} > {max_no} (existing={existing_no}, new={intent.count}, ticker={intent.ticker})"
+                    )
+                    latency = (_time.monotonic() - t0) * 1000
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"Max NO position: {new_no_total} > {max_no}",
+                        latency_ms=round(latency, 2),
+                    )
+    except Exception as side_limit_err:
+        logger.critical(f"[ORDER-ROUTER-ASYNC] Per-side position limit check failed: {side_limit_err} — REJECTING order (fail-closed)")
+        latency = (_time.monotonic() - t0) * 1000
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"Per-side position limit check failed: {side_limit_err}",
+            latency_ms=round(latency, 2),
+        )
 
     # ── Market Regime Gate: REMOVED (2026-06-29) ────────────────────
     # Market regime gate was blocking valid trades in flat markets
