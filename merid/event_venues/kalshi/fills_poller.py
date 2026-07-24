@@ -12,6 +12,7 @@ import os as _os  # Alias to prevent scope shadowing
 import asyncio
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -124,7 +125,9 @@ class FillsPoller:
 
         # Settlement tracking — markets we've already fired record_outcome() for
         # Prevents double-firing when the same market persists in fills_without_positions
-        self._settlement_notified: set = set()
+        # BUG FIX: Changed from set to OrderedDict for bounded LRU eviction
+        self._settlement_notified_max = 5000  # Max markets to track (15m markets expire in 15min)
+        self._settlement_notified: OrderedDict[str, float] = OrderedDict()
 
         # Reconciliation results
         self._last_reconcile_report: Optional[Dict[str, Any]] = None
@@ -380,18 +383,75 @@ class FillsPoller:
             
             self._last_reconcile_report = report
             
+            # CRITICAL FIX: Integrate position drift detector
+            # Compare REST position, derived position (ledger replay), and live cache
+            try:
+                from merid.event_venues.kalshi.position_drift_detector import get_position_drift_detector
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                
+                drift_detector = get_position_drift_detector()
+                cache = get_position_cache()
+                
+                # Check drift for each position
+                for rest_pos in positions:
+                    market_id = rest_pos.get("market_ticker") or rest_pos.get("ticker")
+                    if not market_id:
+                        continue
+                    
+                    # Get REST position
+                    rest_contracts = rest_pos.get("contracts", 0)
+                    
+                    # Get derived position from ledger
+                    derived_pos = await ledger.compute_position_from_fills_async(market_id)
+                    ledger_contracts = derived_pos.get("contracts", 0) if derived_pos else 0
+                    
+                    # Get live cache position
+                    cache_pos = cache.get_position(market_id)
+                    cache_contracts = cache_pos.contracts if cache_pos else 0
+                    
+                    # Check drift
+                    # Extract agent_id from position if available, otherwise use market ticker
+                    agent_id = cache_pos.agent_id if cache_pos else "BTC_15M"
+                    drift_event = await drift_detector.check_drift(
+                        market_id=market_id,
+                        agent_id=agent_id,
+                        rest_position={"contracts": rest_contracts, "side": rest_pos.get("side", "yes")},
+                        ledger_position={"contracts": ledger_contracts} if derived_pos else None,
+                        cache_position={"contracts": cache_contracts} if cache_pos else None
+                    )
+                    
+                    if drift_event and drift_event.severity.value in ("error", "critical"):
+                        # Trigger active reconciliation for critical drifts
+                        from merid.event_venues.kalshi.active_reconciliation import get_active_reconciliation, InvariantCategory
+                        active_recon = get_active_reconciliation()
+                        await active_recon.handle_violation(
+                            category=InvariantCategory.POSITION_DRIFT,
+                            description=drift_event.description,
+                            context={
+                                "market_id": market_id,
+                                "rest_contracts": rest_contracts,
+                                "ledger_contracts": ledger_contracts,
+                                "cache_contracts": cache_contracts
+                            },
+                            severity=drift_event.severity.value
+                        )
+            except Exception as drift_err:
+                logger.warning("[RECONCILE] Drift detection failed: %s", drift_err)
+            
             # Sync position cache with ground truth from Kalshi REST API
-            # SINGLE SOURCE OF TRUTH: Use ONLY Kalshi REST API positions, never computed from fills
+            # FIX 7: REST as primary source - always use REST API positions as primary source
+            # Fills ledger is only for fills history, not position state
             # Orders do NOT count as positions - only actual open positions from REST API
-            # FALLBACK: If REST returns 0 positions but fills ledger shows positions, use fills as fallback
             if report.get("status") in ("ok", "degraded", "broken"):
                 try:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
                     cache = get_position_cache()
-                    
-                    # BUG-FIX: await added - sync_from_rest is now async with mutex protection
-                    await cache.sync_from_rest(positions)
-                    logger.info(f"Position cache synced from REST API (single source of truth): {len(positions)} positions")
+
+                    # FIX 7: Always sync from REST as primary source (with force=True for auto-corrected divergences)
+                    # The auto-corrective reconciliation (Fix 6) may have already synced, but we ensure
+                    # the cache reflects the authoritative REST API state
+                    await cache.sync_from_rest(positions, force=(report.get("status") == "degraded"))
+                    logger.info(f"Position cache synced from REST API (primary source): {len(positions)} positions")
                     
                     # CRITICAL FALLBACK: If REST returns 0 positions but we have fills suggesting positions,
                     # use fills ledger as fallback to ensure PositionMonitor can track positions for trailing stop
@@ -406,6 +466,13 @@ class FillsPoller:
                             # REST API can temporarily return 0 positions due to API issues
                             # Only clear fills ledger if there's evidence of actual data corruption
                             # This prevents accidental data loss from transient API issues
+                            
+                            # CRITICAL FIX (2026-07-19): DO NOT clear slot allocator when fills ledger shows recent positions
+                            # The slot allocator state should be preserved when we have evidence of actual positions
+                            # This prevents the allocator from thinking exposure is 0 when it's not
+                            logger.info(
+                                f"[POSITION-FALLBACK] Preserving slot allocator state - fills ledger shows {len(computed_positions)} recent positions"
+                            )
                         else:
                             # No recent positions (within 1h) - check if there are stale positions (>24h)
                             stale_positions = ledger.compute_net_positions(since_hours=24)
@@ -422,6 +489,7 @@ class FillsPoller:
                             
                             # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator
                             # when REST returns 0 positions to fix the $0.66 vs $1.00 exposure discrepancy
+                            # ONLY do this when we have NO evidence of positions (no recent, no stale)
                             try:
                                 from merid.risk.global_slot_allocator import get_global_slot_allocator
                                 slot_allocator = get_global_slot_allocator()
@@ -754,7 +822,11 @@ class FillsPoller:
                 with tracker._fill_lock:
                     matching_keys = [k for k in tracker._open_trades if k.endswith(f":{ticker}")]
                     if not matching_keys:
-                        self._settlement_notified.add(ticker)
+                        self._settlement_notified[ticker] = time.time()
+                        if len(self._settlement_notified) > self._settlement_notified_max:
+                            evict_count = len(self._settlement_notified) // 2
+                            for _ in range(evict_count):
+                                self._settlement_notified.popitem(last=False)
                         logger.debug("settlement: no open APT trade for %s, skipping record_outcome", ticker)
                         continue
                     _side_hint = tracker._open_trades[matching_keys[0]].side
@@ -823,7 +895,11 @@ class FillsPoller:
                     settled_yes=settled_yes,
                     settlement_price_cents=settlement_cents,
                 )
-                self._settlement_notified.add(ticker)
+                self._settlement_notified[ticker] = time.time()
+                if len(self._settlement_notified) > self._settlement_notified_max:
+                    evict_count = len(self._settlement_notified) // 2
+                    for _ in range(evict_count):
+                        self._settlement_notified.popitem(last=False)
                 logger.info("settlement: record_outcome fired for %s (settled_yes=%s)", ticker, settled_yes)
 
             except Exception as _exc:
