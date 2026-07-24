@@ -103,7 +103,10 @@ class KalshiVenueAdapter:
         self._cache_ts = 0.0
         self._cache_ttl = 300.0  # 5 minutes
 
-        logger.info(f"[KALSHI-VENUE] mode={self.mode.value} base_url={'https://external-api.kalshi.com/trade-api/v2' if self.mode.value == 'live' else 'https://demo.elections.kalshi.com/trade-api/v2'}")
+        # Use unified config from kalshi_config.py for correct endpoints
+        from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
+        config = get_kalshi_config()
+        logger.info(f"[KALSHI-VENUE] mode={self.mode.value} base_url={config.rest_base_url}")
 
     @property
     def venue_name(self) -> str:
@@ -274,11 +277,13 @@ class KalshiVenueAdapter:
                     # Calculate unrealized PnL from current price if available
                     unrealized = float(pos.unrealized_pnl_usd)
                     
+                    # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
+                    avg_price = pos.avg_price_cents if pos.avg_price_cents is not None else 0
                     positions.append(VenuePosition(
                         market_id=market_id,
                         outcome_id=pos.side,
                         size=Decimal(str(pos.contracts)),
-                        average_entry_price=Decimal(str(pos.avg_price_cents)) / Decimal("100"),
+                        average_entry_price=Decimal(str(avg_price)) / Decimal("100"),
                         unrealized_pnl=Decimal(str(unrealized)),
                         realized_pnl=Decimal(str(pos.realized_pnl_usd)),
                         venue="kalshi",
@@ -491,12 +496,17 @@ class KalshiVenueAdapter:
 
         # Kill switch hard gate
         try:
-            from merid.risk.kill_switches import risk_controller
-            if not risk_controller.can_trade():
-                reason = risk_controller.get_kill_reason() or "kill_switch_active"
+            from merid.risk.platform_kill_switch import get_platform_kill_switch
+            ks = get_platform_kill_switch()
+            if not ks.can_trade():
+                reason = ks.state.reason.value if ks.state.reason else "kill_switch_active"
                 raise RuntimeError(f"Trading halted: {reason}")
         except ImportError:
-            logger.warning("[venue-adapter] kill_switches module not available — proceeding without kill switch check")
+            logger.warning("[venue-adapter] platform_kill_switch module not available — proceeding without kill switch check")
+        except Exception as exc:
+            # Fail-closed: if kill switch check fails for any reason, block order for safety
+            logger.error(f"[venue-adapter] platform_kill_switch check failed - blocking order for safety: {exc}")
+            raise RuntimeError(f"Platform kill switch check failed - blocking order for safety: {exc}") from exc
 
         # G10: VenueGate — block real orders in SIM/PAPER/MOCK mode
         try:

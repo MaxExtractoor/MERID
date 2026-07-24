@@ -2337,7 +2337,7 @@ class Kalshi15mLoop:
                             # Get candidate edge (single source of truth: edge_pct in FRACTION units)
                             edge = candidate.get("edge_pct", 0.0)
                             side = candidate.get("side", "")
-                            logger.info("[15m-LOOP] Candidate details: edge=%.6f side=%s", edge, side)
+                            logger.info("[15M-LOOP-SIDE-AWARE] Candidate details: edge=%.6f side=%s", edge, side)
                             
                             # Check if we have an open position for this asset
                             current_position = self._asset_positions.get(asset, 0.0)
@@ -5446,6 +5446,7 @@ class Kalshi15mLoop:
                 # CRITICAL FIX: 2026-07-20 - Select winner side based on edge comparison
                 # This fixes the bug where chosen_side was derived from kalshi_side instead of edge
                 # Get min_edge from profile (default 2% = 0.02)
+                # CRITICAL FIX: 2026-07-24 - YAML value is already decimal (0.015 = 1.5%), do NOT divide by 100
                 min_edge = 0.02
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -5453,7 +5454,7 @@ class Kalshi15mLoop:
                     if profile_adapter and hasattr(profile_adapter, 'profile'):
                         profile = profile_adapter.profile
                         if hasattr(profile, 'guardrails'):
-                            min_edge = profile.guardrails.get('min_post_fee_edge', 0.02) / 100.0
+                            min_edge = profile.guardrails.get('min_post_fee_edge', 0.02)
                 except Exception as edge_err:
                     logger.debug("[15M-LOOP] Failed to get min_edge from profile: %s", edge_err)
                 
@@ -5566,11 +5567,11 @@ class Kalshi15mLoop:
             # Route order
             result = await route_order_async(intent)
             if result and result.status == "rejected":
-                logger.warning("[15M-LOOP] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s latency_ms=%s",
+                logger.warning("[15M-LOOP-SIDE-AWARE] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s latency_ms=%s",
                                ticker, kalshi_side, count, result.reason, result.latency_ms)
                 return False  # Order rejected - do not track as executed
             else:
-                logger.info("[15M-LOOP] Order routed successfully: ticker=%s side=%s count=%d result=%s",
+                logger.info("[15M-LOOP-SIDE-AWARE] Order routed successfully: ticker=%s side=%s count=%d result=%s",
                             ticker, kalshi_side, count, result)
                 return True  # Order submitted successfully - track as executed
             
