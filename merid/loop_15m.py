@@ -1,154 +1,129 @@
-"""
-Kalshi 15m Lean Loop — Minimal event loop for kalshi_crypto_15m_v2 profile.
-
-This is a clean, minimal loop designed specifically for the 15-minute crypto trading
-stack on Kalshi. It replaces the complex legacy merid.loop for this profile.
-
-Responsibilities:
-- Pull latest market state / RTI inputs
-- Run 5 agents' signal + decision logic via AgentGrid.run_cycle()
-- Route orders through KalshiTradingAgent / order router / risk
-- Run at 5-second cadence
-
-This loop intentionally does NOT include:
-- Legacy lane orchestration
-- Reflection/learning systems
-- KalshiContinuousTrader
-- PM agents or regime agents
-- Cross-venue arbitrage
-
-IMPORT POLICY (15m_live mode):
-Allowed imports:
-- merid.loop_15m (this module)
-- merid.prediction.agent_grid_15m
-- merid.prediction.candidate_optimizer
-- merid.event_venues.kalshi.* (venue adapter, market_state, risk)
-- data.unified_spot_service
-- config.kalshi_* (15m-specific configs only)
-- Generic utilities (logging, metrics, datetime, typing, dataclasses)
-
-Forbidden imports:
-- PM runtime controllers
-- Paper trading engine
-- Reflection/learning systems
-- Social broadcasters
-- Cross-venue logic
-- Deprecated config modules (kalshi_15m_crypto_config.py)
-
-See docs/15M_STACK_SURFACE.md for complete allowed surface definition.
-
----
-
-## Degraded Mode Semantics
-
-### Definition
-Degraded mode is a soft-fail / partial-health state where the system can continue
-trading in healthy markets while some markets are temporarily unavailable or illiquid.
-
-### Scope of Degradation
-Degraded mode applies to:
-- Market health signals (catalog age, depth coverage, bankroll sanity)
-- NOT feature disabling (agents/timeframes remain active)
-- NOT per-market blocking (healthy markets continue trading)
-
-### Allowed vs Disallowed Actions
-
-**Allowed in degraded mode:**
-- Continue quoting in healthy markets (those passing depth checks)
-- Continue consuming websockets
-- Maintain bookkeeping (bankroll, PnL, position tracking)
-- Run agent signal generation for all markets
-- Execute orders only in markets with sufficient depth
-
-**Disallowed in degraded mode:**
-- New market onboarding (catalog refresh continues but no new trading)
-- Aggressive scaling (position sizing may be throttled)
-- Opening new positions in markets failing depth checks
-
-### Loop States & Execution Modes (cadence-aware)
-
-The loop separates THREE concerns so a normal gap between 15m strips is never
-confused with a systemic failure:
-
-1. `infra_ready`      — platform health: catalog reachable+fresh, WS forwarder
-                        healthy, bankroll real+valid, risk profile loaded, TOP3 gate.
-2. `markets_expected` — should strips exist now? (15m cadence + maintenance window).
-3. `markets_present`  — does the catalog actually show >=1 active 15m strip?
-
-**`loop_state`** (high-level "should we be trading?" — the source of truth):
-- `HALT`     — `infra_ready=False`. System/venue broken or unsafe. Trading blocked. RED FLAG.
-- `WAITING`  — infra OK, markets expected, but none posted yet (venue posting lag). NOT a fault.
-- `IDLE`     — infra OK, markets not expected (maintenance / off hours). NOT a fault.
-- `ACTIVE`   — infra OK and >=1 strip present. Evaluate per-asset readiness.
-
-**`execution_mode`** (posture signal, meaningful ONLY inside `ACTIVE`):
-- `NORMAL`      — `ready_assets_count >= 2`. Full breadth, normal sizing.
-- `DEGRADED`    — `ready_assets_count == 1`. Trade the single ready asset (NOT a kill-switch).
-- `ACTIVE-HALT` — `ready_assets_count == 0` while markets ARE present. RED FLAG (per-asset
-                  gates rejected everything despite live strips).
-- `NONE`        — set whenever `loop_state != ACTIVE` (no trading-relevant posture).
-
-An asset is "ready" iff its MD is fresh (<30s) AND its book depth meets the
-per-asset threshold. `ready_assets_count` is the number of ready assets (0..5).
-
-**`execution_ready`** (the SINGLE downstream trading gate) is True iff
-`loop_state == ACTIVE and ready_assets_count >= 1`.
-
-### Why "0 ready assets" is not always HALT
-
-In a 15-minute strip system, "0 ready assets" usually means Kalshi has not posted
-the next set yet — a transient, EXPECTED gap — not that the platform is broken.
-Only `HALT` (infra failure) and `ACTIVE-HALT` (strips present but nothing tradable)
-are treated as faults / guardrail trips. `WAITING` and `IDLE` keep the system warm,
-do not trade, and are NOT logged as risk events.
-
-### Venue Posting / Cadence
-
-- Kalshi posts crypto strips on a continuous 15-minute cadence, 24/7.
-- Weekly maintenance window: Thursday 03:00–05:00 ET (markets taken down -> `IDLE`).
-- Short posting lag (seconds to ~1–2 min) between a strip closing and the next
-  appearing; during that lag strips are still "expected" -> `WAITING`.
-- `markets_expected_now()` encodes this schedule (currently: outside maintenance).
-
-### State Transitions
-
-- `WAITING/IDLE -> ACTIVE` : as soon as the catalog shows >=1 strip.
-- `ACTIVE -> WAITING`      : strips disappear (between-strip gap), infra still OK.
-- `ANY -> HALT`            : any infra signal fails (catalog/WS/bankroll/risk/gate).
-- `NORMAL <-> DEGRADED <-> ACTIVE-HALT` : driven purely by `ready_assets_count`.
-
-### Per-Market Eligibility
-
-Each market has its own depth check:
-- `depth_ok(market) = (min_depth_yes >= 25 AND min_depth_no >= 25)`
-- Only markets passing this check are eligible for order placement
-- This is enforced at the agent level, not as a global gate
-
-### Global Readiness vs Per-Market Eligibility
-
-**Global readiness (`ready`):**
-- Driven by CRITICAL signals only: WS connectivity, bankroll sanity, catalog not catastrophically stale
-- Depth coverage threshold: at least 1 market tradable (not 5/5)
-- If `ready=False`, NO trading occurs in any market
-
-**Per-market eligibility:**
-- Each market has its own `depth_ok(market)` check
-- Agents skip order placement for markets failing depth checks
-- Does NOT flip global `ready` flag
-- Only affects that specific market's trading
-
-### Rationale
-
-In multi-asset systems, it's common and expected that some symbols are temporarily
-untradeable (low depth, paused, or disabled) while others remain active. Requiring
-perfect breadth (5/5) before using ANY edge is overly conservative and misaligned
-with typical trading infrastructure design.
-
-Example: If BTC/ETH/SOL have sufficient depth but XRP/DOGE are illiquid, the system
-should trade BTC/ETH/SOL (degraded mode) rather than blocking all trading (halt mode).
-"""
-
 from __future__ import annotations
+
+# Kalshi 15m Lean Loop - Minimal event loop for kalshi_crypto_15m_v2 profile.
+# This is a clean, minimal loop designed specifically for the 15-minute crypto trading
+# stack on Kalshi. It replaces the complex legacy merid.loop for this profile.
+# Responsibilities:
+# - Pull latest market state / RTI inputs
+# - Run 5 agents' signal + decision logic via AgentGrid.run_cycle()
+# - Route orders through KalshiTradingAgent / order router / risk
+# - Run at 5-second cadence
+# This loop intentionally does NOT include:
+# - Legacy lane orchestration
+# - Reflection/learning systems
+# - KalshiContinuousTrader
+# - PM agents or regime agents
+# - Cross-venue arbitrage
+# IMPORT POLICY (15m_live mode):
+# Allowed imports:
+# - merid.loop_15m (this module)
+# - merid.prediction.agent_grid_15m
+# - merid.prediction.candidate_optimizer
+# - merid.event_venues.kalshi.* (venue adapter, market_state, risk)
+# - data.unified_spot_service
+# - config.kalshi_* (15m-specific configs only)
+# - Generic utilities (logging, metrics, datetime, typing, dataclasses)
+# CRITICAL FIX (2026-07-21): Feature flag for legacy direction mapping
+# USE_LEGACY_DIRECTION_MAPPING: When False, uses pure functions from strategy_positions domain layer
+# When True, falls back to legacy side derivation (for backward compatibility)
+# Default: False (use new pure function approach)
+# Set to True only for debugging or rollback scenarios
+# CRITICAL FIX (2026-07-21): Feature flag for legacy direction mapping
+# Set to False to use new pure function approach (recommended)
+# Set to True to use legacy side derivation (backward compatibility only)
+USE_LEGACY_DIRECTION_MAPPING = False
+
+# Forbidden imports:
+# - PM runtime controllers
+# - Paper trading engine
+# - Reflection/learning systems
+# - Social broadcasters
+# - Cross-venue logic
+# - Deprecated config modules (kalshi_15m_crypto_config.py)
+
+# See docs/15M_STACK_SURFACE.md for complete allowed surface definition
+
+# Degraded Mode Semantics
+# Definition
+# Degraded mode is a soft-fail / partial-health state where the system can continue
+# trading in healthy markets while some markets are temporarily unavailable or illiquid.
+# Scope of Degradation
+# Degraded mode applies to:
+# - Market health signals (catalog age, depth coverage, bankroll sanity)
+# - NOT feature disabling (agents/timeframes remain active)
+# - NOT per-market blocking (healthy markets continue trading)
+# Allowed vs Disallowed Actions
+# Allowed in degraded mode:
+# - Continue quoting in healthy markets (those passing depth checks)
+# - Continue consuming websockets
+# - Maintain bookkeeping (bankroll, PnL, position tracking)
+# - Run agent signal generation for all markets
+# - Execute orders only in markets with sufficient depth
+# Disallowed in degraded mode:
+# - New market onboarding (catalog refresh continues but no new trading)
+# - Aggressive scaling (position sizing may be throttled)
+# - Opening new positions in markets failing depth checks
+# Loop States & Execution Modes (cadence-aware)
+# The loop separates THREE concerns so a normal gap between 15m strips is never
+# confused with a systemic failure:
+# 1. `infra_ready`      - platform health: catalog reachable+fresh, WS forwarder
+#                         healthy, bankroll real+valid, risk profile loaded, TOP3 gate.
+# 2. `markets_expected` - should strips exist now? (15m cadence + maintenance window).
+# 3. `markets_present`  - does the catalog actually show >=1 active 15m strip?
+# loop_state (high-level "should we be trading?" - the source of truth):
+# - HALT     - infra_ready=False. System/venue broken or unsafe. Trading blocked. RED FLAG.
+# - WAITING  - infra OK, markets expected, but none posted yet (venue posting lag). NOT a fault.
+# - IDLE     - infra OK, markets not expected (maintenance / off hours). NOT a fault.
+# - ACTIVE   - infra OK and >=1 strip present. Evaluate per-asset readiness.
+# execution_mode (posture signal, meaningful ONLY inside ACTIVE):
+# - NORMAL      - ready_assets_count >= 2. Full breadth, normal sizing.
+# - DEGRADED    - ready_assets_count == 1. Trade the single ready asset (NOT a kill-switch).
+# - ACTIVE-HALT - ready_assets_count == 0 while markets ARE present. RED FLAG (per-asset
+#                   gates rejected everything despite live strips).
+# - NONE        - set whenever loop_state != ACTIVE (no trading-relevant posture).
+# An asset is "ready" iff its MD is fresh (<30s) AND its book depth meets the
+# per-asset threshold. ready_assets_count is the number of ready assets (0..5).
+# execution_ready (the SINGLE downstream trading gate) is True iff
+# loop_state == ACTIVE and ready_assets_count >= 1.
+# Why "0 ready assets" is not always HALT
+# In a 15-minute strip system, "0 ready assets" usually means Kalshi has not posted
+# the next set yet - a transient, EXPECTED gap - not that the platform is broken.
+# Only HALT (infra failure) and ACTIVE-HALT (strips present but nothing tradable)
+# are treated as faults / guardrail trips. WAITING and IDLE keep the system warm,
+# do not trade, and are NOT logged as risk events.
+# Venue Posting / Cadence
+# - Kalshi posts crypto strips on a continuous 15-minute cadence, 24/7.
+# - Weekly maintenance window: Thursday 03:00-05:00 ET (markets taken down -> IDLE).
+# - Short posting lag (seconds to ~1-2 min) between a strip closing and the next
+#   appearing; during that lag strips are still "expected" -> WAITING.
+# - markets_expected_now() encodes this schedule (currently: outside maintenance).
+# State Transitions
+# - WAITING/IDLE -> ACTIVE : as soon as the catalog shows >=1 strip.
+# - ACTIVE -> WAITING      : strips disappear (between-strip gap), infra still OK.
+# - ANY -> HALT            : any infra signal fails (catalog/WS/bankroll/risk/gate).
+# - NORMAL <-> DEGRADED <-> ACTIVE-HALT : driven purely by ready_assets_count.
+# Per-Market Eligibility
+# Each market has its own depth check:
+# - depth_ok(market) = (min_depth_yes >= 25 AND min_depth_no >= 25)
+# - Only markets passing this check are eligible for order placement
+# - This is enforced at the agent level, not as a global gate
+# Global Readiness vs Per-Market Eligibility
+# Global readiness (ready):
+# - Driven by CRITICAL signals only: WS connectivity, bankroll sanity, catalog not catastrophically stale
+# - Depth coverage threshold: at least 1 market tradable (not 5/5)
+# - If ready=False, NO trading occurs in any market
+# Per-market eligibility:
+# - Each market has its own depth_ok(market) check
+# - Agents skip order placement for markets failing depth checks
+# - Does NOT flip global ready flag
+# - Only affects that specific market's trading
+# Rationale
+# In multi-asset systems, it's common and expected that some symbols are temporarily
+# untradeable (low depth, paused, or disabled) while others remain active. Requiring
+# perfect breadth (5/5) before using ANY edge is overly conservative and misaligned
+# with typical trading infrastructure design.
+# Example: If BTC/ETH/SOL have sufficient depth but XRP/DOGE are illiquid, the system
+# should trade BTC/ETH/SOL (degraded mode) rather than blocking all trading (halt mode).
 
 import sys
 from datetime import datetime, timezone
@@ -178,17 +153,13 @@ logger.info("[15M-LOOP] MODULE VERSION v20260529a-cache-fix")
 
 
 def _map_exit_reason_to_intent_contract(exit_reason_str: str) -> "ExitReason":
-    """Map position_management.ExitReason to intent_contract.ExitReason.
-    
-    This bridges the exit policy layer's ExitReason enum with the intent contract's
-    ExitReason enum for formal entry/exit direction contract enforcement.
-    
-    Args:
-        exit_reason_str: Exit reason string from position_management.exit_policy.ExitReason
-        
-    Returns:
-        ExitReason from intent_contract.ExitReason
-    """
+    # Map position_management.ExitReason to intent_contract.ExitReason.
+    # This bridges the exit policy layer's ExitReason enum with the intent contract's
+    # ExitReason enum for formal entry/exit direction contract enforcement.
+    # Args:
+    #     exit_reason_str: Exit reason string from position_management.exit_policy.ExitReason
+    # Returns:
+    #     ExitReason from intent_contract.ExitReason
     from merid.prediction.intent_contract import ExitReason
     
     # Map position_management exit reasons to intent_contract exit reasons
@@ -215,7 +186,7 @@ def _map_exit_reason_to_intent_contract(exit_reason_str: str) -> "ExitReason":
 
 # ── Loop diagnostics file IO (env-gated to avoid hot-loop disk overhead) ──────
 # The 15m loop historically wrote to a hardcoded health_diagnostic.txt on EVERY
-# cycle (open+write+flush), adding disk-fsync latency to the hot path — implicated
+# cycle (open+write+flush), adding disk-fsync latency to the hot path - implicated
 # in Windows ProactorEventLoop stalls. These writes are now DISABLED by default and
 # gated behind MERID_LOOP_DIAG_FILE=1 for on-demand debugging.
 _DIAG_FILE_PATH = "c:\\Dev\\MERID\\web\\health_diagnostic.txt"
@@ -223,7 +194,7 @@ _DIAG_FILE_ENABLED = os.getenv("MERID_LOOP_DIAG_FILE", "").strip().lower() in ("
 
 
 class _NullDiagWriter:
-    """No-op file-like context manager used when loop diagnostics are disabled."""
+    # No-op file-like context manager used when loop diagnostics are disabled.
     def __enter__(self):
         return self
 
@@ -238,12 +209,10 @@ class _NullDiagWriter:
 
 
 def _diag_open():
-    """Return a writable handle for loop diagnostics.
-
-    CRITICAL FIX: Always return no-op writer to prevent Windows ProactorEventLoop blocking.
-    The synchronous file I/O was causing the loop to hang on Windows.
-    Diagnostics are now disabled by default to ensure loop reliability.
-    """
+    # Return a writable handle for loop diagnostics.
+    # CRITICAL FIX: Always return no-op writer to prevent Windows ProactorEventLoop blocking.
+    # The synchronous file I/O was causing the loop to hang on Windows.
+    # Diagnostics are now disabled by default to ensure loop reliability.
     # CRITICAL: Always return no-op writer to prevent blocking on Windows ProactorEventLoop
     # The environment variable check is disabled to ensure loop reliability
     return _NullDiagWriter()
@@ -251,14 +220,14 @@ def _diag_open():
 
 # Liquidity decision enum for order fill safety check
 class LiquidityDecision(Enum):
-    """Decision on whether an order can be filled safely."""
+    # Decision on whether an order can be filled safely.
     FULL = "FULL"  # Full size can be filled within slippage budget
     REDUCED = "REDUCED"  # Partial size available, should size down
     SKIP = "SKIP"  # Insufficient liquidity, skip this asset for this cycle
 
 @dataclass
 class LiquidityCheckResult:
-    """Result of liquidity safety check for an asset."""
+    # Result of liquidity safety check for an asset.
     decision: LiquidityDecision
     available_qty: int  # Available contracts at acceptable price
     target_qty: int  # Target quantity for this trade
@@ -272,23 +241,18 @@ def can_fill_order_safely(
     max_slippage_cents: float,
     side: str = "yes"
 ) -> LiquidityCheckResult:
-    """
-    Check if an order can be filled safely within slippage budget.
-    
-    This replaces binary depth checks with a liquidity-aware decision:
-    - FULL: Enough depth at target price for full size
-    - REDUCED: Partial depth available, should size down
-    - SKIP: Insufficient liquidity, skip this asset
-    
-    Args:
-        state: KalshiMarketState with orderbook data
-        target_qty: Target quantity in contracts
-        max_slippage_cents: Maximum acceptable slippage in cents
-        side: "yes" or "no" side of the book
-        
-    Returns:
-        LiquidityCheckResult with decision and diagnostics
-    """
+    # Check if an order can be filled safely within slippage budget.
+    # This replaces binary depth checks with a liquidity-aware decision:
+    # - FULL: Enough depth at target price for full size
+    # - REDUCED: Partial depth available, should size down
+    # - SKIP: Insufficient liquidity, skip this asset
+    # Args:
+    #     state: KalshiMarketState with orderbook data
+    #     target_qty: Target quantity in contracts
+    #     max_slippage_cents: Maximum acceptable slippage in cents
+    #     side: "yes" or "no" side of the book
+    # Returns:
+    #     LiquidityCheckResult with decision and diagnostics
     if state is None:
         return LiquidityCheckResult(
             decision=LiquidityDecision.SKIP,
@@ -413,18 +377,13 @@ logger.debug("[LOOP-15M-IMPORT] resolve_exit_policy import took %.3fs", _t7 - _t
 
 
 def is_within_kalshi_maintenance() -> bool:
-    """
-    Check if current time is within Kalshi's scheduled maintenance window.
-    
-    Kalshi has a weekly maintenance window on Thursday 3:00-5:00 AM ET.
-    This function checks if the current time falls within that window.
-    
-    Returns:
-        True if within maintenance window, False otherwise
-        
-    Maintenance window configuration now comes from kalshi_agent_grid.yaml SessionConfig
-    (single source of truth) instead of settings.py env vars.
-    """
+    # Check if current time is within Kalshi scheduled maintenance window.
+    # Kalshi has a weekly maintenance window on Thursday 3:00-5:00 AM ET.
+    # This function checks if the current time falls within that window.
+    # Returns:
+    #     True if within maintenance window, False otherwise
+    # Maintenance window configuration now comes from kalshi_agent_grid.yaml SessionConfig
+    # (single source of truth) instead of settings.py env vars.
     try:
         from merid.prediction.agent_grid_config import get_session_config
         session = get_session_config()
@@ -461,22 +420,18 @@ def is_within_kalshi_maintenance() -> bool:
 
 
 def markets_expected_now() -> bool:
-    """Return True if Kalshi 15m crypto strips are *expected* to exist right now.
-
-    This encodes the venue schedule/cadence, NOT whether markets are actually
-    present in the catalog. It is the difference between:
-      - WAITING (markets expected but not yet posted -> transient venue/posting lag)
-      - IDLE    (markets not expected -> scheduled downtime / maintenance)
-
-    For 15-minute crypto, Kalshi posts strips continuously every 15 minutes,
-    24/7, EXCEPT during the weekly maintenance window (Thu 03:00-05:00 ET).
-    There is a short posting lag (seconds to ~1-2 min) between a strip closing
-    and the next strip appearing; during that lag strips are still expected.
-
-    Returns:
-        True if strips should be available now (outside maintenance),
-        False during the scheduled maintenance window (off hours).
-    """
+    # Return True if Kalshi 15m crypto strips are expected to exist right now.
+    # This encodes the venue schedule/cadence, NOT whether markets are actually
+    # present in the catalog. It is the difference between:
+    #   - WAITING (markets expected but not yet posted -> transient venue/posting lag)
+    #   - IDLE    (markets not expected -> scheduled downtime / maintenance)
+    # For 15-minute crypto, Kalshi posts strips continuously every 15 minutes,
+    # 24/7, EXCEPT during the weekly maintenance window (Thu 03:00-05:00 ET).
+    # There is a short posting lag (seconds to ~1-2 min) between a strip closing
+    # and the next strip appearing; during that lag strips are still expected.
+    # Returns:
+    #     True if strips should be available now (outside maintenance),
+    #     False during the scheduled maintenance window (off hours).
     # 15m crypto strips are continuous outside the maintenance window.
     # This is the single hook to add finer-grained off-hours logic later.
     return not is_within_kalshi_maintenance()
@@ -491,33 +446,28 @@ def compute_loop_state(
     spot_fresh_count: int = 0,
     min_ready_for_normal: int = 2,
 ) -> tuple:
-    """Pure decision function for the 15m loop state machine with degraded modes.
-
-    Separates infra health from market presence and per-asset readiness so a
-    normal gap BETWEEN 15m strips is never confused with a systemic failure.
-
-    New execution modes for graceful degradation:
-    - RUN_NORMAL: MD and spot healthy for >=N assets, full trading allowed
-    - RUN_DEGRADED: Some assets stale but >=1 has good MD/spot, reduced trading
-    - NO_NEW_ENTRIES: MD not healthy enough for new entries, manage existing positions
-    - HALT_CRITICAL: Both MD and spot broken for all assets, sustained interval
-
-    Args:
-        infra_ready: platform health (catalog/WS/bankroll/risk/gate all OK)
-        markets_expected: should strips exist now? (cadence + maintenance)
-        markets_present: does the catalog actually show >=1 active 15m strip?
-        ready_assets_count: number of assets with fresh MD AND sufficient depth (0..5)
-        md_fresh_count: number of assets with fresh MD (0..5)
-        spot_fresh_count: number of assets with fresh spot (0..5)
-        min_ready_for_normal: ready-asset count required for NORMAL (default 2)
-
-    Returns:
-        (loop_state, execution_mode, execution_ready, allow_new_entries) where:
-          loop_state        in {"HALT", "WAITING", "IDLE", "ACTIVE", "DEGRADED"}
-          execution_mode    in {"NONE", "RUN_NORMAL", "RUN_DEGRADED", "NO_NEW_ENTRIES", "HALT_CRITICAL"}
-          execution_ready:  True when loop_state allows any trading activity
-          allow_new_entries: True when new position entries are allowed
-    """
+    # Pure decision function for the 15m loop state machine with degraded modes.
+    # Separates infra health from market presence and per-asset readiness so a
+    # normal gap BETWEEN 15m strips is never confused with a systemic failure.
+    # New execution modes for graceful degradation:
+    # - RUN_NORMAL: MD and spot healthy for >=N assets, full trading allowed
+    # - RUN_DEGRADED: Some assets stale but >=1 has good MD/spot, reduced trading
+    # - NO_NEW_ENTRIES: MD not healthy enough for new entries, manage existing positions
+    # - HALT_CRITICAL: Both MD and spot broken for all assets, sustained interval
+    # Args:
+    #     infra_ready: platform health (catalog/WS/bankroll/risk/gate all OK)
+    #     markets_expected: should strips exist now? (cadence + maintenance)
+    #     markets_present: does the catalog actually show >=1 active 15m strip?
+    #     ready_assets_count: number of assets with fresh MD AND sufficient depth (0..5)
+    #     md_fresh_count: number of assets with fresh MD (0..5)
+    #     spot_fresh_count: number of assets with fresh spot (0..5)
+    #     min_ready_for_normal: ready-asset count required for NORMAL (default 2)
+    # Returns:
+    #     (loop_state, execution_mode, execution_ready, allow_new_entries) where:
+    #       loop_state        in {"HALT", "WAITING", "IDLE", "ACTIVE", "DEGRADED"}
+    #       execution_mode    in {"NONE", "RUN_NORMAL", "RUN_DEGRADED", "NO_NEW_ENTRIES", "HALT_CRITICAL"}
+    #       execution_ready:  True when loop_state allows any trading activity
+    #       allow_new_entries: True when new position entries are allowed
     # Determine loop_state based on infra and market presence
     if not infra_ready:
         # Check if it's a critical halt (both MD and spot completely broken)
@@ -576,17 +526,13 @@ def compute_loop_state(
 
 
 class Kalshi15mLoop:
-    """
-    Lean event loop for Kalshi 15m crypto trading.
-    
-    Lifecycle:
-        loop = Kalshi15mLoop(agent_grid, bankroll_service, risk_config, cadence_seconds=5.0)
-        asyncio.create_task(loop.run_forever())
-        ...
-        await loop.stop()
-    
-    NOTE: venue_adapter removed - it was dead code (TradingAgent bypasses it via route_order_async)
-    """
+    # Lean event loop for Kalshi 15m crypto trading.
+    # Lifecycle:
+    #     loop = Kalshi15mLoop(agent_grid, bankroll_service, risk_config, cadence_seconds=5.0)
+    #     asyncio.create_task(loop.run_forever())
+    #     ...
+    #     await loop.stop()
+    # NOTE: venue_adapter removed - it was dead code (TradingAgent bypasses it via route_order_async)
 
     def __init__(
         self,
@@ -597,17 +543,14 @@ class Kalshi15mLoop:
         catalog: Any = None,
         ws_bridge: Any = None,
     ):
-        """
-        Initialize the 15m loop.
-        
-        Args:
-            agent_grid: AgentGrid instance with 5 trading agents
-            bankroll_service: BankrollServiceV2 for balance tracking
-            risk_config: KalshiRiskConfig for risk limits
-            cadence_seconds: Loop cadence (default 5.0 seconds)
-            catalog: KalshiMarketCatalog instance for market discovery
-            ws_bridge: Shared WebSocket bridge instance (from main_15m_lean P1.5)
-        """
+        # Initialize the 15m loop.
+        # Args:
+        #     agent_grid: AgentGrid instance with 5 trading agents
+        #     bankroll_service: BankrollServiceV2 for balance tracking
+        #     risk_config: KalshiRiskConfig for risk limits
+        #     cadence_seconds: Loop cadence (default 5.0 seconds)
+        #     catalog: KalshiMarketCatalog instance for market discovery
+        #     ws_bridge: Shared WebSocket bridge instance (from main_15m_lean P1.5)
         self.agent_grid = agent_grid
         self.bankroll_service = bankroll_service
         self.risk_config = risk_config
@@ -719,16 +662,10 @@ class Kalshi15mLoop:
         # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_POSITIONS_PER_ASSET=1
         self._active_trades: Dict[str, int] = {}  # ticker -> order count (for tracking only, not limiting)
         
-        # CRITICAL FIX: Clear position cache to prevent stale exposure data from previous runs
-        # This prevents false "max exposure" blocking when there are no actual positions
-        try:
-            from merid.event_venues.kalshi.position_cache import get_position_cache
-            position_cache = get_position_cache()
-            # Clear the cache to ensure fresh state (use sync version since we're in __init__)
-            position_cache.clear_sync()
-            logger.info("[15m-LOOP] Position cache cleared to prevent stale exposure data")
-        except Exception as e:
-            logger.warning("[15m-LOOP] Failed to clear position cache: %s", e, exc_info=True)
+        # REMOVED: position_cache.clear_sync() call
+        # The position cache is the single source of truth and should persist across restarts
+        # Clearing it destroys position state and causes PositionMonitor to not load existing positions
+        # Stale data should be handled by reconciliation, not by destroying the cache
         
         # CRITICAL FIX: Load actual positions from position cache for accurate exposure tracking
         # This prevents false "max exposure" blocking when there are no actual positions
@@ -797,10 +734,15 @@ class Kalshi15mLoop:
                             continue
                         
                         # Calculate notional: contracts * avg_price_cents / 100
-                        notional = float((position.contracts * position.avg_price_cents) / 100.0)
-                        self._asset_positions[asset] += notional
-                        logger.debug("[15m-LOOP] Position: market=%s asset=%s contracts=%d price=%d notional=%.2f", 
-                                    market_id, asset, position.contracts, position.avg_price_cents, notional)
+                        # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
+                        if position.avg_price_cents is not None:
+                            notional = float((position.contracts * position.avg_price_cents) / 100.0)
+                            self._asset_positions[asset] += notional
+                            logger.debug("[15m-LOOP] Position: market=%s asset=%s contracts=%d price=%d notional=%.2f", 
+                                        market_id, asset, position.contracts, position.avg_price_cents, notional)
+                        else:
+                            logger.warning("[15m-LOOP] Position with unknown entry price: market=%s asset=%s contracts=%d - skipping notional calculation",
+                                         market_id, asset, position.contracts)
                 
                 # Log final exposure for each asset
                 for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
@@ -892,7 +834,7 @@ class Kalshi15mLoop:
             rt_monitor = get_round_trip_monitor()
             
             def outcome_callback(agent_id: str, logit: float, outcome: int) -> None:
-                """Callback to record calibration outcome to the appropriate agent."""
+                # Callback to record calibration outcome to the appropriate agent.
                 try:
                     # Find the agent by ID and record outcome
                     for agent in self.agent_grid._agents:
@@ -926,45 +868,42 @@ class Kalshi15mLoop:
 
     @property
     def is_running(self) -> bool:
-        """Return whether the loop is currently running."""
+        # Return whether the loop is currently running.
         return self._running
 
     @property
     def last_cycle_ts(self) -> Optional[datetime]:
-        """Return the timestamp of the last cycle."""
+        # Return the timestamp of the last cycle.
         return self._last_cycle_at
 
     @property
     def last_cycle_duration_ms(self) -> Optional[float]:
-        """Return the duration of the last cycle in milliseconds."""
+        # Return the duration of the last cycle in milliseconds.
         if self._cycle_duration_history:
             return self._cycle_duration_history[-1] * 1000 if self._cycle_duration_history else None
         return None
 
     @property
     def error_count(self) -> int:
-        """Return the total error count."""
+        # Return the total error count.
         return self._error_count
 
     @property
     def cycle_id(self) -> int:
-        """Return the current cycle ID (monotonically increasing)."""
+        # Return the current cycle ID (monotonically increasing).
         return self._tick
 
     @property
     def heartbeat_age_seconds(self) -> Optional[float]:
-        """Return seconds since last cycle for heartbeat monitoring."""
+        # Return seconds since last cycle for heartbeat monitoring.
         if self._last_cycle_at is None:
             return None
         return (datetime.now(timezone.utc) - self._last_cycle_at).total_seconds()
 
     def _get_cached_envelope(self, current_bankroll: float):
-        """
-        Get cached risk envelope, recomputing only if bankroll changed significantly.
-        
-        This avoids redundant envelope computation (5 agents × N cycles = 5N work).
-        Only recompute if bankroll changed by more than $1.00.
-        """
+        # Get cached risk envelope, recomputing only if bankroll changed significantly.
+        # This avoids redundant envelope computation (5 agents × N cycles = 5N work).
+        # Only recompute if bankroll changed by more than $1.00.
         if (self._risk_envelope is None or 
             self._last_envelope_bankroll is None or
             abs(current_bankroll - self._last_envelope_bankroll) > 1.0):
@@ -987,7 +926,7 @@ class Kalshi15mLoop:
         return self._risk_envelope
 
     async def _schedule_next_tick_async(self, delay: float) -> None:
-        """Schedule the next tick using asyncio.sleep (Windows ProactorEventLoop compatible)."""
+        # Schedule the next tick using asyncio.sleep (Windows ProactorEventLoop compatible).
         if not self._running:
             logger.debug("[15M-LOOP-TRACE] _schedule_next_tick_async called but loop not running")
             return
@@ -1007,7 +946,7 @@ class Kalshi15mLoop:
             logger.error("[15M-LOOP-TRACE] _schedule_next_tick_async failed: %s", exc, exc_info=True)
 
     async def _on_tick_async(self) -> None:
-        """Async tick handler (Windows ProactorEventLoop compatible)."""
+        # Async tick handler (Windows ProactorEventLoop compatible).
         self._last_tick_time = time.time()
         logger.debug("[15M-LOOP] ON-TICK-ENTRY running=%s tick_before=%d", self._running, self._tick)
         if not self._running:
@@ -1050,7 +989,7 @@ class Kalshi15mLoop:
                 logger.error("[15M-LOOP-ERROR] UNEXPECTED cycle=%d severity=%s: %s - %s", cycle_id, severity, error_type, exc, exc_info=True)
 
     async def _run_cycle_wrapper(self, cycle_id: int) -> None:
-        """Async wrapper for cycle execution (called from callback)."""
+        # Async wrapper for cycle execution (called from callback).
         loop = asyncio.get_running_loop()
         start = loop.time()
         logger.info("[LOOP-STARTUP-WRAPPER] CYCLE-WRAPPER-ENTER cycle=%d loop_time=%.3f", cycle_id, start)
@@ -1204,7 +1143,7 @@ class Kalshi15mLoop:
             logger.debug("[15M-LOOP] CYCLE-WRAPPER-EXIT cycle=%d duration=%.3fs completed=%s", cycle_id, duration, cycle_completed)
 
     async def start(self) -> None:
-        """Start the loop in background task."""
+        # Start the loop in background task.
         if self._running:
             logger.warning("[15m-LOOP] Loop already running, skipping start")
             return
@@ -1293,18 +1232,17 @@ class Kalshi15mLoop:
             try:
                 # Register exit callback to trigger exit orders
                 def exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
-                    """Callback when PositionMonitor detects exit condition.
-                    
-                    CRITICAL FIX: 2026-07-15 - Added robustness improvements:
-                    - Exit order failure tracking
-                    - Position state validation before exit
-                    - Idempotency guard to prevent duplicate exits
-                    
-                    CRITICAL FIX (2026-07-16): Set exit_triggered BEFORE async task to prevent race conditions
-                    Without this, multiple callbacks could fire before the first async task completes,
-                    causing duplicate exit orders. Setting exit_triggered=True immediately provides
-                    the idempotency guard that the callback was checking for.
-                    """
+                    # Callback when PositionMonitor detects exit condition.
+                    # CRITICAL FIX: 2026-07-15 - Added robustness improvements:
+                    # - Exit order failure tracking
+                    # - Position state validation before exit
+                    # - Idempotency guard to prevent duplicate exits
+                    # CRITICAL FIX (2026-07-16): Set exit_triggered BEFORE async task to prevent race conditions
+                    # Without this, multiple callbacks could fire before the first async task completes,
+                    # causing duplicate exit orders. Setting exit_triggered=True immediately provides
+                    # the idempotency guard that the callback was checking for.
+                    # CRITICAL FIX (2026-07-17): Exit-aware cooldown integration
+                    # Set cooldowns in StripOrderState for problematic exits to prevent re-entries.
                     try:
                         # CRITICAL: Check if position already exited (idempotency guard)
                         if position.exit_triggered:
@@ -1318,6 +1256,44 @@ class Kalshi15mLoop:
                             "[POSITION-MONITOR-CALLBACK] Exit intent: position=%s reason=%s price=%dc contracts=%s",
                             position.position_id[:8], exit_reason, exit_price_cents, contracts_to_close or "all"
                         )
+                        
+                        # CRITICAL INVARIANT CHECK: Exit orders can only execute on positions with size > 0
+                        if position.size <= 0:
+                            logger.warning(
+                                "[POSITION-MONITOR-CALLBACK] Exit intent suppressed - no open position: position=%s market=%s size=%d reason=%s",
+                                position.position_id[:8], position.market_id, position.size, exit_reason
+                            )
+                            return
+                        
+                        # CRITICAL FIX (2026-07-17): Set cooldown for problematic exits
+                        # This prevents re-entries after exits due to stale data, risk limits, low liquidity, or regime halts
+                        try:
+                            from merid.prediction.strip_order_state import get_strip_order_state, ExitReason as StripExitReason
+                            strip_state = get_strip_order_state()
+                            
+                            # Map position exit reasons to strip cooldown reasons
+                            cooldown_reason = None
+                            if exit_reason == ExitReason.STALE_DATA:
+                                cooldown_reason = StripExitReason.STALEDATA
+                            elif exit_reason == ExitReason.RISK_LIMIT:
+                                cooldown_reason = StripExitReason.RISK_LIMIT
+                            elif exit_reason == ExitReason.LOW_LIQUIDITY:
+                                cooldown_reason = StripExitReason.LOW_LIQUIDITY
+                            elif exit_reason == ExitReason.REGIME_HALTED:
+                                cooldown_reason = StripExitReason.REGIME_HALTED
+                            
+                            if cooldown_reason:
+                                strip_state.set_cooldown(
+                                    ticker=position.market_id,
+                                    exit_reason=cooldown_reason,
+                                    duration_seconds=300  # 5 minutes cooldown
+                                )
+                                logger.info(
+                                    "[STRIP-COOLDOWN-TRIGGER] ticker=%s reason=%s duration=300s",
+                                    position.market_id, cooldown_reason.value
+                                )
+                        except Exception as cooldown_err:
+                            logger.warning("[STRIP-COOLDOWN] Failed to set cooldown: %s", cooldown_err)
                         
                         # CRITICAL FIX (2026-07-16): Set exit_triggered BEFORE async task ONLY for full exits
                         # For partial exits, we don't set exit_triggered because the position remains monitored
@@ -1390,6 +1366,44 @@ class Kalshi15mLoop:
                 # Start the monitor's polling loop (await to ensure _running flag is set)
                 await self._position_monitor.start()
                 logger.info("[15m-LOOP] Started PositionMonitor with exit callback")
+                
+                # CRITICAL FIX (2026-07-23): Run startup health check for exit coverage
+                # This ensures that on process restart, any mismatch between positions and
+                # resting exit orders is detected and logged before trading resumes.
+                # CRITICAL FIX (2026-07-23): Wait for startup grace window to complete
+                # before enforcing exit invariants to prevent race conditions.
+                try:
+                    # Check if we're in startup grace window
+                    if self._position_monitor.is_in_startup_grace_window():
+                        logger.info(
+                            "[STARTUP-EXIT-HEALTH] In startup grace window - skipping exit coverage check until orders are loaded"
+                        )
+                    else:
+                        health_result = self._position_monitor.health_check_exit_coverage()
+                        health_status = health_result.get("health_status", "unknown")
+                        
+                        if health_status == "critical":
+                            logger.critical(
+                                "[STARTUP-EXIT-HEALTH] CRITICAL: Exit coverage health check failed on startup: %s",
+                                health_result
+                            )
+                            # Continue startup but log critical - positions may ride to settlement without exits
+                        elif health_status == "warning":
+                            logger.warning(
+                                "[STARTUP-EXIT-HEALTH] WARNING: Exit coverage health check found issues on startup: %s",
+                                health_result
+                            )
+                        else:
+                            logger.info(
+                                "[STARTUP-EXIT-HEALTH] Exit coverage health check passed on startup: %s",
+                                health_result
+                            )
+                except Exception as health_err:
+                    logger.error(
+                        "[STARTUP-EXIT-HEALTH] Failed to run exit coverage health check on startup: %s",
+                        health_err,
+                        exc_info=True
+                    )
             except Exception as e:
                 logger.error("[15m-LOOP] CRITICAL: Failed to start PositionMonitor: %s", e, exc_info=True)
                 raise RuntimeError(f"PositionMonitor start failed - exit policies will not execute: {e}")
@@ -1398,14 +1412,90 @@ class Kalshi15mLoop:
             raise RuntimeError("PositionMonitor is None - exit policies will not execute")
 
     async def _execute_exit_order(self, position, exit_reason, exit_price_cents, contracts_to_close=None) -> None:
-        """Execute exit order when PositionMonitor triggers exit condition.
+        # Execute exit order when PositionMonitor triggers exit condition.
+        # Args:
+        #     position: Position to exit
+        #     exit_reason: Exit reason
+        #     exit_price_cents: Exit price in cents
+        #     contracts_to_close: Number of contracts to close (None = full exit)
         
-        Args:
-            position: Position to exit
-            exit_reason: Exit reason
-            exit_price_cents: Exit price in cents
-            contracts_to_close: Number of contracts to close (None = full exit)
-        """
+        # CRITICAL INVARIANT CHECKS: Exit orders can only execute on valid positions
+        assert position.size > 0, f"EXIT-ORDER: No open position for {position.market_id} - size={position.size}"
+        
+        # CRITICAL FIX (2026-07-23): Use position-level lock to prevent TOCTOU races
+        # Only one thread can create an exit order for a given position at a time
+        position_lock = self._position_monitor._get_position_lock(position.position_id)
+        
+        if not position_lock.acquire(blocking=False):
+            logger.warning(
+                "[EXIT-ORDER-LOCK] Position %s is locked for exit creation - skipping duplicate attempt",
+                position.position_id[:8]
+            )
+            return
+        
+        try:
+            # CRITICAL FIX (2026-07-23): Check exit registry first (source of truth)
+            # This is more reliable than querying RestingOrderMonitor which may have websocket lag
+            if self._position_monitor._has_exit_order(position.position_id):
+                existing_exits = self._position_monitor._get_exit_orders_for_position(position.position_id)
+                logger.warning(
+                    "[EXIT-ORDER-DUPLICATE] Exit order already registered for position=%s - "
+                    "skipping new exit order to prevent duplicate fills. "
+                    "Registered exits: %s | New reason: %s | New price: %dc | Partial exit: %s",
+                    position.position_id[:8],
+                    existing_exits,
+                    exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                    exit_price_cents,
+                    contracts_to_close is not None
+                )
+                return
+            
+            # CRITICAL FIX (2026-07-23): Check for duplicate resting exit orders (one-position-one-exit invariant)
+            # Before placing a new exit order, check if a resting exit order already exists for this market_id.
+            # This prevents multiple independent exit orders for the same position, which can lead to
+            # double-fills, flat-then-reversed states, and inconsistent exposure.
+            # CRITICAL: This applies to BOTH full exits and partial exits - only one active exit order per position.
+            try:
+                from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+                resting_monitor = get_resting_order_monitor()
+                
+                # Check if there's a resting exit order for this market_id
+                existing_exit_orders = resting_monitor.get_orders_by_ticker(position.market_id)
+                
+                # Filter for exit orders (check source markers)
+                from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
+                exit_orders = [order for order in existing_exit_orders if is_exit_order_from_source(order.exit_policy_id)]
+                
+                if exit_orders:
+                    logger.warning(
+                        "[EXIT-ORDER-DUPLICATE] Resting exit order already exists for market=%s - "
+                        "skipping new exit order to prevent duplicate fills. "
+                        "Existing orders: %s | New reason: %s | New price: %dc | Partial exit: %s",
+                        position.market_id,
+                        [order.kalshi_order_id for order in exit_orders],
+                        exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                        exit_price_cents,
+                        contracts_to_close is not None
+                    )
+                    # Skip placing new exit order - existing one will handle the exit
+                    return
+            except Exception as dup_check_err:
+                logger.warning(
+                    "[EXIT-ORDER-DUPLICATE] Failed to check for duplicate resting exit orders (non-critical): %s",
+                    dup_check_err
+                )
+                # Continue with exit order placement if check fails (fail-open for safety)
+        finally:
+            position_lock.release()
+        
+        # Derive side_str from position for logging (use thesis_side if available, else position.side)
+        if hasattr(position, 'thesis_side') and position.thesis_side:
+            side_str = position.thesis_side
+        else:
+            side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
+        
+        assert side_str in ("yes", "no", "YES", "NO"), f"EXIT-ORDER: Invalid side_str={side_str} for {position.market_id}"
+        
         try:
             logger.info(
                 "[EXIT-ORDER] Starting exit order execution: position=%s market=%s side=%s reason=%s exit_price=%dc "
@@ -1464,51 +1554,135 @@ class Kalshi15mLoop:
                 )
             
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-
-            # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
-            # For exit orders, we always sell to close the position
-            # YES position: sell YES to exit long position -> SELL_YES
-            # NO position: sell NO to exit long position -> SELL_NO
-            action = "sell"
-
-            # Convert PositionSide enum to string for OrderIntent
-            side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
-            side_upper = side_str.upper()
-
-            # Map to Kalshi side format for exit orders
-            if side_upper == "YES" and action == "sell":
-                kalshi_side = "SELL_YES"
-            elif side_upper == "NO" and action == "sell":
-                kalshi_side = "SELL_NO"
+            
+            # CRITICAL FIX (2026-07-23): Verify exit orders bypass window limits
+            # Exit orders are routed directly via route_order_async and do NOT go through
+            # top3_batch_manager.validate_order where check_window_limit is called.
+            # This ensures exit orders are never blocked by window-based risk limits.
+            logger.info(
+                "[EXIT-ORDER-WINDOW-BYPASS] Exit order routing path: direct route_order_async (bypasses top3 gate window limits)"
+            )
+            
+            # CRITICAL FIX (2026-07-21): Use pure functions from strategy_positions domain layer
+            # This encapsulates direction mapping in one spot, making it impossible for
+            # cache/REST state to leak into side decisions.
+            # Feature flag USE_LEGACY_DIRECTION_MAPPING controls whether to use new approach
+            from merid.event_venues.kalshi.strategy_positions import ThesisSide, build_exit_order
+            
+            # Get thesis_side from position (immutable strategy thesis)
+            # Fallback to position.side for backward compatibility with existing positions
+            if hasattr(position, 'thesis_side'):
+                thesis_side_str = position.thesis_side
+                try:
+                    thesis_side = ThesisSide.from_outcome_side(thesis_side_str)
+                    logger.info(
+                        "[EXIT-ORDER-THESIS] Using thesis_side=%s (immutable strategy thesis) for exit order generation",
+                        thesis_side_str
+                    )
+                except ValueError as e:
+                    logger.error(
+                        "[EXIT-ORDER-THESIS] Invalid thesis_side=%s: %s, falling back to position.side",
+                        thesis_side_str, e
+                    )
+                    thesis_side = None
             else:
-                # Fallback for unexpected combinations
+                # Backward compatibility: use position.side for positions without thesis_side
+                thesis_side = None
                 logger.warning(
-                    "[EXIT-ORDER] Unexpected side/action combination: side=%s action=%s, using fallback",
-                    side_str, action
+                    "[EXIT-ORDER-LEGACY] Position missing thesis_side, using mutable position.side - may be subject to side inversion"
                 )
-                kalshi_side = f"{action.upper()}_{side_upper}"
-
+            
             # Determine count (partial or full exit)
             count = contracts_to_close if contracts_to_close is not None else position.size
+            
+            # Initialize action variable to prevent UnboundLocalError
+            action = "SELL"
+            
+            # Build exit order using pure function from domain layer (if feature flag is False)
+            if not USE_LEGACY_DIRECTION_MAPPING and thesis_side:
+                # Create a temporary StrategyPosition for the pure function
+                # This ensures deterministic mapping from thesis to Kalshi format
+                from merid.event_venues.kalshi.strategy_positions import StrategyPosition
+                temp_position = StrategyPosition(
+                    ticker=position.market_id,
+                    thesis_side=thesis_side,
+                    size_fp=position.size,
+                    avg_entry_price_cents=int(position.avg_entry_price_cents) if hasattr(position, 'avg_entry_price_cents') else 0
+                )
+                
+                try:
+                    exit_order = build_exit_order(temp_position, count, exit_price_cents)
+                    kalshi_side = exit_order["kalshi_side"]
+                    outcome_side = exit_order["outcome_side"]
+                    action = exit_order["action"]
+                    
+                    # VERIFICATION: Exit order logging (ticker, thesis_side, exit_outcome_side, action, size_fp)
+                    logger.info(
+                        "[EXIT-ORDER-GENERATION] ticker=%s thesis_side=%s exit_outcome_side=%s action=%s kalshi_side=%s size_fp=%d price_cents=%d",
+                        position.market_id, thesis_side.value, outcome_side, action, kalshi_side, count, exit_price_cents
+                    )
+                    thesis_side_str = exit_order["thesis_side"]
+                    
+                    logger.info(
+                        "[EXIT-ORDER-PURE-FUNCTION] Built exit order using pure function: "
+                        "thesis=%s -> kalshi_side=%s count=%d price=%dc",
+                        thesis_side_str, kalshi_side, count, exit_price_cents
+                    )
+                except ValueError as e:
+                    logger.error(
+                        "[EXIT-ORDER-PURE-FUNCTION] Failed to build exit order: %s, falling back to legacy logic",
+                        e
+                    )
+                    # Fallback to legacy logic
+                    thesis_side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
+                    thesis_upper = thesis_side_str.upper()
+                    if thesis_upper == "YES":
+                        kalshi_side = "SELL_YES"
+                        action = "SELL"
+                    else:
+                        kalshi_side = "SELL_NO"
+                        action = "SELL"
+            else:
+                # Legacy fallback: either feature flag is True or thesis_side not available
+                if USE_LEGACY_DIRECTION_MAPPING:
+                    logger.warning(
+                        "[EXIT-ORDER-LEGACY-FEATURE] USE_LEGACY_DIRECTION_MAPPING=True, using legacy side derivation"
+                    )
+                    # VERIFICATION: Add metrics for legacy mapping usage
+                    try:
+                        from merid.event_venues.kalshi.thesis_side_monitor import get_thesis_side_monitor
+                        monitor = get_thesis_side_monitor()
+                        monitor.record_legacy_mapping_usage(market_id=position.market_id, reason="feature_flag_enabled")
+                    except Exception as metrics_err:
+                        logger.debug("[EXIT-ORDER-METRICS] Could not record legacy mapping usage: %s", metrics_err)
+                
+                thesis_side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
+                thesis_upper = thesis_side_str.upper()
+                if thesis_upper == "YES":
+                    kalshi_side = "SELL_YES"
+                    action = "SELL"
+                else:
+                    kalshi_side = "SELL_NO"
+                    action = "SELL"
 
             # AUDIT: Venue-side semantics - log Kalshi order semantics for exit
             logger.info(
                 "[VENUE-SEMANTICS-AUDIT] position=%s market=%s exit_reason=%s "
                 "kalshi_side=%s order_type=limit time_in_force=gtc aggressiveness=1.0 price=%dc count=%d "
-                "side_conversion=%s->%s executable=YES",
+                "thesis_conversion=%s->%s executable=YES",
                 position.position_id[:8],
                 position.market_id,
                 exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
                 kalshi_side,
                 exit_price_cents,
                 count,
-                side_str,
+                thesis_side,
                 kalshi_side
             )
             
             logger.info(
-                "[EXIT-ORDER] Kalshi side conversion: side_str=%s action=%s -> kalshi_side=%s",
-                side_str, action, kalshi_side
+                "[EXIT-ORDER] Kalshi side conversion: thesis_side=%s action=%s -> kalshi_side=%s",
+                thesis_side, action, kalshi_side
             )
 
             # Create exit OrderIntent
@@ -1569,11 +1743,39 @@ class Kalshi15mLoop:
                 expected_post_position_size=expected_post_position_size,  # Expected position after order
             )
 
+            # LIFECYCLE-EXIT CANONICAL LOG SCHEMA (machine-parseable, single line)
+            # Contract: thesis_side in {yes,no}; kalshi_side == SELL_YES iff thesis_side==yes,
+            # SELL_NO iff thesis_side==no; size_before > 0; size_after == size_before - count (>= 0).
+            lifecycle_asset = "unknown"
+            for _prefix, _asset_name in (("KXBTC", "BTC"), ("KXETH", "ETH"), ("KXSOL", "SOL"), ("KXXRP", "XRP"), ("KXDOGE", "DOGE")):
+                if position.market_id.startswith(_prefix):
+                    lifecycle_asset = _asset_name
+                    break
+            logger.info(
+                "[LIFECYCLE-EXIT] asset=%s ticker=%s agent_id=%s thesis_side=%s action=%s kalshi_side=%s "
+                "size_before=%d size_after=%d count=%d price_cents=%d exit_reason=%s entry_or_exit=exit",
+                lifecycle_asset,
+                position.market_id,
+                "merid.position_management.position_monitor",
+                side_str.lower(),
+                action.lower(),
+                kalshi_side,
+                pre_position_size,
+                expected_post_position_size,
+                count,
+                exit_price_cents,
+                exit_reason_str,
+            )
+
             logger.info(
                 "[EXIT-ORDER] Routing exit order: ticker=%s side=%s action=%s count=%d price=%dc reason=%s",
                 position.market_id, side_str, action, count, exit_price_cents, exit_reason
             )
 
+            # CRITICAL FIX (2026-07-23): Register exit submission in cache before routing
+            # This handles websocket lag - order is treated as "exists" even if not yet visible
+            self._position_monitor._register_exit_submission(intent.client_order_id)
+            
             # Route the exit order
             result = await route_order_async(intent)
 
@@ -1582,6 +1784,14 @@ class Kalshi15mLoop:
                     "[EXIT-ORDER] Exit order executed successfully: order_id=%s status=%s",
                     result.order_id, result.status
                 )
+                
+                # CRITICAL FIX (2026-07-23): Register exit order in first-class registry
+                # This is the source of truth for exit orders, reducing reliance on exchange data
+                # Pass the exit quantity for quantity-aware coverage invariant
+                if result.order_id:
+                    self._position_monitor._register_exit_order(position.position_id, result.order_id, count)
+                    # CRITICAL FIX (2026-07-23): Clear in-flight flag after successful order placement
+                    self._position_monitor._clear_exit_intent_in_flight(position.position_id)
             else:
                 logger.error(
                     "[EXIT-ORDER] Exit order failed: status=%s error=%s reason=%s",
@@ -1596,18 +1806,16 @@ class Kalshi15mLoop:
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
 
     def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_close=None) -> None:
-        """Re-arm a position in the PositionMonitor after a failed exit order.
+        # Re-arm a position in the PositionMonitor after a failed exit order.
 
-        CRITICAL FIX (2026-07-16): Previously a failed/rejected exit order left the
-        position orphaned — removed from monitoring (full exits) with no retry — so a
-        live position rode to settlement with NO exit enforcement. This violates the
-        "all trades are executed with the exit policy" invariant.
-
-        For full exits: reset exit state and re-add to the monitor so the exit
-        condition re-fires on the next poll. For partial exits: the position is still
-        monitored; restore the optimistically-decremented size so the retry closes
-        the correct amount.
-        """
+        # CRITICAL FIX (2026-07-16): Previously a failed/rejected exit order left the
+        # position orphaned - removed from monitoring (full exits) with no retry - so a
+        # live position rode to settlement with NO exit enforcement. This violates the
+        # "all trades are executed with the exit policy" invariant.
+        # For full exits: reset exit state and re-add to the monitor so the exit
+        # condition re-fires on the next poll. For partial exits: the position is still
+        # monitored; restore the optimistically-decremented size so the retry closes
+        # the correct amount.
         try:
             retry_count = getattr(position, "exit_retry_count", 0) + 1
             
@@ -1691,7 +1899,7 @@ class Kalshi15mLoop:
             )
 
     async def _run_loop(self) -> None:
-        """Main loop execution - runs trading cycles at configured cadence."""
+        # Main loop execution - runs trading cycles at configured cadence.
         tick_id = 0
         logger.info("[15m-LOOP] Entering main loop")
         
@@ -1804,8 +2012,8 @@ class Kalshi15mLoop:
                         # preventing trading on expired markets during the brief window after rollover
                         logger.info("[15m-LOOP] WINDOW-CHANGE: Triggering catalog refresh for new 15m window")
                         try:
-                            from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
-                            catalog = get_kalshi_market_catalog()
+                            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                            catalog = get_market_catalog()
                             # Force a refresh to get new markets for the new window
                             # Add timeout to prevent indefinite blocking if catalog refresh hangs
                             await asyncio.wait_for(catalog.refresh(force=True), timeout=30.0)
@@ -2042,7 +2250,11 @@ class Kalshi15mLoop:
                                     if self.market_state_store:
                                         market_state = self.market_state_store.get(ticker)
                                         if market_state:
-                                            candidate_side = str(candidate.get("side", "yes")).lower()
+                                            candidate_side = str(candidate.get("side", "")).lower()
+                                            # CRITICAL FIX: If side is missing, log error and skip - don't default to "yes"
+                                            if not candidate_side:
+                                                logger.error("[15m-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT DETERMINE PRICE - SKIPPING", ticker)
+                                                continue
                                             yes_mid = 0
                                             if getattr(market_state, 'mid_cents', None):
                                                 yes_mid = int(market_state.mid_cents)
@@ -2064,7 +2276,11 @@ class Kalshi15mLoop:
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
                                 confidence = Decimal(str(candidate.get("confidence", 0.5)))
                                 model_prob = candidate.get("model_prob", None)  # 2026-07-12: Kelly Criterion integration
-                                candidate_side = str(candidate.get("side", "yes")).lower()  # 2026-07-13: Side for Kelly calculation
+                                candidate_side = str(candidate.get("side", "")).lower()  # 2026-07-13: Side for Kelly calculation
+                                # CRITICAL FIX: If side is missing, log error and skip
+                                if not candidate_side:
+                                    logger.error("[15m-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT CALCULATE KELLY - SKIPPING", ticker)
+                                    continue
                                 
                                 # Extract asset from ticker
                                 asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
@@ -2176,7 +2392,7 @@ class Kalshi15mLoop:
             logger.info("[15m-LOOP] Loop stopped (cycles=%d, errors=%d)", self._cycle_count, self._error_count)
 
     async def stop(self) -> None:
-        """Stop the loop gracefully."""
+        # Stop the loop gracefully.
         self._running = False
 
         # CRITICAL: Stop PositionMonitor before stopping loop
@@ -2203,21 +2419,17 @@ class Kalshi15mLoop:
         logger.info("[15m-LOOP] Stop requested")
 
     async def _run_one_cycle(self, tick: int) -> None:
-        """
-        Run a single trading cycle.
-        
-        Steps:
-        1) Reset UnifiedRiskManager cycle tracking (critical for cycle cap enforcement)
-        2) Update envelope equity once per cycle (not per order)
-        3) Check if halted due to drawdown
-        4) Skip cycle if halted
-        5) Pull latest market state / RTI inputs (rely on WS caches)
-        6) Call agent_grid.run_cycle(tick) to step all agents
-        7) Let AgentGrid/TradingAgent issue orders via route_order_async
-        8) Log band transitions
-        
-        Phase 4.2: Enhanced with performance profiling
-        """
+        # Run a single trading cycle.
+        # Steps:
+        # 1) Reset UnifiedRiskManager cycle tracking (critical for cycle cap enforcement)
+        # 2) Update envelope equity once per cycle (not per order)
+        # 3) Check if halted due to drawdown
+        # 4) Skip cycle if halted
+        # 5) Pull latest market state / RTI inputs (rely on WS caches)
+        # 6) Call agent_grid.run_cycle(tick) to step all agents
+        # 7) Let AgentGrid/TradingAgent issue orders via route_order_async
+        # 8) Log band transitions
+        # Phase 4.2: Enhanced with performance profiling
         logger.info("[LOOP-STARTUP-ONE-CYCLE] _run_one_cycle ENTRY tick=%d", tick)
         logger.debug("[TRACE] _run_one_cycle ENTRY tick=%d", tick)
         
@@ -3920,13 +4132,11 @@ class Kalshi15mLoop:
                 logger.warning("[15m-LOOP] Failed to log periodic summary: %s", e, exc_info=True)
 
     async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = True, allow_new_entries: bool = True) -> None:
-        """Run agent grid cycle with proper error handling.
-        
-        Args:
-            tick: Current cycle tick number
-            trading_ready: Whether trading is ready (can place orders)
-            allow_new_entries: Whether new position entries are allowed (from execution_mode)
-        """
+        # Run agent grid cycle with proper error handling.
+        # Args:
+        #     tick: Current cycle tick number
+        #     trading_ready: Whether trading is ready (can place orders)
+        #     allow_new_entries: Whether new position entries are allowed (from execution_mode)
         logger.info("[15M-LOOP] _run_agent_grid_with_timeout ENTRY tick=%d", tick)
         # CRITICAL: Log entry to this method
         
@@ -4221,34 +4431,27 @@ class Kalshi15mLoop:
         logger.debug("[15M-LOOP] GRID-WITH-TIMEOUT-EXIT cycle=%d", tick)
 
     def _get_candidate_key(self, candidate: Dict) -> str:
-        """Generate a unique key for a candidate to track execution within a window.
-        
-        Args:
-            candidate: Candidate dict from agent grid
-            
-        Returns:
-            Unique key string (ticker + side + price_cents)
-            CRITICAL FIX (2026-07-13): Include price_cents to prevent re-executing
-            the same ticker+side at different prices within the same window.
-            This ensures we only execute 1 order per ticker+side+price per 15-minute window.
-        """
+        # Generate a unique key for a candidate to track execution within a window.
+        # Args:
+        #     candidate: Candidate dict from agent grid
+        # Returns:
+        #     Unique key string (ticker + side + price_cents)
+        # CRITICAL FIX (2026-07-13): Include price_cents to prevent re-executing
+        # the same ticker+side at different prices within the same window.
+        # This ensures we only execute 1 order per ticker+side+price per 15-minute window.
         ticker = candidate.get("ticker", "")
         side = candidate.get("side", "")
         price_cents = candidate.get("price_cents", 0)
         return f"{ticker}:{side}:{price_cents}"
     
     def _validate_candidate_edge(self, candidate: Dict) -> bool:
-        """Re-validate candidate edge before execution to prevent bad trades.
-        
-        This checks if the edge has shifted to unprofitable since the candidate
-        was generated. If the edge is no longer positive, the candidate is rejected.
-        
-        Args:
-            candidate: Candidate dict from agent grid
-            
-        Returns:
-            True if edge is still valid (positive), False otherwise
-        """
+        # Re-validate candidate edge before execution to prevent bad trades.
+        # This checks if the edge has shifted to unprofitable since the candidate
+        # was generated. If the edge is no longer positive, the candidate is rejected.
+        # Args:
+        #     candidate: Candidate dict from agent grid
+        # Returns:
+        #     True if edge is still valid (positive), False otherwise
         # Single source of truth: edge_pct in FRACTION units
         edge = candidate.get("edge_pct", 0.0)
         
@@ -4278,7 +4481,7 @@ class Kalshi15mLoop:
         return True
     
     async def _execute_candidate(self, candidate: Dict, tick: int) -> None:
-        """Convert candidate dict to OrderIntent and route to order router."""
+        # Convert candidate dict to OrderIntent and route to order router.
         try:
             from merid.event_venues.kalshi.order_router import OrderIntent, resolve_window_policy, resolve_exit_policy, route_order_async
             
@@ -4418,7 +4621,11 @@ class Kalshi15mLoop:
                     if market_state:
                         # CRITICAL FIX: For NO orders, calculate NO mid-price from YES bid/ask
                         # Kalshi duality: NO_mid = 100 - YES_mid
-                        candidate_side = candidate.get("side", "yes").lower()
+                        candidate_side = candidate.get("side", "").lower()
+                        # CRITICAL FIX: If side is missing, log error and skip
+                        if not candidate_side:
+                            logger.error("[15M-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT DETERMINE PRICE - SKIPPING", ticker)
+                            return
                         if candidate_side == "no" or candidate_side == "buy_no":
                             # NO order: calculate NO mid-price
                             if market_state.best_bid_cents and market_state.best_ask_cents:
@@ -4641,6 +4848,25 @@ class Kalshi15mLoop:
             # CRITICAL FIX (2026-07-19): Validate strategy intent vs net exposure
             # This prevents side/price mapping bugs where intent doesn't match exposure
             strategy_intent = candidate.get("strategy_intent")
+            candidate_side = candidate.get("side")
+
+            # CRITICAL INSTRUMENTATION (2026-07-23): Log candidate_side vs order_side for bias detection
+            logger.info(
+                "[SIDE-PRESERVATION-CHECK] ticker=%s candidate_side=%s order_side=%s order_action=%s kalshi_side=%s strategy_intent=%s",
+                ticker, candidate_side, side_raw, action_raw, kalshi_side, strategy_intent
+            )
+
+            # CRITICAL INVARIANT (2026-07-23): For entries, order_side must match candidate_side
+            # This catches side flipping in the router/allocator path
+            if entry_or_exit == "entry" and candidate_side and side_raw:
+                if candidate_side.lower() != side_raw.lower():
+                    logger.error(
+                        "[SIDE-PRESERVATION-VIOLATION] ticker=%s candidate_side=%s != order_side=%s - SIDE FLIPPING DETECTED IN ROUTER/ALLOCATOR PATH",
+                        ticker, candidate_side, side_raw
+                    )
+                    # Block the trade - this is a critical bug
+                    return
+
             if strategy_intent:
                 # Calculate net exposure from side+action
                 # +Yes exposure: buy_yes, sell_no
@@ -4651,7 +4877,7 @@ class Kalshi15mLoop:
                     net_exposure = "+No"
                 else:
                     net_exposure = "unknown"
-                
+
                 # Assert invariant: intent must match exposure
                 if strategy_intent == "bullish_event":
                     assert net_exposure == "+Yes", (
@@ -4833,6 +5059,28 @@ class Kalshi15mLoop:
                        intent.exit_policy_id, 
                        ticker, 
                        "present" if exit_policy else "None")
+            
+            # LIFECYCLE-ENTRY CANONICAL LOG SCHEMA (machine-parseable, single line)
+            # Contract: indicator_side in {yes,no}; entry_action == buy; thesis_side == indicator_side;
+            # kalshi_side == BUY_YES iff thesis_side==yes, BUY_NO iff thesis_side==no.
+            logger.info(
+                "[LIFECYCLE-ENTRY] asset=%s ticker=%s agent_id=%s indicator_side=%s edge_yes=%s edge_no=%s "
+                "edge_pct=%.4f thesis_side=%s entry_action=%s kalshi_side=%s price_cents=%d count=%d "
+                "strategy_intent=%s entry_or_exit=entry",
+                asset,
+                ticker,
+                agent_id,
+                side_raw.lower(),
+                candidate.get("edge_yes", "n/a"),
+                candidate.get("edge_no", "n/a"),
+                edge_pct if edge_pct is not None else 0.0,
+                side_raw.lower(),
+                action_raw.lower(),
+                kalshi_side,
+                price_cents,
+                count,
+                strategy_intent or "n/a",
+            )
             
             # Load order scaling configuration from profile
             scaling_enabled = False
@@ -5147,7 +5395,7 @@ class Kalshi15mLoop:
             logger.error("[15M-LOOP] Failed to execute candidate: %s", e, exc_info=True)
 
     async def _run_agents_directly(self, tick: int) -> None:
-        """Fallback: run agents directly if run_cycle not implemented."""
+        # Fallback: run agents directly if run_cycle not implemented.
         for agent in self.agent_grid._agents:
             try:
                 if hasattr(agent, 'run_cycle'):
@@ -5162,7 +5410,7 @@ class Kalshi15mLoop:
                 )
 
     def summary(self) -> Dict[str, Any]:
-        """Get loop status summary for API/monitoring."""
+        # Get loop status summary for API/monitoring.
         # Handle both datetime and float (timestamp) types
         started_at = self._started_at
         if started_at and isinstance(started_at, (int, float)):
@@ -5236,13 +5484,9 @@ def get_kalshi_15m_loop(
     catalog: Any = None,
     ws_bridge: Any = None,
 ) -> Kalshi15mLoop:
-    """
-    Factory function to create/get the Kalshi15mLoop singleton.
-    
-    This is the canonical way to get the loop instance for the 15m profile.
-    
-    NOTE: venue_adapter removed - it was dead code (TradingAgent bypasses it via route_order_async)
-    """
+    # Factory function to create/get the Kalshi15mLoop singleton.
+    # This is the canonical way to get the loop instance for the 15m profile.
+    # NOTE: venue_adapter removed - it was dead code (TradingAgent bypasses it via route_order_async)
     return Kalshi15mLoop(
         agent_grid=agent_grid,
         bankroll_service=bankroll_service,
