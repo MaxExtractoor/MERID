@@ -2405,6 +2405,73 @@ class Kalshi15mLoop:
                                 )
                                 continue
                             
+                            # CRITICAL FIX (2026-07-21): Check if asset already has position or pending order in current 15-minute window
+                            # This enforces one-contract-per-asset-per-15-minute rule at execution time, not just signal time
+                            # The key is asset + window (ticker prefix + 15-minute window ID), not just ticker+side+price
+                            # CRITICAL FIX (2026-07-21): Use same source of truth as router (position_cache + resting_order_monitor)
+                            # to ensure loop and router don't diverge on window state
+                            asset_window_key = self._get_asset_window_key(candidate)
+                            
+                            # Check in-memory executed candidates first (fast path)
+                            if asset_window_key in self._executed_candidates_this_window:
+                                logger.warning(
+                                    "[15m-LOOP] Asset already has order in current 15-minute window: asset=%s ticker=%s - skipping to prevent duplicate exposure",
+                                    asset, ticker
+                                )
+                                continue
+                            
+                            # Check position cache for existing positions in this window (same as router)
+                            try:
+                                from merid.event_venues.kalshi.position_cache import get_position_cache
+                                position_cache = get_position_cache()
+                                if position_cache:
+                                    all_positions = position_cache.get_all_positions(validate_freshness=False)
+                                    for pos_ticker, pos_obj in all_positions.items():
+                                        if pos_obj and pos_obj.contracts > 0:
+                                            # Extract asset and window from position ticker
+                                            pos_asset = None
+                                            pos_ticker_upper = pos_ticker.upper()
+                                            if "BTC" in pos_ticker_upper:
+                                                pos_asset = "BTC"
+                                            elif "ETH" in pos_ticker_upper:
+                                                pos_asset = "ETH"
+                                            elif "SOL" in pos_ticker_upper:
+                                                pos_asset = "SOL"
+                                            elif "XRP" in pos_ticker_upper:
+                                                pos_asset = "XRP"
+                                            elif "DOGE" in pos_ticker_upper:
+                                                pos_asset = "DOGE"
+                                            
+                                            if pos_asset == asset:
+                                                pos_window_id = pos_ticker.split("-")[-2] if "-" in pos_ticker else pos_ticker
+                                                if pos_window_id == ticker.split("-")[-2] if "-" in ticker else ticker:
+                                                    logger.warning(
+                                                        "[15m-LOOP] Asset already has position in current window: asset=%s window=%s position=%s (contracts=%d) - skipping",
+                                                        asset, pos_window_id, pos_ticker, pos_obj.contracts
+                                                    )
+                                                    continue
+                            except Exception as pos_check_err:
+                                logger.warning("[15m-LOOP] Failed to check position cache for asset-window state: %s", pos_check_err)
+                            
+                            # Check resting order monitor for pending orders in this window (same as router)
+                            try:
+                                from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+                                monitor = get_resting_order_monitor()
+                                if monitor:
+                                    open_order_id = monitor.find_open_order(
+                                        ticker=ticker,
+                                        side=str(candidate.get("side", "")).lower(),
+                                        action=str(candidate.get("action", "")).lower()
+                                    )
+                                    if open_order_id:
+                                        logger.warning(
+                                            "[15m-LOOP] Asset has resting order in current window: asset=%s ticker=%s order=%s - skipping",
+                                            asset, ticker, open_order_id
+                                        )
+                                        continue
+                            except Exception as monitor_err:
+                                logger.warning("[15m-LOOP] Failed to check resting order monitor: %s", monitor_err)
+                            
                             # CRITICAL: Re-validate edge before execution
                             if not self._validate_candidate_edge(candidate):
                                 logger.warning("[15m-LOOP] Candidate edge validation failed: %s - skipping execution", ticker)
@@ -2540,6 +2607,10 @@ class Kalshi15mLoop:
                             # Track executed candidate to prevent duplicates
                             candidate_key = self._get_candidate_key(candidate)
                             self._executed_candidates_this_window.add(candidate_key)
+                            
+                            # CRITICAL FIX (2026-07-21): Track asset-window key to enforce one-contract-per-asset rule
+                            asset_window_key = self._get_asset_window_key(candidate)
+                            self._executed_candidates_this_window.add(asset_window_key)
                             
                             # FIX: Do NOT reset cycle guards after each execution
                             # The global_slot_allocator should track total exposure across all positions
@@ -4628,6 +4699,20 @@ class Kalshi15mLoop:
         price_cents = candidate.get("price_cents", 0)
         return f"{ticker}:{side}:{price_cents}"
     
+    def _get_asset_window_key(self, candidate: Dict) -> str:
+        # Generate a key for asset + 15-minute window to enforce one-contract-per-asset rule.
+        # Args:
+        #     candidate: Candidate dict from agent grid
+        # Returns:
+        #     Unique key string (asset + 15-minute window ID)
+        # CRITICAL FIX (2026-07-21): This enforces one-contract-per-asset-per-15-minute rule
+        # at execution time, not just signal time. The key is tied to the specific 15-minute
+        # contract (window), not just the asset, to prevent duplicate orders across windows.
+        # CRITICAL FIX (2026-07-21): Use canonical identity helper for consistency across stack
+        from merid.utils.kalshi_identity import extract_asset_window_key
+        ticker = candidate.get("ticker", "")
+        return extract_asset_window_key(ticker)
+    
     def _validate_candidate_edge(self, candidate: Dict) -> bool:
         # Re-validate candidate edge before execution to prevent bad trades.
         # This checks if the edge has shifted to unprofitable since the candidate
@@ -4979,6 +5064,7 @@ class Kalshi15mLoop:
             # CRITICAL INVARIANT CHECK: Position-delta invariant for entry/exit direction
             # ENTRY: applying fill must strictly increase position magnitude (0 to >0)
             # EXIT: applying fill must strictly decrease position magnitude (|pos_after| < |pos_before|)
+            entry_or_exit = None  # Initialize to prevent UnboundLocalError
             if "entry_or_exit" in candidate and "pre_position_size" in candidate and "expected_post_position_size" in candidate:
                 entry_or_exit = candidate["entry_or_exit"]
                 pre_position_size = candidate["pre_position_size"]
