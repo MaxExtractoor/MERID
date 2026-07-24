@@ -366,6 +366,21 @@ def map_intent_to_exposure(
         direction = "decrease"
         target_leg = current_position  # We're reducing the leg we hold
     
+    # SIDE-PRESERVATION-CHECK: Log intent → exposure mapping
+    logger.info(
+        "[SIDE-PRESERVATION-CHECK] "
+        "intent=%s "
+        "target_leg=%s "
+        "direction=%s "
+        "current_position=%s "
+        "magnitude=%d",
+        intent.value,
+        target_leg.value,
+        direction,
+        current_position.value if current_position else "None",
+        magnitude
+    )
+    
     return ExposureChange(leg=target_leg, direction=direction, magnitude=magnitude)
 
 
@@ -399,27 +414,46 @@ def map_exposure_to_kalshi_side(
     if exposure.leg == ExposureLeg.YES:
         if exposure.direction == "increase":
             # Increase YES: BUY YES
-            return KalshiSidePayload(side="yes", action="buy", price_cents=price_cents)
+            payload = KalshiSidePayload(side="yes", action="buy", price_cents=price_cents)
         else:
             # Decrease YES: SELL YES (direct) or BUY NO (equivalent)
             if prefer_liquidity_side == "no":
                 # Buy NO at complementary price
-                return KalshiSidePayload(side="no", action="buy", price_cents=100 - price_cents)
+                payload = KalshiSidePayload(side="no", action="buy", price_cents=100 - price_cents)
             else:
                 # Default: SELL YES
-                return KalshiSidePayload(side="yes", action="sell", price_cents=price_cents)
+                payload = KalshiSidePayload(side="yes", action="sell", price_cents=price_cents)
     else:  # ExposureLeg.NO
         if exposure.direction == "increase":
             # Increase NO: BUY NO
-            return KalshiSidePayload(side="no", action="buy", price_cents=price_cents)
+            payload = KalshiSidePayload(side="no", action="buy", price_cents=price_cents)
         else:
             # Decrease NO: SELL NO (direct) or BUY YES (equivalent)
             if prefer_liquidity_side == "yes":
                 # Buy YES at complementary price
-                return KalshiSidePayload(side="yes", action="buy", price_cents=100 - price_cents)
+                payload = KalshiSidePayload(side="yes", action="buy", price_cents=100 - price_cents)
             else:
                 # Default: SELL NO
-                return KalshiSidePayload(side="no", action="sell", price_cents=price_cents)
+                payload = KalshiSidePayload(side="no", action="sell", price_cents=price_cents)
+    
+    # SIDE-PRESERVATION-CHECK: Log exposure → Kalshi side mapping
+    logger.info(
+        "[SIDE-PRESERVATION-CHECK] "
+        "exposure_leg=%s "
+        "exposure_direction=%s "
+        "kalshi_side=%s "
+        "kalshi_action=%s "
+        "price_cents=%d "
+        "prefer_liquidity_side=%s",
+        exposure.leg.value,
+        exposure.direction,
+        payload.side,
+        payload.action,
+        payload.price_cents,
+        prefer_liquidity_side or "None"
+    )
+    
+    return payload
 
 
 def build_entry_order(

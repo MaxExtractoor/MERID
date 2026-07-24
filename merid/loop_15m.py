@@ -33,6 +33,126 @@ from __future__ import annotations
 # Set to True to use legacy side derivation (backward compatibility only)
 USE_LEGACY_DIRECTION_MAPPING = False
 
+
+def assert_exit_delta(pre_position_size: int, count: int, market_id: str, position_id: str) -> int:
+    """
+    Validate exit order position-delta invariants and return post_size.
+    
+    This helper function enforces the close-only invariant for exit orders:
+    Exit orders can only reduce or close existing positions, never create exposure.
+    
+    Args:
+        pre_position_size: Current position size before exit
+        count: Number of contracts to close
+        market_id: Market identifier for logging
+        position_id: Position identifier for logging
+        
+    Returns:
+        expected_post_position_size: Expected position size after exit
+        
+    Raises:
+        RuntimeError: If any invariant is violated
+        
+    Invariants checked:
+    1. Position must have positive size (cannot exit from zero)
+    2. Exit count must be positive
+    3. Exit count cannot exceed position size (cannot over-close)
+    4. Expected post-size must be non-negative (cannot flip to negative)
+    5. Expected post-size must be strictly less than pre-size (must decrease)
+    """
+    # INVARIANT-1: Position must have positive size (cannot exit from zero)
+    if pre_position_size <= 0:
+        logger.critical(
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_position_size=%d - "
+            "EXIT orders require pre_position_size>0 (existing position). "
+            "This exit order has no position to close. Rejecting as critical bug.",
+            market_id,
+            position_id[:8] if position_id else "unknown",
+            pre_position_size
+        )
+        raise RuntimeError(
+            f"EXIT-INVARIANT-VIOLATION: Cannot exit position with size={pre_position_size} for {market_id}. "
+            f"Exit orders can only close existing positions with positive size."
+        )
+    
+    # INVARIANT-2: Exit count must be positive
+    if count <= 0:
+        logger.critical(
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s count=%d - "
+            "EXIT orders require count>0. Zero or negative count is invalid. Rejecting as critical bug.",
+            market_id,
+            position_id[:8] if position_id else "unknown",
+            count
+        )
+        raise RuntimeError(
+            f"EXIT-INVARIANT-VIOLATION: Invalid exit count={count} for {market_id}. "
+            f"Exit orders must close positive number of contracts."
+        )
+    
+    # INVARIANT-3: Exit count cannot exceed position size (cannot over-close)
+    if count > pre_position_size:
+        logger.critical(
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size=%d count=%d - "
+            "EXIT orders cannot close more contracts than exist in position. "
+            "This would over-close the position. Rejecting as critical bug.",
+            market_id,
+            position_id[:8] if position_id else "unknown",
+            pre_position_size,
+            count
+        )
+        raise RuntimeError(
+            f"EXIT-INVARIANT-VIOLATION: Exit count={count} exceeds position size={pre_position_size} for {market_id}. "
+            f"Exit orders cannot close more than the current position size."
+        )
+    
+    # Calculate expected post-size
+    expected_post_position_size = pre_position_size - count
+    
+    # INVARIANT-4: Expected post-size must be non-negative (cannot flip to negative)
+    if expected_post_position_size < 0:
+        logger.critical(
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size=%d count=%d post_size=%d - "
+            "EXIT orders cannot result in negative position size. "
+            "This would flip position sign and create exposure on opposite leg. Rejecting as critical bug.",
+            market_id,
+            position_id[:8] if position_id else "unknown",
+            pre_position_size,
+            count,
+            expected_post_position_size
+        )
+        raise RuntimeError(
+            f"EXIT-INVARIANT-VIOLATION: Exit would result in negative size={expected_post_position_size} for {market_id}. "
+            f"Exit orders cannot flip position sign."
+        )
+    
+    # INVARIANT-5: Expected post-size must be strictly less than pre-size (must decrease)
+    if expected_post_position_size >= pre_position_size:
+        logger.critical(
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size=%d post_size=%d - "
+            "EXIT orders must strictly decrease position size. "
+            "This order would not decrease or would increase position. Rejecting as critical bug.",
+            market_id,
+            position_id[:8] if position_id else "unknown",
+            pre_position_size,
+            expected_post_position_size
+        )
+        raise RuntimeError(
+            f"EXIT-INVARIANT-VIOLATION: Exit would not decrease position (pre={pre_position_size}, post={expected_post_position_size}) for {market_id}. "
+            f"Exit orders must strictly reduce position size."
+        )
+    
+    logger.info(
+        "[EXIT-INVARIANT-PASS] ticker=%s position_id=%s pre_size=%d count=%d post_size=%d - "
+        "Exit order passes all position-delta invariants (close-only validation)",
+        market_id,
+        position_id[:8] if position_id else "unknown",
+        pre_position_size,
+        count,
+        expected_post_position_size
+    )
+    
+    return expected_post_position_size
+
 # Forbidden imports:
 # - PM runtime controllers
 # - Paper trading engine
@@ -1488,6 +1608,19 @@ class Kalshi15mLoop:
         finally:
             position_lock.release()
         
+        # CRITICAL INVARIANT: Exit orders can only reduce or close existing positions
+        # Exit orders must never create exposure or increase position size
+        # Use assert_exit_delta helper for reusable invariant validation
+        pre_position_size = position.size
+        count = contracts_to_close if contracts_to_close is not None else pre_position_size
+        
+        expected_post_position_size = assert_exit_delta(
+            pre_position_size=pre_position_size,
+            count=count,
+            market_id=position.market_id,
+            position_id=position.position_id
+        )
+        
         # Derive side_str from position for logging (use thesis_side if available, else position.side)
         if hasattr(position, 'thesis_side') and position.thesis_side:
             side_str = position.thesis_side
@@ -1591,9 +1724,6 @@ class Kalshi15mLoop:
                 logger.warning(
                     "[EXIT-ORDER-LEGACY] Position missing thesis_side, using mutable position.side - may be subject to side inversion"
                 )
-            
-            # Determine count (partial or full exit)
-            count = contracts_to_close if contracts_to_close is not None else position.size
             
             # Initialize action variable to prevent UnboundLocalError
             action = "SELL"
@@ -1701,9 +1831,8 @@ class Kalshi15mLoop:
             exit_reason_str = exit_reason.value if hasattr(exit_reason, 'value') else str(exit_reason)
             intent_exit_reason = _map_exit_reason_to_intent_contract(exit_reason_str)
             
-            # Calculate position sizes for validation
-            pre_position_size = position.size
-            expected_post_position_size = position.size - count if contracts_to_close is not None else 0
+            # Position sizes already calculated and validated in invariant checks above
+            # pre_position_size and expected_post_position_size are available from invariant section
             
             # TRADE-TRACE LOG: Exit decision to IntentContract conversion
             # Logs direction, pre_size, post_size, and exit_reason on a single line
