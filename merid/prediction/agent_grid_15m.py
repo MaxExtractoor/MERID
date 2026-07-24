@@ -4651,9 +4651,11 @@ class LeanAgent15m:
 
         no_price_cents = 0
 
-        try:
+        # Extract market_id for logging (must be outside try block for scope)
+        ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+        market_id = ticker  # Alias for consistency with log schema
 
-            ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+        try:
 
             market_state = self.market_state_store.get(ticker) if self.market_state_store else None
 
