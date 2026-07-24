@@ -2602,15 +2602,18 @@ class Kalshi15mLoop:
                                 logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
                                 candidate["count"] = 1
                             
-                            await self._execute_candidate(candidate, tick_id)
+                            # Execute candidate and check if order was actually submitted
+                            order_submitted = await self._execute_candidate(candidate, tick_id)
                             
-                            # Track executed candidate to prevent duplicates
-                            candidate_key = self._get_candidate_key(candidate)
-                            self._executed_candidates_this_window.add(candidate_key)
-                            
-                            # CRITICAL FIX (2026-07-21): Track asset-window key to enforce one-contract-per-asset rule
-                            asset_window_key = self._get_asset_window_key(candidate)
-                            self._executed_candidates_this_window.add(asset_window_key)
+                            # Only track as executed if order was actually submitted
+                            if order_submitted:
+                                # Track executed candidate to prevent duplicates
+                                candidate_key = self._get_candidate_key(candidate)
+                                self._executed_candidates_this_window.add(candidate_key)
+                                
+                                # CRITICAL FIX (2026-07-21): Track asset-window key to enforce one-contract-per-asset rule
+                                asset_window_key = self._get_asset_window_key(candidate)
+                                self._executed_candidates_this_window.add(asset_window_key)
                             
                             # FIX: Do NOT reset cycle guards after each execution
                             # The global_slot_allocator should track total exposure across all positions
@@ -4749,15 +4752,16 @@ class Kalshi15mLoop:
         
         return True
     
-    async def _execute_candidate(self, candidate: Dict, tick: int) -> None:
+    async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # Convert candidate dict to OrderIntent and route to order router.
+        # Returns True if order was submitted, False if order was rejected/skipped.
         try:
             from merid.event_venues.kalshi.order_router import OrderIntent, resolve_window_policy, resolve_exit_policy, route_order_async
             
             ticker = candidate.get("ticker")
             if not ticker:
                 logger.warning("[15M-LOOP] Candidate missing ticker, skipping")
-                return
+                return False
             
             # Resolve policies
             try:
@@ -4779,7 +4783,7 @@ class Kalshi15mLoop:
                 
                 if asset is None:
                     logger.warning("[15M-LOOP] Could not determine asset from ticker %s", ticker)
-                    return
+                    return False
 
                 # CRITICAL FIX: Use HMM regime for exit policy (industry best practice)
                 # HMM regime (bull/choppy/bear) is more meaningful for exit decisions than liquidity regime
@@ -4857,7 +4861,7 @@ class Kalshi15mLoop:
                 else:
                     logger.error("[15M-LOOP] exit_policy is None after resolution! asset=%s regime=%s", asset, regime)
                     # CRITICAL FIX: Reject order when exit policy is None
-                    return
+                    return False
             except Exception as e:
                 logger.error(
                     "[15M-LOOP] Failed to resolve exit policy for %s: %s - REJECTING ORDER for safety",
@@ -4865,7 +4869,7 @@ class Kalshi15mLoop:
                 )
                 # CRITICAL FIX: Reject order when exit policy resolution fails
                 # Fallback policies risk entering trades without effective exits
-                return  # Do not proceed with order submission
+                return False  # Do not proceed with order submission
             
             # CRITICAL FIX: Respect signal's price_cents unless invalid
             # Signal generation now sets correct price based on side (YES uses YES price, NO uses NO price)
@@ -4894,7 +4898,7 @@ class Kalshi15mLoop:
                         # CRITICAL FIX: If side is missing, log error and skip
                         if not candidate_side:
                             logger.error("[15M-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT DETERMINE PRICE - SKIPPING", ticker)
-                            return
+                            return False
                         if candidate_side == "no" or candidate_side == "buy_no":
                             # NO order: calculate NO mid-price
                             if market_state.best_bid_cents and market_state.best_ask_cents:
@@ -5017,7 +5021,7 @@ class Kalshi15mLoop:
                     "preventing systematic YES bias by rejecting incomplete data",
                     side_raw, action_raw, ticker
                 )
-                return
+                return False
             
             side_raw = side_raw.upper()
             action_raw = action_raw.upper()
@@ -5059,7 +5063,7 @@ class Kalshi15mLoop:
                         "Rejecting this entry order to prevent SELL YES/SELL_NO on entry.",
                         ticker, side_raw, action_raw, kalshi_side
                     )
-                    return
+                    return False
             
             # CRITICAL INVARIANT CHECK: Position-delta invariant for entry/exit direction
             # ENTRY: applying fill must strictly increase position magnitude (0 to >0)
@@ -5079,14 +5083,14 @@ class Kalshi15mLoop:
                             "which violates the entry/exit direction invariant. Rejecting.",
                             ticker, entry_or_exit, pre_position_size
                         )
-                        return
+                        return False
                     if expected_post_position_size <= 0:
                         logger.error(
                             "[ENTRY-POSITION-DELTA-VIOLATION] ticker=%s entry_or_exit=%s expected_post_position_size=%d - "
                             "ENTRY orders must result in positive position. This violates the entry/exit direction invariant. Rejecting.",
                             ticker, entry_or_exit, expected_post_position_size
                         )
-                        return
+                        return False
                 elif entry_or_exit == "exit":
                     # Exit: must decrease position magnitude, never go from 0 to nonzero
                     if pre_position_size <= 0:
@@ -5096,7 +5100,7 @@ class Kalshi15mLoop:
                             "This violates the entry/exit direction invariant. Rejecting.",
                             ticker, entry_or_exit, pre_position_size
                         )
-                        return
+                        return False
                     if expected_post_position_size >= pre_position_size:
                         logger.error(
                             "[EXIT-POSITION-DELTA-VIOLATION] ticker=%s entry_or_exit=%s pre=%d post=%d - "
@@ -5104,7 +5108,7 @@ class Kalshi15mLoop:
                             "This violates the entry/exit direction invariant. Rejecting.",
                             ticker, entry_or_exit, pre_position_size, expected_post_position_size
                         )
-                        return
+                        return False
                     # Check for position flip (e.g., +5 -> -1) - exit trying to open opposite leg
                     if expected_post_position_size < 0:
                         logger.error(
@@ -5113,7 +5117,7 @@ class Kalshi15mLoop:
                             "instead of closing the current position. This violates the entry/exit direction invariant. Rejecting.",
                             ticker, entry_or_exit, pre_position_size, expected_post_position_size
                         )
-                        return
+                        return False
             
             # CRITICAL FIX (2026-07-19): Validate strategy intent vs net exposure
             # This prevents side/price mapping bugs where intent doesn't match exposure
@@ -5135,7 +5139,7 @@ class Kalshi15mLoop:
                         ticker, candidate_side, side_raw
                     )
                     # Block the trade - this is a critical bug
-                    return
+                    return False
 
             if strategy_intent:
                 # Calculate net exposure from side+action
@@ -5557,16 +5561,18 @@ class Kalshi15mLoop:
             if parity_blocked:
                 logger.warning("[15M-LOOP] Order skipped due to parity block: ticker=%s", ticker)
                 # Skip routing this order - return to skip this candidate
-                return
+                return False
             
             # Route order
             result = await route_order_async(intent)
             if result and result.status == "rejected":
                 logger.warning("[15M-LOOP] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s latency_ms=%s",
                                ticker, kalshi_side, count, result.reason, result.latency_ms)
+                return False  # Order rejected - do not track as executed
             else:
                 logger.info("[15M-LOOP] Order routed successfully: ticker=%s side=%s count=%d result=%s",
                             ticker, kalshi_side, count, result)
+                return True  # Order submitted successfully - track as executed
             
             # CRITICAL FIX: Record order in KalshiRiskManager for asset_notional tracking
             # This ensures per-asset notional exposure is tracked correctly for risk limits
@@ -5663,6 +5669,7 @@ class Kalshi15mLoop:
             
         except Exception as e:
             logger.error("[15M-LOOP] Failed to execute candidate: %s", e, exc_info=True)
+            return False  # Execution failed - do not track as executed
 
     async def _run_agents_directly(self, tick: int) -> None:
         # Fallback: run agents directly if run_cycle not implemented.

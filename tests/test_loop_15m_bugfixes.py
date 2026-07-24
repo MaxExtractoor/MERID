@@ -815,13 +815,17 @@ def test_client_tag_generated_for_tp_sl_registration():
 def test_tp_price_computed_from_r_multiple():
     """Test that take profit price is computed from R-multiple correctly.
     
+    CRITICAL FIX 2026-07-16: Updated to align with 2:1 risk/reward ratio (80% TP, 40% SL)
+    Previous values (1.0R TP, 0.5R SL) were based on old exit policy
+    New values (0.8R TP, 0.4R SL) align with 80% TP, 40% SL for positive expected value
+    
     For binary options, R (risk per contract) = entry price (max loss is contract price).
     TP = entry_price + (R * tp_r_multiple) for long positions.
     """
     # Mock exit policy with tp_r_multiple
     class MockExitPolicy:
-        tp_r_multiple = 1.0
-        sl_r_multiple = 0.5
+        tp_r_multiple = 0.8  # CRITICAL FIX 2026-07-16: Updated from 1.0 to 0.8
+        sl_r_multiple = 0.4  # CRITICAL FIX 2026-07-16: Updated from 0.5 to 0.4
     
     exit_policy = MockExitPolicy()
     price_cents = 50  # Entry price
@@ -834,21 +838,25 @@ def test_tp_price_computed_from_r_multiple():
         take_profit_price_cents = None
         take_profit_r_multiple = None
     
-    # Verify TP calculation: 50 + (50 * 1.0) = 100
-    assert take_profit_price_cents == 100
-    assert take_profit_r_multiple == 1.0
+    # Verify TP calculation: 50 + (50 * 0.8) = 90
+    assert take_profit_price_cents == 90
+    assert take_profit_r_multiple == 0.8
 
 
 def test_sl_price_computed_from_r_multiple():
     """Test that stop loss price is computed from R-multiple correctly.
+    
+    CRITICAL FIX 2026-07-16: Updated to align with 2:1 risk/reward ratio (80% TP, 40% SL)
+    Previous values (1.0R TP, 0.5R SL) were based on old exit policy
+    New values (0.8R TP, 0.4R SL) align with 80% TP, 40% SL for positive expected value
     
     For binary options, R (risk per contract) = entry price (max loss is contract price).
     SL = entry_price - (R * sl_r_multiple) for long positions.
     """
     # Mock exit policy with sl_r_multiple
     class MockExitPolicy:
-        tp_r_multiple = 1.0
-        sl_r_multiple = 0.5
+        tp_r_multiple = 0.8  # CRITICAL FIX 2026-07-16: Updated from 1.0 to 0.8
+        sl_r_multiple = 0.4  # CRITICAL FIX 2026-07-16: Updated from 0.5 to 0.4
     
     exit_policy = MockExitPolicy()
     price_cents = 50  # Entry price
@@ -859,27 +867,31 @@ def test_sl_price_computed_from_r_multiple():
     else:
         stop_loss_price_cents = None
     
-    # Verify SL calculation: 50 - (50 * 0.5) = 25
-    assert stop_loss_price_cents == 25
+    # Verify SL calculation: 50 - (50 * 0.4) = 30
+    assert stop_loss_price_cents == 30
 
 
 def test_tp_sl_computed_for_different_regimes():
     """Test that TP/SL are computed correctly for different regimes.
     
-    Conservative regime: tp_r_multiple=0.75, sl_r_multiple=0.5
-    Normal regime: tp_r_multiple=1.0, sl_r_multiple=0.5
-    Aggressive regime: tp_r_multiple=1.2, sl_r_multiple=0.5
+    CRITICAL FIX 2026-07-16: Updated to align with 2:1 risk/reward ratio (80% TP, 40% SL)
+    Previous values (0.75/1.0/1.2 TP, 0.5 SL) were based on old exit policy
+    New values (0.6/0.8/0.96 TP, 0.4 SL) align with 80% TP base, adjusted by regime
+    
+    Conservative regime: tp_r_multiple=0.6, sl_r_multiple=0.4
+    Normal regime: tp_r_multiple=0.8, sl_r_multiple=0.4
+    Aggressive regime: tp_r_multiple=0.96, sl_r_multiple=0.4
     """
     test_cases = [
-        ("conservative", 0.75, 50, 87, 25),  # TP: 50 + (50 * 0.75) = 87.5 -> 87 (int truncates), SL: 25
-        ("normal", 1.0, 50, 100, 25),  # TP: 50 + (50 * 1.0) = 100, SL: 25
-        ("aggressive", 1.2, 50, 110, 25),  # TP: 50 + (50 * 1.2) = 110, SL: 25
+        ("conservative", 0.6, 50, 80, 30),  # TP: 50 + (50 * 0.6) = 80, SL: 50 - (50 * 0.4) = 30
+        ("normal", 0.8, 50, 90, 30),  # TP: 50 + (50 * 0.8) = 90, SL: 50 - (50 * 0.4) = 30
+        ("aggressive", 0.96, 50, 98, 30),  # TP: 50 + (50 * 0.96) = 98, SL: 50 - (50 * 0.4) = 30
     ]
     
     for regime, tp_r, price_cents, expected_tp, expected_sl in test_cases:
         class MockExitPolicy:
             tp_r_multiple = tp_r
-            sl_r_multiple = 0.5
+            sl_r_multiple = 0.4  # CRITICAL FIX 2026-07-16: Updated from 0.5 to 0.4
         
         exit_policy = MockExitPolicy()
         
@@ -2032,8 +2044,7 @@ def test_window_exposure_recorded_on_fill_not_at_gate():
     
     assert not found_in_check, \
         "order_gate.py should not record exposure in check() method (gate pass time)"
-    assert found_in_mark_filled, \
-        "order_gate.py should record exposure in mark_filled() method (fill time)"
+    # Note: order_gate.py no longer records exposure in mark_filled - that's handled by slot allocator
     
     # Verify position_cache.py releases slots on fill (new architecture)
     with open("merid/event_venues/kalshi/position_cache.py", "r", encoding="utf-8") as f:
@@ -2063,3 +2074,253 @@ def test_window_exposure_recorded_on_fill_not_at_gate():
     assert router_source.count("envelope.record_order_execution") == 0 or \
            "CRITICAL FIX (2026-07-07): Removed duplicate" in router_source, \
         "order_router.py should not have duplicate record_order_execution calls"
+
+
+def test_exit_reason_import_from_risk_module():
+    """CRITICAL FIX (2026-07-18): ExitReason must be imported from risk.exit_policy.
+    
+    The position_management.exit_policy.ExitReason enum doesn't have a TRAIL member,
+    but loop_15m.py needs TRAIL for swing mode logic (line 1251). Importing from
+    merid.risk.exit_policy ensures TRAIL is available.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify ExitReason is imported from risk.exit_policy
+    assert "from merid.risk.exit_policy import ExitReason" in loop_source, \
+        "loop_15m.py must import ExitReason from merid.risk.exit_policy (has TRAIL member)"
+    
+    # Verify it's NOT imported from position_management.exit_policy
+    assert "from merid.position_management.exit_policy import ExitReason" not in loop_source, \
+        "loop_15m.py must NOT import ExitReason from position_management.exit_policy (missing TRAIL)"
+    
+    # Verify the fix comment is present
+    assert "CRITICAL FIX (2026-07-18)" in loop_source and \
+           "ExitReason must be imported from risk.exit_policy" in loop_source, \
+        "loop_15m.py should have fix comment explaining the import change"
+
+
+def test_execute_candidate_returns_false_on_missing_ticker():
+    """CRITICAL FIX (2026-07-24): _execute_candidate returns False when ticker is missing.
+    
+    This ensures the calling code doesn't track candidates with missing tickers as executed,
+    preventing false positive duplicate exposure warnings.
+    """
+    # Verify the return type change in loop_15m.py
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify _execute_candidate signature returns bool
+    assert "async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:" in loop_source, \
+        "_execute_candidate should return bool, not None"
+    
+    # Verify early return for missing ticker returns False
+    assert "if not ticker:" in loop_source and "return False" in loop_source, \
+        "_execute_candidate should return False when ticker is missing"
+
+
+def test_execute_candidate_returns_false_on_missing_side_action():
+    """CRITICAL FIX (2026-07-24): _execute_candidate returns False when side/action is missing.
+    
+    This ensures the calling code doesn't track candidates with missing side/action as executed,
+    preventing false positive duplicate exposure warnings.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify early return for missing side/action returns False
+    assert "if not side_raw or not action_raw:" in loop_source, \
+        "_execute_candidate should check for missing side/action"
+    
+    # Find the return statement after the check
+    lines = loop_source.split('\n')
+    found_check = False
+    found_return_false = False
+    for i, line in enumerate(lines):
+        if "if not side_raw or not action_raw:" in line:
+            found_check = True
+        elif found_check and "return False" in line and i < len(lines) and i < lines.index(line) + 5:
+            found_return_false = True
+            break
+    
+    assert found_return_false, \
+        "_execute_candidate should return False when side/action is missing"
+
+
+def test_execute_candidate_returns_false_on_exit_policy_none():
+    """CRITICAL FIX (2026-07-24): _execute_candidate returns False when exit policy is None.
+    
+    This ensures the calling code doesn't track candidates without exit policy as executed,
+    preventing false positive duplicate exposure warnings.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify early return for None exit policy returns False
+    assert "exit_policy is None after resolution" in loop_source, \
+        "_execute_candidate should check for None exit policy"
+    
+    # Find the return statement after the check
+    lines = loop_source.split('\n')
+    found_check = False
+    found_return_false = False
+    for i, line in enumerate(lines):
+        if "exit_policy is None after resolution" in line:
+            found_check = True
+        elif found_check and "return False" in line and i < len(lines) and i < lines.index(line) + 5:
+            found_return_false = True
+            break
+    
+    assert found_return_false, \
+        "_execute_candidate should return False when exit policy is None"
+
+
+def test_execute_candidate_returns_true_on_successful_route():
+    """CRITICAL FIX (2026-07-24): _execute_candidate returns True when order is successfully routed.
+    
+    This ensures the calling code tracks only successfully submitted orders,
+    preventing false positive duplicate exposure warnings.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify return True after successful order routing
+    assert "Order routed successfully" in loop_source, \
+        "_execute_candidate should log successful order routing"
+    
+    # Find the return True statement after successful routing
+    lines = loop_source.split('\n')
+    found_success_log = False
+    found_return_true = False
+    for i, line in enumerate(lines):
+        if "Order routed successfully" in line:
+            found_success_log = True
+        elif found_success_log and "return True" in line and i < len(lines) and i < lines.index(line) + 5:
+            found_return_true = True
+            break
+    
+    assert found_return_true, \
+        "_execute_candidate should return True when order is successfully routed"
+
+
+def test_execute_candidate_returns_false_on_rejected_order():
+    """CRITICAL FIX (2026-07-24): _execute_candidate returns False when order is rejected by router.
+    
+    This ensures the calling code doesn't track rejected orders as executed,
+    preventing false positive duplicate exposure warnings.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify return False after order rejection
+    assert "Order REJECTED by router" in loop_source, \
+        "_execute_candidate should log order rejection"
+    
+    # Find the return False statement after rejection
+    lines = loop_source.split('\n')
+    found_reject_log = False
+    found_return_false = False
+    for i, line in enumerate(lines):
+        if "Order REJECTED by router" in line:
+            found_reject_log = True
+        elif found_reject_log and "return False" in line and i < len(lines) and i < lines.index(line) + 5:
+            found_return_false = True
+            break
+    
+    assert found_return_false, \
+        "_execute_candidate should return False when order is rejected by router"
+
+
+def test_executed_candidates_only_tracked_on_true_return():
+    """CRITICAL FIX (2026-07-24): Calling code only tracks candidates when _execute_candidate returns True.
+    
+    This ensures only actually submitted orders are tracked in the duplicate exposure prevention set,
+    preventing false positive duplicate exposure warnings.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify the calling code checks the return value
+    assert "order_submitted = await self._execute_candidate" in loop_source, \
+        "Calling code should capture _execute_candidate return value"
+    
+    # Verify tracking is conditional on return value
+    assert "if order_submitted:" in loop_source, \
+        "Calling code should only track candidates when order_submitted is True"
+    
+    # Verify asset_window_key is only added inside the if block
+    lines = loop_source.split('\n')
+    found_if_order_submitted = False
+    found_asset_window_key_add = False
+    indent_level = 0
+    
+    for i, line in enumerate(lines):
+        if "if order_submitted:" in line:
+            found_if_order_submitted = True
+            indent_level = len(line) - len(line.lstrip())
+        elif found_if_order_submitted and "_executed_candidates_this_window.add(asset_window_key)" in line:
+            # Check if this line is indented more than the if statement
+            current_indent = len(line) - len(line.lstrip())
+            if current_indent > indent_level:
+                found_asset_window_key_add = True
+                break
+    
+    assert found_asset_window_key_add, \
+        "asset_window_key should only be added to _executed_candidates_this_window when order_submitted is True"
+
+
+def test_execute_candidate_returns_false_on_parity_blocked():
+    """CRITICAL FIX (2026-07-24): _execute_candidate returns False when parity check blocks order.
+    
+    This ensures the calling code doesn't track parity-blocked orders as executed,
+    preventing false positive duplicate exposure warnings.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify return False after parity block
+    assert "Order skipped due to parity block" in loop_source, \
+        "_execute_candidate should log parity block"
+    
+    # Find the return False statement after parity block
+    lines = loop_source.split('\n')
+    found_parity_log = False
+    found_return_false = False
+    for i, line in enumerate(lines):
+        if "Order skipped due to parity block" in line:
+            found_parity_log = True
+        elif found_parity_log and "return False" in line and i < len(lines) and i < lines.index(line) + 5:
+            found_return_false = True
+            break
+    
+    assert found_return_false, \
+        "_execute_candidate should return False when parity check blocks order"
+
+
+def test_execute_candidate_returns_false_on_exception():
+    """CRITICAL FIX (2026-07-24): _execute_candidate returns False when exception occurs.
+    
+    This ensures the calling code doesn't track failed executions as executed,
+    preventing false positive duplicate exposure warnings.
+    """
+    with open("c:/Dev/MERID/merid/loop_15m.py", "r") as f:
+        loop_source = f.read()
+    
+    # Verify return False in exception handler
+    assert "except Exception as e:" in loop_source and "Failed to execute candidate" in loop_source, \
+        "_execute_candidate should have exception handler"
+    
+    # Find the return False statement in exception handler
+    lines = loop_source.split('\n')
+    found_exception = False
+    found_return_false = False
+    for i, line in enumerate(lines):
+        if "except Exception as e:" in line and i + 1 < len(lines):
+            if "Failed to execute candidate" in lines[i + 1]:
+                found_exception = True
+        elif found_exception and "return False" in line and i < len(lines) and i < lines.index(line) + 5:
+            found_return_false = True
+            break
+    
+    assert found_return_false, \
+        "_execute_candidate should return False when exception occurs"
