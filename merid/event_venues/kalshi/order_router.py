@@ -279,6 +279,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
+    order_side: str,  # CRITICAL FIX (2026-07-24): Side-aware validation - only check spread for order's side
     max_spread_cents: float = 20.0,  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
@@ -290,6 +291,10 @@ def check_market_microstructure(
     
     Filters based on research: avoid wide spreads and thin books.
     
+    CRITICAL FIX (2026-07-24): Side-aware validation - only checks spread for the order's side.
+    Previously checked both YES and NO spreads sequentially, causing NO-side orders to be
+    rejected when YES spread was too wide (even if NO spread was acceptable).
+    
     Args:
         yes_bid_cents: YES bid price in cents
         yes_ask_cents: YES ask price in cents
@@ -297,6 +302,7 @@ def check_market_microstructure(
         no_ask_cents: NO ask price in cents
         yes_depth: YES depth (number of contracts)
         no_depth: NO depth (number of contracts)
+        order_side: The side of the order being validated ("yes" or "no")
         max_spread_cents: Maximum allowed spread in cents (default 75c, uses dynamic threshold manager)
         min_depth_usd: Minimum depth in USD within 3 cents of mid (default $10)
         min_yes_depth: Minimum YES depth threshold (default 1)
@@ -305,21 +311,40 @@ def check_market_microstructure(
     Returns:
         (passes_gate, reason)
     """
-    # Check YES spread
-    yes_spread_cents = yes_ask_cents - yes_bid_cents
-    if yes_spread_cents > max_spread_cents:
-        return (
-            False,
-            f"yes_spread_too_wide: {yes_spread_cents}c > {max_spread_cents}c"
+    # CRITICAL FIX (2026-07-24): Side-aware spread validation
+    # Only check spread for the order's side, not both sides
+    if order_side == "yes":
+        yes_spread_cents = yes_ask_cents - yes_bid_cents
+        if yes_spread_cents > max_spread_cents:
+            return (
+                False,
+                f"yes_spread_too_wide: {yes_spread_cents}c > {max_spread_cents}c"
+            )
+    elif order_side == "no":
+        no_spread_cents = no_ask_cents - no_bid_cents
+        if no_spread_cents > max_spread_cents:
+            return (
+                False,
+                f"no_spread_too_wide: {no_spread_cents}c > {max_spread_cents}c"
+            )
+    else:
+        # Fallback: check both sides if order_side is invalid (should not happen)
+        logger.warning(
+            "[MICROSTRUCTURE-GATE] Invalid order_side=%s, checking both spreads as fallback",
+            order_side
         )
-    
-    # Check NO spread
-    no_spread_cents = no_ask_cents - no_bid_cents
-    if no_spread_cents > max_spread_cents:
-        return (
-            False,
-            f"no_spread_too_wide: {no_spread_cents}c > {max_spread_cents}c"
-        )
+        yes_spread_cents = yes_ask_cents - yes_bid_cents
+        if yes_spread_cents > max_spread_cents:
+            return (
+                False,
+                f"yes_spread_too_wide: {yes_spread_cents}c > {max_spread_cents}c"
+            )
+        no_spread_cents = no_ask_cents - no_bid_cents
+        if no_spread_cents > max_spread_cents:
+            return (
+                False,
+                f"no_spread_too_wide: {no_spread_cents}c > {max_spread_cents}c"
+            )
     
     # Check minimum depth thresholds
     if yes_depth < min_yes_depth:
@@ -364,6 +389,109 @@ def check_market_microstructure(
                 False,
                 f"no_depth_usd_too_low: ${no_depth_usd:.0f} < ${min_depth_usd:.0f}"
             )
+    
+    return True, "ok"
+
+
+def check_market_microstructure_edge_aware(
+    yes_bid_cents: int,
+    no_bid_cents: int,
+    p_hat_yes_cents: float,
+    order_side: str,
+    yes_depth: int,
+    no_depth: int,
+    min_executable_edge_cents: float = 3.0,
+    max_spread_to_edge_ratio: float = 0.4,
+    max_spread_cents: Optional[int] = None,
+    min_yes_depth: int = 1,
+    min_no_depth: int = 1,
+    min_total_depth: int = 25
+) -> tuple[bool, str]:
+    """
+    Edge-aware microstructure gate using spread/edge ratio instead of fixed spread threshold.
+    
+    This is the NEW gate (2026-07-24) that replaces the fixed 20c spread threshold with
+    edge-aware logic based on prediction market microstructure research.
+    
+    Key improvements over check_market_microstructure:
+    - Uses spread/edge ratio (default 40%) instead of fixed spread threshold
+    - Requires executable edge > min_executable_edge_cents (default 3c)
+    - Allows wide spreads when edge is huge, blocks when spread eats edge
+    - Canonical spread calculation using Kalshi's orderbook semantics
+    
+    Args:
+        yes_bid_cents: Best YES bid in cents (from yes_dollars)
+        no_bid_cents: Best NO bid in cents (from no_dollars)
+        p_hat_yes_cents: Probability estimate in cents (0-100) from signal
+        order_side: The side of the order being validated ("yes" or "no")
+        yes_depth: YES depth (number of contracts)
+        no_depth: NO depth (number of contracts)
+        min_executable_edge_cents: Minimum executable edge threshold (default 3c)
+        max_spread_to_edge_ratio: Max spread/edge ratio (default 0.4 = 40%)
+        max_spread_cents: Optional absolute spread cap (secondary guard)
+        min_yes_depth: Minimum YES depth threshold (default 1)
+        min_no_depth: Minimum NO depth threshold (default 1)
+        min_total_depth: Minimum total depth (yes + no) threshold (default 25)
+    
+    Returns:
+        (passes_gate, reason)
+    """
+    # Import edge analytics module
+    try:
+        from merid.event_venues.kalshi.spread_edge_analytics import (
+            compute_canonical_spreads,
+            compute_per_side_edges,
+            edge_aware_microstructure_gate
+        )
+    except ImportError:
+        logger.warning("[EDGE-AWARE-GATE] spread_edge_analytics module not available, falling back to legacy gate")
+        # Fallback to legacy gate
+        return check_market_microstructure(
+            yes_bid_cents=yes_bid_cents,
+            yes_ask_cents=int(100 - no_bid_cents),  # Canonical ask calculation
+            no_bid_cents=no_bid_cents,
+            no_ask_cents=int(100 - yes_bid_cents),  # Canonical ask calculation
+            yes_depth=yes_depth,
+            no_depth=no_depth,
+            order_side=order_side,
+            max_spread_cents=max_spread_cents or 20.0,
+            min_depth_usd=0.0,
+            min_yes_depth=min_yes_depth,
+            min_no_depth=min_no_depth,
+            min_total_depth=min_total_depth
+        )
+    
+    # Compute canonical spreads using Kalshi's orderbook semantics
+    spread_metrics = compute_canonical_spreads(yes_bid_cents, no_bid_cents)
+    
+    # Compute per-side edges
+    yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents, spread_metrics)
+    
+    # Select edge metrics for the order's side
+    edge_metrics = yes_edge if order_side == "yes" else no_edge
+    
+    # Apply edge-aware gate
+    passes, reason = edge_aware_microstructure_gate(
+        edge_metrics=edge_metrics,
+        min_executable_edge_cents=min_executable_edge_cents,
+        max_spread_to_edge_ratio=max_spread_to_edge_ratio,
+        max_spread_cents=max_spread_cents
+    )
+    
+    if not passes:
+        return False, reason
+    
+    # Check minimum depth thresholds (same as legacy gate)
+    if yes_depth < min_yes_depth:
+        return False, f"yes_depth_too_low: {yes_depth} < {min_yes_depth}"
+    
+    if no_depth < min_no_depth:
+        return False, f"no_depth_too_low: {no_depth} < {min_no_depth}"
+    
+    # Check total depth
+    total_depth = yes_depth + no_depth
+    if total_depth < min_total_depth:
+        return False, f"total_depth_too_low: {total_depth} < {min_total_depth}"
     
     return True, "ok"
 
@@ -1556,6 +1684,13 @@ class OrderIntent:
     yes_depth: Optional[int] = None
     no_depth: Optional[int] = None
     netedgecents: float = 0.0
+    # Phase 2: Edge-aware microstructure metrics (2026-07-24)
+    p_hat_yes_cents: Optional[float] = None  # Probability estimate in cents (0-100) from signal
+    yes_edge_exec_cents: Optional[float] = None  # Executable edge for YES side
+    no_edge_exec_cents: Optional[float] = None  # Executable edge for NO side
+    yes_spread_cents: Optional[int] = None  # YES spread in cents
+    no_spread_cents: Optional[int] = None  # NO spread in cents
+    spread_to_edge_ratio: Optional[float] = None  # Spread/edge ratio for selected side
     band: str = ""
     regime: str = ""
     size_contracts: int = 0
@@ -2171,19 +2306,23 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     # Handle both lowercase ("yes"/"no" + "buy"/"sell") and uppercase ("YES"/"NO" + "BUY"/"SELL")
     # Convert to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
     # CRITICAL: Validate against unified terminology if available to prevent signal inversion
-    logger.info("[CHECK-INTENT-RISK] Before conversion: side=%s action=%s", intent.side, intent.action)
+    # CRITICAL FIX (2026-07-24): Do NOT mutate intent.side - preserve original side for immutability
+    # Use local variable kalshi_side for Kalshi-formatted side instead
+    logger.info("[CHECK-INTENT-RISK-SIDE-AWARE] Before conversion: intent.side=%s action=%s", intent.side, intent.action)
     side_lower = intent.side.lower() if intent.side else ""
     action_lower = intent.action.lower() if intent.action else ""
     
+    kalshi_side = intent.side  # Default to original side if no conversion needed
+    
     if side_lower in ("yes", "no") and action_lower in ("buy", "sell"):
         if side_lower == "yes" and action_lower == "buy":
-            intent.side = "BUY_YES"
+            kalshi_side = "BUY_YES"
         elif side_lower == "yes" and action_lower == "sell":
-            intent.side = "SELL_YES"
+            kalshi_side = "SELL_YES"
         elif side_lower == "no" and action_lower == "buy":
-            intent.side = "BUY_NO"
+            kalshi_side = "BUY_NO"
         elif side_lower == "no" and action_lower == "sell":
-            intent.side = "SELL_NO"
+            kalshi_side = "SELL_NO"
         
         # Validate against unified terminology if available
         if UNIFIED_TERMINOLOGY_AVAILABLE:
@@ -2199,7 +2338,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                 )
                 # Continue with conversion for backward compatibility
     
-    logger.info("[CHECK-INTENT-RISK] After conversion: side=%s action=%s", intent.side, intent.action)
+    logger.info("[CHECK-INTENT-RISK-SIDE-AWARE] After conversion: original_side=%s kalshi_side=%s action=%s", intent.side, kalshi_side, intent.action)
     
     # CRITICAL FIX: 2026-07-24 - Add PRICE-SIDE-CHECK invariant in router
     # Validate that order side matches thesis_side from intent metadata
@@ -2209,9 +2348,9 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     if thesis_side:
         # Extract outcome_side from converted side (BUY_YES -> yes, SELL_NO -> no, etc.)
         order_outcome_side = None
-        if "YES" in intent.side:
+        if "YES" in kalshi_side:
             order_outcome_side = "yes"
-        elif "NO" in intent.side:
+        elif "NO" in kalshi_side:
             order_outcome_side = "no"
         
         # Extract asset from ticker
@@ -2224,7 +2363,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                 "CRITICAL invariant violation: order side does not match thesis_side from intent. "
                 "This indicates cheapness on wrong side overrode directional signal.",
                 datetime.utcnow().isoformat(), asset, intent.ticker, strike_target or "N/A",
-                thesis_side, intent.side, getattr(intent, 'price_cents', 0)
+                thesis_side, kalshi_side, getattr(intent, 'price_cents', 0)
             )
             _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "price_side_mismatch")
             _increment_validation_gate_metric("ROUTER_VALIDATION", "price_side_mismatch")
@@ -2234,7 +2373,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                 "[PRICE-SIDE-CHECK-ROUTER] timestamp=%s asset=%s market_id=%s strike_target=%s thesis_side=%s "
                 "order_side=%s order_price=%dc price_side_mismatch=false INVARIANT_OK",
                 datetime.utcnow().isoformat(), asset, intent.ticker, strike_target or "N/A",
-                thesis_side, intent.side, getattr(intent, 'price_cents', 0)
+                thesis_side, kalshi_side, getattr(intent, 'price_cents', 0)
             )
     
     if intent.count <= 0:
@@ -2317,6 +2456,59 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             asset = "DOGE"
         
         if asset:
+            # CRITICAL FIX (2026-07-21): Check for existing position or pending order in the same 15-minute window
+            # This enforces one-contract-per-asset-per-15-minute rule at execution time, not just signal time
+            # The key is asset + window (ticker prefix + 15-minute window ID), not just asset
+            # CRITICAL FIX (2026-07-21): Use canonical identity helper for consistency across stack
+            if not _is_exit_order(intent):
+                try:
+                    from merid.utils.kalshi_identity import extract_asset_window_key, extract_window_id
+                    ticker = intent.ticker.upper()
+                    asset_window_key = extract_asset_window_key(ticker)
+                    window_id = extract_window_id(ticker)
+                    
+                    # Check position cache for existing position in this window
+                    # This blocks orders if asset already has a filled position (even partial fill)
+                    if position_cache:
+                        all_positions = position_cache.get_all_positions(validate_freshness=False)
+                        for pos_ticker, pos_obj in all_positions.items():
+                            if pos_obj and pos_obj.contracts > 0:
+                                # Check if position is for the same asset and window
+                                # CRITICAL: Use substring match for asset and exact match for window_id
+                                # to handle cases where ticker format may vary (e.g., KXBTC15M vs BTC15M)
+                                if asset in pos_ticker.upper() and window_id in pos_ticker:
+                                    logger.error(
+                                        "[ASSET-WINDOW-CHECK] REJECTING: asset=%s window=%s already has position=%s (contracts=%d) - blocking duplicate order",
+                                        asset, window_id, pos_ticker, pos_obj.contracts
+                                    )
+                                    _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "asset_window_position_exists")
+                                    _increment_validation_gate_metric("ROUTER_VALIDATION", "asset_window_position_exists")
+                                    return f"asset_window_position_exists:{asset_window_key}"
+                    
+                    # Check resting order monitor for pending orders in this window
+                    try:
+                        from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+                        monitor = get_resting_order_monitor()
+                        if monitor:
+                            # Check for resting orders with same ticker (which includes window ID)
+                            open_order_id = monitor.find_open_order(
+                                ticker=ticker,
+                                side=intent.side.lower() if intent.side else "",
+                                action=intent.action.lower() if intent.action else ""
+                            )
+                            if open_order_id:
+                                logger.error(
+                                    "[ASSET-WINDOW-CHECK] REJECTING: asset=%s window=%s has resting order=%s - blocking duplicate submission",
+                                    asset, window_id, open_order_id
+                                )
+                                _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "asset_window_resting_order_exists")
+                                _increment_validation_gate_metric("ROUTER_VALIDATION", "asset_window_resting_order_exists")
+                                return f"asset_window_resting_order_exists:{asset_window_key}"
+                    except Exception as monitor_err:
+                        logger.warning("[ASSET-WINDOW-CHECK] Failed to check resting orders: %s", monitor_err)
+                except Exception as window_check_err:
+                    logger.warning("[ASSET-WINDOW-CHECK] Failed to check asset-window state: %s", window_check_err)
+            
             # CRITICAL FIX (2026-07-14): Check for pending orders to prevent duplicate submissions
             # This prevents multiple orders for the same asset from being submitted before fills occur
             # which would bypass the MAX_POSITIONS_PER_ASSET=1 limit enforced at fill time
@@ -2564,7 +2756,7 @@ def _log_price_band_config() -> None:
 # _log_price_band_config()
 
 
-def _validate_price_band(intent: OrderIntent) -> Optional[str]:
+def _validate_price_band(intent: OrderIntent, outcome_side: Optional[str] = None) -> Optional[str]:
     """Reject orders in [48, 52] cents without exceptional edge.
     
     50¢ is at Kalshi fee curve maximum (worst fee drag).
@@ -2577,6 +2769,15 @@ def _validate_price_band(intent: OrderIntent) -> Optional[str]:
     
     BUG #38 FIX: Add special case for 15m velocity-based orders (source="merid.prediction.agent_grid_15m")
     which often trade near 50c with small velocity edges. Relax price band validation for these orders.
+    
+    CRITICAL FIX (2026-07-24): Added outcome_side parameter for side-aware validation.
+    This enforces side-awareness at the function signature level.
+    
+    Args:
+        intent: Order intent with price_cents and edge_pct
+        outcome_side: Explicit side parameter ("yes" or "no") for side-aware validation.
+                     If None, extracts from intent.side. Providing this explicitly
+                     enforces side-awareness at the function signature level.
     """
     # BUG #38 FIX: Special case for 15m velocity-based orders
     # These orders often trade near 50c with small velocity edges
@@ -2866,25 +3067,99 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                         yes_depth = yes_depth or 1
                         no_depth = no_depth or 1
                     
-                    passes, reason = check_market_microstructure(
-                        yes_bid_cents=intent.yes_bid_cents,
-                        yes_ask_cents=intent.yes_ask_cents,
-                        no_bid_cents=no_bid_cents or 0,
-                        no_ask_cents=no_ask_cents or 0,
-                        yes_depth=yes_depth,
-                        no_depth=no_depth,
-                        max_spread_cents=profile.market_microstructure_max_spread_cents,
-                        min_depth_usd=profile.market_microstructure_min_depth_usd,
-                        min_yes_depth=profile.market_microstructure_min_yes_depth,
-                        min_no_depth=profile.market_microstructure_min_no_depth,
-                        min_total_depth=profile.momentum_fvg_liquidity_min_threshold  # CRITICAL FIX (2026-07-23): Use profile threshold for total depth gating
+                    # 2026-07-24: Edge-aware microstructure gate (NEW)
+                    # Use edge-aware gate if intent has p_hat_yes_cents (probability estimate)
+                    # Otherwise fall back to legacy gate for backward compatibility
+                    use_edge_aware_gate = (
+                        intent.p_hat_yes_cents is not None and
+                        hasattr(profile, 'use_edge_aware_microstructure_gate') and
+                        profile.use_edge_aware_microstructure_gate
                     )
+                    
+                    if use_edge_aware_gate:
+                        # Use NEW edge-aware gate with spread/edge ratio logic
+                        passes, reason = check_market_microstructure_edge_aware(
+                            yes_bid_cents=intent.yes_bid_cents or 0,
+                            no_bid_cents=no_bid_cents or 0,
+                            p_hat_yes_cents=intent.p_hat_yes_cents,
+                            order_side=intent.side,
+                            yes_depth=yes_depth,
+                            no_depth=no_depth,
+                            min_executable_edge_cents=getattr(profile, 'min_executable_edge_cents', 3.0),
+                            max_spread_to_edge_ratio=getattr(profile, 'max_spread_to_edge_ratio', 0.4),
+                            max_spread_cents=profile.market_microstructure_max_spread_cents,
+                            min_yes_depth=profile.market_microstructure_min_yes_depth,
+                            min_no_depth=profile.market_microstructure_min_no_depth,
+                            min_total_depth=profile.momentum_fvg_liquidity_min_threshold
+                        )
+                        logger.info(
+                            "[EDGE-AWARE-GATE] ticker=%s side=%s p_hat=%.1fc passes=%s reason=%s",
+                            intent.ticker, intent.side, intent.p_hat_yes_cents, passes, reason
+                        )
+                    else:
+                        # Use legacy gate (fixed spread threshold)
+                        passes, reason = check_market_microstructure(
+                            yes_bid_cents=intent.yes_bid_cents,
+                            yes_ask_cents=intent.yes_ask_cents,
+                            no_bid_cents=no_bid_cents or 0,
+                            no_ask_cents=no_ask_cents or 0,
+                            yes_depth=yes_depth,
+                            no_depth=no_depth,
+                            order_side=intent.side,  # CRITICAL FIX (2026-07-24): Pass order side for side-aware validation
+                            max_spread_cents=profile.market_microstructure_max_spread_cents,
+                            min_depth_usd=profile.market_microstructure_min_depth_usd,
+                            min_yes_depth=profile.market_microstructure_min_yes_depth,
+                            min_no_depth=profile.market_microstructure_min_no_depth,
+                            min_total_depth=profile.momentum_fvg_liquidity_min_threshold  # CRITICAL FIX (2026-07-23): Use profile threshold for total depth gating
+                        )
                     if not passes:
                         logger.warning(
                             "[MICROSTRUCTURE-GATE] ticker=%s %s",
                             intent.ticker, reason
                         )
                         return f"microstructure_gate_failed:{reason}"
+                    
+                    # 2026-07-24: Liquidity sanity checks (NEW)
+                    # Check depth near inside, price sanity, and exit feasibility
+                    if hasattr(profile, 'enable_liquidity_sanity_checks') and profile.enable_liquidity_sanity_checks:
+                        try:
+                            from merid.event_venues.kalshi.liquidity_sanity import get_liquidity_checker
+                            checker = get_liquidity_checker()
+                            
+                            # Get orderbook data from market state
+                            yes_orderbook = []
+                            no_orderbook = []
+                            if hasattr(state, 'orderbook') and state.orderbook:
+                                if hasattr(state.orderbook, 'yes_bids'):
+                                    yes_orderbook = [(float(p), int(s)) for p, s in state.orderbook.yes_bids]
+                                if hasattr(state.orderbook, 'no_bids'):
+                                    no_orderbook = [(float(p), int(s)) for p, s in state.orderbook.no_bids]
+                            
+                            liquidity_result = checker.check_liquidity_sanity(
+                                yes_bid_cents=intent.yes_bid_cents or 0,
+                                no_bid_cents=intent.no_bid_cents or 0,
+                                yes_orderbook=yes_orderbook,
+                                no_orderbook=no_orderbook,
+                                order_side=intent.side
+                            )
+                            
+                            if not liquidity_result.passes:
+                                logger.warning(
+                                    "[LIQUIDITY-SANITY] ticker=%s %s",
+                                    intent.ticker, liquidity_result.reason
+                                )
+                                return f"liquidity_sanity_failed:{liquidity_result.reason}"
+                            
+                            logger.info(
+                                "[LIQUIDITY-SANITY] ticker=%s passed checks: yes_near=%d no_near=%d price=%dc",
+                                intent.ticker, liquidity_result.yes_depth_near_inside,
+                                liquidity_result.no_depth_near_inside, liquidity_result.price_cents
+                            )
+                        except Exception as liquidity_err:
+                            logger.warning(
+                                "[LIQUIDITY-SANITY] ticker=%s liquidity check failed, skipping: %s",
+                                intent.ticker, liquidity_err
+                            )
             except Exception as e:
                 logger.warning(
                     "[MICROSTRUCTURE-GATE] ticker=%s failed to load profile, skipping microstructure check: %s",
@@ -3238,7 +3513,7 @@ def _check_market_liquidity(intent: OrderIntent, state: Optional[Any]) -> Option
     return None
 
 
-def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any]) -> Optional[str]:
+def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any], outcome_side: Optional[str] = None) -> Optional[str]:
     """Validate limit order price against current order book.
     
     Rejects limit orders that are:
@@ -3252,6 +3527,9 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any])
     Args:
         intent: Order intent with price_cents
         state: KalshiMarketState with current market data
+        outcome_side: Explicit side parameter ("yes" or "no") for side-aware validation.
+                     If None, extracts from intent.side. Providing this explicitly
+                     enforces side-awareness at the function signature level.
         
     Returns:
         Error string if validation fails, None if OK
@@ -3286,15 +3564,32 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any])
     
     order_price = intent.price_cents
     
-    # CRITICAL FIX: For BUY_NO orders, use NO mid-price for validation
-    # The state.mid_cents is YES mid-price, but BUY_NO orders should be validated against NO mid-price
+    # CRITICAL FIX (2026-07-24): Use provided outcome_side or extract from intent.side
+    # Handle both original format ("yes"/"no") and Kalshi format ("BUY_YES"/"BUY_NO"/"SELL_YES"/"SELL_NO")
+    if outcome_side is None:
+        # Extract from intent.side if not provided explicitly
+        side_lower = intent.side.lower() if intent.side else ""
+        if "yes" in side_lower:
+            outcome_side = "yes"
+        elif "no" in side_lower:
+            outcome_side = "no"
+        else:
+            outcome_side = side_lower  # Fallback to original value
+    
+    # CRITICAL FIX: For NO-side orders, use NO mid-price for validation
+    # The state.mid_cents is YES mid-price, but NO-side orders should be validated against NO mid-price
     validation_mid_cents = mid_cents
-    if intent.side == "BUY_NO" or intent.side == "no":
+    if outcome_side == "no":
         # Calculate NO mid-price using Kalshi duality: NO_mid = 100 - YES_mid
         validation_mid_cents = 100 - mid_cents
         logger.info(
-            "[PRICE-VALIDATION-NO] ticker=%s BUY_NO order: YES_mid=%dc -> NO_mid=%dc for validation",
-            intent.ticker, mid_cents, validation_mid_cents
+            "[PRICE-VALIDATION-SIDE-AWARE] ticker=%s outcome_side=%s YES_mid=%dc -> NO_mid=%dc for validation",
+            intent.ticker, outcome_side, mid_cents, validation_mid_cents
+        )
+    else:
+        logger.info(
+            "[PRICE-VALIDATION-SIDE-AWARE] ticker=%s outcome_side=%s using YES_mid=%dc for validation",
+            intent.ticker, outcome_side, mid_cents
         )
     
     # Check 1: Price should be within reasonable range of mid price
@@ -4649,8 +4944,16 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 try:
                     from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
                     # Get orderbook data from state if available
-                    best_bid = getattr(state, 'yes_bid_cents', None) if intent.side == "yes" else getattr(state, 'no_bid_cents', None)
-                    best_ask = getattr(state, 'yes_ask_cents', None) if intent.side == "yes" else getattr(state, 'no_ask_cents', None)
+                    # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
+                    side_lower = intent.side.lower() if intent.side else ""
+                    if "yes" in side_lower:
+                        outcome_side = "yes"
+                    elif "no" in side_lower:
+                        outcome_side = "no"
+                    else:
+                        outcome_side = side_lower
+                    best_bid = getattr(state, 'yes_bid_cents', None) if outcome_side == "yes" else getattr(state, 'no_bid_cents', None)
+                    best_ask = getattr(state, 'yes_ask_cents', None) if outcome_side == "yes" else getattr(state, 'no_ask_cents', None)
                     
                     is_valid, error = validate_price_placement_invariant(
                         role=intent.liquidity_role,
@@ -4730,7 +5033,15 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 from merid.prediction.kalshi_maker_taker_contract import resolve_auto_liquidity_role
                 # Get current market conditions from state
                 edge_pct = getattr(intent, 'edge_pct', 0.0)
-                orderbook_depth = getattr(state, 'yes_depth', 0) if intent.side == "yes" else getattr(state, 'no_depth', 0)
+                # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
+                side_lower = intent.side.lower() if intent.side else ""
+                if "yes" in side_lower:
+                    outcome_side = "yes"
+                elif "no" in side_lower:
+                    outcome_side = "no"
+                else:
+                    outcome_side = side_lower
+                orderbook_depth = getattr(state, 'yes_depth', 0) if outcome_side == "yes" else getattr(state, 'no_depth', 0)
                 time_to_expiry_seconds = getattr(intent, 'max_hold_seconds', 600.0) or 600.0
                 is_exit = _is_exit_order(intent)
                 
@@ -4746,8 +5057,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 intent.liquidity_role = resolved_role.value
                 
                 logger.info(
-                    f"[LIQUIDITY-ROLE-RECOMPUTE] Recomputed AUTO at submission | ticker={intent.ticker} | "
-                    f"original=auto | resolved={resolved_role.value} | edge={edge_pct:.1f}% | "
+                    f"[LIQUIDITY-ROLE-RECOMPUTE-SIDE-AWARE] Recomputed AUTO at submission | ticker={intent.ticker} | "
+                    f"outcome_side={outcome_side} | original=auto | resolved={resolved_role.value} | edge={edge_pct:.1f}% | "
                     f"depth={orderbook_depth} | time_to_expiry={time_to_expiry_seconds:.0f}s | is_exit={is_exit}"
                 )
             except ImportError:
@@ -4762,8 +5073,16 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             try:
                 from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
                 # Get current orderbook data from state
-                best_bid = getattr(state, 'yes_bid_cents', None) if intent.side == "yes" else getattr(state, 'no_bid_cents', None)
-                best_ask = getattr(state, 'yes_ask_cents', None) if intent.side == "yes" else getattr(state, 'no_ask_cents', None)
+                # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
+                side_lower = intent.side.lower() if intent.side else ""
+                if "yes" in side_lower:
+                    outcome_side = "yes"
+                elif "no" in side_lower:
+                    outcome_side = "no"
+                else:
+                    outcome_side = side_lower
+                best_bid = getattr(state, 'yes_bid_cents', None) if outcome_side == "yes" else getattr(state, 'no_bid_cents', None)
+                best_ask = getattr(state, 'yes_ask_cents', None) if outcome_side == "yes" else getattr(state, 'no_ask_cents', None)
                 
                 # Re-validate price placement with current book
                 is_valid, error = validate_price_placement_invariant(
@@ -5111,15 +5430,19 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     # Convert lowercase side/action to Kalshi format before validation
     # CRITICAL FIX: Use unified terminology validation to prevent signal inversion
     # Convert "yes"/"no" + "buy"/"sell" to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
+    # CRITICAL FIX (2026-07-24): Do NOT mutate intent.side - preserve original side for immutability
+    # Use local variable kalshi_side for Kalshi-formatted side instead
+    kalshi_side = intent.side  # Default to original side if no conversion needed
+    
     if intent.side in ("yes", "no") and intent.action in ("buy", "sell"):
         if intent.side == "yes" and intent.action == "buy":
-            intent.side = "BUY_YES"
+            kalshi_side = "BUY_YES"
         elif intent.side == "yes" and intent.action == "sell":
-            intent.side = "SELL_YES"
+            kalshi_side = "SELL_YES"
         elif intent.side == "no" and intent.action == "buy":
-            intent.side = "BUY_NO"
+            kalshi_side = "BUY_NO"
         elif intent.side == "no" and intent.action == "sell":
-            intent.side = "SELL_NO"
+            kalshi_side = "SELL_NO"
         
         # CRITICAL INVARIANT CHECK: Entry orders must ALWAYS use BUY actions
         # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
@@ -5145,7 +5468,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     "[ENTRY-ORDER-INVARIANT-VIOLATION] ticker=%s side=%s action=%s kalshi_side=%s - "
                     "Entry orders must use BUY actions only. SELL actions are for exit trades only. "
                     "Rejecting this entry order to prevent SELL YES/SELL_NO on entry.",
-                    intent.ticker, intent.side, intent.action, intent.side
+                    intent.ticker, intent.side, intent.action, kalshi_side
                 )
                 _release_gate_record(intent, "entry_order_sell_action_rejected")
                 return OrderResult(
@@ -5408,11 +5731,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                             existing_no += abs(pos.contracts)
                 
                 # Check per-side limit
-                if intent.side.lower() == "yes":
+                # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
+                side_lower = intent.side.lower() if intent.side else ""
+                if "yes" in side_lower:
+                    outcome_side = "yes"
+                elif "no" in side_lower:
+                    outcome_side = "no"
+                else:
+                    outcome_side = side_lower
+                
+                if outcome_side == "yes":
                     new_yes_total = existing_yes + intent.count
                     if new_yes_total > max_yes:
                         logger.warning(
-                            f"[ORDER-ROUTER] Per-side YES limit exceeded for {asset}: {new_yes_total} > {max_yes} (existing={existing_yes}, new={intent.count}, ticker={intent.ticker})"
+                            f"[POSITION-LIMIT-SIDE-AWARE] Per-side YES limit exceeded for {asset}: outcome_side={outcome_side} new_total={new_yes_total} > max={max_yes} (existing={existing_yes}, new={intent.count}, ticker={intent.ticker})"
                         )
                         return OrderResult(
                             status="rejected",
@@ -5421,11 +5753,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                             reason=f"Max YES position: {new_yes_total} > {max_yes}",
                             latency_ms=0.0
                         )
-                elif intent.side.lower() == "no":
+                elif outcome_side == "no":
                     new_no_total = existing_no + intent.count
                     if new_no_total > max_no:
                         logger.warning(
-                            f"[ORDER-ROUTER] Per-side NO limit exceeded for {asset}: {new_no_total} > {max_no} (existing={existing_no}, new={intent.count}, ticker={intent.ticker})"
+                            f"[POSITION-LIMIT-SIDE-AWARE] Per-side NO limit exceeded for {asset}: outcome_side={outcome_side} new_total={new_no_total} > max={max_no} (existing={existing_no}, new={intent.count}, ticker={intent.ticker})"
                         )
                         return OrderResult(
                             status="rejected",
@@ -8021,11 +8353,12 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         if profile_adapter and profile_adapter.profile:
             profile_name = getattr(profile_adapter.profile, 'profile_name', '')
             if profile_name == 'kalshi_crypto_15m_v2':
-                # Check source - allow agent_grid_15m, kalshi_tools, offset_hedging, and position_monitor_exit for this profile
+                # Check source - allow agent_grid_15m, kalshi_tools, offset_hedging, position_monitor_exit, and execution_subscriber for this profile
                 # kalshi_tools is used by global allocator for execution (2026-07-10 fix)
                 # offset_hedging is used for hedge orders that reduce net exposure (2026-07-14 fix)
                 # position_monitor_exit is used by position monitor for exit orders (2026-07-17 fix)
-                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools", "offset_hedging", "position_monitor_exit"]
+                # execution_subscriber is used by swarm execution subscriber (2026-07-21 fix - now routes through router)
+                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools", "offset_hedging", "position_monitor_exit", "execution_subscriber"]
                 if intent.source and not any(allowed in intent.source for allowed in allowed_sources):
                     latency = (_time.monotonic() - t0) * 1000
                     logger.error(
@@ -8604,7 +8937,16 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
                         existing_no += abs(pos.contracts)
             
             # Check per-side limit
-            if intent.side.lower() == "yes":
+            # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
+            side_lower = intent.side.lower() if intent.side else ""
+            if "yes" in side_lower:
+                outcome_side = "yes"
+            elif "no" in side_lower:
+                outcome_side = "no"
+            else:
+                outcome_side = side_lower
+            
+            if outcome_side == "yes":
                 new_yes_total = existing_yes + intent.count
                 if new_yes_total > max_yes:
                     logger.warning(
@@ -8617,7 +8959,7 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
                         reason=f"Max YES position: {new_yes_total} > {max_yes}",
                         latency_ms=round(latency, 2),
                     )
-            elif intent.side.lower() == "no":
+            elif outcome_side == "no":
                 new_no_total = existing_no + intent.count
                 if new_no_total > max_no:
                     logger.warning(
@@ -8729,9 +9071,25 @@ async def _execute_scaled_order(
         # Get market depth for scaling decision
         market_depth = 0
         if intent.yes_depth is not None:
-            market_depth = intent.yes_depth if intent.side.lower() == "yes" else intent.no_depth or 0
+            # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
+            side_lower = intent.side.lower() if intent.side else ""
+            if "yes" in side_lower:
+                outcome_side = "yes"
+            elif "no" in side_lower:
+                outcome_side = "no"
+            else:
+                outcome_side = side_lower
+            market_depth = intent.yes_depth if outcome_side == "yes" else intent.no_depth or 0
+            logger.info(
+                "[ORDER-SCALING-SIDE-AWARE] ticker=%s outcome_side=%s selected depth=%d (yes_depth=%d no_depth=%d)",
+                intent.ticker, outcome_side, market_depth, intent.yes_depth, intent.no_depth
+            )
         else:
             market_depth = 50  # Default assumption
+            logger.info(
+                "[ORDER-SCALING-SIDE-AWARE] ticker=%s using default depth=%d (depth info unavailable)",
+                intent.ticker, market_depth
+            )
         
         # Get edge percentage
         edge_pct = intent.edge_pct or 0.0

@@ -5288,6 +5288,8 @@ class Kalshi15mLoop:
                 netedgecents=edge_pct * price_cents / 100.0 if price_cents > 0 else 0.0,  # PHASE 3 FIX: Populate netedgecents for fills ledger
                 confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
                 model_prob=model_prob,  # BUG #34 FIX: Add model_prob from candidate
+                # 2026-07-24: Edge-aware microstructure gate - populate p_hat_yes_cents
+                p_hat_yes_cents=model_prob * 100.0 if model_prob is not None else None,  # Convert probability to cents
                 rationale=candidate.get("rationale"),  # CRITICAL: Pass rationale to skip edge validation for price-based strategy
                 trace_id=trace_id,  # DEBUG: Add trace_id for candidate → order → policy tracking
                 # Phase 2: Strategy identification for multi-strategy support
