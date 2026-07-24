@@ -769,6 +769,206 @@ class TestPositionMonitorSideAwarePrice:
             assert price == expected_no_price, f"YES mid {yes_mid} should convert to NO price {expected_no_price}, got {price}"
 
 
+class TestPositionMonitorStartupLoading:
+    """Test PositionMonitor loads existing positions on startup.
+    
+    CRITICAL FIX (2026-07-23): PositionMonitor must load existing positions from
+    position cache on startup to ensure exit policies trigger for positions
+    opened before monitor started (or during restart).
+    """
+    
+    @patch('merid.event_venues.kalshi.position_cache.get_position_cache')
+    @pytest.mark.asyncio
+    async def test_start_loads_positions_from_cache(self, mock_get_cache):
+        """Test that start() loads existing positions from position cache."""
+        # Mock position cache with existing positions
+        mock_cache = Mock()
+        from merid.event_venues.kalshi.position_cache import CachedPosition
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        
+        cached_positions = {
+            "KXBTC15M-1234": CachedPosition(
+                market_id="KXBTC15M-1234",
+                agent_id="BTC_15M",
+                contracts=10,
+                side="yes",
+                thesis_side="yes",
+                avg_price_cents=50,
+                entry_price_state="known",
+                take_profit_price_cents=60,
+                stop_loss_price_cents=40,
+            ),
+            "KXETH15M-5678": CachedPosition(
+                market_id="KXETH15M-5678",
+                agent_id="ETH_15M",
+                contracts=5,
+                side="no",
+                thesis_side="no",
+                avg_price_cents=55,
+                entry_price_state="known",
+                take_profit_price_cents=45,
+                stop_loss_price_cents=65,
+            ),
+        }
+        mock_cache.get_all_positions.return_value = cached_positions
+        mock_get_cache.return_value = mock_cache
+        
+        monitor = PositionMonitor()
+        
+        # Start monitor - should load positions from cache
+        await monitor.start()
+        
+        # Verify positions were loaded
+        assert len(monitor.get_open_positions()) == 2
+        
+        # Verify BTC position
+        btc_position = monitor.get_position_by_market("KXBTC15M-1234")
+        assert btc_position is not None
+        assert btc_position.side == PositionSide.YES
+        assert btc_position.size == 10
+        assert btc_position.avg_entry_price_cents == 50
+        assert btc_position.take_profit_price_cents == 60
+        assert btc_position.stop_loss_price_cents == 40
+        
+        # Verify ETH position
+        eth_position = monitor.get_position_by_market("KXETH15M-5678")
+        assert eth_position is not None
+        assert eth_position.side == PositionSide.NO
+        assert eth_position.size == 5
+        assert eth_position.avg_entry_price_cents == 55
+        
+        # Stop monitor
+        await monitor.stop()
+    
+    @patch('merid.event_venues.kalshi.position_cache.get_position_cache')
+    @pytest.mark.asyncio
+    async def test_start_skips_zero_contract_positions(self, mock_get_cache):
+        """Test that start() skips positions with zero contracts."""
+        # Mock position cache with zero-contract position
+        mock_cache = Mock()
+        from merid.event_venues.kalshi.position_cache import CachedPosition
+        
+        cached_positions = {
+            "KXBTC15M-1234": CachedPosition(
+                market_id="KXBTC15M-1234",
+                agent_id="BTC_15M",
+                contracts=0,  # Zero contracts - should be skipped
+                side="yes",
+                thesis_side="yes",
+                avg_price_cents=50,
+            ),
+            "KXETH15M-5678": CachedPosition(
+                market_id="KXETH15M-5678",
+                agent_id="ETH_15M",
+                contracts=5,  # Non-zero - should be loaded
+                side="yes",
+                thesis_side="yes",
+                avg_price_cents=55,
+            ),
+        }
+        mock_cache.get_all_positions.return_value = cached_positions
+        mock_get_cache.return_value = mock_cache
+        
+        monitor = PositionMonitor()
+        
+        # Start monitor
+        await monitor.start()
+        
+        # Only non-zero position should be loaded
+        assert len(monitor.get_open_positions()) == 1
+        assert monitor.get_position_by_market("KXETH15M-5678") is not None
+        assert monitor.get_position_by_market("KXBTC15M-1234") is None
+        
+        await monitor.stop()
+    
+    @patch('merid.event_venues.kalshi.position_cache.get_position_cache')
+    @pytest.mark.asyncio
+    async def test_start_handles_cache_error_gracefully(self, mock_get_cache):
+        """Test that start() continues even if cache loading fails."""
+        # Mock position cache that raises error
+        mock_cache = Mock()
+        mock_cache.get_all_positions.side_effect = Exception("Cache error")
+        mock_get_cache.return_value = mock_cache
+        
+        monitor = PositionMonitor()
+        
+        # Start monitor - should not crash despite cache error
+        await monitor.start()
+        
+        # Monitor should still start (empty)
+        assert len(monitor.get_open_positions()) == 0
+        assert monitor._running is True
+        
+        await monitor.stop()
+    
+    @patch('merid.event_venues.kalshi.position_cache.get_position_cache')
+    @pytest.mark.asyncio
+    async def test_start_uses_thesis_side_over_side(self, mock_get_cache):
+        """Test that start() uses thesis_side (immutable) over side (mutable)."""
+        # Mock position cache with mismatched thesis_side and side
+        mock_cache = Mock()
+        from merid.event_venues.kalshi.position_cache import CachedPosition
+        
+        cached_positions = {
+            "KXBTC15M-1234": CachedPosition(
+                market_id="KXBTC15M-1234",
+                agent_id="BTC_15M",
+                contracts=10,
+                side="yes",  # Mutable side (may be wrong from REST)
+                thesis_side="no",  # Immutable thesis_side (correct from fill)
+                avg_price_cents=50,
+            ),
+        }
+        mock_cache.get_all_positions.return_value = cached_positions
+        mock_get_cache.return_value = mock_cache
+        
+        monitor = PositionMonitor()
+        
+        # Start monitor
+        await monitor.start()
+        
+        # Should use thesis_side (NO) not side (YES)
+        position = monitor.get_position_by_market("KXBTC15M-1234")
+        assert position is not None
+        assert position.side == PositionSide.NO  # From thesis_side
+        
+        await monitor.stop()
+    
+    @patch('merid.event_venues.kalshi.position_cache.get_position_cache')
+    @pytest.mark.asyncio
+    async def test_start_fallback_to_side_when_thesis_side_none(self, mock_get_cache):
+        """Test that start() falls back to side when thesis_side is None."""
+        # Mock position cache with None thesis_side
+        mock_cache = Mock()
+        from merid.event_venues.kalshi.position_cache import CachedPosition
+        
+        cached_positions = {
+            "KXBTC15M-1234": CachedPosition(
+                market_id="KXBTC15M-1234",
+                agent_id="BTC_15M",
+                contracts=10,
+                side="yes",
+                thesis_side=None,  # Unknown thesis_side
+                avg_price_cents=50,
+            ),
+        }
+        mock_cache.get_all_positions.return_value = cached_positions
+        mock_get_cache.return_value = mock_cache
+        
+        monitor = PositionMonitor()
+        
+        # Start monitor
+        await monitor.start()
+        
+        # Should fall back to side when thesis_side is None
+        position = monitor.get_position_by_market("KXBTC15M-1234")
+        assert position is not None
+        assert position.side == PositionSide.YES  # From side fallback
+        
+        await monitor.stop()
+
+
 class TestPositionMonitorThreadSafety:
     """Test thread safety of PositionMonitor operations."""
     
