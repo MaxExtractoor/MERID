@@ -794,7 +794,7 @@ class Crypto15mProfileAdapter:
 
         # Validate strategy_policy has required edge fields
         strategy_policy = raw.get('strategy_policy', {})
-        required_strategy_fields = ['min_edge_pct', 'min_confidence']
+        required_strategy_fields = ['min_edge', 'min_confidence']
         for field in required_strategy_fields:
             if field not in strategy_policy:
                 raise ValueError(
