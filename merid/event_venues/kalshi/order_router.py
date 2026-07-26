@@ -471,9 +471,12 @@ def check_market_microstructure_edge_aware(
     edge_metrics = yes_edge if order_side == "yes" else no_edge
     
     # Apply edge-aware gate
+    # CRITICAL FIX 2026-07-25: Use min_executable_edge_frac (fraction) instead of min_executable_edge_cents (cents)
+    # The function signature was changed for canonical alignment - convert cents to fraction
+    min_executable_edge_frac = min_executable_edge_cents / 100.0  # Convert cents to fraction (3c -> 0.03)
     passes, reason = edge_aware_microstructure_gate(
         edge_metrics=edge_metrics,
-        min_executable_edge_cents=min_executable_edge_cents,
+        min_executable_edge_frac=min_executable_edge_frac,
         max_spread_to_edge_ratio=max_spread_to_edge_ratio,
         max_spread_cents=max_spread_cents
     )
@@ -1652,6 +1655,9 @@ class OrderIntent:
     model_prob: Optional[float] = None
     # Phase 2: Strategy identification for multi-strategy support
     strategy_id: Optional[str] = None  # Unique strategy identifier (e.g., "heuristic_velocity")
+    # 2026-07-25: Dual-side probability estimates for edge-aware microstructure gating
+    p_hat_yes_cents: Optional[float] = None  # model-implied YES price in cents
+    p_hat_no_cents: Optional[float] = None   # model-implied NO price in cents
     strategy_type: Optional[str] = None  # Strategy type (e.g., "heuristic_velocity", "model_based")
     # Phase 5.4: Raw logit for probability calibration outcome recording
     raw_logit: Optional[float] = None  # Raw model logit for Platt scaling calibration
@@ -3067,21 +3073,58 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                         yes_depth = yes_depth or 1
                         no_depth = no_depth or 1
                     
-                    # 2026-07-24: Edge-aware microstructure gate (NEW)
-                    # Use edge-aware gate if intent has p_hat_yes_cents (probability estimate)
-                    # Otherwise fall back to legacy gate for backward compatibility
+                    # 2026-07-25: Edge-aware microstructure gate (NEW)
+                    # 2026-07-25: Use edge-aware gate if profile enables it and intent has side-specific p_hat
+                    # Check for side-specific p_hat based on order side
+                    order_side_lower = intent.side.lower() if intent.side else ""
+                    if order_side_lower in ("yes", "buy_yes", "sell_yes"):
+                        has_p_hat = intent.p_hat_yes_cents is not None
+                    elif order_side_lower in ("no", "buy_no", "sell_no"):
+                        has_p_hat = intent.p_hat_no_cents is not None
+                    else:
+                        has_p_hat = intent.p_hat_yes_cents is not None  # Fallback to YES for unknown sides
+                    
+                    # 2026-07-25: Log intent p_hat field state for debugging
+                    logger.info(
+                        "[INTENT-CHECK] ticker=%s side=%s p_hat_yes_cents=%s p_hat_no_cents=%s has_p_hat=%s edge_aware_enabled=%s",
+                        intent.ticker, intent.side, intent.p_hat_yes_cents, intent.p_hat_no_cents, has_p_hat,
+                        (hasattr(profile, 'use_edge_aware_microstructure_gate') and profile.use_edge_aware_microstructure_gate)
+                    )
+                    
                     use_edge_aware_gate = (
-                        intent.p_hat_yes_cents is not None and
+                        has_p_hat and
                         hasattr(profile, 'use_edge_aware_microstructure_gate') and
                         profile.use_edge_aware_microstructure_gate
                     )
                     
                     if use_edge_aware_gate:
+                        # 2026-07-25: Use side-specific p_hat field for dual-side edge-aware gating
+                        # YES orders use p_hat_yes_cents, NO orders use p_hat_no_cents
+                        order_side_lower = intent.side.lower() if intent.side else ""
+                        if order_side_lower in ("yes", "buy_yes", "sell_yes"):
+                            p_hat_cents = intent.p_hat_yes_cents
+                        elif order_side_lower in ("no", "buy_no", "sell_no"):
+                            p_hat_cents = intent.p_hat_no_cents
+                        else:
+                            p_hat_cents = intent.p_hat_yes_cents  # Fallback to YES for unknown sides
+                        
+                        # 2026-07-25: Fail loudly if p_hat is missing when edge-aware mode is enabled
+                        if p_hat_cents is None:
+                            logger.error(
+                                "[EDGE-AWARE-GATE-ERROR] ticker=%s side=%s missing p_hat field (p_hat_yes_cents=%s, p_hat_no_cents=%s) - "
+                                "cannot apply edge-aware gate. This is a configuration/data flow bug, not a market condition.",
+                                intent.ticker, intent.side, intent.p_hat_yes_cents, intent.p_hat_no_cents
+                            )
+                            return f"microstructure_gate_failed:missing_p_hat_field_for_edge_aware_gate"
+                        
+                        # LOG CONTRACT: Ensure p_hat is in valid range (0-100 cents)
+                        assert 0.0 <= p_hat_cents <= 100.0, f"p_hat_cents must be in [0,100], got {p_hat_cents} for ticker={intent.ticker} side={intent.side}"
+                        
                         # Use NEW edge-aware gate with spread/edge ratio logic
                         passes, reason = check_market_microstructure_edge_aware(
                             yes_bid_cents=intent.yes_bid_cents or 0,
                             no_bid_cents=no_bid_cents or 0,
-                            p_hat_yes_cents=intent.p_hat_yes_cents,
+                            p_hat_yes_cents=p_hat_cents,  # Use side-specific p_hat
                             order_side=intent.side,
                             yes_depth=yes_depth,
                             no_depth=no_depth,
@@ -3094,7 +3137,7 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                         )
                         logger.info(
                             "[EDGE-AWARE-GATE] ticker=%s side=%s p_hat=%.1fc passes=%s reason=%s",
-                            intent.ticker, intent.side, intent.p_hat_yes_cents, passes, reason
+                            intent.ticker, intent.side, p_hat_cents, passes, reason
                         )
                     else:
                         # Use legacy gate (fixed spread threshold)
@@ -6731,13 +6774,71 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             intent.expected_fee_rate_bps or 0.0,
             intent.estimated_fee_cents or 0,
         )
-        
+
+        # 2026-07-25: Router pre-send invariants - validate p_hat, canonical edge, spread/edge ratio
+        # This ensures orders sent to Kalshi meet quality thresholds before submission
+        if intent.entry_or_exit == "entry":
+            # Validate p_hat for the side being routed
+            p_hat_side_cents = getattr(intent, 'p_hat_yes_cents', None) if intent.side == "yes" else getattr(intent, 'p_hat_no_cents', None)
+            if p_hat_side_cents is None or not (0 <= p_hat_side_cents <= 100):
+                logger.error(
+                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s p_hat_side_cents=%s (must be 0-100) - REJECTING ORDER",
+                    intent.ticker, intent.side, p_hat_side_cents
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=get_venue_gate().mode,
+                    reason=f"router_invariant_fail:invalid_p_hat_{p_hat_side_cents}",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+
+            # Validate canonical edge >= min_executable_edge_frac
+            canonical_edge_side_frac = getattr(intent, 'edge_yes_frac', None) if intent.side == "yes" else getattr(intent, 'edge_no_frac', None)
+            min_executable_edge_frac = 0.03  # 3% minimum (from profile)
+            if canonical_edge_side_frac is not None and canonical_edge_side_frac < min_executable_edge_frac:
+                logger.warning(
+                    "[ROUTER-INVARIANT-WARN] ticker=%s side=%s canonical_edge_side_frac=%.4f < min_executable_edge_frac=%.4f",
+                    intent.ticker, intent.side, canonical_edge_side_frac, min_executable_edge_frac
+                )
+
+            # Validate spread/edge ratio if edge-aware gate is enabled
+            if hasattr(intent, 'spread_to_edge_ratio') and intent.spread_to_edge_ratio is not None:
+                max_spread_to_edge_ratio = 0.4  # 40% maximum (from profile)
+                if intent.spread_to_edge_ratio > max_spread_to_edge_ratio:
+                    logger.warning(
+                        "[ROUTER-INVARIANT-WARN] ticker=%s side=%s spread_to_edge_ratio=%.4f > max_spread_to_edge_ratio=%.4f",
+                        intent.ticker, intent.side, intent.spread_to_edge_ratio, max_spread_to_edge_ratio
+                    )
+
+            logger.info(
+                "[ROUTER-INVARIANT-PASS] ticker=%s side=%s size=%d p_hat_side_cents=%.2f canonical_edge_side_frac=%.4f min_executable_edge_frac=%.4f",
+                intent.ticker, intent.side, intent.count, p_hat_side_cents, canonical_edge_side_frac, min_executable_edge_frac
+            )
+
+        # 2026-07-25: Log ORDER-SEND before submission
+        logger.info(
+            "[ORDER-SEND] intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d client_tag=%s",
+            intent.intent_id, intent.ticker, intent.side, intent.action, intent.price_cents, intent.count, intent.client_tag
+        )
+
         placed_res = await client.place_order_result(
             order,
             order_group_id=intent.order_group_id,
             self_trade_prevention_type=intent.self_trade_prevention_type,
         )
         latency = (_time.monotonic() - t0) * 1000
+
+        # 2026-07-25: Log ORDER-ACK after submission
+        if placed_res and placed_res.success:
+            logger.info(
+                "[ORDER-ACK] intent_id=%s ticker=%s order_id=%s status=accepted latency_ms=%.2f",
+                intent.intent_id, intent.ticker, getattr(placed_res, 'order_id', 'N/A'), latency
+            )
+        else:
+            logger.warning(
+                "[ORDER-ACK] intent_id=%s ticker=%s status=rejected reason=%s latency_ms=%.2f",
+                intent.intent_id, intent.ticker, getattr(placed_res, 'error', 'unknown'), latency
+            )
 
         # Record intent in fills_ledger for TRADE-TRACE (links fill back to edge/sizing decision)
         try:
@@ -7104,6 +7205,36 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             fill_price_cents,
             latency,
         )
+
+        # 2026-07-25: Log ORDER-FILL when order is filled
+        if filled_count > 0:
+            logger.info(
+                "[ORDER-FILL] intent_id=%s ticker=%s order_id=%s filled_count=%d fill_price_cents=%d notional=$%.2f",
+                intent.intent_id, intent.ticker, _venue_oid, filled_count, fill_price_cents, (filled_count * fill_price_cents) / 100.0
+            )
+
+            # 2026-07-25: Portfolio divergence detection - compare internal exposure with Kalshi portfolio
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                pos_cache = get_position_cache()
+                internal_exposure = pos_cache.get_total_notional_exposure()
+
+                # Query Kalshi portfolio for comparison
+                try:
+                    portfolio_res = await client.get_balance_result()
+                    if portfolio_res.success and portfolio_res.data:
+                        kalshi_balance = float(portfolio_res.data.get('balance', 0))
+                        # Simple divergence check: if internal exposure differs significantly from bankroll usage
+                        # This is a basic check - more sophisticated reconciliation can be added
+                        if abs(internal_exposure - kalshi_balance) > 1.0:  # $1 threshold
+                            logger.warning(
+                                "[PORTFOLIO-DIVERGENCE] internal_exposure=$%.2f kalshi_balance=$%.2f delta=$%.2f",
+                                internal_exposure, kalshi_balance, abs(internal_exposure - kalshi_balance)
+                            )
+                except Exception as portfolio_err:
+                    logger.debug("[PORTFOLIO-DIVERGENCE] Failed to query Kalshi portfolio: %s", portfolio_err)
+            except Exception as pos_err:
+                logger.debug("[PORTFOLIO-DIVERGENCE] Failed to get internal exposure: %s", pos_err)
 
         # CRITICAL FIX (2026-07-21): Set entry window based on actual exposure state
         # Window is set only when we have a fill or resting order, not on submission

@@ -1043,7 +1043,23 @@ class LeanAgent15m:
 
         # Phase 7: Initialize panic fade (volatility reversion) configuration
         # 2026-07-18: DISABLED by default - causing losses by betting against trend
-        self._panic_fade_enabled = getattr(config, 'panic_fade_enabled', False)
+        # 2026-07-24: CRITICAL SSOT FIX - Force disable when profile uses momentum_fvg
+        # Profile YAML (kalshi_crypto_15m_v2.yaml) is single source of truth for signal_mode
+        # When signal_mode is momentum_fvg, panic fade must be disabled regardless of config
+        # Also gate by profile_version to prevent drift across profile versions
+        panic_fade_config_enabled = getattr(config, 'panic_fade_enabled', False)
+        profile_version = getattr(config, 'profile_version', None)
+        
+        # SSOT Gate: Disable panic fade if profile uses momentum_fvg OR profile is v2.x
+        # Profile v2.x explicitly disables panic fade due to losses
+        if self.config.signal_mode == "momentum_fvg" or (profile_version and profile_version.startswith("2.")):
+            self._panic_fade_enabled = False
+            logger.warning(
+                "[SSOT-INVARIANT] %s signal_mode=%s profile_version=%s - forcing panic_fade_enabled=False (profile SSOT)",
+                config.name, self.config.signal_mode, profile_version
+            )
+        else:
+            self._panic_fade_enabled = panic_fade_config_enabled
 
         self._panic_fade_threshold = getattr(config, 'panic_fade_threshold', 0.0002)
 
@@ -4688,7 +4704,43 @@ class LeanAgent15m:
         strict_mode_enabled = os.getenv("MERID_PRICE_SIDE_STRICT_MODE", "false").lower() == "true"
         
         # Extract strike_target from market metadata if available
-        strike_target = getattr(market_state, 'strike_target', None) if market_state else None
+        # CRITICAL FIX: Use window_strike_price instead of non-existent strike_target field
+        # KalshiMarketState has window_strike_price, not strike_target
+        # CRITICAL FIX: 2026-07-24 - Use previous 15m candle close as authoritative strike target
+        # Kalshi's 15-minute markets use the closing price of the previous 15-minute candle
+        # as the strike price for the new window
+        strike_target = getattr(market_state, 'window_strike_price', None) if market_state else None
+        if strike_target is None:
+            # Fallback: Use previous 15m candle close as strike target
+            # This is the authoritative source per Kalshi's 15-minute market mechanics
+            from data.unified_spot_service import get_unified_spot_service
+            spot_service = get_unified_spot_service()
+            previous_15m_close = spot_service.get_previous_15m_candle_close_sync(asset)
+            if previous_15m_close is not None:
+                strike_target = previous_15m_close
+                logger.warning(
+                    "[STRIKE-TARGET-FALLBACK] asset=%s window_strike_price unavailable, using previous 15m candle close=%.2f as strike target",
+                    asset, strike_target
+                )
+            else:
+                # Secondary fallback: Use current spot price if previous candle unavailable
+                # CRITICAL FIX: 2026-07-24 - Use sync get() method instead of async get_spot_price()
+                # get_spot_price() is async and returns a coroutine, causing AttributeError
+                spot_snapshot = spot_service.get(asset)
+                if spot_snapshot and not isinstance(spot_snapshot, SpotError):
+                    strike_target = spot_snapshot.price
+                    logger.warning(
+                        "[STRIKE-TARGET-SECONDARY-FALLBACK] asset=%s previous 15m candle close unavailable, using current spot=%.2f as strike target",
+                        asset, strike_target
+                    )
+                else:
+                    logger.error(
+                        "[STRIKE-TARGET-FAILURE] asset=%s window_strike_price, previous 15m candle close, and current spot all unavailable - CRITICAL DATA FAILURE",
+                        asset
+                    )
+                    # CRITICAL: Never use 0.0 as strike target - this invalidates all pricing logic
+                    # Raise exception to prevent trading with invalid strike target
+                    raise ValueError(f"Cannot determine strike target for {asset} - all data sources unavailable")
         
         # Check price band ONLY for thesis_side (10c-75c range)
         # CRITICAL FIX: 2026-07-12 - Expanded to 75c to match YES prices 60-97c in current market
@@ -4777,9 +4829,25 @@ class LeanAgent15m:
 
             
 
-            base_edge = calculate_velocity_edge(velocity * velocity_sign, velocity_threshold)
-
-            base_edge = max(base_edge, 2.0)  # Minimum 2% edge
+            # CRITICAL FIX: Velocity influences edge as a feature, not a direction gate
+            # Use absolute velocity magnitude for edge strength, not velocity * velocity_sign
+            # This allows velocity to boost edge on both sides based on conviction strength
+            velocity_magnitude = abs(velocity)
+            base_edge = calculate_velocity_edge(velocity_magnitude, velocity_threshold)
+            
+            # Apply velocity alignment bonus: if velocity aligns with side, boost edge
+            # If velocity opposes side, reduce edge (but don't zero it out)
+            velocity_alignment_bonus = 0.0
+            if velocity_sign > 0 and velocity > 0:
+                velocity_alignment_bonus = velocity * 1000  # Boost for aligned velocity
+            elif velocity_sign < 0 and velocity < 0:
+                velocity_alignment_bonus = abs(velocity) * 1000  # Boost for aligned velocity
+            elif velocity_sign > 0 and velocity < 0:
+                velocity_alignment_bonus = -abs(velocity) * 500  # Penalty for counter-trend
+            elif velocity_sign < 0 and velocity > 0:
+                velocity_alignment_bonus = -abs(velocity) * 500  # Penalty for counter-trend
+            
+            base_edge = max(base_edge + velocity_alignment_bonus, 1.0)  # Minimum 1% edge after adjustment
 
             
 
@@ -4823,46 +4891,67 @@ class LeanAgent15m:
 
         
 
-        # Calculate edges for both sides
-
+        # Calculate edges for both sides with validation
         edge_yes_pct = None
-
         edge_no_pct = None
+        
+        # CRITICAL FIX: Validate both sides have valid prices before edge calculation
+        # If one side is N/A, reconstruct from the other side using duality (NO = 100 - YES)
+        if yes_price_cents is None or yes_price_cents <= 0:
+            if no_price_cents and no_price_cents > 0:
+                yes_price_cents = 100 - no_price_cents
+                logger.warning(
+                    "[PRICE-RECONSTRUCTION] asset=%s YES price was N/A, reconstructed from NO price: YES=%dc (NO=%dc)",
+                    asset, yes_price_cents, no_price_cents
+                )
+            else:
+                logger.error(
+                    "[PRICE-VALIDATION-FAILURE] asset=%s both YES and NO prices are N/A - CANNOT CALCULATE EDGES",
+                    asset
+                )
+                return None
+        
+        if no_price_cents is None or no_price_cents <= 0:
+            if yes_price_cents and yes_price_cents > 0:
+                no_price_cents = 100 - yes_price_cents
+                logger.warning(
+                    "[PRICE-RECONSTRUCTION] asset=%s NO price was N/A, reconstructed from YES price: NO=%dc (YES=%dc)",
+                    asset, no_price_cents, yes_price_cents
+                )
+            else:
+                logger.error(
+                    "[PRICE-VALIDATION-FAILURE] asset=%s both YES and NO prices are N/A - CANNOT CALCULATE EDGES",
+                    asset
+                )
+                return None
+        
+        # Recalculate range checks after reconstruction
+        yes_in_range = (10 <= yes_price_cents <= 75)
+        no_in_range = (10 <= no_price_cents <= 75)
+        
+        # CRITICAL FIX: 2026-07-24 - Always calculate edges, never return N/A
+        # Edge calculation should happen regardless of range - range gating happens later
+        # This prevents yes_edge=N/A or no_edge=N/A in logs
+        edge_yes_pct = fvg_edge(long_score, 1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
+        edge_no_pct = fvg_edge(short_score, -1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
 
         
 
-        if yes_in_range:
-
-            edge_yes_pct = fvg_edge(long_score, 1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
-
-        
-
-        if no_in_range:
-
-            edge_no_pct = fvg_edge(short_score, -1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
-
-        
-
-        # Log dual-side evaluation
-
+        # Log dual-side evaluation with enhanced diagnostic detail
         logger.info(
-
-            "[DUAL-SIDE-EVAL] asset=%s yes_price=%dc no_price=%dc yes_in_range=%s no_in_range=%s",
-
-            asset, yes_price_cents, no_price_cents, yes_in_range, no_in_range
-
+            "[DUAL-SIDE-EVAL] asset=%s yes_price=%dc no_price=%dc yes_in_range=%s no_in_range=%s "
+            "strike_target=%s",
+            asset, yes_price_cents, no_price_cents, yes_in_range, no_in_range,
+            strike_target or "N/A"
         )
 
         logger.info(
-
-            "[MOMENTUM-FVG-DUAL-SIDE] asset=%s long_score=%d short_score=%d yes_edge=%s no_edge=%s",
-
-            asset, long_score, short_score, 
-
-            f"{edge_yes_pct:.2f}%" if edge_yes_pct else "None",
-
-            f"{edge_no_pct:.2f}%" if edge_no_pct else "None"
-
+            "[DUAL-SIDE-EDGE-CALC] asset=%s long_score=%d short_score=%d yes_edge=%s no_edge=%s "
+            "macd=%.6f rsi=%.2f fvg_dir=%s fvg_conf=%.2f obi=%.3f obi_strong=%s",
+            asset, long_score, short_score,
+            f"{edge_yes_pct:.4f}" if edge_yes_pct is not None else "N/A",
+            f"{edge_no_pct:.4f}" if edge_no_pct is not None else "N/A",
+            macd_histogram, rsi, fvg_direction, fvg_confidence, obi, obi_strong
         )
 
         
@@ -4911,41 +5000,91 @@ class LeanAgent15m:
 
         
 
-        # CRITICAL FIX: 2026-07-24 - Enforce thesis_side invariant in side selection
-        # Only select the thesis_side if it has a positive edge; reject if thesis_side has no edge
-        # This prevents "cheap but wrong side" from overriding directional signal
+        # CRITICAL FIX: 2026-07-24 - Replace thesis_side invariant with hybrid edge-based selection
+        # Select side with higher positive edge, but apply velocity alignment threshold
+        # This preserves directional bias without killing opportunity when opposite side has much better edge
         
-        thesis_edge = side_edges.get(thesis_side)
+        yes_edge = side_edges.get("yes")
+        no_edge = side_edges.get("no")
         
-        if thesis_edge is None or thesis_edge <= 0:
+        candidates = []
+        
+        if yes_edge and yes_edge > 0:
+            candidates.append(("yes", yes_edge))
+        
+        if no_edge and no_edge > 0:
+            candidates.append(("no", no_edge))
+        
+        if not candidates:
             logger.info(
-                "[PRICE-SIDE-CHECK-REJECT] asset=%s thesis_side=%s thesis_edge=%.4f -> NO TRADE "
-                "(thesis_side has no positive edge; wrong-side cheapness cannot override directional signal)",
-                asset, thesis_side, thesis_edge or 0.0
+                "[DUAL-SIDE-REJECT] asset=%s yes_edge=%.4f no_edge=%.4f -> NO TRADE "
+                "(no positive edge on either side)",
+                asset, yes_edge or 0.0, no_edge or 0.0
             )
             return None
         
-        # CRITICAL INVARIANT: signal_side MUST equal thesis_side
-        # We no longer select based on edge comparison; we use thesis_side from velocity
-        signal_side = thesis_side
-        selected_edge = thesis_edge
+        # Hybrid selection: prefer velocity-aligned side unless opposite side has significantly better edge
+        # Edge ratio threshold: allow opposite side only if it's 1.5x better than velocity-aligned side
+        EDGE_RATIO_THRESHOLD = 1.5
         
-        # Apply midpoint bonus only to thesis_side (for reporting, not selection)
-        if thesis_side == "yes" and yes_in_range:
+        velocity_aligned_side = thesis_side  # thesis_side is derived from velocity sign
+        velocity_aligned_edge = side_edges.get(velocity_aligned_side)
+        opposite_side = "no" if velocity_aligned_side == "yes" else "yes"
+        opposite_edge = side_edges.get(opposite_side)
+        
+        if velocity_aligned_edge and opposite_edge:
+            edge_ratio = opposite_edge / velocity_aligned_edge if velocity_aligned_edge > 0 else float('inf')
+            
+            if edge_ratio >= EDGE_RATIO_THRESHOLD:
+                # Opposite side has significantly better edge - select it despite velocity misalignment
+                signal_side = opposite_side
+                selected_edge = opposite_edge
+                logger.info(
+                    "[HYBRID-SELECTION-COUNTER-TREND] asset=%s velocity_aligned=%s velocity_edge=%.4f "
+                    "opposite=%s opposite_edge=%.4f edge_ratio=%.2f threshold=%.2f -> SELECTED OPPOSITE (edge advantage)",
+                    asset, velocity_aligned_side, velocity_aligned_edge,
+                    opposite_side, opposite_edge, edge_ratio, EDGE_RATIO_THRESHOLD
+                )
+            else:
+                # Velocity-aligned side has comparable or better edge - select it
+                signal_side = velocity_aligned_side
+                selected_edge = velocity_aligned_edge
+                logger.info(
+                    "[HYBRID-SELECTION-ALIGNED] asset=%s velocity_aligned=%s velocity_edge=%.4f "
+                    "opposite=%s opposite_edge=%.4f edge_ratio=%.2f threshold=%.2f -> SELECTED ALIGNED (velocity preferred)",
+                    asset, velocity_aligned_side, velocity_aligned_edge,
+                    opposite_side, opposite_edge, edge_ratio, EDGE_RATIO_THRESHOLD
+                )
+        else:
+            # One side missing - select the available side
+            signal_side, selected_edge = max(candidates, key=lambda x: x[1])
+            logger.info(
+                "[HYBRID-SELECTION-FALLBACK] asset=%s one side missing - selected=%s edge=%.4f",
+                asset, signal_side, selected_edge
+            )
+        
+        # Apply midpoint bonus to selected side
+        if signal_side == "yes" and yes_in_range:
             selected_edge_with_bonus = selected_edge + midpoint_bonus(yes_price_cents)
-        elif thesis_side == "no" and no_in_range:
+        elif signal_side == "no" and no_in_range:
             selected_edge_with_bonus = selected_edge + midpoint_bonus(no_price_cents)
         else:
             selected_edge_with_bonus = selected_edge
         
-        # Log invariant check
+        # Log dual-side selection with diagnostic detail
+        edge_ratio = (yes_edge / no_edge) if yes_edge and no_edge and no_edge > 0 else float('inf')
+        velocity_aligned = (signal_side == thesis_side)
+        
         logger.info(
-            "[PRICE-SIDE-CHECK-INVARIANT] asset=%s thesis_side=%s signal_side=%s thesis_edge=%.4f selected_edge=%.4f (INVARIANT: side matches thesis)",
-            asset, thesis_side, signal_side, thesis_edge, selected_edge
+            "[DUAL-SIDE-SELECTION] asset=%s velocity=%.6f thesis_side=%s "
+            "yes_edge=%.4f no_edge=%.4f selected_side=%s selected_edge=%.4f "
+            "edge_ratio=%.2f velocity_aligned=%s selection_method=MAX_EDGE",
+            asset, velocity, thesis_side, yes_edge or 0.0, no_edge or 0.0,
+            signal_side, selected_edge, edge_ratio, velocity_aligned
         )
 
-        # PHASE 1: Shadow dual-side evaluation for momentum_fvg path
-        # Determine expected side from velocity and strategy mode to measure structural bias
+        # PHASE 1: Dual-side evaluation logging (no longer shadow - this is actual selection)
+        # Log velocity alignment for analysis of whether velocity still provides useful signal
         try:
             from merid.prediction.signal_terminology import Side
             UNIFIED_TERMINOLOGY_AVAILABLE = True
@@ -4953,14 +5092,19 @@ class LeanAgent15m:
             UNIFIED_TERMINOLOGY_AVAILABLE = False
 
         if UNIFIED_TERMINOLOGY_AVAILABLE:
-            expected_side = Side.from_velocity_and_mode(velocity, "trend_following").value
+            velocity_expected_side = Side.from_velocity_and_mode(velocity, "trend_following").value
         else:
-            expected_side = "yes" if velocity > 0 else "no"
+            velocity_expected_side = "yes" if velocity > 0 else "no"
 
-        expected_side_edge = side_edges.get(expected_side) if side_edges.get(expected_side) is not None else 0.0
-        opposite_side = "no" if expected_side == "yes" else "yes"
+        velocity_expected_edge = side_edges.get(velocity_expected_side) if side_edges.get(velocity_expected_side) is not None else 0.0
+        opposite_side = "no" if velocity_expected_side == "yes" else "yes"
         opposite_side_edge = side_edges.get(opposite_side) if side_edges.get(opposite_side) is not None else 0.0
 
+        # CRITICAL FIX: 2026-07-24 - Define expected_side and related variables for metrics logging
+        # These were referenced but not defined, causing "name 'expected_side' is not defined" error
+        expected_side = velocity_expected_side
+        expected_side_edge = velocity_expected_edge
+        
         # Determine hypothetical best side (unconstrained dual-side selection)
         if expected_side_edge > opposite_side_edge:
             hypothetical_best_side = expected_side
@@ -4969,17 +5113,18 @@ class LeanAgent15m:
             hypothetical_best_side = opposite_side
             hypothetical_best_edge = opposite_side_edge
         else:
-            hypothetical_best_side = "no"  # Prefer NO for bias correction
+            # Equal edges - prefer NO for bias correction
+            hypothetical_best_side = "no"
             hypothetical_best_edge = expected_side_edge
 
-        # Log shadow dual-side evaluation for analysis
+        # Log velocity alignment diagnostic
         logger.info(
-            "[SHADOW-DUAL-SIDE-MOMENTUM-FVG] asset=%s velocity=%.6f expected_side=%s expected_edge=%.4f "
-            "opposite_side=%s opposite_edge=%.4f selected_side=%s selected_edge=%.4f hypothetical_best=%s hypothetical_edge=%.4f "
-            "yes_in_range=%s no_in_range=%s",
-            asset, velocity, expected_side, expected_side_edge,
+            "[VELOCITY-ALIGNMENT-DIAGNOSTIC] asset=%s velocity=%.6f velocity_expected_side=%s velocity_expected_edge=%.4f "
+            "opposite_side=%s opposite_edge=%.4f actual_selected_side=%s actual_selected_edge=%.4f "
+            "alignment=%s yes_in_range=%s no_in_range=%s",
+            asset, velocity, velocity_expected_side, velocity_expected_edge,
             opposite_side, opposite_side_edge, signal_side, selected_edge,
-            hypothetical_best_side, hypothetical_best_edge,
+            "ALIGNED" if signal_side == velocity_expected_side else "COUNTER_TREND",
             yes_in_range, no_in_range
         )
 
@@ -5034,14 +5179,10 @@ class LeanAgent15m:
             asset, signal_side, selected_edge, confidence, side_edges
         )
         
-        # CRITICAL INVARIANT CHECK: Verify signal_side matches thesis_side
-        if signal_side != thesis_side:
-            logger.critical(
-                "[PRICE-SIDE-CHECK-VIOLATION] asset=%s thesis_side=%s signal_side=%s MISMATCH - "
-                "This is a CRITICAL invariant violation. Side selection must match thesis_side from velocity.",
-                asset, thesis_side, signal_side
-            )
-            return None
+        # CRITICAL FIX: 2026-07-24 - Removed thesis_side invariant check
+        # Hybrid selection now allows counter-trend trades when opposite side has better edge
+        # signal_side may differ from thesis_side (velocity-derived) when edge_ratio >= threshold
+        # This is intentional behavior, not a violation
 
         # CRITICAL INSTRUMENTATION (2026-07-23): Log raw directional indicators for bias analysis
         logger.info(
@@ -5627,21 +5768,39 @@ class LeanAgent15m:
         )
 
         
-        # CRITICAL FIX: 2026-07-20 - Calculate edges for BOTH sides before selecting
-        # This prevents selecting a side with negative edge when the other side has positive edge
-        # Root cause of WINNER_MISMATCH: side selection based on price thresholds without checking edge sign
+        # CRITICAL FIX: 2026-07-25 - Use canonical edge formula for price-based strategy
+        # This ensures alignment with compute_canonical_edges() in canonical_edge.py
+        # Canonical formula: edge = model_prob - market_price
+        # 
+        # Previous threshold-based formula: edge = (threshold - market_price) / threshold
+        # This was inconsistent with canonical edge and caused allocator vs parity mismatch
+        #
+        # New canonical approach:
+        # 1. Derive model_prob from price thresholds (our "fair price" estimate)
+        # 2. Compute edge as model_prob - market_price (canonical formula)
+        # 3. This ensures consistency across allocator, parity block, and microstructure gate
         
-        # Calculate edge for YES side
-        yes_edge_pct = 0.0
-        if market_price <= buy_threshold:
-            yes_edge_pct = (buy_threshold - market_price) / buy_threshold
-            yes_edge_pct = max(yes_edge_pct, 0.02)  # Minimum 2% edge
+        # Derive model probabilities from thresholds (our fair price estimates)
+        # If price is at buy_threshold, we think fair probability = buy_threshold
+        # If price is below buy_threshold, we think it's undervalued (positive edge)
+        yes_model_prob = buy_threshold  # Our fair probability estimate for YES
+        no_model_prob = 1.0 - sell_threshold  # Our fair probability estimate for NO
         
-        # Calculate edge for NO side
-        no_edge_pct = 0.0
-        if market_price >= sell_threshold:
-            no_edge_pct = (market_price - sell_threshold) / (1.0 - sell_threshold)
-            no_edge_pct = max(no_edge_pct, 0.02)  # Minimum 2% edge
+        # Calculate canonical edges: edge = model_prob - market_price
+        yes_edge_pct = yes_model_prob - market_price
+        no_edge_pct = no_model_prob - (1.0 - market_price)  # NO edge = model_prob_NO - market_price_NO
+        
+        # Apply minimum edge threshold (2% = 0.02 fraction)
+        # This is a quality gate, not a transformation of the edge formula
+        if yes_edge_pct > 0:
+            yes_edge_pct = max(yes_edge_pct, 0.02)
+        else:
+            yes_edge_pct = 0.0  # Negative edge → no trade
+        
+        if no_edge_pct > 0:
+            no_edge_pct = max(no_edge_pct, 0.02)
+        else:
+            no_edge_pct = 0.0  # Negative edge → no trade
         
         # CRITICAL: Only select sides with POSITIVE edges
         # This is the root cause fix for WINNER_MISMATCH parity failures
@@ -7572,51 +7731,32 @@ class LeanAgent15m:
         
 
         # Check spread - RELAXED for one-sided books (common in 15m crypto)
-
-        # Allow trading if at least one side has liquidity
+        # NOTE: This is a coarse market-level filter before signal generation.
+        # Side-aware spread checking happens later in the microstructure gate (order_router.py)
+        # which has access to the order's side and performs side-specific validation.
 
         best_bid = getattr(market_state, 'best_bid_cents', 0)
-
         best_ask = getattr(market_state, 'best_ask_cents', 0)
 
-        
-
         # Handle None values - treat as 0
-
         if best_bid is None:
-
             best_bid = 0
-
         if best_ask is None:
-
             best_ask = 0
 
-        
-
         # For one-sided books, skip spread check and use available side
-
         if best_bid > 0 and best_ask > 0:
-
-            # Both sides available - check spread
-
+            # Both sides available - check spread (coarse filter for market quality)
             spread_cents = best_ask - best_bid
 
-            
-
             # 2026-07-11: Adaptive spread filter - treat wide spread as regime signal, not immediate kill-switch
-
             # For binary options with massive depth (e.g., DOGE: 250 yes, 48886 no), wide spreads (92c) are acceptable
-
             # Only reject pathological spreads (> 150c) that indicate no meaningful liquidity
-
             coarse_filter_threshold = 150  # Relaxed from 75c to allow trading in current market conditions
 
             if spread_cents > coarse_filter_threshold:
-
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread exceeds coarse filter=%dc (spread=%dc) - rejecting as pathological",
-
                                self.config.name, ticker, coarse_filter_threshold, spread_cents)
-
                 return False
 
             
@@ -8792,14 +8932,21 @@ class LeanAgent15m:
         
 
         # Phase 7: Check panic fade (volatility reversion) conditions
-
-        # Panic fade is the Turbine research winner: 93 of 96 variants profitable
-
-        # It fades extreme moves when price is at statistical extremes
-
-        # This strategy can override velocity-based signals when conditions are met
-
-        panic_fade_signal = self._check_panic_fade_conditions(asset, velocity)
+        # 2026-07-24: CRITICAL SSOT FIX - Skip entirely when signal_mode is momentum_fvg or profile is v2.x
+        # Profile YAML (kalshi_crypto_15m_v2.yaml) is single source of truth for signal_mode
+        # When signal_mode is momentum_fvg OR profile is v2.x, panic fade must not execute regardless of config
+        profile_version = getattr(self.config, 'profile_version', None)
+        if self.config.signal_mode == "momentum_fvg" or (profile_version and profile_version.startswith("2.")):
+            logger.debug(
+                "[SSOT-INVARIANT] asset=%s signal_mode=%s profile_version=%s - skipping panic fade check (profile SSOT)",
+                asset, self.config.signal_mode, profile_version
+            )
+            panic_fade_signal = None
+        else:
+            # Panic fade is the Turbine research winner: 93 of 96 variants profitable
+            # It fades extreme moves when price is at statistical extremes
+            # This strategy can override velocity-based signals when conditions are met
+            panic_fade_signal = self._check_panic_fade_conditions(asset, velocity)
 
         if panic_fade_signal:
 
@@ -13093,6 +13240,10 @@ class LeanAgentGrid15m:
 
         # Process results
 
+        # 2026-07-25: Track per-asset candidate counts and signal quality metrics
+        per_asset_candidates = {}
+        signal_quality_metrics = {}  # asset -> list of (model_prob_yes, edge_yes_frac, edge_no_frac)
+
         for agent, result in zip(self._agents, results):
 
             if isinstance(result, Exception):
@@ -13105,11 +13256,59 @@ class LeanAgentGrid15m:
 
                 logger.info("[AGENT-GRID-RUN-CYCLE-CANDIDATE] agent=%s side=%s", agent.config.name, result.get('side'))
 
+                # Track per-asset candidate count
+                asset = agent.config.asset
+                per_asset_candidates[asset] = per_asset_candidates.get(asset, 0) + 1
+
+                # Track signal quality metrics
+                model_prob_yes = result.get('model_prob_yes')
+                edge_yes_frac = result.get('edge_yes_frac')
+                edge_no_frac = result.get('edge_no_frac')
+                if model_prob_yes is not None and edge_yes_frac is not None and edge_no_frac is not None:
+                    if asset not in signal_quality_metrics:
+                        signal_quality_metrics[asset] = []
+                    signal_quality_metrics[asset].append((model_prob_yes, edge_yes_frac, edge_no_frac))
+
             else:
 
                 logger.info("[AGENT-GRID-RUN-CYCLE-NO-CANDIDATE] agent=%s", agent.config.name)
 
-        
+                # Track zero candidates for asset
+                asset = agent.config.asset
+                per_asset_candidates[asset] = per_asset_candidates.get(asset, 0)
+
+        # Log per-asset candidate counts (every tick to detect hidden filters)
+        for asset, count in per_asset_candidates.items():
+            logger.info("[SIGNAL-METRICS] asset=%s candidates=%d", asset, count)
+
+        # Log signal quality histogram every 60 ticks (5 minutes at 5s cadence)
+        if tick % 60 == 0 and signal_quality_metrics:
+            logger.info("[SIGNAL-QUALITY-HISTOGRAM] tick=%d", tick)
+            for asset, metrics in signal_quality_metrics.items():
+                if not metrics:
+                    continue
+                model_probs = [m[0] for m in metrics]
+                edge_yes = [m[1] for m in metrics]
+                edge_no = [m[2] for m in metrics]
+
+                import statistics
+                model_mean = statistics.mean(model_probs) if model_probs else 0.0
+                model_median = statistics.median(model_probs) if model_probs else 0.0
+                edge_yes_mean = statistics.mean(edge_yes) if edge_yes else 0.0
+                edge_yes_median = statistics.median(edge_yes) if edge_yes else 0.0
+                edge_no_mean = statistics.mean(edge_no) if edge_no else 0.0
+                edge_no_median = statistics.median(edge_no) if edge_no else 0.0
+
+                logger.info(
+                    "[SIGNAL-QUALITY] asset=%s samples=%d "
+                    "model_prob_mean=%.4f model_prob_median=%.4f "
+                    "edge_yes_mean=%.4f edge_yes_median=%.4f "
+                    "edge_no_mean=%.4f edge_no_median=%.4f",
+                    asset, len(metrics),
+                    model_mean, model_median,
+                    edge_yes_mean, edge_yes_median,
+                    edge_no_mean, edge_no_median
+                )
 
         logger.info("[CYCLE-COMPLETE] tick=%d candidates=%d", tick, len(candidates))
 
@@ -13363,170 +13562,44 @@ class LeanAgentGrid15m:
 
                 
 
-                # Phase 3: Execute only chosen orders
-
-                try:
-
-                    executed_count = 0
-
-                    for order in chosen_orders:
-
-                        try:
-
-                            # Find the original candidate for this order
-
-                            original_candidate = None
-
-                            for candidate in candidates:
-
-                                if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
-
-                                    original_candidate = candidate
-
-                                    break
-
-                            
-
-                            if original_candidate:
-
-                                # CRITICAL FIX (2026-07-12): Remove slot allocation from agent_grid_15m
-                                # Slot allocation is now handled exclusively in order_router.route_order_async
-                                # This prevents double allocation (agent_grid_15m → kalshi_tools → order_router)
-                                # which was causing exposure cap exhaustion and slot state corruption
-                                #
-                                # Execution flow is now:
-                                # agent_grid_15m → kalshi_tools._kalshi_place_order → order_router.route_order_async
-                                #                                                    → slot_allocator.request_allocation (SINGLE POINT)
-                                
-                                # Execute via kalshi_tools which routes to order_router for slot allocation
-                                from merid.prediction.kalshi_tools import _kalshi_place_order
-
-                                
-
-                                # Extract order parameters
-
-                                ticker = order.ticker
-
-                                side = order.side
-
-                                action = order.action
-
-                                price_cents = order.price_cents
-
-                                count = order.count
-
-                                agent_name = order.agent_name
-
-                                
-
-                                # Extract signal metadata
-
-                                model_prob = original_candidate.get('model_prob')
-
-                                edge_pct = original_candidate.get('edge_pct')
-
-                                confidence = original_candidate.get('confidence')
-
-                                
-
-                                logger.info(
-
-                                    "[GLOBAL-ALLOCATOR-EXECUTE] asset=%s ticker=%s side=%s price=%dc count=%d edge=%.1f%%",
-
-                                    order.asset, ticker, side, price_cents, count, order.edge_pct
-
-                                )
-
-                                
-
-                                # Emit structured REGIME-GATING invariant log for production suite parsing
-                                # Use inferred values for flags not currently tracked in codebase
-                                volatility = 0.02  # Default normal volatility (not currently tracked)
-                                volatility_flag = "normal"  # Default flag (not currently tracked)
-                                strategy_disabled = False  # Strategy is active (not currently tracked)
-                                trade_emitted = True  # Trade is being emitted
-                                logger.info(
-                                    "REGIME-GATING: volatility=%.4f flag=%s position_size=%d disabled=%s trade=%s market=%s",
-                                    volatility, volatility_flag, count, str(strategy_disabled).lower(), str(trade_emitted).lower(), ticker
-                                )
-
-                                # CRITICAL FIX (2026-07-13): Check if this candidate was already executed
-                                # This prevents duplicate executions across consecutive cycles
-                                candidate_key = self._get_candidate_key(ticker, side, price_cents)
-                                if candidate_key in self._executed_candidates:
-                                    logger.warning(
-                                        "[GLOBAL-ALLOCATOR] SKIP duplicate execution: ticker=%s side=%s price=%dc (already executed)",
-                                        ticker, side, price_cents
-                                    )
-                                    continue
-
-                                
-
-                                # CRITICAL FIX (2026-07-10): Session order count and cooldown are updated on FILL, not submission
-
-                                # This prevents perpetual cooldown blocks when orders don't fill (e.g., resting limit orders)
-
-                                # The update_cooldown_on_fill method handles both session count and cooldown on successful fills
-
-                                
-
-                                # Set default TP/SL
-                                # CRITICAL FIX (2026-07-19): Compute TP price from R-multiple to enable exit policy
-                                # Previously only set take_profit_r_multiple but never computed take_profit_price_cents,
-                                # causing positions to have no TP target and exit policies to fail
-                                stop_loss_price_cents = max(1, price_cents - 5)
-                                take_profit_r_multiple = 1.0
-                                risk_cents = abs(price_cents - stop_loss_price_cents)
-                                take_profit_price_cents = price_cents + int(risk_cents * take_profit_r_multiple)
-                                
-                                # Execute the order
-                                result = await _kalshi_place_order(
-                                    ticker=ticker,
-                                    side=side,
-                                    action=action,
-                                    price_cents=price_cents,
-                                    count=count,
-                                    agent_name=agent_name,
-                                    model_prob=model_prob,
-                                    edge_pct=edge_pct,
-                                    confidence=confidence,
-                                    stop_loss_price_cents=stop_loss_price_cents,
-                                    take_profit_price_cents=take_profit_price_cents,
-                                    take_profit_r_multiple=take_profit_r_multiple
-                                )
-                                
-                                # CRITICAL FIX (2026-07-19): Only count as executed if order succeeded
-                                # Previously, rejected orders were counted as executed, causing incorrect
-                                # execution statistics (e.g., "executed=3/3" when only 1 actually executed)
-                                if result and result.success:
-                                    executed_count += 1
-                                else:
-                                    logger.warning(
-                                        "[GLOBAL-ALLOCATOR] Order rejected by venue: ticker=%s side=%s price=%dc reason=%s",
-                                        ticker, side, price_cents,
-                                        result.error_message if result and hasattr(result, 'error_message') else "unknown"
-                                    )
-                            else:
-                                logger.warning(
-                                    "[GLOBAL-ALLOCATOR] Original candidate not found for order: ticker=%s side=%s",
-                                    order.ticker, order.side
-                                )
-                        except Exception as e:
-                            logger.error(
-                                "[GLOBAL-ALLOCATOR] ERROR executing order: ticker=%s side=%s price=%dc error=%s",
-                                order.ticker, order.side, order.price_cents, str(e), exc_info=True
-                            )
-
-                    logger.info(
-                        "[GLOBAL-ALLOCATOR] Execution complete: executed=%d/%d orders",
-                        executed_count, len(chosen_orders)
-                    )
-
-                except Exception as e:
-                    logger.error(
-                        "[GLOBAL-ALLOCATOR] CRITICAL ERROR in order execution phase: %s",
-                        str(e), exc_info=True
-                    )
+                # CRITICAL FIX (2026-07-21): Return chosen orders as candidates instead of executing directly
+                # The agent grid should return candidates to loop_15m.py for proper validation and execution
+                # loop_15m.py has critical checks: duplicate prevention, edge re-validation, count=0 check, parity checks
+                # Executing directly bypasses these checks and causes the 0% fill rate issue
+                
+                # Convert chosen orders back to candidate format for loop_15m.py processing
+                # Preserve original candidates list for lookup
+                original_candidates = candidates
+                candidates = []
+                for order in chosen_orders:
+                    # Find the original candidate for this order
+                    original_candidate = None
+                    for candidate in original_candidates:
+                        if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
+                            original_candidate = candidate
+                            break
+                    
+                    if original_candidate:
+                        # Add TP/SL metadata to candidate
+                        stop_loss_price_cents = max(1, order.price_cents - 5)
+                        take_profit_r_multiple = 1.0
+                        risk_cents = abs(order.price_cents - stop_loss_price_cents)
+                        take_profit_price_cents = order.price_cents + int(risk_cents * take_profit_r_multiple)
+                        
+                        original_candidate['stop_loss_price_cents'] = stop_loss_price_cents
+                        original_candidate['take_profit_price_cents'] = take_profit_price_cents
+                        original_candidate['take_profit_r_multiple'] = take_profit_r_multiple
+                        
+                        candidates.append(original_candidate)
+                        logger.info(
+                            "[GLOBAL-ALLOCATOR-RETURN] asset=%s ticker=%s side=%s price=%dc count=%d edge=%.1f%%",
+                            order.asset, order.ticker, order.side, order.price_cents, order.count, order.edge_pct
+                        )
+                    else:
+                        logger.warning(
+                            "[GLOBAL-ALLOCATOR] Original candidate not found for order: ticker=%s side=%s",
+                            order.ticker, order.side
+                        )
 
             except Exception as e:
                 logger.error(
