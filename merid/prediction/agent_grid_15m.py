@@ -13256,8 +13256,8 @@ class LeanAgentGrid15m:
 
                 logger.info("[AGENT-GRID-RUN-CYCLE-CANDIDATE] agent=%s side=%s", agent.config.name, result.get('side'))
 
-                # Track per-asset candidate count
-                asset = agent.config.asset
+                # Track per-asset candidate count (extract asset from agent name, e.g., "BTC_15M" -> "BTC")
+                asset = agent.config.name.split('_')[0]  # Extract asset from agent name
                 per_asset_candidates[asset] = per_asset_candidates.get(asset, 0) + 1
 
                 # Track signal quality metrics
@@ -13273,8 +13273,8 @@ class LeanAgentGrid15m:
 
                 logger.info("[AGENT-GRID-RUN-CYCLE-NO-CANDIDATE] agent=%s", agent.config.name)
 
-                # Track zero candidates for asset
-                asset = agent.config.asset
+                # Track zero candidates for asset (extract asset from agent name, e.g., "BTC_15M" -> "BTC")
+                asset = agent.config.name.split('_')[0]  # Extract asset from agent name
                 per_asset_candidates[asset] = per_asset_candidates.get(asset, 0)
 
         # Log per-asset candidate counts (every tick to detect hidden filters)
