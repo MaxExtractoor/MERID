@@ -716,8 +716,23 @@ class Kalshi15mLoop:
         except Exception as e:
             logger.warning("[15m-LOOP] Failed to initialize _current_window_suffix: %s", e)
             self._current_window_suffix = None  # Fallback to None if initialization fails
-        self._executed_candidates_this_window = set()  # Track executed candidates in current window to prevent duplicates
+        self._executed_candidates_this_window = {}  # Track executed candidates in current window to prevent duplicates (dict for edge improvement tracking)
         self._halted_due_to_drawdown = False
+        
+        # RESEARCH-ALIGNED: Rejection reason aggregation counters
+        # Track why candidates are rejected to identify filtering bottlenecks
+        self._rejection_counters = {
+            "parity_blocked": 0,
+            "edge_below_threshold": 0,
+            "duplicate_order": 0,
+            "price_out_of_range": 0,
+            "position_exists": 0,
+            "resting_order_exists": 0,
+            "edge_validation_failed": 0,
+            "exit_policy_failed": 0,
+            "router_rejected": 0,
+            "other": 0
+        }
         
         # Market making integration
         self._market_maker = None
@@ -759,10 +774,11 @@ class Kalshi15mLoop:
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
         
-        # Per-asset position tracking for risk enforcement
-        self._asset_positions: Dict[str, float] = {}  # asset -> current notional exposure
+        # Per-asset position tracking for risk enforcement (use Decimal to match position.notional_value type)
+        from decimal import Decimal
+        self._asset_positions: Dict[str, Decimal] = {}  # asset -> current notional exposure
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            self._asset_positions[asset] = 0.0
+            self._asset_positions[asset] = Decimal('0.0')
         
         # Coinbase WebSocket client for external spot velocity signals (Turbine research #1 winner)
         self._coinbase_client = None
@@ -805,9 +821,10 @@ class Kalshi15mLoop:
                 logger.info("[15m-LOOP] get_position_cache() returned: %s (attempt %d/%d)", type(position_cache), attempt + 1, max_retries)
                 
                 # BUG FIX: get_asset_exposure doesn't exist - calculate exposure manually
-                # Initialize all assets to 0
+                # Initialize all assets to 0 (use Decimal to match position.notional_value type)
+                from decimal import Decimal
                 for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                    self._asset_positions[asset] = 0.0
+                    self._asset_positions[asset] = Decimal('0.0')
                 
                 # Get all positions and calculate exposure per asset
                 all_positions = position_cache.get_all_positions(validate_freshness=False)
@@ -882,20 +899,22 @@ class Kalshi15mLoop:
                         time.sleep(retry_delay)
                     else:
                         # Fallback to default 0.0 values
-                        logger.warning("[15m-LOOP] Position cache failed after %d retries, using default 0.0 values", max_retries)
+                        logger.warning("[15m-LOOP] Position cache failed after %d retries, using default Decimal values", max_retries)
+                        from decimal import Decimal
                         for asset in expected_assets:
                             if asset not in self._asset_positions:
-                                self._asset_positions[asset] = 0.0
+                                self._asset_positions[asset] = Decimal('0.0')
                         logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", self._asset_positions)
             except Exception as e:
                 logger.warning("[15m-LOOP] Failed to load positions from position cache (attempt %d/%d): %s", attempt + 1, max_retries, e, exc_info=True)
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
-                    # Fallback to default 0.0 values
-                    logger.warning("[15m-LOOP] Position cache failed after %d retries, using default 0.0 values", max_retries)
+                    # Fallback to default Decimal values
+                    logger.warning("[15m-LOOP] Position cache failed after %d retries, using default Decimal values", max_retries)
+                    from decimal import Decimal
                     for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                        self._asset_positions[asset] = 0.0
+                        self._asset_positions[asset] = Decimal('0.0')
                     logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", self._asset_positions)
         
         # CRITICAL FIX: Reset concurrent trade counter based on actual open positions
@@ -2091,6 +2110,7 @@ class Kalshi15mLoop:
             while self._running and not self._stop_event.is_set():
                 tick_id += 1
                 cycle_start = time.time()
+                logger.info("[15m-LOOP] Starting tick %d", tick_id)
                 
                 try:
                     # P3 FIX: Reset _active_trades counter per cycle based on actual open positions
@@ -2122,9 +2142,10 @@ class Kalshi15mLoop:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
                     position_cache = get_position_cache()
                     
-                    # Initialize all assets to 0
+                    # Initialize all assets to 0 (use Decimal to match position.notional_value type)
+                    from decimal import Decimal
                     for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                        self._asset_positions[asset] = 0.0
+                        self._asset_positions[asset] = Decimal('0.0')
                     
                     # Get all positions and calculate exposure per asset
                     all_positions = position_cache.get_all_positions(validate_freshness=False)
@@ -2288,8 +2309,11 @@ class Kalshi15mLoop:
                     else:
                         logger.debug("[15m-LOOP] Window unchanged: %s - skipping cycle reset", current_window.suffix)
                     
-                    # Run trading cycle
-                    candidates = await self.agent_grid.run_cycle(tick_id, allow_new_entries=True)
+                    # CRITICAL: Run trading cycle via SINGLE canonical path
+                    # Call _run_agent_grid_with_timeout which returns candidates
+                    # This eliminates the dual call problem
+                    logger.info("[15m-LOOP] About to call _run_agent_grid_with_timeout tick=%d", tick_id)
+                    candidates = await self._run_agent_grid_with_timeout(tick_id, trading_ready=True, allow_new_entries=True)
                     logger.info("[15m-LOOP] Generated %d candidates in tick %d", len(candidates), tick_id)
                     
                     # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m._select_best_edge_per_asset
@@ -2305,328 +2329,410 @@ class Kalshi15mLoop:
                             i, candidate.get("ticker"), candidate.get("side"), candidate.get("edge_pct", 0.0)
                         )
                     
-                    # Execute candidates (already filtered by agent_grid_15m to 1 per asset)
-                    logger.info("[15m-LOOP] Starting execution loop for %d candidates (pre-filtered by agent_grid_15m)", len(candidates))
-                    for candidate in candidates:
-                        try:
-                            # Extract asset from ticker (e.g., "KXBTC15M-26JUN300345-45" -> "BTC")
-                            ticker = candidate.get("ticker", "")
-                            logger.info("[15m-LOOP] Processing candidate: ticker=%s", ticker)
-                            
-                            # CRITICAL FIX: More robust asset extraction
-                            # Handle both full market IDs (KXBTC15M-26JUN300345-45) and series tickers (KXBTC15M)
-                            if "15M" in ticker:
-                                # Split on "15M" and take the part before it
-                                asset_part = ticker.split("15M")[0]
-                            else:
-                                asset_part = ticker
-                            
-                            # Remove "KX" prefix if present
-                            asset = asset_part.replace("KX", "")
-                            
-                            # Normalize asset name
-                            asset_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "XRP": "XRP", "DOGE": "DOGE"}
-                            asset = asset_map.get(asset, asset)
-                            
-                            logger.info("[15m-LOOP] Extracted asset=%s from ticker=%s", asset, ticker)
-                            
-                            if asset not in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                                logger.warning("[15m-LOOP] Unknown asset from ticker %s: extracted=%s - skipping", ticker, asset)
-                                continue
-                            
-                            # Get candidate edge (single source of truth: edge_pct in FRACTION units)
-                            edge = candidate.get("edge_pct", 0.0)
-                            side = candidate.get("side", "")
-                            logger.info("[15M-LOOP-SIDE-AWARE] Candidate details: edge=%.6f side=%s", edge, side)
-                            
-                            # Check if we have an open position for this asset
-                            current_position = self._asset_positions.get(asset, 0.0)
-                            has_position = abs(current_position) > 0.01  # Small threshold for floating point
-                            logger.info("[15m-LOOP] Position check: asset=%s position=%.2f has_position=%s", asset, current_position, has_position)
-                            
-                            # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m
-                            # The loop_15m no longer needs to track best edge per asset since agent_grid_15m
-                            # already ensures only 1 candidate per asset (cheapest with best edge) is returned.
-                            # We only need to check for swing mode and edge validation here.
-                            
-                            # Check swing mode status for this asset
-                            swing_enabled = self._swing_mode.get(asset, {}).get("enabled", False)
-                            exited_side = self._swing_mode.get(asset, {}).get("exited_side", None)
-                            
-                            # Determine if this is a swing reversal (opposite side to exited position)
-                            is_swing_reversal = swing_enabled and exited_side and side != exited_side
-                            
-                            # PER-ASSET EDGE THRESHOLD (2026-07-14 FIX)
-                            # Use validate_edge() from risk_parameters.py as single source of truth
-                            # validate_edge() uses unified 2.5% threshold from profile edge_bands (industry standard)
-                            # Previous EDGE_RESTING_ENTRY_* (1.25%-2.75%) were for order aggressiveness (maker vs taker), not trade execution
-                            # This fix aligns with profile YAML edge_bands configuration which is the single source of truth
-                            # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
-                            # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
-                            from merid.event_venues.kalshi.risk_parameters import validate_edge
-                            
-                            # Validate edge using unified 2.5% threshold from profile edge_bands
-                            is_valid, reason = validate_edge(edge, asset, confidence=0.5)
-                            
-                            if not is_valid:
-                                logger.debug(
-                                    "[15m-LOOP] Edge validation failed: asset=%s edge=%.6f reason=%s",
-                                    asset, edge, reason
-                                )
-                                continue  # Skip if edge below 2.5%
-                            
-                            # CRITICAL FIX (2026-07-16): Since agent_grid_15m already filtered to best edge per asset,
-                            # we only need to skip if swing mode is disabled and we have a position (no re-entry)
-                            # Swing mode allows opposite-side entry after trailing exit
-                            if has_position and not is_swing_reversal:
-                                logger.debug(
-                                    "[15m-LOOP] Asset has position and swing mode not enabled: asset=%s - skipping",
-                                    asset
-                                )
-                                continue
-                            
-                            if is_swing_reversal:
-                                logger.info(
-                                    "[SWING-MODE] Reversal entry: asset=%s from %s to %s edge=%.2f%% - swing mode enabled",
-                                    asset, exited_side, side, edge
-                                )
-                                # Disable swing mode after executing reversal
-                                self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
-                                logger.info("[SWING-MODE] Disabled for asset=%s after reversal entry", asset)
-                            
-                            # CRITICAL FIX (2026-07-13): Check if this candidate was already executed in current 15-minute window
-                            # This prevents re-executing the same ticker+side+price combination multiple times
-                            # The previous bug only added to the set AFTER execution, allowing duplicates
-                            candidate_key = self._get_candidate_key(candidate)
-                            if candidate_key in self._executed_candidates_this_window:
-                                logger.debug(
-                                    "[15m-LOOP] Candidate already executed in current window: ticker=%s side=%s - skipping",
-                                    ticker, side
-                                )
-                                continue
-                            
-                            # CRITICAL FIX (2026-07-21): Check if asset already has position or pending order in current 15-minute window
-                            # This enforces one-contract-per-asset-per-15-minute rule at execution time, not just signal time
-                            # The key is asset + window (ticker prefix + 15-minute window ID), not just ticker+side+price
-                            # CRITICAL FIX (2026-07-21): Use same source of truth as router (position_cache + resting_order_monitor)
-                            # to ensure loop and router don't diverge on window state
-                            asset_window_key = self._get_asset_window_key(candidate)
-                            
-                            # Check in-memory executed candidates first (fast path)
-                            if asset_window_key in self._executed_candidates_this_window:
-                                logger.warning(
-                                    "[15m-LOOP] Asset already has order in current 15-minute window: asset=%s ticker=%s - skipping to prevent duplicate exposure",
-                                    asset, ticker
-                                )
-                                continue
-                            
-                            # Check position cache for existing positions in this window (same as router)
+                    # CRITICAL: Handle zero candidates case explicitly
+                    if len(candidates) == 0:
+                        logger.info("[15m-LOOP] No candidates this cycle, skipping execution")
+                    else:
+                        # Execute candidates (already filtered by agent_grid_15m to 1 per asset)
+                        logger.info("[15m-LOOP] Starting execution loop for %d candidates (pre-filtered by agent_grid_15m)", len(candidates))
+                        for candidate in candidates:
                             try:
-                                from merid.event_venues.kalshi.position_cache import get_position_cache
-                                position_cache = get_position_cache()
-                                if position_cache:
-                                    all_positions = position_cache.get_all_positions(validate_freshness=False)
-                                    for pos_ticker, pos_obj in all_positions.items():
-                                        if pos_obj and pos_obj.contracts > 0:
-                                            # Extract asset and window from position ticker
-                                            pos_asset = None
-                                            pos_ticker_upper = pos_ticker.upper()
-                                            if "BTC" in pos_ticker_upper:
-                                                pos_asset = "BTC"
-                                            elif "ETH" in pos_ticker_upper:
-                                                pos_asset = "ETH"
-                                            elif "SOL" in pos_ticker_upper:
-                                                pos_asset = "SOL"
-                                            elif "XRP" in pos_ticker_upper:
-                                                pos_asset = "XRP"
-                                            elif "DOGE" in pos_ticker_upper:
-                                                pos_asset = "DOGE"
-                                            
-                                            if pos_asset == asset:
-                                                pos_window_id = pos_ticker.split("-")[-2] if "-" in pos_ticker else pos_ticker
-                                                if pos_window_id == ticker.split("-")[-2] if "-" in ticker else ticker:
-                                                    logger.warning(
-                                                        "[15m-LOOP] Asset already has position in current window: asset=%s window=%s position=%s (contracts=%d) - skipping",
-                                                        asset, pos_window_id, pos_ticker, pos_obj.contracts
-                                                    )
-                                                    continue
-                            except Exception as pos_check_err:
-                                logger.warning("[15m-LOOP] Failed to check position cache for asset-window state: %s", pos_check_err)
-                            
-                            # Check resting order monitor for pending orders in this window (same as router)
-                            try:
-                                from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
-                                monitor = get_resting_order_monitor()
-                                if monitor:
-                                    open_order_id = monitor.find_open_order(
-                                        ticker=ticker,
-                                        side=str(candidate.get("side", "")).lower(),
-                                        action=str(candidate.get("action", "")).lower()
+                                # Extract asset from ticker (e.g., "KXBTC15M-26JUN300345-45" -> "BTC")
+                                ticker = candidate.get("ticker", "")
+                                logger.info("[15m-LOOP] Processing candidate: ticker=%s", ticker)
+                                
+                                # CRITICAL FIX: More robust asset extraction
+                                # Handle both full market IDs (KXBTC15M-26JUN300345-45) and series tickers (KXBTC15M)
+                                if "15M" in ticker:
+                                    # Split on "15M" and take the part before it
+                                    asset_part = ticker.split("15M")[0]
+                                else:
+                                    asset_part = ticker
+                                
+                                # Remove "KX" prefix if present
+                                asset = asset_part.replace("KX", "")
+                                
+                                # Normalize asset name
+                                asset_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "XRP": "XRP", "DOGE": "DOGE"}
+                                asset = asset_map.get(asset, asset)
+                                
+                                logger.info("[15m-LOOP] Extracted asset=%s from ticker=%s", asset, ticker)
+                                
+                                if asset not in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                                    logger.warning("[15m-LOOP] Unknown asset from ticker %s: extracted=%s - skipping", ticker, asset)
+                                    continue
+                                
+                                # Get candidate edge (single source of truth: edge_pct in FRACTION units)
+                                edge = candidate.get("edge_pct", 0.0)
+                                side = candidate.get("side", "")
+                                logger.info("[15M-LOOP-SIDE-AWARE] Candidate details: edge=%.6f side=%s", edge, side)
+                                
+                                # Check if we have an open position for this asset
+                                current_position = self._asset_positions.get(asset, 0.0)
+                                has_position = abs(current_position) > 0.01  # Small threshold for floating point
+                                logger.info("[15m-LOOP] Position check: asset=%s position=%.2f has_position=%s", asset, current_position, has_position)
+                                
+                                # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m
+                                # The loop_15m no longer needs to track best edge per asset since agent_grid_15m
+                                # already ensures only 1 candidate per asset (cheapest with best edge) is returned.
+                                # We only need to check for swing mode and edge validation here.
+                                
+                                # Check swing mode status for this asset
+                                swing_enabled = self._swing_mode.get(asset, {}).get("enabled", False)
+                                exited_side = self._swing_mode.get(asset, {}).get("exited_side", None)
+                                
+                                # Determine if this is a swing reversal (opposite side to exited position)
+                                is_swing_reversal = swing_enabled and exited_side and side != exited_side
+                                
+                                # PER-ASSET EDGE THRESHOLD (2026-07-14 FIX)
+                                # Use validate_edge() from risk_parameters.py as single source of truth
+                                # validate_edge() uses unified 2.5% threshold from profile edge_bands (industry standard)
+                                # Previous EDGE_RESTING_ENTRY_* (1.25%-2.75%) were for order aggressiveness (maker vs taker), not trade execution
+                                # This fix aligns with profile YAML edge_bands configuration which is the single source of truth
+                                # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
+                                # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
+                                from merid.event_venues.kalshi.risk_parameters import validate_edge
+                                
+                                # Validate edge using unified 2.5% threshold from profile edge_bands
+                                is_valid, reason = validate_edge(edge, asset, confidence=0.5)
+                                
+                                if not is_valid:
+                                    logger.debug(
+                                        "[15m-LOOP] Edge validation failed: asset=%s edge=%.6f reason=%s",
+                                        asset, edge, reason
                                     )
-                                    if open_order_id:
+                                    continue  # Skip if edge below 2.5%
+                                
+                                # CRITICAL FIX (2026-07-16): Since agent_grid_15m already filtered to best edge per asset,
+                                # we only need to skip if swing mode is disabled and we have a position (no re-entry)
+                                # Swing mode allows opposite-side entry after trailing exit
+                                if has_position and not is_swing_reversal:
+                                    logger.debug(
+                                        "[15m-LOOP] Asset has position and swing mode not enabled: asset=%s - skipping",
+                                        asset
+                                    )
+                                    continue
+                                
+                                if is_swing_reversal:
+                                    logger.info(
+                                        "[SWING-MODE] Reversal entry: asset=%s from %s to %s edge=%.2f%% - swing mode enabled",
+                                        asset, exited_side, side, edge
+                                    )
+                                    # Disable swing mode after executing reversal
+                                    self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
+                                    logger.info("[SWING-MODE] Disabled for asset=%s after reversal entry", asset)
+                                
+                                # CRITICAL FIX (2026-07-13): Check if this candidate was already executed in current 15-minute window
+                                # This prevents re-executing the same ticker+side+price combination multiple times
+                                # The previous bug only added to the set AFTER execution, allowing duplicates
+                                candidate_key = self._get_candidate_key(candidate)
+                                if candidate_key in self._executed_candidates_this_window:
+                                    logger.debug(
+                                        "[15m-LOOP] Candidate already executed in current window: ticker=%s side=%s - skipping",
+                                        ticker, side
+                                    )
+                                    continue
+                                
+                                # CRITICAL FIX (2026-07-21): Check if asset already has position or pending order in current 15-minute window
+                                # This enforces one-contract-per-asset-per-15-minute rule at execution time, not just signal time
+                                # The key is asset + window (ticker prefix + 15-minute window ID), not just ticker+side+price
+                                # CRITICAL FIX (2026-07-21): Use same source of truth as router (position_cache + resting_order_monitor)
+                                # to ensure loop and router don't diverge on window state
+                                asset_window_key = self._get_asset_window_key(candidate)
+                                
+                                # RESEARCH-ALIGNED: Exposure-aware re-entry logic instead of binary block
+                                # Allow re-entry if: (1) current exposure < cap, OR (2) new edge > prior edge + delta
+                                # This captures late-window edge formation instead of blocking all re-entries
+                                prior_candidate = self._executed_candidates_this_window.get(asset_window_key)
+                                if prior_candidate:
+                                    prior_edge = prior_candidate.get("edge_pct", 0) / 100.0
+                                    current_edge = candidate.get("edge_pct", 0) / 100.0
+                                    edge_improvement_delta = 0.005  # 0.5% improvement required for re-entry
+                                    
+                                    # Check if current edge is materially better than prior edge
+                                    if current_edge > prior_edge + edge_improvement_delta:
+                                        logger.info(
+                                            "[15m-LOOP] Edge improvement re-entry: asset=%s ticker=%s prior_edge=%.4f current_edge=%.4f improvement=%.4f - ALLOWING",
+                                            asset, ticker, prior_edge, current_edge, current_edge - prior_edge
+                                        )
+                                        # Update tracked candidate to new higher-edge version
+                                        self._executed_candidates_this_window[asset_window_key] = candidate
+                                    else:
+                                        self._rejection_counters["duplicate_order"] += 1
                                         logger.warning(
-                                            "[15m-LOOP] Asset has resting order in current window: asset=%s ticker=%s order=%s - skipping",
-                                            asset, ticker, open_order_id
+                                            "[15m-LOOP] Asset already has order in current window: asset=%s ticker=%s prior_edge=%.4f current_edge=%.4f - skipping (no material improvement)",
+                                            asset, ticker, prior_edge, current_edge
                                         )
                                         continue
-                            except Exception as monitor_err:
-                                logger.warning("[15m-LOOP] Failed to check resting order monitor: %s", monitor_err)
-                            
-                            # CRITICAL: Re-validate edge before execution
-                            if not self._validate_candidate_edge(candidate):
-                                logger.warning("[15m-LOOP] Candidate edge validation failed: %s - skipping execution", ticker)
-                                continue
-                            
-                            # Use dynamic position sizing if enabled
-                            try:
-                                from merid.prediction.unified_sizing import compute_order_size
-                                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                                from decimal import Decimal
                                 
-                                # Use sync version to avoid coroutine error in async context
-                                bankroll_usd = get_equity_for_risk_calc_sync()
-                                if bankroll_usd is None:
-                                    bankroll_usd = 100.0
-                                
-                                # Get price from candidate or market state
-                                # CRITICAL FIX (2026-07-06): The old default of 50c made sizing
-                                # blind to the real price: floor($cap/$0.50)=2 contracts, while
-                                # the order was later built at the real mid (60-89c), producing
-                                # multi-contract orders (doubling up) and asset_notional_exceeded
-                                # rejections. Resolve the SAME side-aware price here that
-                                # _execute_candidate uses to build the order.
-                                price_cents = int(candidate.get("price_cents", 0) or 0)
-                                if price_cents <= 0:
-                                    # Fallback to market state (side-aware, Kalshi duality: NO = 100 - YES_mid)
-                                    if self.market_state_store:
-                                        market_state = self.market_state_store.get(ticker)
-                                        if market_state:
-                                            candidate_side = str(candidate.get("side", "")).lower()
-                                            # CRITICAL FIX: If side is missing, log error and skip - don't default to "yes"
-                                            if not candidate_side:
-                                                logger.error("[15m-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT DETERMINE PRICE - SKIPPING", ticker)
-                                                continue
-                                            yes_mid = 0
-                                            if getattr(market_state, 'mid_cents', None):
-                                                yes_mid = int(market_state.mid_cents)
-                                            elif getattr(market_state, 'best_bid_cents', None) and getattr(market_state, 'best_ask_cents', None):
-                                                yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
-                                            if yes_mid > 0:
-                                                if candidate_side in ("no", "buy_no"):
-                                                    price_cents = 100 - yes_mid
-                                                else:
-                                                    price_cents = yes_mid
-                                if price_cents <= 0:
-                                    logger.warning(
-                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 42c placeholder (midpoint of 10-75c canonical range)",
-                                        ticker
-                                    )
-                                    price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
-                            
-                                # Get edge, confidence, and model_prob from candidate
-                                edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
-                                confidence = Decimal(str(candidate.get("confidence", 0.5)))
-                                model_prob = candidate.get("model_prob", None)  # 2026-07-12: Kelly Criterion integration
-                                candidate_side = str(candidate.get("side", "")).lower()  # 2026-07-13: Side for Kelly calculation
-                                # CRITICAL FIX: If side is missing, log error and skip
-                                if not candidate_side:
-                                    logger.error("[15m-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT CALCULATE KELLY - SKIPPING", ticker)
-                                    continue
-                                
-                                # Extract asset from ticker
-                                asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
-                                
-                                # Compute dynamic size
-                                # 2026 Research-Based Risk Management: Apply time-of-day risk scaling
-                                # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
-                                # 2026-07-13: Pass side for correct Kelly calculation
-                                time_of_day_multiplier = candidate.get("time_of_day_multiplier", 1.0)
-                                count, notional, metadata = compute_order_size(
-                                    bankroll_usd=Decimal(str(bankroll_usd)),
-                                    price_cents=int(price_cents),
-                                    asset=asset,
-                                    edge_pct=edge_pct,
-                                    confidence=confidence,
-                                    time_of_day_multiplier=time_of_day_multiplier,
-                                    model_prob=model_prob,  # 2026-07-12: Kelly Criterion
-                                    side=candidate_side  # 2026-07-13: Pass side for Kelly
-                                )
-                                
-                                candidate["count"] = count
-                                
-                                # CRITICAL FIX: Skip execution if sizing returned count=0
-                                # This prevents invalid orders from being submitted
-                                if count == 0:
-                                    logger.warning(
-                                        "[15m-LOOP] Sizing returned count=0 for ticker=%s (notional=%.2f, rejection_reason=%s) - skipping execution",
-                                        ticker, float(notional), metadata.get("rejection_reason", "unknown")
-                                    )
-                                    continue
-                                
-                                logger.info(
-                                    "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%d notional=%.2f",
-                                    ticker, float(edge_pct), float(confidence), count, float(notional)
-                                )
-                                
-                                # CRITICAL FIX: Integrate LiquidityAwareSizer to reduce size based on market depth
-                                # This prevents slippage and market impact by respecting available liquidity
+                                # Check position cache for existing positions in this window (same as router)
                                 try:
-                                    from execution.liquidity_aware_sizing import get_liquidity_sizer
-                                    sizer = get_liquidity_sizer()
-                                    
-                                    # Determine side from candidate
-                                    side = candidate.get("side", "yes").lower()
-                                    
-                                    # Get liquidity-aware size
-                                    liquidity_adjusted_count = sizer.get_liquidity_aware_size(
-                                        ticker=ticker,
-                                        side=side,
-                                        desired_contracts=count,
-                                        max_participation_rate=0.1  # 10% participation rate
-                                    )
-                                    
-                                    if liquidity_adjusted_count < count:
-                                        logger.info(
-                                            "[15m-LOOP] Liquidity-aware sizing reduced count: ticker=%s from %d to %d (depth-based adjustment)",
-                                            ticker, count, liquidity_adjusted_count
+                                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                                    position_cache = get_position_cache()
+                                    if position_cache:
+                                        all_positions = position_cache.get_all_positions(validate_freshness=False)
+                                        for pos_ticker, pos_obj in all_positions.items():
+                                            if pos_obj and pos_obj.contracts > 0:
+                                                # Extract asset and window from position ticker
+                                                pos_asset = None
+                                                pos_ticker_upper = pos_ticker.upper()
+                                                if "BTC" in pos_ticker_upper:
+                                                    pos_asset = "BTC"
+                                                elif "ETH" in pos_ticker_upper:
+                                                    pos_asset = "ETH"
+                                                elif "SOL" in pos_ticker_upper:
+                                                    pos_asset = "SOL"
+                                                elif "XRP" in pos_ticker_upper:
+                                                    pos_asset = "XRP"
+                                                elif "DOGE" in pos_ticker_upper:
+                                                    pos_asset = "DOGE"
+                                                
+                                                if pos_asset == asset:
+                                                    pos_window_id = pos_ticker.split("-")[-2] if "-" in pos_ticker else pos_ticker
+                                                    if pos_window_id == ticker.split("-")[-2] if "-" in ticker else ticker:
+                                                        self._rejection_counters["position_exists"] += 1
+                                                        logger.warning(
+                                                            "[15m-LOOP] Asset already has position in current window: asset=%s window=%s position=%s (contracts=%d) - skipping",
+                                                            asset, pos_window_id, pos_ticker, pos_obj.contracts
+                                                        )
+                                                        continue
+                                except Exception as pos_check_err:
+                                    logger.warning("[15m-LOOP] Failed to check position cache for asset-window state: %s", pos_check_err)
+                                
+                                # Check resting order monitor for pending orders in this window (same as router)
+                                try:
+                                    from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+                                    monitor = get_resting_order_monitor()
+                                    if monitor:
+                                        open_order_id = monitor.find_open_order(
+                                            ticker=ticker,
+                                            side=str(candidate.get("side", "")).lower(),
+                                            action=str(candidate.get("action", "")).lower()
                                         )
-                                        candidate["count"] = liquidity_adjusted_count
-                                    else:
-                                        logger.debug(
-                                            "[15m-LOOP] Liquidity-aware sizing: ticker=%s count unchanged (sufficient liquidity)",
+                                        if open_order_id:
+                                            self._rejection_counters["resting_order_exists"] += 1
+                                            logger.warning(
+                                                "[15m-LOOP] Asset has resting order in current window: asset=%s ticker=%s order=%s - skipping",
+                                                asset, ticker, open_order_id
+                                            )
+                                            continue
+                                except Exception as monitor_err:
+                                    logger.warning("[15m-LOOP] Failed to check resting order monitor: %s", monitor_err)
+                                
+                                # CRITICAL: Re-validate edge before execution
+                                if not self._validate_candidate_edge(candidate):
+                                    self._rejection_counters["edge_validation_failed"] += 1
+                                    logger.warning("[15m-LOOP] Candidate edge validation failed: %s - skipping execution", ticker)
+                                    continue
+                                
+                                # Use dynamic position sizing if enabled
+                                try:
+                                    from merid.prediction.unified_sizing import compute_order_size
+                                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                                    from decimal import Decimal
+                                    
+                                    # Use sync version to avoid coroutine error in async context
+                                    bankroll_usd = get_equity_for_risk_calc_sync()
+                                    if bankroll_usd is None:
+                                        bankroll_usd = 100.0
+                                    
+                                    # Get price from candidate or market state
+                                    # CRITICAL FIX (2026-07-06): The old default of 50c made sizing
+                                    # blind to the real price: floor($cap/$0.50)=2 contracts, while
+                                    # the order was later built at the real mid (60-89c), producing
+                                    # multi-contract orders (doubling up) and asset_notional_exceeded
+                                    # rejections. Resolve the SAME side-aware price here that
+                                    # _execute_candidate uses to build the order.
+                                    price_cents = int(candidate.get("price_cents", 0) or 0)
+                                    if price_cents <= 0:
+                                        # Fallback to market state (side-aware, Kalshi duality: NO = 100 - YES_mid)
+                                        if self.market_state_store:
+                                            market_state = self.market_state_store.get(ticker)
+                                            if market_state:
+                                                candidate_side = str(candidate.get("side", "")).lower()
+                                                # CRITICAL FIX: If side is missing, log error and skip - don't default to "yes"
+                                                if not candidate_side:
+                                                    logger.error("[15m-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT DETERMINE PRICE - SKIPPING", ticker)
+                                                    continue
+                                                yes_mid = 0
+                                                if getattr(market_state, 'mid_cents', None):
+                                                    yes_mid = int(market_state.mid_cents)
+                                                elif getattr(market_state, 'best_bid_cents', None) and getattr(market_state, 'best_ask_cents', None):
+                                                    yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
+                                                if yes_mid > 0:
+                                                    if candidate_side in ("no", "buy_no"):
+                                                        price_cents = 100 - yes_mid
+                                                    else:
+                                                        price_cents = yes_mid
+                                    if price_cents <= 0:
+                                        logger.warning(
+                                            "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 42c placeholder (midpoint of 10-75c canonical range)",
                                             ticker
                                         )
-                                except Exception as liquidity_err:
-                                    logger.warning("[15m-LOOP] Liquidity-aware sizing failed, using risk-based count: %s", liquidity_err)
-                            except Exception as sizing_err:
-                                logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
-                                candidate["count"] = 1
-                            
-                            # Execute candidate and check if order was actually submitted
-                            order_submitted = await self._execute_candidate(candidate, tick_id)
-                            
-                            # Only track as executed if order was actually submitted
-                            if order_submitted:
-                                # Track executed candidate to prevent duplicates
-                                candidate_key = self._get_candidate_key(candidate)
-                                self._executed_candidates_this_window.add(candidate_key)
+                                        price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                                    
+                                    # Get edge, confidence, and model_prob from candidate
+                                    edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
+                                    confidence = Decimal(str(candidate.get("confidence", 0.5)))
+                                    model_prob = candidate.get("model_prob", None)  # 2026-07-12: Kelly Criterion integration
+                                    candidate_side = str(candidate.get("side", "")).lower()  # 2026-07-13: Side for Kelly calculation
+                                    # CRITICAL FIX: If side is missing, log error and skip
+                                    if not candidate_side:
+                                        logger.error("[15m-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT CALCULATE KELLY - SKIPPING", ticker)
+                                        continue
+                                    
+                                    # Extract asset from ticker
+                                    asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
+                                    
+                                    # Compute dynamic size
+                                    # 2026 Research-Based Risk Management: Apply time-of-day risk scaling
+                                    # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
+                                    # 2026-07-13: Pass side for correct Kelly calculation
+                                    time_of_day_multiplier = candidate.get("time_of_day_multiplier", 1.0)
+                                    count, notional, metadata = compute_order_size(
+                                        bankroll_usd=Decimal(str(bankroll_usd)),
+                                        price_cents=int(price_cents),
+                                        asset=asset,
+                                        edge_pct=edge_pct,
+                                        confidence=confidence,
+                                        time_of_day_multiplier=time_of_day_multiplier,
+                                        model_prob=model_prob,  # 2026-07-12: Kelly Criterion
+                                        side=candidate_side  # 2026-07-13: Pass side for Kelly
+                                    )
+                                    
+                                    candidate["count"] = count
+                                    
+                                    # CRITICAL FIX: Skip execution if sizing returned count=0
+                                    # This prevents invalid orders from being submitted
+                                    if count == 0:
+                                        logger.warning(
+                                            "[15m-LOOP] Sizing returned count=0 for ticker=%s (notional=%.2f, rejection_reason=%s) - skipping execution",
+                                            ticker, float(notional), metadata.get("rejection_reason", "unknown")
+                                        )
+                                        continue
+                                    
+                                    logger.info(
+                                        "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%d notional=%.2f",
+                                        ticker, float(edge_pct), float(confidence), count, float(notional)
+                                    )
+                                    
+                                    # CRITICAL FIX: Integrate LiquidityAwareSizer to reduce size based on market depth
+                                    # This prevents slippage and market impact by respecting available liquidity
+                                    try:
+                                        from execution.liquidity_aware_sizing import get_liquidity_sizer
+                                        sizer = get_liquidity_sizer()
+                                        
+                                        # Determine side from candidate
+                                        side = candidate.get("side", "yes").lower()
+                                        
+                                        # Get liquidity-aware size
+                                        liquidity_adjusted_count = sizer.get_liquidity_aware_size(
+                                            ticker=ticker,
+                                            side=side,
+                                            desired_contracts=count,
+                                            max_participation_rate=0.1  # 10% participation rate
+                                        )
+                                        
+                                        if liquidity_adjusted_count < count:
+                                            logger.info(
+                                                "[15m-LOOP] Liquidity-aware sizing reduced count: ticker=%s from %d to %d (depth-based adjustment)",
+                                                ticker, count, liquidity_adjusted_count
+                                            )
+                                            candidate["count"] = liquidity_adjusted_count
+                                        else:
+                                            logger.debug(
+                                                "[15m-LOOP] Liquidity-aware sizing: ticker=%s count unchanged (sufficient liquidity)",
+                                                ticker
+                                            )
+                                    except Exception as liquidity_err:
+                                        logger.warning("[15m-LOOP] Liquidity-aware sizing failed, using risk-based count: %s", liquidity_err)
+                                except Exception as sizing_err:
+                                    logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
+                                    candidate["count"] = 1
                                 
-                                # CRITICAL FIX (2026-07-21): Track asset-window key to enforce one-contract-per-asset rule
-                                asset_window_key = self._get_asset_window_key(candidate)
-                                self._executed_candidates_this_window.add(asset_window_key)
+                                # Execute candidate and check if order was actually submitted
+                                order_submitted = await self._execute_candidate(candidate, tick_id)
+                                
+                                # Only track as executed if order was actually submitted
+                                if order_submitted:
+                                    # Track executed candidate to prevent duplicates
+                                    candidate_key = self._get_candidate_key(candidate)
+                                    self._executed_candidates_this_window.add(candidate_key)
+                                    
+                                    # CRITICAL FIX (2026-07-21): Track asset-window key to enforce one-contract-per-asset rule
+                                    asset_window_key = self._get_asset_window_key(candidate)
+                                    self._executed_candidates_this_window.add(asset_window_key)
+                                
+                                # FIX: Do NOT reset cycle guards after each execution
+                                # The global_slot_allocator should track total exposure across all positions
+                                # to enforce the fixed $1 exposure cap. Resetting after each trade defeats this.
+                                # Cycle reset only happens at the start of a new 15-minute window (line 1366)
+                                
+                                # CRITICAL FIX: Do NOT clear deduplication cache after each execution
+                                # The cache should only be cleared at the start of a new 15-minute window (line 1346)
+                                # Clearing it here allows the same order to be placed every 5 seconds, causing agents
+                                # to exceed risk limits. The order gate and slot-based risk checks should handle
+                                # allowing new orders when conditions change (different price, side, etc.)
+                            except Exception as e:
+                                logger.error("[15m-LOOP] Failed to execute candidate: %s", e, exc_info=True)
+                                self._rejection_counters["other"] += 1
+                    
+                    # COUNTER SANITY CHECK: Verify candidate → order flow consistency
+                    # Use per-tick counters to avoid cumulative mismatch
+                    tick_rejections = sum(self._rejection_counters.values())
+                    tick_executed = len(self._executed_candidates_this_window)
+                    total_candidates = len(candidates)
+                    logger.info(
+                        "[COUNTER-SANITY-CHECK] tick=%d total_candidates=%d total_executed=%d total_rejections=%d "
+                        "rejection_breakdown=%s",
+                        tick_id, total_candidates, tick_executed, tick_rejections, self._rejection_counters
+                    )
+                    # LOG CONTRACT: Ensure no silent candidate loss (per-tick check)
+                    # Note: Rejection counters are cumulative, so we only warn on mismatch
+                    if total_candidates != tick_executed + tick_rejections:
+                        logger.warning(
+                            "[COUNTER-SANITY-WARNING] tick=%d candidate count mismatch: %d candidates != %d executed + %d rejections (cumulative counters)",
+                            tick_id, total_candidates, tick_executed, tick_rejections
+                        )
+                    # Reset rejection counters for next tick to prevent accumulation
+                    for key in self._rejection_counters:
+                        self._rejection_counters[key] = 0
+                    
+                    # CRITICAL FIX: Wire systematic exposure-based hedging
+                    # After alpha orders are executed, compute and route hedge orders
+                    # to offset net directional exposure per (asset, timeframe) cell
+                    try:
+                        from merid.event_venues.kalshi.order_router import compute_hedge_intents, route_order_async
+                        from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service as get_bankroll_service_v2
+                        
+                        # Get current bankroll for hedge sizing - use v2 directly
+                        bankroll_service = await get_bankroll_service_v2()
+                        if bankroll_service:
+                            summary = await bankroll_service.get_summary()
+                            bankroll_cents = int(summary.equity_usd * 100) if summary and summary.equity_usd else 100000
+                        else:
+                            bankroll_cents = 100000
+                        
+                        # Compute hedge intents based on current exposure
+                        hedge_intents = compute_hedge_intents(bankroll_cents=bankroll_cents)
+                        
+                        if hedge_intents:
+                            logger.info("[15m-LOOP] Generated %d hedge intents, routing to execution", len(hedge_intents))
                             
-                            # FIX: Do NOT reset cycle guards after each execution
-                            # The global_slot_allocator should track total exposure across all positions
-                            # to enforce the fixed $1 exposure cap. Resetting after each trade defeats this.
-                            # Cycle reset only happens at the start of a new 15-minute window (line 1366)
-                            
-                            # CRITICAL FIX: Do NOT clear deduplication cache after each execution
-                            # The cache should only be cleared at the start of a new 15-minute window (line 1346)
-                            # Clearing it here allows the same order to be placed every 5 seconds, causing agents
-                            # to exceed risk limits. The order gate and slot-based risk checks should handle
-                            # allowing new orders when conditions change (different price, side, etc.)
-                        except Exception as e:
-                            logger.error("[15m-LOOP] Failed to execute candidate: %s", e, exc_info=True)
+                            # Route hedge orders
+                            for hedge_intent in hedge_intents:
+                                try:
+                                    result = await route_order_async(hedge_intent)
+                                    logger.info(
+                                        "[15m-LOOP] Hedge order routed: ticker=%s side=%s count=%d status=%s",
+                                        hedge_intent.ticker, hedge_intent.side, hedge_intent.count, result.status
+                                    )
+                                except Exception as hedge_err:
+                                    logger.error("[15m-LOOP] Failed to route hedge order: %s", hedge_err, exc_info=True)
+                        else:
+                            logger.debug("[15m-LOOP] No hedge orders needed (exposure within bounds)")
+                    except Exception as hedge_exc:
+                        logger.warning("[15m-LOOP] Hedge pass failed (non-fatal): %s", hedge_exc, exc_info=True)
                     
                     self._cycle_count += 1
                     self._last_cycle_at = datetime.now(timezone.utc)
@@ -3165,8 +3271,8 @@ class Kalshi15mLoop:
                             # Depth thresholds now come from kalshi_crypto_15m.yaml profile (single source of truth)
                             # Get per-asset depth thresholds from profile
                             depth_thresholds = self._risk_envelope.get_depth_thresholds(asset)
-                            min_depth_yes_threshold = depth_thresholds.get('min_depth_yes', 25)
-                            min_depth_no_threshold = depth_thresholds.get('min_depth_no', 25)
+                            min_depth_yes_threshold = depth_thresholds.get('min_depth_yes', 1)  # FIXED: Default 1 to match YAML (was 25)
+                            min_depth_no_threshold = depth_thresholds.get('min_depth_no', 1)  # FIXED: Default 1 to match YAML (was 25)
                             
                             # DIAGNOSTIC: Log raw state before depth check
                             logger.debug(
@@ -4380,6 +4486,33 @@ class Kalshi15mLoop:
                 reset_parity_metrics()
             except Exception as parity_metrics_err:
                 logger.debug("[15M-LOOP] Failed to log parity metrics: %s", parity_metrics_err)
+            
+            # Log rejection reason summary every 100 cycles
+            try:
+                total_rejections = sum(self._rejection_counters.values())
+                logger.info(
+                    "[REJECTION-COUNTERS] cycle=%d total_rejections=%d parity_blocked=%d edge_below_threshold=%d "
+                    "duplicate_order=%d price_out_of_range=%d position_exists=%d resting_order_exists=%d "
+                    "edge_validation_failed=%d exit_policy_failed=%d router_rejected=%d other=%d",
+                    self._tick,
+                    total_rejections,
+                    self._rejection_counters["parity_blocked"],
+                    self._rejection_counters["edge_below_threshold"],
+                    self._rejection_counters["duplicate_order"],
+                    self._rejection_counters["price_out_of_range"],
+                    self._rejection_counters["position_exists"],
+                    self._rejection_counters["resting_order_exists"],
+                    self._rejection_counters["edge_validation_failed"],
+                    self._rejection_counters["exit_policy_failed"],
+                    self._rejection_counters["router_rejected"],
+                    self._rejection_counters["other"],
+                )
+                
+                # Reset counters for next 100-cycle window
+                for key in self._rejection_counters:
+                    self._rejection_counters[key] = 0
+            except Exception as rejection_err:
+                logger.debug("[15M-LOOP] Failed to log rejection counters: %s", rejection_err)
 
         # P2 Task 11: Log periodic summary every hour (3600 cycles at 5s cadence = 18000s = 5h)
         # Adjust interval based on actual cadence
@@ -4389,12 +4522,15 @@ class Kalshi15mLoop:
             except Exception as e:
                 logger.warning("[15m-LOOP] Failed to log periodic summary: %s", e, exc_info=True)
 
-    async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = True, allow_new_entries: bool = True) -> None:
-        # Run agent grid cycle with proper error handling.
+    async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = True, allow_new_entries: bool = True) -> list[dict]:
+        # Run agent grid cycle with proper error handling and return candidates.
+        # This is the SINGLE canonical path for running the agent grid.
         # Args:
         #     tick: Current cycle tick number
         #     trading_ready: Whether trading is ready (can place orders)
         #     allow_new_entries: Whether new position entries are allowed (from execution_mode)
+        # Returns:
+        #     List of candidate dictionaries (empty list on error or no candidates)
         logger.info("[15M-LOOP] _run_agent_grid_with_timeout ENTRY tick=%d", tick)
         # CRITICAL: Log entry to this method
         
@@ -4429,9 +4565,10 @@ class Kalshi15mLoop:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
                 position_cache = get_position_cache()
                 
-                # Initialize all assets to 0
+                # Initialize all assets to 0 (use Decimal to match position.notional_value type)
+                from decimal import Decimal
                 for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                    self._asset_positions[asset] = 0.0
+                    self._asset_positions[asset] = Decimal('0.0')
                 
                 # Get all positions and calculate exposure per asset
                 all_positions = position_cache.get_all_positions(validate_freshness=False)
@@ -4598,54 +4735,13 @@ class Kalshi15mLoop:
                 # Pass Coinbase velocity signals to agent grid for external spot velocity integration
                 # (Turbine research #1 winner: Coinbase 1-minute velocity)
                 coinbase_velocity = self._coinbase_velocity_signals if hasattr(self, '_coinbase_velocity_signals') else {}
+                logger.info("[15M-LOOP] About to call agent_grid.run_cycle tick=%d", tick)
                 candidates = await self.agent_grid.run_cycle(tick, allow_new_entries=allow_new_entries, coinbase_velocity=coinbase_velocity)
                 logger.info("[15M-LOOP] Generated %d candidates in cycle %d", len(candidates), tick)
                 
-                # Process candidates into orders
-                for candidate in candidates:
-                    try:
-                        await self._execute_candidate(candidate, tick)
-                    except Exception as e:
-                        logger.error("[15M-LOOP] Failed to execute candidate: %s", e, exc_info=True)
-                
-                # CRITICAL FIX: Wire systematic exposure-based hedging
-                # After alpha orders are executed, compute and route hedge orders
-                # to offset net directional exposure per (asset, timeframe) cell
-                try:
-                    from merid.event_venues.kalshi.order_router import compute_hedge_intents, route_order_async
-                    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service as get_bankroll_service_v2
-                    
-                    # Get current bankroll for hedge sizing - use v2 directly
-                    bankroll_service = await get_bankroll_service_v2()
-                    if bankroll_service:
-                        summary = await bankroll_service.get_summary()
-                        bankroll_cents = int(summary.equity_usd * 100) if summary and summary.equity_usd else 100000
-                    else:
-                        bankroll_cents = 100000
-                    
-                    # Compute hedge intents based on current exposure
-                    hedge_intents = compute_hedge_intents(bankroll_cents=bankroll_cents)
-                    
-                    if hedge_intents:
-                        logger.info("[15M-LOOP] Generated %d hedge intents, routing to execution", len(hedge_intents))
-                        
-                        # Route hedge orders
-                        for hedge_intent in hedge_intents:
-                            try:
-                                result = await route_order_async(hedge_intent)
-                                logger.info(
-                                    "[15M-LOOP] Hedge order routed: ticker=%s side=%s count=%d status=%s",
-                                    hedge_intent.ticker, hedge_intent.side, hedge_intent.count, result.status
-                                )
-                            except Exception as hedge_err:
-                                logger.error("[15M-LOOP] Failed to route hedge order: %s", hedge_err, exc_info=True)
-                    else:
-                        logger.debug("[15M-LOOP] No hedge orders needed (exposure within bounds)")
-                except Exception as hedge_exc:
-                    logger.warning("[15M-LOOP] Hedge pass failed (non-fatal): %s", hedge_exc, exc_info=True)
-                
-                # Log after call
-                log_object_origin(self.agent_grid, "agent_grid_after_run_cycle_call", context=f"cycle_id={tick}")
+                # CRITICAL: Return candidates to caller for processing
+                # This is the SINGLE canonical path - caller (_run_loop) will process candidates
+                return candidates
             except Exception as exc:
                 # CRITICAL: Log any exception in run_cycle with full stack trace and structured classification
                 error_msg = str(exc).lower()
@@ -4672,19 +4768,29 @@ class Kalshi15mLoop:
                     f.write(f"[{datetime.now(timezone.utc)}] 15M-LOOP: agent_grid.run_cycle EXCEPTION cycle={tick} severity={severity} error={exc}\n")
                     f.write(f"[{datetime.now(timezone.utc)}] 15M-LOOP: STACK TRACE: {__import__('traceback').format_exc()}\n")
                     f.flush()
-                raise  # Re-raise to be caught by outer handler
+                
+                # CRITICAL: Return empty list on error instead of raising
+                # This allows the caller (_run_loop) to handle the error gracefully
+                logger.warning("[15M-LOOP] Returning empty candidate list due to exception in agent_grid.run_cycle")
+                return []
             
             # CRITICAL: Log after agent_grid.run_cycle returns
             
             
             logger.debug("[15M-LOOP] GRID-RUN-CYCLE-AWAIT EXIT cycle=%d", tick)
             logger.debug("[15M-LOOP-TRACE] agent_grid.run_cycle returned cycle=%d", tick)
+            
+            # CRITICAL: Return candidates to caller for processing
+            return candidates
         else:
             # Fallback: run agents directly if run_cycle not implemented
             pass  # Log below
             logger.info("[15M-LOOP-TRACE] run_cycle not implemented, running agents directly cycle=%d", tick)
             await self._run_agents_directly(tick)
             logger.info("[15M-LOOP-TRACE] _run_agents_directly returned cycle=%d", tick)
+            
+            # CRITICAL: Return empty list for fallback path
+            return []
         logger.debug("[15M-LOOP-TRACE] _run_agent_grid_with_timeout EXIT cycle=%d", tick)
         logger.debug("[15M-LOOP] GRID-WITH-TIMEOUT-EXIT cycle=%d", tick)
 
@@ -4859,10 +4965,12 @@ class Kalshi15mLoop:
                     assert exit_policy.sl_cents >= 0, f"Exit policy SL cents must be non-negative for ticker={ticker}, got {exit_policy.sl_cents}"
                     assert exit_policy.max_hold_seconds > 0, f"Exit policy max_hold_seconds must be positive for ticker={ticker}, got {exit_policy.max_hold_seconds}"
                 else:
+                    self._rejection_counters["exit_policy_failed"] += 1
                     logger.error("[15M-LOOP] exit_policy is None after resolution! asset=%s regime=%s", asset, regime)
                     # CRITICAL FIX: Reject order when exit policy is None
                     return False
             except Exception as e:
+                self._rejection_counters["exit_policy_failed"] += 1
                 logger.error(
                     "[15M-LOOP] Failed to resolve exit policy for %s: %s - REJECTING ORDER for safety",
                     ticker, e, exc_info=True
@@ -4876,8 +4984,19 @@ class Kalshi15mLoop:
             # Only override if signal's price_cents is invalid (<=0 or outside canonical range)
             price_cents = candidate.get("price_cents", 0)
             
+            # RESEARCH-ALIGNED: Regime-aware price band expansion
+            # Late window (<5 min remaining): allow 5-90c range for high-confidence trades
+            # Early/mid window: keep 10-75c canonical range
+            time_to_expiry_sec = candidate.get("time_to_expiry_sec", 900)
+            if time_to_expiry_sec < 300:  # Late window (<5 min remaining)
+                min_price_cents = 5
+                max_price_cents = 90
+            else:  # Early/mid window
+                min_price_cents = 10
+                max_price_cents = 75
+            
             # Validate signal's price_cents
-            price_valid = (price_cents > 0) and (10 <= price_cents <= 75)
+            price_valid = (price_cents > 0) and (min_price_cents <= price_cents <= max_price_cents)
             
             if price_valid:
                 # Signal's price is valid - use it directly
@@ -4885,8 +5004,8 @@ class Kalshi15mLoop:
                           ticker, price_cents, candidate.get("side"))
             else:
                 # Signal's price is invalid - fall back to market state
-                logger.warning("[15M-LOOP] ticker=%s signal price_cents=%d invalid (<=0 or outside 10-75c range), falling back to market state", 
-                            ticker, price_cents)
+                logger.warning("[15M-LOOP] ticker=%s signal price_cents=%d invalid (<=0 or outside %d-%dc range), falling back to market state", 
+                            ticker, price_cents, min_price_cents, max_price_cents)
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                     market_state_store = get_kalshi_market_state_store()
@@ -4904,13 +5023,13 @@ class Kalshi15mLoop:
                             if market_state.best_bid_cents and market_state.best_ask_cents:
                                 yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
                                 raw_price_cents = 100 - yes_mid
-                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
-                                price_cents = max(10, min(75, raw_price_cents))
+                                # RESEARCH-ALIGNED: Clamp to dynamic price band (5-90c late, 10-75c early/mid)
+                                price_cents = max(min_price_cents, min(max_price_cents, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s NO order: YES_mid=%d -> NO_mid=%d (raw=%d, clamped=%d)", ticker, yes_mid, price_cents, raw_price_cents, price_cents)
                             elif market_state.mid_cents:
                                 raw_price_cents = 100 - int(market_state.mid_cents)
-                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
-                                price_cents = max(10, min(75, raw_price_cents))
+                                # RESEARCH-ALIGNED: Clamp to dynamic price band (5-90c late, 10-75c early/mid)
+                                price_cents = max(min_price_cents, min(max_price_cents, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s NO order: YES_mid_cents=%.2f -> NO_mid=%d (raw=%d, clamped=%d)", ticker, market_state.mid_cents, price_cents, raw_price_cents, price_cents)
                             else:
                                 logger.warning("[15M-LOOP] NO order but no market state data for %s, using default 42c", ticker)
@@ -4921,14 +5040,14 @@ class Kalshi15mLoop:
                                 # BUG #39 FIX: Convert mid_cents to integer
                                 # mid_cents is a float from unified_market_state.py but order router requires integer
                                 raw_price_cents = int(market_state.mid_cents)
-                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
-                                price_cents = max(10, min(75, raw_price_cents))
+                                # RESEARCH-ALIGNED: Clamp to dynamic price band (5-90c late, 10-75c early/mid)
+                                price_cents = max(min_price_cents, min(max_price_cents, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s YES order: price_cents from mid_cents=%d (raw=%.2f, clamped=%d)", ticker, price_cents, market_state.mid_cents, price_cents)
                             elif market_state.best_bid_cents and market_state.best_ask_cents:
                                 # Use mid of bid/ask if mid not available
                                 raw_price_cents = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
-                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
-                                price_cents = max(10, min(75, raw_price_cents))
+                                # RESEARCH-ALIGNED: Clamp to dynamic price band (5-90c late, 10-75c early/mid)
+                                price_cents = max(min_price_cents, min(max_price_cents, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s YES order: price_cents from bid/ask mid=%d (raw=%d, clamped=%d) (bid=%d, ask=%d)", ticker, price_cents, raw_price_cents, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
                             else:
                                 logger.warning("[15M-LOOP] YES order but no market state data for %s, using default 42c", ticker)
@@ -5251,16 +5370,16 @@ class Kalshi15mLoop:
             trace_id = str(uuid.uuid4())[:8]
             candidate["trace_id"] = trace_id
 
-            # PRE-SEND ASSERT: Ensure order price is within profile price_range (10c-75c)
-            # Profile YAML: kalshi_crypto_15m_v2.yaml price_range.min_price_cents=10, max_price_cents=75
-            if not (10 <= price_cents <= 75):
+            # PRE-SEND ASSERT: Ensure order price is within dynamic price band
+            # Early/mid window: 10-75c, Late window (<5 min): 5-90c
+            if not (min_price_cents <= price_cents <= max_price_cents):
                 logger.error(
-                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside profile price_range [10,75] ticker=%s side=%s edge_pct=%s "
-                    "candidate_price_cents=%s source=%s",
-                    trace_id, price_cents, ticker, kalshi_side, edge_pct,
-                    candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m"
+                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside dynamic price_range [%d,%d] ticker=%s side=%s edge_pct=%s "
+                    "candidate_price_cents=%s source=%s time_to_expiry=%ds",
+                    trace_id, price_cents, min_price_cents, max_price_cents, ticker, kalshi_side, edge_pct,
+                    candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m", time_to_expiry_sec
                 )
-                raise AssertionError(f"Order price {price_cents}c outside profile price_range [10,75] for ticker={ticker}")
+                raise AssertionError(f"Order price {price_cents}c outside dynamic price_range [{min_price_cents},{max_price_cents}] for ticker={ticker}")
 
             # CRITICAL FIX: Removed hardcoded count=1 assertion
             # The sizing calculation (compute_order_size) now determines count based on edge, confidence, and $1 cap
@@ -5288,8 +5407,9 @@ class Kalshi15mLoop:
                 netedgecents=edge_pct * price_cents / 100.0 if price_cents > 0 else 0.0,  # PHASE 3 FIX: Populate netedgecents for fills ledger
                 confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
                 model_prob=model_prob,  # BUG #34 FIX: Add model_prob from candidate
-                # 2026-07-24: Edge-aware microstructure gate - populate p_hat_yes_cents
+                # 2026-07-25: Dual-side edge-aware microstructure gate - populate both p_hat fields
                 p_hat_yes_cents=model_prob * 100.0 if model_prob is not None else None,  # Convert probability to cents
+                p_hat_no_cents=(100.0 - model_prob * 100.0) if model_prob is not None else None,  # Complement to YES
                 rationale=candidate.get("rationale"),  # CRITICAL: Pass rationale to skip edge validation for price-based strategy
                 trace_id=trace_id,  # DEBUG: Add trace_id for candidate → order → policy tracking
                 # Phase 2: Strategy identification for multi-strategy support
@@ -5339,23 +5459,26 @@ class Kalshi15mLoop:
             # LIFECYCLE-ENTRY CANONICAL LOG SCHEMA (machine-parseable, single line)
             # Contract: indicator_side in {yes,no}; entry_action == buy; thesis_side == indicator_side;
             # kalshi_side == BUY_YES iff thesis_side==yes, BUY_NO iff thesis_side==no.
+            # Populate per-side edges from model_prob for dual-side visibility
+            edge_yes_val = model_prob * 100.0 if model_prob is not None else None
+            edge_no_val = (100.0 - model_prob * 100.0) if model_prob is not None else None
             logger.info(
-                "[LIFECYCLE-ENTRY] asset=%s ticker=%s agent_id=%s indicator_side=%s edge_yes=%s edge_no=%s "
+                "[LIFECYCLE-ENTRY] asset=%s ticker=%s agent_id=%s indicator_side=%s edge_yes=%.2f edge_no=%.2f "
                 "edge_pct=%.4f thesis_side=%s entry_action=%s kalshi_side=%s price_cents=%d count=%d "
                 "strategy_intent=%s entry_or_exit=entry",
                 asset,
                 ticker,
                 agent_id,
                 side_raw.lower(),
-                candidate.get("edge_yes", "n/a"),
-                candidate.get("edge_no", "n/a"),
+                edge_yes_val if edge_yes_val is not None else 0.0,
+                edge_no_val if edge_no_val is not None else 0.0,
                 edge_pct if edge_pct is not None else 0.0,
                 side_raw.lower(),
                 action_raw.lower(),
                 kalshi_side,
                 price_cents,
                 count,
-                strategy_intent or "n/a",
+                strategy_intent or "entry",  # Default to "entry" if None
             )
             
             # Load order scaling configuration from profile
@@ -5435,36 +5558,64 @@ class Kalshi15mLoop:
                 # Compute edges using canonical formula instead of deriving from kalshi_side
                 # This fixes the bug where chosen_side was derived from order side instead of edge comparison
                 if market_price_yes is not None or market_price_no is not None:
+                    logger.info(
+                        "[PARITY-BLOCK-DIAG] ticker=%s model_prob=%.4f market_yes=%.4f market_no=%.4f candidate_price=%dc edge_pct=%.4f",
+                        ticker, model_prob, market_price_yes, market_price_no, price_cents, edge_pct
+                    )
                     edge_yes, edge_no = compute_canonical_edges(
                         model_prob_yes=model_prob,
                         market_price_yes=market_price_yes,
                         market_price_no=market_price_no,
                     )
+                    logger.info(
+                        "[PARITY-BLOCK-EDGE-DIAG] ticker=%s computed edge_yes=%.4f edge_no=%.4f (from orderbook)",
+                        ticker, edge_yes, edge_no
+                    )
                 else:
                     # Fallback to candidate edges if orderbook unavailable
+                    logger.warning("[PARITY-BLOCK] Orderbook unavailable for ticker=%s, using candidate edges", ticker)
                     edge_yes = candidate.get("edge_yes", edge_pct / 100.0)
                     edge_no = candidate.get("edge_no", (1.0 - model_prob) - (1.0 - price_cents / 100.0) if model_prob else 0.0)
                 
                 # CRITICAL FIX: 2026-07-20 - Select winner side based on edge comparison
                 # This fixes the bug where chosen_side was derived from kalshi_side instead of edge
-                # Get min_edge from profile (default 2% = 0.02)
+                # Get min_edge from profile (default 1.5% = 0.015 to match YAML)
                 # CRITICAL FIX: 2026-07-24 - YAML value is already decimal (0.015 = 1.5%), do NOT divide by 100
-                min_edge = 0.02
+                base_min_edge = 0.015  # Default to YAML value (1.5%) instead of 2%
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile
                     profile_adapter = get_active_profile()
                     if profile_adapter and hasattr(profile_adapter, 'profile'):
                         profile = profile_adapter.profile
                         if hasattr(profile, 'guardrails'):
-                            min_edge = profile.guardrails.get('min_post_fee_edge', 0.02)
+                            base_min_edge = profile.guardrails.get('min_post_fee_edge', 0.015)
                 except Exception as edge_err:
                     logger.debug("[15M-LOOP] Failed to get min_edge from profile: %s", edge_err)
+                
+                # RESEARCH-ALIGNED: Dynamic edge threshold by time-in-window
+                # Early window (0-5 min): higher threshold (2.0%)
+                # Mid window (5-10 min): medium threshold (1.2-1.5%)
+                # Late window (10-15 min): lower threshold (0.5-1.0%)
+                # This aligns with volatility compression and information resolution over time
+                time_to_expiry_sec = candidate.get("time_to_expiry_sec", 900)
+                if time_to_expiry_sec > 600:  # Early window (>10 min remaining)
+                    min_edge = max(base_min_edge, 0.020)  # 2.0% minimum
+                elif time_to_expiry_sec > 300:  # Mid window (5-10 min remaining)
+                    min_edge = max(base_min_edge, 0.012)  # 1.2% minimum
+                else:  # Late window (<5 min remaining)
+                    min_edge = max(base_min_edge, 0.008)  # 0.8% minimum
+                
+                logger.debug(
+                    "[15M-LOOP] Dynamic edge threshold: time_to_expiry=%ds base_min_edge=%.4f -> dynamic_min_edge=%.4f",
+                    time_to_expiry_sec, base_min_edge, min_edge
+                )
                 
                 chosen_side = select_winner_side(edge_yes, edge_no, min_edge=min_edge)
                 
                 # CRITICAL FIX: 2026-07-20 - If winner is "none", block the order
                 if chosen_side == "none":
                     parity_blocked = True
+                    self._rejection_counters["parity_blocked"] += 1
                     logger.warning(
                         "[15M-LOOP] PARITY BLOCKED: ticker=%s edge_yes=%.4f edge_no=%.4f both below min_edge=%.4f - NO TRADE",
                         ticker, edge_yes, edge_no, min_edge
@@ -5537,7 +5688,7 @@ class Kalshi15mLoop:
                 if not parity_result.ok:
                     metrics.record_failure(parity_result)
                     checker.log_failure(parity_result, cycle_id=f"15m_{ticker}", logger=logger)
-                    
+
                     # Check if failure is WINNER_MISMATCH - this is a critical bug
                     is_winner_mismatch = any("WINNER_MISMATCH" in reason for reason in parity_result.reasons)
                     if is_winner_mismatch:
@@ -5563,9 +5714,20 @@ class Kalshi15mLoop:
             # CRITICAL FIX: 2026-07-20 - Skip order if parity blocked
             if parity_blocked:
                 logger.warning("[15M-LOOP] Order skipped due to parity block: ticker=%s", ticker)
+                # 2026-07-25: Log pipeline trace for blocked candidate
+                logger.info(
+                    "[PIPELINE-TRACE] ticker=%s side=%s canonical_edge_yes=%.4f canonical_edge_no=%.4f min_edge_frac=%.4f decision=BLOCK_REASON=PARITY_BOTH_SIDES_BELOW_THRESHOLD",
+                    ticker, kalshi_side, edge_yes, edge_no, min_edge
+                )
                 # Skip routing this order - return to skip this candidate
                 return False
-            
+
+            # 2026-07-25: Log pipeline trace for candidate passing all gates before routing
+            logger.info(
+                "[PIPELINE-TRACE] ticker=%s side=%s canonical_edge_yes=%.4f canonical_edge_no=%.4f min_edge_frac=%.4f decision=PASSED_ALL_GATES",
+                ticker, kalshi_side, edge_yes, edge_no, min_edge
+            )
+
             # Route order
             result = await route_order_async(intent)
             if result and result.status == "rejected":

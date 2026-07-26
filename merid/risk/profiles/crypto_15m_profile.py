@@ -413,6 +413,10 @@ class Crypto15mProfile:
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold
+    # 2026-07-24: Edge-aware microstructure gate (NEW)
+    use_edge_aware_microstructure_gate: bool = True  # Use edge-aware gate with spread/edge ratio instead of fixed spread threshold
+    min_executable_edge_cents: float = 3.0  # Minimum executable edge threshold for edge-aware gate
+    max_spread_to_edge_ratio: float = 0.4  # Max spread/edge ratio (40%) for edge-aware gate
 
     # Phase 2: Strategy definitions for multi-strategy support
     strategies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -776,6 +780,26 @@ class Crypto15mProfileAdapter:
                 raise ValueError(
                     f"Profile YAML validation failed: missing required field 'guardrails.{field}' in {self.profile_path}. "
                     f"This field is required for drawdown configuration."
+                )
+
+        # 2026-07-25: Validate critical edge-related fields for canonical alignment
+        market_microstructure = raw.get('market_microstructure', {})
+        required_microstructure_fields = ['use_edge_aware_microstructure_gate', 'min_executable_edge_cents', 'max_spread_to_edge_ratio']
+        for field in required_microstructure_fields:
+            if field not in market_microstructure:
+                raise ValueError(
+                    f"Profile YAML validation failed: missing required field 'market_microstructure.{field}' in {self.profile_path}. "
+                    f"This field is required for edge-aware microstructure gate and canonical alignment."
+                )
+
+        # Validate strategy_policy has required edge fields
+        strategy_policy = raw.get('strategy_policy', {})
+        required_strategy_fields = ['min_edge_pct', 'min_confidence']
+        for field in required_strategy_fields:
+            if field not in strategy_policy:
+                raise ValueError(
+                    f"Profile YAML validation failed: missing required field 'strategy_policy.{field}' in {self.profile_path}. "
+                    f"This field is required for strategy edge thresholds."
                 )
 
         logger.info("[PROFILE-SCHEMA-VALIDATION] Profile YAML schema validation passed")
@@ -1262,6 +1286,10 @@ class Crypto15mProfileAdapter:
                 market_microstructure_min_depth_usd=raw.get('market_microstructure', {}).get('min_depth_usd', 0.0),
                 market_microstructure_min_yes_depth=raw.get('market_microstructure', {}).get('min_yes_depth', 1),
                 market_microstructure_min_no_depth=raw.get('market_microstructure', {}).get('min_no_depth', 1),
+                # 2026-07-24: Edge-aware microstructure gate configuration
+                use_edge_aware_microstructure_gate=raw.get('market_microstructure', {}).get('use_edge_aware_microstructure_gate', True),
+                min_executable_edge_cents=raw.get('market_microstructure', {}).get('min_executable_edge_cents', 3.0),
+                max_spread_to_edge_ratio=raw.get('market_microstructure', {}).get('max_spread_to_edge_ratio', 0.4),
                 # Position Management: Offset Hedging Configuration
                 offset_hedging_enabled=raw.get('offset_hedging', {}).get('enabled', False),
                 offset_hedging_hedge_ratio=raw.get('offset_hedging', {}).get('hedge_ratio', 0.30),
