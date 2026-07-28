@@ -121,12 +121,19 @@ class TestPositionCacheHealth:
         # Log health when never synced
         cache.log_health()
         
-        # After sync, log health again
-        positions_list = []
+        # After sync with actual position data, log health again
+        positions_list = [
+            {
+                "ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "contracts": 1,
+                "avg_price_cents": 50
+            }
+        ]
         await cache.sync_from_rest(positions_list, rest_timestamp=time.time())
         cache.log_health()
         
-        # Should be healthy after sync
+        # Should be healthy after sync with actual data
         assert cache.is_healthy(max_staleness_seconds=60.0)
 
 

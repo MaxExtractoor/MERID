@@ -209,16 +209,16 @@ class TestKalshiMarketStateHealth:
         """YES+NO sum off by >2c → state inconsistent."""
         state = KalshiMarketState(ticker="KXBTCD-25JUN-T100000")
         state.last_book_update_ts = time.monotonic() - 1.0
-        state.best_bid_cents = 45
-        state.best_ask_cents = 60  # 45+60=105, off by 5c (>2c threshold)
-        state.spread_cents = 15  # At threshold, will be marked illiquid
+        state.best_bid_cents = 40
+        state.best_ask_cents = 65  # 40+65=105, off by 5c (>2c threshold)
+        state.spread_cents = 25  # Above 20c threshold, will be marked illiquid
         state.min_depth_yes = 10
         state.min_depth_no = 10
         
         health = state.check_health()
         
         assert health["transport_healthy"] is True
-        # Spread at threshold is marked illiquid
+        # Spread above 20c threshold is marked illiquid
         assert health["liquidity_healthy"] is False
         assert health["state_consistent"] is False
         assert health["overall_healthy"] is False

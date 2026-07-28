@@ -16,6 +16,34 @@ from merid.event_venues.kalshi.contract_normalization import (
 )
 
 
+def generate_future_ticker(minutes_ahead: int, asset: str = "BTC", strike: int = 15) -> str:
+    """Generate a realistic 15m ticker with a future date.
+    
+    Args:
+        minutes_ahead: How many minutes in the future the ticker should be
+        asset: Asset prefix (BTC, ETH, SOL, XRP, DOGE)
+        strike: Strike price
+        
+    Returns:
+        A ticker string like "KXBTC15M-26JUL110615-15"
+    """
+    now = datetime.now(timezone.utc)
+    # Convert to ET for ticker generation (Kalshi uses ET)
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now_et = now.astimezone(et)
+    
+    future_et = now_et + timedelta(minutes=minutes_ahead)
+    
+    # Format: YY MON DD HHMM
+    yy = str(future_et.year)[-2:]
+    mon = future_et.strftime("%b").upper()
+    dd = f"{future_et.day:02d}"
+    hhmm = f"{future_et.hour:02d}{future_et.minute:02d}"
+    
+    return f"KX{asset}15M-{yy}{mon}{dd}{hhmm}-{strike}"
+
+
 class TestTickerToAssetMapping:
     """Test ticker to asset mapping for all 5 crypto assets."""
 
@@ -45,90 +73,100 @@ class TestTickerToAssetMapping:
 
 
 class TestExpirySourcePriority:
-    """Test expiry source priority order for 15m contracts."""
+    """Test expiry source priority order for 15m contracts.
+    
+    CRITICAL UPDATE 2026-07-28: For 15m contracts, ticker-based inference is PRIMARY.
+    The ticker format KXBTC15M-26JUL110515-15 contains the correct contract expiry.
+    Priority for 15m: ticker inference > expected_expiration_time > expiration_time > close_time > end_date
+    
+    NOTE: Ticker inference is PRIMARY and cannot be overridden by expected_expiration_time
+    for 15m contracts. The ticker contains the authoritative expiry time.
+    """
 
-    def test_close_time_priority_over_end_date(self):
-        """Test that close_time is prioritized over end_date for 15m contracts."""
+    def test_ticker_inference_primary_for_15m(self):
+        """Test that ticker-based inference is primary for 15m contracts."""
         now = datetime.now(timezone.utc)
-        close_time = now + timedelta(minutes=10)  # 10 minutes from now
-        end_date = now + timedelta(hours=6)  # 6 hours from now (wrong)
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
+        
+        close_time = now + timedelta(hours=6)  # Wrong (should be ignored)
+        end_date = now + timedelta(hours=12)  # Wrong (should be ignored)
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
+            ticker=ticker,
             end_date=end_date,
             close_time=close_time,
             now=now,
         )
 
-        # Should use close_time (10 minutes), not end_date (6 hours)
+        # Should use ticker inference (primary for 15m), not close_time or end_date
         assert result.status == "ok"
-        assert result.seconds_to_expiry == pytest.approx(600, abs=1)  # 10 minutes
-        assert "source: close_time" in result.status_reason
-        assert "source: end_date" not in result.status_reason
+        assert result.seconds_to_expiry == pytest.approx(600, abs=60)  # ~10 minutes (allow parsing tolerance)
+        assert "ticker_inference_primary" in result.status_reason
 
-    def test_end_date_fallback_when_close_time_missing(self):
-        """Test that end_date is used as fallback when close_time is missing."""
-        now = datetime.now(timezone.utc)
-        end_date = now + timedelta(minutes=10)
-
-        result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
-            end_date=end_date,
-            close_time=None,
-            now=now,
-        )
-
-        # Should use end_date as fallback
-        assert result.status == "ok"
-        assert result.seconds_to_expiry == pytest.approx(600, abs=1)
-        assert "source: end_date" in result.status_reason
-
-    def test_expected_expiration_time_highest_priority(self):
-        """Test that expected_expiration_time has highest priority."""
+    def test_expected_expiration_time_fallback_when_ticker_inference_fails(self):
+        """Test that expected_expiration_time is used when ticker inference fails."""
         now = datetime.now(timezone.utc)
         expected_expiry = now + timedelta(minutes=10)
-        close_time = now + timedelta(minutes=20)
-        end_date = now + timedelta(hours=6)
+        # Use non-15m ticker so ticker inference fails
+        ticker = "KXBTC-26JUL110615-15"
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
+            ticker=ticker,
             expected_expiration_time=expected_expiry.isoformat(),
-            end_date=end_date,
+            now=now,
+        )
+
+        # Should use expected_expiration_time (ticker inference fails for non-15m)
+        assert result.status == "ok"
+        assert result.seconds_to_expiry == pytest.approx(600, abs=1)
+        assert "expected_expiration_time" in result.status_reason
+
+    def test_close_time_fallback_for_non_15m(self):
+        """Test that close_time is used for non-15m contracts."""
+        now = datetime.now(timezone.utc)
+        close_time = now + timedelta(minutes=10)
+        # Use non-15m ticker to avoid ticker inference
+        result = normalize_kalshi_contract(
+            ticker="KXBTC-26JUL110615-15",  # Not a 15m ticker
             close_time=close_time,
             now=now,
         )
 
-        # Should use expected_expiration_time (highest priority)
+        # Should use close_time for non-15m contracts
         assert result.status == "ok"
         assert result.seconds_to_expiry == pytest.approx(600, abs=1)
-        assert "source: expected_expiration_time" in result.status_reason
+        assert "close_time" in result.status_reason
 
 
 class Test15mInvariantGuard:
-    """Test invariant guard for 15m contracts."""
+    """Test invariant guard for 15m contracts.
+    
+    CRITICAL UPDATE 2026-07-28: For 15m contracts, ticker-based inference is PRIMARY.
+    The invariant guard checks that the inferred expiry is within a reasonable window.
+    """
 
     def test_15m_contract_within_allowed_window(self):
         """Test that 15m contracts within allowed window are accepted."""
         now = datetime.now(timezone.utc)
-        close_time = now + timedelta(minutes=10)  # Within 20 minute tolerance
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
-            close_time=close_time,
+            ticker=ticker,
             now=now,
         )
 
         assert result.status == "ok"
-        assert result.seconds_to_expiry == pytest.approx(600, abs=1)
+        assert result.seconds_to_expiry == pytest.approx(600, abs=60)  # ~10 minutes (allow parsing tolerance)
 
     def test_15m_contract_outside_allowed_window_rejected(self):
         """Test that 15m contracts outside allowed window are rejected."""
         now = datetime.now(timezone.utc)
-        close_time = now + timedelta(hours=6)  # Way outside 20 minute tolerance
+        # Use a ticker with far future date (outside 24 hour tolerance)
+        # Invariant guard allows -1 hour to +24 hours for ticker-inferred expiry
+        ticker = generate_future_ticker(minutes_ahead=1500, asset="BTC")  # 25 hours
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
-            close_time=close_time,
+            ticker=ticker,
             now=now,
         )
 
@@ -140,16 +178,16 @@ class Test15mInvariantGuard:
     def test_15m_contract_exactly_at_boundary_accepted(self):
         """Test that 15m contracts at exactly 20 minute boundary are accepted."""
         now = datetime.now(timezone.utc)
-        close_time = now + timedelta(minutes=20)  # Exactly at boundary
+        # Use a ticker with exactly 20 minute future date
+        ticker = generate_future_ticker(minutes_ahead=20, asset="BTC")
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
-            close_time=close_time,
+            ticker=ticker,
             now=now,
         )
 
         assert result.status == "ok"
-        assert result.seconds_to_expiry == pytest.approx(1200, abs=1)
+        assert result.seconds_to_expiry == pytest.approx(1200, abs=60)  # ~20 minutes (allow parsing tolerance)
 
     def test_non_15m_contract_no_invariant_guard(self):
         """Test that non-15m contracts don't have invariant guard applied."""
@@ -168,7 +206,10 @@ class Test15mInvariantGuard:
 
 
 class TestAllFiveAssetsSymmetricTreatment:
-    """Test that all 5 assets are treated symmetrically."""
+    """Test that all 5 assets are treated symmetrically.
+    
+    CRITICAL UPDATE 2026-07-28: For 15m contracts, ticker-based inference is PRIMARY.
+    """
 
     @pytest.mark.parametrize("asset,prefix", [
         ("BTC", "KXBTC"),
@@ -177,13 +218,14 @@ class TestAllFiveAssetsSymmetricTreatment:
         ("XRP", "KXXRP"),
         ("DOGE", "KXDOGE"),
     ])
-    def test_all_assets_close_time_priority(self, asset, prefix):
-        """Test that close_time priority works for all 5 assets."""
+    def test_all_assets_ticker_inference(self, asset, prefix):
+        """Test that ticker-based inference works for all 5 assets."""
         now = datetime.now(timezone.utc)
-        close_time = now + timedelta(minutes=10)
-        end_date = now + timedelta(hours=6)
+        ticker = generate_future_ticker(minutes_ahead=10, asset=asset)
+        
+        close_time = now + timedelta(hours=6)  # Wrong (should be ignored)
+        end_date = now + timedelta(hours=12)  # Wrong (should be ignored)
 
-        ticker = f"{prefix}15M-26JUL110615-15"
         result = normalize_kalshi_contract(
             ticker=ticker,
             end_date=end_date,
@@ -193,8 +235,8 @@ class TestAllFiveAssetsSymmetricTreatment:
 
         assert result.asset == asset
         assert result.status == "ok"
-        assert result.seconds_to_expiry == pytest.approx(600, abs=1)
-        assert "source: close_time" in result.status_reason
+        assert result.seconds_to_expiry == pytest.approx(600, abs=60)  # ~10 minutes (allow parsing tolerance)
+        assert "ticker_inference_primary" in result.status_reason
 
     @pytest.mark.parametrize("asset,prefix", [
         ("BTC", "KXBTC"),
@@ -206,12 +248,12 @@ class TestAllFiveAssetsSymmetricTreatment:
     def test_all_assets_invariant_guard(self, asset, prefix):
         """Test that invariant guard works for all 5 assets."""
         now = datetime.now(timezone.utc)
-        close_time = now + timedelta(hours=6)  # Outside allowed window
+        # Use a ticker with far future date (outside 24 hour tolerance)
+        # Invariant guard allows -1 hour to +24 hours for ticker-inferred expiry
+        ticker = generate_future_ticker(minutes_ahead=1500, asset=asset)  # 25 hours
 
-        ticker = f"{prefix}15M-26JUL110615-15"
         result = normalize_kalshi_contract(
             ticker=ticker,
-            close_time=close_time,
             now=now,
         )
 
@@ -221,16 +263,19 @@ class TestAllFiveAssetsSymmetricTreatment:
 
 
 class TestExpiredContracts:
-    """Test handling of expired contracts."""
+    """Test handling of expired contracts.
+    
+    CRITICAL UPDATE 2026-07-28: For 15m contracts, ticker-based inference is PRIMARY.
+    """
 
     def test_expired_contract_status(self):
         """Test that expired contracts are marked as expired."""
         now = datetime.now(timezone.utc)
-        close_time = now - timedelta(minutes=10)  # Already expired
+        # Use a ticker with past date (already expired)
+        ticker = generate_future_ticker(minutes_ahead=-10, asset="BTC")
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
-            close_time=close_time,
+            ticker=ticker,
             now=now,
         )
 
@@ -269,43 +314,61 @@ class TestInvalidMetadata:
 
 
 class TestSourceLogging:
-    """Test that expiry source is correctly logged in status_reason."""
+    """Test that expiry source is correctly logged in status_reason.
+    
+    CRITICAL UPDATE 2026-07-28: For 15m contracts, ticker-based inference is PRIMARY.
+    For non-15m contracts, close_time/end_date sources are used.
+    """
 
-    def test_close_time_source_logged(self):
-        """Test that close_time source is logged."""
+    def test_ticker_inference_source_logged(self):
+        """Test that ticker_inference_primary source is logged for 15m contracts."""
+        now = datetime.now(timezone.utc)
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
+
+        result = normalize_kalshi_contract(
+            ticker=ticker,
+            now=now,
+        )
+
+        assert "ticker_inference_primary" in result.status_reason
+
+    def test_close_time_source_logged_for_non_15m(self):
+        """Test that close_time source is logged for non-15m contracts."""
         now = datetime.now(timezone.utc)
         close_time = now + timedelta(minutes=10)
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
+            ticker="KXBTC-26JUL110615-15",  # Not a 15m ticker
             close_time=close_time,
             now=now,
         )
 
-        assert "source: close_time" in result.status_reason
+        assert "close_time" in result.status_reason
 
-    def test_end_date_source_logged(self):
-        """Test that end_date source is logged."""
+    def test_end_date_source_logged_for_non_15m(self):
+        """Test that end_date source is logged for non-15m contracts."""
         now = datetime.now(timezone.utc)
         end_date = now + timedelta(minutes=10)
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
+            ticker="KXBTC-26JUL110615-15",  # Not a 15m ticker
             end_date=end_date,
             now=now,
         )
 
-        assert "source: end_date" in result.status_reason
+        assert "end_date" in result.status_reason
 
     def test_expected_expiration_time_source_logged(self):
-        """Test that expected_expiration_time source is logged."""
+        """Test that expected_expiration_time source is logged for non-15m contracts."""
         now = datetime.now(timezone.utc)
         expected_expiry = now + timedelta(minutes=10)
+        # Use non-15m ticker so ticker inference fails
+        ticker = "KXBTC-26JUL110615-15"
 
         result = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
+            ticker=ticker,
             expected_expiration_time=expected_expiry.isoformat(),
             now=now,
         )
 
-        assert "source: expected_expiration_time" in result.status_reason
+        assert "expected_expiration_time" in result.status_reason

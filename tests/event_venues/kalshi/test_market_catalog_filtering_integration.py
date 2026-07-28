@@ -643,11 +643,12 @@ class TestKalshiMarketCatalogGetCurrent15mMarket:
                 raw_data={"status": "open", "close_time": window_end.isoformat()}
             )
 
-            # Create CatalogMarket
+            # Create CatalogMarket with series_ticker (required for filtering)
             catalog_market = CatalogMarket(
                 market=event_market,
                 asset="BTC",
                 timeframe="15m",
+                series_ticker="KXBTC15M",  # CRITICAL: Required for 15m filtering
                 expires_at=window_end,
                 minutes_to_expiry=15.0,
                 api_status="open",
@@ -707,11 +708,12 @@ class TestKalshiMarketCatalogGetCurrent15mMarket:
                 raw_data={"status": "open", "close_time": window_end.isoformat()}
             )
 
-            # Create CatalogMarket WITHOUT expires_at (test fallback)
+            # Create CatalogMarket WITHOUT expires_at (test fallback) but WITH series_ticker
             catalog_market = CatalogMarket(
                 market=event_market,
                 asset="BTC",
                 timeframe="15m",
+                series_ticker="KXBTC15M",  # CRITICAL: Required for 15m filtering
                 expires_at=None,  # Missing expires_at
                 minutes_to_expiry=15.0,
                 api_status="open",
@@ -786,6 +788,7 @@ class TestKalshiMarketCatalogGetCurrent15mMarket:
                 market=event_market_settled,
                 asset="BTC",
                 timeframe="15m",
+                series_ticker="KXBTC15M",  # CRITICAL: Required for 15m filtering
                 expires_at=window_end,
                 minutes_to_expiry=15.0,
                 api_status="settled",
@@ -797,6 +800,7 @@ class TestKalshiMarketCatalogGetCurrent15mMarket:
                 market=event_market_open,
                 asset="BTC",
                 timeframe="15m",
+                series_ticker="KXBTC15M",  # CRITICAL: Required for 15m filtering
                 expires_at=window_end,
                 minutes_to_expiry=15.0,
                 api_status="open",
