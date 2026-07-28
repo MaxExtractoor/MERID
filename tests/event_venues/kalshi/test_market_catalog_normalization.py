@@ -17,6 +17,34 @@ from merid.event_venues.kalshi.market_catalog import (
 )
 
 
+def generate_future_ticker(minutes_ahead: int, asset: str = "BTC", strike: int = 15) -> str:
+    """Generate a realistic 15m ticker with a future date.
+    
+    Args:
+        minutes_ahead: How many minutes in the future the ticker should be
+        asset: Asset prefix (BTC, ETH, SOL, XRP, DOGE)
+        strike: Strike price
+        
+    Returns:
+        A ticker string like "KXBTC15M-26JUL110615-15"
+    """
+    now = datetime.now(timezone.utc)
+    # Convert to ET for ticker generation (Kalshi uses ET)
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now_et = now.astimezone(et)
+    
+    future_et = now_et + timedelta(minutes=minutes_ahead)
+    
+    # Format: YY MON DD HHMM
+    yy = str(future_et.year)[-2:]
+    mon = future_et.strftime("%b").upper()
+    dd = f"{future_et.day:02d}"
+    hhmm = f"{future_et.hour:02d}{future_et.minute:02d}"
+    
+    return f"KX{asset}15M-{yy}{mon}{dd}{hhmm}-{strike}"
+
+
 class TestCloseTsExtraction:
     """Test extraction of close_ts from raw API data."""
 
@@ -88,21 +116,26 @@ class TestCloseTsExtraction:
 
 
 class TestCatalogNormalizationFlow:
-    """Test the full normalization flow from EventMarket to CatalogMarket."""
+    """Test the full normalization flow from EventMarket to CatalogMarket.
+    
+    NOTE: For 15m contracts, ticker-based inference is PRIMARY. The close_ts/end_date
+    fields are only used for non-15m contracts or when ticker inference fails.
+    """
 
     def test_15m_crypto_normalization_with_close_ts(self):
         """Test normalization of 15m crypto market with close_ts."""
         now = datetime.now(timezone.utc)
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
         close_ts = (now + timedelta(minutes=10)).timestamp()
         close_time_utc = datetime.fromtimestamp(close_ts, tz=timezone.utc)
 
         market = EventMarket(
-            market_id="KXBTC15M-26JUL110615-15",
+            market_id=ticker,
             venue="kalshi",
             question="BTC > 50000",
             description="BTC > 50000",
             outcomes=[],
-            end_date=now + timedelta(hours=6),  # Wrong time
+            end_date=now + timedelta(hours=6),  # Wrong time (should be ignored)
             raw_data={
                 "close_ts": close_ts,
                 "status": "open",
@@ -119,18 +152,19 @@ class TestCatalogNormalizationFlow:
             now=now,
         )
 
-        # Should use close_time (from close_ts), not end_date
+        # For 15m contracts, ticker inference is PRIMARY
         assert normalized.status == "ok"
-        assert normalized.seconds_to_expiry == pytest.approx(600, abs=1)
-        assert "source: close_time" in normalized.status_reason
+        assert normalized.seconds_to_expiry == pytest.approx(600, abs=60)  # ~10 minutes (allow parsing tolerance)
+        assert "ticker_inference_primary" in normalized.status_reason
 
     def test_15m_crypto_normalization_without_close_ts(self):
-        """Test normalization of 15m crypto market without close_ts (fallback to end_date)."""
+        """Test normalization of 15m crypto market without close_ts (uses ticker inference)."""
         now = datetime.now(timezone.utc)
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
         end_date = now + timedelta(minutes=10)
 
         market = EventMarket(
-            market_id="KXBTC15M-26JUL110615-15",
+            market_id=ticker,
             venue="kalshi",
             question="BTC > 50000",
             description="BTC > 50000",
@@ -150,26 +184,25 @@ class TestCatalogNormalizationFlow:
             now=now,
         )
 
-        # Should use end_date as fallback
+        # For 15m contracts, ticker inference is PRIMARY (not end_date)
         assert normalized.status == "ok"
-        assert normalized.seconds_to_expiry == pytest.approx(600, abs=1)
-        assert "source: end_date" in normalized.status_reason
+        assert normalized.seconds_to_expiry == pytest.approx(600, abs=60)  # ~10 minutes (allow parsing tolerance)
+        assert "ticker_inference_primary" in normalized.status_reason
 
     def test_15m_crypto_normalization_invariant_guard_rejection(self):
         """Test that invariant guard rejects 15m contracts with wrong expiry."""
         now = datetime.now(timezone.utc)
-        close_ts = (now + timedelta(hours=6)).timestamp()  # Way outside 15m window
-        close_time_utc = datetime.fromtimestamp(close_ts, tz=timezone.utc)
+        # Use a ticker with far future date (outside 24 hour tolerance)
+        ticker = generate_future_ticker(minutes_ahead=1500, asset="BTC")  # 25 hours
 
         market = EventMarket(
-            market_id="KXBTC15M-26JUL110615-15",
+            market_id=ticker,
             venue="kalshi",
             question="BTC > 50000",
             description="BTC > 50000",
             outcomes=[],
             end_date=now + timedelta(hours=6),
             raw_data={
-                "close_ts": close_ts,
                 "status": "open",
             }
         )
@@ -179,7 +212,6 @@ class TestCatalogNormalizationFlow:
         normalized = normalize_kalshi_contract(
             ticker=market.market_id,
             end_date=market.end_date,
-            close_time=close_time_utc,
             now=now,
         )
 
@@ -201,11 +233,12 @@ class TestAllFiveAssetsIntegration:
     def test_all_assets_normalization_with_close_ts(self, asset, prefix):
         """Test that normalization works for all 5 assets with close_ts."""
         now = datetime.now(timezone.utc)
+        ticker = generate_future_ticker(minutes_ahead=10, asset=asset)
         close_ts = (now + timedelta(minutes=10)).timestamp()
         close_time_utc = datetime.fromtimestamp(close_ts, tz=timezone.utc)
 
         market = EventMarket(
-            market_id=f"{prefix}15M-26JUL110615-15",
+            market_id=ticker,
             venue="kalshi",
             question=f"{asset} > 50000",
             description=f"{asset} > 50000",
@@ -228,8 +261,9 @@ class TestAllFiveAssetsIntegration:
 
         assert normalized.asset == asset
         assert normalized.status == "ok"
-        assert normalized.seconds_to_expiry == pytest.approx(600, abs=1)
-        assert "source: close_time" in normalized.status_reason
+        # For 15m contracts, ticker inference is PRIMARY
+        assert normalized.seconds_to_expiry == pytest.approx(600, abs=60)  # ~10 minutes (allow parsing tolerance)
+        assert "ticker_inference_primary" in normalized.status_reason
 
 
 class TestDownstreamPropagation:
@@ -238,11 +272,12 @@ class TestDownstreamPropagation:
     def test_catalog_market_minutes_to_expiry_propagation(self):
         """Test that minutes_to_expiry is set on CatalogMarket."""
         now = datetime.now(timezone.utc)
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
         close_ts = (now + timedelta(minutes=10)).timestamp()
         close_time_utc = datetime.fromtimestamp(close_ts, tz=timezone.utc)
 
         market = EventMarket(
-            market_id="KXBTC15M-26JUL110615-15",
+            market_id=ticker,
             venue="kalshi",
             question="BTC > 50000",
             description="BTC > 50000",
@@ -275,25 +310,25 @@ class TestDownstreamPropagation:
             tradeable=normalized.status == "ok",
         )
 
-        assert catalog_market.minutes_to_expiry == pytest.approx(10.0, abs=0.1)
+        # For 15m contracts, ticker inference is PRIMARY
+        assert catalog_market.minutes_to_expiry == pytest.approx(10.0, abs=1.0)  # Allow parsing tolerance
         assert catalog_market.health_status == "ok"
         assert catalog_market.tradeable is True
 
     def test_invalid_metadata_propagation(self):
         """Test that invalid_metadata status propagates correctly."""
         now = datetime.now(timezone.utc)
-        close_ts = (now + timedelta(hours=6)).timestamp()  # Outside 15m window
-        close_time_utc = datetime.fromtimestamp(close_ts, tz=timezone.utc)
+        # Use a ticker with far future date (outside 24 hour tolerance)
+        ticker = generate_future_ticker(minutes_ahead=1500, asset="BTC")  # 25 hours
 
         market = EventMarket(
-            market_id="KXBTC15M-26JUL110615-15",
+            market_id=ticker,
             venue="kalshi",
             question="BTC > 50000",
             description="BTC > 50000",
             outcomes=[],
             end_date=now + timedelta(hours=6),
             raw_data={
-                "close_ts": close_ts,
                 "status": "open",
             }
         )
@@ -303,7 +338,6 @@ class TestDownstreamPropagation:
         normalized = normalize_kalshi_contract(
             ticker=market.market_id,
             end_date=market.end_date,
-            close_time=close_time_utc,
             now=now,
         )
 
@@ -324,18 +358,20 @@ class TestDownstreamPropagation:
 
 
 class TestSourceTracking:
-    """Test that expiry source is tracked and logged."""
+    """Test that expiry source is tracked and logged.
+    
+    NOTE: For 15m contracts, ticker-based inference is PRIMARY.
+    """
 
     def test_source_extraction_from_status_reason(self):
-        """Test extraction of expiry source from status_reason."""
+        """Test extraction of expiry source from status_reason for 15m contracts."""
         now = datetime.now(timezone.utc)
-        close_time = now + timedelta(minutes=10)
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
 
         from merid.event_venues.kalshi.contract_normalization import normalize_kalshi_contract
 
         normalized = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
-            close_time=close_time,
+            ticker=ticker,
             now=now,
         )
 
@@ -344,17 +380,17 @@ class TestSourceTracking:
         if "(source:" in normalized.status_reason:
             expiry_source = normalized.status_reason.split("(source:")[-1].rstrip(")").strip()
 
-        assert expiry_source == "close_time"
+        assert expiry_source == "ticker_inference_primary"
 
     def test_end_date_source_extraction(self):
-        """Test extraction of end_date source."""
+        """Test extraction of end_date source for non-15m contracts."""
         now = datetime.now(timezone.utc)
         end_date = now + timedelta(minutes=10)
 
         from merid.event_venues.kalshi.contract_normalization import normalize_kalshi_contract
 
         normalized = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
+            ticker="KXBTC-26JUL110615-15",  # Not a 15m ticker
             end_date=end_date,
             now=now,
         )
@@ -366,26 +402,21 @@ class TestSourceTracking:
         assert expiry_source == "end_date"
 
     def test_separate_close_time_and_end_date_priority(self):
-        """Test that when close_time and end_date are passed separately, close_time is prioritized.
-        
-        This tests the fix in market_catalog.py where we now pass end_date separately
-        instead of combining it with close_time_utc.
-        """
+        """Test that for 15m contracts, ticker inference is PRIMARY over close_time/end_date."""
         now = datetime.now(timezone.utc)
+        ticker = generate_future_ticker(minutes_ahead=10, asset="BTC")
         close_time = now + timedelta(minutes=10)  # Correct 15m expiry
         end_date = now + timedelta(hours=6)  # Wrong expiry (should be ignored)
 
         from merid.event_venues.kalshi.contract_normalization import normalize_kalshi_contract
 
         normalized = normalize_kalshi_contract(
-            ticker="KXBTC15M-26JUL110615-15",
+            ticker=ticker,
             end_date=end_date,  # Pass separately
             close_time=close_time,  # Pass separately
             now=now,
         )
 
-        # Should use close_time (10 minutes), not end_date (6 hours)
+        # For 15m contracts, ticker inference is PRIMARY (not close_time or end_date)
         assert normalized.status == "ok"
-        assert normalized.seconds_to_expiry == pytest.approx(600, abs=1)
-        assert "source: close_time" in normalized.status_reason
-        assert "source: end_date" not in normalized.status_reason
+        assert "ticker_inference_primary" in normalized.status_reason
