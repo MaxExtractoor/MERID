@@ -5,7 +5,7 @@ Resolves exit policies and evaluates position exit conditions.
 """
 
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from merid.position_management.exit_policy import ExitPolicy, ExitAction, ExitReason
 from merid.position_management.exit_decision import ExitDecision, get_priority_for_reason
 from merid.position_management.position import Position
@@ -13,11 +13,53 @@ from merid.position_management.position import Position
 logger = logging.getLogger(__name__)
 
 
+def extract_asset_from_position(position: Position) -> str:
+    """
+    Extract asset symbol from position (BTC, ETH, SOL, XRP, DOGE).
+    
+    Args:
+        position: Position to extract asset from
+        
+    Returns:
+        Asset symbol (e.g., "BTC", "ETH") or "UNKNOWN" if not found
+    """
+    # Try series_ticker first (e.g., KXBTC15M-26JUL211745-45)
+    if hasattr(position, 'series_ticker') and position.series_ticker:
+        ticker_upper = position.series_ticker.upper()
+        if "BTC" in ticker_upper:
+            return "BTC"
+        elif "ETH" in ticker_upper:
+            return "ETH"
+        elif "SOL" in ticker_upper:
+            return "SOL"
+        elif "XRP" in ticker_upper:
+            return "XRP"
+        elif "DOGE" in ticker_upper:
+            return "DOGE"
+    
+    # Fallback to market_id
+    if hasattr(position, 'market_id') and position.market_id:
+        market_upper = position.market_id.upper()
+        if "BTC" in market_upper:
+            return "BTC"
+        elif "ETH" in market_upper:
+            return "ETH"
+        elif "SOL" in market_upper:
+            return "SOL"
+        elif "XRP" in market_upper:
+            return "XRP"
+        elif "DOGE" in market_upper:
+            return "DOGE"
+    
+    return "UNKNOWN"
+
+
 class ExitPolicyResolver:
     """
     Resolves exit policies and evaluates position exit conditions.
     
     Provides policy evaluation with configurable parameters.
+    CRITICAL FIX: Loads asset-specific exit policy parameters from profile config.
     """
     
     def __init__(
@@ -35,6 +77,25 @@ class ExitPolicyResolver:
         self._max_hold_seconds = max_hold_seconds
         self._min_edge_threshold = min_edge_threshold
         self._risk_kill_switch = False
+        
+        # CRITICAL FIX: Load asset-specific exit policy parameters from profile config
+        self._profile_config = self._load_profile_config()
+    
+    def _load_profile_config(self) -> Dict[str, Any]:
+        """Load exit policy configuration from active profile."""
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile = get_active_profile().profile
+            
+            # Load exit_policy_risk_reward section which contains per-asset TP/SL distances
+            return {
+                'exit_policy_risk_reward': getattr(profile, 'exit_policy_risk_reward', {}),
+                'exit_policy_trailing': getattr(profile, 'exit_policy_trailing', {}),
+                'exit_policy_time_exit': getattr(profile, 'exit_policy_time_exit', {}),
+            }
+        except Exception as e:
+            logger.warning("[EXIT-POLICY-RESOLVER] Failed to load profile config: %s", e)
+            return {}
     
     def set_risk_kill_switch(self, enabled: bool) -> None:
         """

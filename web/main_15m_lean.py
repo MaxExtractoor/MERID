@@ -549,15 +549,26 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[LIFESPAN] Step 5c: Failed to initialize thesis_side_monitor: {e}")
         
+        # CRITICAL FIX (2026-07-29): Initialize position state desync monitor
+        logger.info("[LIFESPAN] Step 5d: Initializing position state desync monitor")
+        try:
+            from merid.monitoring.position_state_monitor import get_position_state_monitor
+            position_state_monitor = get_position_state_monitor()
+            await position_state_monitor.start()
+            app.state.position_state_monitor = position_state_monitor
+            logger.info("[LIFESPAN] Step 5d: Position state desync monitor started and stored in app.state")
+        except Exception as e:
+            logger.warning(f"[LIFESPAN] Step 5d: Failed to start position state monitor: {e}")
+        
         # CRITICAL FIX (2026-07-21): Cleanup stale per-asset entry windows on startup
         # This prevents stale windows from permanently blocking trading after server restart
-        logger.info("[LIFESPAN] Step 5d: Cleaning up stale per-asset entry windows")
+        logger.info("[LIFESPAN] Step 5e: Cleaning up stale per-asset entry windows")
         try:
             from merid.event_venues.kalshi.order_router import cleanup_stale_entry_windows
             cleanup_stale_entry_windows()
-            logger.info("[LIFESPAN] Step 5d: Stale entry windows cleaned up successfully")
+            logger.info("[LIFESPAN] Step 5e: Stale entry windows cleaned up successfully")
         except Exception as e:
-            logger.warning(f"[LIFESPAN] Step 5d: Failed to cleanup stale entry windows: {e}")
+            logger.warning(f"[LIFESPAN] Step 5e: Failed to cleanup stale entry windows: {e}")
         
         # Run P2.x (trading stack) in lifespan
         logger.info("[LIFESPAN] Step 6: Before _run_full_startup_in_lifespan")
@@ -611,18 +622,28 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[LIFESPAN] Step 9b: Failed to stop trailing stop monitoring: {e}")
     
     try:
+        # Stop position state desync monitor
+        position_state_monitor = getattr(app.state, "position_state_monitor", None)
+        if position_state_monitor is not None:
+            logger.info("[LIFESPAN] Step 9c: Stopping position state desync monitor")
+            await position_state_monitor.stop()
+            logger.info("[LIFESPAN] Step 9c: Position state desync monitor stopped")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9c: Failed to stop position state monitor: {e}")
+    
+    try:
         # Cancel Kalshi15mLoop background task
         kalshi_task = getattr(app.state, "kalshi_15m_task", None)
         if kalshi_task is not None:
-            logger.info("[LIFESPAN] Step 9c: Cancelling Kalshi15mLoop background task")
+            logger.info("[LIFESPAN] Step 9d: Cancelling Kalshi15mLoop background task")
             kalshi_task.cancel()
             try:
                 await kalshi_task
             except asyncio.CancelledError:
-                logger.info("[LIFESPAN] Step 9c: Kalshi15mLoop task cancelled successfully")
-            logger.info("[LIFESPAN] Step 9c: Kalshi15mLoop background task stopped")
+                logger.info("[LIFESPAN] Step 9d: Kalshi15mLoop task cancelled successfully")
+            logger.info("[LIFESPAN] Step 9d: Kalshi15mLoop background task stopped")
     except Exception as e:
-        logger.warning(f"[LIFESPAN] Step 9c: Failed to cancel Kalshi15mLoop task: {e}")
+        logger.warning(f"[LIFESPAN] Step 9d: Failed to cancel Kalshi15mLoop task: {e}")
     
     try:
         # Stop 15m loop if running (legacy support)
@@ -2414,39 +2435,81 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
             orderbook = await client.get_orderbook(ticker)
             if orderbook:
                 # Convert to WS snapshot format with "yes" and "no" keys.
-                # orderbook.bids contains YES bids, orderbook.asks contains NO bids.
-                # Handle both object attributes (price, size) and tuple format.
+                # CRITICAL FIX: Kalshi REST API client now correctly converts:
+                # - yes_dollars → YES bids → orderbook.bids
+                # - no_dollars (YES asks) → NO bids → orderbook.asks
+                # So we just need to convert dollars to cents and use directly
                 yes_levels = []
                 if orderbook.bids:
                     for b in orderbook.bids:
                         try:
+                            bid_price = None
+                            bid_size = None
                             if hasattr(b, 'price'):
-                                yes_levels.append([float(b.price), float(b.size)])
+                                bid_price = float(b.price)
+                                bid_size = float(b.size)
                             else:
                                 # P0 FIX: Defensive check for slice objects
                                 if isinstance(b, slice):
                                     logger.warning("[WS-REFRESH] Skipping slice object in bids for %s", ticker)
                                     continue
-                                yes_levels.append([float(b[0]), float(b[1])])
+                                bid_price = float(b[0])
+                                bid_size = float(b[1])
+                            
+                            if bid_price is not None and bid_size is not None:
+                                # REST API returns prices in DOLLARS, convert to cents
+                                bid_price_cents = bid_price * 100.0
+                                yes_levels.append([bid_price_cents, bid_size])
                         except Exception as e:
                             logger.warning("[WS-REFRESH] Error processing bid for %s: %s", ticker, e)
                             continue
 
+                # CRITICAL FIX: orderbook.asks already contains NO bids (from no_dollars)
+                # The REST API client (client.py) already converts no_dollars to NO bids
+                # using: NO_price = 1.00 - YES_ask_price
+                # So we just need to convert dollars to cents
                 no_levels = []
                 if orderbook.asks:
                     for a in orderbook.asks:
                         try:
+                            ask_price = None
+                            ask_size = None
                             if hasattr(a, 'price'):
-                                no_levels.append([float(a.price), float(a.size)])
+                                ask_price = float(a.price)
+                                ask_size = float(a.size)
                             else:
                                 # P0 FIX: Defensive check for slice objects
                                 if isinstance(a, slice):
                                     logger.warning("[WS-REFRESH] Skipping slice object in asks for %s", ticker)
                                     continue
-                                no_levels.append([float(a[0]), float(a[1])])
+                                ask_price = float(a[0])
+                                ask_size = float(a[1])
+                            
+                            if ask_price is not None and ask_size is not None:
+                                # REST API returns prices in DOLLARS, convert to cents
+                                # NO bids are already in NO price space (converted by client.py)
+                                no_price_cents = ask_price * 100.0
+                                no_levels.append([no_price_cents, ask_size])
                         except Exception as e:
                             logger.warning("[WS-REFRESH] Error processing ask for %s: %s", ticker, e)
                             continue
+                
+                # DEBUG: Log the conversion for verification
+                logger.info("[WS-REFRESH-DEBUG] ticker=%s yes_levels_count=%d no_levels_count=%d sample_no_levels=%s", 
+                           ticker, len(yes_levels), len(no_levels), no_levels[:3] if no_levels else [])
+                
+                # DEBUG: Log raw REST API asks for verification
+                if orderbook.asks:
+                    sample_asks = []
+                    for a in orderbook.asks[:3]:
+                        if hasattr(a, 'price'):
+                            sample_asks.append(float(a.price))
+                        else:
+                            sample_asks.append(float(a[0]))
+                    logger.info("[WS-REFRESH-DEBUG-RAW] ticker=%s sample_rest_asks=%s", ticker, sample_asks)
+                
+                # DEBUG: Check if REST API provides NO-side data directly
+                logger.info("[WS-REFRESH-DEBUG-STRUCTURE] ticker=%s orderbook attributes=%s", ticker, [attr for attr in dir(orderbook) if not attr.startswith('_')])
 
                 msg = {
                     "type": "orderbook_snapshot",
@@ -2719,6 +2782,25 @@ async def _run_full_startup_in_lifespan(app):
             except Exception as e:
                 logger.warning("[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Failed to clear phantom slots: %s", e, exc_info=True)
             
+            # CRITICAL FIX (2026-07-26): Initialize dynamic threshold manager with profile data
+            # This ensures regime-aware thresholds (spread/edge ratio, price range) are loaded from profile
+            logger.info("[STARTUP-STACK] DYNAMIC-THRESHOLDS-INIT: Initializing dynamic threshold manager with profile data")
+            try:
+                from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager, reset_dynamic_threshold_manager
+                reset_dynamic_threshold_manager()  # Clear any stale singleton
+                threshold_manager = get_dynamic_threshold_manager()
+                # Initialize with canonical thresholds (no market data needed for initial load)
+                thresholds = threshold_manager._initialize_with_canonical()
+                logger.info(
+                    "[STARTUP-STACK] DYNAMIC-THRESHOLDS-INIT: Initialized with canonical thresholds: "
+                    "price_range=%d-%dc, spread=%dc, spread/edge_ratio=%.2f, regime=%s",
+                    thresholds.min_price_cents, thresholds.max_price_cents,
+                    thresholds.max_spread_cents, thresholds.max_spread_to_edge_ratio,
+                    thresholds.regime
+                )
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] DYNAMIC-THRESHOLDS-INIT: Failed to initialize dynamic threshold manager: %s", e, exc_info=True)
+            
             # CRITICAL FIX (2026-07-13): Reset window exposure at startup to clear stale exposure tracking
             # This prevents false "window exposure exceeded" rejections from previous sessions
             logger.info("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Resetting window exposure tracking")
@@ -2731,21 +2813,8 @@ async def _run_full_startup_in_lifespan(app):
             
             # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
             # This fixes the hardcoded $50 correlation stack cap bug
-            logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: About to calibrate CategoryExposureTracker with initial bankroll")
-            try:
-                from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
-                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                initial_bankroll = get_equity_for_risk_calc_sync()
-                logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: Fetched initial bankroll=%s", initial_bankroll)
-                if initial_bankroll is not None and initial_bankroll > 0:
-                    balance_cents = int(initial_bankroll * 100)
-                    logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: Calling BalanceCalibrator.update with balance_cents=%d", balance_cents)
-                    did_recalibrate = get_balance_calibrator().update(balance_cents)
-                    logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: BalanceCalibrator.update returned did_recalibrate=%s", did_recalibrate)
-                else:
-                    logger.warning("[STARTUP-STACK] BALANCE-CALIBRATOR: Bankroll is None or <= 0, skipping calibration")
-            except Exception as e:
-                logger.warning("[STARTUP-STACK] BALANCE-CALIBRATOR: Failed to calibrate: %s", e, exc_info=True)
+            # CRITICAL FIX: Moved balance calibrator to AFTER trading loop start to prevent startup hangs
+            # The trading loop will trigger calibration when bankroll becomes available
             
             # Store components in app.state for observability
             app.state.agent_grid_15m = agent_grid
@@ -2760,16 +2829,8 @@ async def _run_full_startup_in_lifespan(app):
             
             logger.info("[STARTUP-STACK] Kalshi15mLoop stored in app.state for lifespan task creation")
 
-            # Phase 2.5: Start integrity monitoring for safety
-            logger.info("[STARTUP-STACK] P2.5: Starting integrity monitoring")
-            try:
-                from merid.monitoring.integrity_monitor import start_integrity_monitoring
-                await start_integrity_monitoring()
-                logger.info("[STARTUP-STACK] Integrity monitoring started successfully")
-            except Exception as e:
-                logger.error(f"[STARTUP-STACK] Failed to start integrity monitoring: {e}")
-
             # CRITICAL FIX: Start Kalshi15mLoop using production pattern
+            # NOTE: Integrity monitoring moved to AFTER trading loop start to prevent startup hangs
             logger.info("[STARTUP-STACK] Starting Kalshi15mLoop using production pattern")
             
             # Use the kalshi_loop variable directly (already created above)
@@ -2786,6 +2847,35 @@ async def _run_full_startup_in_lifespan(app):
             else:
                 logger.error("[STARTUP-STACK] Kalshi15mLoop instance is None, cannot start")
                 raise RuntimeError("Kalshi15mLoop instance is None")
+            
+            # Phase 2.6: Start integrity monitoring AFTER trading loop (non-blocking)
+            # This prevents startup hangs if bankroll service checks timeout
+            logger.info("[STARTUP-STACK] P2.6: Starting integrity monitoring (non-blocking)")
+            try:
+                from merid.monitoring.integrity_monitor import start_integrity_monitoring
+                # Start as background task to avoid blocking startup
+                asyncio.create_task(start_integrity_monitoring())
+                logger.info("[STARTUP-STACK] Integrity monitoring started as background task")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.6: Integrity monitoring start failed (non-fatal): %s", e)
+            
+            # Phase 2.6.5: Balance calibrator (non-blocking, after trading loop)
+            # This prevents startup hangs if bankroll fetch times out
+            logger.info("[STARTUP-STACK] P2.6.5: Starting balance calibrator (non-blocking)")
+            async def calibrate_balance_async():
+                try:
+                    from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+                    service = await get_bankroll_service()
+                    if service:
+                        result = await service.get_current_bankroll()
+                        if result.state.value == "fresh" and result.equity_usd:
+                            balance_cents = int(result.equity_usd * 100)
+                            get_balance_calibrator().update(balance_cents)
+                            logger.info("[STARTUP-STACK] Balance calibrator completed: balance_cents=%d", balance_cents)
+                except Exception as e:
+                    logger.warning("[STARTUP-STACK] Balance calibrator failed (non-fatal): %s", e)
+            asyncio.create_task(calibrate_balance_async())
             
             # ─────────────────────────────────────────────────────────────
             # P2.7: Start background reconciliation / monitoring services.
@@ -3255,7 +3345,9 @@ async def _run_startup_phases_v20260530(app):
     logger.info("[STARTUP] P1.5: BEFORE WS bridge start")
     from merid.event_venues.kalshi.ws_bridge import get_bridge
 
+    logger.info("[STARTUP] P1.5: Calling get_bridge()")
     ws_bridge = get_bridge()
+    logger.info("[STARTUP] P1.5: get_bridge() returned, ws_bridge=%s", type(ws_bridge))
 
     # Wait for catalog to have markets before starting WS bridge
     # The catalog refresh happens in a background thread, so we need to poll
@@ -3439,7 +3531,10 @@ async def _run_startup_phases_v20260530(app):
     # Canonical bridge uses start(tickers) instead of set_markets()
     # Note: reset_bridge() is already called at module level during import
     
+    logger.info("[STARTUP] P1.5: Creating ws_bridge_task with start(%d tickers)", len(initial_tickers))
+    logger.info("[STARTUP] P1.5: initial_tickers=%s", initial_tickers)
     app.state.ws_bridge_task = asyncio.create_task(ws_bridge.start(initial_tickers), name="ws_bridge_start")
+    logger.info("[STARTUP] P1.5: ws_bridge_task created")
     
     # CRITICAL: Add done-callback to catch any exceptions in the WS bridge task
     def _on_ws_bridge_done(task: asyncio.Task):
