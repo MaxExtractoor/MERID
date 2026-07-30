@@ -107,6 +107,18 @@ except ImportError:
 from merid.event_venues.kalshi.toxicity_detection import get_toxicity_detector, ToxicityMetrics
 from merid.event_venues.kalshi.entropy_kill_switch import get_entropy_kill_switch
 
+# Import canonical YES/NO price space model for consistent side mapping
+from merid.event_venues.kalshi.binary_price_space import (
+    to_kalshi_side,
+    parse_kalshi_side,
+    extract_outcome_side,
+    extract_action,
+    yes_to_no_price,
+    no_to_yes_price,
+    derive_yes_ask_from_no_bid,
+    derive_no_ask_from_yes_bid,
+)
+
 
 def _dedup_cache():
     """Helper to get the global order deduplication cache singleton."""
@@ -398,14 +410,17 @@ def check_market_microstructure_edge_aware(
     no_bid_cents: int,
     p_hat_yes_cents: float,
     order_side: str,
-    yes_depth: int,
-    no_depth: int,
+    order_price_cents: Optional[float] = None,  # CRITICAL FIX: Actual order execution price
+    yes_depth: int = 0,
+    no_depth: int = 0,
     min_executable_edge_cents: float = 3.0,
     max_spread_to_edge_ratio: float = 0.4,
     max_spread_cents: Optional[int] = None,
     min_yes_depth: int = 1,
     min_no_depth: int = 1,
-    min_total_depth: int = 25
+    min_total_depth: int = 25,
+    ticker: Optional[str] = None,  # CRITICAL FIX 2026-07-28: Add ticker for dynamic threshold asset extraction
+    aggressiveness: float = 0.0  # CRITICAL FIX 2026-07-28: Add aggressiveness for maker/taker economics selection
 ) -> tuple[bool, str]:
     """
     Edge-aware microstructure gate using spread/edge ratio instead of fixed spread threshold.
@@ -441,7 +456,9 @@ def check_market_microstructure_edge_aware(
         from merid.event_venues.kalshi.spread_edge_analytics import (
             compute_canonical_spreads,
             compute_per_side_edges,
-            edge_aware_microstructure_gate
+            edge_aware_microstructure_gate,
+            compute_dynamic_threshold,
+            DynamicThresholdResult
         )
     except ImportError:
         logger.warning("[EDGE-AWARE-GATE] spread_edge_analytics module not available, falling back to legacy gate")
@@ -464,11 +481,121 @@ def check_market_microstructure_edge_aware(
     # Compute canonical spreads using Kalshi's orderbook semantics
     spread_metrics = compute_canonical_spreads(yes_bid_cents, no_bid_cents)
     
-    # Compute per-side edges
-    yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents, spread_metrics)
+    # CRITICAL FIX 2026-07-28: Derive economics mode from aggressiveness
+    # Resting orders (aggressiveness=0.0) use maker economics (no fee, capture spread)
+    # Marketable orders (aggressiveness>0.0) use taker economics (pay fee, cross spread)
+    use_maker_economics = (aggressiveness == 0.0)
+    
+    # Compute per-side edges using actual order price
+    # Use contracts=1 for per-contract edge calculation (fee scales with contracts)
+    # CRITICAL FIX 2026-07-28: Pass order_side to ensure order_price_cents is used for the correct side
+    # CRITICAL FIX 2026-07-28: Use aggressiveness-based economics selection
+    yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents, spread_metrics, order_price_cents, contracts=1, order_side=order_side, use_maker_economics=use_maker_economics)
     
     # Select edge metrics for the order's side
-    edge_metrics = yes_edge if order_side == "yes" else no_edge
+    # CRITICAL FIX 2026-07-26: Normalize side before comparison. Callers pass Kalshi-formatted
+    # sides ("BUY_YES"/"BUY_NO"), so the previous `order_side == "yes"` check NEVER matched and
+    # every order (including BUY_YES) was evaluated against the NO-side edge metrics.
+    is_yes_side = str(order_side).lower() in ("yes", "buy_yes", "sell_yes")
+    edge_metrics = yes_edge if is_yes_side else no_edge
+
+    # CRITICAL FIX 2026-07-29: Log final executable order parameters before router handoff
+    # This provides observability into the exact economics used for router decision
+    logger.info(
+        "[ROUTER-HANDOFF-TELEMETRY] ticker=%s side=%s order_price_cents=%.2fc raw_edge=%.2fc spread_cents=%.2fc spread_cost_cents=%.2fc taker_fee_cents=%.2fc executable_edge=%.2fc use_maker_economics=%s aggressiveness=%.2f",
+        ticker, order_side, order_price_cents, edge_metrics.raw_edge_cents, edge_metrics.spread_cents, edge_metrics.spread_cost_cents, edge_metrics.taker_fee_cents, edge_metrics.executable_edge_cents, use_maker_economics, aggressiveness
+    )
+    
+    # CRITICAL FIX 2026-07-28: Compute dynamic threshold if asset is available
+    # Dynamic threshold adapts to market conditions: T = α·spread + β·σ_15m + γ·fee + δ·slippage + ε
+    # NOTE: Dynamic threshold is designed for taker economics (includes fee/spread components)
+    # For maker economics (no fee, no spread cost), use maker-specific minimum threshold
+    dynamic_threshold = None
+    # CRITICAL FIX 2026-07-28: Derive economics mode from aggressiveness
+    # Resting orders (aggressiveness=0.0) use maker economics (no fee, capture spread)
+    # Marketable orders (aggressiveness>0.0) use taker economics (pay fee, cross spread)
+    use_maker_economics = (aggressiveness == 0.0)
+    logger.info(
+        "[ECONOMICS-SELECTION] ticker=%s aggressiveness=%.2f use_maker_economics=%s (resting=maker, marketable=taker)",
+        ticker, aggressiveness, use_maker_economics
+    )
+    
+    # Only compute dynamic threshold for taker economics
+    if not use_maker_economics:
+        try:
+            # Extract asset from ticker (e.g., "KXBTC15M-26JUL281200-00" -> "BTC")
+            asset = None
+            if ticker:
+                ticker_parts = str(ticker).split('-') if isinstance(ticker, str) else []
+                if ticker_parts and len(ticker_parts) > 0:
+                    ticker_base = ticker_parts[0]
+                    # Map series ticker to asset
+                    if "BTC" in ticker_base:
+                        asset = "BTC"
+                    elif "ETH" in ticker_base:
+                        asset = "ETH"
+                    elif "SOL" in ticker_base:
+                        asset = "SOL"
+                    elif "XRP" in ticker_base:
+                        asset = "XRP"
+                    elif "DOGE" in ticker_base:
+                        asset = "DOGE"
+            
+            if asset:
+                # Compute dynamic threshold using current spread and fee
+                dynamic_threshold = compute_dynamic_threshold(
+                    asset=asset,
+                    spread_cents=spread_metrics.yes_spread_cents if is_yes_side else spread_metrics.no_spread_cents,
+                    fee_cents=edge_metrics.taker_fee_cents,
+                    orderbook=None,  # TODO: Pass orderbook if available for slippage estimation
+                    order_size=1,
+                    max_price_window_cents=5
+                )
+                logger.info(
+                    "[DYNAMIC-THRESHOLD] asset=%s threshold=%.2fc spread=%.2fc vol=%.2fc fee=%.2fc slippage=%.2fc base=%.2fc",
+                    dynamic_threshold.asset_config_name,
+                    dynamic_threshold.threshold_cents,
+                    dynamic_threshold.spread_component,
+                    dynamic_threshold.volatility_component,
+                    dynamic_threshold.fee_component,
+                    dynamic_threshold.slippage_component,
+                    dynamic_threshold.base_hurdle
+                )
+        except Exception as e:
+            logger.debug(f"[DYNAMIC-THRESHOLD] Computation failed: {e}")
+    else:
+        # For maker economics, use a maker-specific minimum threshold
+        # Maker fees are ~0.44¢ at 50¢, so minimum edge should exceed this
+        # Use 2.5¢ minimum threshold based on industry best practices
+        # This ensures edge exceeds maker fee cost across all price levels
+        from merid.event_venues.kalshi.spread_edge_analytics import DynamicThresholdResult
+        maker_min_threshold_cents = 2.5  # 2.5¢ minimum for maker orders
+        # Extract asset name for logging
+        asset_name = "UNKNOWN"
+        if ticker:
+            ticker_parts = str(ticker).split('-') if isinstance(ticker, str) else []
+            if ticker_parts and len(ticker_parts) > 0:
+                ticker_base = ticker_parts[0]
+                if "BTC" in ticker_base:
+                    asset_name = "BTC"
+                elif "ETH" in ticker_base:
+                    asset_name = "ETH"
+                elif "SOL" in ticker_base:
+                    asset_name = "SOL"
+                elif "XRP" in ticker_base:
+                    asset_name = "XRP"
+                elif "DOGE" in ticker_base:
+                    asset_name = "DOGE"
+        dynamic_threshold = DynamicThresholdResult(
+            threshold_cents=maker_min_threshold_cents,
+            spread_component=0.0,
+            volatility_component=0.0,
+            fee_component=0.0,
+            slippage_component=0.0,
+            base_hurdle=maker_min_threshold_cents,
+            asset_config_name=asset_name
+        )
+        logger.info(f"[MAKER-THRESHOLD] Using maker-specific minimum threshold: {maker_min_threshold_cents}c (no spread/fee components for maker economics)")
     
     # Apply edge-aware gate
     # CRITICAL FIX 2026-07-25: Use min_executable_edge_frac (fraction) instead of min_executable_edge_cents (cents)
@@ -478,7 +605,8 @@ def check_market_microstructure_edge_aware(
         edge_metrics=edge_metrics,
         min_executable_edge_frac=min_executable_edge_frac,
         max_spread_to_edge_ratio=max_spread_to_edge_ratio,
-        max_spread_cents=max_spread_cents
+        max_spread_cents=max_spread_cents,
+        dynamic_threshold=dynamic_threshold
     )
     
     if not passes:
@@ -540,6 +668,40 @@ def _effective_post_only(post_only: bool, aggressiveness: float) -> bool:
     post_only is therefore only honored for resting orders (aggressiveness == 0).
     """
     return bool(post_only) and float(aggressiveness or 0.0) == 0.0
+
+
+def _apply_execution_mode(intent: OrderIntent) -> tuple:
+    """Apply execution mode to order parameters.
+    
+    CRITICAL FIX 2026-07-29: Regime-based routing uses execution_mode to determine
+    order parameters (post_only, aggressiveness, order_type, time_in_force).
+    
+    Research source: https://simplefunctions.dev/concepts/maker-taker-regime-in-pms
+    - maker: Passive limit order (post_only=True, aggressiveness=0.0)
+    - taker: Aggressive market order (post_only=False, aggressiveness=1.0)
+    - staged_ioc: Staged immediate-or-cancel (post_only=False, aggressiveness=0.5)
+    - passive_quote: Quote inside spread (post_only=True, aggressiveness=0.0)
+    
+    Returns:
+        (post_only, aggressiveness, order_type, time_in_force)
+    """
+    execution_mode = intent.execution_mode
+    
+    if execution_mode == "maker":
+        # Passive limit order - rest on book
+        return True, 0.0, "limit", "gtc"
+    elif execution_mode == "taker":
+        # Aggressive market order - cross spread immediately
+        return False, 1.0, "limit", "ioc"
+    elif execution_mode == "staged_ioc":
+        # Staged immediate-or-cancel - partial fills allowed
+        return False, 0.5, "limit", "ioc"
+    elif execution_mode == "passive_quote":
+        # Quote inside spread - post_only to avoid crossing
+        return True, 0.0, "limit", "gtc"
+    else:
+        # Default: use existing intent values
+        return intent.post_only, intent.aggressiveness, intent.order_type, intent.time_in_force
 
 
 def _check_strip_cooldown(intent: OrderIntent) -> Optional[str]:
@@ -1607,6 +1769,7 @@ class OrderIntent:
         source: Originating agent/strategy name
         order_group_id: Optional order group ID for aggregate limits
         self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
+        execution_mode: Execution mode (maker/taker/staged_ioc/passive_quote) for regime-based routing
         intent_id: Unique intent identifier (auto-generated)
         client_tag: Idempotency key for dedup on retry (BUG-2 fix)
         snapshot_ts: Wall-clock epoch when market snapshot was captured (BUG-3 fix)
@@ -1632,6 +1795,7 @@ class OrderIntent:
     source: str = "manual"
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = None
+    execution_mode: Optional[str] = None  # CRITICAL FIX 2026-07-29: Execution mode (maker/taker/staged_ioc/passive_quote) for regime-based routing
     post_only: bool = False
     # BUG-1/BUG-2: canonical context + idempotency fields
     intent_id: str = field(default_factory=lambda: f"intent_{__import__('uuid').uuid4().hex}")
@@ -1665,6 +1829,8 @@ class OrderIntent:
     order_expiration_ts: Optional[int] = None
     # Sentiment / audit trail (propagate to paper fills & ledger metadata)
     decision_trace_id: Optional[str] = None
+    # CRITICAL FIX (2026-07-29): Metadata dict for alpha-hedge pairing and other tracking
+    metadata: Optional[Dict[str, Any]] = None
     sentiment_asset: Optional[str] = None
     sentiment_timeframe: Optional[str] = None
     sentiment_driven: bool = False
@@ -2308,39 +2474,39 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _increment_validation_gate_metric("ROUTER_VALIDATION", "global_rate_limit")
         return rate_limit_rejection
     
-    # CRITICAL FIX: Convert side/action to Kalshi format using unified terminology
+    # CRITICAL FIX: Convert side/action to Kalshi format using canonical model
     # Handle both lowercase ("yes"/"no" + "buy"/"sell") and uppercase ("YES"/"NO" + "BUY"/"SELL")
     # Convert to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
     # CRITICAL: Validate against unified terminology if available to prevent signal inversion
     # CRITICAL FIX (2026-07-24): Do NOT mutate intent.side - preserve original side for immutability
     # Use local variable kalshi_side for Kalshi-formatted side instead
     logger.info("[CHECK-INTENT-RISK-SIDE-AWARE] Before conversion: intent.side=%s action=%s", intent.side, intent.action)
-    side_lower = intent.side.lower() if intent.side else ""
-    action_lower = intent.action.lower() if intent.action else ""
     
     kalshi_side = intent.side  # Default to original side if no conversion needed
     
-    if side_lower in ("yes", "no") and action_lower in ("buy", "sell"):
-        if side_lower == "yes" and action_lower == "buy":
-            kalshi_side = "BUY_YES"
-        elif side_lower == "yes" and action_lower == "sell":
-            kalshi_side = "SELL_YES"
-        elif side_lower == "no" and action_lower == "buy":
-            kalshi_side = "BUY_NO"
-        elif side_lower == "no" and action_lower == "sell":
-            kalshi_side = "SELL_NO"
+    if intent.side in ("yes", "no") and intent.action in ("buy", "sell"):
+        try:
+            kalshi_side = to_kalshi_side(intent.side, intent.action)
+        except ValueError as e:
+            logger.error(
+                f"[CANONICAL-SIDE-MAPPING-ERROR] Invalid side/action combination: "
+                f"side={intent.side} action={intent.action} error={e}"
+            )
+            _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_side_action")
+            _increment_validation_gate_metric("ROUTER_VALIDATION", "invalid_side_action")
+            return "invalid_side_action:side_action_combination"
         
         # Validate against unified terminology if available
         if UNIFIED_TERMINOLOGY_AVAILABLE:
             try:
                 # Validate side
-                UnifiedSide(side_lower)
+                UnifiedSide(intent.side.lower())
                 # Validate action
-                UnifiedAction(action_lower)
+                UnifiedAction(intent.action.lower())
             except ValueError as e:
                 logger.error(
                     f"[UNIFIED-TERMINOLOGY-ERROR] Invalid side/action combination: "
-                    f"side={side_lower} action={action_lower} error={e}"
+                    f"side={intent.side} action={intent.action} error={e}"
                 )
                 # Continue with conversion for backward compatibility
     
@@ -2352,12 +2518,11 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     thesis_side = getattr(intent, 'thesis_side', None)
     strike_target = getattr(intent, 'strike_target', None)
     if thesis_side:
-        # Extract outcome_side from converted side (BUY_YES -> yes, SELL_NO -> no, etc.)
-        order_outcome_side = None
-        if "YES" in kalshi_side:
-            order_outcome_side = "yes"
-        elif "NO" in kalshi_side:
-            order_outcome_side = "no"
+        # Extract outcome_side from converted side using canonical function
+        try:
+            order_outcome_side = extract_outcome_side(kalshi_side)
+        except ValueError:
+            order_outcome_side = None
         
         # Extract asset from ticker
         asset = intent.ticker[:3] if intent.ticker and len(intent.ticker) >= 3 else "UNKNOWN"
@@ -2474,7 +2639,8 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                     window_id = extract_window_id(ticker)
                     
                     # Check position cache for existing position in this window
-                    # This blocks orders if asset already has a filled position (even partial fill)
+                    # CRITICAL FIX (2026-07-30): Side-aware check - block same-side, allow opposite-side (hedging)
+                    # This prevents duplicate same-side positions while allowing valid hedging
                     if position_cache:
                         all_positions = position_cache.get_all_positions(validate_freshness=False)
                         for pos_ticker, pos_obj in all_positions.items():
@@ -2483,13 +2649,46 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                                 # CRITICAL: Use substring match for asset and exact match for window_id
                                 # to handle cases where ticker format may vary (e.g., KXBTC15M vs BTC15M)
                                 if asset in pos_ticker.upper() and window_id in pos_ticker:
-                                    logger.error(
-                                        "[ASSET-WINDOW-CHECK] REJECTING: asset=%s window=%s already has position=%s (contracts=%d) - blocking duplicate order",
-                                        asset, window_id, pos_ticker, pos_obj.contracts
-                                    )
-                                    _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "asset_window_position_exists")
-                                    _increment_validation_gate_metric("ROUTER_VALIDATION", "asset_window_position_exists")
-                                    return f"asset_window_position_exists:{asset_window_key}"
+                                    # CRITICAL FIX (2026-07-30): Side-aware check using thesis_side
+                                    # Get thesis_side from position (immutable strategy thesis)
+                                    existing_thesis_side = getattr(pos_obj, 'thesis_side', None)
+                                    if existing_thesis_side:
+                                        # Derive new order's thesis_side from intent
+                                        # For entry orders: thesis_side = intent.side (yes/no)
+                                        new_thesis_side = intent.side.lower() if intent.side else None
+                                        
+                                        if new_thesis_side and new_thesis_side == existing_thesis_side.lower():
+                                            # SAME SIDE - Block duplicate same-side position
+                                            logger.error(
+                                                "[SIDE-AWARE-CHECK] REJECTING: asset=%s window=%s has same-side position=%s "
+                                                "(existing_thesis=%s new_thesis=%s contracts=%d) - blocking duplicate same-side order",
+                                                asset, window_id, pos_ticker, existing_thesis_side, new_thesis_side, pos_obj.contracts
+                                            )
+                                            _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "same_side_position_exists")
+                                            _increment_validation_gate_metric("ROUTER_VALIDATION", "same_side_position_exists")
+                                            return f"same_side_position_exists:{asset_window_key}"
+                                        elif new_thesis_side and new_thesis_side != existing_thesis_side.lower():
+                                            # OPPOSITE SIDE - Allow hedging
+                                            logger.info(
+                                                "[SIDE-AWARE-CHECK] ALLOWING: asset=%s window=%s has opposite-side position=%s "
+                                                "(existing_thesis=%s new_thesis=%s) - allowing hedging",
+                                                asset, window_id, pos_ticker, existing_thesis_side, new_thesis_side
+                                            )
+                                            # Continue to next position check
+                                            continue
+                                    else:
+                                        # Fallback: no thesis_side available, use old behavior (block any position)
+                                        logger.warning(
+                                            "[SIDE-AWARE-CHECK] No thesis_side on position=%s, using fallback block",
+                                            pos_ticker
+                                        )
+                                        logger.error(
+                                            "[ASSET-WINDOW-CHECK] REJECTING: asset=%s window=%s already has position=%s (contracts=%d) - blocking duplicate order",
+                                            asset, window_id, pos_ticker, pos_obj.contracts
+                                        )
+                                        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "asset_window_position_exists")
+                                        _increment_validation_gate_metric("ROUTER_VALIDATION", "asset_window_position_exists")
+                                        return f"asset_window_position_exists:{asset_window_key}"
                     
                     # Check resting order monitor for pending orders in this window
                     try:
@@ -2649,6 +2848,10 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                             continue
                         elif asset_prefix == "DOGE" and not pos_ticker.startswith("KXDOGE"):
                             continue
+                    
+                    # CRITICAL FIX (2026-07-30): This is a notional calculation, not a position check
+                    # No side-aware check needed here - we're just summing exposure for risk limits
+                    # The side-aware check is done earlier in the asset-window check (lines 2641-2691)
                     
                     # Use current price from position object or estimate
                     pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else intent.price_cents
@@ -3011,9 +3214,52 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                 profile = profile_adapter.profile
                 
                 if profile.market_microstructure_enabled:
+                    # CRITICAL FIX 2026-07-26: Candidate snapshots can carry a degenerate book
+                    # (yes_ask_cents=100 when the NO-bid ladder was empty at snapshot time).
+                    # That derives no_bid_cents=0 and fabricates a near-full-width spread which
+                    # poisons the edge-aware gate (e.g. bogus "non_positive_executable_edge: -19c").
+                    # Refresh degenerate bid/ask from the live market state store before gating.
+                    gate_yes_bid_cents = intent.yes_bid_cents
+                    gate_yes_ask_cents = intent.yes_ask_cents
+                    book_degenerate = (
+                        (gate_yes_bid_cents or 0) <= 0
+                        or (gate_yes_ask_cents or 0) <= 0
+                        or (gate_yes_ask_cents or 100) >= 100
+                    )
+                    if book_degenerate:
+                        try:
+                            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                            _refresh_store = get_kalshi_market_state_store()
+                            _refresh_state = _refresh_store.get(intent.ticker) if _refresh_store else None
+                            _fresh_bid = getattr(_refresh_state, 'best_bid_cents', None) if _refresh_state else None
+                            _fresh_ask = getattr(_refresh_state, 'best_ask_cents', None) if _refresh_state else None
+                            if (
+                                _fresh_bid is not None and _fresh_ask is not None
+                                and 0 < _fresh_bid < 100 and 0 < _fresh_ask < 100
+                            ):
+                                logger.info(
+                                    "[MICROSTRUCTURE-GATE] Refreshed degenerate book from market state: "
+                                    "ticker=%s yes_bid %s->%s yes_ask %s->%s",
+                                    intent.ticker, gate_yes_bid_cents, _fresh_bid,
+                                    gate_yes_ask_cents, _fresh_ask
+                                )
+                                gate_yes_bid_cents = _fresh_bid
+                                gate_yes_ask_cents = _fresh_ask
+                            else:
+                                logger.warning(
+                                    "[MICROSTRUCTURE-GATE] Book degenerate and market state refresh unavailable: "
+                                    "ticker=%s intent_yes_bid=%s intent_yes_ask=%s state_bid=%s state_ask=%s",
+                                    intent.ticker, gate_yes_bid_cents, gate_yes_ask_cents, _fresh_bid, _fresh_ask
+                                )
+                        except Exception as _refresh_err:
+                            logger.warning(
+                                "[MICROSTRUCTURE-GATE] Failed to refresh degenerate book for ticker=%s: %s",
+                                intent.ticker, _refresh_err
+                            )
+                    
                     # Derive NO prices from YES prices using Kalshi duality
-                    no_bid_cents = 100 - intent.yes_ask_cents if intent.yes_ask_cents else None
-                    no_ask_cents = 100 - intent.yes_bid_cents if intent.yes_bid_cents else None
+                    no_bid_cents = 100 - gate_yes_ask_cents if gate_yes_ask_cents else None
+                    no_ask_cents = 100 - gate_yes_bid_cents if gate_yes_bid_cents else None
                     
                     # CRITICAL FIX: Populate depth from market state if not already in intent
                     # This prevents the microstructure gate from failing due to default depth=1
@@ -3098,15 +3344,14 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                     )
                     
                     if use_edge_aware_gate:
-                        # 2026-07-25: Use side-specific p_hat field for dual-side edge-aware gating
-                        # YES orders use p_hat_yes_cents, NO orders use p_hat_no_cents
-                        order_side_lower = intent.side.lower() if intent.side else ""
-                        if order_side_lower in ("yes", "buy_yes", "sell_yes"):
-                            p_hat_cents = intent.p_hat_yes_cents
-                        elif order_side_lower in ("no", "buy_no", "sell_no"):
-                            p_hat_cents = intent.p_hat_no_cents
-                        else:
-                            p_hat_cents = intent.p_hat_yes_cents  # Fallback to YES for unknown sides
+                        # CRITICAL FIX 2026-07-26: compute_per_side_edges expects the CANONICAL
+                        # YES probability and derives the NO side internally (p_no = 100 - p_yes).
+                        # The previous code passed the side-specific p_hat (p_hat_no_cents for NO
+                        # orders) as p_hat_yes_cents, which double-inverted NO orders and produced
+                        # nonsense executable edges for both sides.
+                        p_hat_cents = intent.p_hat_yes_cents
+                        if p_hat_cents is None and intent.p_hat_no_cents is not None:
+                            p_hat_cents = 100.0 - intent.p_hat_no_cents
                         
                         # 2026-07-25: Fail loudly if p_hat is missing when edge-aware mode is enabled
                         if p_hat_cents is None:
@@ -3121,19 +3366,35 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                         assert 0.0 <= p_hat_cents <= 100.0, f"p_hat_cents must be in [0,100], got {p_hat_cents} for ticker={intent.ticker} side={intent.side}"
                         
                         # Use NEW edge-aware gate with spread/edge ratio logic
+                        # 2026-07-28: Use dynamic threshold manager for max_spread_to_edge_ratio (regime-aware)
+                        max_spread_to_edge_ratio = 0.4  # Fallback default
+                        try:
+                            from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+                            threshold_manager = get_dynamic_threshold_manager()
+                            max_spread_to_edge_ratio = threshold_manager.get_max_spread_to_edge_ratio()
+                            logger.info(
+                                "[EDGE-AWARE-GATE] Using dynamic spread/edge ratio from threshold manager: %.2f (regime=%s)",
+                                max_spread_to_edge_ratio, threshold_manager.get_regime()
+                            )
+                        except Exception as e:
+                            logger.warning("[EDGE-AWARE-GATE] Failed to load dynamic spread/edge ratio: %s, using fallback 0.4", e, exc_info=True)
+                        
                         passes, reason = check_market_microstructure_edge_aware(
                             yes_bid_cents=intent.yes_bid_cents or 0,
                             no_bid_cents=no_bid_cents or 0,
                             p_hat_yes_cents=p_hat_cents,  # Use side-specific p_hat
                             order_side=intent.side,
+                            order_price_cents=intent.price_cents,  # CRITICAL FIX: Use actual order price for edge calculation
                             yes_depth=yes_depth,
                             no_depth=no_depth,
                             min_executable_edge_cents=getattr(profile, 'min_executable_edge_cents', 3.0),
-                            max_spread_to_edge_ratio=getattr(profile, 'max_spread_to_edge_ratio', 0.4),
+                            max_spread_to_edge_ratio=max_spread_to_edge_ratio,
                             max_spread_cents=profile.market_microstructure_max_spread_cents,
                             min_yes_depth=profile.market_microstructure_min_yes_depth,
                             min_no_depth=profile.market_microstructure_min_no_depth,
-                            min_total_depth=profile.momentum_fvg_liquidity_min_threshold
+                            min_total_depth=profile.momentum_fvg_liquidity_min_threshold,
+                            ticker=intent.ticker,  # CRITICAL FIX 2026-07-28: Pass ticker for dynamic threshold asset extraction
+                            aggressiveness=intent.aggressiveness  # CRITICAL FIX 2026-07-28: Pass aggressiveness for maker/taker economics
                         )
                         logger.info(
                             "[EDGE-AWARE-GATE] ticker=%s side=%s p_hat=%.1fc passes=%s reason=%s",
@@ -4166,7 +4427,19 @@ def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
     
     # Check 2: Model probability distance
     if intent.model_prob is not None:
+        # CRITICAL FIX: Make deployment safety check side-aware for NO orders
+        # For YES orders: model_prob is P(event happens), price_prob = YES price
+        # For NO orders: model_prob is P(event doesn't happen), price_prob = NO price
+        # The distance check must account for this dual probability space
         price_prob = intent.price_cents / 100.0
+        
+        # Extract side from intent (handle both "yes"/"no" and "BUY_YES"/"BUY_NO" formats)
+        side_lower = (intent.side or "").lower()
+        is_no_side = "no" in side_lower
+        
+        # For NO orders, the model_prob represents P(NO outcome) which should align with NO price
+        # For YES orders, model_prob represents P(YES outcome) which should align with YES price
+        # The distance calculation is the same in both cases since we're comparing apples-to-apples
         distance = abs(intent.model_prob - price_prob)
         
         # Track in histogram for all orders with model_prob
@@ -4178,8 +4451,8 @@ def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
             # This prevents the same unrealistic trades that cause -100% losses
             # Previously this only logged warnings, but now we reject to prevent execution
             logger.warning(
-                "[DEPLOYMENT-SAFETY] %s — Model-market probability distance EXCEEDED: model=%.2f, price=%.2f, distance=%.2f > threshold=%.2f - REJECTING TRADE",
-                intent.ticker, intent.model_prob, price_prob, distance, MODEL_PROB_DISTANCE_THRESHOLD
+                "[DEPLOYMENT-SAFETY] %s — Model-market probability distance EXCEEDED: side=%s model=%.2f, price=%.2f, distance=%.2f > threshold=%.2f - REJECTING TRADE",
+                intent.ticker, intent.side, intent.model_prob, price_prob, distance, MODEL_PROB_DISTANCE_THRESHOLD
             )
             # Track violation metric
             if SAFETY_METRICS_AVAILABLE:
@@ -4885,6 +5158,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # 2026-06-29: Relaxed executable check - allow orders if book is initialized and reasonably fresh
         # Previous: reject if not state.executable (requires both bid and ask)
         # New: allow if book_initialized=True and book_age_s < 30s (graceful degradation)
+        # CRITICAL FIX (2026-07-29): Separated book_initialized from executable.
+        # book_initialized=False: book not loaded (data availability issue)
+        # executable=False: book loaded but duality violation (data quality issue)
+        # This allows distinct handling for data availability vs data quality problems.
         if state is not None and not state.book_initialized and _is_exit_gate:
             logger.warning(
                 "[order-router] EXIT ORDER: book not initialized for %s - proceeding (exit must not be trapped)",
@@ -4907,6 +5184,34 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 status="rejected",
                 mode=mode,
                 reason=f"book_not_initialized:{intent.ticker}:book_not_ready",
+                latency_ms=round(latency, 2),
+            )
+        
+        # CRITICAL FIX (2026-07-29): Check executable flag for duality violations
+        # If book is initialized but not executable (due to duality violation), reject with distinct reason
+        # This allows upstream signal generation to adapt (e.g., skip or reduce size) vs blocking entirely
+        if state is not None and not state.executable and _is_exit_gate:
+            logger.warning(
+                "[order-router] EXIT ORDER: book not executable (duality violation) for %s - proceeding (exit must not be trapped)",
+                intent.ticker,
+            )
+        elif state is not None and not state.executable:
+            latency = (_time.monotonic() - t0) * 1000
+            logger.warning(
+                "[order-router] Live order rejected — book not executable (duality violation): ticker=%s executable=%s",
+                intent.ticker, state.executable,
+            )
+            _release_gate_record(intent, f"book_not_executable:{intent.ticker}")
+            logger.info(
+                "[ORDER-BLOCKED] ticker=%s reason=BOOK_NOT_EXECUTABLE side=%s count=%d detail=duality_violation",
+                intent.ticker,
+                intent.side,
+                intent.count,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"book_not_executable:{intent.ticker}:duality_violation",
                 latency_ms=round(latency, 2),
             )
         
@@ -4963,6 +5268,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         original_price = intent.price_cents
         intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
         
+        # CRITICAL FIX: Adjust price BEFORE sizing to ensure slot allocator uses same price
+        # Previous bug: sizing used original price (39c), slot allocator used adjusted price (49c)
+        # This caused "Insufficient exposure" rejections due to price mismatch
+        intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
+        
         # Enforce $1 fixed exposure cap sizing BEFORE depth-based sizing
         # This prevents depth-based sizing from increasing count beyond the slot cap
         intent.count = _apply_risk_based_order_sizing(intent)
@@ -4973,8 +5283,6 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             # Re-apply slot-based sizing AFTER depth-based sizing
             # This ensures depth-based sizing cannot increase count beyond the $1 cap
             intent.count = _apply_risk_based_order_sizing(intent)
-        
-        intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
         
         # CRITICAL FIX (2026-07-19): Validate price placement matches liquidity role intent
         # This prevents maker orders from incorrectly crossing the spread (incurring taker fees)
@@ -5471,21 +5779,28 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # Still allow but monitor for patterns
     
     # Convert lowercase side/action to Kalshi format before validation
-    # CRITICAL FIX: Use unified terminology validation to prevent signal inversion
+    # CRITICAL FIX: Use canonical model for side mapping to prevent signal inversion
     # Convert "yes"/"no" + "buy"/"sell" to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
     # CRITICAL FIX (2026-07-24): Do NOT mutate intent.side - preserve original side for immutability
     # Use local variable kalshi_side for Kalshi-formatted side instead
     kalshi_side = intent.side  # Default to original side if no conversion needed
     
     if intent.side in ("yes", "no") and intent.action in ("buy", "sell"):
-        if intent.side == "yes" and intent.action == "buy":
-            kalshi_side = "BUY_YES"
-        elif intent.side == "yes" and intent.action == "sell":
-            kalshi_side = "SELL_YES"
-        elif intent.side == "no" and intent.action == "buy":
-            kalshi_side = "BUY_NO"
-        elif intent.side == "no" and intent.action == "sell":
-            kalshi_side = "SELL_NO"
+        try:
+            kalshi_side = to_kalshi_side(intent.side, intent.action)
+        except ValueError as e:
+            latency = (_time.monotonic() - t0) * 1000
+            logger.error(
+                "[CANONICAL-SIDE-MAPPING-ERROR] ticker=%s side=%s action=%s error=%s",
+                intent.ticker, intent.side, intent.action, e
+            )
+            _release_gate_record(intent, "invalid_side_action")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="invalid_side_action:side_action_combination",
+                latency_ms=round(latency, 2),
+            )
         
         # CRITICAL INVARIANT CHECK: Entry orders must ALWAYS use BUY actions
         # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
@@ -6171,15 +6486,44 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 base_state = market_state_store.get(intent.ticker) if market_state_store else None
                 
                 if base_state:
-                    best_bid_cents = getattr(base_state, 'best_bid_cents', None)
-                    best_ask_cents = getattr(base_state, 'best_ask_cents', None)
+                    # NOTE: KalshiMarketState quotes are YES-space (best_ask_cents is the
+                    # YES-equivalent ask). intent.price_cents is YES-space for YES intents
+                    # and NO-space for NO intents, so convert the book to the intent's
+                    # side-space before repricing.
+                    # CRITICAL FIX (2026-07-26): Previously this block compared YES-space
+                    # quotes against NO-space prices for BUY_NO intents, producing
+                    # non-marketable resting orders that never filled (0% fill rate).
+                    yes_bid_cents = getattr(base_state, 'best_bid_cents', None)
+                    yes_ask_cents = getattr(base_state, 'best_ask_cents', None)
                     
-                    if best_bid_cents and best_ask_cents:
+                    if yes_bid_cents and yes_ask_cents:
+                        side_upper = (intent.side or "").upper()
+                        is_no_side = "NO" in side_upper
+                        if is_no_side:
+                            # NO-space book: no_bid = 100 - yes_ask, no_ask = 100 - yes_bid
+                            best_bid_cents = 100 - yes_ask_cents
+                            best_ask_cents = 100 - yes_bid_cents
+                            side_space = "NO"
+                        else:
+                            best_bid_cents = yes_bid_cents
+                            best_ask_cents = yes_ask_cents
+                            side_space = "YES"
+                        
+                        # CRITICAL FIX (2026-07-26): action comparison must be
+                        # case-insensitive (live intents carry action="BUY"). Derive the
+                        # effective action from the Kalshi-formatted side when available.
+                        if "BUY" in side_upper:
+                            effective_action = "buy"
+                        elif "SELL" in side_upper:
+                            effective_action = "sell"
+                        else:
+                            effective_action = (intent.action or "").lower()
+                        
                         original_price = intent.price_cents
                         adjusted_price = original_price
                         
                         # For buy orders: cross spread by setting price >= best_ask
-                        if intent.action == "buy":
+                        if effective_action == "buy":
                             # Calculate how many ticks to cross based on aggressiveness
                             spread_width = best_ask_cents - best_bid_cents
                             cross_ticks = int(spread_width * intent.aggressiveness)
@@ -6189,20 +6533,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                             # Set price at or above best_ask to ensure immediate execution
                             adjusted_price = best_ask_cents + cross_ticks
                             
-                            # Cap at original price + 3 ticks to prevent overpaying
-                            max_acceptable = original_price + 3
+                            # Cap at original price + 10 ticks to allow crossing wide spreads
+                            max_acceptable = original_price + 10
                             if adjusted_price > max_acceptable:
                                 adjusted_price = max_acceptable
                             
                             logger.info(
-                                "[MARKETABLE-LIMIT-BUY] ticker=%s original=%dc adjusted=%dc "
+                                "[MARKETABLE-LIMIT-BUY] ticker=%s side_space=%s original=%dc adjusted=%dc "
                                 "best_bid=%dc best_ask=%dc aggressiveness=%.2f cross_ticks=%d",
-                                intent.ticker, original_price, adjusted_price,
+                                intent.ticker, side_space, original_price, adjusted_price,
                                 best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
                             )
                         
                         # For sell orders: cross spread by setting price <= best_bid
-                        elif intent.action == "sell":
+                        elif effective_action == "sell":
                             spread_width = best_ask_cents - best_bid_cents
                             cross_ticks = int(spread_width * intent.aggressiveness)
                             if cross_ticks < 1:
@@ -6211,23 +6555,28 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                             # Set price at or below best_bid to ensure immediate execution
                             adjusted_price = best_bid_cents - cross_ticks
                             
-                            # Cap at original price - 3 ticks to prevent underselling
-                            min_acceptable = original_price - 3
+                            # Cap at original price - 10 ticks to allow crossing wide spreads
+                            min_acceptable = original_price - 10
                             if adjusted_price < min_acceptable:
                                 adjusted_price = min_acceptable
                             
                             logger.info(
-                                "[MARKETABLE-LIMIT-SELL] ticker=%s original=%dc adjusted=%dc "
+                                "[MARKETABLE-LIMIT-SELL] ticker=%s side_space=%s original=%dc adjusted=%dc "
                                 "best_bid=%dc best_ask=%dc aggressiveness=%.2f cross_ticks=%d",
-                                intent.ticker, original_price, adjusted_price,
+                                intent.ticker, side_space, original_price, adjusted_price,
                                 best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
                             )
+                        
+                        # Clamp to valid Kalshi price range (1-99 cents)
+                        adjusted_price = max(1, min(99, adjusted_price))
                         
                         # Update intent price with marketable adjustment
                         intent.price_cents = adjusted_price
                         
             except Exception as marketable_err:
-                logger.debug("[MARKETABLE-LIMIT] Failed to adjust price for aggressiveness: %s", marketable_err)
+                # CRITICAL FIX (2026-07-26): Surface repricing failures at warning level.
+                # A silent failure here leaves a stale, potentially non-marketable price.
+                logger.warning("[MARKETABLE-LIMIT] Failed to adjust price for aggressiveness: %s", marketable_err)
         
         # Use pre-normalized ticker (stripped of strike suffix) for order submission
         # PRODUCTION FIX: Convert all "market" orders to aggressive limit orders via dynamic bands
@@ -6419,20 +6768,33 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             intent.side, intent.action, outcome_id, order_action
         )
         
+        # CRITICAL FIX 2026-07-29: Apply execution mode to order parameters
+        # Regime-based routing determines post_only, aggressiveness, order_type, time_in_force
+        effective_post_only, effective_aggressiveness, effective_order_type, effective_tif = _apply_execution_mode(intent)
+        
+        logger.info(
+            "[EXECUTION-MODE] intent=%s execution_mode=%s post_only=%s aggressiveness=%.2f order_type=%s tif=%s",
+            intent.intent_id[:16], intent.execution_mode, effective_post_only, effective_aggressiveness, effective_order_type, effective_tif
+        )
+        
         # Create VenueOrder with computed price and order_type
         order = VenueOrder(
             market_id=_normalized_ticker,
             side=order_action,  # CRITICAL FIX: Use extracted action from Kalshi side, not intent.action
             size=Decimal(intent.count),
             price=Decimal(final_price_cents) / Decimal("100"),
-            order_type=final_order_type,  # Always "limit" after market band conversion
+            order_type=effective_order_type,  # CRITICAL FIX 2026-07-29: Use execution mode order_type
             outcome_id=outcome_id,
-            time_in_force=tif,
+            time_in_force=effective_tif,  # CRITICAL FIX 2026-07-29: Use execution mode TIF
             expiration_ts=gtt_exp,
             client_order_id=intent.client_order_id,  # CRITICAL FIX (2026-07-17): Use client_order_id for duplicate prevention
             idempotency_key=intent.idempotency_key,  # CRITICAL FIX (2026-07-17): Prevent duplicate orders on retry
-            post_only=_effective_post_only(intent.post_only, intent.aggressiveness),  # Never post_only on marketable orders
+            post_only=effective_post_only,  # CRITICAL FIX 2026-07-29: Use execution mode post_only
             source="agent_grid",  # Mark as pipeline order
+            # CRITICAL FIX (2026-07-29): Pass TP/SL from OrderIntent to VenueOrder for exit policy enforcement
+            take_profit_price_cents=intent.take_profit_price_cents,
+            take_profit_r_multiple=intent.take_profit_r_multiple,
+            stop_loss_price_cents=intent.stop_loss_price_cents,
         )
 
         # PRODUCTION FIX: Register TP targets with position cache for fill-time lookup
@@ -6814,6 +7176,107 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 "[ROUTER-INVARIANT-PASS] ticker=%s side=%s size=%d p_hat_side_cents=%.2f canonical_edge_side_frac=%.4f min_executable_edge_frac=%.4f",
                 intent.ticker, intent.side, intent.count, p_hat_side_cents, canonical_edge_side_frac, min_executable_edge_frac
             )
+
+        # CRITICAL FIX (2026-07-26): WS-vs-REST divergence guard before order submission
+        # Fetch a fresh REST snapshot and compare with current WS orderbook to detect
+        # data inconsistencies that could lead to non-marketable orders or bad fills.
+        # This prevents trading on stale or corrupted WS data that diverges from REST truth.
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            market_state_store = get_kalshi_market_state_store()
+            ws_state = market_state_store.get(intent.ticker) if market_state_store else None
+            
+            if ws_state and ws_state.best_bid_cents and ws_state.best_ask_cents:
+                # Rate limit: only check if last REST check was > 5 seconds ago
+                now = _time.monotonic()
+                if not hasattr(self, "_last_rest_divergence_check_ts"):
+                    self._last_rest_divergence_check_ts = {}
+                last_check_ts = self._last_rest_divergence_check_ts.get(intent.ticker, 0.0)
+                
+                if now - last_check_ts > 5.0:
+                    self._last_rest_divergence_check_ts[intent.ticker] = now
+                    
+                    # Fetch fresh REST orderbook snapshot
+                    rest_result = await asyncio.wait_for(
+                        client._request_with_resilience(
+                            "GET", f"/markets/{intent.ticker}/orderbook",
+                            operation_name=f"ws_rest_divergence_check({intent.ticker})"
+                        ),
+                        timeout=3.0
+                    )
+                    
+                    if rest_result.success and rest_result.data:
+                        # Parse REST orderbook
+                        rest_data = rest_result.data
+                        orderbook_fp = rest_data.get("orderbook_fp", {})
+                        rest_yes_levels = []
+                        rest_no_levels = []
+                        if "yes_dollars" in orderbook_fp:
+                            rest_yes_levels = [[float(p), float(s)] for p, s in orderbook_fp["yes_dollars"]]
+                        if "no_dollars" in orderbook_fp:
+                            rest_no_levels = [[float(p), float(s)] for p, s in orderbook_fp["no_dollars"]]
+                        
+                        # Extract best bid/ask from REST (YES-space)
+                        rest_best_bid_cents = None
+                        rest_best_ask_cents = None
+                        if rest_yes_levels:
+                            # Bids are sorted descending, take highest price
+                            rest_best_bid_cents = int(max(p for p, s in rest_yes_levels) * 100)
+                        if rest_no_levels:
+                            # NO asks derived from NO bids: ask = 100 - NO_bid
+                            # NO bids are sorted descending, take highest price
+                            best_no_bid_cents = int(max(p for p, s in rest_no_levels) * 100)
+                            rest_best_ask_cents = 100 - best_no_bid_cents
+                        
+                        if rest_best_bid_cents and rest_best_ask_cents:
+                            # Calculate divergence in cents
+                            bid_divergence_cents = abs(ws_state.best_bid_cents - rest_best_bid_cents)
+                            ask_divergence_cents = abs(ws_state.best_ask_cents - rest_best_ask_cents)
+                            max_divergence_cents = max(bid_divergence_cents, ask_divergence_cents)
+                            
+                            # Tolerance: 2 cents max divergence (accounts for normal latency)
+                            divergence_tolerance_cents = 2
+                            
+                            if max_divergence_cents > divergence_tolerance_cents:
+                                logger.error(
+                                    "[WS-REST-DIVERGENCE-REJECT] ticker=%s intent_id=%s "
+                                    "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
+                                    "max_divergence=%dc (tolerance=%dc) - REJECTING ORDER to prevent trading on stale data",
+                                    intent.ticker, intent.intent_id,
+                                    ws_state.best_bid_cents, ws_state.best_ask_cents,
+                                    rest_best_bid_cents, rest_best_ask_cents,
+                                    max_divergence_cents, divergence_tolerance_cents
+                                )
+                                return OrderResult(
+                                    status="rejected",
+                                    mode=mode,
+                                    reason=f"ws_rest_divergence:{max_divergence_cents}c",
+                                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                                )
+                            else:
+                                logger.info(
+                                    "[WS-REST-DIVERGENCE-PASS] ticker=%s intent_id=%s "
+                                    "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
+                                    "max_divergence=%dc (tolerance=%dc)",
+                                    intent.ticker, intent.intent_id,
+                                    ws_state.best_bid_cents, ws_state.best_ask_cents,
+                                    rest_best_bid_cents, rest_best_ask_cents,
+                                    max_divergence_cents, divergence_tolerance_cents
+                                )
+                        else:
+                            logger.warning(
+                                "[WS-REST-DIVERGENCE-SKIP] ticker=%s REST orderbook incomplete (bid=%s ask=%s) - skipping divergence check",
+                                intent.ticker, rest_best_bid_cents, rest_best_ask_cents
+                            )
+                    else:
+                        logger.warning(
+                            "[WS-REST-DIVERGENCE-SKIP] ticker=%s REST fetch failed - skipping divergence check",
+                            intent.ticker
+                        )
+        except asyncio.TimeoutError:
+            logger.warning("[WS-REST-DIVERGENCE-SKIP] ticker=%s REST fetch timeout - skipping divergence check", intent.ticker)
+        except Exception as divergence_err:
+            logger.warning("[WS-REST-DIVERGENCE-SKIP] ticker=%s divergence check failed: %s", intent.ticker, divergence_err)
 
         # 2026-07-25: Log ORDER-SEND before submission
         logger.info(
@@ -7522,17 +7985,21 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         )
         
         # RESTING ORDER MONITOR: Register GTC limit orders for dynamic re-checking
-        # Only register if order is a GTC limit order that may rest on the book
+        # CRITICAL FIX (2026-07-29): Exit orders MUST be registered even if expected to be marketable
+        # If an exit order doesn't fill immediately (liquidity issues, spread, etc.), it will rest
+        # and needs to be tracked for cancellation/replacement. Exit orders are critical for
+        # position management and must never be orphaned on the book.
         if status == "accepted_live" and remaining_count > 0:
             try:
                 from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor, RestingOrderRecord
                 from config.kalshi_crypto_config import kalshi_ticker_to_asset
                 
-                # Check if this is a GTC limit order
+                # Check if this is a GTC limit order OR an exit order
                 tif_lower = (intent.time_in_force or "").lower()
                 order_type_lower = (intent.order_type or "").lower()
+                is_exit_order = intent.entry_or_exit == "exit" or (intent.source and "position_monitor_exit" in str(intent.source))
                 
-                if order_type_lower == "limit" and tif_lower in ("gtc", "good_till_canceled"):
+                if order_type_lower == "limit" and tif_lower in ("gtc", "good_till_canceled") or is_exit_order:
                     kalshi_order_id = getattr(placed, "order_id", "")
                     if kalshi_order_id:
                         monitor = get_resting_order_monitor()
@@ -7565,9 +8032,43 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                         
                         monitor.register_order(resting_record)
                         logger.info(
-                            f"[RESTING_ORDER_MONITOR] Registered GTC limit order: kalshi_order_id={kalshi_order_id} "
-                            f"ticker={intent.ticker} remaining={remaining_count}"
+                            f"[RESTING_ORDER_MONITOR] Registered order: kalshi_order_id={kalshi_order_id} "
+                            f"ticker={intent.ticker} remaining={remaining_count} is_exit={is_exit_order}"
                         )
+
+                        # CRITICAL FIX (2026-07-29): Register ExitOrderState for exit orders
+                        # This enables active retry/timeout management for exit orders
+                        if is_exit_order:
+                            try:
+                                from merid.event_venues.kalshi.resting_order_monitor import ExitOrderState
+                                import time
+
+                                exit_state = ExitOrderState(
+                                    order_id=kalshi_order_id,
+                                    asset=asset,
+                                    side=intent.side,
+                                    action=intent.action,
+                                    base_price_cents=intent.price_cents,
+                                    current_aggressiveness=getattr(intent, 'aggressiveness', 0.5),
+                                    retries_left=5,  # Default max retries
+                                    last_action_ts=time.time(),
+                                    status="pending",
+                                    # Intent reconstruction for retries
+                                    intent_id=intent.intent_id,
+                                    ticker=intent.ticker,
+                                    count=remaining_count,
+                                    exit_reason=getattr(intent, 'exit_reason', 'unknown'),
+                                    exit_policy_id=intent.exit_policy_id or "",
+                                )
+                                monitor.register_exit_state(exit_state)
+                                logger.info(
+                                    f"[EXIT-RETRY-INIT] order_id={kalshi_order_id} asset={asset} "
+                                    f"side={intent.side} action={intent.action} base_price={intent.price_cents}c"
+                                )
+                            except Exception as exit_state_err:
+                                logger.warning(
+                                    f"[EXIT-RETRY-INIT-FAILED] order_id={kalshi_order_id} error={exit_state_err}"
+                                )
             except Exception as _re_exc:
                 logger.warning(f"[RESTING_ORDER_MONITOR] Failed to register order: {_re_exc}")
         
@@ -8063,8 +8564,10 @@ def _run_pre_trade_gate(
             # known (PENDING/SUBMITTED/LIVE/FILLED), so treat this as a no-op success.
             if verdict.is_duplicate:
                 logger.info(
-                    "[order-router] IDEMPOTENT DUPLICATE: %s — status=%s (returning synthetic success)",
-                    intent.ticker, verdict.existing_status,
+                    "[order-router] IDEMPOTENT DUPLICATE: ticker=%s coid=%s status=%s reason=%s "
+                    "agent=%s strategy=%s side=%s action=%s count=%d price=%dc (returning synthetic success)",
+                    intent.ticker, verdict.client_order_id[:16], verdict.existing_status, verdict.reason,
+                    _agent, _strategy, intent.side, intent.action, intent.count, intent.price_cents,
                 )
                 # Return synthetic success based on existing status
                 # FILLED/PARTIAL → filled_live, SUBMITTED/LIVE → accepted_live
@@ -8121,9 +8624,17 @@ def _run_pre_trade_gate(
                 except Exception as release_err:
                     logger.warning("[order-router] Failed to release slot on gate rejection: %s", release_err)
             
+            # ENHANCED LOGGING: Detailed rejection context for debugging
+            # Include all relevant order parameters and rejection reason
             logger.warning(
-                "[order-router] GATE BLOCKED: %s — %s",
-                intent.ticker, verdict.reason,
+                "[order-router] GATE BLOCKED: ticker=%s coid=%s reason=%s "
+                "agent=%s strategy=%s side=%s action=%s count=%d price=%dc "
+                "intent_id=%s entry_or_exit=%s exit_policy_id=%s window_resolution_id=%s "
+                "risk_tier=%s max_hold_seconds=%s latency_ms=%.2f",
+                intent.ticker, verdict.client_order_id[:16], verdict.reason,
+                _agent, _strategy, intent.side, intent.action, intent.count, intent.price_cents,
+                intent.intent_id, intent.entry_or_exit, intent.exit_policy_id, intent.window_resolution_id,
+                intent.risk_tier, intent.max_hold_seconds, latency,
             )
             return OrderResult(
                 status="rejected",

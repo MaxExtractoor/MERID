@@ -854,10 +854,12 @@ class PreTradeGate:
         if existing is not None and existing.status in _BLOCK_DUPLICATE_STATES:
             self._store._metrics.blocked_duplicate += 1
             # PHASE1-DUP-9: Alert for duplicate order attempts (warning level + metric)
+            # ENHANCED LOGGING: Include full context for debugging
             logger.warning(
-                "[GATE-ALERT] duplicate_order_attempt_blocked coid=%s status=%s contract=%s agent=%s "
-                "(metric: blocked_duplicate=%d)",
-                coid, existing.status.value, contract_id, agent_id,
+                "[GATE-ALERT] duplicate_order_attempt_blocked coid=%s status=%s contract=%s agent=%s strategy=%s "
+                "side=%s action=%s count=%d price=%dc intent_id=%s (metric: blocked_duplicate=%d)",
+                coid, existing.status.value, contract_id, agent_id, strategy_group,
+                side, action, target_count, price_cents, intent_id,
                 self._store._metrics.blocked_duplicate,
             )
             return GateVerdict(
@@ -881,11 +883,12 @@ class PreTradeGate:
         )
         if resting_duplicate is not None:
             self._store._metrics.blocked_duplicate += 1
+            # ENHANCED LOGGING: Include full context for debugging
             logger.warning(
                 "[GATE-ALERT] resting_order_duplicate_blocked contract=%s side=%s action=%s price=%dc "
-                "existing_coid=%s new_coid=%s agent=%s (metric: blocked_duplicate=%d)",
-                contract_id, side, action, price_cents, resting_duplicate.client_order_id, coid, agent_id,
-                self._store._metrics.blocked_duplicate,
+                "existing_coid=%s new_coid=%s agent=%s strategy=%s count=%d intent_id=%s (metric: blocked_duplicate=%d)",
+                contract_id, side, action, price_cents, resting_duplicate.client_order_id, coid, agent_id, strategy_group,
+                target_count, intent_id, self._store._metrics.blocked_duplicate,
             )
             return GateVerdict(
                 allowed=False,
@@ -906,11 +909,12 @@ class PreTradeGate:
         )
         if not price_allowed:
             self._store._metrics.blocked_price_repeat += 1
+            # ENHANCED LOGGING: Include full context for debugging
             logger.warning(
-                "[GATE-ALERT] price_repeat_blocked contract=%s side=%s price=%dc reason=%s last_price=%s agent=%s "
-                "(metric: blocked_price_repeat=%d)",
-                contract_id, side, price_cents, price_reason, last_price, agent_id,
-                self._store._metrics.blocked_price_repeat,
+                "[GATE-ALERT] price_repeat_blocked contract=%s side=%s price=%dc reason=%s last_price=%s "
+                "agent=%s strategy=%s action=%s count=%d intent_id=%s (metric: blocked_price_repeat=%d)",
+                contract_id, side, price_cents, price_reason, last_price, agent_id, strategy_group,
+                action, target_count, intent_id, self._store._metrics.blocked_price_repeat,
             )
             return GateVerdict(
                 allowed=False,
@@ -938,14 +942,16 @@ class PreTradeGate:
         # CRITICAL FIX (2026-07-13): DISABLED sequential trading check in gate.check()
         # The gate.check() function doesn't have access to the source field, which is required
         # to properly detect exit orders using _is_exit_order. Without source info, we can't
-        # distinguish between true exit orders and entry orders. Sequential trading enforcement
-        # is now handled in order_router where source is available.
+        # distinguish between true exit orders and entry orders.
+        # CRITICAL FIX (2026-07-30): Sequential trading is now handled by side-aware asset-window check in order_router
+        # The side-aware check provides better protection: blocks same-side duplicates while allowing opposite-side hedging
+        # This is more nuanced than binary sequential trading and better fits the 15m crypto use case
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile = get_active_profile()
             if profile and hasattr(profile, 'risk_policy_sequential_trading') and profile.risk_policy_sequential_trading:
-                # DISABLED: Cannot detect exit orders without source field
-                # Sequential trading check moved to order_router
+                # DISABLED: Sequential trading replaced by side-aware check in order_router
+                # See order_router.py lines 2641-2691 for side-aware asset-window check
                 pass
         except Exception as e:
             logger.warning("[GATE] Sequential trading check failed: %s", e)
@@ -1015,9 +1021,12 @@ class PreTradeGate:
                     
                     if missing_fields:
                         self._store._metrics.blocked_exit_policy += 1
+                        # ENHANCED LOGGING: Include full context for debugging
                         logger.error(
-                            "[GATE-ALERT] exit_policy_metadata_missing contract=%s side=%s agent=%s missing_fields=%s (metric: blocked_exit_policy=%d)",
-                            contract_id, side, agent_id, ", ".join(missing_fields),
+                            "[GATE-ALERT] exit_policy_metadata_missing contract=%s side=%s agent=%s strategy=%s "
+                            "action=%s count=%d price=%dc intent_id=%s missing_fields=%s (metric: blocked_exit_policy=%d)",
+                            contract_id, side, agent_id, strategy_group,
+                            action, target_count, price_cents, intent_id, ", ".join(missing_fields),
                             self._store._metrics.blocked_exit_policy,
                         )
                         return GateVerdict(
@@ -1028,9 +1037,12 @@ class PreTradeGate:
                     
                     if invalid_fields:
                         self._store._metrics.blocked_exit_policy_invalid += 1
+                        # ENHANCED LOGGING: Include full context for debugging
                         logger.error(
-                            "[GATE-ALERT] exit_policy_metadata_invalid contract=%s side=%s agent=%s invalid_fields=%s (metric: blocked_exit_policy_invalid=%d)",
-                            contract_id, side, agent_id, ", ".join(invalid_fields),
+                            "[GATE-ALERT] exit_policy_metadata_invalid contract=%s side=%s agent=%s strategy=%s "
+                            "action=%s count=%d price=%dc intent_id=%s invalid_fields=%s (metric: blocked_exit_policy_invalid=%d)",
+                            contract_id, side, agent_id, strategy_group,
+                            action, target_count, price_cents, intent_id, ", ".join(invalid_fields),
                             self._store._metrics.blocked_exit_policy_invalid,
                         )
                         return GateVerdict(
@@ -1041,9 +1053,12 @@ class PreTradeGate:
                 else:  # Exit order requires exit_policy_id for tracking
                     if not exit_policy_id:
                         self._store._metrics.blocked_exit_policy += 1
+                        # ENHANCED LOGGING: Include full context for debugging
                         logger.error(
-                            "[GATE-ALERT] exit_policy_id_missing contract=%s side=%s agent=%s (metric: blocked_exit_policy=%d)",
-                            contract_id, side, agent_id,
+                            "[GATE-ALERT] exit_policy_id_missing contract=%s side=%s agent=%s strategy=%s "
+                            "action=%s count=%d price=%dc intent_id=%s (metric: blocked_exit_policy=%d)",
+                            contract_id, side, agent_id, strategy_group,
+                            action, target_count, price_cents, intent_id,
                             self._store._metrics.blocked_exit_policy,
                         )
                         return GateVerdict(
@@ -1320,10 +1335,12 @@ class PreTradeGate:
         if existing is not None and existing.status in _BLOCK_DUPLICATE_STATES:
             self._store._metrics.blocked_duplicate += 1
             # PHASE1-DUP-9: Alert for duplicate order attempts (warning level + metric)
+            # ENHANCED LOGGING: Include full context for debugging
             logger.warning(
-                "[GATE-ALERT] duplicate_order_attempt_blocked coid=%s status=%s contract=%s agent=%s "
-                "(metric: blocked_duplicate=%d)",
-                coid, existing.status.value, contract_id, agent_id,
+                "[GATE-ALERT] duplicate_order_attempt_blocked coid=%s status=%s contract=%s agent=%s strategy=%s "
+                "side=%s action=%s count=%d price=%dc intent_id=%s (metric: blocked_duplicate=%d)",
+                coid, existing.status.value, contract_id, agent_id, strategy_group,
+                side, action, target_count, price_cents, intent_id,
                 self._store._metrics.blocked_duplicate,
             )
             return GateVerdict(
@@ -1347,11 +1364,12 @@ class PreTradeGate:
         )
         if resting_duplicate is not None:
             self._store._metrics.blocked_duplicate += 1
+            # ENHANCED LOGGING: Include full context for debugging
             logger.warning(
                 "[GATE-ALERT] resting_order_duplicate_blocked contract=%s side=%s action=%s price=%dc "
-                "existing_coid=%s new_coid=%s agent=%s (metric: blocked_duplicate=%d)",
-                contract_id, side, action, price_cents, resting_duplicate.client_order_id, coid, agent_id,
-                self._store._metrics.blocked_duplicate,
+                "existing_coid=%s new_coid=%s agent=%s strategy=%s count=%d intent_id=%s (metric: blocked_duplicate=%d)",
+                contract_id, side, action, price_cents, resting_duplicate.client_order_id, coid, agent_id, strategy_group,
+                target_count, intent_id, self._store._metrics.blocked_duplicate,
             )
             return GateVerdict(
                 allowed=False,
@@ -1372,11 +1390,12 @@ class PreTradeGate:
         )
         if not price_allowed:
             self._store._metrics.blocked_price_repeat += 1
+            # ENHANCED LOGGING: Include full context for debugging
             logger.warning(
-                "[GATE-ALERT] price_repeat_blocked contract=%s side=%s price=%dc reason=%s last_price=%s agent=%s "
-                "(metric: blocked_price_repeat=%d)",
-                contract_id, side, price_cents, price_reason, last_price, agent_id,
-                self._store._metrics.blocked_price_repeat,
+                "[GATE-ALERT] price_repeat_blocked contract=%s side=%s price=%dc reason=%s last_price=%s "
+                "agent=%s strategy=%s action=%s count=%d intent_id=%s (metric: blocked_price_repeat=%d)",
+                contract_id, side, price_cents, price_reason, last_price, agent_id, strategy_group,
+                action, target_count, intent_id, self._store._metrics.blocked_price_repeat,
             )
             return GateVerdict(
                 allowed=False,
