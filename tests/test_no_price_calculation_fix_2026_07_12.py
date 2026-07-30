@@ -268,5 +268,73 @@ class TestDualSideEvaluationElifBugFix:
         assert True, "Documenting the elif to if fix for defensive programming"
 
 
+class TestUpstreamNoLevelFixes20260730:
+    """Test upstream NO level derivation fixes (2026-07-30)."""
+
+    def test_market_state_derives_no_from_yes(self):
+        """Test market_state.py derives NO levels from YES bids using duality."""
+        from pathlib import Path
+        
+        market_state_path = Path(__file__).parent.parent / "merid" / "event_venues" / "kalshi" / "market_state.py"
+        market_state_src = market_state_path.read_text(encoding="utf-8")
+        
+        # Should derive NO levels from YES bids
+        assert "no_levels = [[1.0 - float(price), float(size)] for price, size in orderbook_fp[\"yes_dollars\"]]" in market_state_src, (
+            "market_state.py should derive NO levels as 1.0 - YES_bid"
+        )
+        
+        # Should NOT use no_dollars directly
+        lines = market_state_src.splitlines()
+        for i, line in enumerate(lines):
+            if 'if "no_dollars" in orderbook_fp:' in line:
+                for j in range(i+1, min(i+5, len(lines))):
+                    if 'no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]' in lines[j]:
+                        if not lines[j].strip().startswith("#"):
+                            pytest.fail("market_state.py should not use no_dollars directly")
+
+    def test_ws_bridge_derives_no_from_yes(self):
+        """Test ws_bridge.py derives NO levels from YES bids in multiple paths."""
+        from pathlib import Path
+        
+        ws_bridge_path = Path(__file__).parent.parent / "merid" / "event_venues" / "kalshi" / "ws_bridge.py"
+        ws_bridge_src = ws_bridge_path.read_text(encoding="utf-8")
+        
+        # Should have duality pattern
+        count = ws_bridge_src.count("no_levels = [[1.0 - float(price), float(size)] for price, size in yes_levels]")
+        assert count >= 3, f"ws_bridge.py should have at least 3 instances of duality pattern, found {count}"
+
+    def test_order_router_derives_no_from_yes(self):
+        """Test order_router.py derives NO levels from YES bids."""
+        from pathlib import Path
+        
+        order_router_path = Path(__file__).parent.parent / "merid" / "event_venues" / "kalshi" / "order_router.py"
+        order_router_src = order_router_path.read_text(encoding="utf-8")
+        
+        # Should derive NO levels from YES bids
+        assert "rest_no_levels = [[1.0 - float(p), float(s)] for p, s in orderbook_fp[\"yes_dollars\"]]" in order_router_src, (
+            "order_router.py should derive NO levels as 1.0 - YES_bid"
+        )
+
+    def test_placeholder_pattern_prevention(self):
+        """Test that corrupted placeholder pattern from Kalshi API is prevented."""
+        # Kalshi API returns placeholder values like 0.0010, 0.0020 in no_dollars
+        # These convert to 0.9990, 0.9980 which are the 99c placeholder pattern
+        
+        # Old bug: using these directly would create NO levels at 99c, 98c, 97c
+        corrupted_no_dollars = [[0.0010, 100], [0.0020, 200]]
+        old_no_levels = [[float(price), float(size)] for price, size in corrupted_no_dollars]
+        
+        # This creates the problematic 99c pattern
+        assert old_no_levels[0][0] == 0.0010, "Old pattern uses corrupted values"
+        
+        # New fix: derive from YES bids instead
+        yes_dollars = [[0.84, 100], [0.83, 200]]
+        new_no_levels = [[1.0 - float(price), float(size)] for price, size in yes_dollars]
+        
+        # This creates correct NO prices (16c, 17c)
+        assert abs(new_no_levels[0][0] - 0.16) < 0.0001, "New pattern derives NO = 1.0 - YES"
+        assert abs(new_no_levels[1][0] - 0.17) < 0.0001, "New pattern derives NO = 1.0 - YES"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

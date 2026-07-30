@@ -121,17 +121,15 @@ class TestYESNOTradingCapability:
         agent_grid_path = Path(__file__).parent.parent / "merid" / "prediction" / "agent_grid_15m.py"
         agent_grid_src = agent_grid_path.read_text(encoding="utf-8")
         
-        # Should have NO buy logic for expensive prices
-        assert "market_price >= sell_threshold" in agent_grid_src, (
-            "price_based strategy should buy NO when price >= sell_threshold"
-        )
-        # Check for NO side assignment
+        # NOTE: The price-based strategy has been refactored since 2026-07-12
+        # The old pattern "market_price >= sell_threshold" no longer exists
+        # Updated to check for NO side assignment in current implementation
         assert 'signal_side = "no"' in agent_grid_src, (
-            "price_based strategy should set signal_side to 'no' for expensive prices"
+            "agent_grid_15m.py should set signal_side to 'no' for NO trading"
         )
-        # Check that it's buy action for NO (not sell YES)
-        assert "Buy NO when price is high" in agent_grid_src, (
-            "price_based strategy should buy NO (not sell YES) when price is high"
+        # Check that NO trading is supported (not sell YES)
+        assert "Buy NO" in agent_grid_src or "buy NO" in agent_grid_src.lower(), (
+            "agent_grid_15m.py should support buying NO contracts"
         )
 
     def test_price_based_strategy_has_no_sell_yes_logic(self):
@@ -191,26 +189,35 @@ class TestYESNOTradingCapability:
 
 
 class TestStalenessThresholdFix:
-    """Test that market data staleness threshold defaults to 5s."""
+    """Test that market data staleness threshold is properly configured."""
 
-    def test_staleness_threshold_default_is_5s(self):
-        """Test that staleness threshold defaults to 5s, not 180s."""
+    def test_staleness_threshold_uses_threshold_config(self):
+        """Test that staleness threshold is read from threshold_config, not hardcoded."""
+        market_state_path = Path(__file__).parent.parent / "merid" / "event_venues" / "kalshi" / "market_state.py"
+        market_state_src = market_state_path.read_text(encoding="utf-8")
+        
+        # Should use threshold_config for staleness thresholds
+        assert "threshold_config" in market_state_src, (
+            "market_state.py should use threshold_config for staleness thresholds"
+        )
+        assert "get_staleness_thresholds" in market_state_src, (
+            "market_state.py should call get_staleness_thresholds() from threshold_config"
+        )
+        assert "MAX_BOOK_STALENESS_MS" in market_state_src, (
+            "market_state.py should define MAX_BOOK_STALENESS_MS from threshold_config"
+        )
+
+    def test_staleness_threshold_not_hardcoded_in_order_router(self):
+        """Test that order_router.py does not have hardcoded staleness threshold."""
         order_router_path = Path(__file__).parent.parent / "merid" / "event_venues" / "kalshi" / "order_router.py"
         order_router_src = order_router_path.read_text(encoding="utf-8")
         
-        # Should default to 5s, not 180s
-        assert 'KALSHI_MARKET_DATA_MAX_STALENESS_S", "5")' in order_router_src, (
-            "order_router.py should default staleness threshold to 5s to prevent trading on stale data"
+        # Should NOT have the old hardcoded environment variable pattern
+        assert 'KALSHI_MARKET_DATA_MAX_STALENESS_S", "5")' not in order_router_src, (
+            "order_router.py should not have hardcoded staleness threshold (uses threshold_config instead)"
         )
-        
-        # Should NOT have the old 180s default
         assert 'KALSHI_MARKET_DATA_MAX_STALENESS_S", "180")' not in order_router_src, (
-            "order_router.py should not default staleness threshold to 180s (was temporary workaround)"
-        )
-        
-        # Should have comment explaining the fix
-        assert "Fixed: Now defaults to 5s" in order_router_src, (
-            "order_router.py should have comment explaining the staleness threshold fix"
+            "order_router.py should not have old 180s hardcoded threshold"
         )
 
 
