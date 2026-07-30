@@ -268,6 +268,14 @@ from dataclasses import dataclass
 
 from utils.logger import get_logger
 
+# Import canonical YES/NO price space model for consistent side mapping
+from merid.event_venues.kalshi.binary_price_space import (
+    to_kalshi_side,
+    parse_kalshi_side,
+    extract_outcome_side,
+    extract_action,
+)
+
 logger = get_logger("merid.loop_15m")
 logger.info("[15M-LOOP] MODULE VERSION v20260529a-cache-fix")
 
@@ -716,8 +724,11 @@ class Kalshi15mLoop:
         except Exception as e:
             logger.warning("[15m-LOOP] Failed to initialize _current_window_suffix: %s", e)
             self._current_window_suffix = None  # Fallback to None if initialization fails
-        self._executed_candidates_this_window = {}  # Track executed candidates in current window to prevent duplicates (dict for edge improvement tracking)
+        self._executed_candidates_this_window = {}  # Track executed candidates in current window to prevent duplicates (dict for edge comparison)
         self._halted_due_to_drawdown = False
+        
+        # Per-tick execution counter for sanity checks (reset each tick)
+        self._tick_executed_count = 0
         
         # RESEARCH-ALIGNED: Rejection reason aggregation counters
         # Track why candidates are rejected to identify filtering bottlenecks
@@ -873,7 +884,7 @@ class Kalshi15mLoop:
                         # Calculate notional: contracts * avg_price_cents / 100
                         # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
                         if position.avg_price_cents is not None:
-                            notional = float((position.contracts * position.avg_price_cents) / 100.0)
+                            notional = Decimal(str((position.contracts * position.avg_price_cents) / 100.0))
                             self._asset_positions[asset] += notional
                             logger.debug("[15m-LOOP] Position: market=%s asset=%s contracts=%d price=%d notional=%.2f", 
                                         market_id, asset, position.contracts, position.avg_price_cents, notional)
@@ -1652,24 +1663,28 @@ class Kalshi15mLoop:
         # This prevents exit orders from failing silently when venue is unavailable
         try:
             from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            from merid.utils.kalshi_identity import extract_asset
             catalog = get_market_catalog()
-            asset_markets = catalog.get_active_markets(asset=position.asset, timeframe="15m")
+            asset = extract_asset(position.market_id)
+            asset_markets = catalog.get_active_markets(asset=asset, timeframe="15m")
             
             if not asset_markets:
                 logger.error(
                     "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=VENUE_UNAVAILABLE - "
                     "No active 15m market found for asset, exit order cannot execute. "
                     "Position will remain open until venue recovers.",
-                    position.asset,
+                    asset,
                     position.market_id
                 )
                 return
         except Exception as venue_check_err:
+            from merid.utils.kalshi_identity import extract_asset
+            asset = extract_asset(position.market_id)
             logger.warning(
                 "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=VENUE_CHECK_FAILED - "
                 "Failed to check venue availability (non-critical): %s. "
                 "Proceeding with exit order attempt.",
-                position.asset,
+                asset,
                 position.market_id,
                 venue_check_err
             )
@@ -1678,7 +1693,9 @@ class Kalshi15mLoop:
         # This prevents exit orders from failing when series data is throttled
         try:
             from merid.event_venues.kalshi.client import get_kalshi_client
+            from merid.utils.kalshi_identity import extract_asset
             client = get_kalshi_client()
+            asset = extract_asset(position.market_id)
             
             # Check if client is in circuit breaker cooldown
             if hasattr(client, '_circuit_breaker_cooldown_until'):
@@ -1690,15 +1707,17 @@ class Kalshi15mLoop:
                         "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=CIRCUIT_BREAKER_COOLDOWN - "
                         "REST client in circuit breaker cooldown for %.1fs, exit order may fail. "
                         "Proceeding with exit order attempt (may use stale data).",
-                        position.asset,
+                        asset,
                         position.market_id,
                         cooldown_remaining
                     )
         except Exception as circuit_check_err:
+            from merid.utils.kalshi_identity import extract_asset
+            asset = extract_asset(position.market_id)
             logger.debug(
                 "[EXIT-LIVENESS-FAIL] asset=%s market=%s reason=CIRCUIT_CHECK_FAILED - "
                 "Failed to check circuit breaker status (non-critical): %s",
-                position.asset,
+                asset,
                 position.market_id,
                 circuit_check_err
             )
@@ -1988,6 +2007,43 @@ class Kalshi15mLoop:
                     result.order_id, result.status
                 )
                 
+                # CRITICAL FIX (2026-07-29): Wire hedge auto-exit to alpha exit events
+                # When an alpha position exits, trigger hedge auto-exit to close associated hedge positions
+                # This prevents orphaned hedge positions that outlive their alpha positions
+                try:
+                    from merid.hedging.pnl_tracker import get_hedge_pnl_tracker
+                    from merid.hedging.config import get_hedge_config
+                    
+                    # Get alpha fill ID from position (used to link to hedge positions)
+                    alpha_fill_id = getattr(position, 'fill_id', None)
+                    if alpha_fill_id:
+                        hedge_tracker = get_hedge_pnl_tracker()
+                        hedge_config = get_hedge_config()
+                        
+                        # Trigger hedge auto-exit for this alpha position
+                        hedge_exit_orders = hedge_tracker.auto_exit_hedges(
+                            hedge_config,
+                            closed_alpha_fills=[alpha_fill_id]
+                        )
+                        
+                        if hedge_exit_orders:
+                            logger.info(
+                                "[HEDGE-AUTO-EXIT] Triggered hedge exit for alpha fill=%s: %d hedge exit orders generated",
+                                alpha_fill_id[:8],
+                                len(hedge_exit_orders)
+                            )
+                        else:
+                            logger.debug(
+                                "[HEDGE-AUTO-EXIT] No hedge positions to close for alpha fill=%s",
+                                alpha_fill_id[:8]
+                            )
+                except Exception as hedge_exit_err:
+                    logger.warning(
+                        "[HEDGE-AUTO-EXIT] Failed to trigger hedge auto-exit for alpha position (non-critical): %s",
+                        hedge_exit_err,
+                        exc_info=True
+                    )
+                
                 # CRITICAL FIX (2026-07-23): Register exit order in first-class registry
                 # This is the source of truth for exit orders, reducing reliance on exchange data
                 # Pass the exit quantity for quantity-aware coverage invariant
@@ -2112,6 +2168,9 @@ class Kalshi15mLoop:
                 cycle_start = time.time()
                 logger.info("[15m-LOOP] Starting tick %d", tick_id)
                 
+                # Reset per-tick counters for sanity checks
+                self._tick_executed_count = 0
+                
                 try:
                     # P3 FIX: Reset _active_trades counter per cycle based on actual open positions
                     # This prevents stale counter values from blocking trades when positions are closed
@@ -2170,7 +2229,7 @@ class Kalshi15mLoop:
                                     break
                             
                             if asset:
-                                self._asset_positions[asset] += float(position.notional_value)
+                                self._asset_positions[asset] += Decimal(str(position.notional_value))
                     
                     logger.info("[15m-LOOP] Reloaded positions from cache: %s", self._asset_positions)
                     
@@ -2443,14 +2502,85 @@ class Kalshi15mLoop:
                                 # RESEARCH-ALIGNED: Exposure-aware re-entry logic instead of binary block
                                 # Allow re-entry if: (1) current exposure < cap, OR (2) new edge > prior edge + delta
                                 # This captures late-window edge formation instead of blocking all re-entries
+                                # CRITICAL FIX (2026-07-29): Check if prior candidate is stale (pending order timeout)
+                                # If global allocator cleared a stale pending order, loop_15m should also allow re-entry
+                                # CRITICAL FIX (2026-07-30): Check thesis compatibility before allowing edge improvement re-entry
+                                # Prevent same-side duplicate positions by checking existing position thesis_side
                                 prior_candidate = self._executed_candidates_this_window.get(asset_window_key)
                                 if prior_candidate:
                                     prior_edge = prior_candidate.get("edge_pct", 0) / 100.0
                                     current_edge = candidate.get("edge_pct", 0) / 100.0
                                     edge_improvement_delta = 0.005  # 0.5% improvement required for re-entry
+                                    pending_order_timeout = 30.0  # Match global allocator timeout
                                     
-                                    # Check if current edge is materially better than prior edge
-                                    if current_edge > prior_edge + edge_improvement_delta:
+                                    # CRITICAL FIX (2026-07-30): Check thesis compatibility with existing position
+                                    # Get current candidate side
+                                    current_side = candidate.get("side", "").lower()
+                                    
+                                    # Check position cache for existing position in this window
+                                    thesis_compatible = True
+                                    try:
+                                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                                        position_cache = get_position_cache()
+                                        if position_cache:
+                                            all_positions = position_cache.get_all_positions(validate_freshness=False)
+                                            for pos_ticker, pos_obj in all_positions.items():
+                                                if pos_obj and pos_obj.contracts > 0:
+                                                    if asset in pos_ticker.upper() and window_id in pos_ticker:
+                                                        # Found position in same asset-window
+                                                        existing_thesis_side = getattr(pos_obj, 'thesis_side', None)
+                                                        if existing_thesis_side and current_side:
+                                                            if current_side == existing_thesis_side.lower():
+                                                                # SAME SIDE - Block re-entry even with edge improvement
+                                                                thesis_compatible = False
+                                                                logger.warning(
+                                                                    "[15m-LOOP] Edge improvement blocked by thesis check: asset=%s ticker=%s "
+                                                                    "existing_thesis=%s new_thesis=%s - same-side position exists",
+                                                                    asset, ticker, existing_thesis_side, current_side
+                                                                )
+                                                                break
+                                                            else:
+                                                                # OPPOSITE SIDE - Allow hedging
+                                                                logger.info(
+                                                                    "[15m-LOOP] Edge improvement allowed for hedging: asset=%s ticker=%s "
+                                                                    "existing_thesis=%s new_thesis=%s",
+                                                                    asset, ticker, existing_thesis_side, current_side
+                                                                )
+                                    except Exception as thesis_check_err:
+                                        logger.warning("[15m-LOOP] Failed to check thesis compatibility: %s", thesis_check_err)
+                                    
+                                    # Check if prior candidate is stale (older than pending order timeout)
+                                    prior_timestamp = prior_candidate.get("timestamp", 0)
+                                    if prior_timestamp > 0:
+                                        time_since_prior = time.time() - prior_timestamp
+                                        if time_since_prior >= pending_order_timeout:
+                                            logger.info(
+                                                "[15m-LOOP] Stale prior candidate cleared: asset=%s ticker=%s age=%.1fs - ALLOWING re-entry",
+                                                asset, ticker, time_since_prior
+                                            )
+                                            # Clear stale prior candidate and allow new order
+                                            del self._executed_candidates_this_window[asset_window_key]
+                                        elif current_edge > prior_edge + edge_improvement_delta and thesis_compatible:
+                                            logger.info(
+                                                "[15m-LOOP] Edge improvement re-entry: asset=%s ticker=%s prior_edge=%.4f current_edge=%.4f improvement=%.4f - ALLOWING",
+                                                asset, ticker, prior_edge, current_edge, current_edge - prior_edge
+                                            )
+                                            # Update tracked candidate to new higher-edge version
+                                            self._executed_candidates_this_window[asset_window_key] = candidate
+                                        else:
+                                            self._rejection_counters["duplicate_order"] += 1
+                                            if not thesis_compatible:
+                                                logger.warning(
+                                                    "[15m-LOOP] Asset already has same-side position: asset=%s ticker=%s - skipping (thesis check)",
+                                                    asset, ticker
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    "[15m-LOOP] Asset already has order in current window: asset=%s ticker=%s prior_edge=%.4f current_edge=%.4f - skipping (no material improvement)",
+                                                    asset, ticker, prior_edge, current_edge
+                                                )
+                                            continue
+                                    elif current_edge > prior_edge + edge_improvement_delta and thesis_compatible:
                                         logger.info(
                                             "[15m-LOOP] Edge improvement re-entry: asset=%s ticker=%s prior_edge=%.4f current_edge=%.4f improvement=%.4f - ALLOWING",
                                             asset, ticker, prior_edge, current_edge, current_edge - prior_edge
@@ -2459,10 +2589,16 @@ class Kalshi15mLoop:
                                         self._executed_candidates_this_window[asset_window_key] = candidate
                                     else:
                                         self._rejection_counters["duplicate_order"] += 1
-                                        logger.warning(
-                                            "[15m-LOOP] Asset already has order in current window: asset=%s ticker=%s prior_edge=%.4f current_edge=%.4f - skipping (no material improvement)",
-                                            asset, ticker, prior_edge, current_edge
-                                        )
+                                        if not thesis_compatible:
+                                            logger.warning(
+                                                "[15m-LOOP] Asset already has same-side position: asset=%s ticker=%s - skipping (thesis check)",
+                                                asset, ticker
+                                            )
+                                        else:
+                                            logger.warning(
+                                                "[15m-LOOP] Asset already has order in current window: asset=%s ticker=%s prior_edge=%.4f current_edge=%.4f - skipping (no material improvement)",
+                                                asset, ticker, prior_edge, current_edge
+                                            )
                                         continue
                                 
                                 # Check position cache for existing positions in this window (same as router)
@@ -2490,9 +2626,13 @@ class Kalshi15mLoop:
                                                 if pos_asset == asset:
                                                     pos_window_id = pos_ticker.split("-")[-2] if "-" in pos_ticker else pos_ticker
                                                     if pos_window_id == ticker.split("-")[-2] if "-" in ticker else ticker:
+                                                        # CRITICAL FIX (2026-07-30): Side-aware check using thesis_side
+                                                        # This check is now redundant with the earlier thesis check in edge improvement logic
+                                                        # but kept as a safety net. The earlier check already blocks same-side duplicates.
+                                                        # This is a legacy check that should be removed in future cleanup.
                                                         self._rejection_counters["position_exists"] += 1
                                                         logger.warning(
-                                                            "[15m-LOOP] Asset already has position in current window: asset=%s window=%s position=%s (contracts=%d) - skipping",
+                                                            "[15m-LOOP] Asset already has position in current window: asset=%s window=%s position=%s (contracts=%d) - skipping (legacy check, superseded by thesis check)",
                                                             asset, pos_window_id, pos_ticker, pos_obj.contracts
                                                         )
                                                         continue
@@ -2655,13 +2795,21 @@ class Kalshi15mLoop:
                                 
                                 # Only track as executed if order was actually submitted
                                 if order_submitted:
+                                    # CRITICAL FIX (2026-07-29): Add timestamp to candidate for stale order detection
+                                    # This allows loop_15m to clear stale candidates like global_allocator does
+                                    candidate_with_timestamp = candidate.copy()
+                                    candidate_with_timestamp["timestamp"] = time.time()
+                                    
                                     # Track executed candidate to prevent duplicates
                                     candidate_key = self._get_candidate_key(candidate)
-                                    self._executed_candidates_this_window.add(candidate_key)
+                                    self._executed_candidates_this_window[candidate_key] = candidate_with_timestamp
                                     
                                     # CRITICAL FIX (2026-07-21): Track asset-window key to enforce one-contract-per-asset rule
                                     asset_window_key = self._get_asset_window_key(candidate)
-                                    self._executed_candidates_this_window.add(asset_window_key)
+                                    self._executed_candidates_this_window[asset_window_key] = candidate_with_timestamp
+                                    
+                                    # Increment per-tick execution counter for sanity checks
+                                    self._tick_executed_count += 1
                                 
                                 # FIX: Do NOT reset cycle guards after each execution
                                 # The global_slot_allocator should track total exposure across all positions
@@ -2680,7 +2828,7 @@ class Kalshi15mLoop:
                     # COUNTER SANITY CHECK: Verify candidate → order flow consistency
                     # Use per-tick counters to avoid cumulative mismatch
                     tick_rejections = sum(self._rejection_counters.values())
-                    tick_executed = len(self._executed_candidates_this_window)
+                    tick_executed = self._tick_executed_count  # Use per-tick counter, not window-accumulated
                     total_candidates = len(candidates)
                     logger.info(
                         "[COUNTER-SANITY-CHECK] tick=%d total_candidates=%d total_executed=%d total_rejections=%d "
@@ -2688,10 +2836,10 @@ class Kalshi15mLoop:
                         tick_id, total_candidates, tick_executed, tick_rejections, self._rejection_counters
                     )
                     # LOG CONTRACT: Ensure no silent candidate loss (per-tick check)
-                    # Note: Rejection counters are cumulative, so we only warn on mismatch
+                    # Note: All counters are now per-tick (reset each tick)
                     if total_candidates != tick_executed + tick_rejections:
                         logger.warning(
-                            "[COUNTER-SANITY-WARNING] tick=%d candidate count mismatch: %d candidates != %d executed + %d rejections (cumulative counters)",
+                            "[COUNTER-SANITY-WARNING] tick=%d candidate count mismatch: %d candidates != %d executed + %d rejections (per-tick counters)",
                             tick_id, total_candidates, tick_executed, tick_rejections
                         )
                     # Reset rejection counters for next tick to prevent accumulation
@@ -2721,14 +2869,39 @@ class Kalshi15mLoop:
                             
                             # Route hedge orders
                             for hedge_intent in hedge_intents:
-                                try:
-                                    result = await route_order_async(hedge_intent)
-                                    logger.info(
-                                        "[15m-LOOP] Hedge order routed: ticker=%s side=%s count=%d status=%s",
-                                        hedge_intent.ticker, hedge_intent.side, hedge_intent.count, result.status
+                                # CRITICAL FIX (2026-07-29): Hedge rejection retry logic
+                                # Retry up to 3 times with 1s delay to handle transient rejections
+                                max_retries = 3
+                                result = None
+                                for attempt in range(max_retries):
+                                    try:
+                                        result = await route_order_async(hedge_intent)
+                                        if result.success:
+                                            logger.info(
+                                                "[15m-LOOP] Hedge order routed successfully: ticker=%s side=%s count=%d status=%s attempt=%d",
+                                                hedge_intent.ticker, hedge_intent.side, hedge_intent.count, result.status, attempt + 1
+                                            )
+                                            break
+                                        else:
+                                            logger.warning(
+                                                "[15m-LOOP] Hedge order rejected (attempt %d/%d): ticker=%s side=%s count=%d status=%s reason=%s",
+                                                attempt + 1, max_retries, hedge_intent.ticker, hedge_intent.side, hedge_intent.count, result.status, result.reason or "unknown"
+                                            )
+                                            if attempt < max_retries - 1:
+                                                await asyncio.sleep(1)  # Wait 1s before retry
+                                    except Exception as hedge_err:
+                                        logger.error(
+                                            "[15m-LOOP] Failed to route hedge order (attempt %d/%d): %s",
+                                            attempt + 1, max_retries, hedge_err, exc_info=True
+                                        )
+                                        if attempt < max_retries - 1:
+                                            await asyncio.sleep(1)  # Wait 1s before retry
+                                
+                                if result and not result.success:
+                                    logger.error(
+                                        "[15m-LOOP] Hedge order failed after %d retries: ticker=%s side=%s count=%d - alpha remains unhedged",
+                                        max_retries, hedge_intent.ticker, hedge_intent.side, hedge_intent.count
                                     )
-                                except Exception as hedge_err:
-                                    logger.error("[15m-LOOP] Failed to route hedge order: %s", hedge_err, exc_info=True)
                         else:
                             logger.debug("[15m-LOOP] No hedge orders needed (exposure within bounds)")
                     except Exception as hedge_exc:
@@ -4593,7 +4766,7 @@ class Kalshi15mLoop:
                                 break
                         
                         if asset:
-                            self._asset_positions[asset] += position.notional_value
+                            self._asset_positions[asset] += Decimal(str(position.notional_value))
                 
                 logger.info("[15M-LOOP] Reloaded positions from cache: %s", self._asset_positions)
                 
@@ -5142,25 +5315,17 @@ class Kalshi15mLoop:
                 )
                 return False
             
-            side_raw = side_raw.upper()
-            action_raw = action_raw.upper()
             logger.debug("[15M-LOOP] Converting side/action: side_raw=%s action_raw=%s", side_raw, action_raw)
             
-            # Map to Kalshi side format
-            if side_raw == "YES" and action_raw == "BUY":
-                kalshi_side = "BUY_YES"
-            elif side_raw == "YES" and action_raw == "SELL":
-                kalshi_side = "SELL_YES"
-            elif side_raw == "NO" and action_raw == "BUY":
-                kalshi_side = "BUY_NO"
-            elif side_raw == "NO" and action_raw == "SELL":
-                kalshi_side = "SELL_NO"
-            else:
+            # Use canonical side mapping function
+            try:
+                kalshi_side = to_kalshi_side(side_raw, action_raw)
+            except ValueError as e:
                 logger.warning(
-                    "[15M-LOOP] Unexpected side/action combination: side=%s action=%s for ticker=%s",
-                    side_raw, action_raw, ticker
+                    "[15M-LOOP] Invalid side/action combination: side=%s action=%s for ticker=%s - %s",
+                    side_raw, action_raw, ticker, e
                 )
-                kalshi_side = f"{action_raw}_{side_raw}"  # Fallback
+                return False
             
             # CRITICAL INVARIANT CHECK: Entry orders must ALWAYS use BUY actions
             # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
@@ -5334,36 +5499,47 @@ class Kalshi15mLoop:
             import uuid
             client_tag = f"15m_{ticker}_{uuid.uuid4().hex[:12]}"
             
-            # CRITICAL FIX: Compute TP/SL from exit policy before OrderIntent creation (2026-07-15)
-            # For binary options (0-100¢ contracts):
-            # TP = entry_price + (entry_price * tp_r_multiple) where tp_r_multiple is percentage (e.g., 0.15 = 15%)
-            # SL = entry_price - sl_cents_offset (absolute cent offset, not percentage)
-            # CRITICAL FIX (2026-07-16): SIDE-SPACE — price_cents is the position's OWN side
-            # price for BOTH sides (NO intents are priced in NO cents, see NO_mid = 100 - YES_mid
-            # above). Both sides are long their own side: TP above entry, SL below entry.
-            if exit_policy and exit_policy.tp_r_multiple:
-                # TP as percentage of entry price (e.g., 15% TP on 42c entry = 42 + 6.3 = 48.3c)
-                take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
-                take_profit_r_multiple = exit_policy.tp_r_multiple
+            # CRITICAL FIX (2026-07-29): Use TP/SL from candidate if set by global allocator
+            # Global allocator computes TP/SL based on entry price and risk parameters
+            # Only compute from exit_policy if not already set by allocator
+            if candidate.get("take_profit_price_cents") and candidate.get("stop_loss_price_cents"):
+                # Use TP/SL from global allocator
+                take_profit_price_cents = candidate.get("take_profit_price_cents")
+                take_profit_r_multiple = candidate.get("take_profit_r_multiple")
+                stop_loss_price_cents = candidate.get("stop_loss_price_cents")
+                logger.info("[15M-LOOP] Using TP/SL from global allocator: tp=%dc sl=%dc", take_profit_price_cents, stop_loss_price_cents)
             else:
-                take_profit_price_cents = None
-                take_profit_r_multiple = None
-            
-            # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
-            # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
-            # CRITICAL FIX (2026-07-16): Side-space — SL sits BELOW own-side entry for BOTH
-            # sides (previous NO branch placed SL above NO entry, i.e. in the PROFIT
-            # direction, so NO "stop losses" fired on winners and never on losers)
-            if exit_policy and exit_policy.sl_cents:
-                sl_cents_offset = exit_policy.sl_cents
-                stop_loss_price_cents = max(1, price_cents - sl_cents_offset)
-            elif exit_policy and exit_policy.sl_r_multiple:
-                # Fallback to R-multiple if sl_cents not set (legacy path)
-                # SL = entry - (entry * sl_r_multiple) in own-side cents
-                stop_loss_price_cents = max(1, int(price_cents * (1 - exit_policy.sl_r_multiple)))
-            else:
-                # Default to 5 cent SL if no policy
-                stop_loss_price_cents = max(1, price_cents - 5)
+                # Compute TP/SL from exit policy (fallback path)
+                # For binary options (0-100¢ contracts):
+                # TP = entry_price + (entry_price * tp_r_multiple) where tp_r_multiple is percentage (e.g., 0.15 = 15%)
+                # SL = entry_price - sl_cents_offset (absolute cent offset, not percentage)
+                # CRITICAL FIX (2026-07-16): SIDE-SPACE — price_cents is the position's OWN side
+                # price for BOTH sides (NO intents are priced in NO cents, see NO_mid = 100 - YES_mid
+                # above). Both sides are long their own side: TP above entry, SL below entry.
+                if exit_policy and exit_policy.tp_r_multiple:
+                    # TP as percentage of entry price (e.g., 15% TP on 42c entry = 42 + 6.3 = 48.3c)
+                    take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
+                    take_profit_r_multiple = exit_policy.tp_r_multiple
+                else:
+                    take_profit_price_cents = None
+                    take_profit_r_multiple = None
+                
+                # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
+                # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
+                # CRITICAL FIX (2026-07-16): Side-space — SL sits BELOW own-side entry for BOTH
+                # sides (previous NO branch placed SL above NO entry, i.e. in the PROFIT
+                # direction, so NO "stop losses" fired on winners and never on losers)
+                if exit_policy and exit_policy.sl_cents:
+                    sl_cents_offset = exit_policy.sl_cents
+                    stop_loss_price_cents = max(1, price_cents - sl_cents_offset)
+                elif exit_policy and exit_policy.sl_r_multiple:
+                    # Fallback to R-multiple if sl_cents not set (legacy path)
+                    # SL = entry - (entry * sl_r_multiple) in own-side cents
+                    stop_loss_price_cents = max(1, int(price_cents * (1 - exit_policy.sl_r_multiple)))
+                else:
+                    # Default to 5 cent SL if no policy
+                    stop_loss_price_cents = max(1, price_cents - 5)
+                logger.info("[15M-LOOP] Computed TP/SL from exit policy: tp=%dc sl=%dc", take_profit_price_cents, stop_loss_price_cents)
             
             # Generate unique trace_id for candidate → order → policy tracking
             import uuid
@@ -5394,6 +5570,15 @@ class Kalshi15mLoop:
                 ticker, aggressiveness
             )
             
+            # CRITICAL FIX (2026-07-27): model_prob is SIDE-SPECIFIC (P(YES) for YES candidates,
+            # P(NO) for NO candidates). The microstructure gate expects p_hat_yes_cents to be the
+            # CANONICAL YES probability. Without this conversion, NO orders had their model view
+            # inverted (e.g. P(NO)=0.81 was stored as p_hat_yes=81c, so the gate valued NO at
+            # 100-81=19c and rejected every NO order with a huge negative executable edge).
+            model_prob_yes_canonical = model_prob
+            if model_prob is not None and side_raw == "NO":
+                model_prob_yes_canonical = 1.0 - model_prob
+
             intent = OrderIntent(
                 ticker=ticker,
                 side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
@@ -5408,14 +5593,17 @@ class Kalshi15mLoop:
                 confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
                 model_prob=model_prob,  # BUG #34 FIX: Add model_prob from candidate
                 # 2026-07-25: Dual-side edge-aware microstructure gate - populate both p_hat fields
-                p_hat_yes_cents=model_prob * 100.0 if model_prob is not None else None,  # Convert probability to cents
-                p_hat_no_cents=(100.0 - model_prob * 100.0) if model_prob is not None else None,  # Complement to YES
+                # 2026-07-27: p_hat fields are CANONICAL (YES-space), derived from side-specific model_prob above
+                p_hat_yes_cents=model_prob_yes_canonical * 100.0 if model_prob_yes_canonical is not None else None,  # Canonical YES probability in cents
+                p_hat_no_cents=(100.0 - model_prob_yes_canonical * 100.0) if model_prob_yes_canonical is not None else None,  # Complement to YES
                 rationale=candidate.get("rationale"),  # CRITICAL: Pass rationale to skip edge validation for price-based strategy
                 trace_id=trace_id,  # DEBUG: Add trace_id for candidate → order → policy tracking
                 # Phase 2: Strategy identification for multi-strategy support
                 strategy_id="heuristic_velocity",  # From profile strategies section
                 strategy_type="heuristic_velocity",  # From profile strategies section
                 regime=regime,  # Regime computed from market state (lines 2689-2717)
+                # CRITICAL FIX 2026-07-29: Add execution mode for regime-based routing
+                execution_mode=candidate.get("execution_mode"),  # Execution mode (maker/taker/staged_ioc/passive_quote)
                 # Phase 5.4: Raw logit for probability calibration outcome recording
                 raw_logit=raw_logit,
                 # CRITICAL FIX: Use order_type from candidate (set by signal generation)
@@ -5537,33 +5725,44 @@ class Kalshi15mLoop:
                 market_price_yes = None
                 market_price_no = None
                 try:
-                    from merid.event_venues.kalshi.orderbook_cache import get_orderbook_cache
-                    ob_cache = get_orderbook_cache()
-                    if ob_cache:
-                        ob_data = ob_cache.get(ticker)
-                        if ob_data:
-                            yes_bid = ob_data.get("yes_bid")
-                            yes_ask = ob_data.get("yes_ask")
-                            no_bid = ob_data.get("no_bid")
-                            no_ask = ob_data.get("no_ask")
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    state_store = get_kalshi_market_state_store()
+                    if state_store:
+                        market_state = state_store.get(ticker)
+                        if market_state:
+                            yes_bid = getattr(market_state, 'best_bid_cents', None)
+                            yes_ask = getattr(market_state, 'best_ask_cents', None)
+                            # Derive NO prices from YES prices using Kalshi duality
+                            if yes_bid is not None:
+                                no_ask = 100 - yes_bid
+                            if yes_ask is not None:
+                                no_bid = 100 - yes_ask
                             # Use mid-price for edge computation if available
                             if yes_bid is not None and yes_ask is not None:
                                 market_price_yes = (yes_bid + yes_ask) / 2.0 / 100.0  # Convert cents to fraction
                             if no_bid is not None and no_ask is not None:
                                 market_price_no = (no_bid + no_ask) / 2.0 / 100.0  # Convert cents to fraction
                 except Exception as ob_err:
-                    logger.debug("[15M-LOOP] Failed to get orderbook data for parity check: %s", ob_err)
+                    logger.debug("[15M-LOOP] Failed to get market state for parity check: %s", ob_err)
                 
                 # CRITICAL FIX: 2026-07-20 - Use canonical edge computation
                 # Compute edges using canonical formula instead of deriving from kalshi_side
                 # This fixes the bug where chosen_side was derived from order side instead of edge comparison
+                # CRITICAL FIX: 2026-07-26 - Convert model_prob to canonical YES probability
+                # model_prob is side-specific: P(YES) for YES candidates, P(NO) for NO candidates
+                # compute_canonical_edges expects canonical YES probability (P(YES))
+                model_prob_yes = model_prob
+                if side_raw.lower() == "no":
+                    # For NO candidates, model_prob is P(NO), convert to P(YES) = 1 - P(NO)
+                    model_prob_yes = 1.0 - model_prob if model_prob is not None else None
+                
                 if market_price_yes is not None or market_price_no is not None:
                     logger.info(
-                        "[PARITY-BLOCK-DIAG] ticker=%s model_prob=%.4f market_yes=%.4f market_no=%.4f candidate_price=%dc edge_pct=%.4f",
-                        ticker, model_prob, market_price_yes, market_price_no, price_cents, edge_pct
+                        "[PARITY-BLOCK-DIAG] ticker=%s side=%s model_prob=%.4f model_prob_yes=%.4f market_yes=%.4f market_no=%.4f candidate_price=%dc edge_pct=%.4f",
+                        ticker, side_raw.lower(), model_prob, model_prob_yes, market_price_yes, market_price_no, price_cents, edge_pct
                     )
                     edge_yes, edge_no = compute_canonical_edges(
-                        model_prob_yes=model_prob,
+                        model_prob_yes=model_prob_yes,
                         market_price_yes=market_price_yes,
                         market_price_no=market_price_no,
                     )
@@ -5574,8 +5773,15 @@ class Kalshi15mLoop:
                 else:
                     # Fallback to candidate edges if orderbook unavailable
                     logger.warning("[PARITY-BLOCK] Orderbook unavailable for ticker=%s, using candidate edges", ticker)
+                    # CRITICAL FIX: 2026-07-26 - Use canonical YES probability for fallback edge calculation
                     edge_yes = candidate.get("edge_yes", edge_pct / 100.0)
-                    edge_no = candidate.get("edge_no", (1.0 - model_prob) - (1.0 - price_cents / 100.0) if model_prob else 0.0)
+                    # For NO candidates, derive edge_no from canonical YES probability
+                    if side_raw.lower() == "no":
+                        # model_prob is P(NO), convert to P(YES) for canonical edge computation
+                        fallback_model_prob_yes = 1.0 - model_prob if model_prob is not None else None
+                        edge_no = candidate.get("edge_no", fallback_model_prob_yes - (1.0 - price_cents / 100.0) if fallback_model_prob_yes is not None else 0.0)
+                    else:
+                        edge_no = candidate.get("edge_no", (1.0 - model_prob) - (1.0 - price_cents / 100.0) if model_prob else 0.0)
                 
                 # CRITICAL FIX: 2026-07-20 - Select winner side based on edge comparison
                 # This fixes the bug where chosen_side was derived from kalshi_side instead of edge
@@ -5592,18 +5798,17 @@ class Kalshi15mLoop:
                 except Exception as edge_err:
                     logger.debug("[15M-LOOP] Failed to get min_edge from profile: %s", edge_err)
                 
-                # RESEARCH-ALIGNED: Dynamic edge threshold by time-in-window
-                # Early window (0-5 min): higher threshold (2.0%)
-                # Mid window (5-10 min): medium threshold (1.2-1.5%)
-                # Late window (10-15 min): lower threshold (0.5-1.0%)
-                # This aligns with volatility compression and information resolution over time
+                # CRITICAL FIX: Lowered dynamic edge thresholds to enable trading
+                # Previous thresholds (2.0%, 1.2%, 0.8%) were blocking all trades
+                # 15-minute markets have lower liquidity and smaller edges
+                # 2026-07-29: Emergency fix to restore trading functionality
                 time_to_expiry_sec = candidate.get("time_to_expiry_sec", 900)
                 if time_to_expiry_sec > 600:  # Early window (>10 min remaining)
-                    min_edge = max(base_min_edge, 0.020)  # 2.0% minimum
+                    min_edge = max(base_min_edge, 0.005)  # 0.5% minimum (lowered from 2.0%)
                 elif time_to_expiry_sec > 300:  # Mid window (5-10 min remaining)
-                    min_edge = max(base_min_edge, 0.012)  # 1.2% minimum
+                    min_edge = max(base_min_edge, 0.005)  # 0.5% minimum (lowered from 1.2%)
                 else:  # Late window (<5 min remaining)
-                    min_edge = max(base_min_edge, 0.008)  # 0.8% minimum
+                    min_edge = max(base_min_edge, 0.005)  # 0.5% minimum (lowered from 0.8%)
                 
                 logger.debug(
                     "[15M-LOOP] Dynamic edge threshold: time_to_expiry=%ds base_min_edge=%.4f -> dynamic_min_edge=%.4f",
@@ -5731,6 +5936,7 @@ class Kalshi15mLoop:
             # Route order
             result = await route_order_async(intent)
             if result and result.status == "rejected":
+                self._rejection_counters["router_rejected"] += 1
                 logger.warning("[15M-LOOP-SIDE-AWARE] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s latency_ms=%s",
                                ticker, kalshi_side, count, result.reason, result.latency_ms)
                 return False  # Order rejected - do not track as executed
@@ -5820,7 +6026,7 @@ class Kalshi15mLoop:
             # FIX: Only increment active_trades if order was actually FILLED, not just routed
             # Previously, rejected orders were counted as active trades, causing phantom trade detection
             if result and asset and result.status and "filled" in result.status:
-                self._asset_positions[asset] = self._asset_positions.get(asset, 0.0) + position_notional_usd
+                self._asset_positions[asset] = self._asset_positions.get(asset, Decimal('0.0')) + Decimal(str(position_notional_usd))
                 self._active_trades[ticker] = self._active_trades.get(ticker, 0) + 1
                 logger.info(
                     "[15M-LOOP] Position tracking updated: asset=%s exposure=%.2f ticker=%s active_trades=%d",
