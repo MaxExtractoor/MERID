@@ -2263,12 +2263,13 @@ class KalshiMarketStateStore:
         logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s states_count=%d", 
                    ticker, threading.current_thread().name, len(self._states))
         
-        # CRITICAL FIX: Use global lock for thread-safe state creation from any thread
-        # This allows catalog refresh thread to safely call apply_rest_market
-        with self._global_lock:
-            logger.info("[APPLY-REST-MARKET] Acquired global lock ticker=%s", ticker)
-            state = self._get_or_create(ticker)
-
+        # CRITICAL FIX: Call _get_or_create directly without outer lock
+        # _get_or_create already handles thread safety with its own global_lock
+        # This prevents deadlock when catalog refresh thread calls apply_rest_market
+        state = self._get_or_create(ticker)
+        
+        # Use per-state lock for updating state fields (thread-safe for individual ticker)
+        with state._lock:
             v24 = data.get("volume_24h")
             if v24 is not None:
                 state.volume_24h = int(v24)
@@ -2421,15 +2422,15 @@ class KalshiMarketStateStore:
             except Exception as e:
                 logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from REST market: {e}")
 
-            # CRITICAL FIX: Capture callbacks while holding lock, then release before notifying
-            # This prevents deadlock where _notify_subscribers tries to acquire the same lock
-            callbacks = []
-            if ticker in self._subscribers:
-                callbacks = list(self._subscribers[ticker])
-            logger.info("[APPLY-REST-MARKET] Captured %d callbacks for ticker=%s", len(callbacks), ticker)
-
-        # Lock is now released by with statement - notify subscribers without re-acquiring lock
-        logger.info("[APPLY-REST-MARKET] Released state lock, calling _notify_subscribers ticker=%s", ticker)
+        # Lock is now released by with statement - capture callbacks and notify subscribers
+        # This prevents deadlock where _notify_subscribers tries to acquire the same lock
+        callbacks = []
+        if ticker in self._subscribers:
+            callbacks = list(self._subscribers[ticker])
+        logger.info("[APPLY-REST-MARKET] Captured %d callbacks for ticker=%s", len(callbacks), ticker)
+        
+        # Notify subscribers without holding lock
+        logger.info("[APPLY-REST-MARKET] Calling _notify_subscribers ticker=%s", ticker)
         self._notify_subscribers(ticker, state, callbacks)
         logger.info("[APPLY-REST-MARKET] AFTER _notify_subscribers ticker=%s", ticker)
         logger.info("[APPLY-REST-MARKET] EXIT ticker=%s", ticker)
