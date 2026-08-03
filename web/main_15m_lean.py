@@ -3268,11 +3268,18 @@ async def _run_startup_phases_v20260530(app):
     
     logger.info("[STARTUP] P1.3: AFTER KalshiVenueClient")
 
-    # Phase 1: Market catalog
+    # Phase 1: Market state store initialization (CRITICAL: Must be before catalog start)
+    # CRITICAL FIX (2026-08-02): Initialize state store BEFORE starting catalog
+    # This prevents deadlock where catalog refresh thread tries to use state store
+    # before the singleton is created in the main thread
+    logger.info("[STARTUP] P1.4: BEFORE market state store init")
+    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+    market_state_store = get_kalshi_market_state_store()
+    logger.info(f"[STARTUP] Market state store initialized: id={id(market_state_store)}")
+    logger.info("[STARTUP] P1.4: AFTER market state store init")
     
-    
-    
-    logger.info("[STARTUP] P1.4: BEFORE KalshiMarketCatalog start")
+    # Phase 2: Market catalog
+    logger.info("[STARTUP] P1.4.1: BEFORE KalshiMarketCatalog start")
     from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, set_market_catalog
     
     
@@ -3304,18 +3311,9 @@ async def _run_startup_phases_v20260530(app):
     await asyncio.sleep(2.0)  # Wait for initial refresh
     catalog_snapshot = catalog.snapshot()
     logger.info(f"[STARTUP] Catalog started: {len(catalog_snapshot.markets)} markets")
-    logger.info("[STARTUP] P1.4: AFTER KalshiMarketCatalog start")
+    logger.info("[STARTUP] P1.4.1: AFTER KalshiMarketCatalog start")
     
-    
-    
-    # Phase 1: Market state store initialization
-    logger.info("[STARTUP] P1.4.5: BEFORE market state store init")
-    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-    market_state_store = get_kalshi_market_state_store()
-    logger.info(f"[STARTUP] Market state store initialized: id={id(market_state_store)}")
-    logger.info("[STARTUP] P1.4.5: AFTER market state store init")
-    
-    # Phase 1: Candle poller initialization (provides 1-minute OHLCV bars for indicator stacks)
+    # Phase 3: Candle poller initialization (provides 1-minute OHLCV bars for indicator stacks)
     # The candle poller fetches 1-minute bars from Kalshi REST and stores them in market state
     # Indicator stacks can use these bars for accurate calculations instead of spot ticks
     # NOTE: Candle poller is initialized here but started AFTER WS bridge to ensure tickers are available
