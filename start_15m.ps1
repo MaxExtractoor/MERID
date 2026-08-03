@@ -127,17 +127,18 @@ Write-Host "[start_15m] Launching server on http://${ServerHost}:${Port}" -Foreg
 Write-Host "[start_15m] Startup is handled by FastAPI lifespan events - no health watcher needed" -ForegroundColor Green
 Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
 
-# CRITICAL FIX (2026-08-02): Skip catalog feed to prevent startup hang
-# The catalog feed is hanging during apply_rest_market calls
-# This allows the server to start and trade without getting stuck in catalog initialization
+# CRITICAL FIX (2026-08-02): Skip catalog feed AND startup phases to prevent hang
+# The startup is hanging in complex initialization phases
+# This allows the server to start with minimal initialization
 $env:MERID_SKIP_CATALOG_FEED = "true"
-Write-Host "[start_15m] Skipping catalog feed to prevent startup hang" -ForegroundColor Yellow
+$env:MERID_SKIP_STARTUP_PHASES = "true"
+Write-Host "[start_15m] Skipping catalog feed and startup phases to prevent startup hang" -ForegroundColor Yellow
 
 # Start the server - FastAPI lifespan will handle startup automatically
-# Use --log-level debug to see more output
+# Use --log-level info (less verbose than debug)
 # CRITICAL FIX: Remove --log-config to prevent interference with lifespan event
 # CRITICAL FIX: Remove --reload after clearing __pycache__ to force fresh import
 # CRITICAL FIX: Remove --lifespan on (redundant - app already has lifespan defined)
 $env:PYTHONUNBUFFERED = "1"
 $ErrorActionPreference = "Continue"
-& py -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level debug
+& py -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level info
