@@ -2420,18 +2420,10 @@ class KalshiMarketStateStore:
         except Exception as e:
             logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from REST market: {e}")
 
-        # Capture callbacks while holding lock, then release before notifying
-        # This prevents deadlock where _notify_subscribers tries to acquire the same lock
-        callbacks = []
-        if ticker in self._subscribers:
-            callbacks = list(self._subscribers[ticker])
-        logger.info("[APPLY-REST-MARKET] Captured %d callbacks for ticker=%s", len(callbacks), ticker)
-        
-        # Notify subscribers without holding lock
-        logger.info("[APPLY-REST-MARKET] Calling _notify_subscribers ticker=%s", ticker)
-        self._notify_subscribers(ticker, state, callbacks)
-        logger.info("[APPLY-REST-MARKET] AFTER _notify_subscribers ticker=%s", ticker)
-        logger.info("[APPLY-REST-MARKET] EXIT ticker=%s", ticker)
+        # CRITICAL FIX (2026-08-02): Skip callback notification for catalog feed
+        # This prevents deadlock when catalog refresh thread calls apply_rest_market
+        # Callbacks will be notified by WS bridge updates instead
+        logger.info("[APPLY-REST-MARKET] EXIT ticker=%s (skipping callback notification for catalog feed)", ticker)
         return state
 
     # ── Quote path (from WS QuoteEvent) ─────────────────────────────────
