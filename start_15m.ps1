@@ -127,22 +127,11 @@ Write-Host "[start_15m] Launching server on http://${ServerHost}:${Port}" -Foreg
 Write-Host "[start_15m] Startup is handled by FastAPI lifespan events - no health watcher needed" -ForegroundColor Green
 Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
 
-# CRITICAL FIX (2026-08-02): Add automatic health trigger to ensure startup runs
-# The lifespan startup is supposed to run automatically, but we need to ensure it triggers
-# We'll add a background task to trigger the health endpoint after server starts
-$healthTriggerScript = @"
-Start-Sleep -Seconds 5
-try {
-    Invoke-WebRequest -Uri "http://${ServerHost}:${Port}/api/v1/health" -Method POST -UseBasicParsing | Out-Null
-    Write-Host "[start_15m] Health endpoint triggered successfully" -ForegroundColor Green
-} catch {
-    Write-Host "[start_15m] Failed to trigger health endpoint: `$`_`" -ForegroundColor Yellow
-}
-"@
-
-# Start health trigger in background
-Start-Job -ScriptBlock ([scriptblock]::Create($healthTriggerScript)) | Out-Null
-Write-Host "[start_15m] Health trigger scheduled to run in 5 seconds" -ForegroundColor Cyan
+# CRITICAL FIX (2026-08-02): Skip catalog feed to prevent startup hang
+# The catalog feed is hanging during apply_rest_market calls
+# This allows the server to start and trade without getting stuck in catalog initialization
+$env:MERID_SKIP_CATALOG_FEED = "true"
+Write-Host "[start_15m] Skipping catalog feed to prevent startup hang" -ForegroundColor Yellow
 
 # Start the server - FastAPI lifespan will handle startup automatically
 # Use --log-level debug to see more output
