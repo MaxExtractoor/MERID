@@ -184,72 +184,88 @@ _ws_forward_stalled: bool = False
 _ws_forwarder_healthy: bool = True  # Overall health flag for WS forwarder
 
 # Prometheus metrics for WS bridge backpressure (P2 Task 7)
-try:
-    from prometheus_client import Counter, Gauge
+# CRITICAL FIX (2026-08-02): Use singleton guard to prevent duplicate registration
+# Metrics are created lazily and only once per process
+_ws_metrics_initialized = False
+ws_events_dropped_total = None
+ws_fills_dropped_total = None
+ws_events_coalesced_total = None
+ws_max_queue_size = None
+ws_forwarder_throughput = None
+ws_queue_depth = None
+kalshi_ws_mode = None
+kalshi_rest_orderbook_errors_total = None
+kalshi_orderbook_completeness = None
 
-    ws_events_dropped_total = Counter(
-        'merid_ws_events_dropped_total',
-        'Total WS events dropped due to backpressure',
-        ['event_type']
-    )
-
-    ws_fills_dropped_total = Counter(
-        'merid_ws_fills_dropped_total',
-        'Total WS fill events dropped due to backpressure',
-    )
-
-    ws_events_coalesced_total = Counter(
-        'merid_ws_events_coalesced_total',
-        'Total WS events coalesced due to queue pressure'
-    )
-
-    ws_max_queue_size = Gauge(
-        'merid_ws_max_queue_size',
-        'Maximum queue size observed since startup'
-    )
-
-    ws_forwarder_throughput = Gauge(
-        'merid_ws_forwarder_throughput',
-        'WS forwarder throughput (events per second)'
-    )
-
-    ws_queue_depth = Gauge(
-        'merid_ws_queue_depth',
-        'Current WS bridge queue depth'
-    )
+def _init_ws_metrics():
+    """Initialize Prometheus metrics with singleton guard to prevent duplicate registration."""
+    global _ws_metrics_initialized, ws_events_dropped_total, ws_fills_dropped_total
+    global ws_events_coalesced_total, ws_max_queue_size, ws_forwarder_throughput
+    global ws_queue_depth, kalshi_ws_mode, kalshi_rest_orderbook_errors_total
+    global kalshi_orderbook_completeness
     
-    # WS mode gauge: 1 = WebSocket connected, 0 = REST fallback
-    kalshi_ws_mode = Gauge(
-        'kalshi_ws_mode',
-        'Kalshi WebSocket connection mode (1=WS, 0=REST fallback)',
-        ['venue']
-    )
+    if _ws_metrics_initialized:
+        return
     
-    # REST error rate counter
-    kalshi_rest_orderbook_errors_total = Counter(
-        'kalshi_rest_orderbook_errors_total',
-        'Total REST orderbook fetch errors',
-        ['endpoint', 'symbol']
-    )
-    
-    # Orderbook completeness gauge
-    kalshi_orderbook_completeness = Gauge(
-        'kalshi_orderbook_completeness',
-        'Orderbook completeness (1=OK, 0=MISSING/UNAVAILABLE)',
-        ['symbol']
-    )
-    
-except ImportError:
-    # Prometheus client not available - metrics will be no-ops
-    ws_events_dropped_total = None
-    ws_fills_dropped_total = None
-    ws_events_coalesced_total = None
-    ws_max_queue_size = None
-    ws_forwarder_throughput = None
-    ws_queue_depth = None
-    kalshi_ws_mode = None
-    kalshi_rest_orderbook_errors_total = None
-    kalshi_orderbook_completeness = None
+    try:
+        from prometheus_client import Counter, Gauge
+
+        ws_events_dropped_total = Counter(
+            'merid_ws_events_dropped_total',
+            'Total WS events dropped due to backpressure',
+            ['event_type']
+        )
+
+        ws_fills_dropped_total = Counter(
+            'merid_ws_fills_dropped_total',
+            'Total WS fill events dropped due to backpressure',
+        )
+
+        ws_events_coalesced_total = Counter(
+            'merid_ws_events_coalesced_total',
+            'Total WS events coalesced due to queue pressure'
+        )
+
+        ws_max_queue_size = Gauge(
+            'merid_ws_max_queue_size',
+            'Maximum queue size observed since startup'
+        )
+
+        ws_forwarder_throughput = Gauge(
+            'merid_ws_forwarder_throughput',
+            'WS forwarder throughput (events per second)'
+        )
+
+        ws_queue_depth = Gauge(
+            'merid_ws_queue_depth',
+            'Current WS bridge queue depth'
+        )
+        
+        # WS mode gauge: 1 = WebSocket connected, 0 = REST fallback
+        kalshi_ws_mode = Gauge(
+            'kalshi_ws_mode',
+            'Kalshi WebSocket connection mode (1=WS, 0=REST fallback)',
+            ['venue']
+        )
+        
+        # REST error rate counter
+        kalshi_rest_orderbook_errors_total = Counter(
+            'kalshi_rest_orderbook_errors_total',
+            'Total REST orderbook fetch errors',
+            ['endpoint', 'symbol']
+        )
+        
+        # Orderbook completeness gauge
+        kalshi_orderbook_completeness = Gauge(
+            'kalshi_orderbook_completeness',
+            'Orderbook completeness (1=OK, 0=MISSING/UNAVAILABLE)',
+            ['symbol']
+        )
+        
+        _ws_metrics_initialized = True
+    except ImportError:
+        # Prometheus client not available - metrics will be no-ops
+        pass
 
 def _check_production_invariant(store) -> Tuple[bool, List[str]]:
     """Helper function to check production invariant (runs in thread pool).
@@ -4402,13 +4418,15 @@ def get_bridge() -> KalshiWebSocketBridge:
     global _bridge
     if _bridge is None:
         logger.info("[WS-BRIDGE] Creating singleton bridge instance")
+        # CRITICAL FIX (2026-08-02): Initialize metrics before creating bridge
+        _init_ws_metrics()
         _bridge = KalshiWebSocketBridge()
     return _bridge
 
 
 def reset_bridge() -> None:
     """Reset the global singleton instance (for clean startup)."""
-    global _bridge
+    global _bridge, _ws_metrics_initialized
     if _bridge is not None:
         logger.info("[WS-BRIDGE] RESET: Stopping and clearing singleton instance")
         if hasattr(_bridge, '_running'):
@@ -4432,6 +4450,10 @@ def reset_bridge() -> None:
         logger.info("[WS-BRIDGE] RESET: Cleared Prometheus metrics registry")
     except Exception as e:
         logger.warning(f"[WS-BRIDGE] RESET: Failed to clear Prometheus registry: {e}")
+    
+    # Reset metrics initialization flag so they can be recreated
+    _ws_metrics_initialized = False
+    logger.info("[WS-BRIDGE] RESET: Metrics initialization flag cleared")
 
 
 # Legacy alias for backward compatibility - deprecated
