@@ -4420,6 +4420,18 @@ def reset_bridge() -> None:
         _bridge = None
         KalshiWebSocketBridge._instance_created = False
         logger.info("[WS-BRIDGE] RESET: Singleton cleared")
+    
+    # CRITICAL FIX (2026-08-02): Clear Prometheus metrics to prevent duplicate registration
+    # This fixes the "Duplicated timeseries in CollectorRegistry" error on restart
+    try:
+        from prometheus_client import REGISTRY
+        # Clear all collectors from the default registry
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for collector in collectors:
+            REGISTRY.unregister(collector)
+        logger.info("[WS-BRIDGE] RESET: Cleared Prometheus metrics registry")
+    except Exception as e:
+        logger.warning(f"[WS-BRIDGE] RESET: Failed to clear Prometheus registry: {e}")
 
 
 # Legacy alias for backward compatibility - deprecated
