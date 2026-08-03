@@ -6,6 +6,8 @@ from datetime import datetime as dt, timezone, timedelta, datetime
 
 import time
 
+import uuid
+
 import collections
 
 import re
@@ -26,6 +28,19 @@ from utils.logger import get_logger
 from merid.validation.regime_gating_invariants import (
     RegimeGatingInvariantChecker,
 )
+
+# Import candidate tracing for end-to-end validation
+try:
+    from merid.event_venues.kalshi.candidate_trace import (
+        CandidateTrace,
+        CandidateTraceStore,
+        Side as TraceSide,
+        get_trace_store,
+    )
+    CANDIDATE_TRACE_AVAILABLE = True
+except ImportError:
+    CANDIDATE_TRACE_AVAILABLE = False
+    logger.warning("candidate_trace module not available - end-to-end tracing disabled")
 
 # INTENT VERIFICATION: Signal snapshot integration
 try:
@@ -4742,41 +4757,63 @@ class LeanAgent15m:
                     # Raise exception to prevent trading with invalid strike target
                     raise ValueError(f"Cannot determine strike target for {asset} - all data sources unavailable")
         
-        # Check price band ONLY for thesis_side (10c-75c range)
-        # CRITICAL FIX: 2026-07-12 - Expanded to 75c to match YES prices 60-97c in current market
-        
+        # Check price band ONLY for thesis_side using side-aware ranges
+        # CRITICAL FIX 2026-08-03: Align with global allocator side-aware ranges
+        # YES: 10c-75c (lower bound 10c to avoid extreme cheapness, upper bound 75c for reasonable YES prices)
+        # NO: 25c-99c (lower bound 25c to avoid extreme cheapness, upper bound 99c for high-probability NO entries)
+        # This fixes the inconsistency where agent-grid rejected NO theses at 78-86c that allocator would accept
+
+        # CRITICAL FIX 2026-08-03: Add diagnostic logging to verify thesis_side detection
+        logger.info(
+            "[THESIS-SIDE-DEBUG] asset=%s thesis_side=%s yes_price=%dc no_price=%dc "
+            "thesis_in_range_check=%s range_str=%s",
+            asset, thesis_side, yes_price_cents, no_price_cents,
+            "YES:10-75c" if thesis_side == "yes" else "NO:25-99c",
+            "10c-75c" if thesis_side == "yes" else "25c-99c"
+        )
+
+        # Verify thesis_side is correctly normalized
+        if thesis_side not in ["yes", "no"]:
+            logger.error(
+                "[THESIS-SIDE-ERROR] asset=%s invalid thesis_side=%s - must be 'yes' or 'no'",
+                asset, thesis_side
+            )
+            return None
+
         if thesis_side == "yes":
             thesis_in_range = (10 <= yes_price_cents <= 75)
             thesis_price_cents = yes_price_cents
+            range_str = "10c-75c"
             logger.info(
                 "[PRICE-SIDE-CHECK] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
                 "yes_price=%dc no_price=%dc selected_side=%s selected_price=%dc price_range_ok=%s strict_mode=%s "
-                "(cheapness evaluated only on thesis_side)",
-                dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A", 
-                thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_side, thesis_price_cents,
-                thesis_in_range, strict_mode_enabled
-            )
-        else:  # thesis_side == "no"
-            thesis_in_range = (10 <= no_price_cents <= 75)
-            thesis_price_cents = no_price_cents
-            logger.info(
-                "[PRICE-SIDE-CHECK] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
-                "yes_price=%dc no_price=%dc selected_side=%s selected_price=%dc price_range_ok=%s strict_mode=%s "
-                "(cheapness evaluated only on thesis_side)",
+                "(cheapness evaluated only on thesis_side, YES range=%s)",
                 dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A",
                 thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_side, thesis_price_cents,
-                thesis_in_range, strict_mode_enabled
+                thesis_in_range, strict_mode_enabled, range_str
             )
-        
+        else:  # thesis_side == "no"
+            thesis_in_range = (25 <= no_price_cents <= 99)
+            thesis_price_cents = no_price_cents
+            range_str = "25c-99c"
+            logger.info(
+                "[PRICE-SIDE-CHECK] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
+                "yes_price=%dc no_price=%dc selected_side=%s selected_price=%dc price_range_ok=%s strict_mode=%s "
+                "(cheapness evaluated only on thesis_side, NO range=%s)",
+                dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A",
+                thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_side, thesis_price_cents,
+                thesis_in_range, strict_mode_enabled, range_str
+            )
+
         # CRITICAL INVARIANT: Reject if thesis_side price is not in range
         # Cheapness on the wrong side is irrelevant - we only trade the thesis_side
         if not thesis_in_range:
             logger.info(
                 "[PRICE-SIDE-CHECK-REJECT] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
-                "yes_price=%dc no_price=%dc reject_type=THESIS_OUT_OF_RANGE_REJECT thesis_price=%dc outside 10c-75c range -> NO TRADE "
+                "yes_price=%dc no_price=%dc reject_type=THESIS_OUT_OF_RANGE_REJECT thesis_price=%dc outside %s range -> NO TRADE "
                 "(cheapness filter only applies to thesis_side, wrong-side cheapness ignored)",
                 dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A",
-                thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_price_cents
+                thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_price_cents, range_str
             )
             return None
         
@@ -5518,6 +5555,9 @@ class LeanAgent15m:
             except Exception as snap_exc:
                 logger.warning(f"[SIGNAL-SNAPSHOT] Failed to create snapshot: {snap_exc}")
         
+        # CRITICAL FIX 2026-08-02: Add candidate tracing for end-to-end validation
+        candidate_id = str(uuid.uuid4()) if CANDIDATE_TRACE_AVAILABLE else None
+        
         signal_dict = {
 
             "side": signal_side,
@@ -5565,6 +5605,9 @@ class LeanAgent15m:
             "onchain_velocity": onchain_velocity,  # On-chain activity signal
 
             "count": 1,  # CRITICAL: Include default count for order execution
+            
+            # CRITICAL FIX 2026-08-02: Add candidate_id for end-to-end tracing
+            "candidate_id": candidate_id,
 
             "rationale": f"momentum_fvg: velocity={velocity:.6f} (threshold={velocity_threshold:.6f}) macd_hist={macd_histogram:.4f} rsi={rsi:.1f} ({rsi_zone}) obi={obi:.2f} fvg_dir={fvg_direction} fvg_conf={fvg_confidence:.2f} edge={edge_pct:.2f}%",
 
@@ -5588,6 +5631,28 @@ class LeanAgent15m:
                     logger.debug("[SIGNAL-QUALITY] Added quality score for %s: %.2f", asset, signal_quality)
             except Exception as exc:
                 logger.warning("[SIGNAL-QUALITY] Failed to get quality score: %s", exc)
+
+        # CRITICAL FIX 2026-08-02: Initialize candidate trace for signal generation stage
+        if CANDIDATE_TRACE_AVAILABLE and candidate_id:
+            try:
+                trace_side = TraceSide.YES if signal_side.upper() == "YES" else TraceSide.NO
+                trace = CandidateTrace(
+                    candidate_id=candidate_id,
+                    signal_timestamp=time.time(),
+                    signal_model_prob=model_prob,
+                    signal_side=trace_side,
+                    signal_edge_pct=edge_pct,
+                    ticker=asset,  # Use asset as ticker for now
+                    asset=asset,
+                    metadata={"signal_mode": "momentum_fvg"}
+                )
+                get_trace_store().add_trace(trace)
+                logger.info(
+                    "[CANDIDATE-TRACE] Initialized trace: candidate_id=%s asset=%s side=%s model_prob=%.3f edge=%.2f%%",
+                    candidate_id, asset, signal_side, model_prob, edge_pct
+                )
+            except Exception as trace_exc:
+                logger.warning("[CANDIDATE-TRACE] Failed to initialize trace: %s", trace_exc)
 
         return signal_dict
 
@@ -5720,8 +5785,7 @@ class LeanAgent15m:
                         market_price = best_ask / 100.0
                         market_price_type = "ask_only"
 
-                    logger.info("[PRICE-BASED-DEBUG] asset=%s ticker=%s best_bid_cents=%s best_ask_cents=%s spread_width=%dc market_price_type=%s", 
-                                asset, ticker, best_bid, best_ask, spread_width_cents, market_price_type)
+                    logger.info(f"[PRICE-BASED-DEBUG] asset={asset} ticker={ticker} best_bid_cents={best_bid} best_ask_cents={best_ask} spread_width={spread_width_cents}c market_price_type={market_price_type}")
 
                     # CRITICAL FIX: Validate market price is in reasonable range [0.01, 0.99]
 
@@ -7755,8 +7819,7 @@ class LeanAgent15m:
             coarse_filter_threshold = 150  # Relaxed from 75c to allow trading in current market conditions
 
             if spread_cents > coarse_filter_threshold:
-                logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread exceeds coarse filter=%dc (spread=%dc) - rejecting as pathological",
-                               self.config.name, ticker, coarse_filter_threshold, spread_cents)
+                logger.warning(f"[MARKET-VALIDATION] asset={self.config.name} ticker={ticker} spread exceeds coarse filter={coarse_filter_threshold}c (spread={spread_cents}c) - rejecting as pathological")
                 return False
 
             
@@ -7773,9 +7836,7 @@ class LeanAgent15m:
 
             if spread_cents > self.config.max_spread_cents:
 
-                logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%dc > max=%dc",
-
-                             self.config.name, ticker, spread_cents, self.config.max_spread_cents)
+                logger.warning(f"[MARKET-VALIDATION] asset={self.config.name} ticker={ticker} spread too wide={spread_cents}c > max={self.config.max_spread_cents}c")
 
                 return False
 
@@ -12236,47 +12297,24 @@ class LeanAgent15m:
 
             
 
-            # Validate market state
-
-            if not self._validate_market_state(market):
-
-                logger.info("[MARKET-VALIDATION-FAILED] asset=%s market validation failed", self.config.name)
-
-                return None
-
-            
-
             # CRITICAL FIX: Block trading during warmup to prevent trades based on insufficient data
-
             # Market validation requires sufficient depth and fresh data, which may not be available
-
             # during startup. Block trading during warmup period to avoid high leverage bugs.
-
             # REDUCED warmup from 2 to 1 for immediate 15m trading start (spot service refreshes every 5s)
-
             # 1 data point sufficient for immediate velocity-based trading
-
             price_history_len = len(list(self._spot_price_history.get(asset, [])))
-
+            
             if price_history_len < 1:
-
                 logger.warning(
-
                     "[MARKET-VALIDATION-SKIP] asset=%s price_history=%d < 1, BLOCKING TRADE during warmup (insufficient data)",
-
                     self.config.name, price_history_len
-
                 )
-
                 return None  # Block trading during warmup
-
-            else:
-
-                if not self._validate_market_state(market):
-
-                    logger.info("[MARKET-VALIDATION-FAILED] asset=%s market validation failed", self.config.name)
-
-                    return None
+            
+            # Validate market state (single call after warmup check)
+            if not self._validate_market_state(market):
+                logger.info("[MARKET-VALIDATION-FAILED] asset=%s market validation failed", self.config.name)
+                return None
 
             
 
@@ -12666,10 +12704,16 @@ class LeanAgent15m:
             # Previously this incremented on every candidate generation, causing misleading counts
             # Now strip order count is incremented in GLOBAL-ALLOCATOR-EXECUTE-SUCCESS path
 
-            
+            # CRITICAL FIX: 2026-08-02 - Add unique candidate ID for lifecycle tracking
+            import uuid
+            candidate_id = f"cid-{uuid.uuid4().hex[:12]}"
+            candidate["candidate_id"] = candidate_id
+            candidate["generation_tick"] = tick
+            candidate["generation_timestamp_ms"] = int(time.time() * 1000)
+            candidate["lifecycle_state"] = "GENERATED"
 
-            logger.info("[CANDIDATE-GENERATED] asset=%s side=%s strategy_intent=%s", 
-                       self.config.name, signal["side"], signal.get("strategy_intent", "N/A"))
+            logger.info("[CANDIDATE-GENERATED] asset=%s side=%s strategy_intent=%s candidate_id=%s", 
+                       self.config.name, signal["side"], signal.get("strategy_intent", "N/A"), candidate_id)
 
             
 

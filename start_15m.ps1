@@ -110,11 +110,10 @@ Write-Host "[start_15m] Risk limits configured in config/risk_limits.yaml (Unifi
 $env:MERID_DISABLE_SHARED_RISK_GUARD = "true"
 Write-Host "[start_15m] MERID_DISABLE_SHARED_RISK_GUARD=$($env:MERID_DISABLE_SHARED_RISK_GUARD) - using risk envelope only" -ForegroundColor Cyan
 
-# CRITICAL FIX: Increase MAX_CYCLE_RISK_PCT to 5% to match risk envelope agent defaults
-# GlobalExecutionGuard was using 0.5% which is too restrictive for micro accounts
-# This aligns with the 5% agent default max_notional_pct in the risk envelope
-$env:MAX_CYCLE_RISK_PCT = "0.05"
-Write-Host "[start_15m] MAX_CYCLE_RISK_PCT=$($env:MAX_CYCLE_RISK_PCT) (5% - aligned with risk envelope agent defaults)" -ForegroundColor Cyan
+# 2026-07-16: MAX_CYCLE_RISK_PCT REMOVED (percentage-based allocation PRUNED)
+# The $1 global slot allocator (MERID_FIXED_EXPOSURE_CAP_USD, default 1.00) is the
+# single source of truth for exposure. GlobalExecutionGuard is deprecated (import-blocked).
+Write-Host "[start_15m] Exposure model: fixed `$1 global slot allocator (percentage caps disabled)" -ForegroundColor Cyan
 
 # Market making and correlation tracking are controlled by profile config (kalshi_crypto_15m_v2.yaml)
 # These are already enabled in the profile config
@@ -128,11 +127,28 @@ Write-Host "[start_15m] Launching server on http://${ServerHost}:${Port}" -Foreg
 Write-Host "[start_15m] Startup is handled by FastAPI lifespan events - no health watcher needed" -ForegroundColor Green
 Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
 
+# CRITICAL FIX (2026-08-02): Add automatic health trigger to ensure startup runs
+# The lifespan startup is supposed to run automatically, but we need to ensure it triggers
+# We'll add a background task to trigger the health endpoint after server starts
+$healthTriggerScript = @"
+Start-Sleep -Seconds 5
+try {
+    Invoke-WebRequest -Uri "http://${ServerHost}:${Port}/api/v1/health" -Method POST -UseBasicParsing | Out-Null
+    Write-Host "[start_15m] Health endpoint triggered successfully" -ForegroundColor Green
+} catch {
+    Write-Host "[start_15m] Failed to trigger health endpoint: `$`_`" -ForegroundColor Yellow
+}
+"@
+
+# Start health trigger in background
+Start-Job -ScriptBlock ([scriptblock]::Create($healthTriggerScript)) | Out-Null
+Write-Host "[start_15m] Health trigger scheduled to run in 5 seconds" -ForegroundColor Cyan
+
 # Start the server - FastAPI lifespan will handle startup automatically
 # Use --log-level debug to see more output
 # CRITICAL FIX: Remove --log-config to prevent interference with lifespan event
 # CRITICAL FIX: Remove --reload after clearing __pycache__ to force fresh import
-# CRITICAL FIX: Add --lifespan on to force lifespan protocol and show actual errors
+# CRITICAL FIX: Remove --lifespan on (redundant - app already has lifespan defined)
 $env:PYTHONUNBUFFERED = "1"
 $ErrorActionPreference = "Continue"
-& py -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level debug --lifespan on
+& py -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level debug
