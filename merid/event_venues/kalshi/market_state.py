@@ -2260,23 +2260,13 @@ class KalshiMarketStateStore:
         if not ticker:
             return None
         
-        # CRITICAL FIX (2026-08-02): Fail fast if state store is not properly initialized
-        # This prevents deadlock during early boot when catalog refresh tries to use
-        # state store before it's guaranteed to exist
-        if not hasattr(self, '_states') or not hasattr(self, '_lock'):
-            logger.warning("[APPLY-REST-MARKET] State store not fully initialized, skipping ticker=%s", ticker)
-            return None
-        
         logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s states_count=%d", 
                    ticker, threading.current_thread().name, len(self._states))
-
-        logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s", ticker, threading.current_thread().name)
         
-        # CRITICAL FIX: Use with statement for RLock (reentrant lock)
-        # RLock allows the same thread to acquire the lock multiple times, preventing deadlock
-        # when apply_rest_market calls _get_or_create which also acquires the lock
-        with self._lock:
-            logger.info("[APPLY-REST-MARKET] Acquired state lock ticker=%s", ticker)
+        # CRITICAL FIX: Use global lock for thread-safe state creation from any thread
+        # This allows catalog refresh thread to safely call apply_rest_market
+        with self._global_lock:
+            logger.info("[APPLY-REST-MARKET] Acquired global lock ticker=%s", ticker)
             state = self._get_or_create(ticker)
 
             v24 = data.get("volume_24h")
