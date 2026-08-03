@@ -2267,162 +2267,160 @@ class KalshiMarketStateStore:
         # _get_or_create already handles thread safety with its own global_lock
         # This prevents deadlock when catalog refresh thread calls apply_rest_market
         state = self._get_or_create(ticker)
+
+        v24 = data.get("volume_24h")
+        if v24 is not None:
+            state.volume_24h = int(v24)
+
+        oi = data.get("open_interest")
+        if oi is not None:
+            state.open_interest = int(oi)
+
+        nv = data.get("notional_value")
+        if nv is not None:
+            state.notional_value_cents = int(nv)
+
+        for attr, key in (
+            ("expiration_time", "expiration_time"),
+            ("expected_expiration_time", "expected_expiration_time"),
+            ("latest_expiration_time", "latest_expiration_time"),
+        ):
+            val = data.get(key)
+            if val:
+                setattr(state, attr, str(val))
+
+        # NEW: Underlying asset and strike info (from catalog)
+        underlying = data.get("underlying")
+        if underlying:
+            state.underlying = underlying
         
-        # Use per-state lock for updating state fields (thread-safe for individual ticker)
-        with state._lock:
-            v24 = data.get("volume_24h")
-            if v24 is not None:
-                state.volume_24h = int(v24)
+        # PRODUCTION FIX (2026-05-18): Set market status for health check
+        # Default to "open" if not provided - markets with orderbook data should be tradable
+        status = data.get("status", "open").lower()
+        if hasattr(state, 'status'):
+            state.status = status
 
-            oi = data.get("open_interest")
-            if oi is not None:
-                state.open_interest = int(oi)
+        strike = data.get("strike_price")
+        if strike is not None:
+            state.strike_price = float(strike)
 
-            nv = data.get("notional_value")
-            if nv is not None:
-                state.notional_value_cents = int(nv)
-
-            for attr, key in (
-                ("expiration_time", "expiration_time"),
-                ("expected_expiration_time", "expected_expiration_time"),
-                ("latest_expiration_time", "latest_expiration_time"),
-            ):
-                val = data.get(key)
-                if val:
-                    setattr(state, attr, str(val))
-
-            # NEW: Underlying asset and strike info (from catalog)
-            underlying = data.get("underlying")
-            if underlying:
-                state.underlying = underlying
-            
-            # PRODUCTION FIX (2026-05-18): Set market status for health check
-            # Default to "open" if not provided - markets with orderbook data should be tradable
-            status = data.get("status", "open").lower()
-            if hasattr(state, 'status'):
-                state.status = status
-
-            strike = data.get("strike_price")
-            if strike is not None:
-                state.strike_price = float(strike)
-
-            floor = data.get("floor_strike")
-            if floor is not None:
-                state.floor_strike = float(floor)
-                # CRITICAL: Capture window strike price for 15-minute markets
-                # For 15m UP/DOWN markets, floor_strike is Kalshi's reference price at window start
-                # This is the authoritative source for strike price determination
-                if state.window_strike_price is None or state.window_strike_source == "":
-                    state.window_strike_price = float(floor)
-                    state.window_strike_source = "kalshi_floor_strike"
-                    state.window_strike_ts = time.time()
-                    logger.info(
-                        "[WINDOW-STRIKE-CAPTURE] ticker=%s floor_strike=%.4f captured as window_strike_price (source=kalshi_floor_strike)",
-                        ticker, float(floor)
-                    )
-
-            cap = data.get("cap_strike")
-            if cap is not None:
-                state.cap_strike = float(cap)
-
-            # External spot price (from CF Benchmarks RTI or other feed)
-            spot = data.get("external_spot")
-            if spot is not None:
-                state.external_spot = float(spot)
-                
-                # CRITICAL: 2026-07-01 - Update strike divergence tracking
-                # Calculate how far spot has moved from window strike price
-                if state.window_strike_price is not None and state.window_strike_price > 0:
-                    current_spot = float(spot)
-                    strike = state.window_strike_price
-                    divergence_pct = abs((current_spot - strike) / strike) * 100
-                    
-                    # Update current divergence
-                    state.current_divergence_pct = divergence_pct
-                    state.last_divergence_update_ts = time.time()
-                    
-                    # Track maximum divergence
-                    if divergence_pct > state.max_divergence_pct:
-                        state.max_divergence_pct = divergence_pct
-                    
-                    # Add to history (keep last 180 points = 15 minutes at 5-second cadence)
-                    state.strike_divergence_history.append((time.time(), divergence_pct, current_spot))
-                    if len(state.strike_divergence_history) > 180:
-                        state.strike_divergence_history = state.strike_divergence_history[-180:]
-                    
-                    # Divergence alerts (2026 best practice from Buildix)
-                    if divergence_pct >= 10.0:
-                        logger.warning(
-                            "[DIVERGENCE-CRITICAL] ticker=%s strike=%.4f spot=%.4f divergence=%.2f%% (threshold=10%%)",
-                            ticker, strike, current_spot, divergence_pct
-                        )
-                    elif divergence_pct >= 5.0:
-                        logger.info(
-                            "[DIVERGENCE-WARNING] ticker=%s strike=%.4f spot=%.4f divergence=%.2f%% (threshold=5%%)",
-                            ticker, strike, current_spot, divergence_pct
-                        )
-
-            # REST updated_time cross-check: track exchange timestamp for lag detection
-            updated_time = data.get("updated_time")
-            if updated_time:
-                try:
-                    # Parse ISO timestamp to Unix timestamp
-                    from datetime import datetime
-                    if isinstance(updated_time, str):
-                        # Handle ISO format with or without Z suffix
-                        if updated_time.endswith('Z'):
-                            updated_time = updated_time[:-1] + '+00:00'
-                        dt = datetime.fromisoformat(updated_time)
-                        self._rest_updated_time[ticker] = dt.timestamp()
-                        self._rest_updated_time_fetched[ticker] = time.time()
-                        
-                        # Calculate user timestamp lag for lag classification
-                        now_wall = time.time()
-                        self._rest_user_ts_lag_s = now_wall - dt.timestamp()
-                        
-                        # Check for WS lag
-                        lag = self._check_rest_updated_time_lag(ticker)
-                        if lag is not None:
-                            logger.warning(
-                                "[REST-CROSS-CHECK] ticker=%s WS lag detected during REST fetch lag_s=%.1f",
-                                ticker, lag
-                            )
-                except Exception as e:
-                    logger.warning("[APPLY-REST-MARKET] Failed to parse updated_time for %s: %s", ticker, e)
-
-            state.last_rest_update_ts = time.monotonic()
-            logger.info("[APPLY-REST-MARKET] BEFORE _recompute_seconds_to_expiry ticker=%s", ticker)
-            _recompute_seconds_to_expiry(state)
-            logger.info("[APPLY-REST-MARKET] AFTER _recompute_seconds_to_expiry ticker=%s", ticker)
-            
-            logger.info("[APPLY-REST-MARKET] BEFORE _sync_unified_rest ticker=%s", ticker)
-            self._sync_unified_rest(ticker, state)
-            logger.info("[APPLY-REST-MARKET] AFTER _sync_unified_rest ticker=%s", ticker)
-
-            # Check REST staleness and mark untradeable if too old
-            now = time.monotonic()
-            rest_age = now - state.last_rest_update_ts
-            if rest_age > _MAX_REST_AGE_SECONDS:
-                logger.warning(
-                    "[MARKET-STATE] rest_price_stale market=%s age_sec=%.0f threshold=%s - marking untradeable",
-                    ticker, rest_age, _MAX_REST_AGE_SECONDS
+        floor = data.get("floor_strike")
+        if floor is not None:
+            state.floor_strike = float(floor)
+            # CRITICAL: Capture window strike price for 15-minute markets
+            # For 15m UP/DOWN markets, floor_strike is Kalshi's reference price at window start
+            # This is the authoritative source for strike price determination
+            if state.window_strike_price is None or state.window_strike_source == "":
+                state.window_strike_price = float(floor)
+                state.window_strike_source = "kalshi_floor_strike"
+                state.window_strike_ts = time.time()
+                logger.info(
+                    "[WINDOW-STRIKE-CAPTURE] ticker=%s floor_strike=%.4f captured as window_strike_price (source=kalshi_floor_strike)",
+                    ticker, float(floor)
                 )
-                state.can_trade = False
-                state.confidence = 0.0
-            
-            # CRITICAL FIX (2026-08-02): Update book freshness tracker from REST market data
-            # This ensures REST-based updates also refresh the state machine
-            try:
-                from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
-                freshness_tracker = get_book_freshness_tracker()
-                freshness_tracker.update_from_rest(ticker, received_ts=time.time(), is_fallback=False)
-                logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from REST market data")
-            except ImportError:
-                logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
-            except Exception as e:
-                logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from REST market: {e}")
 
-        # Lock is now released by with statement - capture callbacks and notify subscribers
+        cap = data.get("cap_strike")
+        if cap is not None:
+            state.cap_strike = float(cap)
+
+        # External spot price (from CF Benchmarks RTI or other feed)
+        spot = data.get("external_spot")
+        if spot is not None:
+            state.external_spot = float(spot)
+            
+            # CRITICAL: 2026-07-01 - Update strike divergence tracking
+            # Calculate how far spot has moved from window strike price
+            if state.window_strike_price is not None and state.window_strike_price > 0:
+                current_spot = float(spot)
+            strike = state.window_strike_price
+            divergence_pct = abs((current_spot - strike) / strike) * 100
+            
+            # Update current divergence
+            state.current_divergence_pct = divergence_pct
+            state.last_divergence_update_ts = time.time()
+            
+            # Track maximum divergence
+            if divergence_pct > state.max_divergence_pct:
+                state.max_divergence_pct = divergence_pct
+            
+            # Add to history (keep last 180 points = 15 minutes at 5-second cadence)
+            state.strike_divergence_history.append((time.time(), divergence_pct, current_spot))
+            if len(state.strike_divergence_history) > 180:
+                state.strike_divergence_history = state.strike_divergence_history[-180:]
+            
+            # Divergence alerts (2026 best practice from Buildix)
+            if divergence_pct >= 10.0:
+                logger.warning(
+                    "[DIVERGENCE-CRITICAL] ticker=%s strike=%.4f spot=%.4f divergence=%.2f%% (threshold=10%%)",
+                    ticker, strike, current_spot, divergence_pct
+                )
+            elif divergence_pct >= 5.0:
+                logger.info(
+                    "[DIVERGENCE-WARNING] ticker=%s strike=%.4f spot=%.4f divergence=%.2f%% (threshold=5%%)",
+                    ticker, strike, current_spot, divergence_pct
+                )
+
+        # REST updated_time cross-check: track exchange timestamp for lag detection
+        updated_time = data.get("updated_time")
+        if updated_time:
+            try:
+                # Parse ISO timestamp to Unix timestamp
+                from datetime import datetime
+                if isinstance(updated_time, str):
+                    # Handle ISO format with or without Z suffix
+                    if updated_time.endswith('Z'):
+                        updated_time = updated_time[:-1] + '+00:00'
+                    dt = datetime.fromisoformat(updated_time)
+                    self._rest_updated_time[ticker] = dt.timestamp()
+                    self._rest_updated_time_fetched[ticker] = time.time()
+                    
+                    # Calculate user timestamp lag for lag classification
+                    now_wall = time.time()
+                    self._rest_user_ts_lag_s = now_wall - dt.timestamp()
+            
+            # Check for WS lag
+            lag = self._check_rest_updated_time_lag(ticker)
+            if lag is not None:
+                logger.warning(
+                    "[REST-CROSS-CHECK] ticker=%s WS lag detected during REST fetch lag_s=%.1f",
+                    ticker, lag
+                )
+            except Exception as e:
+                logger.warning("[APPLY-REST-MARKET] Failed to parse updated_time for %s: %s", ticker, e)
+
+        state.last_rest_update_ts = time.monotonic()
+        logger.info("[APPLY-REST-MARKET] BEFORE _recompute_seconds_to_expiry ticker=%s", ticker)
+        _recompute_seconds_to_expiry(state)
+        logger.info("[APPLY-REST-MARKET] AFTER _recompute_seconds_to_expiry ticker=%s", ticker)
+        
+        logger.info("[APPLY-REST-MARKET] BEFORE _sync_unified_rest ticker=%s", ticker)
+        self._sync_unified_rest(ticker, state)
+        logger.info("[APPLY-REST-MARKET] AFTER _sync_unified_rest ticker=%s", ticker)
+
+        # Check REST staleness and mark untradeable if too old
+        now = time.monotonic()
+        rest_age = now - state.last_rest_update_ts
+        if rest_age > _MAX_REST_AGE_SECONDS:
+            logger.warning(
+                "[MARKET-STATE] rest_price_stale market=%s age_sec=%.0f threshold=%s - marking untradeable",
+                ticker, rest_age, _MAX_REST_AGE_SECONDS
+            )
+            state.can_trade = False
+            state.confidence = 0.0
+        
+        # CRITICAL FIX (2026-08-02): Update book freshness tracker from REST market data
+        # This ensures REST-based updates also refresh the state machine
+        try:
+            from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
+            freshness_tracker = get_book_freshness_tracker()
+            freshness_tracker.update_from_rest(ticker, received_ts=time.time(), is_fallback=False)
+            logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from REST market data")
+        except ImportError:
+            logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
+        except Exception as e:
+            logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from REST market: {e}")
+
+        # Capture callbacks while holding lock, then release before notifying
         # This prevents deadlock where _notify_subscribers tries to acquire the same lock
         callbacks = []
         if ticker in self._subscribers:
