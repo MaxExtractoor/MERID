@@ -234,6 +234,7 @@ class KalshiFill:
     fill_id: str  # Kalshi's unique fill ID — THE primary key
     trade_id: Optional[str] = None  # May be same as fill_id or different
     order_id: Optional[str] = None  # Parent order ID
+    market_id: str = ""  # Kalshi market ID (UUID) for position cache validation
     market_ticker: str = ""  # e.g., "KXBTC-25DEC-ABOVE-100000"
     side: str = ""  # "yes" or "no"
     action: str = ""  # "buy" or "sell"
@@ -413,16 +414,122 @@ class OrderIntent:
     broker_order_id: Optional[str] = None  # Kalshi order ID for reconciliation
     execution_report_hash: Optional[str] = None  # Hash of execution report from venue
     
+    # Liquidity and fee tracking for fill reconciliation
+    liquidity_role: Optional[str] = None  # "maker" or "taker"
+    expected_fee_role: Optional[str] = None  # Expected fee role
+    estimated_fee_cents: Optional[int] = None  # Estimated fee in cents
+    snapshot_age_ms: float = 0.0  # Age of signal snapshot in milliseconds
+    
     def add_fill(self, fill_id: str, fill_count: int) -> None:
         """Add a fill to this intent and update status.
         
         This handles partial fills by tracking the cumulative filled quantity.
         Status transitions from 'submitted' -> 'partially_filled' -> 'filled'.
         
+        CRITICAL FIX: Prevent terminal state regression - once filled, cannot regress.
+        CRITICAL FIX: Integrate order state machine for strict transition validation.
+        
         Args:
             fill_id: The fill ID to add
             fill_count: Number of contracts in this fill
         """
+        # CRITICAL FIX: Integrate order state machine for strict transition validation
+        try:
+            from merid.event_venues.kalshi.order_state_machine import get_order_state_machine, OrderState, TransitionResult
+            state_machine = get_order_state_machine()
+            
+            # Map string status to OrderState enum
+            status_map = {
+                "pending": OrderState.NEW,
+                "submitted": OrderState.SUBMITTED,
+                "partially_filled": OrderState.PARTIALLY_FILLED,
+                "filled": OrderState.FILLED,
+                "cancelled": OrderState.CANCELLED,
+                "rejected": OrderState.REJECTED
+            }
+            
+            current_state = status_map.get(self.status, OrderState.NEW)
+            
+            # Determine target state based on fill completeness
+            new_filled_count = self.filled_count + fill_count
+            if new_filled_count >= self.count:
+                target_state = OrderState.FILLED
+            elif new_filled_count > 0:
+                target_state = OrderState.PARTIALLY_FILLED
+            else:
+                target_state = current_state
+            
+            # Attempt state transition
+            order_id = self.order_id or self.intent_id
+            result = state_machine.attempt_transition(
+                order_id=order_id,
+                to_state=target_state,
+                filled_qty=new_filled_count,
+                context={"fill_id": fill_id, "intent_id": self.intent_id}
+            )
+            
+            if result == TransitionResult.REJECTED:
+                logger.error(
+                    "[ORDER-STATE-MACHINE] State transition rejected for %s: %s → %s",
+                    order_id, current_state.value, target_state.value
+                )
+                return  # Don't apply fill if transition rejected
+            elif result == TransitionResult.LATE_FILL:
+                logger.warning(
+                    "[ORDER-STATE-MACHINE] Late fill detected for %s: fill_id=%s after terminal state",
+                    order_id, fill_id
+                )
+                # Still apply fill but don't update state (keep terminal state)
+        except Exception as sm_err:
+            logger.debug("[ORDER-INTENT] Could not check state machine: %s", sm_err)
+        
+        # CRITICAL FIX (2026-08-01): Notify global_allocator BEFORE terminal state checks
+        # This ensures pending orders are cleared even for terminal-state intents
+        # Previously, terminal state checks returned early, skipping global_allocator notification
+        # This caused pending orders to persist after fills occurred
+        try:
+            from merid.risk.profiles.global_allocator import get_global_allocator
+            allocator = get_global_allocator()
+            if allocator and self.ticker:
+                # Extract asset from ticker (e.g., KXBTC15M-26JUL311830-30 -> BTC)
+                import re
+                asset = self.ticker.split("-")[0][2:] if self.ticker.startswith("KX") else "UNKNOWN"
+                asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
+                
+                # Calculate fill notional
+                fill_notional = (fill_count * self.price_cents) / 100.0
+                
+                allocator.record_order_filled(asset, self.order_id or self.intent_id, fill_notional)
+                logger.info(
+                    "[FILLS-LEDGER] Notified global_allocator of fill: asset=%s order_id=%s notional=$%.2f fill_id=%s",
+                    asset, self.order_id or self.intent_id, fill_notional, fill_id
+                )
+        except Exception as ga_err:
+            logger.warning("[FILLS-LEDGER] Failed to notify global_allocator of fill: %s", ga_err)
+        
+        # CRITICAL FIX: Prevent terminal state regression
+        if self.status == "filled":
+            logger.warning(
+                "[ORDER-INTENT-TERMINAL-REGRESSION] intent_id=%s client_order_id=%s status=filled - "
+                "rejecting fill_id=%s fill_count=%d to prevent terminal state regression",
+                self.intent_id, self.client_order_id, fill_id, fill_count
+            )
+            return
+        if self.status == "cancelled":
+            logger.warning(
+                "[ORDER-INTENT-TERMINAL-REGRESSION] intent_id=%s client_order_id=%s status=cancelled - "
+                "rejecting fill_id=%s fill_count=%d to prevent terminal state regression",
+                self.intent_id, self.client_order_id, fill_id, fill_count
+            )
+            return
+        if self.status == "rejected":
+            logger.warning(
+                "[ORDER-INTENT-TERMINAL-REGRESSION] intent_id=%s client_order_id=%s status=rejected - "
+                "rejecting fill_id=%s fill_count=%d to prevent terminal state regression",
+                self.intent_id, self.client_order_id, fill_id, fill_count
+            )
+            return
+
         if fill_id not in self.fill_ids:
             self.fill_ids.append(fill_id)
             self.filled_count += fill_count
@@ -1008,6 +1115,39 @@ class KalshiFillsLedger:
                 fill = self._parse_fill(raw, "http_poller")
                 if _is_test_fixture_fill(fill.fill_id):
                     continue
+                
+                # CRITICAL FIX: Validate fill data before ingesting (same as on_fill)
+                # This prevents corrupted fill data from entering the ledger via HTTP
+                if fill.count_fp is None or fill.count_fp <= 0:
+                    logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: count_fp=%s (must be > 0) fill_id=%s", fill.count_fp, fill.fill_id)
+                    continue
+                
+                if not fill.fill_id or not fill.fill_id.strip():
+                    logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: fill_id=%s (must be non-empty)", fill.fill_id)
+                    continue
+                
+                if fill.side not in ["yes", "no"]:
+                    logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: side=%s (must be 'yes' or 'no') fill_id=%s", fill.side, fill.fill_id)
+                    continue
+                
+                if fill.action not in ["buy", "sell"]:
+                    logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: action=%s (must be 'buy' or 'sell') fill_id=%s", fill.action, fill.fill_id)
+                    continue
+                
+                # CRITICAL FIX: Check global fill_id uniqueness across all sources
+                # This prevents false dedupe or missed dedupe across WS, REST, backfill, replay
+                try:
+                    from merid.event_venues.kalshi.system_invariants import get_system_invariant_checker
+                    invariant_checker = get_system_invariant_checker()
+                    uniqueness_report = await invariant_checker.check_fill_id_uniqueness(fill.fill_id, "http_poller")
+                    if not uniqueness_report.passed:
+                        logger.warning(
+                            "[FILLS-LEDGER] fill_id=%s already seen in another source - potential identity collision",
+                            fill.fill_id
+                        )
+                except Exception as inv_err:
+                    logger.debug("[FILLS-LEDGER] Could not check fill_id uniqueness: %s", inv_err)
+                
                 if fill.fill_id in self._fills:
                     # HTTP upsert over prior WS row: enrich without zeroing good data.
                     existing = self._fills[fill.fill_id]
@@ -1067,8 +1207,9 @@ class KalshiFillsLedger:
                 # Link to intent and resolve action
                 if fill.client_order_id and fill.client_order_id in self._intents:
                     intent = self._intents[fill.client_order_id]
-                    intent.fill_ids.append(fill.fill_id)
-                    intent.status = "filled"
+                    # CRITICAL FIX: Use add_fill() method to prevent terminal state regression
+                    # instead of directly setting intent.status = "filled"
+                    intent.add_fill(fill.fill_id, fill.count_fp or 1)
                     intent.last_update = datetime.now(timezone.utc)
                     fill.intent_id = intent.intent_id
                     fill.agent_id = intent.agent_id
@@ -1083,6 +1224,22 @@ class KalshiFillsLedger:
                         if 'hedge' in intent.tags:
                             fill.fill_source = "hedge"
                             fill.hedge_reason = intent.tags.get('hedge_reason', 'unknown')
+                    
+                    # CRITICAL FIX (2026-07-29): Extract alpha-hedge pairing metadata from intent
+                    # This enables end-to-end tracking of alpha-hedge pairs
+                    if intent.metadata and "paired_alpha_id" in intent.metadata:
+                        fill.related_alpha_fill_id = intent.metadata.get("paired_alpha_fill_id")
+                        # Store pairing metadata in raw_payload for persistence
+                        if not fill.raw_payload:
+                            fill.raw_payload = {}
+                        fill.raw_payload["paired_alpha_id"] = intent.metadata.get("paired_alpha_id")
+                        fill.raw_payload["paired_alpha_fill_id"] = intent.metadata.get("paired_alpha_fill_id")
+                        fill.raw_payload["paired_alpha_entry_time"] = intent.metadata.get("paired_alpha_entry_time")
+                        logger.debug(
+                            "[FILL-PAIRING] Extracted alpha-hedge pairing metadata from intent: fill_id=%s paired_alpha_id=%s",
+                            fill.fill_id[:8] if fill.fill_id else None,
+                            intent.metadata.get("paired_alpha_id", "")[:8] if intent.metadata.get("paired_alpha_id") else None,
+                        )
                 elif agent_map and fill.client_order_id in agent_map:
                     fill.agent_id = agent_map[fill.client_order_id]
                 
@@ -1206,6 +1363,31 @@ class KalshiFillsLedger:
             except Exception as e:
                 logger.warning(f"Failed to auto-export CSV after HTTP ingest: {e}")
             
+            # CRITICAL FIX: Notify position cache of new fills to keep cache in sync with fills ledger
+            # This ensures that when fills are ingested via HTTP (through fills ledger),
+            # the position cache is also updated. Previously, the position cache only updated
+            # when fills arrived via WebSocket directly, causing cache/ledger desync.
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                cache = get_position_cache()
+                
+                for fill_id in new_fill_ids:
+                    fill = self._fills.get(fill_id)
+                    if fill:
+                        await cache.on_fill(
+                            market_id=fill.market_ticker,
+                            contracts=fill.count_fp,
+                            price_cents=fill.price_cents,
+                            fee_cents=int(fill.fee_cost * 100) if fill.fee_cost else 0,
+                            side=fill.side,
+                            client_order_id=fill.client_order_id,
+                            fill_id=fill.fill_id,
+                            action=fill.action
+                        )
+                logger.debug(f"[FILLS-LEDGER] Notified position cache of {len(new_fill_ids)} new fills from HTTP")
+            except Exception as cache_err:
+                logger.warning(f"[FILLS-LEDGER] Failed to notify position cache of fills: {cache_err}")
+            
         return new_count, new_fill_ids
     
     async def ingest_ws_fill(self, raw: Dict[str, Any], agent_id: Optional[str] = None) -> bool:
@@ -1222,6 +1404,24 @@ class KalshiFillsLedger:
         async with mutex:
             fill = self._parse_fill(raw, "websocket")
             
+            # CRITICAL FIX: Validate fill data before ingesting (same as on_fill)
+            # This prevents corrupted fill data from entering the ledger via WebSocket
+            if fill.count_fp is None or fill.count_fp <= 0:
+                logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: count_fp=%s (must be > 0) fill_id=%s", fill.count_fp, fill.fill_id)
+                return False
+            
+            if not fill.fill_id or not fill.fill_id.strip():
+                logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: fill_id=%s (must be non-empty)", fill.fill_id)
+                return False
+            
+            if fill.side not in ["yes", "no"]:
+                logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: side=%s (must be 'yes' or 'no') fill_id=%s", fill.side, fill.fill_id)
+                return False
+            
+            if fill.action not in ["buy", "sell"]:
+                logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: action=%s (must be 'buy' or 'sell') fill_id=%s", fill.action, fill.fill_id)
+                return False
+            
             if fill.fill_id in self._fills:
                 self._duplicates_dropped += 1
                 return False
@@ -1229,12 +1429,27 @@ class KalshiFillsLedger:
             # WebSocket may not have all fields - try to enrich
             if not fill.agent_id and agent_id:
                 fill.agent_id = agent_id
+            
+            # CRITICAL FIX: Check global fill_id uniqueness across all sources
+            # This prevents false dedupe or missed dedupe across WS, REST, backfill, replay
+            try:
+                from merid.event_venues.kalshi.system_invariants import get_system_invariant_checker
+                invariant_checker = get_system_invariant_checker()
+                uniqueness_report = await invariant_checker.check_fill_id_uniqueness(fill.fill_id, "websocket")
+                if not uniqueness_report.passed:
+                    logger.warning(
+                        "[FILLS-LEDGER] fill_id=%s already seen in another source - potential identity collision",
+                        fill.fill_id
+                    )
+            except Exception as inv_err:
+                logger.debug("[FILLS-LEDGER] Could not check fill_id uniqueness: %s", inv_err)
                 
             # Link to intent and resolve action
             if fill.client_order_id and fill.client_order_id in self._intents:
                 intent = self._intents[fill.client_order_id]
-                intent.fill_ids.append(fill.fill_id)
-                intent.status = "filled"
+                # CRITICAL FIX: Use add_fill() method to prevent terminal state regression
+                # instead of directly setting intent.status = "filled"
+                intent.add_fill(fill.fill_id, fill.count_fp or 1)
                 intent.last_update = datetime.now(timezone.utc)
                 fill.intent_id = intent.intent_id
                 fill.agent_id = intent.agent_id
@@ -1246,6 +1461,22 @@ class KalshiFillsLedger:
                     if 'hedge' in intent.tags:
                         fill.fill_source = "hedge"
                         fill.hedge_reason = intent.tags.get('hedge_reason', 'unknown')
+                
+                # CRITICAL FIX (2026-07-29): Extract alpha-hedge pairing metadata from intent
+                # This enables end-to-end tracking of alpha-hedge pairs
+                if intent.metadata and "paired_alpha_id" in intent.metadata:
+                    fill.related_alpha_fill_id = intent.metadata.get("paired_alpha_fill_id")
+                    # Store pairing metadata in raw_payload for persistence
+                    if not fill.raw_payload:
+                        fill.raw_payload = {}
+                    fill.raw_payload["paired_alpha_id"] = intent.metadata.get("paired_alpha_id")
+                    fill.raw_payload["paired_alpha_fill_id"] = intent.metadata.get("paired_alpha_fill_id")
+                    fill.raw_payload["paired_alpha_entry_time"] = intent.metadata.get("paired_alpha_entry_time")
+                    logger.debug(
+                        "[FILL-PAIRING] Extracted alpha-hedge pairing metadata from intent (WS): fill_id=%s paired_alpha_id=%s",
+                        fill.fill_id[:8] if fill.fill_id else None,
+                        intent.metadata.get("paired_alpha_id", "")[:8] if intent.metadata.get("paired_alpha_id") else None,
+                    )
             
             # Task 5: Detect hedge fills by client_order_id prefix
             if fill.client_order_id and fill.client_order_id.startswith('HEDGE_'):
@@ -1384,8 +1615,20 @@ class KalshiFillsLedger:
         return True
     
     def record_intent(self, intent: OrderIntent) -> None:
-        """Record an order intent before submission."""
+        """Record an order intent before submission.
+        
+        CRITICAL FIX (2026-07-29): Extract alpha-hedge pairing metadata from intent
+        for downstream tracking in hedge fills.
+        """
         self._intents[intent.intent_id] = intent
+        # CRITICAL FIX (2026-07-29): Log hedge pairing metadata for debugging
+        if intent.metadata and "paired_alpha_id" in intent.metadata:
+            logger.debug(
+                "[INTENT-PAIRING] Recorded hedge intent with pairing metadata: intent_id=%s paired_alpha_id=%s paired_alpha_fill_id=%s",
+                intent.intent_id[:8] if intent.intent_id else None,
+                intent.metadata.get("paired_alpha_id", "")[:8] if intent.metadata.get("paired_alpha_id") else None,
+                intent.metadata.get("paired_alpha_fill_id", "")[:8] if intent.metadata.get("paired_alpha_fill_id") else None,
+            )
         logger.debug(f"Recorded intent: {intent.intent_id} for {intent.ticker}")
         # Prune stale intents to prevent unbounded growth (runs every 100 adds)
         if len(self._intents) % 100 == 0:
@@ -1483,6 +1726,10 @@ class KalshiFillsLedger:
             return
         
         try:
+            # CRITICAL FIX (2026-07-29): Call confirm_hedge_fill to track fill confirmation and latency
+            # This enables the new hedge fill confirmation tracking and latency metrics features
+            self._pnl_tracker.confirm_hedge_fill(fill.fill_id)
+            
             # Check if this fill is linked to an alpha fill
             if fill.related_alpha_fill_id:
                 # This is a closing hedge fill - record the exit
@@ -2132,11 +2379,11 @@ class KalshiFillsLedger:
             checked_markets.add(ticker)
             computed = await self.compute_position_from_fills_async(ticker)
 
-            # Debug: Log computed vs Kalshi position for diagnostics
+            # Debug: Log computed vs Kalshi position for diagnostics (side-aware)
             if computed:
-                logger.debug(f"Reconciliation compare {ticker}: Kalshi={kalshi_pos.get('contracts', 0)}@{kalshi_pos.get('side', 'yes')}, Ledger={computed['contracts']}@{computed['side']}")
+                logger.debug(f"[RECONCILIATION-SIDE-AWARE] {ticker}: Kalshi={kalshi_pos.get('contracts', 0)}@{kalshi_pos.get('side', 'yes')}, Ledger={computed['contracts']}@{computed['side']}")
             else:
-                logger.debug(f"Reconciliation compare {ticker}: Kalshi={kalshi_pos.get('contracts', 0)}@{kalshi_pos.get('side', 'yes')}, Ledger=None (no fills)")
+                logger.debug(f"[RECONCILIATION-SIDE-AWARE] {ticker}: Kalshi={kalshi_pos.get('contracts', 0)}@{kalshi_pos.get('side', 'yes')}, Ledger=None (no fills)")
             
             kalshi_contracts = int(kalshi_pos.get("contracts", 0) or kalshi_pos.get("count", 0))
             kalshi_side = kalshi_pos.get("side", "yes")
@@ -2362,7 +2609,7 @@ class KalshiFillsLedger:
             
             # Build set of markets with actual positions from Kalshi
             markets_with_kalshi_position: set = set()
-            for pos in cached_positions:
+            for pos in cached_positions.values():
                 ticker = getattr(pos, 'market_id', None) or getattr(pos, 'ticker', None)
                 contracts = getattr(pos, 'contracts', 0) or getattr(pos, 'size', 0)
                 if ticker and contracts > 0:
@@ -2968,6 +3215,24 @@ class KalshiFillsLedger:
         Args:
             fill: KalshiFill object
         """
+        # CRITICAL FIX (2026-08-01): Validate fill data before recording
+        # This prevents corrupted fill data from entering the ledger
+        if fill.count_fp is None or fill.count_fp <= 0:
+            logger.error("[FILLS-LEDGER] Rejecting invalid fill: count_fp=%s (must be > 0)", fill.count_fp)
+            return
+        
+        if not fill.fill_id or not fill.fill_id.strip():
+            logger.error("[FILLS-LEDGER] Rejecting invalid fill: fill_id=%s (must be non-empty)", fill.fill_id)
+            return
+        
+        if fill.side not in ["yes", "no"]:
+            logger.error("[FILLS-LEDGER] Rejecting invalid fill: side=%s (must be 'yes' or 'no')", fill.side)
+            return
+        
+        if fill.action not in ["buy", "sell"]:
+            logger.error("[FILLS-LEDGER] Rejecting invalid fill: action=%s (must be 'buy' or 'sell')", fill.action)
+            return
+        
         # Deduplicate fills
         if fill.fill_id in self._processed_fill_ids:
             return
@@ -2979,7 +3244,7 @@ class KalshiFillsLedger:
             try:
                 from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
                 tracker = get_agent_performance_tracker()
-                
+
                 # Calculate predicted edge from price (if not provided)
                 # For YES: edge = (1 - price) if we expect YES to resolve true
                 # For NO: edge = price if we expect NO to resolve false
@@ -2989,7 +3254,7 @@ class KalshiFillsLedger:
                     predicted_edge = (1.0 - float(fill.price_cents) / 100.0)
                 elif fill.side == "no":
                     predicted_edge = float(fill.price_cents) / 100.0
-                
+
                 # Extract velocity from fill if available (from raw_payload or decision_trace)
                 velocity = None
                 try:
@@ -2999,7 +3264,7 @@ class KalshiFillsLedger:
                         velocity = payload.get('velocity')
                 except Exception:
                     pass
-                
+
                 tracker.record_fill(
                     agent_id=fill.agent_id,
                     market_id=fill.market_ticker,
@@ -3016,6 +3281,48 @@ class KalshiFillsLedger:
                 )
             except Exception as e:
                 logger.debug("Failed to record fill in agent_performance_tracker: %s", e)
+
+        # 2026-08-01: Record FLB metrics for performance tracking
+        try:
+            from merid.metrics.flb_metrics import record_flb_trade
+            # Determine if this is a winning trade (for entry fills only)
+            # For now, we'll record all fills and track performance later
+            # TODO: Add proper win/loss determination when position closes
+            won = None  # Will be determined on position close
+            edge_pct = predicted_edge if 'predicted_edge' in locals() else 0.0
+            position_multiplier = 1.0  # Default, will be enhanced with actual multiplier from intent
+            record_flb_trade(
+                side=fill.side,
+                price_cents=fill.price_cents,
+                edge_pct=edge_pct,
+                position_multiplier=position_multiplier,
+                pnl_cents=0,  # PnL determined on position close
+                won=False  # Placeholder, will be updated on close
+            )
+            logger.debug(
+                "[FLB-METRICS] Recorded fill for FLB tracking: side=%s price=%dc",
+                fill.side, fill.price_cents
+            )
+        except Exception as flb_err:
+            logger.debug("[FLB-METRICS] Failed to record FLB metrics: %s", flb_err)
+        
+        # CRITICAL FIX: Notify position cache of fill to keep cache in sync with fills ledger
+        # This ensures that when fills are ingested via HTTP (through fills ledger),
+        # the position cache is also updated. Previously, the position cache only updated
+        # when fills arrived via WebSocket directly, causing cache/ledger desync.
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            # Call position cache's on_fill method to update cache state
+            # Note: This is a synchronous call, but position_cache.on_fill is async
+            # We need to handle this properly - for now, we'll skip this in on_fill
+            # and instead add async notification in ingest_http_fills
+            logger.debug(
+                "[FILLS-LEDGER] Fill ingested, position cache sync deferred to async path: fill_id=%s market=%s",
+                fill.fill_id, fill.market_ticker
+            )
+        except Exception as cache_err:
+            logger.debug("[FILLS-LEDGER] Could not notify position cache of fill: %s", cache_err)
         
         # Get or create position
         instrument_key = self._get_instrument_key(fill)
@@ -3046,16 +3353,17 @@ class KalshiFillsLedger:
                     
                     # Allow positions from last 30 minutes (current + previous window)
                     # This prevents stale positions from hours ago from triggering exits
+                    is_legacy_position = False
                     if expiry_ts > 0 and now_ts > expiry_ts + 1800:  # 30 minutes = 1800 seconds
                         logger.warning(
-                            "[FILLS-LEDGER-POSITION-MONITOR] Skipping stale position for monitor: "
+                            "[FILLS-LEDGER-POSITION-MONITOR] Marking position as legacy (no exit monitoring): "
                             "market=%s expired %d seconds ago (>30m threshold) - "
-                            "preventing premature exit orders for old positions",
+                            "position will be tracked for reconciliation but not for exit orders",
                             market_id,
                             int(now_ts - expiry_ts)
                         )
-                        # Skip adding to monitor - position is too old
-                        return
+                        # Mark as legacy - skip exit monitoring but still complete position creation
+                        is_legacy_position = True
                 except Exception as age_err:
                     logger.debug(
                         "[FILLS-LEDGER-POSITION-MONITOR] Could not validate position age for %s: %s",
@@ -3083,12 +3391,67 @@ class KalshiFillsLedger:
                     logger.debug("[FILLS-LEDGER] Could not read trailing stop config: %s", ts_err)
                 
                 # Assign default SL if missing
-                sl_price = position.get("avg_price_cents", 0)
+                entry_price = position.get("avg_price_cents", 0)
+                sl_price = entry_price
                 if sl_price:
                     sl_price = max(1, sl_price - 5)
                 
-                # Calculate risk for trailing stop
-                risk_cents = abs(position.get("avg_price_cents", 0) - sl_price) if sl_price else 5
+                # Calculate risk for trailing stop and TP target
+                risk_cents = abs(entry_price - sl_price) if sl_price and entry_price else 5
+                
+                # CRITICAL FIX: 2026-07-31 - Look up TP targets from position_cache registry
+                # This ensures that TP targets registered at order placement time are preserved
+                # when fills_ledger creates positions for monitoring
+                tp_price = None
+                tp_r_multiple = None
+                
+                # Try to get client_order_id from fill for TP target lookup
+                client_order_id = getattr(fill, 'client_order_id', None)
+                if not client_order_id and hasattr(fill, 'order_id'):
+                    # Try to map order_id to client_order_id via position_cache
+                    try:
+                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                        cache = get_position_cache()
+                        client_order_id = cache._order_id_to_client_tag.get(fill.order_id)
+                    except Exception as lookup_err:
+                        logger.debug("[FILLS-LEDGER] Could not look up client_order_id: %s", lookup_err)
+                
+                # Look up TP targets from position_cache registry
+                if client_order_id:
+                    try:
+                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                        cache = get_position_cache()
+                        tp_targets = cache._pending_tp_targets.get(client_order_id, {})
+                        if tp_targets:
+                            registered_tp = tp_targets.get("tp_price")
+                            registered_tp_r = tp_targets.get("tp_r")
+                            registered_entry = tp_targets.get("entry_price")
+                            
+                            # Use registered TP if available, otherwise compute from entry
+                            if registered_tp:
+                                tp_price = registered_tp
+                                tp_r_multiple = registered_tp_r
+                                logger.info(
+                                    "[FILLS-LEDGER-TP-LOOKUP] Found registered TP for client_order_id=%s: tp=%dc tp_r=%s entry=%dc",
+                                    client_order_id[:12], tp_price, tp_r_multiple, registered_entry
+                                )
+                            elif registered_entry and registered_entry > 0:
+                                # Compute TP from registered entry price if no explicit TP
+                                tp_price = registered_entry + risk_cents
+                                logger.info(
+                                    "[FILLS-LEDGER-TP-LOOKUP] Computed TP from registered entry for client_order_id=%s: entry=%dc tp=%dc",
+                                    client_order_id[:12], registered_entry, tp_price
+                                )
+                    except Exception as tp_err:
+                        logger.debug("[FILLS-LEDGER] Could not look up TP targets: %s", tp_err)
+                
+                # Fallback: Compute TP from current entry price if no registered TP found
+                if tp_price is None and entry_price and entry_price > 0:
+                    tp_price = entry_price + risk_cents  # 1R take profit target
+                    logger.debug(
+                        "[FILLS-LEDGER-TP-FALLBACK] Computed fallback TP for market=%s: entry=%dc tp=%dc",
+                        market_id, entry_price, tp_price
+                    )
                 
                 # Mandatory trailing stop (FIXED_CENTS mode)
                 trailing_type = TrailingType.FIXED_CENTS
@@ -3106,19 +3469,27 @@ class KalshiFillsLedger:
                     series_ticker=series_ticker,
                     side=side_enum,
                     size=position.get("total_contracts", 1),
-                    avg_entry_price_cents=position.get("avg_price_cents", 0),
-                    take_profit_price_cents=None,  # fills_ledger doesn't track TP
+                    avg_entry_price_cents=entry_price,
+                    take_profit_price_cents=tp_price,  # CRITICAL FIX: Compute TP target instead of None
                     stop_loss_price_cents=sl_price,
                     trailing_type=trailing_type,
                     trailing_param=trailing_param,
                     exit_policy_id="fills_ledger",
                 )
                 
-                monitor.add_position(monitor_position)
-                logger.info(
-                    "[FILLS-LEDGER-POSITION-MONITOR] Added position to monitor: market=%s side=%s size=%d SL=%dc",
-                    market_id, position.get("side"), position.get("total_contracts"), sl_price
-                )
+                # CRITICAL FIX (2026-08-01): Only add to monitor if not a legacy position
+                # Legacy positions (>30m old) are tracked for reconciliation but not for exit orders
+                if not is_legacy_position:
+                    monitor.add_position(monitor_position)
+                    logger.info(
+                        "[FILLS-LEDGER-POSITION-MONITOR] Added position to monitor: market=%s side=%s size=%d entry=%dc TP=%dc SL=%dc",
+                        market_id, position.get("side"), position.get("total_contracts"), entry_price, tp_price, sl_price
+                    )
+                else:
+                    logger.info(
+                        "[FILLS-LEDGER-POSITION-MONITOR] Legacy position tracked for reconciliation only (no exit orders): market=%s side=%s size=%d entry=%dc",
+                        market_id, position.get("side"), position.get("total_contracts"), entry_price
+                    )
             except Exception as monitor_err:
                 logger.error("[FILLS-LEDGER] CRITICAL: Failed to add position to monitor: %s", monitor_err, exc_info=True)
                 # CRITICAL: Do not silently swallow - this means exit policies won't execute
@@ -3637,6 +4008,7 @@ class KalshiFillsLedger:
             
             synthetic_fill = KalshiFill(
                 fill_id=f"manual_close_{ticker}_{int(closed_at.timestamp())}",
+                market_id="",  # Empty for synthetic fills
                 market_ticker=ticker,
                 side=current_pos.get("side", "yes"),
                 action=close_action,
@@ -3875,28 +4247,49 @@ class KalshiFillsLedger:
         yes_price_dollars = normalize_price(yes_price) if yes_price else None
         no_price_dollars = normalize_price(no_price) if no_price else None
         
-        # CRITICAL FIX: Kalshi quotes everything from YES side - do NOT trust raw.get("side")
-        # Kalshi's "side" field always reports "yes" because they quote from YES side perspective
-        # We must derive the correct side from the original intent using client_order_id
+        # CRITICAL FIX (2026-07-21): Use outcome_side as canonical direction field per Kalshi's order-direction semantics
+        # outcome_side (yes/no) expresses which outcome the user is long - this is the canonical field
+        # Legacy action/side are deprecated and should not drive logic
+        # Reference: https://docs.kalshi.com/getting_started/order_direction
         client_order_id = raw.get("client_order_id")
-        derived_side = raw.get("side", "yes")  # Fallback to Kalshi's reported side
         
-        if client_order_id and client_order_id in self._intents:
+        # Try to get outcome_side from raw payload (canonical field)
+        outcome_side = raw.get("outcome_side") or raw.get("intent_side")
+        
+        # If outcome_side not available, derive from intent using client_order_id
+        if not outcome_side and client_order_id and client_order_id in self._intents:
             intent = self._intents[client_order_id]
             if intent and intent.side:
-                # Extract side from Kalshi-formatted intent.side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+                # Extract outcome_side from Kalshi-formatted intent.side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+                # BUY_YES, SELL_NO → outcome_side=yes (long YES exposure)
+                # BUY_NO, SELL_YES → outcome_side=no (long NO exposure)
                 if "YES" in intent.side:
-                    derived_side = "yes"
+                    outcome_side = "yes"
                 elif "NO" in intent.side:
-                    derived_side = "no"
+                    outcome_side = "no"
                 else:
                     # Fallback to intent.side if not in Kalshi format
-                    derived_side = intent.side.lower() if intent.side else derived_side
+                    outcome_side = intent.side.lower() if intent.side else "yes"
                 logger.debug(
-                    "[HTTP-FILL-SIDE-FIX] fill_id=%s client_order_id=%s | "
-                    "Kalshi reported side=%s | Derived from intent.side=%s -> %s",
-                    fill_id, client_order_id, raw.get("side", ""), intent.side, derived_side
+                    "[FILL-OUTCOME-SIDE-DERIVATION] fill_id=%s client_order_id=%s | "
+                    "Derived outcome_side=%s from intent.side=%s",
+                    fill_id, client_order_id, outcome_side, intent.side
                 )
+        
+        # Fallback to legacy side derivation if outcome_side still not available
+        if not outcome_side:
+            # Legacy: derive from Kalshi's reported side (always "yes" from YES-side perspective)
+            # This is less reliable but provides backward compatibility
+            derived_side = raw.get("side", "yes")
+            outcome_side = derived_side
+            logger.debug(
+                "[FILL-LEGACY-SIDE-FALLBACK] fill_id=%s | Using legacy side=%s (outcome_side not available)",
+                fill_id, derived_side
+            )
+        
+        # Store outcome_side as the canonical direction field
+        # This is what should be used for all direction logic going forward
+        derived_side = outcome_side  # For backward compatibility with existing code
         
         # If we only have generic price, assign to side
         if price and not yes_price_dollars and not no_price_dollars:
@@ -4027,6 +4420,7 @@ class KalshiFillsLedger:
             fill_id=str(fill_id),
             trade_id=raw.get("trade_id"),
             order_id=raw.get("order_id"),
+            market_id=raw.get("market_id", ""),  # CRITICAL FIX: Add market_id for position cache validation
             market_ticker=ticker,
             side=derived_side,  # CRITICAL FIX: Use derived side from intent, not Kalshi's reported side
             action=_action,
@@ -4035,7 +4429,7 @@ class KalshiFillsLedger:
             no_price_dollars=no_price_dollars,
             fee_cost=fee_decimal,
             proceeds_dollars=proceeds,
-            client_order_id=raw.get("client_order_id"),
+            client_order_id=raw.get("client_order_id") or raw.get("client_order_id") or fill_id,  # CRITICAL FIX (2026-08-01): Use fill_id as fallback if client_order_id missing
             subaccount_number=raw.get("subaccount_number"),
             created_time=created_time,
             idempotency_key=raw.get("idempotency_key"),
@@ -4830,6 +5224,7 @@ class KalshiFillsLedger:
                         fill_id=row["fill_id"],
                         trade_id=row["trade_id"],
                         order_id=row["order_id"],
+                        market_id=row.get("market_id", ""),  # CRITICAL FIX: Add market_id for position cache validation
                         market_ticker=row["market_ticker"],
                         side=row["side"],
                         action=row["action"],

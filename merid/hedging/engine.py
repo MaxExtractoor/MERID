@@ -54,6 +54,11 @@ class HedgeOrder:
     hedge_reason: str  # "same_asset_same_horizon" | "same_asset_nearby_horizon"
     target_ticker: Optional[str] = None
     client_tag: Optional[str] = None
+    # CRITICAL FIX (2026-07-29): Alpha-hedge pairing metadata
+    # Enables precise tracking of which hedge corresponds to which alpha position
+    paired_alpha_id: Optional[str] = None  # Alpha position_id this hedge pairs with
+    paired_alpha_fill_id: Optional[str] = None  # Alpha fill_id this hedge pairs with
+    paired_alpha_entry_time: Optional[float] = None  # Alpha entry timestamp
 
 
 @dataclass
@@ -89,6 +94,9 @@ class CryptoHedgeEngine:
         self._auto_exit_total_iterations: int = 0
         self._auto_exit_last_error: Optional[str] = None
         self._auto_exit_last_error_ts: float = 0.0
+        # CRITICAL FIX (2026-07-29): Track previous exposure to detect flips
+        # Enables reduce_on_exposure_flip logic to prevent over-hedging during reversals
+        self._previous_exposure: Dict[Tuple[str, str], int] = {}  # (asset, tf) -> net_delta_cents
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -168,10 +176,32 @@ class CryptoHedgeEngine:
 
         for asset in top_assets:
             for tf in all_tfs:
+                # CRITICAL FIX (2026-07-29): Detect exposure flip before computing hedge
+                # Check if exposure flipped direction since last computation
+                current_net_delta = exposure.net_delta_cents(asset, tf)
+                cell_key = (asset, tf)
+                previous_net_delta = self._previous_exposure.get(cell_key, 0)
+                
+                # Detect flip: sign changed from positive to negative or vice versa
+                exposure_flipped = (previous_net_delta > 0 and current_net_delta < 0) or \
+                                 (previous_net_delta < 0 and current_net_delta > 0)
+                
+                if exposure_flipped and config.auto_exit.reduce_on_exposure_flip:
+                    logger.warning(
+                        "[hedge-engine] EXPOSURE FLIP detected: asset=%s tf=%s previous=%d¢ current=%d¢ - "
+                        "reducing hedge size by 50%% to prevent over-hedging",
+                        asset, tf, previous_net_delta, current_net_delta
+                    )
+                
                 orders = self._compute_cell(
                     asset, tf, exposure, config, bankroll_cents, market_catalog,
+                    exposure_flipped=exposure_flipped if config.auto_exit.reduce_on_exposure_flip else False
                 )
                 result.orders.extend(orders)
+                
+                # Update previous exposure for next cycle
+                with self._lock:
+                    self._previous_exposure[cell_key] = current_net_delta
 
         with self._lock:
             self._total_orders_generated += len(result.orders)
@@ -219,8 +249,19 @@ class CryptoHedgeEngine:
         config: Any,
         bankroll_cents: int,
         market_catalog: Optional[Any],
+        exposure_flipped: bool = False,
     ) -> List[HedgeOrder]:
-        """Compute hedge orders for a single (asset, tf) cell."""
+        """Compute hedge orders for a single (asset, tf) cell.
+        
+        Args:
+            asset: Asset symbol (BTC, ETH, etc.)
+            tf: Timeframe (15m, 1h, etc.)
+            exposure: ExposureSnapshot with per-cell directional deltas
+            config: HedgeConfig loaded from YAML
+            bankroll_cents: Current total bankroll in cents
+            market_catalog: Optional KalshiMarketCatalog for ticker resolution
+            exposure_flipped: If True, exposure flipped direction since last computation
+        """
         rule = config.get_timeframe_rule(tf)
         max_net = config.max_net_exposure_cents(asset, tf, bankroll_cents)
         net_delta = exposure.net_delta_cents(asset, tf)
@@ -268,6 +309,35 @@ class CryptoHedgeEngine:
         max_hedge_notional = slice_cents * rule.max_net_exposure_pct_of_slice / 100.0
         max_count = max(1, int(max_hedge_notional / mid_price_cents))
         count = min(count, max_count)
+        
+        # CRITICAL FIX (2026-07-29): Reduce hedge size on exposure flip
+        # When alpha exposure flips direction (long → short or short → long),
+        # reduce hedge size by 50% to prevent over-hedging during reversals
+        if exposure_flipped:
+            original_count = count
+            count = max(1, int(count * 0.5))  # Reduce by 50%, minimum 1 contract
+            logger.info(
+                "[hedge-engine] Reduced hedge size on exposure flip: asset=%s tf=%s original=%d reduced=%d",
+                asset, tf, original_count, count
+            )
+        
+        # CRITICAL FIX (2026-07-29): Hedge size validation
+        # Ensure hedge size never exceeds alpha size to prevent over-hedging
+        try:
+            cell = exposure.get_cell(asset, tf)
+            # Total alpha contracts (yes + no) in this cell
+            total_alpha_contracts = cell.yes_contracts + cell.no_contracts
+            if total_alpha_contracts > 0:
+                max_hedge_by_alpha = total_alpha_contracts
+                if count > max_hedge_by_alpha:
+                    original_count = count
+                    count = max_hedge_by_alpha
+                    logger.warning(
+                        "[hedge-engine] Hedge size capped to alpha size: asset=%s tf=%s original=%d capped=%d alpha_contracts=%d",
+                        asset, tf, original_count, count, total_alpha_contracts
+                    )
+        except Exception as size_err:
+            logger.warning("[hedge-engine] Failed to validate hedge size against alpha (non-critical): %s", size_err)
 
         # Step 6: Resolve target ticker
         ticker = self._resolve_ticker(asset, tf, hedge_side, market_catalog)
@@ -282,6 +352,34 @@ class CryptoHedgeEngine:
         )
         final_price_cents = fvg_optimized_price if fvg_optimized_price else mid_price_cents
         
+        # CRITICAL FIX (2026-07-29): Populate alpha-hedge pairing metadata
+        # Get the largest alpha position from the cell to pair with this hedge
+        paired_alpha_id = None
+        paired_alpha_fill_id = None
+        paired_alpha_entry_time = None
+        
+        try:
+            cell = exposure.get_cell(asset, tf)
+            if cell.alpha_positions:
+                # Find the largest alpha position by size
+                largest_alpha_id = max(
+                    cell.alpha_positions.keys(),
+                    key=lambda pid: cell.alpha_positions[pid].get("size", 0)
+                )
+                alpha_meta = cell.alpha_positions[largest_alpha_id]
+                paired_alpha_id = largest_alpha_id
+                paired_alpha_fill_id = alpha_meta.get("fill_id")
+                paired_alpha_entry_time = alpha_meta.get("entry_time")
+                
+                logger.debug(
+                    "[hedge-engine] Pairing hedge with alpha: alpha_id=%s fill_id=%s entry_time=%s",
+                    paired_alpha_id[:8] if paired_alpha_id else None,
+                    paired_alpha_fill_id[:8] if paired_alpha_fill_id else None,
+                    paired_alpha_entry_time
+                )
+        except Exception as pair_err:
+            logger.warning("[hedge-engine] Failed to get alpha pairing metadata (non-critical): %s", pair_err)
+        
         orders = [
             HedgeOrder(
                 asset=asset,
@@ -293,6 +391,9 @@ class CryptoHedgeEngine:
                 hedge_reason="same_asset_same_horizon",
                 target_ticker=ticker,
                 client_tag=tag,
+                paired_alpha_id=paired_alpha_id,
+                paired_alpha_fill_id=paired_alpha_fill_id,
+                paired_alpha_entry_time=paired_alpha_entry_time,
             )
         ]
 
@@ -508,6 +609,13 @@ class CryptoHedgeEngine:
                 client_tag=ho.client_tag,
                 group_id=HEDGE_STRATEGY_GROUP,
                 rationale=f"hedge:{ho.hedge_reason}:{ho.asset}:{ho.timeframe}",
+                # CRITICAL FIX (2026-07-29): Pass alpha-hedge pairing metadata
+                # Store in metadata dict for fill tracking and PnL attribution
+                metadata={
+                    "paired_alpha_id": ho.paired_alpha_id,
+                    "paired_alpha_fill_id": ho.paired_alpha_fill_id,
+                    "paired_alpha_entry_time": ho.paired_alpha_entry_time,
+                } if ho.paired_alpha_id else None,
             )
             intents.append(intent)
         return intents

@@ -108,12 +108,14 @@ async def _get_legacy_projection(kalshi_client: Optional[Any] = None) -> RiskPro
         # Convert to BackendPosition format
         positions = []
         for ticker, pos in cached_positions.items():
+            # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
+            avg_price = pos.avg_price_cents if pos.avg_price_cents is not None else 0
             backend_pos = BackendPosition(
                 ticker=ticker,
                 side=pos.side,
                 count=pos.contracts,
-                avg_price_dollars=Decimal(pos.avg_price_cents) / 100,
-                total_cost_dollars=Decimal(pos.contracts * pos.avg_price_cents) / 100,
+                avg_price_dollars=Decimal(avg_price) / 100,
+                total_cost_dollars=Decimal(pos.contracts * avg_price) / 100,
                 unrealized_pnl_dollars=pos.unrealized_pnl_usd,
                 realized_pnl_dollars=pos.realized_pnl_usd,
                 created_at=pos.last_updated,

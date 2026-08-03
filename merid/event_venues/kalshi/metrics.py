@@ -2,6 +2,9 @@
 
 Tracks QPS, latency percentiles, error rates, and request counts per endpoint.
 Designed for production monitoring and alerting.
+
+CRITICAL FIX (2026-07-29): Added duality violation and resync counters for
+monitoring orderbook health and preventing cascading failures.
 """
 
 from __future__ import annotations
@@ -118,6 +121,14 @@ class KalshiMetricsCollector:
 
         # Error type breakdown
         self._error_types: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+        # CRITICAL FIX (2026-07-29): Duality violation and resync counters
+        self._duality_violations_total: int = 0
+        self._duality_violations_per_ticker: Dict[str, int] = defaultdict(int)
+        self._duality_resyncs_triggered_total: int = 0
+        self._duality_resyncs_triggered_per_ticker: Dict[str, int] = defaultdict(int)
+        self._duality_resyncs_suppressed_total: int = 0
+        self._duality_resyncs_suppressed_per_ticker: Dict[str, int] = defaultdict(int)
 
         # Start time for uptime calculation
         self._start_time = time.monotonic()
@@ -288,7 +299,64 @@ class KalshiMetricsCollector:
             self._total_requests.clear()
             self._total_errors.clear()
             self._error_types.clear()
+            self._duality_violations_total = 0
+            self._duality_violations_per_ticker.clear()
+            self._duality_resyncs_triggered_total = 0
+            self._duality_resyncs_triggered_per_ticker.clear()
+            self._duality_resyncs_suppressed_total = 0
+            self._duality_resyncs_suppressed_per_ticker.clear()
             self._start_time = time.monotonic()
+
+    def record_duality_violation(self, ticker: str, gap: Optional[int] = None) -> None:
+        """Record a duality violation for a ticker.
+
+        CRITICAL FIX (2026-07-29): Track duality violations to monitor orderbook health
+        and prevent cascading failures from thin-market conditions.
+
+        Args:
+            ticker: Market ticker
+            gap: Duality gap in cents (None if NO ladder empty)
+        """
+        self._duality_violations_total += 1
+        self._duality_violations_per_ticker[ticker] += 1
+        logger.debug(
+            "[METRICS] Duality violation recorded: ticker=%s gap=%dc total=%d ticker_total=%d",
+            ticker, gap, self._duality_violations_total, self._duality_violations_per_ticker[ticker]
+        )
+
+    def record_duality_resync_triggered(self, ticker: str, backoff_s: float) -> None:
+        """Record a triggered duality REST re-sync.
+
+        CRITICAL FIX (2026-07-29): Track resync triggers to monitor backoff behavior
+        and prevent circuit breaker trips.
+
+        Args:
+            ticker: Market ticker
+            backoff_s: Backoff duration in seconds
+        """
+        self._duality_resyncs_triggered_total += 1
+        self._duality_resyncs_triggered_per_ticker[ticker] += 1
+        logger.info(
+            "[METRICS] Duality resync triggered: ticker=%s backoff=%.1fs total=%d ticker_total=%d",
+            ticker, backoff_s, self._duality_resyncs_triggered_total, self._duality_resyncs_triggered_per_ticker[ticker]
+        )
+
+    def record_duality_resync_suppressed(self, ticker: str, violation_count: int) -> None:
+        """Record a suppressed duality REST re-sync.
+
+        CRITICAL FIX (2026-07-29): Track suppressed resyncs to verify violation counting
+        is preventing resync storms.
+
+        Args:
+            ticker: Market ticker
+            violation_count: Current violation count in window
+        """
+        self._duality_resyncs_suppressed_total += 1
+        self._duality_resyncs_suppressed_per_ticker[ticker] += 1
+        logger.debug(
+            "[METRICS] Duality resync suppressed: ticker=%s violations=%d total=%d ticker_total=%d",
+            ticker, violation_count, self._duality_resyncs_suppressed_total, self._duality_resyncs_suppressed_per_ticker[ticker]
+        )
 
     @staticmethod
     def _percentile(data: List[float], percentile: float) -> float:

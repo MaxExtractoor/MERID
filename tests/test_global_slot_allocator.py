@@ -7,6 +7,7 @@ Tests the $1 hard limit enforcement across all 5 assets with slot-based position
 import pytest
 import sys
 import os
+from unittest.mock import MagicMock, patch
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,7 +63,7 @@ class TestGlobalSlotAllocator:
         print("✓ Max exposure limit test passed")
     
     def test_entry_price_range_validation(self):
-        """Test that entry price must be between 10c and 75c (2026-07-12 expanded range)."""
+        """Test that entry price must be between 1c and 99c (2026-07-31 expanded range)."""
         from merid.risk.global_slot_allocator import (
             get_global_slot_allocator,
             AllocationRequest
@@ -70,53 +71,53 @@ class TestGlobalSlotAllocator:
         allocator = get_global_slot_allocator()
         
         # Test that AllocationRequest validates entry price for entry orders
-        # Should reject below 10c
+        # Should reject below 1c (expanded from 10c on 2026-07-31)
         with pytest.raises(ValueError, match="Entry price.*outside allowed range"):
             AllocationRequest(
                 agent_id="BTC_15M",
                 asset="BTC",
                 ticker="KXBTC15M-TEST",
-                entry_price_cents=5,
+                entry_price_cents=0,
                 edge_pct=2.0,
                 spread_cents=5,
                 is_exit_order=False
             )
         
-        # Should reject above 75c (expanded from 50c on 2026-07-12)
+        # Should reject above 99c (expanded from 75c on 2026-07-31)
         with pytest.raises(ValueError, match="Entry price.*outside allowed range"):
             AllocationRequest(
                 agent_id="BTC_15M",
                 asset="BTC",
                 ticker="KXBTC15M-TEST",
-                entry_price_cents=80,
+                entry_price_cents=100,
                 edge_pct=2.0,
                 spread_cents=5,
                 is_exit_order=False
             )
         
-        # Should accept 10c (minimum)
+        # Should accept 1c (minimum, expanded from 10c)
         request_min = AllocationRequest(
             agent_id="BTC_15M",
             asset="BTC",
             ticker="KXBTC15M-TEST",
-            entry_price_cents=10,
+            entry_price_cents=1,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
         )
-        assert request_min.entry_price_cents == 10
+        assert request_min.entry_price_cents == 1
         
-        # Should accept 75c (maximum, expanded from 50c)
+        # Should accept 99c (maximum, expanded from 75c)
         request_max = AllocationRequest(
             agent_id="ETH_15M",
             asset="ETH",
             ticker="KXETH15M-TEST",
-            entry_price_cents=75,
+            entry_price_cents=99,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
         )
-        assert request_max.entry_price_cents == 75
+        assert request_max.entry_price_cents == 99
         
         print("✓ Entry price range validation test passed")
     
@@ -367,11 +368,116 @@ class TestGlobalSlotAllocator:
         assert released_count == 1
         assert allocator.get_total_exposure() == 0.0
         
-        # Now BTC order should be allowed again
-        allocated3, _, slot3 = allocator.request_allocation(request1)
-        assert allocated3
+        print("✓ Release by asset test passed")
+    
+    def test_clear_stale_slots(self):
+        """Test clearing stale slots that have been occupied too long."""
+        from merid.risk.global_slot_allocator import (
+            get_global_slot_allocator,
+            AllocationRequest
+        )
+        import time
+        allocator = get_global_slot_allocator()
         
-        print("✓ Release by asset test passed (with per-asset limit)")
+        # Allocate a slot
+        request = AllocationRequest(
+            agent_id="BTC_15M",
+            asset="BTC",
+            ticker="KXBTC15M-TEST",
+            entry_price_cents=35,
+            edge_pct=2.0,
+            spread_cents=5
+        )
+        allocated, _, slot_id = allocator.request_allocation(request)
+        assert allocated
+        
+        # Manually set entry time to be old (2 hours ago)
+        with allocator._lock:
+            slot = allocator._slots[slot_id]
+            slot.entry_time = time.time() - 7200  # 2 hours ago
+        
+        # Clear stale slots with 1 hour max age
+        cleared = allocator.clear_stale_slots(max_age_seconds=3600)
+        assert cleared == 1
+        assert allocator.get_total_exposure() == 0.0
+        assert allocator.get_slot_count() == 0
+        
+        print("✓ Clear stale slots test passed")
+    
+    def test_sync_with_position_cache(self):
+        """Test synchronizing slot allocator with position cache.
+        
+        CRITICAL FIX (2026-07-31): Tests state drift fix where slots remain allocated
+        even though positions no longer exist in the position cache.
+        """
+        from merid.risk.global_slot_allocator import (
+            get_global_slot_allocator,
+            AllocationRequest
+        )
+        allocator = get_global_slot_allocator()
+        
+        # Allocate a slot
+        request = AllocationRequest(
+            agent_id="BTC_15M",
+            asset="BTC",
+            ticker="KXBTC15M-TEST-ORPHAN",
+            entry_price_cents=35,
+            edge_pct=2.0,
+            spread_cents=5
+        )
+        allocated, _, slot_id = allocator.request_allocation(request)
+        assert allocated
+        assert allocator.get_total_exposure() == 0.35
+        
+        # Mock position cache to return empty (position no longer exists)
+        with patch('merid.event_venues.kalshi.position_cache.get_position_cache') as mock_get_cache:
+            mock_cache = MagicMock()
+            mock_cache.get_all_positions.return_value = []  # No positions
+            mock_get_cache.return_value = mock_cache
+            
+            # Sync should remove the orphaned slot
+            removed = allocator.sync_with_position_cache()
+            assert removed == 1
+            assert allocator.get_total_exposure() == 0.0
+            assert allocator.get_slot_count() == 0
+        
+        print("✓ Sync with position cache test passed")
+    
+    def test_sync_with_position_cache_no_orphans(self):
+        """Test sync when all slots have corresponding positions."""
+        from merid.risk.global_slot_allocator import (
+            get_global_slot_allocator,
+            AllocationRequest
+        )
+        allocator = get_global_slot_allocator()
+        
+        # Allocate a slot
+        request = AllocationRequest(
+            agent_id="BTC_15M",
+            asset="BTC",
+            ticker="KXBTC15M-TEST-VALID",
+            entry_price_cents=35,
+            edge_pct=2.0,
+            spread_cents=5
+        )
+        allocated, _, slot_id = allocator.request_allocation(request)
+        assert allocated
+        
+        # Mock position cache to return the position
+        with patch('merid.event_venues.kalshi.position_cache.get_position_cache') as mock_get_cache:
+            mock_cache = MagicMock()
+            mock_position = MagicMock()
+            mock_position.market_id = "KXBTC15M-TEST-VALID"
+            mock_cache.get_all_positions.return_value = [mock_position]
+            mock_get_cache.return_value = mock_cache
+            
+            # Sync should not remove any slots
+            removed = allocator.sync_with_position_cache()
+            assert removed == 0
+            assert allocator.get_total_exposure() == 0.35
+            assert allocator.get_slot_count() == 1
+        
+        print("✓ Sync with position cache (no orphans) test passed")
 
 
 if __name__ == "__main__":

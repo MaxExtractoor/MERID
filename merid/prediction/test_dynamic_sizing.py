@@ -12,9 +12,9 @@ class TestDynamicSizing:
         """Test that dynamic sizing is disabled when feature is off."""
         from merid.prediction.unified_sizing import compute_order_size
         
+        # 2026-07-16: pct getter patches removed - percentage-based sizing PRUNED
+        # ($1 global slot allocator is the single source of truth)
         with patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=False), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
-             patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=1), \
              patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):
             
@@ -23,7 +23,8 @@ class TestDynamicSizing:
                 price_cents=50,
                 asset="BTC",
                 edge_pct=Decimal("0.05"),
-                confidence=Decimal("0.8")
+                confidence=Decimal("0.8"),
+                model_prob=0.60  # 2026-07-12: Kelly Criterion integration
             )
             
             # Should use standard sizing without dynamic scaling
@@ -40,8 +41,6 @@ class TestDynamicSizing:
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=1.0), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=1), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
-             patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=1), \
              patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):
             
@@ -51,7 +50,8 @@ class TestDynamicSizing:
                 price_cents=50,
                 asset="BTC",
                 edge_pct=Decimal("0.05"),  # 5% edge
-                confidence=Decimal("0.5")
+                confidence=Decimal("0.5"),
+                model_prob=0.60  # 2026-07-12: Kelly Criterion integration
             )
             
             # Dynamic size = 1 + (5 * 0.5) + (50 * 0.3) = 1 + 2.5 + 15 = 18.5 -> capped at 3
@@ -68,8 +68,6 @@ class TestDynamicSizing:
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=1.0), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=1), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
-             patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=1), \
              patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):
             
@@ -79,7 +77,8 @@ class TestDynamicSizing:
                 price_cents=50,
                 asset="BTC",
                 edge_pct=Decimal("0.01"),  # 1% edge
-                confidence=Decimal("0.5")
+                confidence=Decimal("0.5"),
+                model_prob=0.51  # 2026-07-12: Kelly Criterion integration (just above price)
             )
             
             # Dynamic size = 1 + (1 * 0.5) + (50 * 0.3) = 1 + 0.5 + 15 = 16.5 -> capped at 3
@@ -96,8 +95,6 @@ class TestDynamicSizing:
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=1.0), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=1), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
-             patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=1), \
              patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):
             
@@ -107,7 +104,8 @@ class TestDynamicSizing:
                 price_cents=50,
                 asset="BTC",
                 edge_pct=Decimal("0.03"),
-                confidence=Decimal("0.8")  # 80% confidence
+                confidence=Decimal("0.8"),  # 80% confidence
+                model_prob=0.60  # 2026-07-12: Kelly Criterion integration
             )
             
             # Dynamic size = 1 + (3 * 0.5) + (80 * 0.3) = 1 + 1.5 + 24 = 26.5 -> capped at 3
@@ -116,7 +114,7 @@ class TestDynamicSizing:
     def test_dynamic_sizing_max_contracts_cap(self):
         """Test that dynamic sizing respects per-asset max contracts cap.
         
-        CRITICAL FIX (2026-07-08): All assets max 1 contract to enforce 3% risk limit.
+        Slot model: all assets max 1 contract ($1 global slot allocator).
         """
         from merid.prediction.unified_sizing import compute_order_size
         
@@ -128,8 +126,6 @@ class TestDynamicSizing:
                  patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=0.3), \
                  patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=1), \
                  patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-                 patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
-                 patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
                  patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=1):
                 
                 # Even with high edge/confidence, should cap at per-asset max_contracts (1)
@@ -138,7 +134,8 @@ class TestDynamicSizing:
                     price_cents=50,
                     asset=asset,
                     edge_pct=Decimal("0.10"),  # 10% edge
-                    confidence=Decimal("0.9")  # 90% confidence
+                    confidence=Decimal("0.9"),  # 90% confidence
+                    model_prob=0.70  # 2026-07-12: Kelly Criterion integration
                 )
                 
                 # Should not exceed per-asset max_contracts (1)

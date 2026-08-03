@@ -9,18 +9,23 @@ logger = get_logger("merid.swarm.orchestrator")
 
 
 # Kalshi 15m guardrail constants
-# PROFILE-GATED: For kalshi_crypto_15m_v2, use profile edge bands (4-7% = 400-700 bps)
-MIN_EDGE_BPS = 10.0  # 0.10% - PROFILE-GATED for kalshi_crypto_15m_v2
+# 2026-07-14: Updated to 2.5% (250 bps) based on industry research (Market Math, Beatpoly)
+# Industry standard for Kalshi: 3% raw edge minimum
+# Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
+# PROFILE-GATED: For kalshi_crypto_15m_v2, use profile edge bands (2.5% = 250 bps)
+MIN_EDGE_BPS = 250.0  # 2.5% - PROFILE-GATED for kalshi_crypto_15m_v2 (industry standard)
 MAX_F_USED = 0.35
 MAX_SIZE_CONTRACTS = 1  # 2026-07-09: Reduced from 100 to 1 to align with slot-based model and $1 exposure cap
 
 # Symbol-specific limits (can be loaded from config)
 # 2026-07-09: All max_size_contracts reduced to 1 to enforce slot-based model
+# 2026-07-16: Added DOGE to complete 5-asset stack (BTC, ETH, SOL, XRP, DOGE)
 SYMBOL_LIMITS = {
     "BTC": {"max_f_used": 0.35, "max_size_contracts": 1},
     "ETH": {"max_f_used": 0.30, "max_size_contracts": 1},
     "SOL": {"max_f_used": 0.25, "max_size_contracts": 1},
     "XRP": {"max_f_used": 0.25, "max_size_contracts": 1},
+    "DOGE": {"max_f_used": 0.20, "max_size_contracts": 1},
 }
 
 
@@ -46,8 +51,8 @@ class SwarmOrchestrator:
 
         Expected intent keys for Kalshi 15m crypto:
           - venue: "kalshi"
-          - lane_id: "BTC_15M" | "ETH_15M" | "SOL_15M" | "XRP_15M"
-          - symbol: "BTC" | "ETH" | "SOL" | "XRP"
+          - lane_id: "BTC_15M" | "ETH_15M" | "SOL_15M" | "XRP_15M" | "DOGE_15M"
+          - symbol: "BTC" | "ETH" | "SOL" | "XRP" | "DOGE"
           - market_id: Kalshi market identifier
           - series_ticker: e.g. "KXBTC15M"
           - timeframe: "15m"

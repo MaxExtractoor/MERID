@@ -9,6 +9,7 @@ Tests the shared $1 pool allocation model with the following scenarios:
 
 import sys
 import os
+import time
 # Add repository root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
@@ -26,8 +27,8 @@ class TestGlobalAllocator:
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
-            min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
             max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
@@ -83,8 +84,8 @@ class TestGlobalAllocator:
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
-            min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
             max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
@@ -142,8 +143,8 @@ class TestGlobalAllocator:
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
-            min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
             max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
@@ -189,8 +190,8 @@ class TestGlobalAllocator:
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
-            min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
             max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
@@ -229,7 +230,7 @@ class TestGlobalAllocator:
         assert "BTC" not in assets, "BTC should be filtered (3c below min)"
         assert "SOL" not in assets, "SOL should be filtered (97c above max)"
         
-        print(f"[PASS] Test passed: Price range filtering -> {len(chosen)} selected (only within [10c-75c])")
+        print(f"[PASS] Test passed: Price range filtering -> {len(chosen)} selected (only within [5c-85c])")
     
     def test_confidence_filtering(self):
         """
@@ -238,8 +239,8 @@ class TestGlobalAllocator:
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
-            min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
             max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
@@ -272,13 +273,13 @@ class TestGlobalAllocator:
     
     def test_edge_filtering(self):
         """
-        Scenario: Candidates with edge below 2.0%.
-        Expected: Only candidates with edge ≥ 2.0% are considered.
+        Scenario: Candidates with edge below 2.5%.
+        Expected: Only candidates with edge ≥ 2.5% are considered.
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
-            min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
             max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
@@ -286,28 +287,28 @@ class TestGlobalAllocator:
         candidates = [
             OrderCandidate(
                 asset="BTC", ticker="KXBTC15M-TEST", side="yes", action="buy",
-                price_cents=20, count=1, edge_pct=1.5, confidence=0.55,
-                model_prob=0.85, agent_name="BTC_15M"  # Below min (2.0%)
+                price_cents=20, count=1, edge_pct=0.015, confidence=0.55,
+                model_prob=0.85, agent_name="BTC_15M"  # Below min (1.5% < 2.5%)
             ),
             OrderCandidate(
                 asset="ETH", ticker="KXETH15M-TEST", side="yes", action="buy",
-                price_cents=20, count=1, edge_pct=2.5, confidence=0.55,
-                model_prob=0.84, agent_name="ETH_15M"  # Above min
+                price_cents=20, count=1, edge_pct=0.025, confidence=0.55,
+                model_prob=0.84, agent_name="ETH_15M"  # At threshold (2.5%)
             ),
             OrderCandidate(
                 asset="SOL", ticker="KXSOL15M-TEST", side="yes", action="buy",
-                price_cents=20, count=1, edge_pct=1.0, confidence=0.55,
-                model_prob=0.83, agent_name="SOL_15M"  # Below min
+                price_cents=20, count=1, edge_pct=0.01, confidence=0.55,
+                model_prob=0.83, agent_name="SOL_15M"  # Below min (1.0% < 2.5%)
             ),
         ]
         
         chosen = allocator.allocate(candidates)
         
         # Only ETH should be selected (edge 2.5%)
-        assert len(chosen) == 1, f"Expected 1 chosen (edge ≥ 2.0%), got {len(chosen)}"
+        assert len(chosen) == 1, f"Expected 1 chosen (edge ≥ 2.5%), got {len(chosen)}"
         assert chosen[0].asset == "ETH", "ETH should be selected (edge 2.5%)"
         
-        print(f"[PASS] Test passed: Edge filtering -> {len(chosen)} selected (only >= 2.0%)")
+        print(f"[PASS] Test passed: Edge filtering -> {len(chosen)} selected (only >= 2.5%)")
     
     def test_one_contract_per_asset(self):
         """
@@ -316,8 +317,8 @@ class TestGlobalAllocator:
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
-            min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
             max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
@@ -358,7 +359,7 @@ class TestGlobalAllocator:
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
-            min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
             max_price_cents=95,  # 2026-07-10: Expanded from 50c to 95c for skewed markets
@@ -385,6 +386,154 @@ class TestGlobalAllocator:
         # But with shared pool, it's allowed as long as total ≤ $1.00
         
         print(f"[PASS] Test passed: Shared pool model -> single asset at 50c allowed (no per-asset rescaling)")
+    
+    def test_per_asset_position_dedupe(self):
+        """
+        Scenario: Asset with existing position should be filtered out.
+        Expected: Candidates for assets with positions are rejected.
+        """
+        allocator = GlobalAllocator(
+            venue_cap_usd=1.00,
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,
+            min_price_cents=10,
+            max_price_cents=75
+        )
+        
+        # Simulate existing position for BTC via current_positions parameter
+        # CRITICAL FIX: Use current_positions parameter instead of internal _asset_positions
+        # This tests the proper API after the position sync fix
+        current_positions = {"BTC": 0.50}  # $0.50 position
+        
+        candidates = [
+            OrderCandidate(
+                asset="BTC", ticker="KXBTC15M-TEST", side="yes", action="buy",
+                edge_pct=0.025, confidence=0.60, price_cents=30, count=1,
+                model_prob=0.55, agent_name="BTC_15M"
+            ),
+            OrderCandidate(
+                asset="ETH", ticker="KXETH15M-TEST", side="yes", action="buy",
+                edge_pct=0.030, confidence=0.55, price_cents=25, count=1,
+                model_prob=0.50, agent_name="ETH_15M"
+            ),
+        ]
+        
+        chosen = allocator.allocate(candidates, current_positions=current_positions)
+        
+        # BTC should be filtered due to existing position
+        assets = [c.asset for c in chosen]
+        assert "BTC" not in assets, "BTC should be filtered (has existing position)"
+        assert "ETH" in assets, "ETH should be selected (no position)"
+        
+        print(f"[PASS] Test passed: Per-asset position dedupe -> {len(chosen)} selected (BTC filtered)")
+    
+    def test_pending_order_dedupe(self):
+        """
+        Scenario: Asset with pending order should be filtered out.
+        Expected: Candidates for assets with pending orders are rejected.
+        """
+        allocator = GlobalAllocator(
+            venue_cap_usd=1.00,
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,
+            min_price_cents=10,
+            max_price_cents=75
+        )
+        
+        # Simulate pending order for SOL
+        allocator._pending_orders["SOL"] = "order_123"
+        allocator._pending_order_timestamps["SOL"] = time.time()
+        
+        candidates = [
+            OrderCandidate(
+                asset="SOL", ticker="KXSOL15M-TEST", side="yes", action="buy",
+                edge_pct=0.030, confidence=0.65, price_cents=35, count=1,
+                model_prob=0.60, agent_name="SOL_15M"
+            ),
+            OrderCandidate(
+                asset="XRP", ticker="KXXRP15M-TEST", side="yes", action="buy",
+                edge_pct=0.035, confidence=0.52, price_cents=20, count=1,
+                model_prob=0.50, agent_name="XRP_15M"
+            ),
+        ]
+        
+        chosen = allocator.allocate(candidates)
+        
+        # SOL should be filtered due to pending order
+        assets = [c.asset for c in chosen]
+        assert "SOL" not in assets, "SOL should be filtered (has pending order)"
+        assert "XRP" in assets, "XRP should be selected (no pending order)"
+        
+        print(f"[PASS] Test passed: Pending order dedupe -> {len(chosen)} selected (SOL filtered)")
+    
+    def test_stale_pending_order_cleared(self):
+        """
+        Scenario: Stale pending order (>30s) should be cleared and allowed.
+        Expected: Old pending orders are cleared and new candidates allowed.
+        """
+        allocator = GlobalAllocator(
+            venue_cap_usd=1.00,
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,
+            min_price_cents=10,
+            max_price_cents=75
+        )
+        
+        # Simulate stale pending order for DOGE (>30s old)
+        allocator._pending_orders["DOGE"] = "order_456"
+        allocator._pending_order_timestamps["DOGE"] = time.time() - 35.0  # 35 seconds ago
+        
+        candidates = [
+            OrderCandidate(
+                asset="DOGE", ticker="KXDOGE15M-TEST", side="yes", action="buy",
+                edge_pct=0.040, confidence=0.70, price_cents=15, count=1,
+                model_prob=0.65, agent_name="DOGE_15M"
+            ),
+        ]
+        
+        chosen = allocator.allocate(candidates)
+        
+        # DOGE should be selected (stale order cleared)
+        assets = [c.asset for c in chosen]
+        assert "DOGE" in assets, "DOGE should be selected (stale pending order cleared)"
+        assert "DOGE" not in allocator._pending_orders, "Stale pending order should be cleared"
+        
+        print(f"[PASS] Test passed: Stale pending order cleared -> {len(chosen)} selected")
+    
+    def test_lifecycle_callbacks(self):
+        """
+        Scenario: Test order lifecycle callbacks (submit, fill, reject, close).
+        Expected: State transitions correctly through lifecycle.
+        """
+        allocator = GlobalAllocator(
+            venue_cap_usd=1.00,
+            min_edge_pct=0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
+            min_confidence=0.50,
+            min_price_cents=10,
+            max_price_cents=75
+        )
+        
+        # Test order submission
+        allocator.record_order_submitted("BTC", "order_789", 0.35)
+        assert "BTC" in allocator._pending_orders, "BTC should have pending order"
+        assert allocator._pending_orders["BTC"] == "order_789"
+        
+        # Test order fill
+        allocator.record_order_filled("BTC", "order_789", 0.35)
+        assert "BTC" not in allocator._pending_orders, "BTC should not have pending order after fill"
+        assert allocator._asset_positions["BTC"] == 0.35, "BTC should have position"
+        
+        # Test position close
+        allocator.record_position_closed("BTC")
+        assert "BTC" not in allocator._asset_positions, "BTC should not have position after close"
+        
+        # Test order rejection
+        allocator.record_order_submitted("ETH", "order_999", 0.25)
+        allocator.record_order_rejected("ETH", "order_999")
+        assert "ETH" not in allocator._pending_orders, "ETH should not have pending order after rejection"
+        assert "ETH" not in allocator._asset_positions, "ETH should not have position after rejection"
+        
+        print(f"[PASS] Test passed: Lifecycle callbacks -> state transitions correct")
 
 
 if __name__ == "__main__":
@@ -402,6 +551,10 @@ if __name__ == "__main__":
     test.test_edge_filtering()
     test.test_one_contract_per_asset()
     test.test_shared_pool_not_per_asset_budget()
+    test.test_per_asset_position_dedupe()
+    test.test_pending_order_dedupe()
+    test.test_stale_pending_order_cleared()
+    test.test_lifecycle_callbacks()
     
     print("=" * 60)
     print("✓ All tests passed!")

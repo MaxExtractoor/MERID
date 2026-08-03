@@ -20,10 +20,15 @@ logger = get_logger("merid.event_venues.kalshi.rebalancer")
 
 @dataclass
 class TargetAllocation:
-    """Target allocation for an event or market."""
+    """Target allocation for an event or market.
+    
+    CRITICAL: The 15m Kalshi crypto system uses a fixed $1 global exposure cap
+    (MERID_FIXED_EXPOSURE_CAP_USD). Target allocations are in USD dollars, not percentages.
+    The total across all assets (BTC, ETH, SOL, XRP, DOGE) must never exceed $1.00.
+    """
     ticker: str
-    target_pct: Decimal  # Target percentage of portfolio (0-100)
-    max_deviation_pct: Decimal = Decimal("5.0")  # Rebalance if deviated by this much
+    target_usd: Decimal  # Target USD allocation (fixed dollar model, not percentage)
+    max_deviation_usd: Decimal = Decimal("0.05")  # Rebalance if deviated by this much (USD)
     side_preference: str = "yes"  # "yes" or "no"
 
 
@@ -74,7 +79,7 @@ class PortfolioRebalancer:
     def set_target(self, target: TargetAllocation) -> None:
         """Set target allocation for a ticker."""
         self._targets[target.ticker] = target
-        logger.info(f"Rebalancer target set: {target.ticker} = {target.target_pct}%")
+        logger.info(f"Rebalancer target set: {target.ticker} = ${target.target_usd} (fixed $1 cap model)")
 
     def remove_target(self, ticker: str) -> bool:
         """Remove target allocation."""
@@ -130,18 +135,12 @@ class PortfolioRebalancer:
 
             current_exposure = Decimal(str(pos_data.get("event_exposure", 0)))
 
-            # Calculate current percentage
-            if total_value > 0:
-                current_pct = (current_exposure / total_value) * 100
-            else:
-                current_pct = Decimal("0")
+            # Calculate deviation in USD (fixed dollar model)
+            deviation = abs(current_exposure - target.target_usd)
 
-            # Calculate deviation
-            deviation = abs(current_pct - target.target_pct)
-
-            if deviation > target.max_deviation_pct:
+            if deviation > target.max_deviation_usd:
                 # Need to rebalance
-                target_exposure = (target.target_pct / 100) * total_value
+                target_exposure = target.target_usd
                 delta = target_exposure - current_exposure
 
                 # Determine action
@@ -174,7 +173,7 @@ class PortfolioRebalancer:
                         current_exposure=current_exposure,
                         target_exposure=target_exposure,
                         delta=contracts_delta,
-                        reason=f"Deviation {deviation:.1f}% exceeds max {target.max_deviation_pct}%",
+                        reason=f"Deviation ${deviation:.2f} exceeds max ${target.max_deviation_usd}",
                     ))
 
         # Sort by largest deviation first
@@ -300,8 +299,8 @@ class PortfolioRebalancer:
             "targets": [
                 {
                     "ticker": t.ticker,
-                    "target_pct": float(t.target_pct),
-                    "max_deviation_pct": float(t.max_deviation_pct),
+                    "target_usd": float(t.target_usd),
+                    "max_deviation_usd": float(t.max_deviation_usd),
                 }
                 for t in self._targets.values()
             ],
@@ -363,8 +362,10 @@ def _bootstrap_targets(rebalancer: "PortfolioRebalancer") -> None:
         if prediction_domain is None:
             return
 
-        domain_alloc_pct = float(prediction_domain.allocation_pct) * 100.0  # 0.10 → 10.0
-
+        # CRITICAL: Fixed $1 global exposure cap model
+        # Distribute $1.00 evenly across all 5 assets (BTC, ETH, SOL, XRP, DOGE)
+        # Each asset gets $0.20 target allocation under the $1 cap
+        
         # Collect active tickers from the agent grid
         tickers: list = []
         try:
@@ -380,21 +381,21 @@ def _bootstrap_targets(rebalancer: "PortfolioRebalancer") -> None:
             logger.debug("rebalancer bootstrap: no active tickers — targets not seeded")
             return
 
-        # Distribute domain allocation evenly across active tickers
-        per_ticker_pct = Decimal(str(round(domain_alloc_pct / len(tickers), 4)))
-        max_dev = Decimal("5.0")
+        # Distribute $1.00 cap evenly across active tickers (fixed dollar model)
+        per_ticker_usd = Decimal("1.00") / Decimal(str(len(tickers)))
+        max_dev = Decimal("0.05")  # $0.05 deviation threshold
 
         for ticker in tickers:
             rebalancer.set_target(TargetAllocation(
                 ticker=ticker,
-                target_pct=per_ticker_pct,
-                max_deviation_pct=max_dev,
+                target_usd=per_ticker_usd,
+                max_deviation_usd=max_dev,
                 side_preference="yes",
             ))
 
         logger.info(
-            "rebalancer bootstrap: %d targets seeded (%.2f%% each, domain_alloc=%.1f%%)",
-            len(tickers), float(per_ticker_pct), domain_alloc_pct,
+            "rebalancer bootstrap: %d targets seeded ($%.2f each, total $1.00 cap)",
+            len(tickers), float(per_ticker_usd),
         )
     except Exception as exc:
         logger.debug("rebalancer bootstrap skipped: %s", exc)

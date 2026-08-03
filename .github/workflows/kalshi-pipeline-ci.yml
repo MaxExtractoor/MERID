@@ -72,12 +72,60 @@ jobs:
         "
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # REQUIRED: Thesis Side Invariant Verification (V13b)
+  # ═══════════════════════════════════════════════════════════════════════════
+  thesis-side-invariant:
+    name: Thesis Side Invariant Verification
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest
+    
+    - name: Run thesis-side invariant tests
+      env:
+        MERID_PROFILE: kalshi_crypto_15m_v2
+        MERID_TEST_MODE: 1
+      run: |
+        pytest tests/test_thesis_side_invariant.py -v --tb=short
+    
+    - name: Run lifecycle thesis trace tests
+      env:
+        MERID_PROFILE: kalshi_crypto_15m_v2
+        MERID_TEST_MODE: 1
+      run: |
+        pytest tests/test_lifecycle_thesis_trace.py -v --tb=short
+    
+    - name: Run zero-quantity fill tests
+      env:
+        MERID_PROFILE: kalshi_crypto_15m_v2
+        MERID_TEST_MODE: 1
+      run: |
+        pytest tests/test_zero_quantity_fills.py -v --tb=short
+    
+    - name: Run position cache sync tests
+      env:
+        MERID_PROFILE: kalshi_crypto_15m_v2
+        MERID_TEST_MODE: 1
+      run: |
+        pytest tests/test_position_cache_sync.py -v --tb=short
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # Kalshi Risk Infrastructure Tests
   # ═══════════════════════════════════════════════════════════════════════════
   kalshi-risk:
     name: Kalshi Risk Infrastructure
     runs-on: ubuntu-latest
-    needs: [formula-checks, version-drift]
+    needs: [formula-checks, version-drift, thesis-side-invariant]  # Added thesis-side-invariant as required
     
     steps:
     - uses: actions/checkout@v4
@@ -109,7 +157,7 @@ jobs:
   test-suite:
     name: Full Test Suite
     runs-on: ubuntu-latest
-    needs: [formula-checks, version-drift, kalshi-risk]  # Only run if checks pass
+    needs: [formula-checks, version-drift, kalshi-risk, thesis-side-invariant]  # Added thesis-side-invariant as required
     
     steps:
     - uses: actions/checkout@v4

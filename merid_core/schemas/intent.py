@@ -77,6 +77,9 @@ class CanonicalOrderIntent:
     edge_pct: Optional[float] = None        # net edge estimate (0–1)
     confidence: Optional[float] = None      # model confidence (0–1)
     rationale: Optional[str] = None         # ≤ 200 chars human-readable reason
+    # 2026-07-25: Dual-side probability estimates for edge-aware microstructure gating
+    p_hat_yes_cents: Optional[float] = None  # model-implied YES price in cents
+    p_hat_no_cents: Optional[float] = None   # model-implied NO price in cents
 
     # ── Timestamp ──────────────────────────────────────────────────────────
     timestamp: float = field(default_factory=_now_ts)

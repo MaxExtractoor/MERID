@@ -31,7 +31,6 @@ class TestWindowLimitEnforcement:
             profile_capital_usd=bankroll,
             max_single_order_notional_usd=bankroll * 0.03,
             max_total_notional_usd=bankroll * 0.15,
-            max_concurrent_trades=5,
             agent_max_notional_usd=bankroll * 0.03,
             asset_max_notional_usd={"BTC": bankroll * 0.03, "ETH": bankroll * 0.03, "SOL": bankroll * 0.03, "XRP": bankroll * 0.03, "DOGE": bankroll * 0.03},
             asset_depth_thresholds={},
@@ -55,10 +54,6 @@ class TestWindowLimitEnforcement:
             correlation_tracking_enabled=False,
             correlation_threshold=0.7,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=bankroll * 0.03,
-            total_venue_window_limit_usd=bankroll * 0.05,
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
@@ -69,19 +64,17 @@ class TestWindowLimitEnforcement:
     
     def test_window_limit_fields_exist(self, risk_envelope):
         """Test that window limit fields exist in envelope."""
-        assert hasattr(risk_envelope, 'guardrails_per_window_risk_pct')
-        assert hasattr(risk_envelope, 'guardrails_total_venue_risk_pct')
+        # CRITICAL FIX (2026-07-23): Percentage-based guardrails fields removed
+        # Only fixed $1.00 cap fields remain
         assert hasattr(risk_envelope, 'per_agent_window_limit_usd')
         assert hasattr(risk_envelope, 'total_venue_window_limit_usd')
         assert hasattr(risk_envelope, 'window_start_ts')
         assert hasattr(risk_envelope, 'agent_window_exposure_usd')
         assert hasattr(risk_envelope, 'total_window_exposure_usd')
         
-        # Verify values are correct
-        assert risk_envelope.guardrails_per_window_risk_pct == 0.03
-        assert risk_envelope.guardrails_total_venue_risk_pct == 0.05
-        assert risk_envelope.per_agent_window_limit_usd == 300.0
-        assert risk_envelope.total_venue_window_limit_usd == 500.0
+        # Verify values are correct (fixed $1.00 cap)
+        assert risk_envelope.per_agent_window_limit_usd == 1.0
+        assert risk_envelope.total_venue_window_limit_usd == 1.0
     
     def test_check_window_limit_method_exists(self, risk_envelope):
         """Test that check_window_limit method exists."""
@@ -110,16 +103,17 @@ class TestWindowLimitEnforcement:
         assert isinstance(reason, str)
     
     def test_check_window_limit_with_custom_limit(self, risk_envelope):
-        """Test that check_window_limit accepts custom limit for exit orders."""
-        # Test with 100% custom limit for exit orders
+        """Test that check_window_limit enforces fixed $1.00 cap (no percentage overrides)."""
+        # CRITICAL FIX (2026-07-23): Percentage-based parameters removed
+        # check_window_limit now enforces ONLY the fixed $1.00 exposure cap
+        # Order for $300.0 should be rejected (exceeds $1.00 fixed cap)
         allowed, reason = risk_envelope.check_window_limit(
             agent_id="BTC_15M",
             order_notional_usd=300.0,
             current_ts=time.time(),
-            custom_per_agent_limit_pct=1.0,  # 100% limit
         )
-        # Should be allowed with 100% limit
-        assert allowed is True or isinstance(allowed, bool)
+        # Should be rejected (exceeds $1.00 fixed cap)
+        assert allowed is False, f"Order exceeding $1.00 cap should be rejected, reason: {reason}"
 
 
 if __name__ == "__main__":

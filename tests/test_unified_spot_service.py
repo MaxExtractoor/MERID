@@ -22,7 +22,8 @@ from data.unified_spot_service import (
     SpotError,
     get_unified_spot_service,
     _get_coinbase_credentials,
-    _generate_coinbase_signature
+    _generate_coinbase_signature,
+    _retry_with_backoff
 )
 
 
@@ -470,6 +471,141 @@ class TestProductionScenarios:
         assert len(set(prices)) == 1, "Cache stampede - different prices returned"
         
         print(f"  ✓ 10 concurrent requests → consistent prices (stampede prevented)")
+
+
+class TestRetryWithBackoff:
+    """Test retry logic with exponential backoff for transient HTTP errors"""
+    
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_on_transient_error(self):
+        """Test that retry logic succeeds after transient 502 error"""
+        call_count = 0
+        
+        async def flaky_func():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise Exception("HTTP 502: Bad Gateway")
+            return {"price": 67000.0}
+        
+        result = await _retry_with_backoff(flaky_func, max_retries=3, base_delay=0.1, max_delay=1.0)
+        
+        assert result == {"price": 67000.0}
+        assert call_count == 2  # Failed once, succeeded on retry
+    
+    @pytest.mark.asyncio
+    async def test_retry_exhausts_on_permanent_error(self):
+        """Test that retry logic exhausts retries on non-retryable error"""
+        call_count = 0
+        
+        async def permanent_error_func():
+            nonlocal call_count
+            call_count += 1
+            raise Exception("HTTP 404: Not Found")
+        
+        with pytest.raises(Exception, match="HTTP 404"):
+            await _retry_with_backoff(permanent_error_func, max_retries=3, base_delay=0.1, max_delay=1.0)
+        
+        assert call_count == 1  # Should not retry 404
+    
+    @pytest.mark.asyncio
+    async def test_retry_handles_502_error(self):
+        """Test that 502 Bad Gateway is retried"""
+        call_count = 0
+        
+        async def cloudflare_error_func():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise Exception("HTTP 502: <html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>cloudflare</center></body></html>")
+            return {"price": 100.0}
+        
+        result = await _retry_with_backoff(cloudflare_error_func, max_retries=3, base_delay=0.1, max_delay=1.0)
+        
+        assert result == {"price": 100.0}
+        assert call_count == 2
+    
+    @pytest.mark.asyncio
+    async def test_retry_handles_503_error(self):
+        """Test that 503 Service Unavailable is retried"""
+        call_count = 0
+        
+        async def service_unavailable_func():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise Exception("HTTP 503: Service Unavailable")
+            return {"price": 200.0}
+        
+        result = await _retry_with_backoff(service_unavailable_func, max_retries=3, base_delay=0.1, max_delay=1.0)
+        
+        assert result == {"price": 200.0}
+        assert call_count == 2
+    
+    @pytest.mark.asyncio
+    async def test_retry_handles_429_rate_limit(self):
+        """Test that 429 Too Many Requests is retried"""
+        call_count = 0
+        
+        async def rate_limit_func():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise Exception("HTTP 429: Too Many Requests")
+            return {"price": 300.0}
+        
+        result = await _retry_with_backoff(rate_limit_func, max_retries=3, base_delay=0.1, max_delay=1.0)
+        
+        assert result == {"price": 300.0}
+        assert call_count == 2
+    
+    @pytest.mark.asyncio
+    async def test_retry_max_retries_exceeded(self):
+        """Test that retry logic gives up after max retries"""
+        call_count = 0
+        
+        async def always_fail_func():
+            nonlocal call_count
+            call_count += 1
+            raise Exception("HTTP 502: Bad Gateway")
+        
+        with pytest.raises(Exception, match="HTTP 502"):
+            await _retry_with_backoff(always_fail_func, max_retries=2, base_delay=0.1, max_delay=1.0)
+        
+        assert call_count == 3  # Initial attempt + 2 retries
+    
+    @pytest.mark.asyncio
+    async def test_retry_exponential_backoff_timing(self):
+        """Test that retry delays increase exponentially"""
+        call_times = []
+        
+        async def timing_func():
+            call_times.append(time.time())
+            if len(call_times) < 3:
+                raise Exception("HTTP 502: Bad Gateway")
+            return {"price": 400.0}
+        
+        start = time.time()
+        await _retry_with_backoff(timing_func, max_retries=3, base_delay=0.1, max_delay=1.0)
+        total_time = time.time() - start
+        
+        # Should have 3 calls with delays between them
+        assert len(call_times) == 3
+        # Total time should be at least base_delay + 2*base_delay = 0.3s (with jitter)
+        assert total_time >= 0.25  # Allow for some timing variance
+    
+    @pytest.mark.asyncio
+    async def test_retry_no_delay_on_first_success(self):
+        """Test that no delay occurs on first success"""
+        async def immediate_success_func():
+            return {"price": 500.0}
+        
+        start = time.time()
+        result = await _retry_with_backoff(immediate_success_func, max_retries=3, base_delay=0.5, max_delay=1.0)
+        elapsed = time.time() - start
+        
+        assert result == {"price": 500.0}
+        assert elapsed < 0.1  # Should complete almost instantly
 
 
 class TestCoinbaseAuthentication:

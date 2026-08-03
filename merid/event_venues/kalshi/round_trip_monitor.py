@@ -45,6 +45,13 @@ class RoundTripRecord:
     realized_pnl_cents: int = 0
     realized_hold_seconds: float = 0.0
     
+    # INTENT VERIFICATION: Full hash chain for end-to-end audit trail
+    source_signal_id: Optional[str] = None  # Signal ID from AgentSignal/SignalSnapshot
+    source_signal_hash: Optional[str] = None  # Hash of original signal from SignalSnapshot
+    entry_intent_hash: Optional[str] = None  # Hash of entry intent's core executable fields
+    exit_intent_hash: Optional[str] = None  # Hash of exit intent's core executable fields
+    fill_chain_hash: Optional[str] = None  # Hash linking signal_hash -> intent_hash -> execution_report_hash
+    
     def to_dict(self) -> Dict:
         """Convert to dict for logging/serialization."""
         return {
@@ -67,6 +74,12 @@ class RoundTripRecord:
             "actual_exit_reason": self.actual_exit_reason,
             "realized_pnl_cents": self.realized_pnl_cents,
             "realized_hold_seconds": self.realized_hold_seconds,
+            # INTENT VERIFICATION: Hash chain fields
+            "source_signal_id": self.source_signal_id,
+            "source_signal_hash": self.source_signal_hash,
+            "entry_intent_hash": self.entry_intent_hash,
+            "exit_intent_hash": self.exit_intent_hash,
+            "fill_chain_hash": self.fill_chain_hash,
         }
 
 

@@ -19,7 +19,9 @@ class TestRatchetPositionCacheIntegration:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=10,
             avg_price_cents=50,
             # Ratchet fields
@@ -39,7 +41,9 @@ class TestRatchetPositionCacheIntegration:
         # Simulate a new position creation (as happens in on_fill)
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=10,
             avg_price_cents=50,
             take_profit_price_cents=99,
@@ -66,7 +70,9 @@ class TestRatchetPositionCacheIntegration:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=10,
             avg_price_cents=50,
             ratchet_activated=False,
@@ -263,8 +269,10 @@ class TestRatchetPositionCacheIntegration:
         # Reconstruct from dict
         reconstructed = CachedPosition(
             market_id=pos_dict["market_id"],
+            agent_id="test_agent",
             contracts=pos_dict["contracts"],
             side=pos_dict["side"],
+            thesis_side=pos_dict.get("thesis_side", "yes"),
             avg_price_cents=pos_dict["avg_price_cents"],
             ratchet_activated=pos_dict.get("ratchet_activated", False),
             ratchet_floor_price_cents=pos_dict.get("ratchet_floor_price_cents"),

@@ -1631,6 +1631,8 @@ class Settings(BaseSettings):
 
 
 # Create global settings instance
+# pydantic_settings BaseSettings automatically loads from environment variables
+# and .env file specified in model_config when instantiated
 settings = Settings()
 
 # PROFILE VALIDATION FOR LEAN 15M STACK

@@ -279,8 +279,8 @@ def compute_min_notional_for_venue(
     must be equal to the contract notional itself (price_cents / 100) to ensure
     a single contract always satisfies the minimum notional requirement.
     
-    This prevents rejection of low-priced contracts (1c-9c) when they are valid
-    entries in the 10-75c sweet spot range.
+    This prevents rejection of low-priced contracts (1c-4c) when they are valid
+    entries in the 5c-85c sweet spot range.
     
     Args:
         venue: Venue name (e.g., "kalshi")
@@ -371,10 +371,11 @@ def _get_max_contracts_per_asset(asset: str) -> int:
             adapter = get_active_profile()
             profile = adapter.profile
             
-            # CRITICAL FIX: Normalize asset name by stripping "15M" suffix
+            # CRITICAL FIX (2026-07-21): Use canonical identity helper for asset normalization
             # Profile config uses keys like "BTC", "ETH", "SOL", "XRP", "DOGE"
-            # But callers may pass "BTC15M", "ETH15M", etc.
-            asset_normalized = asset.replace("15M", "") if asset.endswith("15M") else asset
+            # But callers may pass "BTC15M", "ETH15M", etc. or full tickers
+            from merid.utils.kalshi_identity import extract_asset
+            asset_normalized = extract_asset(asset)
             
             asset_config = profile.asset_configs.get(asset_normalized)
             if asset_config:
@@ -464,7 +465,7 @@ def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None, asset: Optional[st
 
 
 # 2026-07-16: _get_per_trade_risk_pct REMOVED (percentage-based sizing PRUNED).
-# The $1 global slot allocator enforces per-trade exposure (1 contract, 10-75c).
+# The $1 global slot allocator enforces per-trade exposure (1 contract, 5c-85c).
 
 
 def _is_dynamic_sizing_enabled() -> bool:
@@ -621,7 +622,7 @@ def calculate_kelly_fraction(
     
     Args:
         model_prob: True probability of winning (0.0-1.0)
-        price_cents: Contract price in cents (10-75)
+        price_cents: Contract price in cents (5-85)
         confidence: Model confidence (0.0-1.0) for weighting
         fractional_kelly: Kelly fraction multiplier (default 0.25 for quarter-Kelly)
         side: "yes" or "no" - determines how model_prob is interpreted
@@ -704,6 +705,8 @@ def compute_order_size(
     tte_seconds: Optional[float] = None,  # Time to expiry in seconds for TTE regime multiplier
     model_prob: Optional[float] = None,  # 2026-07-12: Model probability for Kelly calculation
     side: str = "yes",  # 2026-07-13: Side for Kelly calculation (yes/no)
+    metadata: Optional[dict] = None,  # 2026-07-31: Metadata for sweet spot price adjustment tracking
+    flb_position_multiplier: float = 1.0,  # 2026-08-01: FLB-aware position sizing multiplier
 ) -> Tuple[int, Decimal, dict]:
     """Compute order size using fixed $1 total exposure model with Kelly filtering (2026-07-12).
     
@@ -753,7 +756,13 @@ def compute_order_size(
     
     # 2026-07-12: Kelly Criterion filtering
     # Calculate Kelly fraction to filter trades with no edge
-    if model_prob is not None:
+    # CRITICAL FIX: Skip Kelly filter if price was adjusted by sweet spot logic
+    # The model_prob was calculated at the original signal price, not the adjusted price
+    # Using the adjusted price would cause false Kelly rejections
+    price_adjusted = metadata.get("price_adjusted_by_sweet_spot", False) if metadata else False
+    original_signal_price = metadata.get("original_signal_price") if metadata else None
+    
+    if model_prob is not None and not price_adjusted:
         confidence_float = float(confidence) if confidence is not None else 0.5
         kelly_fraction = calculate_kelly_fraction(
             model_prob=model_prob,
@@ -782,6 +791,13 @@ def compute_order_size(
             "[UNIFIED-SIZING] Kelly filter passed: asset=%s model_prob=%.2f price=%dc kelly=%.4f",
             asset, model_prob, price_cents, kelly_fraction
         )
+    elif model_prob is not None and price_adjusted:
+        # Price was adjusted by sweet spot logic - skip Kelly filter
+        # The edge calculation at the original signal price is still valid
+        logger.info(
+            "[UNIFIED-SIZING] Kelly filter SKIPPED: asset=%s model_prob=%.2f adjusted_price=%dc original_price=%dc (price adjusted by sweet spot logic)",
+            asset, model_prob, price_cents, original_signal_price
+        )
     
     # 2026-07-08 UPDATE: Fixed $1 total exposure model - slot-based position management
     # All percentage-based sizing has been removed
@@ -802,6 +818,14 @@ def compute_order_size(
     try:
         from merid.risk.global_slot_allocator import get_global_slot_allocator
         slot_allocator = get_global_slot_allocator()
+        
+        # CRITICAL FIX (2026-07-31): Sync slot allocator with position cache before checking exposure
+        # This prevents state drift where slots remain allocated even though positions no longer exist
+        # This is the root cause of "total_exposure=1.00 when no positions exist" issue
+        sync_count = slot_allocator.sync_with_position_cache()
+        if sync_count > 0:
+            logger.info("[UNIFIED-SIZING] Synced slot allocator with position cache: removed %d orphaned slots", sync_count)
+        
         existing_exposure_usd = Decimal(str(slot_allocator.get_total_exposure()))
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from slot allocator: %s", e)
@@ -814,11 +838,28 @@ def compute_order_size(
     
     # Step 5: Check if we have enough exposure slot
     if available_exposure_usd < contract_cost_usd:
-        logger.info(
+        logger.warning(
             "[UNIFIED-SIZING] Insufficient exposure slot: available=%.2f, needed=%.2f, existing=%.2f, cap=%.2f asset=%s",
             float(available_exposure_usd), float(contract_cost_usd), float(existing_exposure_usd),
             float(fixed_exposure_cap_usd), asset
         )
+        # Debug: log slot allocator state for troubleshooting
+        try:
+            from merid.risk.global_slot_allocator import get_global_slot_allocator
+            slot_allocator = get_global_slot_allocator()
+            slots = slot_allocator.get_slots_by_asset(asset) if asset else []
+            logger.warning(
+                "[UNIFIED-SIZING] Slot allocator state: total_slots=%d, asset_slots=%d, total_exposure=%.2f",
+                slot_allocator.get_slot_count(), len(slots), slot_allocator.get_total_exposure()
+            )
+            for slot in slots:
+                logger.warning(
+                    "[UNIFIED-SIZING] Active slot: slot_id=%s ticker=%s entry_price=%dc exposure=%.2f status=%s",
+                    slot.slot_id, slot.ticker, slot.entry_price_cents, slot.exposure_usd, slot.status
+                )
+        except Exception as e:
+            logger.warning("[UNIFIED-SIZING] Failed to log slot allocator state: %s", e)
+        
         return 0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
@@ -832,16 +873,27 @@ def compute_order_size(
     # Step 6: Allow 1 contract (slot-based)
     contract_count = 1
     order_notional_usd = contract_cost_usd
-    
+
     # Step 7: Get per-asset max contracts cap (should be 1)
     max_contracts_cap = _get_max_contracts_per_asset(asset)
     contract_count = min(contract_count, max_contracts_cap)
-    
+
+    # 2026-08-01: Apply FLB position sizing multiplier
+    # FLB multiplier reduces effective position size based on FLB risk zones
+    # Since slot-based model enforces 1 contract, we pass this in metadata for downstream use
+    # The order router can use this to adjust position sizing or reject high-risk trades
+    if flb_position_multiplier != 1.0:
+        logger.info(
+            "[UNIFIED-SIZING] FLB position multiplier applied: asset=%s price=%dc flb_multiplier=%.2f "
+            "(FLB-aware position sizing based on research-backed risk zones)",
+            asset, price_cents, flb_position_multiplier
+        )
+
     logger.info(
         "[UNIFIED-SIZING] Slot-based sizing: asset=%s price=%dc cost=$%.2f "
-        "existing_exposure=$%.2f available=$%.2f cap=$%.2f contracts=%d",
+        "existing_exposure=$%.2f available=$%.2f cap=$%.2f contracts=%d flb_multiplier=%.2f",
         asset, price_cents, float(contract_cost_usd), float(existing_exposure_usd),
-        float(available_exposure_usd), float(fixed_exposure_cap_usd), contract_count
+        float(available_exposure_usd), float(fixed_exposure_cap_usd), contract_count, flb_position_multiplier
     )
     
     # Step 8: Validate min_notional and min_contracts if provided
@@ -883,6 +935,7 @@ def compute_order_size(
         "existing_exposure_usd": float(existing_exposure_usd),
         "available_exposure_usd": float(available_exposure_usd),
         "fixed_exposure_cap_usd": float(fixed_exposure_cap_usd),
+        "flb_position_multiplier": flb_position_multiplier,  # 2026-08-01: FLB multiplier for downstream use
     }
     
     # Add Kelly information if model_prob was provided

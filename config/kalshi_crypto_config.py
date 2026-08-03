@@ -98,13 +98,10 @@ else:
 
 
 
-# CRITICAL SAFETY: Maximum number of assets to execute per cycle (default 3)
-
-# This prevents over-trading all 5 assets when only top edge has sufficient quality
-
-# REVERTED (2026-05-08): default 3 (was 1) to restore profitable trading volume
-
-TOP_N_EDGE_ASSETS = int(os.getenv("MERID_TOP_N_EDGE_ASSETS", "3"))
+# CRITICAL SAFETY: Maximum number of assets to execute per cycle (default 5)
+# CRITICAL FIX: 2026-07-30 - Changed from 3 to 5 to ensure all 5 critical assets (BTC, ETH, SOL, XRP, DOGE) are hedged
+# Previous default of 3 caused only 3 of 5 assets to be hedged, violating the requirement that all 5 assets must be hedged
+TOP_N_EDGE_ASSETS = int(os.getenv("MERID_TOP_N_EDGE_ASSETS", "5"))
 
 
 

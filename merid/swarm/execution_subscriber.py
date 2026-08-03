@@ -388,81 +388,47 @@ class ExecutionSubscriber:
             )
             raise RuntimeError(f"ExecutionGuard check failed: {_ege}") from _ege
 
-        # Try to route through LeanAgentGrid15m — match on the agent that owns this market_id
+        # CRITICAL FIX (2026-07-21): Route through order_router to enforce validation gates
+        # Previous path: execution_subscriber → kalshi_tools._kalshi_place_order → venue (BYPASSES ALL VALIDATION)
+        # New path: execution_subscriber → order_router.route_order_async → validation gates → venue
+        # This ensures asset-window checks, $1 cap, position cache, and resting monitor are enforced
         try:
-            from merid.prediction.agent_grid_15m import get_agent_grid
-            grid = get_agent_grid()
-            if grid and grid.is_running:
-                from merid.prediction.kalshi_tools import _kalshi_place_order
-                kalshi_action = "buy" if "buy" in action else "sell"
-
-                # First pass: find the agent whose active_tickers includes market_id
-                owning_agent = None
-                for agent in grid.agents:
-                    if agent.state.enabled and market_id in agent.state.active_tickers:
-                        owning_agent = agent
-                        break
-
-                # Second pass: fall back to the agent whose assets appear in market_id
-                if owning_agent is None:
-                    for agent in grid.agents:
-                        if agent.state.enabled and any(
-                            a.upper() in market_id.upper() for a in agent.config.assets
-                        ):
-                            owning_agent = agent
-                            break
-
-                if owning_agent is not None:
-                    # CRITICAL FIX (2026-07-12): Remove slot allocation from execution_subscriber
-                    # Slot allocation is now handled exclusively in order_router.route_order_async
-                    # This prevents double allocation (execution_subscriber → kalshi_tools → order_router)
-                    # which was causing exposure cap exhaustion and slot state corruption
-                    #
-                    # Execution flow is now:
-                    # execution_subscriber → kalshi_tools._kalshi_place_order → order_router.route_order_async
-                    #                                                              → slot_allocator.request_allocation (SINGLE POINT)
-                    
-                    try:
-                        await _kalshi_place_order(
-                            ticker=market_id,
-                            side=side,
-                            action=kalshi_action,
-                            price_cents=limit_price,
-                            count=size,
-                            agent_name=owning_agent.agent_id,
-                        )
-                    except Exception as order_err:
-                        # Slot release is now handled in order_router
-                        raise
-                    return
-                logger.warning(
-                    "ExecutionSubscriber: no owning agent found for %s — falling back to direct placement",
-                    market_id,
-                )
-        except Exception as exc:
-            logger.warning("ExecutionSubscriber: AgentGrid routing failed for %s: %s — falling back to direct placement", market_id, exc)
-
-        # Fallback: direct order placement
-        # CRITICAL FIX (2026-07-12): Remove slot allocation from execution_subscriber fallback
-        # Slot allocation is now handled exclusively in order_router.route_order_async
-        # This prevents double allocation (execution_subscriber → kalshi_tools → order_router)
-        #
-        # Execution flow is now:
-        # execution_subscriber → kalshi_tools._kalshi_place_order → order_router.route_order_async
-        #                                                              → slot_allocator.request_allocation (SINGLE POINT)
-        try:
-            from merid.prediction.kalshi_tools import _kalshi_place_order
+            from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+            
+            # Convert execution_subscriber parameters to OrderIntent
             kalshi_action = "buy" if "buy" in action else "sell"
-            await _kalshi_place_order(
+            intent = OrderIntent(
                 ticker=market_id,
                 side=side,
                 action=kalshi_action,
                 price_cents=limit_price,
                 count=size,
-                agent_name="execution_subscriber",
+                order_type="limit",
+                time_in_force="gtc",
+                source="execution_subscriber",
+                agent_id="execution_subscriber",
+                rationale="execution_subscriber_order",
             )
-        except Exception as exc:
-            raise RuntimeError(f"Direct order placement failed: {exc}") from exc
+            
+            result = await route_order_async(intent)
+            
+            if result and result.status == "rejected":
+                logger.warning(
+                    "[EXECUTION-SUBSCRIBER] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s",
+                    market_id, side, size, result.reason
+                )
+            else:
+                logger.info(
+                    "[EXECUTION-SUBSCRIBER] Order routed successfully: ticker=%s side=%s count=%d",
+                    market_id, side, size
+                )
+            return
+        except Exception as router_err:
+            logger.error(
+                "[EXECUTION-SUBSCRIBER] Router routing failed for %s: %s — blocking order",
+                market_id, router_err
+            )
+            raise RuntimeError(f"Router routing failed: {router_err}") from router_err
 
     @property
     def stats(self) -> Dict[str, Any]:

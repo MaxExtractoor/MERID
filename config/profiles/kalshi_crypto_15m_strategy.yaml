@@ -1,17 +1,17 @@
 # ═══════════════════════════════════════════════════════════════════════
 # Kalshi Crypto 15m Strategy Profile
 # ═══════════════════════════════════════════════════════════════════════
-# SINGLE SOURCE OF TRUTH for strategy thresholds and filters for BTC/ETH/SOL/XRP/DOGE 15m trading.
+# DEPRECATED 2026-07-14: This file is NOT used for kalshi_crypto_15m_v2 profile
 #
-# This profile defines the canonical strategy behavior for Kalshi 15m crypto:
-# - Edge thresholds per asset and time bucket
-# - Spread filters and liquidity guards
-# - Time-to-expiry bounds
-# - Entry/exit rules
+# For kalshi_crypto_15m_v2 (production), edge thresholds come from:
+# config/profiles/kalshi_crypto_15m_v2.yaml -> edge_bands section
 #
-# Strategy implementation: merid/prediction/agent_grid_15m.py::_generate_signal()
-# Sizing implementation: merid/prediction/unified_sizing.py
-# Risk envelope: config/profiles/kalshi_crypto_15m.yaml (via RiskEnvelopeService)
+# The edge_thresholds section below is IGNORED by the production 15m stack.
+# Single source of truth: kalshi_crypto_15m_v2.yaml edge_bands (2.5% unified minimum)
+# Industry standard: 3% raw edge minimum for Kalshi (Market Math, Beatpoly)
+# Reference: https://marketmath.io/blog/prediction-market-strategy
+#
+# This file is retained for backward compatibility with other profiles only.
 # ═══════════════════════════════════════════════════════════════════════
 
 profile_name: kalshi_crypto_15m_strategy

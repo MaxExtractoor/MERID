@@ -278,19 +278,17 @@ class TestMomentumFVGIntegration:
     def test_macd_dead_zone_from_profile_yaml(self):
         """Test that MACD dead zone is read from profile YAML."""
         from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
-        
+
         profile = get_crypto_15m_profile()
         # momentum_fvg is a dictionary property, use dict access
         macd_dead_zone = profile.momentum_fvg.get('macd_dead_zone', None)
-        
+
         # Verify dead zone is configured in profile
         assert macd_dead_zone is not None, "macd_dead_zone should be configured in profile YAML"
-        
-        # Verify it's the optimized value (0.0001 for 15m crypto, not the old 0.0005)
-        assert macd_dead_zone == 0.0001, f"macd_dead_zone should be 0.0001, got {macd_dead_zone}"
-        
-        # Verify it's not the old too-strict value
-        assert macd_dead_zone != 0.0005, "macd_dead_zone should not be the old too-strict 0.0005 value"
+
+        # CRITICAL FIX (2026-07-28): Dead zone set to 0.0 to allow signal generation for XRP/DOGE
+        # XRP/DOGE have histogram values like -0.000003 which are below 0.0001 threshold
+        assert macd_dead_zone == 0.0, f"macd_dead_zone should be 0.0 (disabled), got {macd_dead_zone}"
     
     def test_macd_dead_zone_allows_valid_signals(self):
         """Test that optimized dead zone allows valid signals."""
@@ -371,10 +369,12 @@ class TestMomentumFVGIntegration:
         assert "rsi < momentum_rsi_short_max" in source, \
             "Short conditions should check RSI < momentum_rsi_short_max"
         
-        # Verify that the scoring system uses minimum score of 3
-        # (updated from "3 of 5" string check to actual implementation pattern)
-        assert "score - 3" in source or "score >= 3" in source or "score > 3" in source, \
-            "Signal conditions should use minimum score of 3"
+        # CRITICAL FIX (2026-08-01): Scoring system refactored to use scores as inputs to edge calculation
+        # Scores are used for dual-side edge evaluation, not as direct side selectors
+        assert "long_score = sum(long_conditions)" in source, \
+            "Long score should be calculated as sum of long conditions"
+        assert "short_score = sum(short_conditions)" in source, \
+            "Short score should be calculated as sum of short conditions"
     
     def test_timing_window_uses_profile_yaml(self):
         """Test that timing window uses profile YAML configuration (CRITICAL FIX: 2026-07-08)."""

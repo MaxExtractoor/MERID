@@ -38,14 +38,16 @@ class TestPriceSideInvariant:
         
         # Invariant: thesis_side should be NO
         assert expected_thesis_side == "no"
-        
+
         # Invariant: Only NO price should be evaluated for cheapness
         # YES price being cheap is irrelevant for bearish thesis
-        thesis_in_range = (10 <= no_price_cents <= 75)
+        # CRITICAL FIX 2026-08-03: NO uses side-aware range 25c-99c
+        thesis_in_range = (25 <= no_price_cents <= 99)
         assert thesis_in_range, "NO price should be in range for bearish thesis"
-        
+
         # Invariant: YES cheapness should NOT generate YES candidate
         # Even though YES is cheap (15c), it's on the wrong side
+        # YES uses side-aware range 10c-75c
         yes_in_range = (10 <= yes_price_cents <= 75)
         # YES being in range doesn't matter - thesis_side=NO
         
@@ -73,15 +75,17 @@ class TestPriceSideInvariant:
         
         # Invariant: thesis_side should be YES
         assert expected_thesis_side == "yes"
-        
+
         # Invariant: Only YES price should be evaluated for cheapness
         # NO price being cheap is irrelevant for bullish thesis
+        # CRITICAL FIX 2026-08-03: YES uses side-aware range 10c-75c
         thesis_in_range = (10 <= yes_price_cents <= 75)
         assert thesis_in_range, "YES price should be in range for bullish thesis"
-        
+
         # Invariant: NO cheapness should NOT generate NO candidate
         # Even though NO is cheap (15c), it's on the wrong side
-        no_in_range = (10 <= no_price_cents <= 75)
+        # NO uses side-aware range 25c-99c
+        no_in_range = (25 <= no_price_cents <= 99)
         # NO being in range doesn't matter - thesis_side=YES
         
         print(f"[TEST] velocity={velocity} thesis_side={expected_thesis_side}")
@@ -108,28 +112,37 @@ class TestPriceSideInvariant:
     
     def test_price_range_gating_thesis_side_only(self):
         """Test that price range gating only applies to thesis_side."""
+        # CRITICAL FIX 2026-08-03: Use side-aware ranges (YES 10c-75c, NO 25c-99c)
         # Case 1: thesis_side=YES, YES in range, NO out of range
         thesis_side = "yes"
-        yes_price = 42  # In range
-        no_price = 5    # Out of range
-        
-        thesis_in_range = (10 <= yes_price <= 75) if thesis_side == "yes" else (10 <= no_price <= 75)
+        yes_price = 42  # In range (10c-75c)
+        no_price = 5    # Out of range (25c-99c)
+
+        thesis_in_range = (10 <= yes_price <= 75) if thesis_side == "yes" else (25 <= no_price <= 99)
         assert thesis_in_range, "Thesis side price should be in range"
-        
+
         # Case 2: thesis_side=NO, NO in range, YES out of range
         thesis_side = "no"
-        yes_price = 95   # Out of range
-        no_price = 42    # In range
-        
-        thesis_in_range = (10 <= yes_price <= 75) if thesis_side == "yes" else (10 <= no_price <= 75)
+        yes_price = 95   # Out of range (10c-75c)
+        no_price = 42    # In range (25c-99c)
+
+        thesis_in_range = (10 <= yes_price <= 75) if thesis_side == "yes" else (25 <= no_price <= 99)
         assert thesis_in_range, "Thesis side price should be in range"
-        
+
         # Case 3: thesis_side=YES, YES out of range → should reject
         thesis_side = "yes"
-        yes_price = 95   # Out of range
+        yes_price = 95   # Out of range (10c-75c)
         no_price = 42    # In range (but irrelevant)
-        
-        thesis_in_range = (10 <= yes_price <= 75) if thesis_side == "yes" else (10 <= no_price <= 75)
+
+        thesis_in_range = (10 <= yes_price <= 75) if thesis_side == "yes" else (25 <= no_price <= 99)
+        assert not thesis_in_range, "Thesis side price out of range should reject"
+
+        # Case 4: thesis_side=NO, NO out of range → should reject
+        thesis_side = "no"
+        yes_price = 42   # In range (but irrelevant)
+        no_price = 20    # Out of range (25c-99c)
+
+        thesis_in_range = (10 <= yes_price <= 75) if thesis_side == "yes" else (25 <= no_price <= 99)
         assert not thesis_in_range, "Thesis side price out of range should reject"
     
     def test_both_sides_out_of_range_reject(self):
@@ -284,21 +297,37 @@ class TestPriceSideLogSchema:
     
     def test_price_side_check_reject_log_schema(self):
         """Test that [PRICE-SIDE-CHECK-REJECT] log has required fields."""
+        # CRITICAL FIX 2026-08-03: Log schema now includes side-aware ranges
         # Expected log schema:
-        # [PRICE-SIDE-CHECK-REJECT] asset=%s thesis_side=%s thesis_price=%dc outside 10c-75c range -> NO TRADE
-        
-        log_template = "[PRICE-SIDE-CHECK-REJECT] asset={asset} thesis_side={thesis_side} thesis_price={price}c outside 10c-75c range -> NO TRADE"
-        
-        log = log_template.format(
+        # [PRICE-SIDE-CHECK-REJECT] asset=%s thesis_side=%s thesis_price=%dc outside %s range -> NO TRADE
+
+        # Test YES side (10c-75c range)
+        log_template_yes = "[PRICE-SIDE-CHECK-REJECT] asset={asset} thesis_side={thesis_side} thesis_price={price}c outside {range_str} range -> NO TRADE"
+
+        log_yes = log_template_yes.format(
             asset="BTC",
             thesis_side="YES",
-            price=95
+            price=95,
+            range_str="10c-75c"
         )
-        
-        assert "thesis_side=YES" in log
-        assert "thesis_price=95c" in log
-        assert "outside 10c-75c range" in log
-        assert "NO TRADE" in log
+
+        assert "thesis_side=YES" in log_yes
+        assert "thesis_price=95c" in log_yes
+        assert "outside 10c-75c range" in log_yes
+        assert "NO TRADE" in log_yes
+
+        # Test NO side (25c-99c range)
+        log_no = log_template_yes.format(
+            asset="ETH",
+            thesis_side="NO",
+            price=20,
+            range_str="25c-99c"
+        )
+
+        assert "thesis_side=NO" in log_no
+        assert "thesis_price=20c" in log_no
+        assert "outside 25c-99c range" in log_no
+        assert "NO TRADE" in log_no
     
     def test_price_side_check_invariant_log_schema(self):
         """Test that [PRICE-SIDE-CHECK-INVARIANT] log has required fields."""
@@ -343,15 +372,17 @@ class TestNoSideSignalIntegrityWithCheaperYes:
         # Market state: YES is much cheaper than NO
         yes_price_cents = 10  # Very cheap YES
         no_price_cents = 42   # Fair NO
-        
+
         # Invariant: thesis_side should be NO
         assert thesis_side == "no"
-        
+
         # Invariant: Only NO price should be evaluated
-        thesis_in_range = (10 <= no_price_cents <= 75)
+        # CRITICAL FIX 2026-08-03: NO uses side-aware range 25c-99c
+        thesis_in_range = (25 <= no_price_cents <= 99)
         assert thesis_in_range, "NO price should be in range"
-        
+
         # Invariant: YES cheapness should be ignored
+        # YES uses side-aware range 10c-75c
         yes_in_range = (10 <= yes_price_cents <= 75)
         assert yes_in_range, "YES is in range but should be ignored"
         

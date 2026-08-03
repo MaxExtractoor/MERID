@@ -171,6 +171,8 @@ class IntentContract:
         """
         # CRITICAL FIX (2026-07-21): Validate outcome_side and thesis_side consistency
         # outcome_side must match thesis_side (both canonical direction fields)
+        # NOTE: This thesis_side is derived from strategy intent (BULLISH_EVENT → yes, BEARISH_EVENT → no)
+        # This is a semantic invariant, NOT the velocity-derived thesis_side from agent_grid_15m.py
         if self.outcome_side.lower() != self.thesis_side.lower():
             return False, f"outcome_side={self.outcome_side} must match thesis_side={self.thesis_side}"
         

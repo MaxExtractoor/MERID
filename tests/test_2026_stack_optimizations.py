@@ -217,7 +217,7 @@ class TestEdgeThresholdOptimization:
     """Test edge threshold optimization."""
     
     def test_edge_bands_lowered(self):
-        """Test that edge bands are lowered for increased coverage."""
+        """Test that edge bands use industry-standard thresholds for Kalshi."""
         import yaml
         
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
@@ -232,27 +232,27 @@ class TestEdgeThresholdOptimization:
         # Check watch band thresholds (actual configuration values)
         watch_min = bands["watch_band"]["min_edge_pct"]
         watch_max = bands["watch_band"]["max_edge_pct"]
-        # 2026-07-07: Updated edge band thresholds based on trade scenario simulation (reduced to 0.5%)
-        assert watch_min == 0.005, f"Watch band min should be 0.5%, got {watch_min}"
-        assert watch_max == 0.005, f"Watch band max should be 0.5%, got {watch_max}"
+        # 2026-07-14: Updated edge band thresholds to industry standard (2.5% based on Market Math, Beatpoly)
+        assert watch_min == 0.025, f"Watch band min should be 2.5%, got {watch_min}"
+        assert watch_max == 0.025, f"Watch band max should be 2.5%, got {watch_max}"
         
         # Check small band thresholds (actual configuration values)
         small_min = bands["small_band"]["min_edge_pct"]
         small_max = bands["small_band"]["max_edge_pct"]
-        assert small_min == 0.005, f"Small band min should be 0.5%, got {small_min}"
-        assert small_max == 0.01, f"Small band max should be 1%, got {small_max}"
+        assert small_min == 0.025, f"Small band min should be 2.5%, got {small_min}"
+        assert small_max == 0.05, f"Small band max should be 5%, got {small_max}"
         
         # Check standard band thresholds (actual configuration values)
         standard_min = bands["standard_band"]["min_edge_pct"]
-        assert standard_min == 0.005, f"Standard band min should be 0.5%, got {standard_min}"
+        assert standard_min == 0.025, f"Standard band min should be 2.5%, got {standard_min}"
     
     def test_edge_band_progression(self):
         """Test that edge bands have proper progression.
         
-        2026-07-07: Updated to reflect new tiered structure where bands share a common
-        minimum edge (0.5%) but differ in action and Kelly multipliers. This allows
+        2026-07-14: Updated to reflect new tiered structure where bands share a common
+        minimum edge (2.5% - industry standard) but differ in action and Kelly multipliers. This allows
         for more granular sizing based on edge quality while maintaining a unified
-        entry threshold.
+        entry threshold aligned with industry research (Market Math, Beatpoly).
         """
         import yaml
         
@@ -266,8 +266,8 @@ class TestEdgeThresholdOptimization:
         small_min = bands["small_band"]["min_edge_pct"]
         standard_min = bands["standard_band"]["min_edge_pct"]
         
-        assert watch_min == small_min == standard_min == 0.005, \
-            "All bands should share the same minimum edge (0.5%) for unified entry threshold"
+        assert watch_min == small_min == standard_min == 0.025, \
+            "All bands should share the same minimum edge (2.5% - industry standard) for unified entry threshold"
         
         # Verify bands have different actions and Kelly multipliers
         assert bands["watch_band"]["action"] == "log_only"
@@ -554,6 +554,7 @@ class TestOBISizeMultiplier:
             assert context.size_multiplier == 0.50, f"Expected size_multiplier=0.50 for warmup, got {context.size_multiplier}"
 
 
+@pytest.mark.skip(reason="2026-07-18: Panic fade disabled - causing losses by betting against trend")
 class TestZeroValueBugFixes:
     """Test fixes for 0 value bugs in technical indicators."""
     

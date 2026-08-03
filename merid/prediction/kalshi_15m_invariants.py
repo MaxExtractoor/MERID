@@ -237,7 +237,7 @@ Kalshi 15-Minute Up/Down Market Invariants (2026-07-23)
    - Per-asset tuning allowed (volatility, thresholds) but not exclusion
 
 6. Price Range:
-   - Canonical range: 10c-75c for order execution
+   - Canonical range: 5c-85c for order execution
    - Crisis regime: 5c-95c (expanded during extreme volatility)
    - Price clamping enforced at multiple layers
 

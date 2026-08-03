@@ -294,14 +294,35 @@ class KalshiUniversalAgent:
         if net_edge < self.config.min_edge:
             return
 
-        side = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+        # CRITICAL FIX (2026-07-21): Use ThesisSide enum for canonical direction mapping
+        # Signal action determines the outcome_side (which outcome we're long on)
+        # BUY_YES, SELL_NO → outcome_side=yes (long YES exposure)
+        # BUY_NO, SELL_YES → outcome_side=no (long NO exposure)
+        from merid.event_venues.kalshi.strategy_positions import ThesisSide
+        
+        # Determine outcome_side from signal action
+        if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES):
+            outcome_side = "yes"
+            thesis_side = ThesisSide.YES
+        elif signal.action in (SignalAction.BUY_NO, SignalAction.SELL_YES):
+            outcome_side = "no"
+            thesis_side = ThesisSide.NO
+        else:
+            # Fallback for unexpected actions
+            outcome_side = "yes"
+            thesis_side = ThesisSide.YES
+            self.logger.warning(
+                "[SIGNAL-LAYER-THESIS] Unexpected signal action=%s, defaulting to thesis_side=YES",
+                signal.action
+            )
+        
         action = "buy" if signal.action in (SignalAction.BUY_YES, SignalAction.BUY_NO) else "sell"
         price_cents = int(signal.limit_price_cents or 50)
         contracts = max(1, min(int(signal.contracts or 1), self.config.max_contracts))
 
         # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
-        # universal_agent uses lowercase 'yes'/'no' for side, but order_router expects Kalshi format
-        side_upper = side.upper()
+        # Use thesis_side.value for canonical mapping
+        side_upper = thesis_side.value.upper()
         action_lower = action.lower()
         if side_upper == "YES" and action_lower == "buy":
             kalshi_side = "BUY_YES"
@@ -362,7 +383,7 @@ class KalshiUniversalAgent:
         }
 
         if self.config.dry_run:
-            self.logger.info("[DRY-RUN] Would place %s %s %s %dx@%dc", ticker, mode, side, contracts, price_cents)
+            self.logger.info(f"[DRY-RUN] Would place {ticker} {mode} {side} {contracts}x@{price_cents}c")
             self._append_log(self.state.order_log, log_entry)
             return
 
@@ -382,6 +403,9 @@ class KalshiUniversalAgent:
                 decision_trace_id=new_decision_trace_id("ua"),
                 sentiment_driven=False,
             )
+            # CRITICAL FIX (2026-07-19): Set client_tag to enable TP target registration
+            # order_router only registers TP targets if client_tag is set AND TP/SL values exist
+            intent.client_tag = intent.intent_id
             result = await route_order_async(intent)
             log_entry["result_status"] = result.status
             log_entry["latency_ms"] = result.latency_ms
@@ -452,9 +476,16 @@ class KalshiUniversalAgent:
             spread_cents=Decimal(ask - bid) if (bid > 0 and ask > 0) else None,
         )
 
+        # CRITICAL FIX: 2026-07-24 - Prevent IndexError if rsplit returns empty list
+        # Use safe fallback for event_id extraction
+        event_id = raw.get("event_ticker")
+        if not event_id:
+            parts = mkt.market_id.rsplit("-", 1)
+            event_id = parts[0] if parts else mkt.market_id
+
         return MarketSnapshot(
             market_id=mkt.market_id,
-            event_id=raw.get("event_ticker") or mkt.market_id.rsplit("-", 1)[0],
+            event_id=event_id,
             title=mkt.question or mkt.market_id,
             state=resolved_state,
             implied=implied,
@@ -571,7 +602,21 @@ class KalshiUniversalAgent:
                     # Risk check
                     if self._risk:
                         try:
-                            side = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+                            # CRITICAL FIX (2026-07-21): Use ThesisSide enum for canonical direction
+                            from merid.event_venues.kalshi.strategy_positions import ThesisSide
+                            
+                            # Determine outcome_side from signal action
+                            if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES):
+                                side = "yes"
+                                thesis_side = ThesisSide.YES
+                            elif signal.action in (SignalAction.BUY_NO, SignalAction.SELL_YES):
+                                side = "no"
+                                thesis_side = ThesisSide.NO
+                            else:
+                                # Fallback for unexpected actions
+                                side = "yes"
+                                thesis_side = ThesisSide.YES
+                            
                             contracts = max(1, min(int(signal.contracts or 1), self.config.max_contracts))
                             price_cents = int(signal.limit_price_cents or 50)
                             

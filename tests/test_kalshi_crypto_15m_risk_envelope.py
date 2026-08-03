@@ -54,10 +54,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=1.5,
-            total_venue_window_limit_usd=2.5,
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
@@ -109,8 +105,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
             per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap
             total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap
             window_start_ts=0.0,
@@ -169,8 +163,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
             per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap
             total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap
             window_start_ts=0.0,
@@ -214,8 +206,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
             per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap
             total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap
             window_start_ts=0.0,
@@ -521,7 +511,7 @@ class TestEdgeBandConfiguration:
     """Test that edge band thresholds are lowered for small bankroll regime."""
 
     def test_edge_bands_lowered_for_small_bankroll(self):
-        """Test that edge bands use lowered thresholds for increased throughput."""
+        """Test that edge bands use industry-standard thresholds for Kalshi."""
         import yaml
         
         # Load profile config (UTF-8 encoding for Unicode characters)
@@ -530,26 +520,28 @@ class TestEdgeBandConfiguration:
         
         edge_bands = profile_config.get('edge_bands', {})
         
-        # 2026-07-07: Verify edge bands updated based on trade scenario simulation (reduced from 3% to 0.5%)
-        # Verify watch band: 0.5% (reduced from 0.8% based on simulation)
-        assert edge_bands['watch_band']['min_edge_pct'] == 0.005, \
-            "Watch band min edge should be 0.5% (reduced from 0.8% based on trade scenario simulation)"
-        assert edge_bands['watch_band']['max_edge_pct'] == 0.005, \
-            "Watch band max edge should be 0.5% (unified with min for consistency)"
+        # 2026-07-14: Verify edge bands updated to industry standard (2.5% based on Market Math, Beatpoly)
+        # Industry standard for Kalshi: 3% raw edge minimum
+        # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
+        # Verify watch band: 2.5% (industry standard)
+        assert edge_bands['watch_band']['min_edge_pct'] == 0.025, \
+            "Watch band min edge should be 2.5% (industry standard for Kalshi)"
+        assert edge_bands['watch_band']['max_edge_pct'] == 0.025, \
+            "Watch band max edge should be 2.5% (unified with min for consistency)"
         assert edge_bands['watch_band']['action'] == "log_only"
         assert edge_bands['watch_band']['kelly_multiplier'] == 0.0
         
-        # Verify small band: 0.5-1% (reduced from 1.5-3% based on simulation)
-        assert edge_bands['small_band']['min_edge_pct'] == 0.005, \
-            "Small band min edge should be 0.5% (reduced from 1.5% based on trade scenario simulation)"
-        assert edge_bands['small_band']['max_edge_pct'] == 0.01, \
-            "Small band max edge should be 1% (reduced from 3% based on trade scenario simulation)"
+        # Verify small band: 2.5-5% (industry standard with better band separation)
+        assert edge_bands['small_band']['min_edge_pct'] == 0.025, \
+            "Small band min edge should be 2.5% (industry standard for Kalshi)"
+        assert edge_bands['small_band']['max_edge_pct'] == 0.05, \
+            "Small band max edge should be 5% (better band separation)"
         assert edge_bands['small_band']['action'] == "trade_small"
         assert edge_bands['small_band']['kelly_multiplier'] == 0.25
         
-        # Verify standard band: ≥0.5% (reduced from ≥3% based on simulation)
-        assert edge_bands['standard_band']['min_edge_pct'] == 0.005, \
-            "Standard band min edge should be 0.5% (reduced from 3% based on trade scenario simulation)"
+        # Verify standard band: ≥2.5% (industry standard)
+        assert edge_bands['standard_band']['min_edge_pct'] == 0.025, \
+            "Standard band min edge should be 2.5% (industry standard for Kalshi)"
         assert edge_bands['standard_band']['max_edge_pct'] == 1.0, \
             "Standard band max edge should be unlimited (1.0)"
         assert edge_bands['standard_band']['action'] == "trade_standard"
@@ -623,8 +615,6 @@ class TestWindowBasedRiskLimitEnforcement:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,  # DEPRECATED: Not used (fixed $1 cap instead)
-            guardrails_total_venue_risk_pct=0.05,  # DEPRECATED: Not used (fixed $1 cap instead)
             per_agent_window_limit_usd=1.0,  # DEPRECATED: Not used (fixed $1 cap instead)
             total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
             window_start_ts=0.0,  # Required field
@@ -635,8 +625,6 @@ class TestWindowBasedRiskLimitEnforcement:
         )
         
         # Verify window limit fields exist
-        assert hasattr(envelope, 'guardrails_per_window_risk_pct')
-        assert hasattr(envelope, 'guardrails_total_venue_risk_pct')
         assert hasattr(envelope, 'per_agent_window_limit_usd')
         assert hasattr(envelope, 'total_venue_window_limit_usd')
         assert hasattr(envelope, 'window_start_ts')
@@ -644,8 +632,6 @@ class TestWindowBasedRiskLimitEnforcement:
         assert hasattr(envelope, 'total_window_exposure_usd')
         
         # Verify values are correct
-        assert envelope.guardrails_per_window_risk_pct == 0.03
-        assert envelope.guardrails_total_venue_risk_pct == 0.05
         # CRITICAL FIX 2026-07-10: Fixed $1.00 exposure model (not percentage-based)
         assert envelope.per_agent_window_limit_usd == 1.0  # Fixed $1.00 exposure cap
         assert envelope.total_venue_window_limit_usd == 1.0  # Fixed $1.00 total exposure cap
@@ -686,8 +672,6 @@ class TestWindowBasedRiskLimitEnforcement:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
             per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap (2026-07-10)
             total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (2026-07-10)
             window_start_ts=0.0,
@@ -744,8 +728,6 @@ class TestWindowBasedRiskLimitEnforcement:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
             per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap (2026-07-10)
             total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (2026-07-10)
             window_start_ts=0.0,

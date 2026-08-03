@@ -54,16 +54,24 @@ class CellExposure:
     # Pending orders
     pending_yes_cents: int = 0
     pending_no_cents: int = 0
+    
+    # CRITICAL FIX (2026-07-29): Alpha position metadata for pairing
+    # Tracks which alpha positions contribute to this cell's exposure
+    alpha_positions: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # position_id -> {fill_id, entry_time, side, size}
 
     @property
     def net_delta_cents(self) -> int:
-        """Signed net directional exposure including pending orders.
+        """Signed net directional exposure from FILLED positions only.
+        
+        CRITICAL FIX (2026-07-29): Removed pending orders from exposure calculation.
+        Hedge engine should only hedge filled positions, not pending orders that may be rejected.
+        Pending orders are no longer included to prevent hedge orders before alpha fills.
         
         Task 2: Uses alpha exposure only (hedge exposure is the hedge, not exposure).
         """
         return (
-            (self.yes_notional_cents + self.pending_yes_cents)
-            - (self.no_notional_cents + self.pending_no_cents)
+            self.yes_notional_cents
+            - self.no_notional_cents
         )
     
     @property
@@ -149,7 +157,8 @@ def build_exposure_snapshot() -> ExposureSnapshot:
                 continue
             tf = get_series_timeframe_bucket(ticker)
             cell = snap.get_cell(asset, tf)
-            notional = pos.contracts * pos.avg_price_cents
+            # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
+            notional = pos.contracts * pos.avg_price_cents if pos.avg_price_cents is not None else 0
             
             # Task 2: Check if position came from hedge fill
             # Use fill_source_map from ledger (primary) or client_order_id prefix (fallback)
@@ -183,6 +192,18 @@ def build_exposure_snapshot() -> ExposureSnapshot:
                 else:
                     cell.no_notional_cents += notional
                     cell.no_contracts += pos.contracts
+                
+                # CRITICAL FIX (2026-07-29): Track alpha position metadata for pairing
+                # Store market_id, fill_id, entry_time, side, and size for hedge pairing
+                # BUG FIX (2026-07-29): CachedPosition uses market_id not position_id
+                if hasattr(pos, 'market_id') and pos.market_id:
+                    cell.alpha_positions[pos.market_id] = {
+                        "fill_id": getattr(pos, 'fill_id', None),
+                        "entry_time": getattr(pos, 'entry_time', None),
+                        "side": pos.side,
+                        "size": pos.contracts,
+                        "avg_price_cents": pos.avg_price_cents,
+                    }
     except Exception as exc:
         logger.debug("[exposure] position cache read failed: %s", exc)
 
@@ -230,9 +251,11 @@ def build_exposure_snapshot() -> ExposureSnapshot:
 
 # Define asset groups for cross-asset hedging
 # Task 1 Fix: Configurable via environment variable with sensible default
+# CRITICAL FIX 2026-07-28: Include all 5 crypto assets by default (BTC, ETH, SOL, XRP, DOGE)
+# Previous default only included 3 assets (BTC, ETH, SOL), leaving XRP and DOGE unhedged
 CRYPTO_BASKET_ASSETS = os.environ.get(
     "MERID_HEDGE_CRYPTO_ASSETS", 
-    "BTC,ETH,SOL"
+    "BTC,ETH,SOL,XRP,DOGE"
 ).split(",")
 # Strip whitespace from each asset
 CRYPTO_BASKET_ASSETS = [a.strip().upper() for a in CRYPTO_BASKET_ASSETS if a.strip()]

@@ -10,8 +10,8 @@ db_path = r'c:\Dev\MERID\data\kalshi_fills.db'
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 
-# Get all fills from the last 24 hours to capture completed trades
-cutoff_time = datetime.now() - timedelta(hours=24)
+# Get all fills from the last 5 hours to capture completed trades
+cutoff_time = datetime.now() - timedelta(hours=5)
 
 # Query fills
 cursor.execute("""

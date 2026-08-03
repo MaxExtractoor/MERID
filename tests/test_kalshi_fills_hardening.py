@@ -81,7 +81,7 @@ class TestFillsIntegrityEnforcement:
         # Patch kalshi_risk module where get_kalshi_risk is defined
         with patch("merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk", return_value=broken_fills_risk):
             result = await _kalshi_place_order(
-                ticker="KXBTC-25JAN-T100000",
+                ticker="KXBTC15M-25JAN-T100000",
                 side="yes",
                 action="buy",
                 price_cents=55,
@@ -142,6 +142,8 @@ class TestSilentErrorElevation:
         """Fills ledger WS ingestion errors must be warning level."""
         from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
         
+        # Reset singleton guard (another test may have created the bridge already)
+        KalshiWebSocketBridge._instance_created = False
         # Setup bridge with mock that fails ledger ingestion
         bridge = KalshiWebSocketBridge()
         

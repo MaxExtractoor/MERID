@@ -51,6 +51,7 @@ class DualSideCandidate:
     
     # Metadata
     p_hat_yes_cents: float = 0.0
+    p_hat_no_cents: float = 0.0  # 2026-07-25: Added for dual-side edge-aware gating
     minutes_to_expiry: float = 0.0
     timestamp: float = 0.0
     
@@ -237,7 +238,9 @@ class DualSideCandidateGenerator:
         
         # Compute spreads and edges
         spread_metrics = compute_canonical_spreads(yes_bid_cents, no_bid_cents)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents, spread_metrics)
+        # CRITICAL FIX 2026-07-28: Pass order_side parameter for correct price usage
+        # In dual-side candidate generation, we're not placing an order yet, so use None (market bids)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents, spread_metrics, order_side=None)
         
         # Check YES side
         yes_passes, yes_reason = edge_aware_microstructure_gate(
@@ -288,6 +291,8 @@ class DualSideCandidateGenerator:
             selected_edge_exec = no_edge.executable_edge_cents
         
         # Create candidate
+        # 2026-07-25: Compute p_hat_no_cents as complement to p_hat_yes_cents
+        p_hat_no_cents = 100.0 - p_hat_yes_cents
         candidate = DualSideCandidate(
             market_id=market_id,
             asset=asset,
@@ -307,6 +312,7 @@ class DualSideCandidateGenerator:
             selected_side=selected_side,
             selected_edge_exec_cents=selected_edge_exec,
             p_hat_yes_cents=p_hat_yes_cents,
+            p_hat_no_cents=p_hat_no_cents,
             minutes_to_expiry=market.get("minutes_to_expiry", 0.0),
             yes_rejection_reason=None if yes_passes else yes_reason,
             no_rejection_reason=None if no_passes else no_reason,

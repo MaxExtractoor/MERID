@@ -72,6 +72,12 @@ class VenueOrder:
     post_only: bool = False
     # Source of the order: "agent_grid" for pipeline orders, None for manual/test orders
     source: Optional[str] = None
+    # CRITICAL FIX (2026-07-17): Idempotency and client order ID for duplicate prevention
+    idempotency_key: Optional[str] = None  # Prevents duplicate orders on retry
+    # CRITICAL FIX (2026-07-29): Exit policy parameters for TP/SL enforcement
+    take_profit_price_cents: Optional[int] = None  # Take profit price in cents
+    take_profit_r_multiple: Optional[float] = None  # R-multiple target (e.g., 1.5R, 2.0R)
+    stop_loss_price_cents: Optional[int] = None  # Protective stop in cents
 
 
 @dataclass

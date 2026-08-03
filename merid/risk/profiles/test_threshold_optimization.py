@@ -591,7 +591,8 @@ class TestThresholdOptimization:
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
-            time_of_day_multiplier=1.0
+            time_of_day_multiplier=1.0,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # With Asian session multiplier (0.8)
@@ -599,7 +600,8 @@ class TestThresholdOptimization:
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
-            time_of_day_multiplier=0.8
+            time_of_day_multiplier=0.8,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # Verify that reduced multiplier results in equal or smaller position size
@@ -611,7 +613,8 @@ class TestThresholdOptimization:
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
-            time_of_day_multiplier=1.0
+            time_of_day_multiplier=1.0,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         assert count_us == count_baseline
@@ -631,7 +634,8 @@ class TestThresholdOptimization:
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
-            time_of_day_multiplier=1.0
+            time_of_day_multiplier=1.0,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # Weekend (0.5 multiplier)
@@ -639,7 +643,8 @@ class TestThresholdOptimization:
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
-            time_of_day_multiplier=0.5
+            time_of_day_multiplier=0.5,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # Weekend should have equal or smaller position size

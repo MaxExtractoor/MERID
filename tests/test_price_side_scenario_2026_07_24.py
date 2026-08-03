@@ -42,12 +42,14 @@ class TestPriceSideScenarioBearishCheapYes:
         # Override for scenario: YES=15c, NO=42c
         yes_price_cents = 15
         no_price_cents = 42
-        
+
         # Step 3: Candidate generation (should only evaluate NO)
-        thesis_in_range = (10 <= no_price_cents <= 75)
+        # CRITICAL FIX 2026-08-03: NO uses side-aware range 25c-99c
+        thesis_in_range = (25 <= no_price_cents <= 99)
         assert thesis_in_range, "NO price should be in range for thesis_side=NO"
-        
+
         # YES cheapness should be ignored
+        # YES uses side-aware range 10c-75c
         yes_in_range = (10 <= yes_price_cents <= 75)
         assert yes_in_range, "YES is in range but should be ignored (wrong side)"
         
@@ -110,13 +112,15 @@ class TestPriceSideScenarioBullishCheapNo:
         # Step 2: Market state (cheap NO, fair YES)
         yes_price_cents = 42  # Fair YES
         no_price_cents = 15   # Cheap NO
-        
+
         # Step 3: Candidate generation (should only evaluate YES)
+        # CRITICAL FIX 2026-08-03: YES uses side-aware range 10c-75c
         thesis_in_range = (10 <= yes_price_cents <= 75)
         assert thesis_in_range, "YES price should be in range for thesis_side=YES"
-        
+
         # NO cheapness should be ignored
-        no_in_range = (10 <= no_price_cents <= 75)
+        # NO uses side-aware range 25c-99c
+        no_in_range = (25 <= no_price_cents <= 99)
         assert no_in_range, "NO is in range but should be ignored (wrong side)"
         
         # Step 4: Intent creation
@@ -178,12 +182,14 @@ class TestPriceSideScenarioBothSidesCheap:
         # Step 2: Market state (both cheap)
         yes_price_cents = 15  # Cheap YES
         no_price_cents = 15   # Cheap NO
-        
+
         # Step 3: Candidate generation (should only evaluate NO)
-        thesis_in_range = (10 <= no_price_cents <= 75)
+        # CRITICAL FIX 2026-08-03: NO uses side-aware range 25c-99c
+        thesis_in_range = (25 <= no_price_cents <= 99)
         assert thesis_in_range, "NO price should be in range for thesis_side=NO"
-        
+
         # YES cheapness should be ignored even though it's also cheap
+        # YES uses side-aware range 10c-75c
         yes_in_range = (10 <= yes_price_cents <= 75)
         assert yes_in_range, "YES is in range but should be ignored (wrong side)"
         
@@ -246,13 +252,15 @@ class TestPriceSideScenarioThesisSideOutOfRange:
         # Step 2: Market state (YES out of range, NO in range)
         yes_price_cents = 95  # Out of range
         no_price_cents = 42   # In range (but irrelevant)
-        
+
         # Step 3: Candidate generation (should reject YES out of range)
+        # CRITICAL FIX 2026-08-03: YES uses side-aware range 10c-75c
         thesis_in_range = (10 <= yes_price_cents <= 75)
         assert not thesis_in_range, "YES price out of range should reject"
-        
+
         # NO being in range doesn't matter - thesis_side=YES
-        no_in_range = (10 <= no_price_cents <= 75)
+        # NO uses side-aware range 25c-99c
+        no_in_range = (25 <= no_price_cents <= 99)
         assert no_in_range, "NO is in range but thesis_side=YES so irrelevant"
         
         # Step 4: No intent created (rejected at candidate stage)

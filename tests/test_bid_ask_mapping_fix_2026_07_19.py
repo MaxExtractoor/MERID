@@ -1,27 +1,32 @@
-"""Regression tests for bid/ask mapping fix (2026-07-19).
+"""Regression tests for bid/ask mapping fix (2026-07-19, updated 2026-07-20).
 
 This test verifies the correct mapping of outcome+action to bid/ask per Kalshi semantics:
 - BUY_YES = bid (bidding to buy YES)
 - SELL_YES = ask (asking to sell YES)
-- BUY_NO = ask (equivalent to SELL_YES, both are long NO)
-- SELL_NO = bid (equivalent to BUY_YES, both are long YES)
+- BUY_NO = bid (bidding to buy NO)
+- SELL_NO = ask (asking to sell NO)
 
-Reference: Kalshi quotes everything from YES side.
+CRITICAL FIX (2026-07-20): Previous comments incorrectly claimed BUY_NO=ask/SELL_NO=bid
+This was causing side inversion - buying NO was sent as ask (selling YES), etc.
+The correct mapping is: buy = bid (bidding), sell = ask (asking), regardless of outcome
 """
 
 import pytest
 
 
 def map_outcome_action_to_bid_ask(outcome: str, action: str) -> str:
-    """Replicate the bid/ask mapping logic from client.py for testing."""
+    """Replicate the bid/ask mapping logic from client.py for testing.
+    
+    CRITICAL FIX (2026-07-20): Correct mapping is buy=bid, sell=ask, regardless of outcome
+    """
     if outcome == "yes" and action == "buy":
         return "bid"
     elif outcome == "yes" and action == "sell":
         return "ask"
     elif outcome == "no" and action == "buy":
-        return "ask"
+        return "bid"  # FIXED: buying NO = bidding
     elif outcome == "no" and action == "sell":
-        return "bid"
+        return "ask"  # FIXED: selling NO = asking
     else:
         # Fallback for unexpected combinations
         return "bid"
@@ -38,13 +43,13 @@ class TestBidAskMappingFix:
         """SELL_YES should map to ask (asking to sell YES)."""
         assert map_outcome_action_to_bid_ask("yes", "sell") == "ask"
     
-    def test_buy_no_maps_to_ask(self):
-        """BUY_NO should map to ask (equivalent to SELL_YES, both are long NO)."""
-        assert map_outcome_action_to_bid_ask("no", "buy") == "ask"
+    def test_buy_no_maps_to_bid(self):
+        """BUY_NO should map to bid (bidding to buy NO)."""
+        assert map_outcome_action_to_bid_ask("no", "buy") == "bid"
     
-    def test_sell_no_maps_to_bid(self):
-        """SELL_NO should map to bid (equivalent to BUY_YES, both are long YES)."""
-        assert map_outcome_action_to_bid_ask("no", "sell") == "bid"
+    def test_sell_no_maps_to_ask(self):
+        """SELL_NO should map to ask (asking to sell NO)."""
+        assert map_outcome_action_to_bid_ask("no", "sell") == "ask"
     
     def test_all_combinations_covered(self):
         """Verify all four outcome+action combinations are covered."""
@@ -63,19 +68,21 @@ class TestBidAskMappingFix:
         assert map_outcome_action_to_bid_ask("invalid", "invalid") == "bid"
     
     def test_kalshi_semantics_equivalence(self):
-        """Verify that equivalent trades map to the same bid/ask side.
+        """Verify that buy actions map to bid and sell actions map to ask.
         
-        Kalshi semantics:
-        - BUY_YES and SELL_NO are equivalent (both long YES) → both should be bid
-        - SELL_YES and BUY_NO are equivalent (both long NO) → both should be ask
+        CRITICAL FIX (2026-07-20): The correct semantics are:
+        - buy = bid (bidding), regardless of outcome
+        - sell = ask (asking), regardless of outcome
+        
+        Previous incorrect equivalence claims (BUY_NO=ask/SELL_NO=bid) caused side inversion.
         """
-        # BUY_YES and SELL_NO both map to bid (long YES)
+        # All buy actions map to bid (bidding)
         assert map_outcome_action_to_bid_ask("yes", "buy") == "bid"
-        assert map_outcome_action_to_bid_ask("no", "sell") == "bid"
+        assert map_outcome_action_to_bid_ask("no", "buy") == "bid"
         
-        # SELL_YES and BUY_NO both map to ask (long NO)
+        # All sell actions map to ask (asking)
         assert map_outcome_action_to_bid_ask("yes", "sell") == "ask"
-        assert map_outcome_action_to_bid_ask("no", "buy") == "ask"
+        assert map_outcome_action_to_bid_ask("no", "sell") == "ask"
 
 
 class TestDirectionalConsistency:

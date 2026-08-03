@@ -86,7 +86,7 @@ class ExitPolicyConfig:
     # Take-profit configuration
     take_profit_enabled: bool = True
     take_profit_pct: float = 0.80  # 80% profit target (edge capture ratio) - CRITICAL FIX 2026-07-16: Changed from 0.50 to achieve positive risk/reward
-    min_hold_minutes: float = 2.0  # Minimum hold before TP (prevents noise exits)
+    min_hold_minutes: float = 5.0  # Minimum hold before TP (prevents noise exits) - CRITICAL FIX 2026-07-30: Increased from 2.0 to 5.0 for 15m markets
     
     # Stop-loss configuration
     stop_loss_enabled: bool = True
@@ -164,6 +164,21 @@ class ExitPolicyEngine:
         Returns:
             ExitSignal with exit decision
         """
+        # CRITICAL FIX (2026-08-01): Validate entry_price_cents to prevent division by zero
+        # Invalid entry prices should trigger immediate exit for safety
+        if entry_price_cents is None or entry_price_cents <= 0:
+            logger.error(
+                "[EXIT-POLICY] Invalid entry_price_cents=%s for position - triggering emergency exit for safety",
+                entry_price_cents
+            )
+            return ExitSignal(
+                should_exit=True,
+                reason=ExitReason.MANUAL,
+                message=f"Invalid entry price: {entry_price_cents} - emergency exit for safety",
+                exit_price_cents=current_price_cents,
+                confidence=confidence,
+            )
+        
         # Calculate profit/loss percentage
         if side.lower() == "yes":
             profit_pct = (current_price_cents - entry_price_cents) / entry_price_cents
@@ -207,8 +222,11 @@ class ExitPolicyEngine:
                     )
         
         # Check time stop
+        # CRITICAL FIX: 2026-07-30 - Fixed logic bug: "profit_pct < 0 or profit_pct < 0.05" is redundant
+        # Previous condition always triggered because profit_pct < 0 implies profit_pct < 0.05
+        # New condition: exit only if losing (profit_pct < 0) OR minimal progress (0 <= profit_pct < 0.05)
         if self.config.time_stop_enabled and minutes_held >= self.config.max_hold_minutes:
-            if profit_pct < 0 or profit_pct < 0.05:  # Losing or minimal progress
+            if profit_pct < 0 or (profit_pct >= 0 and profit_pct < 0.05):  # Losing or minimal progress
                 return ExitSignal(
                     should_exit=True,
                     reason=ExitReason.TIME_STOP,

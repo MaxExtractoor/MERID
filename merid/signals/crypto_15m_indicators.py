@@ -161,10 +161,13 @@ class IndicatorConfig:
     max_bars: int = 250                # keep ~4 hours of 1m bars (increased from 120 to support EMA(200))
     # CRITICAL FIX: 2026-07-12 - Adjusted warmup thresholds for RSI(14) and MACD(8,21,5)
     # RSI(14) needs 14 periods, MACD(8,21,5) needs 21 + 5 = 26 periods minimum
-    # Set min_bars_required to 30 to ensure MACD is fully initialized before trading
-    # Previous 20 was insufficient for MACD(8,21,5) which requires 26 bars
-    min_bars_required: int = 30        # 30 bars for MACD(8,21,5) initialization + buffer
-    min_bars_cold_start: int = 1       # Cold start: allow trading with minimal bars during initialization
+    # CRITICAL FIX: 2026-08-01 - Set min_bars_required to 26 to match MACD(8,21,5) requirement exactly
+    # Previous 30 was overly conservative, 26 is sufficient for MACD(8,21,5) which requires 26 bars
+    min_bars_required: int = 26        # 26 bars for MACD(8,21,5) initialization (21 slow + 5 signal)
+    # CRITICAL FIX: 2026-07-16 - REMOVED min_bars_cold_start to prevent warmup bypass
+    # Previous min_bars_cold_start=1 allowed trading with 1 bar, completely bypassing warmup
+    # This caused orders to execute within minutes of startup with insufficient indicator data
+    # All trading now requires full 26-bar warmup period
     min_bars_for_macd: int = 26        # MACD(8,21,5) needs 21 (slow) + 5 (signal) = 26 bars minimum
 
     # ── Fair Value Gap (FVG) detection ────────────────────────────────
@@ -787,20 +790,33 @@ class Crypto15mIndicatorStack:
             self._avg_loss = (self._avg_loss * (self._rsi_period - 1) + loss) / self._rsi_period
 
         # ── MACD update (8-21-5 scalping) ─────────────────────────────
+        # CRITICAL FIX: 2026-08-01 - Fix MACD initialization to prevent zero values
+        # Initialize fast and slow EMAs using SMA for the first period, then switch to EMA
+        # This matches standard TA-Lib and pandas ewm behavior
         if not self._macd_initialized and n >= self.cfg.macd_slow:
             prices_list = list(self._prices)
+            # Initialize fast EMA with SMA of last fast_period prices
             self._macd_ema_fast = sum(prices_list[-self.cfg.macd_fast:]) / self.cfg.macd_fast
+            # Initialize slow EMA with SMA of last slow_period prices
             self._macd_ema_slow = sum(prices_list[-self.cfg.macd_slow:]) / self.cfg.macd_slow
             self._macd_initialized = True
-            # Seed signal line after MACD is available
-            macd_val = self._macd_ema_fast - self._macd_ema_slow
-            self._macd_signal_ema = macd_val
-            self._macd_signal_initialized = True
+            # CRITICAL FIX: Don't initialize signal line yet - need MACD history first
+            # Signal line requires at least signal_period MACD values to compute EMA
+            self._macd_signal_initialized = False
         elif self._macd_initialized:
+            # Update fast and slow EMAs using exponential smoothing
             self._macd_ema_fast = price * self._macd_fast_k + self._macd_ema_fast * (1 - self._macd_fast_k)
             self._macd_ema_slow = price * self._macd_slow_k + self._macd_ema_slow * (1 - self._macd_slow_k)
             macd_val = self._macd_ema_fast - self._macd_ema_slow
-            if self._macd_signal_initialized:
+            
+            # Initialize signal line after we have enough MACD history
+            # Need at least signal_period MACD values before computing signal EMA
+            if not self._macd_signal_initialized and n >= self.cfg.macd_slow + self.cfg.macd_signal:
+                # Initialize signal EMA with the first MACD value
+                self._macd_signal_ema = macd_val
+                self._macd_signal_initialized = True
+            elif self._macd_signal_initialized:
+                # Update signal EMA using exponential smoothing
                 self._macd_signal_ema = macd_val * self._macd_signal_k + self._macd_signal_ema * (1 - self._macd_signal_k)
 
         # ── Chop filter: consecutive closes above/below EMA(50) trend ──
@@ -1093,16 +1109,25 @@ class Crypto15mIndicatorStack:
             snap.rsi_alignment = "15m_only"
 
         # ── 3. MACD (8-21-5 scalping) ─────────────────────────────────
-        if self._macd_initialized and self._macd_signal_initialized:
+        # CRITICAL FIX: 2026-08-01 - Report MACD line even when signal line not yet initialized
+        # This prevents zero MACD values during warmup period
+        if self._macd_initialized:
             snap.macd_line = self._macd_ema_fast - self._macd_ema_slow
-            snap.macd_signal_line = self._macd_signal_ema
-            snap.macd_histogram = snap.macd_line - snap.macd_signal_line
-            snap.macd_histogram_positive = snap.macd_histogram > 0
-            if snap.macd_line > snap.macd_signal_line:
-                snap.macd_cross = "bullish"
-            elif snap.macd_line < snap.macd_signal_line:
-                snap.macd_cross = "bearish"
+            if self._macd_signal_initialized:
+                snap.macd_signal_line = self._macd_signal_ema
+                snap.macd_histogram = snap.macd_line - snap.macd_signal_line
+                snap.macd_histogram_positive = snap.macd_histogram > 0
+                if snap.macd_line > snap.macd_signal_line:
+                    snap.macd_cross = "bullish"
+                elif snap.macd_line < snap.macd_signal_line:
+                    snap.macd_cross = "bearish"
+                else:
+                    snap.macd_cross = "neutral"
             else:
+                # Signal line not yet initialized - set to 0 and cross to neutral
+                snap.macd_signal_line = 0.0
+                snap.macd_histogram = 0.0
+                snap.macd_histogram_positive = False
                 snap.macd_cross = "neutral"
             
             # MACD zero-line filter (2026 research best practices)
@@ -1278,20 +1303,17 @@ class Crypto15mIndicatorStack:
 
         # ── 11. Composite gate ────────────────────────────────────────
         # NOTE: liquidity_ok removed - microstructure handled by unified edge
-        # Cold start: use lower threshold during initialization and bypass volatility gates
-        # During cold start, volatility gates cannot be calculated properly due to insufficient data
-        min_bars_threshold = self.cfg.min_bars_cold_start if snap.bars_available < self.cfg.min_bars_required else self.cfg.min_bars_required
-        if snap.bars_available < self.cfg.min_bars_required:
-            # Cold start: only check bar count, bypass volatility gates
-            snap.trade_allowed = snap.bars_available >= min_bars_threshold
-        else:
-            # Normal operation: check all gates
-            snap.trade_allowed = (
-                snap.vol_gate_ok
-                and snap.atr_move_ok
-                and snap.chop_gate_ok
-                and snap.bars_available >= min_bars_threshold
-            )
+        # CRITICAL FIX: 2026-07-16 - REMOVED cold start bypass logic
+        # Previous cold start logic allowed trading with 1 bar, bypassing 30-bar warmup
+        # Now ALL trading requires full 30-bar warmup and all gates to pass
+        # This prevents orders from executing within minutes of startup with insufficient data
+        min_bars_threshold = self.cfg.min_bars_required
+        snap.trade_allowed = (
+            snap.vol_gate_ok
+            and snap.atr_move_ok
+            and snap.chop_gate_ok
+            and snap.bars_available >= min_bars_threshold
+        )
 
         # ── 12. Edge metrics (if set) ─────────────────────────────────
         snap.kalshi_implied_prob = self._kalshi_implied_prob

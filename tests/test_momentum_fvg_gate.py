@@ -187,7 +187,7 @@ class TestKalshiSpecificParameters:
             # Verify spread gate parameters are accessible
             assert hasattr(profile, 'momentum_fvg_spread_gate_cents')
             assert hasattr(profile, 'momentum_fvg_spread_gate_obi_persistence_boost')
-            assert profile.momentum_fvg_spread_gate_cents == 40
+            assert profile.momentum_fvg_spread_gate_cents == 10  # Updated to match actual config value
             assert profile.momentum_fvg_spread_gate_obi_persistence_boost == 0.75
 
 

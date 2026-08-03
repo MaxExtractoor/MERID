@@ -13,19 +13,21 @@
 # Single Source of Truth for all risk management parameters
 # All caps are percentages of live bankroll unless otherwise specified
 
+# Fixed exposure cap (SINGLE SOURCE OF TRUTH: global slot allocator $1 model)
+# Env var MERID_FIXED_EXPOSURE_CAP_USD overrides this value.
+fixed_exposure_cap_usd: 1.00
+
 # Bankroll-based risk limits for highly correlated crypto assets
 # BTC, ETH, SOL, XRP, DOGE have 0.8+ correlation and are treated as single position
-# Based on 2026 HFT best practices: Quarter Kelly (0.25x) for crypto, 1-3% per trade
+# 2026-07-16: Percentage-based ALLOCATION caps DISABLED (0.0) - the $1 global slot
+# allocator (merid/risk/global_slot_allocator.py) is the single source of truth.
+# pct==0.0 makes UnifiedRiskManager defer to fixed_exposure_cap_usd.
 bankroll:
-  # Maximum total exposure per trading cycle (5% for 15m window)
-  # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (5% per 15m window)
-  # Previous 0.5% was too restrictive for 15m trading, causing all orders to be rejected
-  max_cycle_risk_pct: 0.05
+  # DISABLED - fixed $1 cap via global slot allocator (was 0.05 = 5% per cycle)
+  max_cycle_risk_pct: 0.0
   
-  # Maximum total exposure across all positions (15% total)
-  # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (15% total venue)
-  # This allows 3% per asset across 5 assets (3% × 5 = 15%)
-  max_total_risk_pct: 0.15
+  # DISABLED - fixed $1 cap via global slot allocator (was 0.15 = 15% total)
+  max_total_risk_pct: 0.0
   
   # Maximum daily loss limit (5% - triggers trading halt)
   # Standard institutional practice: 3-5% daily loss limit
@@ -37,11 +39,9 @@ bankroll:
 # Category-level caps
 categories:
   crypto:
-    # Maximum total exposure to crypto category (25% of bankroll)
-    # Increased to 25% to allow 5% per asset across 5 assets (5 × 5% = 25%)
-    # Industry standard: 15-25% for category-level exposure in binary options
-    max_notional_pct: 0.25
-    # Minimum floor in USD (prevents impossibly small caps)
+    # DISABLED - fixed $1 cap via global slot allocator (was 0.25 = 25% of bankroll)
+    max_notional_pct: 0.0
+    # Minimum floor in USD (legacy pct mode only - unused when pct is 0.0)
     min_cap_usd: 100.0
 
 # Correlated stack caps (same underlying across timeframes)
@@ -70,21 +70,18 @@ per_asset:
 
 # Per-trade limits
 per_trade:
-  # Maximum notional for single trade (3% of bankroll)
-  # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (3% per trade)
-  # This is the SINGLE SOURCE OF TRUTH for per-trade risk
-  # All upstream sizing (Kelly fraction, profile per_trade_risk_pct) must align with this value
-  # to prevent systematic rejections due to misalignment
-  max_notional_pct: 0.03
-  # Maximum contracts per trade
-  max_contracts: 10
+  # DISABLED - fixed $1 cap via global slot allocator (was 0.03 = 3% of bankroll)
+  # The $1 global slot allocator enforces per-order exposure (10-75c, 1 contract).
+  max_notional_pct: 0.0
+  # Maximum contracts per trade (slot model: 1 contract per order)
+  max_contracts: 1
 
-# Drawdown limits
+# Drawdown limits (loss guardrails - NOT allocation; percentage of bankroll is correct here)
 drawdown:
-  # Drawdown percentage that triggers trading halt (10%)
-  halt_pct: 0.10
-  # Drawdown percentage that triggers position unwind (15%)
-  unwind_pct: 0.15
+  # Drawdown percentage that triggers trading halt (20% - aligned with profile guardrails)
+  halt_pct: 0.20
+  # Drawdown percentage that triggers position unwind (25% - aligned with profile guardrails)
+  unwind_pct: 0.25
 
 # Rate limiting
 rate_limit:

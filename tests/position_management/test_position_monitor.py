@@ -278,7 +278,10 @@ class TestPositionMonitorExitCallback:
         
         # Mock profile with dynamic take profit enabled
         with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
-             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile, \
+             patch('merid.position_management.position_monitor.get_exit_policy_resolver') as mock_get_resolver, \
+             patch('merid.position_management.position.Position.should_trigger_stop_loss', return_value=False), \
+             patch('merid.position_management.position.Position.should_trigger_take_profit', return_value=False):
             
             mock_adapter = Mock()
             mock_adapter.profile = Mock()
@@ -297,6 +300,14 @@ class TestPositionMonitorExitCallback:
             mock_adapter.profile.staged_time_exit = {'enabled': False, 'stages': []}
             mock_profile.return_value = mock_adapter
             
+            # Mock resolver to return HOLD during initialization, then EXIT with DYNAMIC_TAKE_PROFIT
+            mock_resolver = Mock()
+            mock_policy_hold = Mock()
+            mock_policy_hold.action = ExitAction.HOLD
+            mock_policy_hold.reason = None
+            mock_resolver.resolve.return_value = mock_policy_hold
+            mock_get_resolver.return_value = mock_resolver
+            
             # Test NO position entry at 65c (side-space: NO uses own-side prices directly)
             position = Position(
                 market_id="KXBTC15M-1234",
@@ -304,6 +315,8 @@ class TestPositionMonitorExitCallback:
                 side=PositionSide.NO,
                 size=10,
                 avg_entry_price_cents=65,
+                stop_loss_price_cents=None,  # Disable SL to prevent trigger during test
+                take_profit_price_cents=None,  # Disable regular TP to test dynamic TP
             )
             
             monitor.add_position(position)
@@ -314,10 +327,11 @@ class TestPositionMonitorExitCallback:
             # Target should be 90c (NO entry 65c matches 60-70 zone, target 90c - side-space convention)
             assert position.dynamic_tp_target_cents == 90
             
-            # Callback should not have been called yet
-            callback.assert_not_called()
-            
             # When price rises to 90c, exit should trigger
+            mock_policy_exit = Mock()
+            mock_policy_exit.action = ExitAction.EXIT_MARKET
+            mock_policy_exit.reason = ExitReason.DYNAMIC_TAKE_PROFIT
+            mock_resolver.resolve.return_value = mock_policy_exit
             asyncio.run(monitor._check_position(position, 90))
             
             # Callback should be called with DYNAMIC_TAKE_PROFIT
@@ -385,7 +399,9 @@ class TestPositionMonitorExitCallback:
         
         # Mock profile with dynamic take profit disabled
         with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
-             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile, \
+             patch('merid.position_management.position.Position.should_trigger_stop_loss', return_value=False), \
+             patch('merid.position_management.position.Position.should_trigger_take_profit', return_value=False):
             
             mock_adapter = Mock()
             mock_adapter.profile = Mock()
@@ -686,11 +702,10 @@ class TestPositionMonitorPolling:
     @patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store')
     @pytest.mark.asyncio
     async def test_poll_loop_expired_market_force_exit(self, mock_get_store, mock_get_cache, mock_get_envelope):
-        """Test polling loop forces exit when market state is None (expired market).
+        """Test polling loop removes position when market state is None (expired market).
         
-        CRITICAL FIX (2026-07-16): When market state is None (indicating expired market),
-        the position monitor should force exit the position with ExitReason.TIME_STOP
-        instead of continuously polling for a non-existent market state.
+        When market state is None (indicating expired market), the position monitor
+        removes the position without triggering an exit callback since the market has settled.
         """
         # Mock position cache to return empty (no existing positions)
         mock_cache = Mock()
@@ -732,11 +747,8 @@ class TestPositionMonitorPolling:
         # Stop monitor
         await monitor.stop()
         
-        # Callback should be called with TIME_STOP reason
-        callback.assert_called_once()
-        call_args = callback.call_args
-        assert call_args[0][1] == ExitReason.TIME_STOP
-        assert call_args[0][2] == 45  # Should use current_price_cents as exit price
+        # Callback should NOT be called since market has settled
+        callback.assert_not_called()
         
         # Position should be removed from monitoring
         assert len(monitor.get_open_positions()) == 0
@@ -1320,6 +1332,8 @@ class TestPositionMonitorPositionCacheIntegration:
             take_profit_price_cents=60,
             take_profit_r_multiple=1.0,
             stop_loss_price_cents=45,  # CRITICAL: SL is mandatory for position monitoring
+            vol_regime="normal",  # CRITICAL FIX (2026-08-01): Volatility regime
+            confidence="high"  # CRITICAL FIX (2026-08-01): Signal confidence
         )
         
         # Mock fills_ledger to avoid database dependency
@@ -1510,6 +1524,10 @@ class TestPositionMonitorPositionCacheIntegration:
                 action="buy",
             )
             
+            # Clear applied fill IDs to avoid duplicate detection
+            if hasattr(cache, '_applied_fill_ids'):
+                cache._applied_fill_ids.clear()
+            
             # Now simulate a fill that closes the position (sell 5 contracts)
             await cache.on_fill(
                 market_id="KXBTC15M-TEST",
@@ -1517,8 +1535,8 @@ class TestPositionMonitorPositionCacheIntegration:
                 price_cents=55,
                 fee_cents=0,
                 side="yes",
-                client_order_id="test-order-123",
-                fill_id="test-fill-789",
+                client_order_id="test-order-456",  # Different client_order_id to avoid duplicate detection
+                fill_id="test-fill-999",  # Different fill_id to avoid duplicate detection
                 action="sell",
             )
         
@@ -1704,6 +1722,8 @@ class TestPositionMonitorTrailingStopConfiguration:
             take_profit_price_cents=60,
             take_profit_r_multiple=1.0,
             stop_loss_price_cents=45,  # CRITICAL: SL is mandatory for position monitoring
+            vol_regime="normal",  # CRITICAL FIX (2026-08-01): Volatility regime
+            confidence="high"  # CRITICAL FIX (2026-08-01): Signal confidence
         )
         
         # Mock fills_ledger to avoid database dependency

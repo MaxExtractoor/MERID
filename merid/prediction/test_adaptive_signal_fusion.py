@@ -29,7 +29,7 @@ class TestAdaptiveSignalFusion:
             max_spread_cents=100,
             min_time_to_expiry_s=180,
             max_time_to_expiry_s=900,
-            per_strip_order_limit=200,
+            # CRITICAL FIX: 2026-07-17 - Removed per_strip_order_limit (replaced by $1 exposure cap)
             per_asset_cooldown_s=3  # CRITICAL FIX: 2026-07-12 - Aligned to 3s (was 10s) to match profile YAML
         )
     

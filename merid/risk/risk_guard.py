@@ -69,8 +69,9 @@ class RiskLimits:
     
     # Per-trade limits - MUST be set from live bankroll
     max_single_trade_usd: float = 0.0  # No default - configure from bankroll
-    # 2026-07-10: Lowered from 0.65 to 0.50 to match agent grid confidence calculation (0.5 + edge/100)
-    # Previous value 0.65 was inconsistent with agent grid which produces ~53% confidence
+    # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
+    # Signal generation produces confidence = 0.5 + edge (edge is 0.02-0.08), resulting in 52-58%
+    # Profile YAML is the authoritative source for confidence thresholds
     min_confidence_for_trade: float = 0.50
     
     # Timing limits

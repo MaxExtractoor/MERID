@@ -1,8 +1,8 @@
-"""Unit tests for window-based risk limits (3% per-agent / 5% total venue per 15m window).
+"""Unit tests for slot-based risk limits (fixed $1 exposure cap per 15m window).
 
-CRITICAL FIX (2026-07-07): Window limit check removed from unified_sizing.py.
-Window limits are now enforced ONLY in order_gate.py with ACTUAL order notional.
-These tests now verify the window limit enforcement in order_gate.py instead.
+CRITICAL FIX (2026-07-08): Window-based percentage limits (3% per-agent, 5% total) REMOVED.
+Risk is now enforced via global_slot_allocator with fixed $1.00 exposure cap across all 5 assets.
+These tests verify the slot allocation enforcement in global_slot_allocator.py.
 """
 
 import pytest
@@ -11,241 +11,109 @@ from unittest.mock import MagicMock, patch
 from decimal import Decimal
 
 
-class TestWindowBasedRiskLimits:
-    """Test window-based risk limit enforcement."""
+class TestSlotBasedRiskLimits:
+    """Test slot-based risk limit enforcement (fixed $1 exposure cap)."""
     
-    def test_window_limit_enforced_in_order_gate(self):
-        """Test that window limit is enforced in order_gate.py with actual notional."""
-        with patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_get_envelope:
-            mock_envelope = MagicMock()
-            mock_envelope.check_window_limit.return_value = (False, "per_agent_window_limit")
-            mock_get_envelope.return_value = mock_envelope
-            
-            # Window limit check is now in order_gate.py, not unified_sizing.py
-            # This test verifies the envelope check works correctly
-            assert mock_envelope.check_window_limit.called is False  # Not called in this test setup
-    
-    def test_window_limit_check_uses_actual_notional(self):
-        """Test that window limit check uses actual order notional, not estimate."""
-        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import KalshiCrypto15mRiskEnvelope
+    def test_slot_limit_enforced_in_global_allocator(self):
+        """Test that slot limit is enforced in global_slot_allocator.py with fixed $1 cap."""
+        from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
         
-        # Create envelope with $1000 bankroll
-        # 2026-07-08: Updated to use fixed $1 exposure model
-        envelope = KalshiCrypto15mRiskEnvelope(
-            live_bankroll_usd=1000.0,
-            profile_capital_usd=0.0,
-            max_single_order_notional_usd=1.0,  # Fixed $1 exposure
-            max_total_notional_usd=1.0,  # Fixed $1 exposure
-            max_concurrent_trades=5,
-            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},  # Fixed $1 per asset
-            asset_depth_thresholds={},
-            agent_max_notional_usd=1.0,  # Fixed $1 exposure
-            agent_max_orders_per_window=5,
-            agent_max_yes_position=5,
-            agent_max_no_position=5,
-            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
-            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
-            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
-            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
-            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
-            window_start_ts=0.0,
-            agent_window_exposure_usd={},
-            total_window_exposure_usd=0.0,
-            agent_resting_exposure_usd={},  # Resting orders exposure
-            total_resting_exposure_usd=0.0,  # Total resting orders exposure
-            daily_loss_enabled=True,
-            max_daily_loss_usd=50.0,
-            drawdown_halt_pct=0.15,
-            drawdown_unwind_pct=0.20,
-            peak_equity_usd=1000.0,
-            current_equity_usd=1000.0,
-            current_drawdown_pct=0.0,
-            kelly_fraction=0.02,
-            adaptive_risk_bands=[],
-            per_trade_risk_multiplier=1.0,
-            is_halted=False,
-            current_risk_band=None,
-            resume_if_drawdown_improves=False,
-            correlation_tracking_enabled=False,
-            correlation_threshold=0.5,
-            correlation_multiplier=1.0,
-        )
+        allocator = GlobalSlotAllocator()
         
-        # Test with actual notional ($0.35 for 1 contract at 35c)
-        allowed, reason = envelope.check_window_limit(
+        # Test 1: Allocate first slot (35c)
+        request1 = AllocationRequest(
             agent_id="BTC_15M",
-            order_notional_usd=0.35,
-            current_ts=time.time()
+            asset="BTC",
+            ticker="KXBTC15M-26JUN301900-00",
+            entry_price_cents=35,
+            edge_pct=5.0,
+            spread_cents=2,
+            confidence=0.8  # High confidence
         )
+        allocated1, reason1, slot_id1 = allocator.request_allocation(request1)
+        assert allocated1 is True
+        assert slot_id1 is not None
         
-        # Should be allowed (within $1 per-agent limit)
-        assert allowed is True
-        assert reason == ""
+        # Test 2: Allocate second slot (40c) - should succeed
+        request2 = AllocationRequest(
+            agent_id="ETH_15M",
+            asset="ETH",
+            ticker="KXETH15M-26JUN301900-00",
+            entry_price_cents=40,
+            edge_pct=5.0,
+            spread_cents=2,
+            confidence=0.7  # Medium-high confidence
+        )
+        allocated2, reason2, slot_id2 = allocator.request_allocation(request2)
+        assert allocated2 is True
+        assert slot_id2 is not None
+        
+        # Test 3: Allocate third slot (25c) - should succeed (total = $1.00)
+        request3 = AllocationRequest(
+            agent_id="SOL_15M",
+            asset="SOL",
+            ticker="KXSOL15M-26JUN301900-00",
+            entry_price_cents=25,
+            edge_pct=5.0,
+            spread_cents=2,
+            confidence=0.6  # Medium confidence
+        )
+        allocated3, reason3, slot_id3 = allocator.request_allocation(request3)
+        assert allocated3 is True
+        assert slot_id3 is not None
+        
+        # Test 4: Total exposure = $1.00, should reject next allocation
+        request4 = AllocationRequest(
+            agent_id="XRP_15M",
+            asset="XRP",
+            ticker="KXXRP15M-26JUN301900-00",
+            entry_price_cents=20,
+            edge_pct=5.0,
+            spread_cents=2,
+            confidence=0.9  # High confidence but no slot available
+        )
+        allocated4, reason4, slot_id4 = allocator.request_allocation(request4)
+        assert allocated4 is False
+        assert "insufficient exposure" in reason4.lower()
     
-    def test_window_limit_blocks_exceeding_per_agent_limit(self):
-        """Test that window limit blocks orders exceeding $1 per-agent limit."""
-        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
-            KalshiCrypto15mRiskEnvelope,
-            _reset_shared_window_state_for_testing
-        )
+    def test_exit_orders_bypass_slot_allocation(self):
+        """Test that exit orders bypass slot allocation and free up slots."""
+        from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
         
-        # Reset module-level window state for clean test
-        _reset_shared_window_state_for_testing()
+        allocator = GlobalSlotAllocator()
         
-        # Create envelope with $1000 bankroll
-        # 2026-07-08: Updated to use fixed $1 exposure model
-        envelope = KalshiCrypto15mRiskEnvelope(
-            live_bankroll_usd=1000.0,
-            profile_capital_usd=0.0,
-            max_single_order_notional_usd=1.0,  # Fixed $1 exposure
-            max_total_notional_usd=1.0,  # Fixed $1 exposure
-            max_concurrent_trades=5,
-            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
-            asset_depth_thresholds={},
-            agent_max_notional_usd=1.0,  # Fixed $1 exposure
-            agent_max_orders_per_window=5,
-            agent_max_yes_position=5,
-            agent_max_no_position=5,
-            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
-            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
-            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
-            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
-            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
-            window_start_ts=0.0,
-            agent_window_exposure_usd={"BTC_15M": 0.65},  # Already at $0.65 exposure
-            total_window_exposure_usd=0.65,
-            agent_resting_exposure_usd={},  # Resting orders exposure
-            total_resting_exposure_usd=0.0,  # Total resting orders exposure
-            daily_loss_enabled=True,
-            max_daily_loss_usd=50.0,
-            drawdown_halt_pct=0.15,
-            drawdown_unwind_pct=0.20,
-            peak_equity_usd=1000.0,
-            current_equity_usd=1000.0,
-            current_drawdown_pct=0.0,
-            kelly_fraction=0.02,
-            adaptive_risk_bands=[],
-            per_trade_risk_multiplier=1.0,
-            is_halted=False,
-            current_risk_band=None,
-            resume_if_drawdown_improves=False,
-            correlation_tracking_enabled=False,
-            correlation_threshold=0.5,
-            correlation_multiplier=1.0,
-        )
-        
-        # Record initial exposure in module-level state
-        envelope.record_order_execution(agent_id="BTC_15M", order_notional_usd=0.65)
-        
-        # Try to add $0.40 more (would exceed $1 limit)
-        allowed, reason = envelope.check_window_limit(
+        # Allocate a slot (35c)
+        request1 = AllocationRequest(
             agent_id="BTC_15M",
-            order_notional_usd=0.40,
-            current_ts=time.time()
+            asset="BTC",
+            ticker="KXBTC15M-26JUN301900-00",
+            entry_price_cents=35,
+            edge_pct=5.0,
+            spread_cents=2,
+            confidence=0.8  # High confidence
         )
+        allocated1, reason1, slot_id1 = allocator.request_allocation(request1)
+        assert allocated1 is True
+        assert allocator.get_total_exposure() == 0.35
         
-        # Should be blocked (exceeds $1 limit - either per-agent or total venue)
-        assert allowed is False
-        # When both limits are equal ($1.00), either can trigger first
-        assert "per_agent_window_limit" in reason or "total_venue_window_limit" in reason
-    
-    def test_regime_sizing_multiplier_disabled(self):
-        """Test that regime sizing multiplier is disabled (returns 1.0)."""
-        from merid.prediction.unified_sizing import _get_regime_position_size_multiplier
+        # Exit order should bypass allocation
+        exit_request = AllocationRequest(
+            agent_id="BTC_15M",
+            asset="BTC",
+            ticker="KXBTC15M-26JUN301900-00",
+            entry_price_cents=35,
+            edge_pct=5.0,
+            spread_cents=2,
+            confidence=0.5,  # Default confidence for exit orders
+            is_exit_order=True
+        )
+        allocated_exit, reason_exit, slot_id_exit = allocator.request_allocation(exit_request)
+        assert allocated_exit is True
+        assert slot_id_exit is None  # Exit orders don't get slot IDs
         
-        multiplier = _get_regime_position_size_multiplier()
-        
-        # Should return 1.0 (disabled to prevent interference with risk limits)
-        assert multiplier == 1.0
-    
-    def test_profile_kelly_parameters_exist(self):
-        """Test that kelly.hard_cap and kelly.global_notional_cap_pct exist in profile."""
-        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
-             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_get_profile:
-            mock_profile = MagicMock()
-            mock_profile.kelly_hard_cap = 0.02
-            mock_profile.kelly_global_notional_cap_pct = 0.02
-            mock_adapter = MagicMock()
-            mock_adapter.profile = mock_profile
-            mock_get_profile.return_value = mock_adapter
-            
-            from merid.risk.profiles.crypto_15m_profile import get_active_profile
-            
-            adapter = get_active_profile()
-            profile = adapter.profile
-            
-            # Verify kelly parameters exist with correct values
-            assert profile.kelly_hard_cap == 0.02
-            assert profile.kelly_global_notional_cap_pct == 0.02
-
-
-class TestOrderRouterWindowTracking:
-    """Test order router window tracking integration."""
-    
-    def test_order_execution_records_window_exposure(self):
-        """Test that order execution records window exposure in risk envelope."""
-        with patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_get_envelope, \
-             patch('merid.risk.unified_risk_manager.get_unified_risk_manager') as mock_get_risk:
-            mock_envelope = MagicMock()
-            mock_envelope.record_order_execution = MagicMock()
-            mock_get_envelope.return_value = mock_envelope
-            
-            mock_risk = MagicMock()
-            mock_risk.record_fill = MagicMock()
-            mock_get_risk.return_value = mock_risk
-            
-            # Simulate the window tracking code path from order_router
-            # This is a simplified test of the integration
-            filled_count = 5
-            fill_price_cents = 50
-            order_notional_usd = filled_count * fill_price_cents / 100.0
-            asset = "BTC"
-            agent_id = f"{asset}_15M"
-            
-            # Call the window tracking method
-            mock_envelope.record_order_execution(agent_id, order_notional_usd)
-            
-            # Verify it was called with correct parameters
-            mock_envelope.record_order_execution.assert_called_once_with(agent_id, order_notional_usd)
-    
-    def test_window_tracking_handles_envelope_not_ready(self):
-        """Test that window tracking handles risk envelope not ready gracefully."""
-        with patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_get_envelope:
-            mock_get_envelope.side_effect = RuntimeError("Risk envelope not ready")
-            
-            # Should not raise exception, should log warning and proceed
-            # This is tested by ensuring no exception is raised
-            try:
-                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                envelope = get_kalshi_crypto_15m_risk_envelope()
-            except RuntimeError:
-                # Expected when envelope not ready
-                pass
-
-
-class TestExitPolicyPrecedence:
-    """Test exit policy precedence order documentation."""
-    
-    def test_exit_precedence_documented(self):
-        """Test that exit precedence order is documented in ExitReason."""
-        from merid.position_management.exit_policy import ExitReason
-        
-        # Check that the docstring contains precedence documentation
-        assert "EXIT PRECEDENCE ORDER" in ExitReason.__doc__
-        assert "EXTREME_PROFIT" in ExitReason.__doc__
-        assert "DYNAMIC_TAKE_PROFIT" in ExitReason.__doc__
-        assert "RATCHET_FLOOR" in ExitReason.__doc__
-    
-    def test_critical_exit_reasons_exist(self):
-        """Test that critical exit reasons are defined."""
-        from merid.position_management.exit_policy import ExitReason
-        
-        # Verify critical exit reasons exist
-        assert hasattr(ExitReason, 'EXTREME_PROFIT')
-        assert hasattr(ExitReason, 'RATCHET_FLOOR')
-        assert hasattr(ExitReason, 'RATCHET_TRIM')
-        assert hasattr(ExitReason, 'DYNAMIC_TAKE_PROFIT')
-        assert hasattr(ExitReason, 'TRAIL')
+        # Release the slot
+        allocator.release_slot(slot_id1)
+        assert allocator.get_total_exposure() == 0.0
 
 
 if __name__ == "__main__":

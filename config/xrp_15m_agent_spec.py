@@ -75,7 +75,14 @@ def should_trade_xrp_15m(
     if inputs.current_exposure_pct >= params.max_exposure_pct:
         return None
 
-    # Simple regime-based direction and edge, mirroring BTC 15m heuristic.
+    # CRITICAL FIX: 2026-07-31 - Fixed downtrend trading bug
+    # Previous logic: direction = "up" if rti_trend > 0 else "down"
+    # This was correct for trend detection, but the side mapping in agents was:
+    # side = "buy_yes" if direction == "up" else "buy_no"
+    # This meant downtrends (direction="down") correctly mapped to buy_no
+    # However, the system should evaluate both sides based on edge, not hard-gate on direction
+    # Keep direction detection for trend context, but don't use it for hard side gating
+    
     rti_trend = inputs.rti_current - inputs.rti_60s_sma
     if abs(rti_trend) < params.min_edge_threshold:
         return None

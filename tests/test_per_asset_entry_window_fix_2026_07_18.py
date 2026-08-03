@@ -36,15 +36,11 @@ class TestPerAssetEntryWindowFix:
 
     def test_window_based_entry_limit(self, mock_profile_adapter):
         """Test that window-based entry limit allows only 1 entry per 15-minute window."""
-        # Import route_order_async to access the window tracking
-        from merid.event_venues.kalshi.order_router import route_order_async
-        
-        # Initialize window tracking
-        if not hasattr(route_order_async, '_asset_entry_windows'):
-            route_order_async._asset_entry_windows = {}
+        # Import the module-level window tracking
+        from merid.event_venues.kalshi import order_router
         
         # Clear any existing state
-        route_order_async._asset_entry_windows.clear()
+        order_router._asset_entry_windows.clear()
         
         # Create first order intent for BTC
         intent1 = OrderIntent(
@@ -59,7 +55,7 @@ class TestPerAssetEntryWindowFix:
         # Simulate being in a specific 15-minute window
         now = time.time()
         window_start = int(now // 900) * 900
-        route_order_async._asset_entry_windows["BTC"] = window_start
+        order_router._asset_entry_windows["BTC"] = window_start
         
         # Create second order intent for BTC (same window)
         intent2 = OrderIntent(
@@ -72,11 +68,11 @@ class TestPerAssetEntryWindowFix:
         )
         
         # Verify window is set
-        assert route_order_async._asset_entry_windows.get("BTC") == window_start
+        assert order_router._asset_entry_windows.get("BTC") == window_start
         
         # The second order should be rejected because it's in the same window
         # We can't easily test the full async function, but we can verify the logic
-        last_window = route_order_async._asset_entry_windows.get("BTC", 0)
+        last_window = order_router._asset_entry_windows.get("BTC", 0)
         current_window = int(now // 900) * 900
         
         assert last_window == current_window, "Should be in same window"
@@ -87,19 +83,16 @@ class TestPerAssetEntryWindowFix:
 
     def test_window_reset_after_15_minutes(self, mock_profile_adapter):
         """Test that entry window resets after 15 minutes."""
-        from merid.event_venues.kalshi.order_router import route_order_async
-        
-        # Initialize window tracking
-        if not hasattr(route_order_async, '_asset_entry_windows'):
-            route_order_async._asset_entry_windows = {}
+        # Import the module-level window tracking
+        from merid.event_venues.kalshi import order_router
         
         # Clear any existing state
-        route_order_async._asset_entry_windows.clear()
+        order_router._asset_entry_windows.clear()
         
         # Set window to previous 15-minute window
         now = time.time()
         previous_window = int((now - 900) // 900) * 900  # Previous window
-        route_order_async._asset_entry_windows["BTC"] = previous_window
+        order_router._asset_entry_windows["BTC"] = previous_window
         
         # Current window
         current_window = int(now // 900) * 900
@@ -108,7 +101,7 @@ class TestPerAssetEntryWindowFix:
         assert previous_window != current_window, "Windows should be different"
         
         # The order should be allowed because it's in a new window
-        last_window = route_order_async._asset_entry_windows.get("BTC", 0)
+        last_window = order_router._asset_entry_windows.get("BTC", 0)
         should_reject = (last_window == current_window)
         
         assert not should_reject, "Entry in new window should be allowed"
@@ -131,32 +124,29 @@ class TestPerAssetEntryWindowFix:
 
     def test_different_assets_separate_windows(self):
         """Test that different assets have separate window tracking."""
-        from merid.event_venues.kalshi.order_router import route_order_async
-        
-        # Initialize window tracking
-        if not hasattr(route_order_async, '_asset_entry_windows'):
-            route_order_async._asset_entry_windows = {}
+        # Import the module-level window tracking
+        from merid.event_venues.kalshi import order_router
         
         # Clear any existing state
-        route_order_async._asset_entry_windows.clear()
+        order_router._asset_entry_windows.clear()
         
         # Set windows for different assets
         now = time.time()
         window = int(now // 900) * 900
         
-        route_order_async._asset_entry_windows["BTC"] = window
-        route_order_async._asset_entry_windows["ETH"] = window
-        route_order_async._asset_entry_windows["SOL"] = window
+        order_router._asset_entry_windows["BTC"] = window
+        order_router._asset_entry_windows["ETH"] = window
+        order_router._asset_entry_windows["SOL"] = window
         
         # Verify all assets have windows set
-        assert len(route_order_async._asset_entry_windows) == 3
-        assert route_order_async._asset_entry_windows["BTC"] == window
-        assert route_order_async._asset_entry_windows["ETH"] == window
-        assert route_order_async._asset_entry_windows["SOL"] == window
+        assert len(order_router._asset_entry_windows) == 3
+        assert order_router._asset_entry_windows["BTC"] == window
+        assert order_router._asset_entry_windows["ETH"] == window
+        assert order_router._asset_entry_windows["SOL"] == window
         
         # Each asset should be rejected in its own window
         for asset in ["BTC", "ETH", "SOL"]:
-            last_window = route_order_async._asset_entry_windows.get(asset, 0)
+            last_window = order_router._asset_entry_windows.get(asset, 0)
             should_reject = (last_window == window)
             assert should_reject, f"{asset} should be rejected in current window"
 

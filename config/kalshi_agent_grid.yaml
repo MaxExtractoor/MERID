@@ -28,10 +28,10 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # CRITICAL FIX 2026-07-24: Aligned signal_mode with profile YAML (momentum_fvg)
     # Profile YAML is single source of truth for signal_mode
-    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
-    signal_mode: hybrid
+    # momentum_fvg only - panic fade disabled due to losses by fading trend incorrectly
+    signal_mode: momentum_fvg
   take_profit:
     enabled: true
     # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
@@ -69,10 +69,10 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # CRITICAL FIX 2026-07-24: Aligned signal_mode with profile YAML (momentum_fvg)
     # Profile YAML is single source of truth for signal_mode
-    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
-    signal_mode: hybrid
+    # momentum_fvg only - panic fade disabled due to losses by fading trend incorrectly
+    signal_mode: momentum_fvg
   take_profit:
     enabled: true
     # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
@@ -110,10 +110,10 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # CRITICAL FIX 2026-07-24: Aligned signal_mode with profile YAML (momentum_fvg)
     # Profile YAML is single source of truth for signal_mode
-    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
-    signal_mode: hybrid
+    # momentum_fvg only - panic fade disabled due to losses by fading trend incorrectly
+    signal_mode: momentum_fvg
   take_profit:
     enabled: true
     # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
@@ -145,10 +145,10 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # CRITICAL FIX 2026-07-24: Aligned signal_mode with profile YAML (momentum_fvg)
     # Profile YAML is single source of truth for signal_mode
-    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
-    signal_mode: hybrid
+    # momentum_fvg only - panic fade disabled due to losses by fading trend incorrectly
+    signal_mode: momentum_fvg
     frequency: fifteen_min
   strike_selection:
     # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
@@ -187,10 +187,10 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # CRITICAL FIX 2026-07-24: Aligned signal_mode with profile YAML (momentum_fvg)
     # Profile YAML is single source of truth for signal_mode
-    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
-    signal_mode: hybrid
+    # momentum_fvg only - panic fade disabled due to losses by fading trend incorrectly
+    signal_mode: momentum_fvg
   strike_selection:
     # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
     # Removed max_spot_to_strike_pct to use single source of truth

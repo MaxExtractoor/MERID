@@ -663,7 +663,9 @@ class Top3BatchManager:
         
         CRITICAL FIX (2026-07-07): Added window-based risk limit check to unify
         top 3 gate with window limits. This prevents the top 3 gate from allowing
-        orders that would exceed the 3% per-agent / 5% total venue window limits.
+        orders that would exceed the fixed $1 exposure cap (GlobalSlotAllocator).
+        2026-07-17: Updated comment - percentage-based limits (3% per-agent / 5% total) are DISABLED,
+        system now uses fixed $1 exposure cap via GlobalSlotAllocator.
         
         Args:
             asset: Asset to check (BTC, ETH, SOL, XRP, DOGE)

@@ -27,16 +27,18 @@ class TestSingleExecutionPoint:
             source = f.read()
         
         # Check the execution path (global allocator execution) - should NOT have slot allocation
-        # Find the global allocator execution section (around line 12637 where _kalshi_place_order is called)
+        # Find the global allocator execution loop (where _kalshi_place_order is called)
+        # NOTE: Anchor on the actual execution loop statement, not log markers, because
+        # comments elsewhere in the file may mention GLOBAL-ALLOCATOR-EXECUTE.
         lines = source.split('\n')
         execution_path_lines = []
         
         for i, line in enumerate(lines):
-            # Look for the global allocator execution section
-            if 'GLOBAL-ALLOCATOR-EXECUTE' in line or 'chosen_orders' in line:
+            # Look for the global allocator execution loop
+            if 'for order in chosen_orders' in line:
                 # Capture a section around this line
                 start = max(0, i - 5)
-                end = min(len(lines), i + 50)
+                end = min(len(lines), i + 200)
                 execution_path_lines.extend(lines[start:end])
                 break
         

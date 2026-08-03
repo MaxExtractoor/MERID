@@ -9,8 +9,8 @@ import pytest
 
 
 def test_price_filter_normal_regime():
-    """Test price filter uses canonical range (10c-75c) in normal conditions."""
-    # Simulate normal price conditions (both sides within 15c-85c)
+    """Test price filter uses canonical range (5c-85c) in normal conditions."""
+    # Simulate normal price conditions (both sides within 5c-85c)
     yes_price_cents = 45
     no_price_cents = 55
     

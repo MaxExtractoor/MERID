@@ -438,7 +438,7 @@ def is_tradeable(
     # Strategy-level checks
     not_expired = expiry_time > now_utc
     minutes_to_expiry = (expiry_time - now_utc).total_seconds() / 60
-    within_entry_window = 2.0 <= minutes_to_expiry <= 12.0  # Entry window
+    within_entry_window = 0.5 <= minutes_to_expiry <= 15.0  # Entry window (full 15m window, block last 30s only)
     health_acceptable = health_status in {"ok", "expired"}  # Relaxed
     
     return not_expired and within_entry_window and health_acceptable

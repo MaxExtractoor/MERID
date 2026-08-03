@@ -143,7 +143,7 @@ log_price_range_rejection(
     asset="ETH",
     yes_price_cents=5,
     no_price_cents=95,
-    reason="both sides outside 10c-50c range",
+    reason="both sides outside side-aware ranges (regime=NORMAL)",
 )
 
 # Trend alignment rejection

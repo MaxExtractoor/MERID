@@ -137,17 +137,33 @@ class MakerTakerPolicyEngine:
     # bleeding fees on zero-edge orders. Root cause (velocity-magnitude edges of 0.03%) is
     # fixed upstream: agent_grid_15m now emits probability-based edges (>= 3-5% per asset).
     # Threshold semantics: edge NET of taker fees must exceed this to cross the spread;
-    # otherwise post maker (post_only) and let the swing come to us. 2.0% net-of-taker-fee
-    # aligns with EDGE_MARKET_ENTRY (4% raw) at typical mid-band prices (~1.4% taker fee).
-    AGGRESSIVE_THRESHOLD_PCT = 2.0
-    ARB_MIN_EDGE_PCT = 0.5  # 0.5% minimum for arb legs
+    # otherwise post maker (post_only) and let the swing come to us.
+    # 2026-07-24 FIX: Lowered threshold from 2.0% to 0.5% to enable trade execution.
+    # With current market conditions, 2.0% net-of-taker-fee threshold was too restrictive,
+    # causing orders to be placed as maker orders that never filled. 0.5% allows orders
+    # with 2.0% raw edge (typical current edges) to cross the spread and execute.
+    # CRITICAL FIX (2026-08-01): Increased threshold from 0.5% to 2.0% based on industry research.
+    # Industry standard for profitable binary options trading is 8%+ EV per trade to overcome variance.
+    # 2.0% is a conservative threshold that protects against very low edge trades while still
+    # allowing execution of reasonable signals. This aligns with research showing that below 2% EV,
+    # variance often eats the edge and trades are practically unprofitable.
+    # CRITICAL FIX (2026-08-01 FULL-STACK REMEDIATION): Implemented maker-first strategy with separate thresholds.
+    # Maker fees are 75% lower than taker fees (1.75% vs 7% of notional), so makers should have lower thresholds.
+    # Maker threshold: 0.5% (allows resting orders with modest positive edge)
+    # Taker threshold: 2.0% (requires higher edge to justify crossing spread and paying higher fees)
+    # This aligns with academic research showing makers outperform takers on Kalshi due to fee differential.
+    AGGRESSIVE_THRESHOLD_PCT = 2.0  # Taker threshold (crossing spread)
+    AGGRESSIVE_MAKER_THRESHOLD_PCT = 0.5  # Maker threshold (resting orders)
+    ARB_MIN_EDGE_PCT = 2.0  # 2.0% minimum for arb legs (increased from 0.5% for consistency)
 
     def __init__(
         self,
         aggressive_threshold_pct: float = AGGRESSIVE_THRESHOLD_PCT,
+        aggressive_maker_threshold_pct: float = AGGRESSIVE_MAKER_THRESHOLD_PCT,
         arb_min_edge_pct: float = ARB_MIN_EDGE_PCT,
     ):
         self.aggressive_threshold_pct = aggressive_threshold_pct
+        self.aggressive_maker_threshold_pct = aggressive_maker_threshold_pct
         self.arb_min_edge_pct = arb_min_edge_pct
 
     def decide(
@@ -200,15 +216,18 @@ class MakerTakerPolicyEngine:
 
         if mode == PolicyMode.NEUTRAL_MM:
             # Never cross spread, always maker
+            # CRITICAL FIX (2026-08-01 FULL-STACK REMEDIATION): Use maker threshold for NEUTRAL_MM
+            edge_net_of_maker = edge_pct - maker_fee_pct
+            should_execute = edge_net_of_maker >= self.aggressive_maker_threshold_pct if self.aggressive_maker_threshold_pct > 0 else True
             return RoleDecision(
                 recommended_role=LiquidityRole.MAKER,
                 expected_role=LiquidityRole.MAKER,
-                should_execute=edge_pct > 0,  # Only execute if positive edge
+                should_execute=should_execute,
                 post_only=True,
-                reason=f"NEUTRAL_MM: Maker-only mode. Edge={edge_pct:.2f}%, fee={maker_fee_pct:.3f}%",
-                threshold_pct=0.0,
+                reason=f"NEUTRAL_MM: Maker-only mode. Edge={edge_pct:.2f}%, net_of_maker_fee={edge_net_of_maker:.3f}%, threshold={self.aggressive_maker_threshold_pct:.2f}%",
+                threshold_pct=self.aggressive_maker_threshold_pct,
                 fee_cents_estimate=maker_fee_cents,
-                edge_net_of_fees_pct=edge_pct - maker_fee_pct,
+                edge_net_of_fees_pct=edge_net_of_maker,
             )
 
         elif mode == PolicyMode.AGGRESSIVE_CONVICTION:
@@ -251,7 +270,9 @@ class MakerTakerPolicyEngine:
                 # Use maker to save fees
                 # CRITICAL FIX: 2026-07-05 - Disable should_execute check when threshold is 0.0
                 # This allows velocity-based signals to execute even if edge < fees
-                should_execute = edge_net_of_maker > 0 if self.aggressive_threshold_pct > 0 else True
+                # CRITICAL FIX (2026-08-01 FULL-STACK REMEDIATION): Use separate maker threshold
+                # Maker fees are 75% lower, so we can accept lower edge for resting orders
+                should_execute = edge_net_of_maker >= self.aggressive_maker_threshold_pct if self.aggressive_maker_threshold_pct > 0 else True
                 return RoleDecision(
                     recommended_role=LiquidityRole.MAKER,
                     expected_role=LiquidityRole.MAKER if not crosses_spread else LiquidityRole.TAKER,
@@ -259,9 +280,9 @@ class MakerTakerPolicyEngine:
                     post_only=True,
                     reason=(
                         f"AGGRESSIVE (maker): Edge {edge_pct:.2f}% insufficient to cross. "
-                        f"Net of maker fee: {edge_net_of_maker:.3f}%"
+                        f"Net of maker fee: {edge_net_of_maker:.3f}% (threshold={self.aggressive_maker_threshold_pct:.2f}%)"
                     ),
-                    threshold_pct=self.aggressive_threshold_pct,
+                    threshold_pct=self.aggressive_maker_threshold_pct,
                     fee_cents_estimate=maker_fee_cents,
                     edge_net_of_fees_pct=edge_net_of_maker,
                 )
@@ -287,16 +308,18 @@ class MakerTakerPolicyEngine:
             else:
                 # Edge too small, use maker
                 edge_net_of_maker = edge_pct - maker_fee_pct
+                # CRITICAL FIX (2026-08-01 FULL-STACK REMEDIATION): Use maker threshold for ARB_LEG
+                should_execute = edge_net_of_maker >= self.aggressive_maker_threshold_pct if self.aggressive_maker_threshold_pct > 0 else True
                 return RoleDecision(
                     recommended_role=LiquidityRole.MAKER,
                     expected_role=LiquidityRole.MAKER,
-                    should_execute=edge_net_of_maker > 0,
+                    should_execute=should_execute,
                     post_only=True,
                     reason=(
                         f"ARB_LEG (maker): Edge {edge_pct:.2f}% insufficient for taker. "
-                        f"Using maker. Net: {edge_net_of_maker:.3f}%"
+                        f"Using maker. Net: {edge_net_of_maker:.3f}% (threshold={self.aggressive_maker_threshold_pct:.2f}%)"
                     ),
-                    threshold_pct=self.arb_min_edge_pct,
+                    threshold_pct=self.aggressive_maker_threshold_pct,
                     fee_cents_estimate=maker_fee_cents,
                     edge_net_of_fees_pct=edge_net_of_maker,
                 )

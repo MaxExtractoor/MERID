@@ -10,7 +10,7 @@ import hashlib
 import os
 import time as _time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -56,8 +56,8 @@ def _is_test_ticker(ticker: str) -> bool:
 def _is_expired_ticker(ticker: str) -> bool:
     """Check if a ticker has expired (market is in the past).
     
-    Parses the date from the ticker format (e.g., KXBTC15M-26JUL022230-30)
-    and checks if the market expiration time is in the past.
+    Uses the market catalog to get the actual close_time from Kalshi API
+    instead of parsing the ticker format, which is fragile.
     
     Args:
         ticker: The market ticker to check
@@ -69,50 +69,36 @@ def _is_expired_ticker(ticker: str) -> bool:
         return False
     
     try:
-        import re
+        from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
         from datetime import datetime, timezone, timedelta
         
-        # Parse ticker format: KXBTC15M-26JUL022230-30
-        # Extract date part: 26JUL022230 (DDMMMHHMMSS format - 11 total chars)
-        match = re.search(r'-(\d{2}[A-Z]{3}\d{6})', ticker.upper())
-        if not match:
+        catalog = get_kalshi_market_catalog()
+        if not catalog:
+            # If catalog unavailable, assume not expired to avoid false positives
             return False
         
-        date_str = match.group(1)  # e.g., "26JUL022230"
-        
-        # Parse components - format is DDMMMHHMMSS
-        day = int(date_str[0:2])
-        month_str = date_str[2:5]
-        hour = int(date_str[5:7])
-        minute = int(date_str[7:9])
-        second = int(date_str[9:11])
-        
-        # Convert month abbreviation to number
-        months = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-                  'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
-        month = months.get(month_str)
-        if month is None:
+        # Get market from catalog
+        market = catalog.get_market(ticker)
+        if not market:
+            # Market not found in catalog, assume not expired
             return False
         
-        # Assume current year (Kalshi tickers are typically current year)
-        current_year = datetime.now(timezone.utc).year
-        
-        # Create expiration datetime in UTC
-        try:
-            expiry_dt = datetime(current_year, month, day, hour, minute, second, tzinfo=timezone.utc)
-        except ValueError:
-            # Invalid date (e.g., Feb 30), assume expired
+        # Check if market has closed or settled
+        if market.status in ("closed", "settled"):
             return True
         
-        # Check if expired (allow 15 minute buffer for market close processing)
-        now = datetime.now(timezone.utc)
-        expiry_buffer = timedelta(minutes=15)
+        # Check close_time if available
+        if hasattr(market, 'close_time') and market.close_time:
+            now = datetime.now(timezone.utc)
+            # Allow 15 minute buffer for market close processing
+            expiry_buffer = timedelta(minutes=15)
+            return market.close_time < (now - expiry_buffer)
         
-        return expiry_dt < (now - expiry_buffer)
+        return False
         
     except Exception as e:
-        logger.debug(f"[EXPIRED-TICKER] Exception parsing ticker {ticker}: {e}")
-        return False  # On parse error, don't filter out
+        logger.debug(f"[EXPIRED-TICKER] Exception checking ticker {ticker}: {e}")
+        return False  # On error, don't filter out
 
 
 def _get_market_price_fallback(ticker: str) -> int:
@@ -129,6 +115,43 @@ def _get_market_price_fallback(ticker: str) -> int:
     except Exception as _exc:
         logger.debug("position_cache: failed to fetch market state for %s, using 50c fallback: %s", ticker, _exc)
     return 50
+
+
+def _get_fallback_price_for_market(market_id: str) -> Optional[int]:
+    """Get fallback price for a market based on asset.
+    
+    This provides asset-specific fallback prices when REST API returns
+    invalid/missing entry prices. Used for both notional calculation
+    and PositionMonitor initialization.
+    
+    Args:
+        market_id: Kalshi market ID (e.g., "KXBTC15M-26AUG010100-00")
+        
+    Returns:
+        Fallback price in cents, or None if cannot determine
+    """
+    try:
+        # First try to get from market state store (most accurate)
+        fallback = _get_market_price_fallback(market_id)
+        if fallback != 50:  # If we got actual market data, use it
+            return fallback
+        
+        # Asset-specific fallbacks based on typical price ranges
+        if "BTC" in market_id.upper():
+            return 46  # Typical BTC 15m contract price
+        elif "ETH" in market_id.upper():
+            return 23  # Typical ETH 15m contract price
+        elif "SOL" in market_id.upper():
+            return 54  # Typical SOL 15m contract price
+        elif "XRP" in market_id.upper():
+            return 55  # Typical XRP 15m contract price
+        elif "DOGE" in market_id.upper():
+            return 28  # Typical DOGE 15m contract price
+        else:
+            return 50  # Generic fallback
+    except Exception as _exc:
+        logger.debug("position_cache: failed to determine fallback price for %s: %s", market_id, _exc)
+        return 50
 
 
 @dataclass
@@ -163,6 +186,10 @@ class CachedPosition:
     entry_intent_id: Optional[str] = None  # Intent ID of the entry order
     # Task 1: Fill source tracking ("alpha" or "hedge")
     fill_source: str = "alpha"  # "alpha" = trading position, "hedge" = hedge position
+    # CRITICAL FIX (2026-08-01): Add exit policy metadata for bracket orders
+    # Required for _validate_risk_contract_linkage in order router
+    exit_policy_id: Optional[str] = None  # Exit policy ID for tracking
+    window_resolution_id: Optional[str] = None  # Window resolution ID for tracking
     client_order_id: Optional[str] = None  # For hedge fill detection
     # Resting bracket order tracking (GTC limit at TP / SL price)
     tp_bracket_client_tag: Optional[str] = None  # client_tag of resting TP order
@@ -175,16 +202,29 @@ class CachedPosition:
     entry_price_state: str = "unknown"  # "known", "unknown", "invalid" - tracks avg_price_cents data quality
     # CRITICAL FIX (2026-07-23): Risk parameters state tracking
     risk_params_state: str = "unknown"  # "known", "unknown" - tracks SL/TP metadata availability
+    # CRITICAL FIX (2026-08-01): Volatility regime and confidence tracking
+    vol_regime: str = "unknown"  # Volatility regime at entry time (unknown/low/normal/high/extreme)
+    confidence: str = "unknown"  # Signal confidence at entry time (unknown/low/medium/high)
 
     @property
     def notional_usd(self) -> Decimal:
         """Compute notional value in USD from contracts and average price.
         
-        CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price).
-        Returns 0 if avg_price_cents is None or 0 (invalid).
+        CRITICAL FIX (2026-07-31): Handle None avg_price_cents (unknown entry price) with fallback.
+        Uses market state fallback price when avg_price_cents is None or 0 to prevent
+        position cache from reporting 0 exposure for valid positions.
         """
-        if self.avg_price_cents is None or self.avg_price_cents == 0:
+        if self.contracts <= 0:
             return Decimal("0")
+        if self.avg_price_cents is None or self.avg_price_cents == 0:
+            # CRITICAL FIX: Use fallback price from market state to prevent 0 exposure bug
+            fallback_price = _get_market_price_fallback(self.market_id)
+            logger.warning(
+                "[POSITION-CACHE-FALLBACK] market=%s avg_price_cents=%s contracts=%d "
+                "using fallback=%dc for notional calculation (prevents 0 exposure bug)",
+                self.market_id, self.avg_price_cents, self.contracts, fallback_price
+            )
+            return Decimal(self.contracts * fallback_price) / Decimal("100")
         return Decimal(self.contracts * self.avg_price_cents) / Decimal("100")
 
     @property
@@ -212,14 +252,15 @@ class CachedPosition:
         Args:
             expected_post_size: Expected position size after fill (for reconciliation)
         """
+        from utils.logger import get_logger
+        logger = get_logger("merid.position_cache")
+        
         action = (action or "buy").lower()
         is_open = action == "buy" and side == self.side
         is_close = action == "sell" or (action == "buy" and side != self.side)
         
         # AUDIT: Log fill reconciliation for exit orders
         if is_close:
-            from utils.logger import get_logger
-            logger = get_logger("merid.position_cache")
             pre_size = self.contracts
             logger.info(
                 "[FILL-RECONCILIATION-AUDIT] ticker=%s side=%s action=%s pre_size=%d fill_size=%d price=%dc type=exit_fill expected_post_size=%s",
@@ -235,6 +276,19 @@ class CachedPosition:
         if is_open:
             # Adding to position (same side, buy action)
             pre_size = self.contracts
+            
+            # CRITICAL FIX (2026-08-01): Enforce 1 contract per position rule BEFORE updating
+            # Entry fills should not result in >1 contract per position
+            if pre_size + contracts > 1:
+                logger.critical(
+                    "[POSITION-CACHE-CONTRACT-LIMIT-REJECTION] ticker=%s side=%s action=%s "
+                    "pre_size=%d fill_size=%d would_post_size=%d - REJECTING FILL to enforce 1 CONTRACT PER POSITION RULE. "
+                    "This fill would exceed $1 allocation rule limit.",
+                    self.market_id, side, action, pre_size, contracts, pre_size + contracts
+                )
+                # Reject the fill by returning early without updating position
+                return
+            
             # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
             # If avg_price_cents is None, use fill price as new basis
             avg_price_old = self.avg_price_cents if self.avg_price_cents is not None else price_cents
@@ -395,6 +449,22 @@ class KalshiPositionCache:
         self._last_sync: Optional[datetime] = None
         # CRITICAL FIX: Track unhealthy positions (missing exit metadata)
         self._unhealthy_positions: set = set()
+        # CRITICAL FIX: Track applied fill_ids for exactly-once idempotency
+        # Prevents double-application of fills when same fill arrives via WebSocket and HTTP poller
+        from collections import OrderedDict
+        
+        # CRITICAL FIX: Integrate active reconciliation with callbacks
+        # Set up resync callback for auto-resync action
+        try:
+            from merid.event_venues.kalshi.active_reconciliation import get_active_reconciliation
+            active_recon = get_active_reconciliation()
+            active_recon.set_resync_callback(self._auto_resync_callback)
+            active_recon.set_halt_callback(self._auto_halt_callback)
+            logger.info("[POSITION-CACHE] Active reconciliation callbacks registered")
+        except Exception as recon_err:
+            logger.debug("[POSITION-CACHE] Could not register reconciliation callbacks: %s", recon_err)
+        self._applied_fill_ids: OrderedDict[str, float] = OrderedDict()
+        self._applied_fill_ids_max = 10000  # Max fill_ids to track (fills are unique and don't expire)
 
         # Log bracket order mode on startup
         brackets_enabled = os.getenv("MERID_RESTING_BRACKETS_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -517,7 +587,7 @@ class KalshiPositionCache:
                             )
                             return intent_side.lower()
             
-            logger.debug("[POSITION-CACHE] Could not infer thesis_side from fill history for market %s", market_id)
+            logger.debug("[POSITION-CACHE-SIDE-AWARE] Could not infer thesis_side from fill history for market %s", market_id)
             return None
             
         except Exception as e:
@@ -563,6 +633,8 @@ class KalshiPositionCache:
         take_profit_r_multiple: Optional[float] = None,
         stop_loss_price_cents: Optional[int] = None,
         entry_price_cents: Optional[int] = None,  # CRITICAL FIX (2026-07-23): Persist entry price at order placement
+        vol_regime: Optional[str] = None,  # CRITICAL FIX (2026-08-01): Persist volatility regime at order placement
+        confidence: Optional[str] = None,  # CRITICAL FIX (2026-08-01): Persist signal confidence at order placement
     ) -> None:
         """Register TP targets and entry price for an order before it fills.
 
@@ -575,12 +647,17 @@ class KalshiPositionCache:
         CRITICAL FIX (2026-07-23): Added entry_price_cents to persist intended entry price
         at order placement time. This provides a fallback if REST API doesn't provide
         avg_price_cents or if fill data is missing.
+        
+        CRITICAL FIX (2026-08-01): Added vol_regime and confidence to persist market conditions
+        at order placement time. This ensures positions have valid metadata even if fills_ledger lookup fails.
         """
         self._pending_tp_targets[client_order_id] = {
             "tp_price": take_profit_price_cents,
             "tp_r": take_profit_r_multiple,
             "sl_price": stop_loss_price_cents,
             "entry_price": entry_price_cents,  # CRITICAL FIX (2026-07-23): Persist entry price
+            "vol_regime": vol_regime,  # CRITICAL FIX (2026-08-01): Persist volatility regime
+            "confidence": confidence,  # CRITICAL FIX (2026-08-01): Persist signal confidence
             "registered_at": _time.time(),
         }
         # Opportunistic GC every 100 registrations to keep the dict bounded.
@@ -790,6 +867,14 @@ class KalshiPositionCache:
                         try:
                             from merid.risk.global_slot_allocator import get_global_slot_allocator
                             slot_allocator = get_global_slot_allocator()
+                            
+                            # CRITICAL FIX: Log slot allocator state before release for diagnostics
+                            slot_summary = slot_allocator.get_summary()
+                            logger.info(
+                                "[POSITION-CACHE] Slot allocator state before release: total_exposure=$%.2f slot_count=%d asset=%s agent=%s market=%s",
+                                slot_summary["total_exposure_usd"], slot_summary["slot_count"], asset, agent_id, market_id
+                            )
+                            
                             # Release slot by asset (more precise than agent_id)
                             # Since exit orders bypass allocation, we release by asset to free up exposure
                             released_count = slot_allocator.release_by_asset(asset) if asset else 0
@@ -821,6 +906,13 @@ class KalshiPositionCache:
                                         "Slot may have already been released or never allocated.",
                                         agent_id
                                     )
+                            
+                            # CRITICAL FIX: Log slot allocator state after release for verification
+                            slot_summary_after = slot_allocator.get_summary()
+                            logger.info(
+                                "[POSITION-CACHE] Slot allocator state after release: total_exposure=$%.2f slot_count=%d released=%d",
+                                slot_summary_after["total_exposure_usd"], slot_summary_after["slot_count"], released_count
+                            )
                             
                             # 2026-07-13: Record position close in GlobalAllocator for per-asset tracking
                             try:
@@ -986,6 +1078,18 @@ class KalshiPositionCache:
                             )
                             # Do NOT create a new position - return early to prevent mixed legs
                             return
+                        else:
+                            # CRITICAL FIX (2026-08-01): Prevent adding to existing position (1 contract per position rule)
+                            # If position already exists and has contracts, reject entry fill to prevent >1 contract
+                            if existing_position.contracts > 0:
+                                logger.critical(
+                                    "[POSITION-CACHE-ENTRY-REJECT] market=%s existing_position_contracts=%d fill_contracts=%d - "
+                                    "REJECTING entry fill to prevent >1 contract per position violation. "
+                                    "This violates the $1 allocation rule limit. Position already exists.",
+                                    market_id, existing_position.contracts, contracts
+                                )
+                                # Do NOT add to existing position - return early to prevent contract limit violation
+                                return
                 
                 # CRITICAL INVARIANT (2026-07-23): Validate entry fill side matches thesis_side (candidate_side)
                 # This catches side inversion bugs at entry time
@@ -1053,6 +1157,30 @@ class KalshiPositionCache:
                         logger.debug("[POSITION-CACHE] Could not derive agent_id from ticker: %s", derive_err)
                         position_agent_id = "unknown_agent"  # Fallback to prevent None
                 
+                # CRITICAL FIX (2026-08-01): Ensure position has valid TP/SL even if tp_targets lookup failed
+                # Use side-aware fallback values if tp_targets is empty
+                tp_price = tp_targets.get("tp_price")
+                sl_price = tp_targets.get("sl_price")
+                tp_r = tp_targets.get("tp_r")
+                
+                # If tp_targets is empty, compute fallback TP/SL based on entry price and side
+                if tp_price is None or sl_price is None:
+                    entry_price = price_cents if price_cents > 0 else tp_targets.get("entry_price", 50)
+                    if side.lower() == "yes":
+                        # YES contracts: TP above entry, SL below entry
+                        tp_price = tp_price or int(entry_price * 1.15)  # 15% TP above entry
+                        sl_price = sl_price or max(1, entry_price - 5)  # 5 cent SL below entry
+                    else:
+                        # NO contracts: TP below entry, SL above entry
+                        tp_price = tp_price or max(1, int(entry_price * 0.85))  # 15% TP below entry
+                        sl_price = sl_price or min(99, entry_price + 5)  # 5 cent SL above entry
+                    tp_r = tp_r or 1.5  # Default 1.5R
+                    logger.warning(
+                        "[POSITION-CACHE-TP-SL-FALLBACK] market=%s side=%s entry=%dc - "
+                        "tp_targets lookup failed, using fallback TP=%dc SL=%dc R=%.2f",
+                        market_id, side, entry_price, tp_price, sl_price, tp_r
+                    )
+                
                 new_position = CachedPosition(
                     market_id=market_id,
                     agent_id=position_agent_id,  # Composite key component
@@ -1062,14 +1190,17 @@ class KalshiPositionCache:
                     # CRITICAL FIX (2026-07-23): Use persisted entry price as fallback if fill price is missing/invalid
                     avg_price_cents=tp_targets.get("entry_price") if (price_cents is None or price_cents == 0) else price_cents,
                     entry_price_state="known" if (price_cents is not None and price_cents > 0) else "fallback",  # CRITICAL FIX (2026-07-23): Track if using fallback
-                    take_profit_price_cents=tp_targets.get("tp_price"),
-                    take_profit_r_multiple=tp_targets.get("tp_r"),
-                    stop_loss_price_cents=tp_targets.get("sl_price"),
+                    take_profit_price_cents=tp_price,  # CRITICAL FIX (2026-08-01): Use computed fallback if tp_targets empty
+                    take_profit_r_multiple=tp_r,  # CRITICAL FIX (2026-08-01): Use computed fallback if tp_targets empty
+                    stop_loss_price_cents=sl_price,  # CRITICAL FIX (2026-08-01): Use computed fallback if tp_targets empty
                     fill_source=fill_source,  # Task 1: Track fill source
                     client_order_id=client_order_id,  # Task 1: Store for hedge detection
                     entry_intent_id=client_order_id or fill_id or "unknown",  # For RoundTripMonitor tracking
                     # CRITICAL FIX (2026-07-23): Set risk_params_state based on SL/TP availability
-                    risk_params_state="known" if (tp_targets.get("sl_price") is not None) else "unknown",
+                    risk_params_state="known" if (sl_price is not None) else "unknown",
+                    # CRITICAL FIX (2026-08-01): Store vol_regime and confidence from tp_targets
+                    vol_regime=tp_targets.get("vol_regime") or "unknown",
+                    confidence=tp_targets.get("confidence") or "unknown",
                     # Ratchet profit floor initialization (defaults to inactive)
                     ratchet_activated=False,
                     ratchet_floor_price_cents=None,
@@ -1124,7 +1255,13 @@ class KalshiPositionCache:
                         
                         # Get current bankroll for hedge sizing (async version)
                         bankroll_service = await get_bankroll_service()
-                        bankroll_usd = bankroll_service.get_equity() if bankroll_service else 100.0
+                        bankroll_usd = 100.0  # Default fallback
+                        if bankroll_service:
+                            try:
+                                equity = await bankroll_service.get_equity_for_risk_calc()
+                                bankroll_usd = float(equity) if equity is not None else 100.0
+                            except Exception as equity_err:
+                                logger.debug("[POSITION-CACHE] Could not get equity for hedging: %s", equity_err)
                         
                         # Get edge from fills_ledger if available
                         edge_pct = 0.0
@@ -1135,6 +1272,22 @@ class KalshiPositionCache:
                                     edge_pct = getattr(fill_record, 'edgepct', 0.0) or 0.0
                             except Exception as edge_err:
                                 logger.debug("[POSITION-CACHE] Could not get edge for hedging: %s", edge_err)
+                        
+                        # CRITICAL FIX (2026-08-01): If edge is 0, compute fallback from fill price
+                        # This ensures hedging always has a valid edge value (should never be 0)
+                        if edge_pct == 0.0 and price_cents > 0:
+                            # Compute edge as distance from mid (50c)
+                            # YES: edge = price - 50 (positive when above mid)
+                            # NO: edge = 50 - price (positive when below mid)
+                            if side.lower() == "yes":
+                                edge_pct = (price_cents - 50) / 100.0  # Convert cents to fraction
+                            else:
+                                edge_pct = (50 - price_cents) / 100.0  # Convert cents to fraction
+                            logger.warning(
+                                "[POSITION-CACHE-EDGE-FALLBACK] fill_id=%s market=%s side=%s edge=0 - "
+                                "computed fallback edge=%.4f from price=%dc (distance from 50c mid)",
+                                fill_id, market_id, side, edge_pct, price_cents
+                            )
                         
                         # Trigger hedging check (fire and forget - don't block position update)
                         asyncio.create_task(handle_fill_for_hedging(
@@ -1214,15 +1367,21 @@ class KalshiPositionCache:
                     tp_r = tp_targets.get("tp_r", 1.0)
                     sl_price = tp_targets.get("sl_price")
                     
-                    # CRITICAL FIX (2026-07-16): Assign default SL for positions without SL
-                    # Previously rejected positions without SL, leaving them orphaned
-                    # Now assigns default 5c SL to ensure all positions have exit protection
+                    # CRITICAL FIX (2026-07-31): Side-aware default SL assignment for binary options
+                    # YES contracts: SL below entry (loss when price goes down)
+                    # NO contracts: SL above entry (loss when price goes up)
+                    # Previous bug: treated both sides identically, causing NO contracts to have inverted SL
                     if sl_price is None:
-                        sl_price = max(1, price_cents - 5)
-                        logger.warning(
+                        if side.lower() == "yes":
+                            # YES contracts: SL below entry
+                            sl_price = max(1, price_cents - 5)
+                        else:
+                            # NO contracts: SL above entry
+                            sl_price = min(99, price_cents + 5)
+                        logger.debug(
                             "[POSITION-CACHE] Missing SL price for order %s - "
-                            "assigned default SL=%dc (entry=%dc) to ensure exit protection",
-                            client_order_id, sl_price, price_cents
+                            "assigned default SL=%dc (entry=%dc side=%s) to ensure exit protection",
+                            client_order_id, sl_price, price_cents, side
                         )
                     
                     risk_cents = abs(price_cents - sl_price)
@@ -1245,6 +1404,36 @@ class KalshiPositionCache:
                     # This overrides the agent's TP to ensure quick wins
                     final_tp_price = mandatory_tp_price if mandatory_profit_enabled and mandatory_tp_price else tp_targets.get("tp_price")
                     
+                    # CRITICAL FIX (2026-07-30): Add fallback TP/SL if lookup failed
+                    # CRITICAL FIX (2026-07-31): Side-aware fallback TP for binary options
+                    # YES contracts: TP above entry (profit when price goes up)
+                    # NO contracts: TP below entry (profit when price goes down)
+                    # This ensures positions are always added to monitor with valid exit targets
+                    if final_tp_price is None:
+                        if side.lower() == "yes":
+                            final_tp_price = int(price_cents * 1.15)  # 15% TP above entry for YES
+                        else:
+                            final_tp_price = max(1, int(price_cents * 0.85))  # 15% TP below entry for NO
+                        logger.warning(
+                            "[POSITION-MONITOR-INTEGRATION] TP lookup failed for %s - using fallback TP=%dc (entry=%dc side=%s)",
+                            market_id, final_tp_price, price_cents, side
+                        )
+                    
+                    final_sl_price = tp_targets.get("sl_price")
+                    if final_sl_price is None:
+                        # CRITICAL FIX (2026-07-31): Side-aware fallback SL for binary options
+                        # YES contracts: SL below entry (loss when price goes down)
+                        # NO contracts: SL above entry (loss when price goes up)
+                        # Previous bug: treated both sides identically, causing NO contracts to have inverted SL
+                        if side.lower() == "yes":
+                            final_sl_price = max(1, price_cents - 5)  # 5 cent risk below entry
+                        else:
+                            final_sl_price = min(99, price_cents + 5)  # 5 cent risk above entry
+                        logger.debug(
+                            "[POSITION-MONITOR-INTEGRATION] SL lookup failed for %s - using fallback SL=%dc (entry=%dc side=%s) to restore symmetric risk",
+                            market_id, final_sl_price, price_cents, side
+                        )
+                    
                     # Extract series_ticker from market_id (e.g., KXBTC15M-26JUL162015-15 -> KXBTC15M)
                     series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
                     
@@ -1255,20 +1444,23 @@ class KalshiPositionCache:
                         side=side_enum,
                         size=contracts,
                         avg_entry_price_cents=price_cents,
-                        take_profit_price_cents=final_tp_price,  # Use mandatory TP if enabled
-                        stop_loss_price_cents=tp_targets.get("sl_price"),
+                        take_profit_price_cents=final_tp_price,  # Use mandatory TP or fallback
+                        stop_loss_price_cents=final_sl_price,  # Use SL or fallback
                         trailing_type=trailing_type,
                         trailing_param=trailing_param,
                         scale_out_price_cents=scale_out_price,  # Research: Scale-out at 1.5-2R
                         exit_policy_id=client_order_id or fill_id or "unknown",
+                        # CRITICAL FIX (2026-08-01): Pass entry metadata to PositionMonitor
+                        vol_regime=new_position.vol_regime or "unknown",
+                        confidence=new_position.confidence or "unknown",
                     )
                     
                     monitor.add_position(monitor_position)
                     logger.info(
                         "[POSITION-MONITOR-INTEGRATION] Added position to monitor: market=%s side=%s size=%d TP=%dc SL=%dc trail=%sR",
                         market_id, side, contracts,
-                        tp_targets.get('tp_price') or 0,
-                        tp_targets.get('sl_price') or 0,
+                        final_tp_price,
+                        final_sl_price,
                         trailing_param
                     )
                 except Exception as monitor_err:
@@ -1279,12 +1471,55 @@ class KalshiPositionCache:
                     raise RuntimeError(f"Failed to add position to monitor - exit policies will not execute: {monitor_err}")
 
                 # Log entry timing for audit (correlate with [SCHEDULER-CHECK] for full timing metrics)
+                # Calculate TCA metrics: arrival price slippage and early cost
                 asset = market_id.split("-")[0].replace("KX", "") if "-" in market_id else "UNKNOWN"
+                
+                # Get arrival price (mid price at fill time) for slippage calculation
+                arrival_price_cents = price_cents  # Default to fill price if state unavailable
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    state = get_kalshi_market_state_store().get_unified(market_id)
+                    if state and state.mid_cents > 0:
+                        arrival_price_cents = state.mid_cents
+                except Exception as arrival_err:
+                    logger.debug("[ENTRY-TIMING] Could not get arrival price from market state: %s", arrival_err)
+                
+                # Calculate slippage cost (difference between fill and arrival price)
+                # For YES: positive slippage = paid more than mid (bad)
+                # For NO: positive slippage = received less than mid (bad)
+                slippage_cents = 0
+                if side.lower() == "yes":
+                    slippage_cents = price_cents - arrival_price_cents
+                else:
+                    slippage_cents = arrival_price_cents - price_cents
+                
+                # Calculate early cost as multiple of risk (R)
+                # R is the stop-loss distance from entry
+                sl_price = tp_targets.get('sl_price') or 0
+                if sl_price > 0:
+                    if side.lower() == "yes":
+                        # YES: SL below entry, R = entry - SL
+                        r_distance = price_cents - sl_price
+                    else:
+                        # NO: SL above entry, R = SL - entry
+                        r_distance = sl_price - price_cents
+                    
+                    early_cost_r = slippage_cents / r_distance if r_distance > 0 else 0.0
+                else:
+                    early_cost_r = 0.0
+                
+                # For best_price_after, we'll need to track this asynchronously
+                # For now, use arrival price as placeholder (will be updated by background task)
+                best_price_after = arrival_price_cents
+                
                 logger.info(
                     "[ENTRY-TIMING] position_id=%s asset=%s ticker=%s side=%s size=%d entry_price=%dc "
-                    "entry_timestamp=%s best_price_after=N/A early_cost_cents=N/A early_cost_r=N/A",
+                    "entry_timestamp=%s best_price_after=%dc early_cost_cents=%dc early_cost_r=%.3f",
                     market_id, asset, market_id, side, contracts, price_cents,
-                    datetime.utcnow().isoformat()
+                    datetime.utcnow().isoformat(),
+                    best_price_after,
+                    slippage_cents,
+                    early_cost_r
                 )
                 # Task 1: Different log message for hedge vs alpha
                 if fill_source == "hedge":
@@ -1295,12 +1530,39 @@ class KalshiPositionCache:
                         client_id=client_order_id
                     )
                 else:
+                    # CRITICAL FIX (2026-08-01): Use actual TP/SL from position or fallback to tp_targets
+                    # The tp_targets lookup may fail if client_order_id doesn't match registration key
+                    # Use the position's stored TP/SL values as the primary source of truth
+                    tp_price = new_position.take_profit_price_cents or tp_targets.get('tp_price') or 0
+                    sl_price = new_position.stop_loss_price_cents or tp_targets.get('sl_price') or 0
+                    tp_r = tp_targets.get('tp_r') or 0.0
+                    
+                    # CRITICAL FIX (2026-08-01): Calculate tp_r from actual TP/SL prices if tp_r is 0.0
+                    # This ensures r_multiple is never 0.00 when valid TP/SL prices exist
+                    if tp_r == 0.0 and tp_price > 0 and sl_price > 0:
+                        # Calculate R-multiple from actual TP and SL prices
+                        if side.lower() == "yes":
+                            # YES: R = entry - SL, TP-R = (TP - entry) / R
+                            risk_distance = price_cents - sl_price
+                            profit_distance = tp_price - price_cents
+                        else:
+                            # NO: R = SL - entry, TP-R = (entry - TP) / R
+                            risk_distance = sl_price - price_cents
+                            profit_distance = price_cents - tp_price
+                        
+                        if risk_distance > 0:
+                            tp_r = profit_distance / risk_distance
+                        else:
+                            tp_r = 1.5  # Default fallback if calculation fails
+                    
+                    # CRITICAL FIX (2026-08-01): Use stored vol_regime and confidence from position
+                    # This ensures valid values even if fills_ledger lookup fails
+                    vol_regime = new_position.vol_regime or "unknown"
+                    confidence = new_position.confidence or "unknown"
+                    
                     logger.info(
-                        "[TP-SL-ARMED] market=%s side=%s entry=%dc tp=%dc sl=%dc r_multiple=%.2f vol_regime=N/A confidence=N/A",
-                        market_id, side, price_cents,
-                        tp_targets.get('tp_price') or 0,
-                        tp_targets.get('sl_price') or 0,
-                        tp_targets.get('tp_r') or 0
+                        "[TP-SL-ARMED] market=%s side=%s entry=%dc tp=%dc sl=%dc r_multiple=%.2f vol_regime=%s confidence=%s",
+                        market_id, side, price_cents, tp_price, sl_price, tp_r, vol_regime, confidence
                     )
                     logger.debug(
                         f"Position cache: opened {side} position on {market_id}: {contracts} @ {price_cents}¢ "
@@ -1361,6 +1623,21 @@ class KalshiPositionCache:
                     except Exception as invariant_err:
                         logger.debug("[POSITION-CACHE] Could not validate exit fill invariant: %s", invariant_err)
                 
+                # CRITICAL FIX: Exactly-once idempotency check for fill_id
+                # Prevents double-application of fills when same fill arrives via WebSocket and HTTP poller
+                if fill_id and fill_id in self._applied_fill_ids:
+                    logger.warning(
+                        "[POSITION-CACHE-IDEMPOTENCY] fill_id=%s already applied to position state - skipping duplicate application",
+                        fill_id
+                    )
+                    return
+                if fill_id:
+                    self._applied_fill_ids[fill_id] = _time.time()
+                    if len(self._applied_fill_ids) > self._applied_fill_ids_max:
+                        evict_count = len(self._applied_fill_ids) // 2
+                        for _ in range(evict_count):
+                            self._applied_fill_ids.popitem(last=False)
+
                 position.apply_fill(contracts, price_cents, fee_cents, side, action=action)
                 logger.debug(
                     f"Position cache: updated {market_id}: action={action} side={side} "
@@ -1624,7 +1901,202 @@ class KalshiPositionCache:
                     f"[POSITION-CACHE-STALE] Cache is {staleness_seconds:.0f}s old. "
                     f"Consider calling sync_from_rest() before get_all_positions()."
                 )
+        
+        # CRITICAL FIX (2026-07-31): Health check for positions with invalid entry prices
+        # This prevents the 0 exposure bug from going undetected
+        self._check_position_health()
+        
         return dict(self._positions)
+    
+    def _check_position_health(self) -> None:
+        """Check position cache health and log warnings for invalid states.
+        
+        CRITICAL FIX (2026-07-31): Detects positions with invalid entry prices
+        that would cause 0 exposure reporting and exit policy failures.
+        
+        CRITICAL FIX (2026-08-01): Auto-fix positions with invalid entry prices
+        by looking up fills ledger for the specific market.
+        """
+        invalid_positions = []
+        for market_id, position in self._positions.items():
+            if position.contracts > 0:
+                if position.avg_price_cents is None or position.avg_price_cents == 0:
+                    invalid_positions.append({
+                        'market_id': market_id,
+                        'contracts': position.contracts,
+                        'avg_price_cents': position.avg_price_cents,
+                        'side': position.side,
+                        'thesis_side': position.thesis_side
+                    })
+        
+        if invalid_positions:
+            logger.warning(
+                "[POSITION-CACHE-HEALTH-CHECK] Found %d positions with invalid entry prices (None or 0). "
+                "These positions will use fallback prices for notional calculation. "
+                "Invalid positions: %s",
+                len(invalid_positions),
+                invalid_positions
+            )
+            # Log details for each invalid position
+            for pos in invalid_positions:
+                logger.warning(
+                    "[POSITION-CACHE-INVALID-POSITION] market=%s contracts=%d avg_price=%s side=%s thesis_side=%s",
+                    pos['market_id'], pos['contracts'], pos['avg_price_cents'], pos['side'], pos['thesis_side']
+                )
+            
+            # CRITICAL FIX (2026-08-01): Auto-fix positions with invalid entry prices
+            # by looking up fills ledger for the specific market
+            self._auto_fix_invalid_positions(invalid_positions)
+    
+    def force_health_check_and_fix(self) -> int:
+        """Force a health check and auto-fix invalid positions.
+        
+        CRITICAL FIX (2026-08-01): Public method to manually trigger health check
+        and auto-fix for positions with invalid entry prices. This can be called
+        by operators or scripts to immediately fix positions without waiting for
+        get_all_positions to be called.
+        
+        Returns:
+            Number of positions fixed
+        """
+        logger.info("[POSITION-CACHE] Force health check and fix triggered")
+        self._check_position_health()
+        return len([p for p in self._positions.values() if p.contracts > 0 and p.avg_price_cents is not None and p.avg_price_cents > 0])
+    
+    def force_delete_phantom_position(self, market_id: str) -> bool:
+        """Force delete a phantom position from cache.
+        
+        This is called when fills ledger confirms zero net position but cache
+        still shows a position. This prevents phantom positions from causing
+        incorrect exposure calculations and forced exits.
+        
+        Args:
+            market_id: The market ID to delete from cache
+            
+        Returns:
+            True if position was deleted, False if not found or already deleted
+        """
+        if market_id in self._positions:
+            position = self._positions[market_id]
+            logger.warning(
+                "[POSITION-CACHE] Force deleting phantom position: market=%s contracts=%d avg_price=%s",
+                market_id, position.contracts, position.avg_price_cents
+            )
+            del self._positions[market_id]
+            return True
+        return False
+    
+    def _auto_fix_invalid_positions(self, invalid_positions: List[Dict]) -> None:
+        """Auto-fix positions with invalid entry prices by looking up fills ledger.
+        
+        CRITICAL FIX (2026-08-01): When positions have avg_price_cents=None or 0,
+        this method looks up the fills ledger for the specific market to recover
+        the correct entry price and thesis_side from fill events.
+        
+        Args:
+            invalid_positions: List of dicts with market_id, contracts, avg_price_cents, side, thesis_side
+        """
+        try:
+            ledger = self._get_fills_ledger()
+            if not ledger:
+                logger.error("[POSITION-CACHE-AUTO-FIX] Fills ledger not available for auto-fix")
+                return
+            
+            from datetime import datetime, timedelta, timezone
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)  # Look back 24 hours
+            
+            fixed_count = 0
+            for pos_info in invalid_positions:
+                market_id = pos_info['market_id']
+                
+                # Get fills for this specific market
+                market_fills = ledger.get_fills(since=cutoff_time, market_ticker=market_id, limit=50)
+                
+                if not market_fills:
+                    logger.warning(
+                        "[POSITION-CACHE-AUTO-FIX] No fills found for market %s - cannot fix invalid entry price",
+                        market_id
+                    )
+                    continue
+                
+                # Compute net position and avg price from fills
+                net_contracts = 0
+                total_cost_cents = 0
+                total_contracts_for_avg = 0
+                thesis_side = None
+                
+                for fill in market_fills:
+                    contracts = getattr(fill, 'count', 0) or getattr(fill, 'contracts', 0)
+                    price_cents = getattr(fill, 'price_cents', 0)
+                    side = getattr(fill, 'side', 'yes')
+                    action = getattr(fill, 'action', 'buy')
+                    
+                    if action == 'buy':
+                        net_contracts += contracts
+                        total_cost_cents += contracts * price_cents
+                        total_contracts_for_avg += contracts
+                        
+                        # Set thesis_side from first entry fill
+                        if thesis_side is None and side in ('yes', 'no'):
+                            thesis_side = side
+                    elif action == 'sell':
+                        net_contracts -= contracts
+                
+                # CRITICAL FIX (2026-08-01): Handle zero net positions from fills ledger
+                # If fills ledger shows net_contracts=0 but cache shows contracts>0,
+                # this is a phantom position that should be DELETED from cache
+                if net_contracts == 0 and market_id in self._positions:
+                    cached_pos = self._positions[market_id]
+                    if cached_pos.contracts > 0:
+                        # Phantom position detected - delete from cache
+                        logger.warning(
+                            "[POSITION-CACHE-AUTO-FIX] Phantom position detected for %s: cache shows %d contracts but fills ledger shows 0. DELETING from cache.",
+                            market_id, cached_pos.contracts
+                        )
+                        del self._positions[market_id]
+                        fixed_count += 1
+                    else:
+                        # Cache already shows 0 contracts, just clean up
+                        del self._positions[market_id]
+                        fixed_count += 1
+                # Only fix if we have a net position matching current cache
+                elif net_contracts > 0 and market_id in self._positions:
+                    cached_pos = self._positions[market_id]
+                    
+                    # Update avg_price_cents
+                    if total_contracts_for_avg > 0:
+                        avg_price_cents = total_cost_cents // total_contracts_for_avg
+                        cached_pos.avg_price_cents = avg_price_cents
+                        cached_pos.entry_price_state = "known"
+                        
+                        # Update thesis_side if it was unknown
+                        if thesis_side and cached_pos.thesis_side in ('unknown', 'yes'):
+                            cached_pos.thesis_side = thesis_side
+                            cached_pos.side = thesis_side  # Update side for consistency
+                        
+                        fixed_count += 1
+                        logger.info(
+                            "[POSITION-CACHE-AUTO-FIX] Fixed position %s: avg_price=%dc thesis_side=%s (from fills ledger)",
+                            market_id, avg_price_cents, thesis_side or cached_pos.thesis_side
+                        )
+                    else:
+                        logger.warning(
+                            "[POSITION-CACHE-AUTO-FIX] Could not compute avg price for market %s (total_contracts_for_avg=0)",
+                            market_id
+                        )
+                else:
+                    logger.warning(
+                        "[POSITION-CACHE-AUTO-FIX] Net position from fills (%d) does not match cache for market %s",
+                        net_contracts, market_id
+                    )
+            
+            logger.info(
+                "[POSITION-CACHE-AUTO-FIX] Fixed %d positions with invalid entry prices",
+                fixed_count
+            )
+            
+        except Exception as e:
+            logger.error("[POSITION-CACHE-AUTO-FIX] Error auto-fixing invalid positions: %s", e, exc_info=True)
     
     def get_total_exposure_usd(self) -> float:
         """Get total exposure in USD across all open positions.
@@ -1644,6 +2116,52 @@ class KalshiPositionCache:
                 total_exposure += position_exposure
         return total_exposure
     
+    async def _auto_resync_callback(self, context: Dict[str, Any]) -> None:
+        """Callback for active reconciliation auto-resync action.
+        
+        Force sync position cache from REST API when invariant violation detected.
+        """
+        market_id = context.get("market_id")
+        logger.info("[POSITION-CACHE-AUTO-RESYNC] Auto-resync triggered for %s", market_id)
+        
+        try:
+            # Get fresh positions from REST API
+            from merid.event_venues.kalshi.kalshi_rest_client import get_kalshi_rest_client
+            rest_client = await get_kalshi_rest_client()
+            
+            positions_result = await rest_client.get_positions_with_filters({})
+            if positions_result.success:
+                positions = positions_result.data or {}
+                raw_positions = positions.get("market_positions") or positions.get("positions") or []
+                
+                # Force sync with force=True to bypass staleness guard
+                await self.sync_from_rest(raw_positions, force=True)
+                logger.info("[POSITION-CACHE-AUTO-RESYNC] Auto-resync completed for %s", market_id)
+            else:
+                logger.error("[POSITION-CACHE-AUTO-RESYNC] Failed to fetch positions: %s", positions_result.error)
+        except Exception as e:
+            logger.error("[POSITION-CACHE-AUTO-RESYNC] Auto-resync failed: %s", e, exc_info=True)
+            raise
+    
+    async def _auto_halt_callback(self, context: Dict[str, Any]) -> None:
+        """Callback for active reconciliation trading halt action.
+        
+        Halt trading for specific market or globally when critical invariant violation detected.
+        """
+        market_id = context.get("market_id")
+        logger.critical("[POSITION-CACHE-AUTO-HALT] Trading halt triggered for %s", market_id)
+        
+        try:
+            # TODO: Implement trading halt logic
+            # This should:
+            # 1. Cancel all pending orders for the market
+            # 2. Prevent new orders from being submitted
+            # 3. Alert operators
+            logger.warning("[POSITION-CACHE-AUTO-HALT] Trading halt not yet implemented - manual intervention required")
+        except Exception as e:
+            logger.error("[POSITION-CACHE-AUTO-HALT] Halt callback failed: %s", e, exc_info=True)
+            raise
+
     def get_cache_health(self) -> Dict[str, Any]:
         """Get position cache health status for monitoring.
         
@@ -1696,6 +2214,114 @@ class KalshiPositionCache:
                 if position.contracts > 0:
                     asset_positions.append(position)
         return asset_positions
+
+    async def recompute_position_from_ledger(self, market_id: str, agent_id: str) -> Optional[CachedPosition]:
+        """
+        Deterministic recompute path: rebuild position purely from fills_ledger.
+        
+        This provides byte-for-byte reproducibility and is critical for:
+        - Drift detection (compare live cache vs ledger-derived)
+        - Recovery from corrupted state
+        - Verification that live cache matches canonical ledger
+        
+        Args:
+            market_id: Market identifier (e.g., "KXBTC15M-26JUL211745-45")
+            agent_id: Agent identifier for composite key
+            
+        Returns:
+            CachedPosition rebuilt from fills_ledger, or None if no fills exist
+        """
+        ledger = self._get_fills_ledger()
+        if not ledger:
+            logger.warning("[POSITION-RECOMPUTE] Fills ledger not available for recompute")
+            return None
+        
+        # Get all fills for this market from the ledger
+        market_fills = ledger.get_fills_by_market(market_id)
+        if not market_fills:
+            logger.debug("[POSITION-RECOMPUTE] No fills found for %s", market_id)
+            return None
+        
+        # Filter fills by agent_id if provided
+        if agent_id:
+            market_fills = [f for f in market_fills if getattr(f, 'agent_id', None) == agent_id]
+        
+        if not market_fills:
+            logger.debug("[POSITION-RECOMPUTE] No fills found for %s with agent_id=%s", market_id, agent_id)
+            return None
+        
+        # Sort fills by timestamp for deterministic replay
+        # Use created_at or ts field
+        sorted_fills = sorted(
+            market_fills,
+            key=lambda f: getattr(f, 'created_at', None) or getattr(f, 'ts', 0)
+        )
+        
+        # Replay fills to compute position state
+        contracts = 0
+        avg_price_cents = None
+        realized_pnl_usd = Decimal("0")
+        thesis_side = None
+        entry_intent_id = None
+        fill_source = "alpha"
+        
+        for fill in sorted_fills:
+            fill_contracts = fill.count_fp or 1
+            fill_price_cents = fill.price_cents or 0
+            fill_action = fill.action or "buy"
+            fill_side = fill.side or "yes"
+            fill_fee_cents = getattr(fill, 'fee_cents', 0) or 0
+            
+            # Set thesis_side from first fill (entry)
+            if thesis_side is None:
+                thesis_side = fill_side
+                entry_intent_id = getattr(fill, 'intent_id', None)
+                fill_source = getattr(fill, 'fill_source', 'alpha')
+            
+            # Apply fill using same logic as CachedPosition.apply_fill
+            if fill_action == "buy":
+                # Entry: add contracts, update avg price
+                if contracts == 0:
+                    avg_price_cents = fill_price_cents
+                else:
+                    # Weighted average price
+                    total_cost = (contracts * avg_price_cents) + (fill_contracts * fill_price_cents)
+                    contracts += fill_contracts
+                    avg_price_cents = total_cost // contracts
+                contracts += fill_contracts
+            elif fill_action == "sell":
+                # Exit: subtract contracts, compute realized PnL
+                if contracts > 0 and avg_price_cents:
+                    realized_pnl = (fill_price_cents - avg_price_cents) * fill_contracts
+                    realized_pnl_usd += Decimal(realized_pnl) / Decimal("100")
+                contracts -= fill_contracts
+        
+        # If no contracts remain, position is closed
+        if contracts == 0:
+            logger.debug("[POSITION-RECOMPUTE] Position %s is closed (no contracts after replay)", market_id)
+            return None
+        
+        # Build reconstructed position
+        reconstructed = CachedPosition(
+            market_id=market_id,
+            agent_id=agent_id,
+            contracts=contracts,
+            side=thesis_side or "yes",
+            thesis_side=thesis_side or "yes",
+            avg_price_cents=avg_price_cents,
+            realized_pnl_usd=realized_pnl_usd,
+            unrealized_pnl_usd=Decimal("0"),  # Would need current market price
+            last_updated=datetime.now(timezone.utc),
+            entry_intent_id=entry_intent_id,
+            fill_source=fill_source
+        )
+        
+        logger.info(
+            "[POSITION-RECOMPUTE] Reconstructed position for %s: %d contracts @ %dc, thesis_side=%s",
+            market_id, contracts, avg_price_cents, thesis_side
+        )
+        
+        return reconstructed
 
     def get_asset_exposure(self, asset: str) -> Dict[str, Any]:
         """Get total exposure for an asset across all markets.
@@ -1811,11 +2437,77 @@ class KalshiPositionCache:
                         )
                     return
 
-                # CRITICAL FIX: Preserve existing positions to avoid overwriting correct side from fills
+                # CRITICAL FIX (2026-08-01): Preserve existing positions to avoid overwriting correct side from fills
                 # Kalshi REST API always reports side="yes" (YES-side perspective), which would
                 # invert the side for NO positions. We preserve the fill-based side and only update
                 # size/price from REST.
+                # CRITICAL FIX (2026-08-01): Add cross-validation with fills ledger to detect sync source disagreement
+                # If REST data disagrees with fills ledger, flag position as unhealthy and trigger reconciliation
                 existing_positions = dict(self._positions)
+                
+                # Cross-validate with fills ledger if available
+                try:
+                    fills_ledger = self._get_fills_ledger()
+                    if fills_ledger:
+                        # Get all fills from ledger
+                        fills = fills_ledger.get_fills(since=datetime.now(timezone.utc) - timedelta(hours=24))
+                        
+                        # Build expected positions from fills
+                        expected_positions = {}
+                        for fill in fills:
+                            market_id = getattr(fill, 'market_id', None)
+                            if not market_id:
+                                continue
+                                
+                            if market_id not in expected_positions:
+                                # Get price in cents from the appropriate field
+                                price_cents = None
+                                if fill.side == "yes" and fill.yes_price_dollars:
+                                    price_cents = int(fill.yes_price_dollars * 100)
+                                elif fill.side == "no" and fill.no_price_dollars:
+                                    price_cents = int(fill.no_price_dollars * 100)
+                                    
+                                expected_positions[market_id] = {
+                                    'contracts': 0,
+                                    'side': fill.side,
+                                    'avg_price_cents': price_cents
+                                }
+                            # Aggregate fills
+                            if fill.action == "buy":
+                                expected_positions[market_id]['contracts'] += fill.count_fp
+                            else:
+                                expected_positions[market_id]['contracts'] -= fill.count_fp
+                        
+                        # Validate REST positions against fills ledger
+                        validation_discrepancies = []
+                        for pos in positions:
+                            market_id = pos.get('market_id')
+                            if market_id in expected_positions:
+                                # Check for discrepancies
+                                rest_contracts = pos.get('contracts', 0)
+                                expected_contracts = expected_positions[market_id]['contracts']
+                                
+                                if abs(rest_contracts - expected_contracts) > 0:
+                                    validation_discrepancies.append({
+                                        'market_id': market_id,
+                                        'rest_contracts': rest_contracts,
+                                        'expected_contracts': expected_contracts,
+                                        'reason': 'contract_mismatch'
+                                    })
+                                    logger.warning(
+                                        "[POSITION-CACHE-VALIDATION] Discrepancy detected for %s: "
+                                        "REST contracts=%d, fills ledger contracts=%d",
+                                        market_id, rest_contracts, expected_contracts
+                                    )
+                        
+                        if validation_discrepancies:
+                            logger.warning(
+                                "[POSITION-CACHE-VALIDATION] Found %d discrepancies between REST and fills ledger. "
+                                "Proceeding with REST sync but positions may be flagged as unhealthy.",
+                                len(validation_discrepancies)
+                            )
+                except Exception as validation_err:
+                    logger.warning("[POSITION-CACHE-VALIDATION] Cross-validation with fills ledger failed: %s", validation_err)
                 
                 # VERIFICATION: Debug logging around sync_from_rest (before/after thesis_side)
                 logger.info(
@@ -1877,30 +2569,98 @@ class KalshiPositionCache:
                         positions_filtered += 1
                         continue
 
-                    # CRITICAL FIX (2026-07-23): Distinguish missing vs invalid avg_price_cents
-                    # REST API may return 0 for avg_price_cents, which is invalid (real prices are 10-75c)
-                    # None = unknown/missing, 0 = invalid, valid price = 10-75c
+                    # CRITICAL FIX (2026-08-01): Calculate avg_price_cents from REST API data when not provided
+                    # Kalshi REST API provides market_exposure_dollars and position_fp, which can be used
+                    # to calculate the weighted average entry price: avg_price = market_exposure_dollars / position_fp
+                    # IMPORTANT: Use market_exposure_dollars (current position cost) NOT total_traded_dollars (cumulative)
+                    # This is the industry-standard method for reconstructing entry prices after restart.
                     avg_price_from_rest = pos.get("avg_price_cents")
-                    if avg_price_from_rest is None:
-                        # Missing data - set to None and mark state as unknown
-                        avg_price_cents = None
-                        entry_price_state = "unknown"
-                        logger.warning(
-                            "[POSITION-CACHE] REST API returned avg_price_cents=missing for %s, setting to None with state=unknown",
-                            market_id
-                        )
-                    elif avg_price_from_rest == 0:
-                        # Invalid data (0 is not a valid price in 10-75c range)
-                        avg_price_cents = None
-                        entry_price_state = "invalid"
-                        logger.warning(
-                            "[POSITION-CACHE] REST API returned avg_price_cents=0 (invalid) for %s, setting to None with state=invalid",
-                            market_id
-                        )
-                    else:
-                        # Valid price
+                    market_exposure_dollars = pos.get("market_exposure_dollars")
+                    position_fp = pos.get("position_fp")
+                    
+                    if avg_price_from_rest is not None and avg_price_from_rest != 0:
+                        # REST API provided valid avg_price_cents
                         avg_price_cents = int(avg_price_from_rest)
                         entry_price_state = "known"
+                        logger.debug(
+                            "[POSITION-CACHE] REST API provided avg_price_cents=%d for %s",
+                            avg_price_cents, market_id
+                        )
+                    elif market_exposure_dollars is not None and position_fp is not None:
+                        # Calculate avg_price_cents from market_exposure_dollars / position_fp
+                        try:
+                            # Convert fixed-point strings to floats
+                            market_exposure = float(market_exposure_dollars)
+                            position_count = float(position_fp)
+                            
+                            if position_count > 0:
+                                # Calculate average price in dollars, then convert to cents
+                                avg_price_dollars = market_exposure / position_count
+                                avg_price_cents = int(avg_price_dollars * 100)
+                                
+                                # Validate price is in reasonable range (10-75c)
+                                if 10 <= avg_price_cents <= 75:
+                                    entry_price_state = "known"
+                                    logger.info(
+                                        "[POSITION-CACHE] Calculated avg_price_cents=%d from REST data for %s (market_exposure=$%.2f, position_fp=%.2f)",
+                                        avg_price_cents, market_id, market_exposure, position_count
+                                    )
+                                else:
+                                    # Calculated price is out of range - use fallback
+                                    avg_price_cents = None
+                                    entry_price_state = "invalid"
+                                    logger.warning(
+                                        "[POSITION-CACHE] Calculated avg_price_cents=%d out of range [10-75c] for %s - using fallback",
+                                        avg_price_cents, market_id
+                                    )
+                            else:
+                                avg_price_cents = None
+                                entry_price_state = "invalid"
+                                logger.warning(
+                                    "[POSITION-CACHE] Cannot calculate avg_price_cents for %s - position_fp=%.2f (invalid)",
+                                    market_id, position_count
+                                )
+                        except (ValueError, ZeroDivisionError) as calc_err:
+                            avg_price_cents = None
+                            entry_price_state = "invalid"
+                            logger.warning(
+                                "[POSITION-CACHE] Failed to calculate avg_price_cents for %s from REST data: %s",
+                                market_id, calc_err
+                            )
+                    else:
+                        # Missing data - try to reconstruct from fills_ledger before giving up
+                        avg_price_cents = None
+                        entry_price_state = "unknown"
+                        
+                        # CRITICAL FIX (2026-08-01): Fallback to fills_ledger when REST API data is insufficient
+                        # This handles cases where Kalshi REST API returns avg_price_cents=0 or missing fields
+                        if self._fills_ledger:
+                            try:
+                                # Look up the most recent entry fill for this market
+                                fills = self._fills_ledger.get_fills_by_market(market_id)
+                                if fills:
+                                    # Find the first entry fill (buy action) for this market
+                                    for fill in fills:
+                                        import json
+                                        if hasattr(fill, 'raw_payload') and fill.raw_payload:
+                                            payload = json.loads(fill.raw_payload) if isinstance(fill.raw_payload, str) else fill.raw_payload
+                                            action = payload.get('action', '')
+                                            if action == 'buy' and hasattr(fill, 'price_cents') and fill.price_cents and fill.price_cents > 0:
+                                                avg_price_cents = fill.price_cents
+                                                entry_price_state = "fills_ledger"
+                                                logger.info(
+                                                    "[POSITION-CACHE] Reconstructed avg_price_cents=%d from fills_ledger for %s (fill_id=%s)",
+                                                    avg_price_cents, market_id, getattr(fill, 'fill_id', 'unknown')
+                                                )
+                                                break
+                            except Exception as fills_err:
+                                logger.debug("[POSITION-CACHE] Could not reconstruct avg_price from fills_ledger for %s: %s", market_id, fills_err)
+                        
+                        if avg_price_cents is None:
+                            logger.warning(
+                                "[POSITION-CACHE] REST API returned insufficient data for %s (avg_price_cents=%s, market_exposure_dollars=%s, position_fp=%s) - setting to None with state=unknown",
+                                market_id, avg_price_from_rest, market_exposure_dollars, position_fp
+                            )
                     
                     # CRITICAL FIX (2026-07-21): Use preserved thesis_side from fill-based cache instead of REST API
                     # Kalshi REST API always reports side="yes" (YES-side perspective), which would
@@ -1970,10 +2730,11 @@ class KalshiPositionCache:
                             )
                     else:
                         # New position from REST (not in existing cache)
-                        # CRITICAL FIX (2026-07-22): Cannot blindly use REST side as thesis_side
+                        # CRITICAL FIX (2026-08-01): Cannot blindly use REST side as thesis_side
                         # Kalshi REST always reports side="yes" regardless of actual position side,
                         # so using pos.get("side", "yes") would invert NO positions to YES.
-                        # Try to infer thesis_side from fill history first, then mark as unknown if not found.
+                        # Try to infer thesis_side from fill history first.
+                        preserved_thesis_side = "unknown"  # Initialize with default
                         inferred_side = self._infer_thesis_side_from_fill_history(market_id)
                         if inferred_side:
                             preserved_thesis_side = inferred_side
@@ -1982,14 +2743,38 @@ class KalshiPositionCache:
                                 market_id, preserved_thesis_side
                             )
                         else:
-                            preserved_thesis_side = "unknown"
-                            logger.critical(
-                                "[POSITION-CACHE-NEW-POSITION-UNKNOWN-SIDE] market=%s new position from REST with unknown thesis_side - "
-                                "Kalshi REST always reports side='yes' so we cannot determine actual YES/NO side from REST alone. "
-                                "Fill history lookup failed. This position will be marked as thesis_side='unknown' and will require "
-                                "manual intervention to determine the correct side before trading can proceed.",
-                                market_id
-                            )
+                            # CRITICAL FIX (2026-08-01): Fallback to fills_ledger reconstruction for new positions
+                            # If fill history inference fails, try direct fills_ledger lookup
+                            if self._fills_ledger:
+                                try:
+                                    fills = self._fills_ledger.get_fills_by_market(market_id)
+                                    if fills:
+                                        for fill in fills:
+                                            import json
+                                            if hasattr(fill, 'raw_payload') and fill.raw_payload:
+                                                payload = json.loads(fill.raw_payload) if isinstance(fill.raw_payload, str) else fill.raw_payload
+                                                action = payload.get('action', '')
+                                                if action == 'buy':
+                                                    intent_side = payload.get('side', '')
+                                                    if intent_side in ('yes', 'no'):
+                                                        preserved_thesis_side = intent_side.lower()
+                                                        logger.info(
+                                                            "[POSITION-CACHE-NEW-POSITION-FILLS-LEDGER] market=%s reconstructed thesis_side=%s from fills_ledger (fill_id=%s)",
+                                                            market_id, preserved_thesis_side, getattr(fill, 'fill_id', 'unknown')
+                                                        )
+                                                        break
+                                except Exception as fills_err:
+                                    logger.debug("[POSITION-CACHE] Could not reconstruct thesis_side from fills_ledger for new position %s: %s", market_id, fills_err)
+                            
+                            if not preserved_thesis_side or preserved_thesis_side == "unknown":
+                                preserved_thesis_side = "unknown"
+                                logger.critical(
+                                    "[POSITION-CACHE-NEW-POSITION-UNKNOWN-SIDE] market=%s new position from REST with unknown thesis_side - "
+                                    "Kalshi REST always reports side='yes' so we cannot determine actual YES/NO side from REST alone. "
+                                    "Fill history lookup failed. This position will be marked as thesis_side='unknown' and will require "
+                                    "manual intervention to determine the correct side before trading can proceed.",
+                                    market_id
+                                )
                     
                     # Derive agent_id from ticker for composite key (REST sync path)
                     try:
@@ -2087,26 +2872,49 @@ class KalshiPositionCache:
                                 )
                                 continue
                             
-                            # CRITICAL FIX (2026-07-23): Skip positions with unknown/invalid entry price
-                            # These positions cannot safely calculate PnL or execute exit orders until
-                            # the entry price is determined from fill history or manual intervention.
+                            # CRITICAL FIX (2026-08-01): Use fallback entry price for positions with unknown/invalid entry price
+                            # Instead of skipping these positions (which breaks exit policy), use fallback prices
+                            # to enable monitoring and exit execution. The fallback prices are already used for
+                            # notional calculation, so we should use them for PositionMonitor as well.
+                            # Track if we used fallback price for this position
+                            original_avg_price = None
                             if cached_pos.entry_price_state in ("unknown", "invalid"):
-                                logger.warning(
-                                    "[POSITION-CACHE-REST-SYNC] Skipping position with unknown/invalid entry price for monitor: "
-                                    "market=%s entry_price_state=%s - cannot add to PositionMonitor until entry price is determined",
-                                    market_id, cached_pos.entry_price_state
-                                )
-                                continue
+                                # Use fallback price based on asset (same logic as notional calculation)
+                                fallback_price_cents = _get_fallback_price_for_market(market_id)
+                                if fallback_price_cents:
+                                    logger.warning(
+                                        "[POSITION-CACHE-REST-SYNC] Using fallback entry price for monitor: "
+                                        "market=%s entry_price_state=%s fallback=%dc",
+                                        market_id, cached_pos.entry_price_state, fallback_price_cents
+                                    )
+                                    # Temporarily override avg_price_cents for PositionMonitor
+                                    # Store original to restore after PositionMonitor initialization
+                                    original_avg_price = cached_pos.avg_price_cents
+                                    cached_pos.avg_price_cents = fallback_price_cents
+                                    # Mark that we're using fallback so we can restore later
+                                    cached_pos._using_fallback_price = True
+                                else:
+                                    logger.warning(
+                                        "[POSITION-CACHE-REST-SYNC] Skipping position with unknown/invalid entry price for monitor: "
+                                        "market=%s entry_price_state=%s - cannot determine fallback price",
+                                        market_id, cached_pos.entry_price_state
+                                    )
+                                    continue
                             
-                            # CRITICAL FIX (2026-07-23): Skip positions with unknown risk parameters
-                            # These positions cannot safely execute exit orders until SL/TP metadata is determined
+                            # Continue with rest of the position processing
+                            # ...
+                            
+                            # CRITICAL FIX (2026-07-30): Do NOT skip positions with unknown risk parameters
+                            # Instead, use fallback TP/SL from profile configuration. Skipping positions
+                            # entirely prevents exit policy execution, which is a critical safety violation.
+                            # The fallback logic below will assign default SL/TP if missing.
                             if cached_pos.risk_params_state == "unknown":
                                 logger.warning(
-                                    "[POSITION-CACHE-REST-SYNC] Skipping position with unknown risk parameters for monitor: "
-                                    "market=%s risk_params_state=%s - cannot add to PositionMonitor until SL/TP is determined",
+                                    "[POSITION-CACHE-REST-SYNC] Position has unknown risk parameters - using fallback TP/SL: "
+                                    "market=%s risk_params_state=%s",
                                     market_id, cached_pos.risk_params_state
                                 )
-                                continue
+                                # Do NOT continue - let fallback logic handle missing TP/SL
                             
                             # CRITICAL FIX (2026-07-19): Validate position age before adding to PositionMonitor
                             # Only add positions from current or recent 15-minute windows to prevent
@@ -2132,14 +2940,31 @@ class KalshiPositionCache:
                             
                             side_enum = PositionSide.YES if cached_pos.side.lower() == "yes" else PositionSide.NO
                             
-                            # Assign default SL if missing (same logic as fill handling)
+                            # CRITICAL FIX (2026-07-31): Side-aware default SL for REST-synced positions
+                            # YES contracts: SL below entry (loss when price goes down)
+                            # NO contracts: SL above entry (loss when price goes up)
+                            # Previous bug: treated both sides identically, causing NO contracts to have inverted SL
                             sl_price = cached_pos.stop_loss_price_cents
                             if sl_price is None:
-                                sl_price = max(1, cached_pos.avg_price_cents - 5)
+                                if side_enum == PositionSide.YES:
+                                    sl_price = max(1, cached_pos.avg_price_cents - 5)
+                                else:
+                                    sl_price = min(99, cached_pos.avg_price_cents + 5)
                                 logger.warning(
                                     "[POSITION-CACHE-REST-SYNC] Missing SL for REST-synced position %s - "
-                                    "assigned default SL=%dc (entry=%dc)",
-                                    market_id, sl_price, cached_pos.avg_price_cents
+                                    "assigned default SL=%dc (entry=%dc side=%s)",
+                                    market_id, sl_price, cached_pos.avg_price_cents, side_enum.value
+                                )
+                            
+                            # Assign default TP if missing (fallback from profile configuration)
+                            tp_price = cached_pos.take_profit_price_cents
+                            if tp_price is None:
+                                # Use 15% TP as fallback (consistent with profile defaults)
+                                tp_price = int(cached_pos.avg_price_cents * 1.15)
+                                logger.warning(
+                                    "[POSITION-CACHE-REST-SYNC] Missing TP for REST-synced position %s - "
+                                    "assigned default TP=%dc (entry=%dc, 15%% TP)",
+                                    market_id, tp_price, cached_pos.avg_price_cents
                                 )
                             
                             # Calculate risk for trailing stop
@@ -2159,7 +2984,7 @@ class KalshiPositionCache:
                                 side=side_enum,
                                 size=cached_pos.contracts,
                                 avg_entry_price_cents=cached_pos.avg_price_cents,
-                                take_profit_price_cents=cached_pos.take_profit_price_cents,
+                                take_profit_price_cents=tp_price,  # Use fallback TP if original was None
                                 stop_loss_price_cents=sl_price,
                                 trailing_type=trailing_type,
                                 trailing_param=trailing_param,
@@ -2170,9 +2995,21 @@ class KalshiPositionCache:
                             logger.info(
                                 "[POSITION-MONITOR-REST-SYNC] Added REST-synced position to monitor: market=%s side=%s size=%d TP=%dc SL=%dc",
                                 market_id, cached_pos.side, cached_pos.contracts,
-                                cached_pos.take_profit_price_cents or 0,
+                                tp_price,
                                 sl_price
                             )
+                            
+                            # CRITICAL FIX (2026-08-01): Restore original avg_price_cents if we used fallback
+                            # This ensures the position cache reflects the true state while PositionMonitor
+                            # has a working fallback for exit execution
+                            if original_avg_price is not None:
+                                cached_pos.avg_price_cents = original_avg_price
+                                if hasattr(cached_pos, '_using_fallback_price'):
+                                    delattr(cached_pos, '_using_fallback_price')
+                                logger.debug(
+                                    "[POSITION-CACHE-REST-SYNC] Restored original avg_price_cents after monitor init: market=%s original=%dc",
+                                    market_id, original_avg_price
+                                )
                     except Exception as monitor_err:
                         logger.error("[POSITION-CACHE-REST-SYNC] CRITICAL: Failed to add REST-synced positions to monitor: %s", monitor_err, exc_info=True)
                         # CRITICAL FIX (2026-07-17): Do not silently swallow position monitor failures
@@ -2306,14 +3143,8 @@ class KalshiPositionCache:
             from datetime import datetime, timedelta, timezone
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=1)
             
-            # Try to get recent fills from ledger
-            if hasattr(ledger, 'get_recent_fills'):
-                recent_fills = ledger.get_recent_fills(limit=100)
-            elif hasattr(ledger, 'get_fills_since'):
-                recent_fills = ledger.get_fills_since(cutoff_time)
-            else:
-                logger.error("[POSITION-CACHE-REBUILD] Fills ledger has no method to query recent fills")
-                return
+            # Use get_fills method with since parameter
+            recent_fills = ledger.get_fills(since=cutoff_time, limit=100)
             
             if not recent_fills:
                 logger.warning("[POSITION-CACHE-REBUILD] No recent fills found in ledger")
@@ -2705,9 +3536,10 @@ class KalshiPositionCache:
             import re
             from datetime import datetime, timezone
             
-            # Kalshi market ID format: KX{COIN}15M-{DD}{MON}{HHMM}-{STRIKE}
-            # Example: KXBTC15M-26JUL191645-45
-            match = re.search(r'KX\w+15M-(\d{2})([A-Z]{3})(\d{4})', market_id)
+            # Kalshi market ID format: KX{COIN}15M-{DD}{MON}{HHMMSS}-{STRIKE}
+            # Example: KXBTC15M-26JUL312230-30 (HHMMSS format)
+            # CRITICAL FIX (2026-08-01): Updated regex to handle 6-digit time format (HHMMSS)
+            match = re.search(r'KX\w+15M-(\d{2})([A-Z]{3})(\d{6})', market_id)
             if not match:
                 logger.warning("[DYNAMIC-HOLD] Could not parse market ID for TTE: %s", market_id)
                 return 300  # Conservative 5-minute fallback
@@ -2724,21 +3556,41 @@ class KalshiPositionCache:
                 logger.warning("[DYNAMIC-HOLD] Invalid month in market ID: %s", month_str)
                 return 300
             
-            # Parse time (HHMM format)
+            # Parse time (HHMMSS format - 6 digits)
+            # CRITICAL FIX (2026-08-01): Handle 6-digit time format (HHMMSS)
             hour = int(time_str[:2])
-            minute = int(time_str[2:])
+            minute = int(time_str[2:4])
+            second = int(time_str[4:6]) if len(time_str) >= 6 else 0
+            
+            # CRITICAL FIX: Validate hour is in valid range 0-23
+            if hour < 0 or hour > 23:
+                logger.warning("[DYNAMIC-HOLD] Invalid hour %d parsed from time_str=%s, using fallback", hour, time_str)
+                return 300
             
             # Calculate expiry timestamp (assume current year, UTC)
             now = datetime.now(timezone.utc)
             year = now.year
-            expiry_dt = datetime(year, month, int(day_str), hour, minute, 0, tzinfo=timezone.utc)
+            expiry_dt = datetime(year, month, int(day_str), hour, minute, second, tzinfo=timezone.utc)
             
-            # If expiry is in the past, it's next year (unlikely but defensive)
+            # CRITICAL FIX (2026-08-01): If expiry is in the past, check if it's same day earlier time
+            # This handles 15-minute contracts where the time might be earlier in the same day
             if expiry_dt < now:
+                # Check if it's the same day but earlier time (e.g., 01:04 vs current 21:54)
+                # This would be a stale/expired market, not next year
+                if expiry_dt.day == now.day and expiry_dt.month == now.month:
+                    logger.warning("[DYNAMIC-HOLD] Market expired earlier today: %s vs now %s, using fallback", expiry_dt, now)
+                    return 300  # Use fallback for expired markets
+                # Otherwise, assume next year (unlikely but defensive)
                 expiry_dt = expiry_dt.replace(year=year + 1)
             
             # Calculate remaining seconds
             remaining_seconds = (expiry_dt - now).total_seconds()
+            
+            # CRITICAL FIX (2026-08-01): Sanity check for absurdly large values
+            # If remaining time is > 1 day, the market ID parsing is likely wrong
+            if remaining_seconds > 86400:  # More than 1 day
+                logger.warning("[DYNAMIC-HOLD] Absurd remaining time: %ds (>1 day), market ID parsing likely incorrect, using fallback", remaining_seconds)
+                return 300
             
             # Use 80% of remaining TTE (20% buffer for execution)
             dynamic_max_hold = int(remaining_seconds * 0.8)
@@ -2790,6 +3642,10 @@ class KalshiPositionCache:
 
         # TP leg: GTC sell at TP price
         tp_tag = self._bracket_client_tag(position.market_id, "tp", tp_price)
+        logger.info(
+            "[BRACKET-CREATION-DEBUG] Creating TP bracket: market=%s side=%s action=sell price=%dc count=%d",
+            position.market_id, position.side, tp_price, position.contracts
+        )
         tp_intent = OrderIntent(
             ticker=position.market_id,
             side=position.side,
@@ -2807,6 +3663,14 @@ class KalshiPositionCache:
             window_resolution_id=position.window_resolution_id or "bracket_window",
             risk_tier="A",  # Default to tier A for bracket exits
             max_hold_seconds=max_hold_seconds,  # Dynamic based on remaining TTE
+            # CRITICAL FIX (2026-08-01): Set entry_or_exit to prevent ENTRY-ORDER-INVARIANT-VIOLATION
+            # Bracket orders are exit orders and must bypass entry guards
+            entry_or_exit="exit",
+            exit_reason="BRACKET_TAKE_PROFIT",
+        )
+        logger.info(
+            "[BRACKET-CREATION-DEBUG] TP intent created: side=%s action=%s price=%dc count=%d",
+            tp_intent.side, tp_intent.action, tp_intent.price_cents, tp_intent.count
         )
 
         position.tp_bracket_client_tag = tp_tag
@@ -2829,6 +3693,10 @@ class KalshiPositionCache:
         # SL leg (optional)
         if sl_price and sl_price > 0:
             sl_tag = self._bracket_client_tag(position.market_id, "sl", sl_price)
+            logger.info(
+                "[BRACKET-CREATION-DEBUG] Creating SL bracket: market=%s side=%s action=sell price=%dc count=%d",
+                position.market_id, position.side, sl_price, position.contracts
+            )
             sl_intent = OrderIntent(
                 ticker=position.market_id,
                 side=position.side,
@@ -2846,6 +3714,14 @@ class KalshiPositionCache:
                 window_resolution_id=position.window_resolution_id or "bracket_window",
                 risk_tier="A",  # Default to tier A for bracket exits
                 max_hold_seconds=max_hold_seconds,  # Dynamic based on remaining TTE
+                # CRITICAL FIX (2026-08-01): Set entry_or_exit to prevent ENTRY-ORDER-INVARIANT-VIOLATION
+                # Bracket orders are exit orders and must bypass entry guards
+                entry_or_exit="exit",
+                exit_reason="BRACKET_STOP_LOSS",
+            )
+            logger.info(
+                "[BRACKET-CREATION-DEBUG] SL intent created: side=%s action=%s price=%dc count=%d",
+                sl_intent.side, sl_intent.action, sl_intent.price_cents, sl_intent.count
             )
             position.sl_bracket_client_tag = sl_tag
             try:

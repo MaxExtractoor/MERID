@@ -123,6 +123,8 @@ def set_task_context(
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "full.log"
+# Production-visible log file in project root for easy access
+PRODUCTION_LOG_FILE = PROJECT_ROOT / "server_output.log"
 
 _LOGGER_CACHE: Dict[str, logging.Logger] = {}
 
@@ -261,11 +263,20 @@ def get_logger(name: str) -> logging.Logger:
         text_formatter = logging.Formatter(_TEXT_FORMAT, _TEXT_DATEFMT)
         json_formatter = JsonFormatter()
 
+        # Primary log file in logs/ directory
         file_handler = SafeRotatingFileHandler(
             LOG_FILE, maxBytes=5_000_000, backupCount=5, encoding="utf-8"
         )
         file_handler.setFormatter(json_formatter if _json_logging_enabled else text_formatter)
         logger.addHandler(file_handler)
+
+        # Production-visible log file in project root (server_output.log)
+        # Uses text format for easy viewing in IDE
+        production_handler = SafeRotatingFileHandler(
+            PRODUCTION_LOG_FILE, maxBytes=10_000_000, backupCount=3, encoding="utf-8"
+        )
+        production_handler.setFormatter(text_formatter)
+        logger.addHandler(production_handler)
 
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(text_formatter)

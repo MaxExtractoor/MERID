@@ -237,7 +237,7 @@ class SignalScore:
     contra_trend: bool = False
     low_confidence_reason: Optional[str] = None
 
-    def is_tradeable(self, min_confidence: float = 0.6, min_quality: float = 0.5) -> bool:
+    def is_tradeable(self, min_confidence: float = 0.5, min_quality: float = 0.5) -> bool:
         return (
             self.direction in ("long", "short")
             and self.confidence >= min_confidence
@@ -281,7 +281,7 @@ class FusedClusterSignal:
     rejection_reason: Optional[str] = None
     size_multiplier: float = 1.0
 
-    def is_tradeable(self, min_confidence: float = 0.6, min_quality: float = 0.5) -> bool:
+    def is_tradeable(self, min_confidence: float = 0.5, min_quality: float = 0.5) -> bool:
         if self.direction == "flat":
             return False
         if self.rejection_reason:

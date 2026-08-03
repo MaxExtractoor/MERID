@@ -47,8 +47,7 @@ New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 Write-Host "Starting MERID server..." -ForegroundColor Green
 
 # Start uvicorn with logging
-uvicorn web.main:create_app `
-    --factory `
+uvicorn web.main_15m_lean:app `
     --host 0.0.0.0 `
     --port 8011 `
     --log-level info `

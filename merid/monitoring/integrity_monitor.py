@@ -184,9 +184,9 @@ class IntegrityMonitor:
             catalog = get_market_catalog()
             snapshot = catalog.snapshot()
             
-            # Get current 15m markets for BTC and ETH
+            # Get current 15m markets for all 5 crypto assets (BTC, ETH, SOL, XRP, DOGE)
             key_tickers = []
-            for asset in ["BTC", "ETH"]:
+            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
                 market = snapshot.get_current_15m_market(asset)
                 if market:
                     ticker = market.market.market_id if hasattr(market, 'market') else market.market_id

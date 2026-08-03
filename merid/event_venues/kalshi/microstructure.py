@@ -113,7 +113,7 @@ def compute_side_microstructure(
         # Spread <= 0 indicates crossed market - should flag as invalid
         if view.spread_cents <= 0:
             logger.warning(
-                f"[MICROSTRUCTURE] Crossed market detected for {ob.ticker}: "
+                f"[MICROSTRUCTURE-SIDE-AWARE] Crossed market detected for {ob.ticker}: "
                 f"yes_bid={view.best_yes_bid}, yes_ask={view.best_yes_ask}, spread={view.spread_cents}"
             )
         
@@ -122,7 +122,7 @@ def compute_side_microstructure(
         WIDE_SPREAD_THRESHOLD = 15
         if view.spread_cents > WIDE_SPREAD_THRESHOLD:
             logger.warning(
-                f"[MICROSTRUCTURE] Wide spread detected for {ob.ticker}: "
+                f"[MICROSTRUCTURE-SIDE-AWARE] Wide spread detected for {ob.ticker}: "
                 f"spread={view.spread_cents}c (threshold={WIDE_SPREAD_THRESHOLD}c) - market may be illiquid"
             )
         

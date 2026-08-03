@@ -232,7 +232,7 @@ class RealtimeTradingMonitor:
         'kill_switch': re.compile(r'\[KILL-SWITCH\]'),
         # Updated patterns to match actual log format
         'no_signal_actual': re.compile(r'\[NO-SIGNAL\] asset=(\w+)_15M no signal generated'),
-        'price_filter_reject_actual': re.compile(r'\[PRICE-FILTER-REJECT\] asset=(\w+) both sides outside 10c-75c range'),
+        'price_filter_reject_actual': re.compile(r'\[PRICE-FILTER-REJECT\] asset=(\w+) both sides outside side-aware ranges'),
         'generated_candidates': re.compile(r'\[15m-LOOP\] Generated (\d+) candidates in tick (\d+)'),
         'starting_execution': re.compile(r'\[15m-LOOP\] Starting execution loop for (\d+) candidates'),
         'market_validation_valid': re.compile(r'\[MARKET-VALIDATION\] asset=(\w+)_15M ticker=(\w+) VALID'),

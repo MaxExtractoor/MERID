@@ -15,7 +15,7 @@ This ensures:
 - No artificial per-asset limits
 - Concentration on highest expected returns
 - 1 contract per asset per window
-- Entry prices in 10c-75c range (expanded for current market conditions - YES prices 60-97c observed)
+- Entry prices use side-aware ranges: YES 1c-75c, NO 25c-99c (CRITICAL FIX 2026-07-31)
 - Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.0% (actual percentage)
 """
 
@@ -65,8 +65,8 @@ class GlobalAllocator:
     CRITICAL RULES:
     - $1 total exposure cap across ALL assets (shared pool, not per-asset)
     - 1 contract per asset per window
-    - Entry price must be in 5c-95c range (expanded for skewed markets)
-    - Confidence must be ≥ 50% (matches agent grid: 0.5 + edge/100)
+    - Entry price uses side-aware ranges: YES 1c-75c, NO 25c-99c (CRITICAL FIX 2026-07-31)
+    - Confidence must be ≥ 50% (matches signal generation range: 0.5 + edge)
     - Edge must be ≥ 2.5% (matches profile edge_bands - industry standard)
     - Assets compete for capital (no per-asset budgets)
     """
@@ -75,17 +75,21 @@ class GlobalAllocator:
         self,
         venue_cap_usd: float = 1.00,
         min_edge_pct: float = 0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
-        min_confidence: float = 0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
-        min_price_cents: int = 10,  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
-        max_price_cents: int = 75,  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
+                                      # 2026-07-25: CRITICAL - This is stored as FRACTION (0.025 = 2.5%), not percentage
+                                      # Display multiplies by 100 for logging, but internal comparison uses fraction
+        min_confidence: float = 0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
+                                      # Signal generation produces confidence = 0.5 + edge (edge is 0.02-0.08), resulting in 52-58%
+        min_price_cents: int = 1,  # 2026-07-31: Lowered to 1c for YES orders (side-aware filtering applied later)
+        max_price_cents: int = 99,  # 2026-07-31: Expanded to 99c for NO orders (side-aware filtering applied later)
         max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
         # 2026-07-14: Per-asset edge thresholds aligned with profile edge_bands (2.5% unified - industry standard)
+        # 2026-07-25: CRITICAL - These are stored as FRACTIONS (0.025 = 2.5%), not percentages
         # This ensures global allocator doesn't filter candidates that pass validate_edge()
         per_asset_min_edge_pct: dict = None,
     ):
         self.venue_cap_usd = venue_cap_usd
-        self.min_edge_pct = min_edge_pct
+        self.min_edge_pct = min_edge_pct  # Stored as fraction (0.025 = 2.5%)
         self.min_confidence = min_confidence
         self.min_price_cents = min_price_cents
         self.max_price_cents = max_price_cents
@@ -94,6 +98,7 @@ class GlobalAllocator:
         
         # Per-asset edge thresholds (aligned with profile edge_bands - single source of truth)
         # CRITICAL FIX 2026-07-14: Updated to use unified 2.5% threshold from profile edge_bands
+        # CRITICAL FIX 2026-07-25: All thresholds stored as FRACTIONS (0.025 = 2.5%), not percentages
         # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
         # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
         # Edge threshold hierarchy (from profile YAML):
@@ -101,11 +106,11 @@ class GlobalAllocator:
         # 2. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
         if per_asset_min_edge_pct is None:
             self.per_asset_min_edge_pct = {
-                "BTC": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-                "ETH": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-                "SOL": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-                "XRP": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-                "DOGE": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
+                "BTC": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+                "ETH": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+                "SOL": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+                "XRP": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+                "DOGE": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
             }
         else:
             self.per_asset_min_edge_pct = per_asset_min_edge_pct
@@ -118,8 +123,8 @@ class GlobalAllocator:
         self._pending_order_timeout = 30.0  # 30 seconds timeout for pending orders
         
         logger.info(
-            "[GLOBAL-ALLOCATOR] Initialized: venue_cap=$%.2f, min_edge=%.3f%%, min_conf=%.0f%%, price_range=[%dc-%dc], max_single=%.1f%%",
-            venue_cap_usd, min_edge_pct, min_confidence * 100, min_price_cents, max_price_cents, max_single_asset_fraction * 100
+            "[GLOBAL-ALLOCATOR] Initialized: venue_cap=$%.2f, min_edge=%.3f%% (fraction=%.3f), min_conf=%.0f%%, price_range=[%dc-%dc], max_single=%.1f%%",
+            venue_cap_usd, min_edge_pct * 100, min_edge_pct, min_confidence * 100, min_price_cents, max_price_cents, max_single_asset_fraction * 100
         )
         logger.info(
             "[GLOBAL-ALLOCATOR] Per-asset edge thresholds: %s",
@@ -154,6 +159,18 @@ class GlobalAllocator:
         # This ensures lifecycle callbacks don't drift from actual position cache state
         self._asset_positions = current_positions.copy()
         
+        # CRITICAL FIX (2026-07-31): Clear pending orders for assets that already have positions
+        # This handles the case where fills occurred but global_allocator wasn't notified
+        # (e.g., before the fills_ledger fix was applied)
+        for asset in list(self._pending_orders.keys()):
+            if asset in current_positions and current_positions[asset] > 0:
+                logger.warning(
+                    "[GLOBAL-ALLOCATOR] Clearing stale pending order for %s: position exists ($%.2f)",
+                    asset, current_positions[asset]
+                )
+                del self._pending_orders[asset]
+                del self._pending_order_timestamps[asset]
+        
         # Filter by minimum edge (per-asset thresholds aligned with risk_parameters.py)
         filtered = []
         for c in candidates:
@@ -180,18 +197,97 @@ class GlobalAllocator:
                 len(filtered) - len(conf_filtered), len(filtered), self.min_confidence * 100
             )
         
-        # Filter by price range (10c-75c canonical range)
-        price_filtered = [c for c in conf_filtered if self.min_price_cents <= c.price_cents <= self.max_price_cents]
+        # CRITICAL FIX (2026-07-31): Use side-aware price ranges to prevent NO order rejection
+        # YES orders: 1c-75c (expanded low end for late-expiry markets)
+        # NO orders: 25c-99c (expanded high end for late-expiry markets)
+        # This prevents systematic rejection of NO orders at high prices (90c+) which is where NO typically trades
+        def is_price_in_side_range(candidate: OrderCandidate) -> bool:
+            """Check if candidate price is within side-appropriate range."""
+            if candidate.side.lower() == "yes":
+                # YES: 1c-75c range
+                return 1 <= candidate.price_cents <= 75
+            else:  # NO
+                # NO: 25c-99c range
+                return 25 <= candidate.price_cents <= 99
+        
+        price_filtered = [c for c in conf_filtered if is_price_in_side_range(c)]
         if len(price_filtered) < len(conf_filtered):
+            # Log which candidates were filtered and why
+            filtered_candidates = [c for c in conf_filtered if not is_price_in_side_range(c)]
+            for c in filtered_candidates:
+                logger.info(
+                    "[GLOBAL-ALLOCATOR] Filtered candidate outside side-aware range: "
+                    "asset=%s ticker=%s side=%s price=%dc (YES: 1-75c, NO: 25-99c)",
+                    c.asset, c.ticker, c.side, c.price_cents
+                )
             logger.info(
-                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates outside price range [%dc-%dc]",
-                len(conf_filtered) - len(price_filtered), len(conf_filtered), self.min_price_cents, self.max_price_cents
+                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates outside side-aware price ranges "
+                "(YES: 1c-75c, NO: 25c-99c)",
+                len(conf_filtered) - len(price_filtered), len(conf_filtered)
             )
+        
+        # CRITICAL FIX (2026-07-31): Filter by contract count (must be 1 for entry orders)
+        # This enforces the $1 allocation rule: each asset can only trade 1 contract at a time
+        count_filtered = [c for c in price_filtered if c.count == 1]
+        if len(count_filtered) < len(price_filtered):
+            logger.warning(
+                "[GLOBAL-ALLOCATOR] CRITICAL: Filtered %d/%d candidates with count != 1 (violates $1 allocation rule). This indicates a bug in the sizing pipeline.",
+                len(price_filtered) - len(count_filtered), len(price_filtered)
+            )
+            # Log the violating candidates for debugging
+            for c in price_filtered:
+                if c.count != 1:
+                    logger.warning(
+                        "[GLOBAL-ALLOCATOR] VIOLATING CANDIDATE: asset=%s ticker=%s count=%d price=%dc edge=%.2f%%",
+                        c.asset, c.ticker, c.count, c.price_cents, c.edge_pct
+                    )
         
         # 2026-07-13: Filter by per-asset position and pending order status
         # This prevents multiple contracts per asset (the core issue)
         position_filtered = []
-        for c in price_filtered:
+        for c in count_filtered:
+            # CRITICAL FIX (2026-08-01): Check for phantom positions in position cache
+            # Phantom positions have contracts > 0 but invalid avg_price_cents (None or 0)
+            # This can happen when fills ledger shows net_contracts=0 but cache shows contracts > 0
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                cache = get_position_cache()
+                phantom_deleted = False
+                for market_id, position in list(cache._positions.items()):
+                    if (position.contracts > 0 and 
+                        (position.avg_price_cents is None or position.avg_price_cents == 0) and
+                        c.asset in market_id.upper()):
+                        if cache.force_delete_phantom_position(market_id):
+                            phantom_deleted = True
+                            logger.info(
+                                "[GLOBAL-ALLOCATOR] Cleaned up phantom position for %s: market=%s contracts=%d avg_price=%s",
+                                c.asset, market_id, position.contracts, position.avg_price_cents
+                            )
+                if phantom_deleted:
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR] Phantom position cleanup completed for %s",
+                        c.asset
+                    )
+            except Exception as cleanup_err:
+                logger.warning(
+                    "[GLOBAL-ALLOCATOR] Failed to clean up phantom positions for %s: %s",
+                    c.asset, cleanup_err
+                )
+            
+            # CRITICAL FIX (2026-07-31): Validate position data integrity before using it
+            # Filter out assets with corrupted position data (exposure = None)
+            # This prevents corrupted positions from blocking all trades
+            asset_exposure = current_positions.get(c.asset, 0.0)
+            if asset_exposure is None:
+                # Asset has corrupted position data (None), skip it
+                logger.warning(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: asset has corrupted position data (exposure=None), treating as no position",
+                    c.asset
+                )
+                # Don't add to position_filtered - allow this asset to trade
+                position_filtered.append(c)
+                continue
+            
             # CRITICAL FIX: Use current_positions from position cache instead of internal _asset_positions
             # The internal dict is only for lifecycle tracking and may be stale
             # current_positions is the authoritative source from the actual position cache
@@ -203,6 +299,7 @@ class GlobalAllocator:
                 continue
             
             # Check if asset has pending order (and not stale)
+            # CRITICAL FIX (2026-08-01): Cross-validate with order gate before clearing
             if c.asset in self._pending_orders:
                 time_since_submit = time.time() - self._pending_order_timestamps.get(c.asset, 0)
                 if time_since_submit < self._pending_order_timeout:
@@ -212,20 +309,58 @@ class GlobalAllocator:
                     )
                     continue
                 else:
-                    # Stale pending order - clear it
-                    logger.warning(
-                        "[GLOBAL-ALLOCATOR] Clearing stale pending order for %s: %.1fs old",
-                        c.asset, time_since_submit
-                    )
-                    del self._pending_orders[c.asset]
-                    del self._pending_order_timestamps[c.asset]
+                    # CRITICAL FIX (2026-08-01): Cross-validate with order gate before clearing
+                    # This prevents clearing pending orders that are still active
+                    try:
+                        from merid.event_venues.kalshi.order_gate import get_order_gate
+                        order_gate = get_order_gate()
+                        order_id = self._pending_orders[c.asset]
+                        
+                        # Check if order still exists in order gate
+                        if order_gate:
+                            order_record = order_gate.lookup(order_id)
+                            # Order is still active if it exists and is not in terminal state
+                            if order_record and order_record.status not in ("filled", "canceled", "rejected"):
+                                logger.warning(
+                                    "[GLOBAL-ALLOCATOR] Pending order %s for %s still active in order gate "
+                                    "(status=%s), not clearing despite timeout (%.1fs old)",
+                                    order_id, c.asset, order_record.status, time_since_submit
+                                )
+                                continue
+                            else:
+                                # Order not active in gate - safe to clear
+                                logger.warning(
+                                    "[GLOBAL-ALLOCATOR] Clearing stale pending order for %s: %.1fs old "
+                                    "(order not active in gate, status=%s)",
+                                    c.asset, time_since_submit, order_record.status if order_record else "not_found"
+                                )
+                                del self._pending_orders[c.asset]
+                                del self._pending_order_timestamps[c.asset]
+                        else:
+                            # Order gate not available - clear to avoid permanent block
+                            logger.warning(
+                                "[GLOBAL-ALLOCATOR] Order gate not available, clearing pending order for %s "
+                                "to avoid permanent block",
+                                c.asset
+                            )
+                            del self._pending_orders[c.asset]
+                            del self._pending_order_timestamps[c.asset]
+                    except Exception as e:
+                        # If order gate check fails, log but still clear to avoid permanent block
+                        logger.warning(
+                            "[GLOBAL-ALLOCATOR] Failed to cross-validate pending order with order gate: %s. "
+                            "Clearing pending order for %s to avoid permanent block",
+                            e, c.asset
+                        )
+                        del self._pending_orders[c.asset]
+                        del self._pending_order_timestamps[c.asset]
             
             position_filtered.append(c)
         
-        if len(position_filtered) < len(price_filtered):
+        if len(position_filtered) < len(count_filtered):
             logger.info(
                 "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates due to existing positions/pending orders",
-                len(price_filtered) - len(position_filtered), len(price_filtered)
+                len(count_filtered) - len(position_filtered), len(count_filtered)
             )
         
         if not position_filtered:
@@ -487,21 +622,25 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     
     # CRITICAL: Use the shared $1 pool parameters (no per-asset rescaling)
     min_edge_pct = 0.025  # 2026-07-14: Changed from 0.5% to 2.5% to match profile edge_bands (industry standard)
-    min_confidence = 0.50  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
+                       # 2026-07-25: CRITICAL - Stored as FRACTION (0.025 = 2.5%), not percentage
+    min_confidence = 0.50  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
+                          # Signal generation produces confidence = 0.5 + edge (edge is 0.02-0.08), resulting in 52-58%
+                          # Previous 65% threshold was blocking all candidates despite valid edge
     min_price_cents = 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
     max_price_cents = 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
     max_single_asset_fraction = 1.00  # 100% - allows single asset to use full venue cap (shared pool)
     
     # 2026-07-14: Per-asset edge thresholds aligned with profile edge_bands (2.5% unified)
+    # 2026-07-25: CRITICAL - All thresholds stored as FRACTIONS (0.025 = 2.5%), not percentages
     # CRITICAL FIX: Updated to use unified 2.5% threshold from profile edge_bands (industry standard)
     # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
     # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
     per_asset_min_edge_pct = {
-        "BTC": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-        "ETH": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-        "SOL": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-        "XRP": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
-        "DOGE": 0.025,  # Unified edge_bands threshold (2.5% - industry standard)
+        "BTC": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+        "ETH": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+        "SOL": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+        "XRP": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
+        "DOGE": 0.025,  # Unified edge_bands threshold (2.5% = 0.025 fraction - industry standard)
     }
     
     # Optional: read allocator knobs from envelope if available

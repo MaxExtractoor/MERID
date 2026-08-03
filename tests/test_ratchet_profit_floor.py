@@ -157,13 +157,13 @@ class TestRatchetProfitFloor:
         assert 'RATCHET-99C-MANDATORY' not in content, \
             "Should NOT have RATCHET-99C-MANDATORY logic (removed, consolidated to position-level)"
         
-        # Verify position-level extreme profit check is present
-        assert 'should_trigger_extreme_profit' in content, \
-            "Should use position-level extreme profit check for 99c exit"
+        # Verify position-level auto exit 99c check is present
+        assert 'should_trigger_auto_exit_99c' in content, \
+            "Should use position-level auto_exit_99c check for 99c exit"
         
-        # Verify EXTREME-PROFIT logging is present
-        assert 'EXTREME-PROFIT triggered' in content, \
-            "Should log EXTREME-PROFIT trigger"
+        # Verify AUTO_EXIT_99C logging is present
+        assert 'AUTO-EXIT-99C triggered' in content, \
+            "Should log AUTO_EXIT_99C trigger"
     
     def test_ratchet_no_duplicate_in_position_cache(self):
         """Test that duplicate ratchet logic was removed from position_cache.py."""
@@ -174,9 +174,11 @@ class TestRatchetProfitFloor:
         assert 'RATCHET PROFIT FLOOR: Research-backed profit locking mechanism' not in content, \
             "Duplicate ratchet logic should be removed from position_cache"
         
-        # Verify there's a comment explaining the delegation
-        assert 'PositionMonitor (authoritative source)' in content, \
-            "Should have comment explaining PositionMonitor is authoritative"
+        # Verify ratchet tracking fields exist in position_cache
+        assert 'ratchet_activated' in content, \
+            "Should have ratchet_activated field"
+        assert 'ratchet_floor_price_cents' in content, \
+            "Should have ratchet_floor_price_cents field"
     
     def test_ratchet_position_trimming(self):
         """Test that ratchet position trimming logic is present."""

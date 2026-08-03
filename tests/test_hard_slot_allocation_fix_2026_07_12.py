@@ -252,66 +252,81 @@ class TestHardSlotAllocationInOrderRouter:
 
 
 class TestGlobalAllocatorSlotAllocation:
-    """Test slot allocation in global allocator execution path."""
+    """Test slot allocation for the global allocator execution path.
+
+    UPDATED (single execution point architecture): Slot allocation was REMOVED
+    from the agent_grid_15m execution path to prevent double allocation.
+    The execution flow is now:
+      agent_grid_15m → kalshi_tools._kalshi_place_order → order_router.route_order_async
+                                                          → slot_allocator.request_allocation (SINGLE POINT)
+    Slot rejection and release are handled inside order_router.
+    See tests/test_single_execution_point.py for the companion assertions.
+    """
     
-    def test_global_allocator_requests_slot_before_execution(self):
-        """Verify global allocator requests slot before executing orders."""
+    def test_global_allocator_delegates_slot_allocation_to_order_router(self):
+        """Verify the execution path delegates slot allocation to order_router (single point)."""
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Verify slot allocation happens before execution
-        lines = grid_source.split('\n')
-        allocation_line = None
-        execution_line = None
+        # Execution path routes via kalshi_tools._kalshi_place_order
+        assert "_kalshi_place_order" in grid_source, \
+            "Global allocator execution path should route via _kalshi_place_order"
         
-        for i, line in enumerate(lines):
-            if "GLOBAL-ALLOCATOR-SLOT-ALLOCATED" in line:
-                allocation_line = i
-            if "GLOBAL-ALLOCATOR-EXECUTE" in line:
-                execution_line = i
+        # Execution section must document the single-point delegation
+        assert "SINGLE POINT" in grid_source, \
+            "agent_grid_15m should document slot allocation delegation to order_router"
         
-        assert allocation_line is not None, "GLOBAL-ALLOCATOR-SLOT-ALLOCATED log should exist"
-        assert execution_line is not None, "GLOBAL-ALLOCATOR-EXECUTE log should exist"
-        assert allocation_line < execution_line, "Slot allocation should happen before execution"
+        # order_router owns request_allocation
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        assert "request_allocation" in router_source, \
+            "order_router should own slot allocation (single execution point)"
     
-    def test_global_allocator_rejects_on_slot_failure(self):
-        """Verify global allocator skips orders when slot allocation fails."""
+    def test_global_allocator_handles_order_router_rejection(self):
+        """Verify global allocator handles order_router rejections (incl. slot failures)."""
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Verify rejection logic exists
-        assert "GLOBAL-ALLOCATOR-SLOT-REJECT" in grid_source, \
-            "Global allocator should log GLOBAL-ALLOCATOR-SLOT-REJECT on slot failure"
+        # Rejections from order_router (including slot_allocator_hard_block) surface
+        # as failed order results and are logged in the EXECUTE-FAILED path
+        assert "GLOBAL-ALLOCATOR-EXECUTE-FAILED" in grid_source, \
+            "Global allocator should log GLOBAL-ALLOCATOR-EXECUTE-FAILED on order rejection"
         
-        # Verify continue statement after rejection
-        assert "continue  # Skip this order - no slot available" in grid_source, \
-            "Global allocator should continue to next order on slot rejection"
+        # Slot rejection itself is enforced in order_router
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        assert "slot_allocator_hard_block" in router_source or "insufficient_exposure" in router_source, \
+            "order_router should hard block on slot allocation failure"
     
-    def test_global_allocator_releases_slot_on_execution_failure(self):
-        """Verify global allocator releases slot when order execution fails."""
+    def test_slot_release_delegated_to_order_router_on_failure(self):
+        """Verify slot release on execution failure is handled by order_router."""
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Verify slot release on execution failure
-        assert "GLOBAL-ALLOCATOR-SLOT-RELEASED" in grid_source, \
-            "Global allocator should log GLOBAL-ALLOCATOR-SLOT-RELEASED on execution failure"
+        # agent_grid documents the delegation instead of releasing directly
+        assert "Slot release is now handled in order_router" in grid_source, \
+            "agent_grid_15m should document slot release delegation to order_router"
         
-        # Verify release happens in execution failure handler
-        assert "execution failed" in grid_source.lower() or "EXECUTE-FAILED" in grid_source, \
-            "Global allocator should release slot on EXECUTE-FAILED"
+        # order_router owns release_slot
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        assert "release_slot" in router_source, \
+            "order_router should own slot release (single execution point)"
     
-    def test_global_allocator_releases_slot_on_exception(self):
-        """Verify global allocator releases slot when exception occurs."""
+    def test_global_allocator_logs_execution_exceptions(self):
+        """Verify global allocator logs exceptions; slot release is order_router's job."""
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Verify slot release on exception
-        assert "GLOBAL-ALLOCATOR-SLOT-RELEASED" in grid_source, \
-            "Global allocator should log GLOBAL-ALLOCATOR-SLOT-RELEASED on exception"
+        # Exception path is logged
+        assert "GLOBAL-ALLOCATOR-EXECUTE-ERROR" in grid_source, \
+            "Global allocator should log GLOBAL-ALLOCATOR-EXECUTE-ERROR on exception"
         
-        # Verify release happens in exception handler
-        assert "exception" in grid_source.lower() or "EXECUTE-ERROR" in grid_source, \
-            "Global allocator should release slot on EXECUTE-ERROR"
+        # No direct release in the execution path (delegated to order_router)
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        assert "_release_allocated_slot" in router_source, \
+            "order_router should have the slot release helper"
 
 
 class TestExposureCapEnforcement:

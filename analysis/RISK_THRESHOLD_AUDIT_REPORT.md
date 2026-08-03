@@ -263,6 +263,89 @@ The MERID 15m Kalshi crypto trading system has significant discrepancies between
 - Kelly fraction settings
 - Daily loss limits
 - Cycle risk limits
+- Confidence thresholds
+- Position monitoring and resting order consistency
+
+---
+
+## Configuration Contradiction Fixes (2026-07-17)
+
+### Confidence Threshold Alignment (FIXED)
+**Severity:** 🟠 HIGH - Inconsistent confidence thresholds could allow trades below minimum confidence
+
+**Config Value:**
+```yaml
+confidence:
+  min_confidence_threshold: 0.65  # 65% minimum confidence
+```
+
+**Code Contradictions Found:**
+- `merid/risk/profiles/global_allocator.py` (from_envelope method): Used `min_confidence = 0.50` instead of 0.65
+- `merid/risk/profiles/test_global_allocator.py`: Test cases used `min_confidence=0.50` instead of 0.65
+
+**Impact:** The from_envelope method could create GlobalAllocator instances with 50% confidence threshold when the profile specifies 65%, potentially allowing lower-confidence trades than intended.
+
+**Files Fixed:**
+- `merid/risk/profiles/global_allocator.py` (line 490): Updated to `min_confidence = 0.65`
+- `merid/risk/profiles/test_global_allocator.py` (multiple lines): Updated all test cases to `min_confidence=0.65`
+
+**Status:** ✅ FIXED
+
+---
+
+### Percentage-Based Limit Removal (FIXED)
+**Severity:** 🟠 HIGH - Audit harness was checking for deprecated percentage-based limits
+
+**Config Value:**
+```yaml
+# 2026-07-16: Percentage-based allocation caps PRUNED
+# The $1 global slot allocator is the single source of truth for exposure
+fixed_exposure_cap_usd: 1.00  # Fixed $1 total exposure cap
+max_cycle_risk_pct: 0.0  # DISABLED - defers to fixed $1 cap
+per_trade_max_notional_pct: 0.0  # DISABLED - defers to fixed $1 cap
+```
+
+**Code Contradictions Found:**
+- `merid/audit/production_audit_harness.py`: Was checking for 3% per-agent / 5% total percentage limits
+- `merid/trading/top3_batch_manager.py`: Comment referenced 3% per-agent / 5% total limits
+
+**Impact:** The audit harness was validating against deprecated percentage-based limits instead of the current fixed $1 exposure cap model.
+
+**Files Fixed:**
+- `merid/audit/production_audit_harness.py`: Updated to check for `FIXED_EXPOSURE_CAP_USD = 1.00` instead of percentage limits
+- `merid/trading/top3_batch_manager.py`: Updated comment to reflect fixed $1 cap model
+
+**Status:** ✅ FIXED
+
+---
+
+### Position Monitoring and Resting Order Consistency (AUDITED)
+**Severity:** 🟢 NO ISSUE - Proper wiring confirmed
+
+**Findings:**
+- PositionMonitor is properly initialized in `loop_15m.py` with exit intent callback registration
+- PositionCache adds positions to PositionMonitor on fill (line 741-853)
+- PositionCache removes positions from PositionMonitor on close (line 941-952)
+- RestingOrderMonitor tracks GTC limit orders and prevents duplicate submissions
+- GlobalAllocator records fills and position closes for exposure tracking
+- All components properly wire position lifecycle events
+
+**Status:** ✅ CONSISTENT
+
+---
+
+### Exposure Limit Enforcement (AUDITED)
+**Severity:** 🟢 NO ISSUE - Fixed $1 cap properly enforced
+
+**Findings:**
+- GlobalSlotAllocator enforces $1 total exposure cap across all 5 assets
+- UnifiedRiskManager uses `fixed_exposure_cap_usd = 1.00` (mirrors MERID_FIXED_EXPOSURE_CAP_USD)
+- KalshiCrypto15mRiskEnvelope uses fixed $1 cap from environment variable
+- Percentage-based limits (3% per-agent, 5% total) are DISABLED (set to 0.0)
+- All exposure checks defer to fixed $1 cap when pct == 0.0
+- Deprecated components (PortfolioOptimizer, MonteCarlo, CorrelationMatrix) marked as DEPRECATED
+
+**Status:** ✅ CONSISTENT
 
 ---
 
@@ -313,6 +396,81 @@ The root cause of these bypasses is a combination of:
 - Incomplete migration to profile-driven configuration
 - Fallback values that were never updated when profile values changed
 - Environment variable defaults that were not synchronized with profile
+
+---
+
+## Configuration Contradiction Fixes (2026-07-17)
+
+### Settings.py Percentage-Based Fallback Removal
+
+**Issue:** `merid/settings.py` contained percentage-based fallback logic for asset cap calculations that contradicted the fixed $1 exposure cap model.
+
+**Findings:**
+- Static mode fallback used 3% of bankroll (`bankroll * 0.03`) instead of fixed $1 cap
+- Dynamic allocation fallback used 0.5% of bankroll (`bankroll * 0.005`) instead of fixed $1 cap
+- Both fallbacks occurred in two locations (static mode and dynamic allocation paths)
+
+**Fixes Applied:**
+1. **merid/settings.py** (lines 1316-1323, 1462-1469): Replaced 3% bankroll percentage fallback with fixed $1 exposure cap from `MERID_FIXED_EXPOSURE_CAP_USD` environment variable
+2. **merid/settings.py** (lines 1367-1375, 1513-1521): Replaced 0.5% bankroll percentage fallback with fixed $1 exposure cap from `MERID_FIXED_EXPOSURE_CAP_USD` environment variable
+3. Updated comments to document that percentage-based model is DISABLED and fixed $1 cap is used instead
+
+**Impact:**
+- All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) now consistently use $1.00 cap in fallback scenarios
+- Eliminates contradiction between settings.py fallback logic and production fixed $1 exposure model
+- Aligns with GlobalSlotAllocator and UnifiedRiskManager enforcement
+
+**Tests Added:**
+- `tests/test_settings_fixed_exposure_cap_fix_2026_07_17.py`: 4 tests validating fixed $1 cap usage in settings.py
+  - Test static mode uses fixed $1 cap instead of 3%
+  - Test settings.py reads MERID_FIXED_EXPOSURE_CAP_USD from environment
+  - Test percentage-based fallbacks are disabled
+  - Test all 5 assets are included in fallback logic
+
+### End-to-End Stack Audit Summary (2026-07-17)
+
+**Objective:** Audit entire production 15-minute Kalshi crypto trading stack for fixed $1 global exposure cap enforcement across all layers.
+
+**Layers Audited:**
+
+1. **Upstream Layer (Signal Generation, Agent Grid, Edge/Confidence Validation):**
+   - ✅ Confidence thresholds (0.65) aligned with profile YAML
+   - ✅ Edge thresholds (~2% or 1.25 cents) consistent across signal generation
+   - ✅ No percentage-based risk limits in upstream signal paths
+   - ✅ All 5 crypto assets included in agent grid
+
+2. **Midstream Layer (Position Sizing, Order Routing, Risk Envelope):**
+   - ✅ PositionSizer percentage caps disabled (max_bankroll_pct = 0.0)
+   - ✅ OrderRouter enforces fixed $1 cap via GlobalSlotAllocator
+   - ✅ UnifiedRiskManager uses fixed_exposure_cap_usd (1.00) as single source of truth
+   - ✅ KalshiCrypto15mRiskEnvelope uses fixed $1 cap, percentage limits disabled
+   - ✅ GridValidator uses fixed $1 cap from environment variable
+
+3. **Downstream Layer (Execution, Fills, Position Management, Exits):**
+   - ✅ PositionCache records exposure on fill for GlobalSlotAllocator
+   - ✅ PositionMonitor manages exit policies (TP/SL/trailing stop)
+   - ✅ FillsLedger tracks fills for PnL and exposure reconciliation
+   - ✅ Exit policies (risk_reward, trailing, time_exit) loaded from profile YAML
+   - ✅ All exit paths respect fixed $1 exposure cap
+
+4. **Reconciliation Layer (State Sync, Exposure Tracking, Audit Harness):**
+   - ✅ ProductionAuditHarness checks fixed $1 exposure cap
+   - ✅ Exposure tracking via GlobalSlotAllocator (single source of truth)
+   - ✅ Window-based tracking in risk envelope for monitoring (not enforcement)
+   - ✅ State synchronization between position cache and Kalshi API
+
+**Contradictions Fixed:**
+- Settings.py percentage-based fallbacks (3%, 0.5%) → Fixed $1 cap
+- GridValidator bankroll * risk_fraction → Fixed $1 cap from environment
+- All percentage-based allocation caps disabled (pct = 0.0)
+
+**Test Coverage:**
+- 16 tests for fixed $1 exposure cap enforcement
+- All tests passing
+- Coverage includes: GlobalSlotAllocator, UnifiedRiskManager, settings.py, profile adapter, risk envelope
+
+**Conclusion:**
+The entire production stack now consistently enforces the fixed $1 global exposure cap across all layers. No percentage-based allocation caps remain in the production code paths. All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) are included and active.
 
 ### Impact
 

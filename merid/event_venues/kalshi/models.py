@@ -395,6 +395,9 @@ class KalshiMarketState:
     book_initialized: bool = False
     best_bid_cents: Optional[int] = None
     best_ask_cents: Optional[int] = None
+    # CRITICAL FIX (2026-08-01): Add NO-side specific fields for proper NO-side tracking
+    best_no_bid_cents: Optional[int] = None
+    best_no_ask_cents: Optional[int] = None
     mid_cents: Optional[int] = None
     spread_cents: Optional[float] = None
     top_of_book_size: int = 0
@@ -433,6 +436,9 @@ class KalshiMarketState:
     # Liquidity audit fields (for MD-HEALTH logging and validation)
     has_bid: bool = False  # whether bid side exists
     has_ask: bool = False  # whether ask side exists
+    # CRITICAL FIX (2026-08-01): Add NO-side liquidity flags
+    has_no_bid: bool = False  # whether NO bid side exists
+    has_no_ask: bool = False  # whether NO ask side exists
     min_depth_yes: int = 0  # depth on yes side at best bid (single-level)
     min_depth_no: int = 0  # depth on no side at best ask (single-level)
     depth_10c_yes: int = 0  # window-based depth on yes side (±10c of mid)

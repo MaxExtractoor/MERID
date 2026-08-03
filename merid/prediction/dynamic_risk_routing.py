@@ -276,9 +276,21 @@ class DynamicRiskRouter:
                 "[RISK-ROUTING-VIOLATION] Total allocated %.2f > global cap %.2f - INVARIANT VIOLATION",
                 total_allocated, self.total_risk_budget_usd
             )
-            # Safe mode: truncate allocations to cap
+            # Safe mode: truncate allocations to cap proportionally
             logger.warning("[RISK-ROUTING-SAFE-MODE] Truncating allocations to global cap")
-            # TODO: Implement truncation logic
+            scale_factor = self.total_risk_budget_usd / total_allocated if total_allocated > 0 else 0
+            for allocation in allocations:
+                original_contracts = allocation.contracts
+                original_risk = allocation.risk_usd
+                allocation.contracts = max(1, int(allocation.contracts * scale_factor))
+                allocation.risk_usd = allocation.risk_usd * scale_factor
+                logger.info(
+                    "[RISK-ROUTING-TRUNCATE] %s: %d->%d contracts, %.2f->%.2f USD (scale=%.3f)",
+                    allocation.asset, original_contracts, allocation.contracts,
+                    original_risk, allocation.risk_usd, scale_factor
+                )
+            # Recalculate total after truncation
+            total_allocated = sum(a.risk_usd for a in allocations)
         
         # INVARIANT: Per-asset allocation never exceeds cap
         for asset, exposure in current_exposures.items():

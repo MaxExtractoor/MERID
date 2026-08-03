@@ -28,8 +28,13 @@ Usage::
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal, ROUND_CEILING
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union
+
+from utils.logger import get_logger
+
+logger = get_logger("merid.event_venues.kalshi.fees")
 
 from merid.event_venues.kalshi.risk_parameters import (
     FEE_TIER_SMALL_MIN,
@@ -50,8 +55,15 @@ TIER_RATES: Dict[Tuple[int, int], Decimal] = {
     (FEE_TIER_LARGE_MIN, FEE_TIER_LARGE_MAX): Decimal(str(FEE_RATE_LARGE)), # 1000+: 3%
 }
 
-MIN_FEE_CENTS: int = 2
-"""Minimum fee per contract in cents (Kalshi floor)."""
+MIN_FEE_CENTS: int = 1
+"""Minimum fee per contract in cents (Kalshi floor).
+
+CRITICAL FIX (2026-08-01): Changed from 2 to 1 to match Kalshi's official fee formula.
+The parabolic fee formula ceil(rate * C * P * (1-P) * 100) correctly calculates 1¢ for
+1 contract @ 11¢ (0.07 * 1 * 0.11 * 0.89 = 0.006853 → ceil(0.6853¢) = 1¢).
+Previous MIN_FEE_CENTS=2 was incorrectly overriding valid 1¢ calculations, doubling fees at low prices.
+Reference: https://kalshi.com/docs/kalshi-fee-schedule.pdf
+"""
 
 
 def _get_rate_for_contracts(contracts: int) -> Decimal:

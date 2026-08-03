@@ -37,7 +37,7 @@ class TestDynamicThresholdManager:
         thresholds = self.manager.get_current_thresholds()
         
         assert thresholds.min_price_cents == 10
-        assert thresholds.max_price_cents == 50
+        assert thresholds.max_price_cents == 75  # 2026-07-12: Expanded from 50c to 75c
         assert thresholds.max_spread_cents == 30
         assert thresholds.min_spread_gate_cents == 30
         assert thresholds.regime == "MEAN_REVERSION"
@@ -47,7 +47,7 @@ class TestDynamicThresholdManager:
         min_price, max_price = self.manager.get_price_range()
         
         assert min_price == 10
-        assert max_price == 50
+        assert max_price == 75  # 2026-07-12: Expanded from 50c to 75c
     
     def test_get_max_spread_cents(self):
         """Test getting max spread threshold."""
@@ -107,7 +107,7 @@ class TestDynamicThresholdManager:
                 )
                 
                 assert thresholds.min_price_cents == 10
-                assert thresholds.max_price_cents == 50
+                assert thresholds.max_price_cents == 75  # 2026-07-12: Expanded from 50c to 75c
                 assert thresholds.max_spread_cents == 30
                 assert thresholds.regime == "MEAN_REVERSION"
     
@@ -137,12 +137,11 @@ class TestDynamicThresholdManager:
                     {"BTC": {"bid_depth": 100, "ask_depth": 100}}
                 )
                 
-                # Crisis regime: uses crisis config directly with multipliers applied
-                # Crisis config: 5-95c, 100c spread
-                # Multipliers: 1.9x price range, 3.3x spread
-                # Implementation applies multipliers to crisis config values
-                assert thresholds.min_price_cents == 9  # 5 * 1.9
-                assert thresholds.max_price_cents == 180  # 95 * 1.9
+                # Crisis regime: applies multiplier to canonical range (10-75c)
+                # Multiplier: 1.9x price range, 3.3x spread
+                # Implementation applies multipliers to canonical config values
+                assert thresholds.min_price_cents == 19  # 10 * 1.9
+                assert thresholds.max_price_cents == 142  # 75 * 1.9
                 assert thresholds.max_spread_cents == 330  # 100 * 3.3
                 assert thresholds.regime == "CRISIS"
     

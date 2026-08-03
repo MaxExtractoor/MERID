@@ -340,3 +340,56 @@ class TestPositionCacheDeletionOnClose:
         assert f"KXBTC15M-{future_str}-50" in cache._positions
         assert f"KXSOL15M-{future_str}-50" in cache._positions
         assert f"KXETH15M-{future_str}-50" not in cache._positions
+
+    @pytest.mark.asyncio
+    async def test_exit_fill_reduces_position_correctly(self):
+        """Exit fill should reduce position contracts correctly for both YES and NO sides."""
+        cache = KalshiPositionCache()
+        
+        # Test NO position exit
+        market_no = "KXXRP15M-21JUL220000-50"
+        cache._positions[market_no] = CachedPosition(
+            market_id=market_no,
+            contracts=10,
+            side="no",
+            avg_price_cents=4000,
+            realized_pnl_usd=Decimal("0"),
+            unrealized_pnl_usd=Decimal("0")
+        )
+        
+        # Apply exit fill (SELL_NO)
+        cache._positions[market_no].apply_fill(
+            contracts=5,
+            price_cents=4000,
+            fee_cents=2,
+            side="no",
+            action="sell"
+        )
+        
+        # Position should be reduced
+        assert cache._positions[market_no].contracts == 5
+        assert cache._positions[market_no].side == "no"
+        
+        # Test YES position exit
+        market_yes = "KXBTC15M-21JUL220000-50"
+        cache._positions[market_yes] = CachedPosition(
+            market_id=market_yes,
+            contracts=10,
+            side="yes",
+            avg_price_cents=5000,
+            realized_pnl_usd=Decimal("0"),
+            unrealized_pnl_usd=Decimal("0")
+        )
+        
+        # Apply exit fill (SELL_YES)
+        cache._positions[market_yes].apply_fill(
+            contracts=3,
+            price_cents=5000,
+            fee_cents=2,
+            side="yes",
+            action="sell"
+        )
+        
+        # Position should be reduced
+        assert cache._positions[market_yes].contracts == 7
+        assert cache._positions[market_yes].side == "yes"

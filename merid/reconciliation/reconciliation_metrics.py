@@ -366,11 +366,10 @@ def emit_recon_metrics(
     # Count discrepancies per asset
     asset_discrepancies = defaultdict(int)
     for d in discrepancies:
-        # Extract asset from symbol (e.g., "KXBTC-..." -> "BTC")
-        symbol_parts = d.symbol.split("-")
-        if symbol_parts:
-            asset = symbol_parts[0].replace("KX", "")
-            asset_discrepancies[asset] += 1
+        # CRITICAL FIX (2026-07-21): Use canonical identity helper for asset extraction
+        from merid.utils.kalshi_identity import extract_asset
+        asset = extract_asset(d.symbol)
+        asset_discrepancies[asset] += 1
 
     collector.record_reconciliation_run(
         venue=venue,

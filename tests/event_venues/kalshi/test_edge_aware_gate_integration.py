@@ -52,10 +52,12 @@ class TestEdgeAwareGateIntegration:
     def test_edge_aware_gate_with_spread_cost_too_high(self):
         """Test that edge-aware gate fails when spread cost is too high relative to edge."""
         # Create scenario where spread is high relative to edge
+        # CRITICAL FIX 2026-07-28: Adjusted for full spread cost model (not spread/2)
+        # Need higher raw edge to get positive exec edge, but high spread/edge ratio
         passes, reason = check_market_microstructure_edge_aware(
-            yes_bid_cents=45,
-            no_bid_cents=45,
-            p_hat_yes_cents=55.0,
+            yes_bid_cents=40,
+            no_bid_cents=40,
+            p_hat_yes_cents=70.0,
             order_side="yes",
             yes_depth=50,
             no_depth=50,
@@ -63,7 +65,7 @@ class TestEdgeAwareGateIntegration:
             max_spread_to_edge_ratio=0.4
         )
         
-        # YES: raw = 10c, spread = 10c, exec = 5c, ratio = 1.0 (exceeds 0.4 threshold)
+        # YES: raw = 30c, spread = 20c, exec = 8c, ratio = 0.67 (exceeds 0.4 threshold)
         assert passes is False
         assert "spread_cost_too_high" in reason
     

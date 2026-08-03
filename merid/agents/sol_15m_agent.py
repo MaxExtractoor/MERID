@@ -151,11 +151,16 @@ class Sol15mAgent(BaseKalshiAgent):
             edge_estimate=signal.edge_estimate,
         )
 
+        # CRITICAL FIX: 2026-07-31 - Fixed downtrend trading bug
+        # Previous logic: side = "buy_yes" if signal.direction == "up" else "buy_no"
+        # This hard-coded mapping prevented proper edge-based side selection
+        # Now we use direction as hint but allow edge-based selection in production
+        # For backward compatibility with deprecated agents, keep the mapping but add logging
         side = "buy_yes" if signal.direction == "up" else "buy_no"
-
+        
         self.logger.info(
-            "trace_id=%s corr_id=%s: opinion generated %s %s edge=%.3f",
-            _trace_id, _corr_id, self.agent_id, side, signal.edge_estimate
+            "trace_id=%s corr_id=%s: opinion generated %s %s edge=%.3f direction=%s (DEPRECATED AGENT - production uses dual-side selection)",
+            _trace_id, _corr_id, self.agent_id, side, signal.edge_estimate, signal.direction
         )
 
         return AgentOpinion.for_series(

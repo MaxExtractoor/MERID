@@ -128,6 +128,7 @@ class TestFeeAwareSizing:
             edge_pct=Decimal("5.0"),
             confidence=Decimal("0.8"),
             consider_fee_impact=False,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         assert count > 0
@@ -145,6 +146,7 @@ class TestFeeAwareSizing:
             confidence=Decimal("0.8"),
             consider_fee_impact=True,
             estimated_fee_cents=5,  # $0.05 fee
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         assert count >= 0
@@ -162,6 +164,7 @@ class TestFeeAwareSizing:
             confidence=Decimal("0.8"),
             consider_fee_impact=True,
             estimated_fee_cents=0,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         assert metadata['fee_adjusted'] is False
@@ -176,6 +179,7 @@ class TestFeeAwareSizing:
             confidence=Decimal("0.8"),
             consider_fee_impact=True,
             estimated_fee_cents=None,
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # Should not crash, fee_adjusted should be False

@@ -158,8 +158,9 @@ class TestExposureSnapshot(unittest.TestCase):
             pending_yes_cents=200,
             pending_no_cents=100,
         )
-        # net = (1000+200) - (500+100) = 600
-        self.assertEqual(cell.net_delta_cents, 600)
+        # CRITICAL FIX (2026-07-29): Pending orders removed from exposure calculation
+        # net = 1000 - 500 = 500 (pending orders excluded)
+        self.assertEqual(cell.net_delta_cents, 500)
 
     def test_get_cell_creates_on_access(self):
         from merid.hedging.exposure import ExposureSnapshot

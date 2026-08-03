@@ -151,16 +151,17 @@ class PositionStateMonitor:
                 return
             
             # Check each position
-            for position in positions:
+            # positions is Dict[str, Position] from get_open_positions()
+            for position_id, position in positions.items():
                 try:
                     # Get cache entry for this position
-                    cache_position = cache.get_position(position.position_id)
+                    cache_position = cache.get_position(position_id)
                     
                     if cache_position is None:
                         continue
                     
                     # Compare position.size with cache.contracts
-                    position_size = position.size
+                    position_size = position.size if hasattr(position, 'size') else 0
                     cache_contracts = cache_position.contracts if hasattr(cache_position, 'contracts') else 0
                     
                     desync_amount = abs(position_size - cache_contracts)
@@ -169,11 +170,11 @@ class PositionStateMonitor:
                         await self._handle_desync(position, position_size, cache_contracts, desync_amount)
                     else:
                         # Check if this was an active desync that's now resolved
-                        if position.position_id in self._active_desyncs:
-                            await self._resolve_desync(position.position_id)
+                        if position_id in self._active_desyncs:
+                            await self._resolve_desync(position_id)
                             
                 except Exception as e:
-                    logger.error(f"[POSITION-STATE-MONITOR] Error checking position {position.position_id}: {e}")
+                    logger.error(f"[POSITION-STATE-MONITOR] Error checking position {position_id}: {e}")
                     
         except Exception as e:
             logger.error(f"[POSITION-STATE-MONITOR] Desync check error: {e}", exc_info=True)

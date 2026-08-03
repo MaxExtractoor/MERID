@@ -214,15 +214,19 @@ def train_sb3_marl(
     total_timesteps: int = 100000,
     n_envs: int = 4,
     algorithm: str = "ppo",
+    seed: int = 42,
 ) -> Any:
     """
     Train MARL agents using Stable Baselines3.
+    
+    CRITICAL FIX (2026-07-23): Integrated SeedManager for deterministic reproducibility.
     
     Args:
         num_agents: Number of agents in swarm
         total_timesteps: Total training timesteps
         n_envs: Number of parallel environments
         algorithm: Algorithm to use (ppo, dqn)
+        seed: Random seed for reproducibility
     
     Returns:
         Trained model
@@ -234,6 +238,19 @@ def train_sb3_marl(
     except ImportError:
         logger.error("Stable Baselines3 not installed. Run: pip install stable-baselines3")
         return None
+    
+    # CRITICAL FIX (2026-07-23): Use SeedManager for deterministic training
+    try:
+        from merid.ml.seed_manager import get_seed_manager
+        seed_manager = get_seed_manager()
+        seed_manager.set_seed(seed, "training", "sb3_marl", "model_init")
+        logger.info(f"[SEED-MANAGER] Set seed={seed} for SB3 MARL training")
+    except ImportError:
+        logger.warning("[SEED-MANAGER] SeedManager not available, using direct seed")
+        import random
+        import numpy as np
+        random.seed(seed)
+        np.random.seed(seed)
     
     # Create vectorized environment
     def make_env():

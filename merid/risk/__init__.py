@@ -32,6 +32,11 @@ from merid.risk.kill_switches import (
     get_risk_status,
     risk_controller,
 )
+from merid.risk.platform_kill_switch import (
+    get_platform_kill_switch,
+    can_trade as platform_can_trade,
+    get_kill_reason,
+)
 
 # Heavy imports (pandas/numpy) are deferred via __getattr__ to avoid a 5+s
 # cold-import penalty that blocks tests and startup.  No caller imports
@@ -62,6 +67,10 @@ __all__ = [
     "emergency_stop",
     "get_risk_status",
     "risk_controller",
+    # Platform kill switch
+    "get_platform_kill_switch",
+    "platform_can_trade",
+    "get_kill_reason",
     # LEGACY REMOVAL: capital_engine moved to archive/legacy/ during 15m stack cleanup
     # "AssetCapitalConfig",
     # "CapitalEngine",

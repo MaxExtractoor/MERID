@@ -42,7 +42,7 @@ class RiskEnvelopeConfig:
     asset_max_notional_usd: Dict[str, float]
     
     # ── Static (profile-configured) ───────────────────────────────────────
-    max_concurrent_trades: int
+    # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
     agent_max_yes_position: int
     agent_max_no_position: int
     agent_max_orders_per_window: int
@@ -117,7 +117,7 @@ class RiskEnvelopeService:
             asset_max_notional_usd=envelope.asset_max_notional_usd,
             
             # Static (profile-configured)
-            max_concurrent_trades=envelope.max_concurrent_trades,
+            # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
             agent_max_yes_position=envelope.agent_max_yes_position,
             agent_max_no_position=envelope.agent_max_no_position,
             agent_max_orders_per_window=envelope.agent_max_orders_per_window,
@@ -134,7 +134,7 @@ class RiskEnvelopeService:
                 "max_total_notional_usd": DynamicSource.BANKROLL,
                 "max_single_order_notional_usd": DynamicSource.BANKROLL,
                 "asset_max_notional_usd": DynamicSource.BANKROLL,
-                "max_concurrent_trades": DynamicSource.STATIC,
+                # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
                 "agent_max_yes_position": DynamicSource.STATIC,
                 "agent_max_no_position": DynamicSource.STATIC,
                 "agent_max_orders_per_window": DynamicSource.STATIC,

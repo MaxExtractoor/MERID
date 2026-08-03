@@ -102,8 +102,16 @@ class LiquiditySanityChecker:
             no_orderbook, no_ask_cents / 100.0, self.depth_window_cents / 100.0
         )
         
+        # CRITICAL FIX (2026-08-02): Convert Kalshi-formatted sides to canonical format
+        # The liquidity checker expects canonical sides ("yes", "no") but may receive
+        # Kalshi-formatted sides (BUY_YES, SELL_YES, BUY_NO, SELL_NO) from loop_15m.py
+        canonical_order_side = order_side
+        if order_side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"):
+            from merid.event_venues.kalshi.binary_price_space import parse_kalshi_side
+            canonical_order_side, _ = parse_kalshi_side(order_side)
+        
         # Check price sanity
-        price_cents = yes_bid_cents if order_side == "yes" else no_bid_cents
+        price_cents = yes_bid_cents if canonical_order_side == "yes" else no_bid_cents
         is_extreme = (price_cents < self.min_price_cents or price_cents > self.max_price_cents)
         
         # Perform checks
@@ -120,7 +128,7 @@ class LiquiditySanityChecker:
         
         # Check 2: Exit feasibility (opposite side depth)
         if passes:
-            if order_side == "yes":
+            if canonical_order_side == "yes":
                 # For YES order, need NO side depth to exit
                 if no_depth_opposite == 0:
                     passes = False

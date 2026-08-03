@@ -762,17 +762,17 @@ def compute_edge(candidate: MarketCandidate, config: TraderConfig) -> MarketCand
         candidate.best_side = "yes"
         candidate.best_edge = yes_edge
         # Limit price = implied YES price in cents (we bid at model value)
-        # CRITICAL FIX: Clamp to 10-50 cents to prevent extreme purchases
-        # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
-        # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
-        candidate.limit_price_cents = max(10, min(50, int(implied_yes * 100)))
+        # CRITICAL FIX: Clamp to 10-75 cents to prevent extreme purchases
+        # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 75]
+        # 2026-07-12: Expanded max from 50c to 75c to match profile price_range.max_price_cents
+        candidate.limit_price_cents = max(10, min(75, int(implied_yes * 100)))
     elif no_edge > Decimal("0"):
         candidate.best_side = "no"
         candidate.best_edge = no_edge
-        # CRITICAL FIX: Clamp to 10-50 cents to prevent extreme purchases
-        # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
-        # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
-        candidate.limit_price_cents = max(10, min(50, int(implied_no * 100)))
+        # CRITICAL FIX: Clamp to 10-75 cents to prevent extreme purchases
+        # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 75]
+        # 2026-07-12: Expanded max from 50c to 75c to match profile price_range.max_price_cents
+        candidate.limit_price_cents = max(10, min(75, int(implied_no * 100)))
     else:
         candidate.best_side = ""
         candidate.best_edge = max(yes_edge, no_edge)

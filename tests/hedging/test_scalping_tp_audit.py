@@ -271,8 +271,10 @@ class TestPositionCacheBrackets(unittest.TestCase):
 
         pos = CachedPosition(
             market_id="KXBTCD-26MAY03H1330-T106",
+            agent_id="test_agent",
             contracts=10,
             side="yes",
+            thesis_side="yes",
             avg_price_cents=50,
             take_profit_price_cents=58,
             stop_loss_price_cents=43,

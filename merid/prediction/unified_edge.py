@@ -348,7 +348,7 @@ class UnifiedEdgeComputer:
             from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
             threshold_manager = get_dynamic_threshold_manager()
             max_spread = threshold_manager.get_max_spread_cents()
-            logger.debug("[EDGE-CHECK] Using dynamic spread threshold: %dc (regime=%s)", max_spread, threshold_manager.get_regime())
+            logger.debug(f"[EDGE-CHECK] Using dynamic spread threshold: {max_spread}c (regime={threshold_manager.get_regime()})")
             return max_spread
         except Exception as e:
             logger.debug("[EDGE-CHECK] Failed to load dynamic spread threshold: %s, trying profile", e)
@@ -527,15 +527,16 @@ class UnifiedEdgeComputer:
             logger.debug("[EDGE-CHECK] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
         
         # Check 2.76: Maximum contract price ceiling (low-profit trap prevention)
+        # CRITICAL FIX (2026-08-01): Updated to 85c to match expanded canonical range (1c-85c)
         # 2026-07-12: Canonical price band (75c) - aligned with GlobalSlotAllocator
-        max_price_cents = 75  # Default fallback (75 cents / $0.75) - aligned with profile
+        max_price_cents = 85  # Default fallback (85 cents / $0.85) - updated from 75c for 15m crypto volatility
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
                 max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
         except Exception as e:
-            logger.debug("[EDGE-CHECK] Failed to load max_contract_price_cents from profile: %s, using default 50c", e)
+            logger.debug("[EDGE-CHECK] Failed to load max_contract_price_cents from profile: %s, using default 85c", e)
         
         # Get contract price from mid_price_cents (ContractState only has mid_price_cents)
         # For YES contracts, mid_price_cents is the YES price
@@ -806,7 +807,7 @@ class UnifiedEdgeComputer:
                 from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
                 threshold_manager = get_dynamic_threshold_manager()
                 max_spread_for_edge = threshold_manager.get_max_spread_cents()
-                logger.debug("[EDGE-CHECK] Using dynamic spread threshold for edge check: %dc (regime=%s)", max_spread_for_edge, threshold_manager.get_regime())
+                logger.debug(f"[EDGE-CHECK] Using dynamic spread threshold for edge check: {max_spread_for_edge}c (regime={threshold_manager.get_regime()})")
             except Exception as e:
                 logger.debug("[EDGE-CHECK] Failed to load dynamic spread threshold: %s, trying profile", e)
                 # Fallback to profile guardrails

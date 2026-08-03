@@ -70,12 +70,12 @@ def test_catalog_refresh_interval_configured():
 
 
 def test_scheduler_trading_window_validation():
-    """Verify scheduler correctly validates 2-12 minute trading window."""
+    """Verify scheduler correctly validates 0.5-15 minute trading window (full 15m window)."""
     from merid.event_venues.kalshi.crypto_15m_scheduler import MarketWindow
     from datetime import datetime, timezone, timedelta
-    
+
     now = datetime.now(timezone.utc)
-    
+
     # Create a window that's in the trading window (5 minutes to expiry)
     expiry_in_window = now + timedelta(minutes=5)
     window_in_range = MarketWindow(
@@ -83,34 +83,34 @@ def test_scheduler_trading_window_validation():
         expiry_utc=expiry_in_window,
         ticker="KXBTC15M-TEST"
     )
-    
+
     # Should be in trading window
-    assert window_in_range.is_in_trading_window(min_minutes=2, max_minutes=12), \
+    assert window_in_range.is_in_trading_window(min_minutes=0.5, max_minutes=15.0), \
         "Window with 5 minutes to expiry should be in trading window"
-    
-    # Create a window that's too close to expiry (1 minute to expiry)
-    expiry_too_close = now + timedelta(minutes=1)
+
+    # Create a window that's too close to expiry (0.25 minutes to expiry)
+    expiry_too_close = now + timedelta(seconds=15)
     window_too_close = MarketWindow(
-        start_utc=now - timedelta(minutes=14),
+        start_utc=now - timedelta(minutes=14.75),
         expiry_utc=expiry_too_close,
         ticker="KXBTC15M-TEST"
     )
-    
+
     # Should NOT be in trading window
-    assert not window_too_close.is_in_trading_window(min_minutes=2, max_minutes=12), \
-        "Window with 1 minute to expiry should NOT be in trading window"
-    
-    # Create a window that's too far from expiry (15 minutes to expiry)
-    expiry_too_far = now + timedelta(minutes=15)
+    assert not window_too_close.is_in_trading_window(min_minutes=0.5, max_minutes=15.0), \
+        "Window with 0.25 minutes to expiry should NOT be in trading window"
+
+    # Create a window that's too far from expiry (16 minutes to expiry)
+    expiry_too_far = now + timedelta(minutes=16)
     window_too_far = MarketWindow(
         start_utc=now,
         expiry_utc=expiry_too_far,
         ticker="KXBTC15M-TEST"
     )
-    
+
     # Should NOT be in trading window
-    assert not window_too_far.is_in_trading_window(min_minutes=2, max_minutes=12), \
-        "Window with 15 minutes to expiry should NOT be in trading window"
+    assert not window_too_far.is_in_trading_window(min_minutes=0.5, max_minutes=15.0), \
+        "Window with 16 minutes to expiry should NOT be in trading window"
 
 
 def test_catalog_scheduler_alignment():
@@ -120,8 +120,8 @@ def test_catalog_scheduler_alignment():
     # Catalog refresh interval (default 5s)
     refresh_interval = float(os.getenv("MERID_KALSHI_CATALOG_REFRESH_INTERVAL_S", "5.0"))
     
-    # 15m window is 10 minutes (2-12 min to expiry)
-    window_duration_minutes = 10
+    # 15m window is 14.5 minutes (0.5-15 min to expiry - full window trading)
+    window_duration_minutes = 14.5
     
     # Catalog should refresh many times within a window to catch window rollovers
     refreshes_per_window = (window_duration_minutes * 60) / refresh_interval

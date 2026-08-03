@@ -196,7 +196,8 @@ def test_kelly_determines_eligibility_risk_caps_determine_permission():
             price_cents=price_cents,
             asset="BTC",
             edge_pct=edge_pct,
-            confidence=Decimal("0.8")
+            confidence=Decimal("0.8"),
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # Risk cap should limit to 1 contract
@@ -210,7 +211,8 @@ def test_kelly_determines_eligibility_risk_caps_determine_permission():
             price_cents=price_cents,
             asset="BTC",
             edge_pct=edge_pct,
-            confidence=Decimal("0.8")
+            confidence=Decimal("0.8"),
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # Should still be 1 contract (Kelly eligible, cap permits)

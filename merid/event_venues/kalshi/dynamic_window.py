@@ -143,7 +143,7 @@ def evaluate_dynamic_window(
             max_spread_cents, threshold_manager.get_regime()
         )
     except Exception as e:
-        logger.debug("[SPREAD-CONFIG] Failed to load dynamic spread threshold: %s, using fallback %dc", e, legacy_max_spread)
+        logger.debug(f"[SPREAD-CONFIG] Failed to load dynamic spread threshold: {e}, using fallback {legacy_max_spread}c")
         # Fallback to profile
         try:
             from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter

@@ -47,10 +47,35 @@ class Direction(str, Enum):
     
     In trend_following mode: BULLISH → favors YES, BEARISH → favors NO
     In mean_reversion mode: BULLISH → favors NO (expect reversion), BEARISH → favors YES
+    
+    CRITICAL FIX (2026-07-19): Added StrategyIntent for explicit event-level intent.
+    Direction describes market trend; StrategyIntent describes our betting direction.
     """
     BULLISH = "bullish"  # Uptrend - price generally rising
     BEARISH = "bearish"  # Downtrend - price generally falling
     NEUTRAL = "neutral"  # Ranging/no clear trend
+
+
+class StrategyIntent(str, Enum):
+    """Strategy-level intent for event outcome - independent of contract side.
+    
+    This represents our betting intent on the event outcome, not which contract to trade.
+    StrategyIntent is used to ensure net exposure matches our directional thesis.
+    
+    BULLISH_EVENT: We believe the event will occur (e.g., "up in 15m")
+    - Net exposure must be +Yes (buy_yes or sell_no)
+    - Never +No (buy_no or sell_yes)
+    
+    BEARISH_EVENT: We believe the event will NOT occur (e.g., "not up in 15m")
+    - Net exposure must be +No (buy_no or sell_yes)
+    - Never +Yes (buy_yes or sell_no)
+    
+    CRITICAL FIX (2026-07-19): Added to prevent side/price mapping bugs.
+    All signal generation must express intent explicitly, then derive Yes/No side.
+    """
+    BULLISH_EVENT = "bullish_event"  # Bet on event occurring (net +Yes exposure)
+    BEARISH_EVENT = "bearish_event"  # Bet against event occurring (net +No exposure)
+    NEUTRAL = "neutral"  # No directional bias
 
 
 class Momentum(str, Enum):

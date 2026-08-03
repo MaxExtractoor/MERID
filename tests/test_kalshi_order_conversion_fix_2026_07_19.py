@@ -220,8 +220,10 @@ class TestKalshiOrderConversionFix:
         else:
             kalshi_side = "bid"  # fallback
         
-        # CRITICAL: kalshi_side should be "ask" (book-side), NOT "no" (outcome)
-        assert kalshi_side == "ask", f"CRITICAL BUG: kalshi_side should be 'ask' (book-side), got '{kalshi_side}' - old buggy yes/no logic may still be present"
+        # CRITICAL FIX (2026-07-20): kalshi_side should be "bid" (buying NO = bidding)
+        # Previous bug: BUY_NO was incorrectly mapped to "ask" (equivalent to SELL_YES)
+        # This caused side inversion - buying NO was sent as selling YES
+        assert kalshi_side == "bid", f"CRITICAL BUG: kalshi_side should be 'bid' (buying NO = bidding), got '{kalshi_side}' - side inversion bug may still be present"
         assert kalshi_side != "no", f"CRITICAL BUG: kalshi_side should NOT be 'no' (outcome) - old buggy yes/no logic may still be present"
     
     def test_all_four_combinations(self):
@@ -323,23 +325,24 @@ class TestOrderRouterToClientMapping:
         
         # Now test that client.py would convert this correctly
         # VenueOrder would be: side="buy", outcome_id="no"
-        # client.py should produce: side="ask", action="buy" (buying NO = ask)
+        # CRITICAL FIX (2026-07-20): client.py should produce: side="bid", action="buy" (buying NO = bidding)
+        # Previous bug: incorrectly mapped to "ask" (equivalent to SELL_YES), causing side inversion
         
-        # New bid/ask mapping logic (FIXED 2026-07-19)
+        # New bid/ask mapping logic (FIXED 2026-07-20)
         if outcome_id == "yes" and order_action == "buy":
             api_side = "bid"
         elif outcome_id == "yes" and order_action == "sell":
             api_side = "ask"
         elif outcome_id == "no" and order_action == "buy":
-            api_side = "bid"
+            api_side = "bid"  # FIXED: buying NO = bidding
         elif outcome_id == "no" and order_action == "sell":
-            api_side = "ask"
+            api_side = "ask"  # FIXED: selling NO = asking
         else:
             api_side = "bid"  # fallback
         
         api_action = order_action
         
-        assert api_side == "ask", f"Expected API side='ask', got {api_side}"
+        assert api_side == "bid", f"Expected API side='bid' (buying NO = bidding), got {api_side}"
         assert api_action == "buy", f"Expected API action='buy', got {api_action}"
     
     def test_all_kalshi_formats_to_venue_order(self):

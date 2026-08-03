@@ -62,6 +62,7 @@ class AllocationRequest:
     spread_cents: int
     confidence: float = 0.5  # Model confidence (0.0-1.0) for priority/tiebreaker
     is_exit_order: bool = False  # CRITICAL: Exit orders bypass slot allocation
+    count: int = 1  # Contract count (default 1, used for validation)
     request_time: float = field(default_factory=time.time)
     
     def __post_init__(self):
@@ -133,6 +134,65 @@ class GlobalSlotAllocator:
         """Get number of active position slots."""
         with self._lock:
             return len(self._slots)
+    
+    def sync_with_position_cache(self) -> int:
+        """
+        Sync slot allocator with position cache to remove orphaned slots.
+        
+        This method compares the active slots in the allocator with the actual positions
+        in the position cache and removes any slots that no longer have corresponding positions.
+        This prevents state drift where slots remain allocated even though positions no longer exist.
+        
+        Returns:
+            Number of orphaned slots removed
+        """
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            position_cache = get_position_cache()
+            
+            # Get all actual positions from position cache
+            actual_positions = position_cache.get_all_positions()
+            
+            # Create a set of position identifiers that actually exist
+            # Use (market_id, agent_id) tuples as the composite key
+            actual_position_keys = set()
+            for pos in actual_positions.values():
+                key = (pos.market_id, pos.agent_id)
+                actual_position_keys.add(key)
+            
+            with self._lock:
+                # Find orphaned slots (slots without corresponding positions)
+                orphaned_slots = []
+                for slot_id, slot in list(self._slots.items()):
+                    slot_key = (slot.ticker, slot.agent_id)
+                    if slot_key not in actual_position_keys:
+                        orphaned_slots.append(slot_id)
+                
+                # Remove orphaned slots
+                for slot_id in orphaned_slots:
+                    slot = self._slots.get(slot_id)
+                    if slot:
+                        logger.info(
+                            "[SLOT-ALLOCATOR] Removed orphaned slot: slot_id=%s ticker=%s agent=%s",
+                            slot_id, slot.ticker, slot.agent_id
+                        )
+                        del self._slots[slot_id]
+                
+                removed_count = len(orphaned_slots)
+                if removed_count > 0:
+                    logger.info(
+                        "[SLOT-ALLOCATOR] sync_with_position_cache: removed %d orphaned slots",
+                        removed_count
+                    )
+                
+                return removed_count
+                
+        except Exception as e:
+            logger.warning(
+                "[SLOT-ALLOCATOR] sync_with_position_cache failed: %s",
+                e
+            )
+            return 0
     
     def get_slots_by_asset(self, asset: str) -> List[PositionSlot]:
         """Get all slots for a specific asset."""
@@ -249,35 +309,46 @@ class GlobalSlotAllocator:
             return False, reason, None
         
         # Allocate slot
+        # CRITICAL FIX (2026-08-01): Add try-finally to ensure slot cleanup on exceptions
+        slot_id = None
         with self._lock:
-            slot_id = f"{request.agent_id}_{request.asset}_{int(time.time() * 1000)}"
-            
-            slot = PositionSlot(
-                slot_id=slot_id,
-                agent_id=request.agent_id,
-                asset=request.asset,
-                ticker=request.ticker,
-                entry_price_cents=request.entry_price_cents,
-                entry_time=request.request_time,
-                status=SlotStatus.OCCUPIED
-            )
-            
-            self._slots[slot_id] = slot
-            self._total_allocations += 1
-            
-            total_exposure = self.get_total_exposure()
-            available = self.get_available_exposure()
-            
-            logger.info(
-                "[SLOT-ALLOCATOR] Allocated slot: slot_id=%s agent=%s asset=%s "
-                "ticker=%s price=%dc edge=%.2f%% spread=%dc confidence=%.2f "
-                "total_exposure=$%.2f available=$%.2f slot_count=%d",
-                slot_id, request.agent_id, request.asset, request.ticker,
-                request.entry_price_cents, request.edge_pct, request.spread_cents,
-                request.confidence, total_exposure, available, len(self._slots)
-            )
-            
-            return True, "", slot_id
+            try:
+                slot_id = f"{request.agent_id}_{request.asset}_{int(time.time() * 1000)}"
+                
+                slot = PositionSlot(
+                    slot_id=slot_id,
+                    agent_id=request.agent_id,
+                    asset=request.asset,
+                    ticker=request.ticker,
+                    entry_price_cents=request.entry_price_cents,
+                    entry_time=request.request_time,
+                    status=SlotStatus.OCCUPIED
+                )
+                
+                self._slots[slot_id] = slot
+                self._total_allocations += 1
+                
+                total_exposure = self.get_total_exposure()
+                available = self.get_available_exposure()
+                
+                logger.info(
+                    "[SLOT-ALLOCATOR] Allocated slot: slot_id=%s agent=%s asset=%s "
+                    "ticker=%s price=%dc edge=%.2f%% spread=%dc confidence=%.2f "
+                    "total_exposure=$%.2f available=$%.2f slot_count=%d",
+                    slot_id, request.agent_id, request.asset, request.ticker,
+                    request.entry_price_cents, request.edge_pct, request.spread_cents,
+                    request.confidence, total_exposure, available, len(self._slots)
+                )
+                
+                return True, "", slot_id
+                
+            except Exception as e:
+                # CRITICAL FIX (2026-08-01): Ensure slot cleanup on exception
+                logger.error("[SLOT-ALLOCATOR] Exception during allocation: %s", e)
+                if slot_id and slot_id in self._slots:
+                    del self._slots[slot_id]
+                    logger.warning("[SLOT-ALLOCATOR] Cleaned up partially allocated slot: %s", slot_id)
+                return False, f"Allocation failed: {str(e)}", None
     
     def release_slot(self, slot_id: str, exit_price_cents: Optional[int] = None) -> bool:
         """
@@ -373,6 +444,55 @@ class GlobalSlotAllocator:
                 )
             
             return len(slots_to_release)
+    
+    def release_slot_by_ticker(self, ticker: str, exit_price_cents: Optional[int] = None) -> bool:
+        """
+        Release a slot by ticker (for exit orders).
+        
+        This method is used by exit orders to release the original entry slot
+        when the exit order fills and closes the position. It finds the slot
+        by ticker and releases it, tracking PnL if exit price is provided.
+        
+        Args:
+            ticker: Market ticker (e.g., "KXBTC15M-26JUL312200-00")
+            exit_price_cents: Optional exit price for PnL tracking
+            
+        Returns:
+            True if slot was released, False if not found
+        """
+        with self._lock:
+            for slot_id, slot in list(self._slots.items()):
+                if slot.ticker == ticker:
+                    # Calculate PnL if exit price provided
+                    pnl_cents = None
+                    if exit_price_cents is not None:
+                        pnl_cents = (exit_price_cents - slot.entry_price_cents) * slot.exposure_usd * 100
+                    
+                    # Log the release
+                    total_exposure = sum(s.exposure_usd for s in self._slots.values())
+                    available = self.MAX_EXPOSURE_USD - total_exposure
+                    
+                    logger.info(
+                        "[SLOT-ALLOCATOR] Released slot by ticker: slot_id=%s agent=%s asset=%s ticker=%s "
+                        "entry_price=%dc exit_price=%s pnl=%s total_exposure=$%.2f available=$%.2f slot_count=%d",
+                        slot_id, slot.agent_id, slot.asset, slot.ticker,
+                        slot.entry_price_cents,
+                        f"{exit_price_cents}c" if exit_price_cents else "N/A",
+                        f"{pnl_cents}c" if pnl_cents is not None else "N/A",
+                        total_exposure, available, len(self._slots)
+                    )
+                    
+                    # Remove the slot
+                    del self._slots[slot_id]
+                    self._total_releases += 1
+                    return True
+            
+            # Ticker not found
+            logger.warning(
+                "[SLOT-ALLOCATOR] Failed to release slot by ticker: ticker=%s not found in %d slots",
+                ticker, len(self._slots)
+            )
+            return False
     
     def reset_all(self) -> None:
         """Reset all slots (emergency recovery)."""

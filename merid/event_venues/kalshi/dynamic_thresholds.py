@@ -34,6 +34,7 @@ class DynamicThresholds:
     max_price_cents: int
     max_spread_cents: int
     min_spread_gate_cents: int
+    max_spread_to_edge_ratio: float  # Maximum spread/edge ratio (dynamic by regime)
     min_volume: int
     min_depth: int
     regime: str
@@ -46,6 +47,7 @@ class DynamicThresholds:
             "max_price_cents": self.max_price_cents,
             "max_spread_cents": self.max_spread_cents,
             "min_spread_gate_cents": self.min_spread_gate_cents,
+            "max_spread_to_edge_ratio": self.max_spread_to_edge_ratio,
             "min_volume": self.min_volume,
             "min_depth": self.min_depth,
             "regime": self.regime,
@@ -127,6 +129,7 @@ class DynamicThresholdManager:
             max_price_cents = int(base["price_range"]["max_cents"] * adjustment["price_range_multiplier"]),
             max_spread_cents = int(base["spread"]["max_cents"] * adjustment["spread_multiplier"]),
             min_spread_gate_cents = base["spread"]["min_gate_cents"],
+            max_spread_to_edge_ratio = base["spread"]["max_spread_to_edge_ratio"] * adjustment.get("spread_to_edge_ratio_multiplier", 1.0),
             min_volume = base["liquidity"]["min_volume_24h"],
             min_depth = base["liquidity"]["min_depth_top_of_book"],
             regime = regime_state.current.value,
@@ -160,7 +163,8 @@ class DynamicThresholdManager:
                 },
                 "spread": {
                     "max_cents": profile.canonical.spread.max_cents,
-                    "min_gate_cents": profile.canonical.spread.min_gate_cents
+                    "min_gate_cents": profile.canonical.spread.min_gate_cents,
+                    "max_spread_to_edge_ratio": profile.canonical.spread.max_spread_to_edge_ratio
                 },
                 "liquidity": {
                     "min_volume_24h": profile.canonical.liquidity.min_volume_24h,
@@ -189,7 +193,8 @@ class DynamicThresholdManager:
                 },
                 "spread": {
                     "max_cents": profile.crisis.spread.max_cents,
-                    "min_gate_cents": profile.crisis.spread.min_gate_cents
+                    "min_gate_cents": profile.crisis.spread.min_gate_cents,
+                    "max_spread_to_edge_ratio": profile.crisis.spread.max_spread_to_edge_ratio
                 },
                 "liquidity": {
                     "min_volume_24h": profile.crisis.liquidity.min_volume_24h,
@@ -204,7 +209,11 @@ class DynamicThresholdManager:
         """Fallback canonical thresholds if profile not updated."""
         return {
             "price_range": {"min_cents": 10, "max_cents": 75},  # 2026-07-12: Expanded to 75c for market conditions
-            "spread": {"max_cents": 30, "min_gate_cents": 30},
+            # CRITICAL FIX (2026-07-27): Increased max_spread_to_edge_ratio from 0.4 to 0.8
+            # Previous 0.4 threshold was too strict for current market conditions where spread/edge ratios
+            # are frequently 0.8-1.1 due to wider spreads and moderate edges. Relaxing to 0.8 allows
+            # more orders to pass while still protecting against extremely wide spreads (>80% of edge).
+            "spread": {"max_cents": 30, "min_gate_cents": 30, "max_spread_to_edge_ratio": 0.8},
             "liquidity": {"min_volume_24h": 500, "min_depth_top_of_book": 100}
         }
     
@@ -212,7 +221,7 @@ class DynamicThresholdManager:
         """Fallback crisis thresholds if profile not updated."""
         return {
             "price_range": {"min_cents": 5, "max_cents": 95},
-            "spread": {"max_cents": 100, "min_gate_cents": 30},
+            "spread": {"max_cents": 100, "min_gate_cents": 30, "max_spread_to_edge_ratio": 1.5},
             "liquidity": {"min_volume_24h": 500, "min_depth_top_of_book": 100}
         }
     
@@ -238,12 +247,14 @@ class DynamicThresholdManager:
             max_price_cents = canonical["price_range"]["max_cents"],
             max_spread_cents = canonical["spread"]["max_cents"],
             min_spread_gate_cents = canonical["spread"]["min_gate_cents"],
+            max_spread_to_edge_ratio = canonical["spread"]["max_spread_to_edge_ratio"],
             min_volume = canonical["liquidity"]["min_volume_24h"],
             min_depth = canonical["liquidity"]["min_depth_top_of_book"],
             regime = "MEAN_REVERSION",  # Default regime
             adjustment_factors = {
                 "price_range_multiplier": 1.0,
                 "spread_multiplier": 1.0,
+                "spread_to_edge_ratio_multiplier": 1.0,
                 "position_size_multiplier": 1.0
             }
         )
@@ -265,6 +276,11 @@ class DynamicThresholdManager:
         """Get current min spread gate threshold."""
         thresholds = self.get_current_thresholds()
         return thresholds.min_spread_gate_cents
+    
+    def get_max_spread_to_edge_ratio(self) -> float:
+        """Get current max spread/edge ratio threshold."""
+        thresholds = self.get_current_thresholds()
+        return thresholds.max_spread_to_edge_ratio
     
     def get_liquidity_thresholds(self) -> tuple[int, int]:
         """Get current liquidity thresholds (min_volume, min_depth)."""

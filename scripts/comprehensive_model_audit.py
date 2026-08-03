@@ -779,7 +779,8 @@ class ComprehensiveModelAuditor:
                     bankroll_usd=bankroll,
                     price_cents=price_cents,
                     asset=asset,
-                    max_notional_usd=max_notional
+                    max_notional_usd=max_notional,
+                    model_prob=0.60  # 2026-07-12: Kelly Criterion integration
                 )
                 
                 # Verify count is reasonable (should be 1 for 1-contract rule)

@@ -45,32 +45,39 @@ hedging:
     pairs: []
 
   # Take profit configuration for hedge positions
+  # CRITICAL FIX 2026-07-16: Updated to align with 2:1 risk/reward ratio
+  # Previous values (tp_1=2.0R, tp_2=4.0R, stop_loss=1.5R) had inconsistent risk/reward
+  # New values (tp_1=0.8R, tp_2=1.6R, stop_loss=0.4R) align with 80% TP, 40% SL for positive expected value
   take_profit:
     enabled: true
     BTC:
-      tp_1: 2.0
-      tp_2: 4.0
-      stop_loss: 1.5
+      tp_1: 0.8
+      tp_2: 1.6
+      stop_loss: 0.4
     ETH:
-      tp_1: 2.0
-      tp_2: 4.0
-      stop_loss: 1.5
+      tp_1: 0.8
+      tp_2: 1.6
+      stop_loss: 0.4
     SOL:
-      tp_1: 2.0
-      tp_2: 4.0
-      stop_loss: 1.5
+      tp_1: 0.8
+      tp_2: 1.6
+      stop_loss: 0.4
     XRP:
-      tp_1: 2.0
-      tp_2: 4.0
-      stop_loss: 1.5
+      tp_1: 0.8
+      tp_2: 1.6
+      stop_loss: 0.4
     DOGE:
-      tp_1: 2.0
-      tp_2: 4.0
-      stop_loss: 1.5
+      tp_1: 0.8
+      tp_2: 1.6
+      stop_loss: 0.4
 
   # Auto-exit configuration for hedge positions
   auto_exit:
     enabled: true
     close_hedge_when_alpha_closed: true
-    max_hedge_hold_minutes: 120
+    max_hedge_hold_minutes: 15
     reduce_on_exposure_flip: true
+    # CRITICAL FIX (2026-07-29): Resting exit fallback for hedge positions
+    # If true, places resting TP/SL orders on exchange as fallback to auto-exit loop
+    # This prevents hedge positions from being stuck if auto-exit loop crashes
+    resting_exit_enabled: true  # ENABLED - must-have for exit policy safety

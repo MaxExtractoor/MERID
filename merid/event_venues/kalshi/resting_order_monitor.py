@@ -140,6 +140,36 @@ class RecheckResult:
     model_quality_good: Optional[bool] = None
 
 
+@dataclass
+class ExitOrderState:
+    """State tracking for exit orders with retry logic.
+    
+    Exit orders are critical for risk management and must be actively managed
+    until filled. This state tracks retry attempts, aggressiveness adjustments,
+    and timeout handling for exit orders that don't fill immediately.
+    """
+    order_id: str  # Kalshi order ID
+    asset: str  # Asset ticker (BTC, ETH, SOL, XRP, DOGE)
+    side: str  # Order side (yes/no)
+    action: str  # Order action (buy/sell)
+    base_price_cents: int  # Original exit price
+    current_aggressiveness: float  # Current aggressiveness level (0.0-1.0)
+    retries_left: int  # Remaining retry attempts
+    last_action_ts: float  # Timestamp of last action (Unix time)
+    status: str  # "pending", "resting", "rejected", "filled", "cancelled", "gave_up"
+    
+    # Intent reconstruction for retries
+    intent_id: str = ""  # Original intent ID
+    ticker: str = ""  # Market ticker
+    count: int = 0  # Order size
+    exit_reason: str = ""  # Exit reason (tp, sl, 99c, etc.)
+    exit_policy_id: str = ""  # Exit policy ID
+    
+    # Retry tracking
+    total_retries: int = 0  # Total retry attempts made
+    last_retry_ts: Optional[float] = None  # Timestamp of last retry
+
+
 class RestingOrderMonitor:
     """Monitors and dynamically re-checks resting orders against current signals.
     
@@ -159,6 +189,8 @@ class RestingOrderMonitor:
         self._resting_orders: Dict[str, RestingOrderRecord] = {}  # kalshi_order_id -> record
         # Secondary index for intent_id lookup
         self._intent_to_order_id: Dict[str, str] = {}  # intent_id -> kalshi_order_id
+        # Exit order state tracking (kalshi_order_id -> ExitOrderState)
+        self._exit_states: Dict[str, ExitOrderState] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -166,10 +198,67 @@ class RestingOrderMonitor:
         self._keep_count = 0
         self._poll_count = 0
         self._last_poll_time: Optional[datetime] = None  # Health monitoring
-        
+
         # Market order fallback engine
         self._fallback_engine: Optional[MarketOrderFallbackEngine] = None
         self._fallback_enabled: bool = False
+
+        # Exit policy configuration (loaded from profile YAML)
+        self._load_exit_policy_config()
+        
+    def _load_exit_policy_config(self) -> None:
+        """Load exit policy configuration from profile YAML.
+        
+        CRITICAL FIX (2026-07-30): Load from kalshi_crypto_15m_v2.yaml instead of hardcoding.
+        Falls back to hardcoded defaults if YAML loading fails.
+        """
+        try:
+            import yaml
+            from merid.profile_resolver import get_active_profile
+            
+            profile_name = get_active_profile()
+            config_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / f"{profile_name}.yaml"
+            
+            if config_path.exists():
+                with open(config_path, "r") as f:
+                    config = yaml.safe_load(f)
+                
+                exit_policy = config.get("exit_policy", {})
+                
+                self._exit_policy_enabled = exit_policy.get("enabled", True)
+                self._exit_max_retries = exit_policy.get("max_retries", 5)
+                self._exit_retry_interval_ms = exit_policy.get("retry_interval_ms", 500)
+                self._exit_retry_backoff_multiplier = exit_policy.get("retry_backoff_multiplier", 1.5)
+                self._exit_aggressiveness_step = exit_policy.get("aggressiveness_step", 0.05)
+                self._exit_max_aggressiveness = exit_policy.get("max_aggressiveness", 1.0)
+                
+                # CRITICAL FIX (2026-07-30): Increase timeout from 15s to 60s for 15m markets
+                # Research shows 15s is too aggressive for 15-minute markets (1.67% of cycle)
+                # 60s allows market to move to favorable price before forcing aggressive retry
+                self._exit_time_to_give_up_ms = exit_policy.get("time_to_give_up_ms", 60000)
+                
+                logger.info(
+                    f"[RESTING_ORDER_MONITOR] Loaded exit policy config from {config_path.name}: "
+                    f"enabled={self._exit_policy_enabled}, max_retries={self._exit_max_retries}, "
+                    f"time_to_give_up_ms={self._exit_time_to_give_up_ms}ms"
+                )
+            else:
+                logger.warning(f"[RESTING_ORDER_MONITOR] Config file not found: {config_path}, using defaults")
+                self._set_default_exit_policy_config()
+        except Exception as e:
+            logger.error(f"[RESTING_ORDER_MONITOR] Failed to load exit policy config: {e}, using defaults")
+            self._set_default_exit_policy_config()
+    
+    def _set_default_exit_policy_config(self) -> None:
+        """Set default exit policy configuration (fallback if YAML loading fails)."""
+        self._exit_policy_enabled = True
+        self._exit_max_retries = 5
+        self._exit_retry_interval_ms = 500
+        self._exit_retry_backoff_multiplier = 1.5
+        self._exit_aggressiveness_step = 0.05
+        self._exit_max_aggressiveness = 1.0
+        # CRITICAL FIX (2026-07-30): Default to 60s instead of 15s for 15m markets
+        self._exit_time_to_give_up_ms = 60000
         
     def register_order(self, record: RestingOrderRecord) -> None:
         """Register a resting order for monitoring.
@@ -189,6 +278,17 @@ class RestingOrderMonitor:
                 f"time_in_force={record.time_in_force} - these orders never rest"
             )
             return
+        
+        # CRITICAL FIX: Convert side/action to Kalshi format for consistency
+        # RestingOrderRecord may receive lowercase sides (yes/no) from loop_15m
+        # but monitor expects Kalshi format (BUY_YES, BUY_NO, etc.) for duplicate detection
+        if record.side and record.action:
+            try:
+                from merid.event_venues.kalshi.binary_price_space import to_kalshi_side
+                record.side = to_kalshi_side(record.side, record.action)
+            except ValueError:
+                # If conversion fails, keep original side
+                pass
         
         # Assert we have the required server-side ID
         if not record.kalshi_order_id:
@@ -271,6 +371,28 @@ class RestingOrderMonitor:
             return record.kalshi_order_id
 
         return None
+
+    def get_orders_by_ticker(self, ticker: str) -> List[RestingOrderRecord]:
+        """Get all resting orders for a given ticker.
+
+        CRITICAL FIX (2026-07-23): Added for duplicate exit order detection.
+        Used by exit order logic to check if a resting exit order already exists
+        for a position before placing a new one (one-position-one-exit invariant).
+
+        Args:
+            ticker: Market ticker (case-insensitive match, required)
+
+        Returns:
+            List of RestingOrderRecord objects matching the ticker
+        """
+        ticker_norm = (ticker or "").upper()
+        matching_orders = []
+
+        for record in list(self._resting_orders.values()):
+            if (record.ticker or "").upper() == ticker_norm:
+                matching_orders.append(record)
+
+        return matching_orders
 
     def unregister_by_intent_id(self, intent_id: str) -> None:
         """Unregister an order by intent_id (fallback for legacy code).
@@ -357,6 +479,27 @@ class RestingOrderMonitor:
                     current_vol_tier=None,
                     model_quality_good=None,
                 )
+            
+            # CRITICAL FIX (2026-07-17): Resting order sweeper - cancel old orders
+            # Check if order has exceeded max hold time (age-based cancellation)
+            now = datetime.utcnow()
+            if record.created_at:
+                age_seconds = (now - record.created_at).total_seconds()
+                if age_seconds > record.max_hold_seconds:
+                    logger.warning(
+                        "[RESTING-ORDER-SWEEPER] Order exceeded max hold time: kalshi_order_id=%s ticker=%s "
+                        "age=%.1fs max_hold=%ds - cancelling stale order",
+                        record.kalshi_order_id, record.ticker, age_seconds, record.max_hold_seconds
+                    )
+                    return RecheckResult(
+                        intent_id=record.intent_id,
+                        ticker=record.ticker,
+                        action="cancel",
+                        reason=f"max_hold_exceeded:{age_seconds:.1f}s",
+                        current_regime=None,
+                        current_vol_tier=None,
+                        model_quality_good=None,
+                    )
             
             from merid.prediction.dynamic_entry_window import resolve_entry_window
             from config.kalshi_crypto_config import kalshi_ticker_to_asset
@@ -558,9 +701,11 @@ class RestingOrderMonitor:
             # Reset missing data counter on successful data fetch
             record.missing_data_count = 0
             
+            # CRITICAL FIX (2026-07-31): result.data is a PlacedOrder object, not a dict
+            # Access attributes directly instead of using .get()
             order_data = result.data
-            raw_status = order_data.get("status", "")
-            remaining_size = order_data.get("remaining_size", order_data.get("remaining_quantity", 0))
+            raw_status = order_data.status if order_data else ""
+            remaining_size = int(order_data.remaining_size) if order_data and order_data.remaining_size else 0
             
             # Normalize status to internal vocabulary
             status = _normalize_status(raw_status)
@@ -864,6 +1009,223 @@ class RestingOrderMonitor:
             "resting_orders_count": len(self._resting_orders),
             "last_poll_time": self._last_poll_time,
         }
+
+    # ── Exit Order Retry Logic (2026-07-29) ───────────────────────────────────────
+
+    def register_exit_state(self, state: ExitOrderState) -> None:
+        """Register an exit order state for active management.
+        
+        Args:
+            state: ExitOrderState to track
+        """
+        self._exit_states[state.order_id] = state
+        logger.info(
+            f"[EXIT-RETRY] Registered exit state: order_id={state.order_id} asset={state.asset} "
+            f"side={state.side} base_price={state.base_price_cents}c retries_left={state.retries_left}"
+        )
+
+    def update_exit_state(self, order_id: str, status: str) -> None:
+        """Update exit order state based on order status change.
+        
+        Args:
+            order_id: Kalshi order ID
+            status: New status (filled, cancelled, rejected, etc.)
+        """
+        if order_id not in self._exit_states:
+            return
+
+        state = self._exit_states[order_id]
+        state.last_action_ts = time.time()
+        state.status = status
+
+        logger.info(
+            f"[EXIT-RETRY] Updated exit state: order_id={order_id} status={status}"
+        )
+
+        # Trigger retry logic for rejected orders
+        if status == "rejected":
+            self._schedule_exit_retry(state, reason="rejected")
+        # Trigger timeout for resting orders
+        elif status == "resting":
+            self._schedule_exit_timeout(state)
+        # Clean up terminal states
+        elif status in ("filled", "cancelled", "gave_up"):
+            logger.info(
+                f"[EXIT-RETRY] Cleaning up terminal exit state: order_id={order_id} status={status}"
+            )
+
+    def _schedule_exit_retry(self, state: ExitOrderState, reason: str) -> None:
+        """Schedule a retry for a rejected or timed-out exit order.
+        
+        Args:
+            state: ExitOrderState to retry
+            reason: Reason for retry (rejected, timeout, etc.)
+        """
+        if not self._exit_policy_enabled or state.retries_left <= 0:
+            state.status = "gave_up"
+            logger.warning(
+                f"[EXIT-RETRY-GAVE-UP] order_id={state.order_id} asset={state.asset} "
+                f"reason={reason} total_retries={state.total_retries}"
+            )
+            return
+
+        # Compute new aggressiveness
+        new_agg = min(
+            self._exit_max_aggressiveness,
+            state.current_aggressiveness + self._exit_aggressiveness_step,
+        )
+
+        # Compute new price: for exit, "more aggressive" means:
+        # - long exit (sell): lower price -> more likely to hit
+        # - short exit (buy): higher price -> more likely to hit
+        base = state.base_price_cents
+        aggressiveness_delta = new_agg - state.current_aggressiveness
+
+        # CRITICAL FIX (2026-07-30): Same logic for YES and NO contracts
+        # More aggressive = more likely to fill:
+        # - Sell orders (both YES and NO): lower price
+        # - Buy orders (both YES and NO): higher price
+        if state.action == "sell":
+            # Sell orders: lower price = more aggressive (more likely to hit bids)
+            new_price_cents = max(1, int(base * (1 - aggressiveness_delta)))
+        else:
+            # Buy orders: higher price = more aggressive (more likely to hit asks)
+            new_price_cents = int(base * (1 + aggressiveness_delta))
+
+        # Schedule retry after backoff
+        delay_ms = self._exit_retry_interval_ms * (
+            self._exit_retry_backoff_multiplier ** (self._exit_max_retries - state.retries_left)
+        )
+        state.retries_left -= 1
+        state.current_aggressiveness = new_agg
+        state.total_retries += 1
+        state.last_retry_ts = time.time()
+
+        logger.info(
+            f"[EXIT-RETRY-SCHEDULED] order_id={state.order_id} asset={state.asset} reason={reason} "
+            f"retries_left={state.retries_left} new_aggressiveness={new_agg:.2f} "
+            f"new_price={new_price_cents}c delay_ms={delay_ms:.0f}"
+        )
+
+        # Schedule async retry
+        asyncio.create_task(self._retry_exit_order(state, new_price_cents, delay_ms))
+
+    async def _retry_exit_order(self, state: ExitOrderState, new_price_cents: int, delay_ms: int) -> None:
+        """Execute a retry for an exit order with adjusted price.
+        
+        Args:
+            state: ExitOrderState to retry
+            new_price_cents: New price for retry
+            delay_ms: Delay before retry (backoff)
+        """
+        await asyncio.sleep(delay_ms / 1000.0)
+
+        # Check if state has been resolved (filled/cancelled) during backoff
+        if state.status in ("filled", "cancelled", "gave_up"):
+            logger.info(
+                f"[EXIT-RETRY-SKIPPED] order_id={state.order_id} status={state.status} - already resolved"
+            )
+            return
+
+        try:
+            # Import order router for retry
+            from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+
+            # Build new exit intent with updated price & aggressiveness
+            new_intent = OrderIntent(
+                ticker=state.ticker,
+                side=state.side,
+                action=state.action,
+                price_cents=new_price_cents,
+                count=state.count,
+                order_type="limit",
+                time_in_force="gtc",
+                source="position_monitor_exit_retry",
+                agent_id="merid.position_management.position_monitor",
+                aggressiveness=state.current_aggressiveness,
+                entry_or_exit="exit",
+                exit_reason=state.exit_reason,
+                exit_policy_id=state.exit_policy_id,
+            )
+
+            logger.info(
+                f"[EXIT-RETRY-EXECUTING] order_id={state.order_id} new_price={new_price_cents}c "
+                f"aggressiveness={state.current_aggressiveness:.2f}"
+            )
+
+            # Route the retry order
+            result = await route_order_async(new_intent)
+
+            if result.success:
+                # Update tracking with new order ID
+                new_order_id = result.order_id
+                del self._exit_states[state.order_id]
+                state.order_id = new_order_id
+                state.status = "pending"
+                self._exit_states[new_order_id] = state
+
+                logger.info(
+                    f"[EXIT-RETRY-SUCCESS] old_order_id={state.order_id} new_order_id={new_order_id} "
+                    f"status={result.status}"
+                )
+            else:
+                logger.error(
+                    f"[EXIT-RETRY-FAILED] order_id={state.order_id} reason={result.reason}"
+                )
+                # Schedule another retry if retries remain
+                if state.retries_left > 0:
+                    self._schedule_exit_retry(state, reason="retry_failed")
+
+        except Exception as e:
+            logger.error(
+                f"[EXIT-RETRY-ERROR] order_id={state.order_id} error={e}",
+                exc_info=True
+            )
+            # Schedule another retry if retries remain
+            if state.retries_left > 0:
+                self._schedule_exit_retry(state, reason="retry_error")
+
+    def _schedule_exit_timeout(self, state: ExitOrderState) -> None:
+        """Schedule timeout-based replacement for a resting exit order.
+        
+        If an exit order is resting but not filling within the configured time,
+        cancel it and retry with more aggressive pricing.
+        
+        Args:
+            state: ExitOrderState to monitor for timeout
+        """
+        if not self._exit_policy_enabled:
+            return
+
+        async def timeout_handler():
+            await asyncio.sleep(self._exit_time_to_give_up_ms / 1000.0)
+
+            # Check if state is still resting
+            if state.status != "resting":
+                logger.info(
+                    f"[EXIT-TIMEOUT-SKIPPED] order_id={state.order_id} status={state.status} - not resting"
+                )
+                return
+
+            resting_ms = (time.time() - state.last_action_ts) * 1000
+            logger.warning(
+                f"[EXIT-TIMEOUT] order_id={state.order_id} asset={state.asset} "
+                f"resting_ms={resting_ms:.0f} - cancelling and retrying"
+            )
+
+            # Cancel the resting order
+            try:
+                from merid.event_venues.kalshi.order_router import cancel_order_async
+                await cancel_order_async(state.order_id)
+            except Exception as cancel_err:
+                logger.error(
+                    f"[EXIT-TIMEOUT-CANCEL-FAILED] order_id={state.order_id} error={cancel_err}"
+                )
+
+            # Schedule retry with more aggressive pricing
+            self._schedule_exit_retry(state, reason="timeout")
+
+        asyncio.create_task(timeout_handler())
 
 
 # Global singleton instance

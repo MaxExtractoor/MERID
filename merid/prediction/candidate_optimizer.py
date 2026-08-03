@@ -284,9 +284,25 @@ class CandidateOptimizer:
                 
                 # Skip uninitialized or non-executable markets
                 # KalshiMarketState uses 'book_initialized' not 'initialized'
-                if not getattr(state, 'book_initialized', False) or not getattr(state, 'executable', False):
-                    logger.debug("[CANDIDATE-OPTIMIZER] Skipping uninitialized/non-executable market %s (book_initialized=%s, executable=%s)",
-                               market_id, getattr(state, 'book_initialized', False), getattr(state, 'executable', False))
+                # CRITICAL FIX (2026-07-29): Separate book_initialized from executable
+                # book_initialized=False: data availability issue (no snapshot loaded)
+                # executable=False: data quality issue (duality violation, one-sided book)
+                if not getattr(state, 'book_initialized', False):
+                    logger.debug("[CANDIDATE-OPTIMIZER] Skipping uninitialized market %s (book_initialized=%s)",
+                               market_id, getattr(state, 'book_initialized', False))
+                    return None
+                
+                if not getattr(state, 'executable', False):
+                    # Check if non-executable due to duality violation
+                    data_quality = getattr(state, 'data_quality', 'unknown')
+                    if data_quality == 'SUSPECT':
+                        logger.info(
+                            "[CANDIDATE-OPTIMIZER] Intent suppression: ticker=%s executable=False due to duality violation (data_quality=SUSPECT) - skipping candidate generation",
+                            market_id
+                        )
+                    else:
+                        logger.debug("[CANDIDATE-OPTIMIZER] Skipping non-executable market %s (executable=%s, data_quality=%s)",
+                                   market_id, getattr(state, 'executable', False), data_quality)
                     return None
                 
                 metrics.markets_with_md += 1

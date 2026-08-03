@@ -42,6 +42,14 @@ from merid.prediction.agent_grid_config import (
 )
 from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
 from merid.prediction.kalshi_tools import register_kalshi_tools
+# CRITICAL FIX (2026-07-17): RollingBuffer for signal generation bias prevention
+from merid.prediction.rolling_buffer import (
+    RollingBuffer,
+    InputDeclaration,
+    WarmupCalculator,
+    SignalGeneratorWithBuffers,
+    create_crypto_signal_generator,
+)
 #     select_top_edges,
 # )
 
@@ -71,6 +79,12 @@ __all__ = [
     "PortfolioRiskAgent",
     # "KalshiSocialBroadcaster",  # moved to archive/legacy/
     # "get_social_broadcaster",  # moved to archive/legacy/
+    # CRITICAL FIX (2026-07-17): RollingBuffer for signal generation bias prevention
+    "RollingBuffer",
+    "InputDeclaration",
+    "WarmupCalculator",
+    "SignalGeneratorWithBuffers",
+    "create_crypto_signal_generator",
     # Cross-asset top edge arbiter
     # "CandidateSignal",  # moved to archive/legacy/
     # "CrossAssetCycleResult",  # moved to archive/legacy/

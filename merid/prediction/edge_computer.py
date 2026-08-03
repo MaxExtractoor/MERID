@@ -105,13 +105,14 @@ class LegacyEdgeBackend(EdgeComputer):
             spread_cents = int(state.spread_cents) if state and hasattr(state, "spread_cents") else 0
 
             # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
-            max_spread_cents = 75  # Fallback
+            # CRITICAL FIX (2026-08-01): Updated fallback to 85c to match expanded canonical range (1c-85c)
+            max_spread_cents = 85  # Fallback (updated from 75c to 85c for 15m crypto volatility)
             try:
                 from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
                 threshold_manager = get_dynamic_threshold_manager()
                 max_spread_cents = threshold_manager.get_max_spread_cents()
             except Exception as e:
-                logger.debug("[LEGACY-EDGE] Failed to load dynamic spread threshold: %s, using fallback 75c", e)
+                logger.debug("[LEGACY-EDGE] Failed to load dynamic spread threshold: %s, using fallback 85c", e)
             
             if spread_cents > max_spread_cents:
                 logger.info(
@@ -133,9 +134,9 @@ class LegacyEdgeBackend(EdgeComputer):
                 if best_bid > 0 and best_ask > 0:
                     price_cents = (best_bid + best_ask) // 2
                 else:
-                    price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                    price_cents = 45  # CRITICAL FIX (2026-08-01): Updated to 45c (midpoint of 5c-85c canonical range)
             else:
-                price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                price_cents = 45  # CRITICAL FIX (2026-08-01): Updated to 45c (midpoint of 5c-85c canonical range)
 
             # CRITICAL: Check minimum contract price floor (blocks deep OTM longshots)
             # This guardrail prevents trading ultra-low priced contracts that are statistically losing
@@ -311,7 +312,7 @@ class UnifiedEdgeBackend(EdgeComputer):
                 if window_strike is not None and window_strike > 0:
                     strike_price = window_strike
                     logger.debug(
-                        "[EDGE-COMPUTER] asset=%s ticker=%s using window_strike_price=%.2f (dual-source capture)",
+                        "[EDGE-COMPUTER] asset=%s ticker=%s using window_strike_price=%.4f (dual-source capture)",
                         asset, market_id, strike_price
                     )
                 else:

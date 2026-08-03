@@ -577,7 +577,30 @@ class CryptoSpotService:
                 return None
             if price_str:
                 price = float(price_str)
-                logger.debug("Kraken success: %s = %.2f", asset, price)
+                # Extract timestamp from API response for staleness validation
+                # Kraken returns timestamp in ticker_data as 't' field (Unix time in seconds)
+                api_time = ticker_data.get("t")
+                if api_time:
+                    try:
+                        # Kraken timestamp is in seconds
+                        api_ts = float(api_time)
+                        age_seconds = time.time() - api_ts
+                        if age_seconds > 30.0:
+                            from utils.logger import format_price
+                            logger.warning(
+                                "Kraken stale price for %s: %s (age=%.1fs > 30s threshold)",
+                                asset, format_price(asset, price), age_seconds
+                            )
+                            self._failure_metrics["kraken"]["stale"] += 1
+                            # Reject stale data
+                            return None
+                        logger.debug("Kraken success: %s = %.2f (age=%.1fs)", asset, price, age_seconds)
+                    except (ValueError, TypeError) as e:
+                        logger.debug("Kraken timestamp parse failed for %s: %s", asset, e)
+                        # If timestamp parsing fails, accept price but log warning
+                        logger.debug("Kraken success: %s = %.2f (timestamp unavailable)", asset, price)
+                else:
+                    logger.debug("Kraken success: %s = %.2f (no timestamp in response)", asset, price)
                 self._clear_venue_error("kraken")
                 return price
             else:
@@ -671,14 +694,63 @@ class CryptoSpotService:
                     symbol = item.get("symbol", "").upper()
                     asset = symbol_to_asset.get(symbol)
                     if asset and "price" in item:
-                        results[asset] = float(item["price"])
-                        logger.debug("BinanceUS success: %s = %.2f", asset, results[asset])
+                        price = float(item["price"])
+                        # Extract timestamp from API response for staleness validation
+                        # BinanceUS returns timestamp in 'closeTime' or 'time' field (Unix ms)
+                        api_time = item.get("closeTime") or item.get("time")
+                        if api_time:
+                            try:
+                                # BinanceUS timestamp is in milliseconds
+                                api_ts = float(api_time) / 1000.0
+                                age_seconds = time.time() - api_ts
+                                if age_seconds > 30.0:
+                                    from utils.logger import format_price
+                                    logger.warning(
+                                        "BinanceUS stale price for %s: %s (age=%.1fs > 30s threshold)",
+                                        asset, format_price(asset, price), age_seconds
+                                    )
+                                    self._failure_metrics["binanceus"]["stale"] += 1
+                                    # Reject stale data
+                                    continue
+                                logger.debug("BinanceUS success: %s = %.2f (age=%.1fs)", asset, price, age_seconds)
+                            except (ValueError, TypeError) as e:
+                                logger.debug("BinanceUS timestamp parse failed for %s: %s", asset, e)
+                                # If timestamp parsing fails, accept price but log warning
+                                logger.debug("BinanceUS success: %s = %.2f (timestamp unavailable)", asset, price)
+                        else:
+                            logger.debug("BinanceUS success: %s = %.2f (no timestamp in response)", asset, price)
+                        results[asset] = price
             elif isinstance(data, dict) and "price" in data:
                 symbol = data.get("symbol", "").upper()
                 asset = symbol_to_asset.get(symbol)
                 if asset:
-                    results[asset] = float(data["price"])
-                    logger.debug("BinanceUS success: %s = %.2f", asset, results[asset])
+                    price = float(data["price"])
+                    # Extract timestamp from API response for staleness validation
+                    # BinanceUS returns timestamp in 'closeTime' or 'time' field (Unix ms)
+                    api_time = data.get("closeTime") or data.get("time")
+                    if api_time:
+                        try:
+                            # BinanceUS timestamp is in milliseconds
+                            api_ts = float(api_time) / 1000.0
+                            age_seconds = time.time() - api_ts
+                            if age_seconds > 30.0:
+                                from utils.logger import format_price
+                                logger.warning(
+                                    "BinanceUS stale price for %s: %s (age=%.1fs > 30s threshold)",
+                                    asset, format_price(asset, price), age_seconds
+                                )
+                                self._failure_metrics["binanceus"]["stale"] += 1
+                                # Reject stale data
+                                self._bump_venue_error("binanceus")
+                                return {}
+                            logger.debug("BinanceUS success: %s = %.2f (age=%.1fs)", asset, price, age_seconds)
+                        except (ValueError, TypeError) as e:
+                            logger.debug("BinanceUS timestamp parse failed for %s: %s", asset, e)
+                            # If timestamp parsing fails, accept price but log warning
+                            logger.debug("BinanceUS success: %s = %.2f (timestamp unavailable)", asset, price)
+                    else:
+                        logger.debug("BinanceUS success: %s = %.2f (no timestamp in response)", asset, price)
+                    results[asset] = price
             
             # Log any assets that weren't returned
             missing = set(symbols) - {data.get("symbol", "").upper() if isinstance(data, dict) else 

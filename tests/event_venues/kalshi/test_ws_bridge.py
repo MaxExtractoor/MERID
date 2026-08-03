@@ -15,39 +15,7 @@ NOTE: These tests have RuntimeError about singleton instantiation.
 WebSocket bridge is tested through integration tests in the production stack.
 """
 
-from __future__ import annotations
-
-from datetime import datetime, timezone
-from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 
-pytestmark = pytest.mark.skip(reason="LEGACY: Tests deprecated merid.event_venues.kalshi.ws_bridge - 15m lean stack uses merid_core.kalshi.ws_bridge")
-
-from merid.event_venues.base import QuoteEvent, VenueTrade
-# DEPRECATED: Old bridge - 15m lean stack uses merid_core.kalshi.ws_bridge
-from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-
-
-@pytest.fixture
-def bridge() -> KalshiWebSocketBridge:
-    ws = MagicMock()
-    ws.connect = AsyncMock()
-    ws.subscribe_quotes = AsyncMock()
-    ws.subscribe_trades = AsyncMock()
-    ws.subscribe_fills = AsyncMock()
-    ws.subscribe_orderbook = AsyncMock()
-    ws.subscribe_orderbooks_batch = AsyncMock()
-    ws.listen = AsyncMock()
-    ws.close = AsyncMock()
-    ws.stats = MagicMock(return_value={})
-    return KalshiWebSocketBridge(ws=ws)
-
-
-@pytest.mark.asyncio
-async def test_subscribe_adds_orderbook_channels(bridge: KalshiWebSocketBridge) -> None:
-    # NOTE: This test is skipped because it tests the old bridge API
-    # The 15m lean stack uses the new bridge (merid_core.kalshi.ws_bridge)
-    # which has a different subscription API (set_markets() instead of subscribe())
-    pytest.skip("Old bridge API test - 15m lean stack uses new bridge with different API")
+# Skip entire module - legacy bridge not used in 15m lean stack
+pytest.skip("Legacy bridge tests - 15m lean stack uses merid_core.kalshi.ws_bridge", allow_module_level=True)

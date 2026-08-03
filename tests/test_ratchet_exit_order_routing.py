@@ -19,7 +19,9 @@ class TestRatchetExitOrderRouting:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=10,
             avg_price_cents=50,
             ratchet_activated=True,
@@ -65,7 +67,9 @@ class TestRatchetExitOrderRouting:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="test_agent",
             side="no",
+            thesis_side="no",
             contracts=10,
             avg_price_cents=50,
             ratchet_activated=True,
@@ -182,7 +186,9 @@ class TestRatchetExitOrderRouting:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=10,
             avg_price_cents=50,
             ratchet_activated=True,
@@ -219,7 +225,9 @@ class TestRatchetExitOrderRouting:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=10,
             avg_price_cents=50,
             ratchet_activated=True,

@@ -3282,7 +3282,10 @@ async def place_order(
                 # If TP computation fails, set a conservative default
                 take_profit_r_multiple = 1.0  # 1R as fallback
                 if stop_loss_price_cents is None:
-                    # CRITICAL FIX: 2026-07-13 - Load SL offset from profile instead of hardcoded 5
+                    # CRITICAL FIX (2026-07-31): Side-aware SL calculation for binary options
+                    # YES contracts: SL below entry (loss when price goes down)
+                    # NO contracts: SL above entry (loss when price goes up)
+                    # Previous bug: treated both sides identically, causing NO contracts to have inverted SL
                     sl_offset_cents = 5  # Default fallback
                     try:
                         from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -3290,7 +3293,10 @@ async def place_order(
                         sl_offset_cents = profile.dynamic_risk_sl_cents_normal_vol
                     except Exception as sl_exc:
                         logger.warning("[API-SL] Failed to load SL config from profile: %s", sl_exc)
-                    stop_loss_price_cents = max(1, price_cents - sl_offset_cents)
+                    if side == "yes":
+                        stop_loss_price_cents = max(1, price_cents - sl_offset_cents)  # YES: SL below entry
+                    else:
+                        stop_loss_price_cents = min(99, price_cents + sl_offset_cents)  # NO: SL above entry
 
     # Try old order router first
     try:
@@ -3395,34 +3401,27 @@ async def place_order(
             })
         )
 
-    # SIM/MOCK only: Allow fallback for development (different risk profile)
-    # Note: This path should only be reached in explicit development/testing contexts
-    logger.warning("[PASS8_SIM_FALLBACK] SIM/MOCK mode: Using REST fallback for development")
-    import uuid, time as _time
-    rest = _get_rest_client()
-    if not rest:
-        raise HTTPException(500, "No Kalshi client configured")
-    
-    try:
-        t0 = _time.time()
-        _coid = str(uuid.uuid4())
-        result = await asyncio.to_thread(
-            rest.create_order,
-            ticker=ticker, side=side, action=action, quantity=count,
-            price=price_cents, client_order_id=_coid,
-            order_type=order_type, time_in_force=time_in_force,
-        )
-        latency = (_time.time() - t0) * 1000
-        order = result.get("order", {})
-        return {
-            "status": order.get("status", "submitted"), "mode": "sim_fallback",
-            "ticker": ticker, "side": side, "action": action,
-            "price_cents": price_cents, "count": count,
-            "fill": order, "reason": None, "latency_ms": round(latency, 1),
-        }
-    except Exception as exc:
-        logger.error(f"[PASS8_SIM_FALLBACK] Order placement failed: {exc}")
-        raise HTTPException(500, f"Order placement failed: {exc}")
+    # FAIL CLOSED: No REST fallback allowed in any mode
+    # The REST fallback bypasses order_router, violating single-executor contract
+    # and ALL risk guards (GlobalRiskGuard, Top-3 batch gate, PreTradeGate, kill switches)
+    logger.error(
+        f"[{_guard_type}] Order router unavailable in {mode_value} mode. "
+        "REST fallback blocked - trading halted for safety."
+    )
+    raise HTTPException(
+        status_code=503,
+        detail=json.dumps({
+            "error": "SYSTEM_DEGRADED_EXECUTOR_UNAVAILABLE",
+            "message": "Trading system degraded. Order router unavailable.",
+            "mode": mode_value,
+            "guard": _guard_type,
+            "severity": "critical",
+            "remediation": "Contact operations immediately. Do not attempt to bypass.",
+            "contact": "#on-call",
+            "status": "trading_halted",
+            "timestamp": "2026-04-23T00:00:00Z"
+        })
+    )
 
 
 # ── Order management (cancel / amend) ────────────────────────────────────
@@ -3431,20 +3430,28 @@ async def place_order(
 async def cancel_order(order_id: str) -> Dict[str, Any]:
     """Cancel a single resting order by Kalshi order ID."""
     executor = _get_executor()
-    if executor:
-        try:
-            ok = await executor.cancel_order(order_id)
-            return {"status": "cancelled" if ok else "failed", "order_id": order_id}
-        except Exception as exc:
-            logger.error(f"Executor cancel order {order_id} failed: {exc}")
-    rest = _get_rest_client()
-    if not rest:
-        raise HTTPException(500, "No Kalshi client configured")
+    if not executor:
+        # FAIL CLOSED: No REST fallback allowed - executor required for all cancel operations
+        logger.error("[CANCEL_GUARD] Executor unavailable - cancel order blocked")
+        raise HTTPException(
+            status_code=503,
+            detail=json.dumps({
+                "error": "SYSTEM_DEGRADED_EXECUTOR_UNAVAILABLE",
+                "message": "Trading system degraded. Executor unavailable for cancel operation.",
+                "order_id": order_id,
+                "guard": "CANCEL_EXECUTOR_GUARD",
+                "severity": "critical",
+                "remediation": "Contact operations immediately. Do not attempt to bypass.",
+                "contact": "#on-call",
+                "status": "trading_halted",
+                "timestamp": "2026-04-23T00:00:00Z"
+            })
+        )
     try:
-        result = await asyncio.to_thread(rest.cancel_order, order_id)
-        return {"status": "cancelled", "order_id": order_id, "result": result}
+        ok = await executor.cancel_order(order_id)
+        return {"status": "cancelled" if ok else "failed", "order_id": order_id}
     except Exception as exc:
-        logger.error(f"Cancel order {order_id} failed: {exc}")
+        logger.error(f"Executor cancel order {order_id} failed: {exc}")
         raise HTTPException(500, f"Cancel failed: {exc}")
 
 
@@ -3457,16 +3464,24 @@ async def amend_order(
     """Amend a resting order's price and/or quantity (cancel-replace)."""
     if price_cents is None and count is None:
         raise HTTPException(400, "Must provide price_cents and/or count to amend")
-    # Amend is not on KalshiExecutor interface — use REST client directly
-    rest = _get_rest_client()
-    if not rest:
-        raise HTTPException(500, "No Kalshi client configured")
-    try:
-        result = await asyncio.to_thread(rest.amend_order, order_id, price=price_cents, quantity=count)
-        return {"status": "amended", "order_id": order_id, "result": result}
-    except Exception as exc:
-        logger.error(f"Amend order {order_id} failed: {exc}")
-        raise HTTPException(500, f"Amend failed: {exc}")
+    
+    # FAIL CLOSED: Amend operations must go through executor to ensure risk guard compliance
+    # Direct REST client bypasses all risk checks (GlobalRiskGuard, slot allocator, kill switches)
+    logger.error("[AMEND_GUARD] Amend operation blocked - must use executor with cancel-replace through order_router")
+    raise HTTPException(
+        status_code=503,
+        detail=json.dumps({
+            "error": "SYSTEM_DEGRADED_AMEND_BYPASS_BLOCKED",
+            "message": "Amend operation blocked. Use cancel-replace through canonical order_router path.",
+            "order_id": order_id,
+            "guard": "AMEND_EXECUTOR_GUARD",
+            "severity": "critical",
+            "remediation": "Cancel existing order and place new order through order_router to ensure risk guard compliance.",
+            "contact": "#on-call",
+            "status": "trading_halted",
+            "timestamp": "2026-04-23T00:00:00Z"
+        })
+    )
 
 
 @router.delete("/orders")
@@ -3474,15 +3489,23 @@ async def batch_cancel_orders(
     ticker: Optional[str] = Query(None, description="Cancel only orders for this ticker; omit to cancel ALL"),
 ) -> Dict[str, Any]:
     """Cancel all resting orders, optionally scoped to a single market."""
-    rest = _get_rest_client()
-    if not rest:
-        raise HTTPException(500, "No Kalshi client configured")
-    try:
-        result = await asyncio.to_thread(rest.batch_cancel_orders, ticker=ticker)
-        return {"status": "batch_cancelled", "ticker": ticker or "ALL", "result": result}
-    except Exception as exc:
-        logger.error(f"Batch cancel failed: {exc}")
-        raise HTTPException(500, f"Batch cancel failed: {exc}")
+    # FAIL CLOSED: Batch cancel must go through executor to ensure risk guard compliance
+    # Direct REST client bypasses all risk checks (GlobalRiskGuard, slot allocator, kill switches)
+    logger.error("[BATCH_CANCEL_GUARD] Batch cancel operation blocked - must use executor")
+    raise HTTPException(
+        status_code=503,
+        detail=json.dumps({
+            "error": "SYSTEM_DEGRADED_BATCH_CANCEL_BYPASS_BLOCKED",
+            "message": "Batch cancel operation blocked. Use individual cancel through executor.",
+            "ticker": ticker or "ALL",
+            "guard": "BATCH_CANCEL_EXECUTOR_GUARD",
+            "severity": "critical",
+            "remediation": "Cancel orders individually through executor to ensure risk guard compliance.",
+            "contact": "#on-call",
+            "status": "trading_halted",
+            "timestamp": "2026-04-23T00:00:00Z"
+        })
+    )
 
 
 @router.post("/orders/batch",

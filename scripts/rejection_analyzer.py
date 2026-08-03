@@ -143,7 +143,7 @@ class RejectionCapture:
             r"\[TIME-WINDOW-FILTER\] asset=(\w+) minutes_to_expiry=([\d.]+) -> (SKIP|REDUCED|OPTIMAL) \((.*?)\)"
         ),
         "price_range": re.compile(
-            r"\[PRICE-FILTER-REJECT\] asset=(\w+) both sides outside 10c-75c range \(yes=(\d+)c, no=(\d+)c\)"
+            r"\[PRICE-FILTER-REJECT\] asset=(\w+) both sides outside side-aware ranges \(yes=(\d+)c, no=(\d+)c\)"
         ),
         "trend_alignment": re.compile(
             r"\[TREND-ALIGNMENT-FILTER\] asset=(\w+) (.*?) -> SKIP"

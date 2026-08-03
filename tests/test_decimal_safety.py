@@ -163,8 +163,10 @@ class TestPositionCachePnL(unittest.TestCase):
         
         pos = CachedPosition(
             market_id="TEST-123",
+            agent_id="test_agent",
             contracts=10,
             side="yes",
+            thesis_side="yes",
             avg_price_cents=50,
         )
         

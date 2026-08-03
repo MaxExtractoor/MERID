@@ -11,7 +11,7 @@ This suite tests:
 - PnL computation with Kalshi binary payoff and fee schedule
 - Risk breach response (80% warning, 90% critical, 100% hard stop)
 - Kill-switch integration with reconciliation
-- Risk → gate integration (limit breach → reduce-only/block)
+- Risk to gate integration (limit breach to reduce-only/block)
 
 Cross-references:
 - External contract: docs/audit/KALSHI_RISK_EXTERNAL_CONTRACT.md

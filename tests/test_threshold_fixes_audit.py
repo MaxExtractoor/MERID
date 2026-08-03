@@ -6,7 +6,7 @@ Tests for the following fixes:
 2. agent_grid_15m.py uses profile staleness values (not hardcoded 120s)
 3. MIN_TIME_TO_EXPIRY default changed from 2 to 3 minutes
 4. Depth thresholds now use risk envelope (not hardcoded tier-based)
-5. min_bars_required reduced from 52 to 20 for 15-minute markets (research-based optimization)
+5. min_bars_required updated to 26 for MACD(8,21,5) warmup (21 slow + 5 signal)
 """
 
 import pytest
@@ -167,10 +167,10 @@ class TestDepthThresholdFixes:
 
 
 class TestMinBarsRequiredFix:
-    """Test min_bars_required fix - updated from 20 to 30 for MACD(8,21,5) warmup."""
+    """Test min_bars_required fix - updated from 30 to 26 for MACD(8,21,5) warmup."""
 
-    def test_indicators_min_bars_required_is_30(self):
-        """Test that crypto_15m_indicators.py min_bars_required is 30 (for MACD warmup)."""
+    def test_indicators_min_bars_required_is_26(self):
+        """Test that crypto_15m_indicators.py min_bars_required is 26 (for MACD warmup)."""
         indicators_path = Path(__file__).parent.parent / "merid" / "signals" / "crypto_15m_indicators.py"
 
         if not indicators_path.exists():
@@ -178,10 +178,11 @@ class TestMinBarsRequiredFix:
 
         content = indicators_path.read_text(encoding='utf-8')
 
-        # CRITICAL FIX: 2026-07-12 - min_bars_required changed from 20 to 30 for MACD(8,21,5) warmup
-        # Check that min_bars_required is 30 (not 20 or 52)
-        assert "min_bars_required: int = 30" in content, \
-            "min_bars_required should be 30 for MACD(8,21,5) warmup"
+        # CRITICAL FIX: 2026-08-01 - min_bars_required changed from 30 to 26 for MACD(8,21,5) warmup
+        # MACD(8,21,5) needs 21 (slow) + 5 (signal) = 26 bars minimum
+        # Check that min_bars_required is 26 (not 20, 30, or 52)
+        assert "min_bars_required: int = 26" in content, \
+            "min_bars_required should be 26 for MACD(8,21,5) warmup"
 
         # Check comment mentions MACD(8,21,5)
         assert "MACD(8,21,5)" in content, \
