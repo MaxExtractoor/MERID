@@ -2670,16 +2670,6 @@ async def _run_full_startup_in_lifespan(app):
         logger.debug("[STARTUP-STACK] P2.0: imported loop_15m OK")
         logger.debug("[STARTUP-STACK] P2.0: AFTER import dependencies")
         
-        # CRITICAL FIX (2026-08-02): Handle minimal startup when P1.x phases are skipped
-        # When MERID_SKIP_STARTUP_PHASES=true, catalog and other components are not initialized
-        # We need to handle this gracefully or skip P2.x initialization
-        import os
-        skip_startup_phases = os.getenv("MERID_SKIP_STARTUP_PHASES", "false").lower() == "true"
-        if skip_startup_phases:
-            logger.warning("[STARTUP-STACK] Skipping P2.x initialization (MERID_SKIP_STARTUP_PHASES=true)")
-            logger.warning("[STARTUP-STACK] Trading loop will not be started with minimal initialization")
-            return
-        
         # Get references to components initialized in P1.x
         # These are stored in app.state by P1.x phases
         catalog = app.state.catalog
@@ -3048,15 +3038,6 @@ class UnifiedEdgeConfig:
 async def _run_startup_phases_v20260530(app):
     """Actual startup logic - linearized phase-based initializer."""
     global loop_task, kalshi_loop, ws_refresh_task, ws_refresh_stop
-    
-    # CRITICAL FIX (2026-08-02): Skip startup phases if environment variable is set
-    # This prevents startup hang during complex initialization
-    import os
-    skip_startup_phases = os.getenv("MERID_SKIP_STARTUP_PHASES", "false").lower() == "true"
-    if skip_startup_phases:
-        logger.warning("[STARTUP] Skipping startup phases (MERID_SKIP_STARTUP_PHASES=true) to prevent startup hang")
-        logger.warning("[STARTUP] Server will start with minimal initialization")
-        return
     
     # P0-12 DIAGNOSTIC: Log function entry
     logger.info("[P1-STARTUP-ENTRY] _run_startup_phases_v20260530 ENTERED")

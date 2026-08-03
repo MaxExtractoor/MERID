@@ -127,12 +127,11 @@ Write-Host "[start_15m] Launching server on http://${ServerHost}:${Port}" -Foreg
 Write-Host "[start_15m] Startup is handled by FastAPI lifespan events - no health watcher needed" -ForegroundColor Green
 Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
 
-# CRITICAL FIX (2026-08-02): Skip catalog feed AND startup phases to prevent hang
-# The startup is hanging in complex initialization phases
-# This allows the server to start with minimal initialization
+# CRITICAL FIX (2026-08-02): Re-enable catalog feed skip - apply_rest_market is blocking
+# The catalog feed is hanging during apply_rest_market calls
+# This allows the server to start and trade without getting stuck in catalog initialization
 $env:MERID_SKIP_CATALOG_FEED = "true"
-$env:MERID_SKIP_STARTUP_PHASES = "true"
-Write-Host "[start_15m] Skipping catalog feed and startup phases to prevent startup hang" -ForegroundColor Yellow
+Write-Host "[start_15m] Skipping catalog feed to prevent startup hang" -ForegroundColor Yellow
 
 # Start the server - FastAPI lifespan will handle startup automatically
 # Use --log-level info (less verbose than debug)
