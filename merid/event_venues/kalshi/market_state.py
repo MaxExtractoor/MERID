@@ -2377,14 +2377,14 @@ class KalshiMarketStateStore:
                     # Calculate user timestamp lag for lag classification
                     now_wall = time.time()
                     self._rest_user_ts_lag_s = now_wall - dt.timestamp()
-            
-            # Check for WS lag
-            lag = self._check_rest_updated_time_lag(ticker)
-            if lag is not None:
-                logger.warning(
-                    "[REST-CROSS-CHECK] ticker=%s WS lag detected during REST fetch lag_s=%.1f",
-                    ticker, lag
-                )
+                    
+                    # Check for WS lag
+                    lag = self._check_rest_updated_time_lag(ticker)
+                    if lag is not None:
+                        logger.warning(
+                            "[REST-CROSS-CHECK] ticker=%s WS lag detected during REST fetch lag_s=%.1f",
+                            ticker, lag
+                        )
             except Exception as e:
                 logger.warning("[APPLY-REST-MARKET] Failed to parse updated_time for %s: %s", ticker, e)
 
