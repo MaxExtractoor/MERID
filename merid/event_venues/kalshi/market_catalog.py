@@ -1525,14 +1525,6 @@ class KalshiMarketCatalog:
             f"[CATALOG-FEED] Sample tickers being fed to state store: {sample_tickers}"
         )
         
-        # CRITICAL FIX (2026-08-02): Skip catalog feed if environment variable is set
-        # This prevents startup hang when apply_rest_market is blocking
-        skip_catalog_feed = os.getenv("MERID_SKIP_CATALOG_FEED", "false").lower() == "true"
-        if skip_catalog_feed:
-            logger.warning("[CATALOG-FEED] Skipping catalog feed (MERID_SKIP_CATALOG_FEED=true) to prevent startup hang")
-            logger.warning("[CATALOG-FEED] Markets will be loaded via WebSocket and REST API during trading")
-            return len(enriched)
-        
         for idx, cm in enumerate(enriched):
             ticker = cm.market.market_id
             logger.info(f"[CATALOG-FEED] Processing market {idx+1}/{len(enriched)}: ticker={ticker} asset={cm.asset}")
