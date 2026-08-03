@@ -2266,6 +2266,9 @@ class KalshiMarketStateStore:
         if not hasattr(self, '_states') or not hasattr(self, '_lock'):
             logger.warning("[APPLY-REST-MARKET] State store not fully initialized, skipping ticker=%s", ticker)
             return None
+        
+        logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s states_count=%d", 
+                   ticker, threading.current_thread().name, len(self._states))
 
         logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s", ticker, threading.current_thread().name)
         
@@ -4952,15 +4955,20 @@ def get_kalshi_market_state_store() -> KalshiMarketStateStore:
     CRITICAL FIX (2026-08-01): Eagerly initialize async lock during store creation
     to prevent race conditions where locks are created in the wrong event loop.
     """
+    import threading
     global _store, _store_lock_async
-    logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: checking if _store is None")
+    logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: checking if _store is None thread=%s", 
+               threading.current_thread().name)
     if _store is None:
         with _store_lock:
             if _store is None:
-                logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: _store is None, creating new instance")
+                logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: _store is None, creating new instance thread=%s", 
+                          threading.current_thread().name)
                 logger.info("[MARKET-STATE] store init starting")
                 try:
                     _store = KalshiMarketStateStore()
+                    logger.info("[MARKET-STATE] store init completed id=%d thread=%s", 
+                              id(_store), threading.current_thread().name)
                     # CRITICAL FIX (2026-08-01): Eagerly initialize async lock in current event loop
                     # This prevents race conditions where locks are created in wrong event loop
                     import asyncio
@@ -4972,13 +4980,13 @@ def get_kalshi_market_state_store() -> KalshiMarketStateStore:
                         # No event loop running yet - will be initialized on first async call
                         logger.debug("[MARKET-STATE] No event loop running, async lock will be initialized on first async call")
                         _store_lock_async = None
-                    logger.info("[MARKET-STATE] store init completed store_id=%s", id(_store))
                 except Exception as e:
                     logger.error(f"[MARKET-STATE] store init failed: {e}")
                     raise RuntimeError(f"Market state store initialization failed: {e}")
             else:
                 logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: another thread created store_id=%s", id(_store))
     else:
-        logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: returning existing store_id=%s", id(_store))
+        logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: returning existing store_id=%s thread=%s", 
+                   id(_store), threading.current_thread().name)
     logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: returning _store")
     return _store
