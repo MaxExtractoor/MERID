@@ -806,18 +806,6 @@ class KalshiMarketCatalog:
     async def _refresh_loop(self) -> None:
         logger.info("[CATALOG-REFRESH-LOOP] Starting periodic refresh loop (interval=%.1fs)", self._refresh_interval)
         
-        # CRITICAL FIX (2026-08-02): Skip catalog refresh loop if environment variable is set
-        # This prevents startup hang in the catalog refresh loop
-        import os
-        skip_catalog_refresh = os.getenv("MERID_SKIP_CATALOG_REFRESH", "false").lower() == "true"
-        if skip_catalog_refresh:
-            logger.warning("[CATALOG-REFRESH-LOOP] Skipping catalog refresh loop (MERID_SKIP_CATALOG_REFRESH=true) to prevent startup hang")
-            logger.warning("[CATALOG-REFRESH-LOOP] Catalog will not auto-refresh during startup")
-            # Still set the event so startup can proceed
-            self._first_refresh_completed.set()
-            logger.warning("[CATALOG-REFRESH-LOOP] First refresh completed event set despite skip")
-            return
-        
         # CRITICAL FIX: Do immediate refresh on thread startup
         logger.info("[CATALOG-REFRESH-LOOP] Performing immediate initial refresh in thread...")
         try:
