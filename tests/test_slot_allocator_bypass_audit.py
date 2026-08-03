@@ -93,17 +93,20 @@ class TestSlotAllocatorBypassAudit:
         assert "is_exit_order=False" in grid_source, \
             "agent_grid_15m.py should set is_exit_order=False for entry orders"
         
-        # CRITICAL FIX (2026-07-12): Verify global allocator execution path uses slot allocation
-        assert "GLOBAL-ALLOCATOR-SLOT-ALLOCATED" in grid_source, \
-            "agent_grid_15m.py should log GLOBAL-ALLOCATOR-SLOT-ALLOCATED on successful allocation"
+        # UPDATED (single execution point): Execution-path slot allocation was moved
+        # to order_router.route_order_async to prevent double allocation.
+        # agent_grid keeps the signal-generation reservation (request_allocation above)
+        # and delegates execution-time allocation/release to order_router.
+        assert "SINGLE POINT" in grid_source, \
+            "agent_grid_15m.py should document slot allocation delegation to order_router"
         
-        # Verify slot allocation happens BEFORE execution
-        assert "GLOBAL-ALLOCATOR-SLOT-ALLOCATED" in grid_source and "GLOBAL-ALLOCATOR-EXECUTE" in grid_source, \
-            "agent_grid_15m.py should allocate slot before GLOBAL-ALLOCATOR-EXECUTE"
+        # Verify the execution path routes via _kalshi_place_order → order_router
+        assert "_kalshi_place_order" in grid_source and "GLOBAL-ALLOCATOR-EXECUTE" in grid_source, \
+            "agent_grid_15m.py execution path should route via _kalshi_place_order"
         
-        # Verify slot release on execution failure
-        assert "GLOBAL-ALLOCATOR-SLOT-RELEASED" in grid_source, \
-            "agent_grid_15m.py should release slot on execution failure"
+        # Verify slot release is delegated to order_router
+        assert "Slot release is now handled in order_router" in grid_source, \
+            "agent_grid_15m.py should document slot release delegation to order_router"
 
     def test_loop_15m_exit_order_bypass(self):
         """Verify loop_15m.py exit orders bypass slot allocation."""

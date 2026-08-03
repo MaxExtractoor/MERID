@@ -147,19 +147,14 @@ def validate_kalshi_grid(strict: bool = True) -> Dict[str, CellStatus]:
 
             # ── Check 2: risk limits ──────────────────────────────────
             notional = float(agent.risk_limits.max_notional_usd)
-            # If 0, derive from live bankroll via bankroll_service_v2 (3% for top-3 edge strategy)
+            # If 0, use fixed $1 exposure cap (2026-07-17: percentage-based model DISABLED)
             if notional == 0:
                 try:
-                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                    bankroll_usd = get_equity_for_risk_calc_sync()
-                    if bankroll_usd is None or bankroll_usd <= 0:
-                        # Fail closed - no bankroll available
-                        notional = 0.0
-                    else:
-                        risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.03)
-                        notional = bankroll_usd * risk_fraction
+                    import os
+                    # Use fixed $1 exposure cap from environment variable
+                    notional = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
                 except Exception:
-                    notional = 0.0  # Fail closed on error
+                    notional = 1.0  # Fail closed to $1 default on error
             cell.max_notional_usd = notional
             if notional < 0:
                 cell.errors.append(

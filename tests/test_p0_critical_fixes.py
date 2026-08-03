@@ -66,7 +66,9 @@ class TestP0PositionCacheRounding:
         
         pos = CachedPosition(
             market_id="KXBTC-15M",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=3,
             avg_price_cents=50,
             realized_pnl_usd=Decimal("0")
@@ -86,7 +88,9 @@ class TestP0PositionCacheRounding:
         
         pos = CachedPosition(
             market_id="KXBTC-15M",
+            agent_id="test_agent",
             side="yes",
+            thesis_side="yes",
             contracts=2,
             avg_price_cents=51,  # 102 cents total
             realized_pnl_usd=Decimal("0")

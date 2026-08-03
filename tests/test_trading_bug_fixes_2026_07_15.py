@@ -223,8 +223,10 @@ class TestPhantomSlotLockoutFix:
         # Add a mock position to simulate actual position
         pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
             market_id="KXBTC15M-26JUL151645-45",
+            agent_id="BTC_15M",
             contracts=1,
             side="yes",
+            thesis_side="yes",
             avg_price_cents=75
         )
         
@@ -278,20 +280,26 @@ class TestGetPositionsByAsset:
         # Add mock positions for different assets
         pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
             market_id="KXBTC15M-26JUL151645-45",
+            agent_id="BTC_15M",
             contracts=1,
             side="yes",
+            thesis_side="yes",
             avg_price_cents=75
         )
         pos_cache._positions["KXETH15M-26JUL151645-45"] = CachedPosition(
             market_id="KXETH15M-26JUL151645-45",
+            agent_id="ETH_15M",
             contracts=2,
             side="no",
+            thesis_side="no",
             avg_price_cents=50
         )
         pos_cache._positions["KXSOL15M-26JUL151645-45"] = CachedPosition(
             market_id="KXSOL15M-26JUL151645-45",
+            agent_id="SOL_15M",
             contracts=0,  # Closed position
             side="yes",
+            thesis_side="yes",
             avg_price_cents=30
         )
         
@@ -329,8 +337,10 @@ class TestGetPositionsByAsset:
         # Add a BTC position
         pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
             market_id="KXBTC15M-26JUL151645-45",
+            agent_id="BTC_15M",
             contracts=1,
             side="yes",
+            thesis_side="yes",
             avg_price_cents=75
         )
         
@@ -355,14 +365,18 @@ class TestGetPositionsByAsset:
         # Add multiple BTC positions (different markets)
         pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
             market_id="KXBTC15M-26JUL151645-45",
+            agent_id="BTC_15M",
             contracts=1,
             side="yes",
+            thesis_side="yes",
             avg_price_cents=75
         )
         pos_cache._positions["KXBTC15M-26JUL151700-30"] = CachedPosition(
             market_id="KXBTC15M-26JUL151700-30",
+            agent_id="BTC_15M",
             contracts=1,
             side="no",
+            thesis_side="no",
             avg_price_cents=25
         )
         

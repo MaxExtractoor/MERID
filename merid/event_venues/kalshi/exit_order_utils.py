@@ -24,6 +24,8 @@ EXIT_ORDER_MARKERS = [
     "hedge",  # SEV-0 FIX: Hedge orders reduce net exposure and should be treated as exit orders
     "hedge_engine",  # SEV-0 FIX: HEDGE_ENGINE source marker for hedge order detection
     "offset_hedging",  # SEV-0 FIX: offset_hedging source marker for offset hedging strategy
+    "position_monitor_exit",  # CRITICAL FIX (2026-07-20): PositionMonitor exit orders must bypass risk checks to ensure profitable positions cash out
+    "resting_bracket",  # CRITICAL FIX (2026-08-01): Bracket orders (TP/SL) are exit orders and must bypass entry guards
 ]
 
 
@@ -59,12 +61,21 @@ def is_exit_order_from_intent(intent) -> bool:
     This is a convenience wrapper for is_exit_order_from_source() that extracts
     the source field from an OrderIntent object.
     
+    CRITICAL FIX (2026-08-01): Also check entry_or_exit field for explicit direction.
+    Bracket orders now set entry_or_exit="exit" to prevent ENTRY-ORDER-INVARIANT-VIOLATION.
+    
     Args:
         intent: OrderIntent object with a source attribute
         
     Returns:
         True if order is an exit order, False otherwise
     """
+    # Check explicit entry_or_exit field first (most reliable)
+    entry_or_exit = getattr(intent, "entry_or_exit", None)
+    if entry_or_exit == "exit":
+        return True
+    
+    # Fallback to source marker detection
     source = getattr(intent, "source", "") or ""
     return is_exit_order_from_source(source)
 

@@ -72,37 +72,41 @@ class TestExecutableEdgeCalculation:
         # YES spread = 5c, NO spread = 5c
         # yes_edge_raw = 62 - 55 = 7c
         # no_edge_raw = (38 - 40) = -2c
-        # yes_edge_exec = 7 - 2.5 = 4.5c
-        # no_edge_exec = -2 - 2.5 = -4.5c
+        # CRITICAL FIX 2026-08-01: Default is maker economics (no spread cost, no fee)
+        # yes_edge_exec_maker = 7c (no spread cost, no fee)
+        # no_edge_exec_maker = -2c (no spread cost, no fee)
+        # For taker economics: yes_edge_exec = 7 - 5 - 2 = 0c (full spread + fee)
         
         spread_metrics = compute_canonical_spreads(yes_bid_cents=55, no_bid_cents=40)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics, order_side=None)
         
+        # Default is maker economics
         assert yes_edge.raw_edge_cents == 7.0
         assert yes_edge.spread_cents == 5
-        assert yes_edge.spread_cost_cents == 2.5
-        assert yes_edge.executable_edge_cents == 4.5
+        assert yes_edge.spread_cost_cents == 0.0  # Maker: no spread cost
+        assert yes_edge.executable_edge_cents == 7.0  # Maker: raw edge (no cost)
         assert yes_edge.spread_to_edge_ratio == 5.0 / 7.0
         
         assert no_edge.raw_edge_cents == -2.0
         assert no_edge.spread_cents == 5
-        assert no_edge.spread_cost_cents == 2.5
-        assert no_edge.executable_edge_cents == -4.5
+        assert no_edge.spread_cost_cents == 0.0  # Maker: no spread cost
+        assert no_edge.executable_edge_cents == -2.0  # Maker: raw edge (no cost)
     
     def test_edge_calculation_positive_both_sides(self):
         """Test edge calculation when both sides have positive edge."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=45, no_bid_cents=45)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=55.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=55.0, spread_metrics=spread_metrics, order_side=None)
         
-        # YES: 55 - 45 = 10c raw, spread = 10c, exec = 10 - 5 = 5c
-        # NO: 45 - 45 = 0c raw, spread = 10c, exec = 0 - 5 = -5c
-        assert yes_edge.executable_edge_cents == 5.0
-        assert no_edge.executable_edge_cents == -5.0
+        # Default is maker economics: no spread cost, no fee
+        # YES: 55 - 45 = 10c raw, spread = 10c, exec = 10c (maker: no cost)
+        # NO: 45 - 45 = 0c raw, spread = 10c, exec = 0c (maker: no cost)
+        assert yes_edge.executable_edge_cents == 10.0  # Maker: raw edge
+        assert no_edge.executable_edge_cents == 0.0  # Maker: raw edge
     
     def test_edge_calculation_spread_ratio(self):
         """Test spread/edge ratio calculation."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=50, no_bid_cents=50)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=60.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=60.0, spread_metrics=spread_metrics, order_side=None)
         
         # YES: raw = 10c, spread = 0c, ratio = 0
         assert yes_edge.spread_to_edge_ratio == 0.0
@@ -120,12 +124,12 @@ class TestEdgeAwareMicrostructureGate:
         """Test that gate passes when executable edge is positive and ratio is low."""
         # Use a case where spread cost ratio is low enough to pass
         spread_metrics = compute_canonical_spreads(yes_bid_cents=55, no_bid_cents=45)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics, order_side=None)
         
         # YES: raw = 7c, spread = 0c, exec = 7c, ratio = 0 (passes)
         passes, reason = edge_aware_microstructure_gate(
             edge_metrics=yes_edge,
-            min_executable_edge_cents=3.0,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=0.4
         )
         
@@ -135,12 +139,12 @@ class TestEdgeAwareMicrostructureGate:
     def test_gate_fails_non_positive_executable_edge(self):
         """Test that gate fails when executable edge is non-positive."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=55, no_bid_cents=40)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics, order_side=None)
         
         # NO side has negative executable edge
         passes, reason = edge_aware_microstructure_gate(
             edge_metrics=no_edge,
-            min_executable_edge_cents=3.0,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=0.4
         )
         
@@ -150,12 +154,12 @@ class TestEdgeAwareMicrostructureGate:
     def test_gate_fails_executable_edge_too_low(self):
         """Test that gate fails when executable edge is below threshold."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=55, no_bid_cents=40)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=56.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=56.0, spread_metrics=spread_metrics, order_side=None)
         
-        # YES: raw = 1c, exec = 1 - 2.5 = -1.5c (below 3c threshold)
+        # YES: raw = 1c, exec = 1 - 5 - 2 = -6c (below 3c threshold)
         passes, reason = edge_aware_microstructure_gate(
             edge_metrics=yes_edge,
-            min_executable_edge_cents=3.0,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=0.4
         )
         
@@ -165,22 +169,32 @@ class TestEdgeAwareMicrostructureGate:
     def test_gate_fails_spread_cost_too_high(self):
         """Test that gate fails when spread/edge ratio exceeds threshold."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=50, no_bid_cents=50)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=51.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=51.0, spread_metrics=spread_metrics, order_side=None)
         
         # YES: raw = 1c, spread = 0c, ratio = 0 (should pass ratio check)
         # But let's create a case where spread is high relative to edge
         spread_metrics_wide = compute_canonical_spreads(yes_bid_cents=40, no_bid_cents=40)
-        yes_edge_wide, _ = compute_per_side_edges(p_hat_yes_cents=45.0, spread_metrics=spread_metrics_wide)
+        yes_edge_wide, _ = compute_per_side_edges(p_hat_yes_cents=45.0, spread_metrics=spread_metrics_wide, order_side=None)
         
-        # YES: raw = 5c, spread = 20c, exec = -5c (negative, fails executable edge check first)
+        # YES: raw = 5c, spread = 20c, exec = -15c (negative, fails executable edge check first)
         # Need a case where exec edge is positive but spread/edge ratio is high
         spread_metrics_wide2 = compute_canonical_spreads(yes_bid_cents=45, no_bid_cents=45)
-        yes_edge_wide2, _ = compute_per_side_edges(p_hat_yes_cents=55.0, spread_metrics=spread_metrics_wide2)
+        yes_edge_wide2, _ = compute_per_side_edges(p_hat_yes_cents=55.0, spread_metrics=spread_metrics_wide2, order_side=None)
         
-        # YES: raw = 10c, spread = 10c, exec = 5c, ratio = 1.0 (exceeds 0.4 threshold)
+        # YES: raw = 10c, spread = 10c, exec = -2c (negative, fails executable edge check first)
+        # Need higher edge to get positive exec edge but high ratio
+        spread_metrics_wide3 = compute_canonical_spreads(yes_bid_cents=45, no_bid_cents=45)
+        yes_edge_wide3, _ = compute_per_side_edges(p_hat_yes_cents=70.0, spread_metrics=spread_metrics_wide3, order_side=None)
+        
+        # YES: raw = 25c, spread = 10c, exec = 13c, ratio = 0.4 (at threshold)
+        # Need even higher spread to exceed ratio
+        spread_metrics_wide4 = compute_canonical_spreads(yes_bid_cents=40, no_bid_cents=40)
+        yes_edge_wide4, _ = compute_per_side_edges(p_hat_yes_cents=70.0, spread_metrics=spread_metrics_wide4, order_side=None)
+        
+        # YES: raw = 30c, spread = 20c, exec = 8c, ratio = 0.67 (exceeds 0.4 threshold)
         passes, reason = edge_aware_microstructure_gate(
-            edge_metrics=yes_edge_wide2,
-            min_executable_edge_cents=3.0,
+            edge_metrics=yes_edge_wide4,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=0.4
         )
         
@@ -190,24 +204,24 @@ class TestEdgeAwareMicrostructureGate:
     def test_gate_fails_absolute_spread_cap(self):
         """Test that gate fails when absolute spread exceeds cap (tertiary guard)."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=20, no_bid_cents=40)
-        yes_edge, _ = compute_per_side_edges(p_hat_yes_cents=80.0, spread_metrics=spread_metrics)
+        yes_edge, _ = compute_per_side_edges(p_hat_yes_cents=80.0, spread_metrics=spread_metrics, order_side=None)
         
-        # YES: raw = 60c, spread = 40c, exec = 40c, ratio = 0.67 (fails spread cost check first)
+        # YES: raw = 60c, spread = 40c, exec = 18c, ratio = 0.67 (fails spread cost check first)
         # Need a case where spread cost passes but absolute spread cap fails
         spread_metrics_wide = compute_canonical_spreads(yes_bid_cents=30, no_bid_cents=30)
-        yes_edge_wide, _ = compute_per_side_edges(p_hat_yes_cents=80.0, spread_metrics=spread_metrics_wide)
+        yes_edge_wide, _ = compute_per_side_edges(p_hat_yes_cents=80.0, spread_metrics=spread_metrics_wide, order_side=None)
         
-        # YES: raw = 50c, spread = 40c, exec = 30c, ratio = 0.8 (fails spread cost check)
+        # YES: raw = 50c, spread = 40c, exec = 8c, ratio = 0.8 (fails spread cost check)
         # Need even higher edge to pass spread cost but fail absolute cap
         spread_metrics_wide2 = compute_canonical_spreads(yes_bid_cents=35, no_bid_cents=35)
-        yes_edge_wide2, _ = compute_per_side_edges(p_hat_yes_cents=90.0, spread_metrics=spread_metrics_wide2)
+        yes_edge_wide2, _ = compute_per_side_edges(p_hat_yes_cents=90.0, spread_metrics=spread_metrics_wide2, order_side=None)
         
-        # YES: raw = 55c, spread = 30c, exec = 40c, ratio = 0.55 (fails spread cost check)
+        # YES: raw = 55c, spread = 30c, exec = 23c, ratio = 0.55 (fails spread cost check)
         # Absolute spread cap of 25c should block, but spread cost check fails first
         # Test with higher ratio threshold to allow spread cost to pass
         passes, reason = edge_aware_microstructure_gate(
             edge_metrics=yes_edge_wide2,
-            min_executable_edge_cents=3.0,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=1.0,  # Allow high ratio to test absolute cap
             max_spread_cents=25
         )
@@ -223,14 +237,14 @@ class TestBestSideSelection:
         """Test selecting YES when only YES side passes gates."""
         # Create a case where YES passes but NO fails (negative edge)
         spread_metrics = compute_canonical_spreads(yes_bid_cents=50, no_bid_cents=50)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=65.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=65.0, spread_metrics=spread_metrics, order_side=None)
         
-        # YES: raw = 15c, spread = 0c, exec = 15c, ratio = 0 (passes)
+        # YES: raw = 15c, spread = 0c, exec = 13c, ratio = 0 (passes)
         # NO: raw = 35 - 50 = -15c (negative, fails)
         selected = select_best_side(
             yes_edge=yes_edge,
             no_edge=no_edge,
-            min_executable_edge_cents=3.0,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=0.4
         )
         
@@ -240,7 +254,7 @@ class TestBestSideSelection:
     def test_select_no_when_only_no_passes(self):
         """Test selecting NO when only NO side passes gates."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=55, no_bid_cents=40)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=38.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=38.0, spread_metrics=spread_metrics, order_side=None)
         
         # Signal says NO is worth 62c (38c for YES)
         # YES: raw = 38 - 55 = -17c (negative)
@@ -248,7 +262,7 @@ class TestBestSideSelection:
         selected = select_best_side(
             yes_edge=yes_edge,
             no_edge=no_edge,
-            min_executable_edge_cents=3.0,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=0.4
         )
         
@@ -260,10 +274,10 @@ class TestBestSideSelection:
         # This requires p_hat to be between yes_bid and (100 - no_bid)
         # And spread to be small relative to raw edge
         spread_metrics = compute_canonical_spreads(yes_bid_cents=45, no_bid_cents=45)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=50.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=50.0, spread_metrics=spread_metrics, order_side=None)
         
-        # YES: raw = 5c, spread = 10c, exec = 0c (fails min edge)
-        # NO: raw = 5c, spread = 10c, exec = 0c (fails min edge)
+        # YES: raw = 5c, spread = 10c, exec = -7c (fails min edge)
+        # NO: raw = 5c, spread = 10c, exec = -7c (fails min edge)
         # Both fail min edge check
         # This test is renamed to reflect actual behavior - in practice with tight spreads,
         # it's rare for both sides to pass all gates simultaneously
@@ -273,7 +287,7 @@ class TestBestSideSelection:
         selected = select_best_side(
             yes_edge=yes_edge,
             no_edge=no_edge,
-            min_executable_edge_cents=3.0,
+            min_executable_edge_frac=0.03,  # CRITICAL FIX 2026-07-28: Use fraction instead of cents
             max_spread_to_edge_ratio=0.4
         )
         
@@ -283,13 +297,13 @@ class TestBestSideSelection:
     def test_select_none_when_neither_passes(self):
         """Test returning None when neither side passes gates."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=55, no_bid_cents=40)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=50.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=50.0, spread_metrics=spread_metrics, order_side=None)
         
         # Both sides have low edge
         selected = select_best_side(
             yes_edge=yes_edge,
             no_edge=no_edge,
-            min_executable_edge_cents=10.0,  # High threshold
+            min_executable_edge_frac=0.10,  # High threshold (10%)
             max_spread_to_edge_ratio=0.4
         )
         
@@ -302,7 +316,7 @@ class TestEdgeMetricsFormatting:
     def test_format_edge_metrics_table(self):
         """Test that edge metrics table is formatted correctly."""
         spread_metrics = compute_canonical_spreads(yes_bid_cents=55, no_bid_cents=40)
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents=62.0, spread_metrics=spread_metrics, order_side=None)
         
         table = format_edge_metrics_table(
             asset="BTC",
@@ -316,7 +330,7 @@ class TestEdgeMetricsFormatting:
         assert "YES" in table
         assert "NO" in table
         assert "7.0" in table  # YES raw edge
-        assert "4.5" in table  # YES executable edge
+        assert "7.0" in table  # YES executable edge (CRITICAL FIX: maker economics = raw edge)
 
 
 if __name__ == "__main__":

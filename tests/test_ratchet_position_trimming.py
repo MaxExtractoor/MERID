@@ -48,9 +48,11 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_floor_offset_cents = 5
             mock_adapter.profile.ratchet_force_exit_on_floor_breach = True
             mock_adapter.profile.ratchet_min_hold_after_activation_sec = 30
+            # Mock staged_time_exit as dict with empty stages to avoid Mock iteration error
+            mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
             
             # Simulate price crossing 80c threshold
-            asyncio.run(monitor._check_position(position, 81))
+            asyncio.run(monitor._check_position(position, 81, poll_count=1))
             
             # Verify position size was reduced (trim logic executed)
             assert position.size == 1, f"Position size should be 1 after trim, got {position.size}"
@@ -64,7 +66,7 @@ class TestRatchetPositionTrimming:
             assert call_args[0][3] == 2  # contracts_to_close (3 - 1 = 2)
     
     def test_ratchet_trim_triggered_for_no_position(self):
-        """Test that ratchet trim is triggered for NO position when price <20c and size >1."""
+        """Test that ratchet trim is triggered for NO position when own-side price >=80c and size >1."""
         monitor = PositionMonitor()
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
@@ -96,9 +98,11 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_floor_offset_cents = 5
             mock_adapter.profile.ratchet_force_exit_on_floor_breach = True
             mock_adapter.profile.ratchet_min_hold_after_activation_sec = 30
+            # Mock staged_time_exit as dict with empty stages to avoid Mock iteration error
+            mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
             
-            # Simulate price crossing 20c threshold (100 - 80 = 20 for NO)
-            asyncio.run(monitor._check_position(position, 19))
+            # Simulate own-side price crossing 80c threshold (side-space fix: NO uses own-side price directly)
+            asyncio.run(monitor._check_position(position, 81, poll_count=1))
             
             # Verify position size was reduced (trim logic executed)
             assert position.size == 1, f"Position size should be 1 after trim, got {position.size}"
@@ -108,7 +112,7 @@ class TestRatchetPositionTrimming:
             assert callback.called, "Callback should have been called for trim"
             call_args = callback.call_args
             assert call_args[0][1] == ExitReason.RATCHET_TRIM  # exit_reason
-            assert call_args[0][2] == 19  # exit_price_cents
+            assert call_args[0][2] == 81  # exit_price_cents
             assert call_args[0][3] == 2  # contracts_to_close (3 - 1 = 2)
     
     def test_ratchet_trim_not_triggered_when_size_equals_trim_target(self):
@@ -139,9 +143,10 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_threshold_cents = 80
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
             
             # Simulate price crossing 80c threshold
-            asyncio.run(monitor._check_position(position, 81))
+            asyncio.run(monitor._check_position(position, 81, poll_count=1))
             
             # Verify trim intent was NOT emitted
             assert not callback.called
@@ -176,9 +181,10 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_threshold_cents = 80
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
             
             # Simulate price below threshold
-            asyncio.run(monitor._check_position(position, 75))
+            asyncio.run(monitor._check_position(position, 75, poll_count=1))
             
             # Verify trim intent was NOT emitted
             assert not callback.called
@@ -214,9 +220,10 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_threshold_cents = 80
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
             
             # Simulate price crossing 80c threshold
-            asyncio.run(monitor._check_position(position, 81))
+            asyncio.run(monitor._check_position(position, 81, poll_count=1))
             
             # Verify trim intent was NOT emitted (already trimmed)
             assert not callback.called
@@ -249,9 +256,10 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_profit_floor_enabled = True
             mock_adapter.profile.ratchet_trim_position_enabled = False  # Disabled
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
             
             # Simulate price crossing 80c threshold
-            asyncio.run(monitor._check_position(position, 81))
+            asyncio.run(monitor._check_position(position, 81, poll_count=1))
             
             # Verify trim intent was NOT emitted
             assert not callback.called

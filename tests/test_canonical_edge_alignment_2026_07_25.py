@@ -116,7 +116,7 @@ class TestCanonicalEdgeAlignment:
         spread_metrics = compute_canonical_spreads(yes_bid_cents, no_bid_cents)
         
         # Compute edges using canonical formula
-        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents, spread_metrics)
+        yes_edge, no_edge = compute_per_side_edges(p_hat_yes_cents, spread_metrics, order_side=None)
         
         # Expected: yes_raw_edge = 51 - 50 = 1c (canonical formula in cents)
         assert abs(yes_edge.raw_edge_cents - 1.0) < 1e-6, \

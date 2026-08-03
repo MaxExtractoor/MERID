@@ -144,42 +144,43 @@ class TestNegativeEdgeValidation:
 
 
 class TestSweetSpotEntryBand:
-    """Test sweet-spot entry band [25c, 75c] (2026-07-05 research fix).
+    """Test sweet-spot entry band [5c, 85c] (2026-08-01 CRITICAL FIX).
     
-    Entries below 25c are lottery tickets (<30c zone has 10.4% win rate);
-    entries above 75c have no profit room to ratchet to the 99c exit.
+    CRITICAL FIX (2026-08-01): Updated from [25c, 75c] to [5c, 85c] for 15m crypto volatility
+    Previous range was too restrictive and dropped valid signals at 1c (BTC/ETH/SOL/XRP)
+    Markets can show extreme prices near expiry; we should trade them if edge is sufficient
     """
-    
-    ENTRY_MIN_PRICE_CENTS = 25
-    ENTRY_MAX_PRICE_CENTS = 75
+
+    ENTRY_MIN_PRICE_CENTS = 5  # Updated from 25c to 5c
+    ENTRY_MAX_PRICE_CENTS = 85  # Updated from 75c to 85c
     
     def test_price_below_band_rejected(self):
-        """Prices below 25c are rejected (lottery zone)."""
-        market_price_cents = 20
+        """Prices below 5c are rejected (lottery zone)."""
+        market_price_cents = 4
         should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
-        assert not should_trade, "Price below 25c should be rejected"
-    
+        assert not should_trade, "Price below 5c should be rejected"
+
     def test_price_at_band_floor_accepted(self):
-        """Price at exactly 25c is accepted."""
-        market_price_cents = 25
+        """Price at exactly 5c is accepted."""
+        market_price_cents = 5
         should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
-        assert should_trade, "Price at 25c should be accepted"
-    
+        assert should_trade, "Price at 5c should be accepted"
+
     def test_cheap_sweet_spot_accepted(self):
-        """Cheap entries (30-50c) are accepted - core of the swing-catching strategy."""
-        for market_price_cents in (30, 40, 45, 50):
+        """Cheap entries (10-50c) are accepted - core of the swing-catching strategy."""
+        for market_price_cents in (10, 20, 30, 40, 45, 50):
             should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
             assert should_trade, f"Cheap entry at {market_price_cents}c should be accepted"
-    
+
     def test_price_at_band_cap_accepted(self):
-        """Price at exactly 75c is accepted."""
-        market_price_cents = 75
+        """Price at exactly 85c is accepted."""
+        market_price_cents = 85
         should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
-        assert should_trade, "Price at 75c should be accepted"
-    
+        assert should_trade, "Price at 85c should be accepted"
+
     def test_price_above_band_rejected(self):
-        """Prices above 75c are rejected (chasing, no profit room to 99c exit)."""
-        for market_price_cents in (76, 85, 98, 99):
+        """Prices above 85c are rejected (chasing, no profit room to 99c exit)."""
+        for market_price_cents in (86, 90, 95, 98, 99):
             should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
             assert not should_trade, f"Price at {market_price_cents}c should be rejected (no chasing)"
 
@@ -288,14 +289,25 @@ class TestNoSideConviction:
 
 
 class TestRegimeAwareVelocityMapping:
-    """Test regime-aware velocity-to-side mapping logic."""
+    """Test regime-aware velocity-to-side mapping logic (DEPRECATED 2026-07-31).
     
-    def test_trend_following_positive_velocity(self):
-        """Test trend-following mode with positive velocity -> buy YES."""
+    CRITICAL FIX 2026-07-31: These tests document the OLD velocity-based hard mapping logic.
+    Production now uses dual-side selection based on edge comparison, not hard velocity mapping.
+    These tests are kept for historical reference but no longer reflect production behavior.
+    
+    New behavior: Both YES and NO sides are evaluated based on edge, with expected_side as tie-breaker.
+    """
+    
+    def test_trend_following_positive_velocity_legacy(self):
+        """Test trend-following mode with positive velocity -> buy YES (LEGACY).
+        
+        DEPRECATED: This tests the old hard mapping logic. Production now uses dual-side selection.
+        """
         strategy_mode = "trend_following"
         velocity = 0.01  # Positive
         velocity_threshold = 0.005
         
+        # Legacy hard mapping (no longer used in production)
         if velocity > velocity_threshold:
             if strategy_mode == "trend_following":
                 signal_side = "yes"
@@ -304,12 +316,16 @@ class TestRegimeAwareVelocityMapping:
         
         assert signal_side == "yes"
     
-    def test_trend_following_negative_velocity(self):
-        """Test trend-following mode with negative velocity -> buy NO."""
+    def test_trend_following_negative_velocity_legacy(self):
+        """Test trend-following mode with negative velocity -> buy NO (LEGACY).
+        
+        DEPRECATED: This tests the old hard mapping logic. Production now uses dual-side selection.
+        """
         strategy_mode = "trend_following"
         velocity = -0.01  # Negative
         velocity_threshold = 0.005
         
+        # Legacy hard mapping (no longer used in production)
         if velocity < -velocity_threshold:
             if strategy_mode == "trend_following":
                 signal_side = "no"
@@ -318,12 +334,16 @@ class TestRegimeAwareVelocityMapping:
         
         assert signal_side == "no"
     
-    def test_mean_reversion_positive_velocity(self):
-        """Test mean-reversion mode with positive velocity -> buy NO."""
+    def test_mean_reversion_positive_velocity_legacy(self):
+        """Test mean-reversion mode with positive velocity -> buy NO (LEGACY).
+        
+        DEPRECATED: This tests the old hard mapping logic. Production now uses dual-side selection.
+        """
         strategy_mode = "mean_reversion"
         velocity = 0.01  # Positive
         velocity_threshold = 0.005
         
+        # Legacy hard mapping (no longer used in production)
         if velocity > velocity_threshold:
             if strategy_mode == "trend_following":
                 signal_side = "yes"
@@ -332,12 +352,16 @@ class TestRegimeAwareVelocityMapping:
         
         assert signal_side == "no"
     
-    def test_mean_reversion_negative_velocity(self):
-        """Test mean-reversion mode with negative velocity -> buy YES."""
+    def test_mean_reversion_negative_velocity_legacy(self):
+        """Test mean-reversion mode with negative velocity -> buy YES (LEGACY).
+        
+        DEPRECATED: This tests the old hard mapping logic. Production now uses dual-side selection.
+        """
         strategy_mode = "mean_reversion"
         velocity = -0.01  # Negative
         velocity_threshold = 0.005
         
+        # Legacy hard mapping (no longer used in production)
         if velocity < -velocity_threshold:
             if strategy_mode == "trend_following":
                 signal_side = "no"
@@ -379,6 +403,216 @@ class TestRegimeAwareVelocityMapping:
         
         # Zero velocity should NOT trigger a YES trade
         assert signal_side is None, f"Expected NO TRADE for velocity=0.0, got {signal_side}"
+
+
+class TestDualSideSelection:
+    """Test dual-side selection logic (NEW 2026-07-31).
+    
+    CRITICAL FIX 2026-07-31: Tests for the new dual-side selection logic that fixes
+    the downtrend trading bug. The new logic evaluates both YES and NO sides based on
+    edge comparison, with expected_side as tie-breaker, not hard gating.
+    """
+    
+    def test_dual_side_selection_with_better_edge_on_opposite_side(self):
+        """Test that opposite side is selected when it has significantly better edge."""
+        # Simulate downtrend (negative velocity) but YES has better edge due to mispricing
+        velocity = -0.01  # Negative velocity (downtrend)
+        strategy_mode = "trend_following"
+        velocity_threshold = 0.005
+        
+        # Expected side from velocity
+        expected_side = "no" if velocity < 0 else "yes"
+        
+        # Simulate edge calculation (opposite side has better edge)
+        side_edges = {
+            "yes": 0.08,  # YES has 8% edge (mispricing opportunity)
+            "no": 0.02    # NO has 2% edge (expected side has poor edge)
+        }
+        
+        # Filter to positive edges only
+        positive_sides = {side: edge for side, edge in side_edges.items() if edge > 0}
+        
+        # Select best side (should be YES despite negative velocity)
+        best_side = None
+        best_edge = -float('inf')
+        for side in ["yes", "no"]:
+            if side in positive_sides:
+                total_edge = positive_sides[side]
+                if total_edge > best_edge or (total_edge == best_edge and side == expected_side):
+                    best_side = side
+                    best_edge = total_edge
+        
+        # YES should be selected due to better edge
+        assert best_side == "yes", f"Expected YES (better edge), got {best_side}"
+        assert best_edge == 0.08
+    
+    def test_dual_side_selection_with_expected_side_tie(self):
+        """Test that expected side wins tie-breaker when edges are equal."""
+        velocity = 0.01  # Positive velocity (uptrend)
+        strategy_mode = "trend_following"
+        velocity_threshold = 0.005
+        
+        # Expected side from velocity
+        expected_side = "yes" if velocity > 0 else "no"
+        
+        # Simulate equal edges
+        side_edges = {
+            "yes": 0.05,
+            "no": 0.05
+        }
+        
+        # Filter to positive edges only
+        positive_sides = {side: edge for side, edge in side_edges.items() if edge > 0}
+        
+        # Select best side (expected side should win tie)
+        best_side = None
+        best_edge = -float('inf')
+        for side in ["yes", "no"]:
+            if side in positive_sides:
+                total_edge = positive_sides[side]
+                if total_edge > best_edge or (total_edge == best_edge and side == expected_side):
+                    best_side = side
+                    best_edge = total_edge
+        
+        # Expected side (YES) should win tie
+        assert best_side == expected_side, f"Expected {expected_side} to win tie, got {best_side}"
+    
+    def test_dual_side_selection_with_no_positive_edges(self):
+        """Test that no trade occurs when both sides have negative edges."""
+        velocity = 0.01
+        strategy_mode = "trend_following"
+        
+        # Expected side from velocity
+        expected_side = "yes" if velocity > 0 else "no"
+        
+        # Simulate negative edges
+        side_edges = {
+            "yes": -0.02,
+            "no": -0.01
+        }
+        
+        # Filter to positive edges only
+        positive_sides = {side: edge for side, edge in side_edges.items() if edge > 0}
+        
+        # Should have no positive sides
+        assert len(positive_sides) == 0, "Should have no positive edges"
+        
+        # Selection should return None (no trade)
+        best_side = None
+        if positive_sides:
+            best_side = max(positive_sides, key=positive_sides.get)
+        
+        assert best_side is None, "Should return None when no positive edges"
+    
+    def test_dual_side_selection_with_midpoint_bonus(self):
+        """Test that midpoint bonus influences side selection."""
+        velocity = -0.01  # Negative velocity
+        strategy_mode = "trend_following"
+        
+        # Expected side from velocity
+        expected_side = "no" if velocity < 0 else "yes"
+        
+        # Simulate edges before bonus
+        side_edges = {
+            "yes": 0.04,
+            "no": 0.04
+        }
+        
+        # Simulate midpoint bonus function (peak at 42.5c)
+        def midpoint_bonus(price_cents):
+            dist = abs(price_cents - 42.5)
+            midpoint_bonus_max = 0.5
+            midpoint_bonus_slope = 0.02
+            return max(0.0, midpoint_bonus_max - dist * midpoint_bonus_slope)
+        
+        # Simulate prices (YES at midpoint, NO at edge)
+        yes_price_cents = 42.5  # Perfect midpoint
+        no_price_cents = 10.0    # At edge
+        
+        # Calculate bonus-adjusted edges
+        side_edges_with_bonus = {}
+        for side, edge in side_edges.items():
+            price_cents = yes_price_cents if side == "yes" else no_price_cents
+            bonus = midpoint_bonus(price_cents) / 100.0  # Convert to fraction
+            side_edges_with_bonus[side] = edge + bonus
+        
+        # Select best side with bonus
+        best_side = None
+        best_edge = -float('inf')
+        for side in ["yes", "no"]:
+            if side in side_edges_with_bonus:
+                total_edge = side_edges_with_bonus[side]
+                if total_edge > best_edge or (total_edge == best_edge and side == expected_side):
+                    best_side = side
+                    best_edge = total_edge
+        
+        # YES should win due to midpoint bonus
+        assert best_side == "yes", f"Expected YES (midpoint bonus), got {best_side}"
+    
+    def test_dual_side_selection_downtrend_with_no_edge(self):
+        """Test downtrend scenario where expected side (NO) has no positive edge."""
+        velocity = -0.01  # Negative velocity (downtrend)
+        strategy_mode = "trend_following"
+        
+        # Expected side from velocity
+        expected_side = "no" if velocity < 0 else "yes"
+        
+        # Simulate edges (NO has no positive edge, YES does)
+        side_edges = {
+            "yes": 0.03,
+            "no": -0.01  # Negative edge
+        }
+        
+        # Filter to positive edges only
+        positive_sides = {side: edge for side, edge in side_edges.items() if edge > 0}
+        
+        # Only YES has positive edge
+        assert "yes" in positive_sides, "YES should have positive edge"
+        assert "no" not in positive_sides, "NO should not have positive edge"
+        
+        # Select best side (should be YES, the only positive edge)
+        best_side = None
+        best_edge = -float('inf')
+        for side in ["yes", "no"]:
+            if side in positive_sides:
+                total_edge = positive_sides[side]
+                if total_edge > best_edge or (total_edge == best_edge and side == expected_side):
+                    best_side = side
+                    best_edge = total_edge
+        
+        # YES should be selected (only positive edge)
+        assert best_side == "yes", f"Expected YES (only positive edge), got {best_side}"
+    
+    def test_dual_side_selection_uptrend_with_better_no_edge(self):
+        """Test uptrend scenario where NO has better edge despite positive velocity."""
+        velocity = 0.01  # Positive velocity (uptrend)
+        strategy_mode = "trend_following"
+        
+        # Expected side from velocity
+        expected_side = "yes" if velocity > 0 else "no"
+        
+        # Simulate edges (NO has much better edge)
+        side_edges = {
+            "yes": 0.02,
+            "no": 0.08  # NO has 4x better edge
+        }
+        
+        # Filter to positive edges only
+        positive_sides = {side: edge for side, edge in side_edges.items() if edge > 0}
+        
+        # Select best side (should be NO due to much better edge)
+        best_side = None
+        best_edge = -float('inf')
+        for side in ["yes", "no"]:
+            if side in positive_sides:
+                total_edge = positive_sides[side]
+                if total_edge > best_edge or (total_edge == best_edge and side == expected_side):
+                    best_side = side
+                    best_edge = total_edge
+        
+        # NO should be selected due to better edge
+        assert best_side == "no", f"Expected NO (better edge), got {best_side}"
+        assert best_edge == 0.08
     
     def test_regime_bull_uses_trend_following(self):
         """Test that bull regime uses trend-following mode."""

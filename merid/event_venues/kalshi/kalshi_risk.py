@@ -3537,7 +3537,7 @@ def get_kalshi_risk() -> KalshiRiskManager:
     applies profile-based risk configuration from kalshi_crypto_15m.yaml.
     """
     global _risk
-    logger.info("[PROFILE_WIRING] get_kalshi_risk() called, _risk is None: %s", _risk is None)
+    logger.debug("[PROFILE_WIRING] get_kalshi_risk() called, _risk is None: %s", _risk is None)
     if _risk is None:
         with _risk_lock:
             if _risk is None:

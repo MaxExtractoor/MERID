@@ -1071,9 +1071,10 @@ class PreTradeGate:
             # Continue with other checks if validation fails (non-critical)
 
         # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
-        # Load min_contract_price_cents from profile with fallback to 10 cents
-        min_price_cents = 10  # CRITICAL FIX: Default fallback 10c to match profile (was 15c)
-        max_price_cents = 75  # CRITICAL FIX: Default fallback 75c to match profile (was 55c)
+        # Load min_contract_price_cents from profile with fallback to 5 cents
+        # CRITICAL FIX (2026-08-01): Updated fallback from 10c-75c to 5c-85c for 15m crypto volatility
+        min_price_cents = 5  # CRITICAL FIX (2026-08-01): Default fallback 5c to match profile (was 10c)
+        max_price_cents = 85  # CRITICAL FIX (2026-08-01): Default fallback 85c to match profile (was 75c)
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
@@ -1404,9 +1405,10 @@ class PreTradeGate:
             )
 
         # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
-        # Load min_contract_price_cents from profile with fallback to 10 cents
-        min_price_cents = 10  # CRITICAL FIX: Default fallback 10c to match profile (was 15c)
-        max_price_cents = 75  # CRITICAL FIX: Default fallback 75c to match profile (was 55c)
+        # Load min_contract_price_cents from profile with fallback to 5 cents
+        # CRITICAL FIX (2026-08-01): Updated fallback from 10c-75c to 5c-85c for 15m crypto volatility
+        min_price_cents = 5  # CRITICAL FIX (2026-08-01): Default fallback 5c to match profile (was 10c)
+        max_price_cents = 85  # CRITICAL FIX (2026-08-01): Default fallback 85c to match profile (was 75c)
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()

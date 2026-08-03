@@ -32,14 +32,16 @@ class ExitPriority(int, Enum):
     6. RATCHET_TRIM (partial close at >80c) - 75
     7. RATCHET_FLOOR (profit protection) - 70
     8. STOP_LOSS - 60
-    9. TAKE_PROFIT - 55
-    10. CANDLE_REVERSAL (momentum reversal) - 50
-    11. ADAPTIVE_TIMING (historical performance) - 45
-    12. TIME_STOP (volatility-adjusted time-based) - 40
-    13. EDGE_DECAY (edge threshold) - 35
-    14. SCALE_OUT (partial exit at 1.5-2R) - 30
-    15. TRAIL (trailing stop) - 25
-    16. MANUAL - 20
+    9. LOSS_CUT_40PCT (-40% loss cut when thesis changes) - 58
+    10. TAKE_PROFIT - 55
+    11. CANDLE_REVERSAL (momentum reversal) - 50
+    12. ADAPTIVE_TIMING (historical performance) - 45
+    13. TIME_STOP (volatility-adjusted time-based) - 40
+    14. EDGE_DECAY (edge threshold) - 35
+    15. OPPORTUNITY_COST (better opportunity exists) - 33
+    16. SCALE_OUT (partial exit at 1.5-2R) - 30
+    17. TRAIL (trailing stop) - 25
+    18. MANUAL - 20
     """
     AUTO_EXIT_99C = 95
     RISK = 100
@@ -49,11 +51,13 @@ class ExitPriority(int, Enum):
     RATCHET_TRIM = 75
     RATCHET_FLOOR = 70
     STOP_LOSS = 60
+    LOSS_CUT_40PCT = 58  # 2026-08-01: -40% loss cut when thesis changes
     TAKE_PROFIT = 55
     CANDLE_REVERSAL = 50
     ADAPTIVE_TIMING = 45
     TIME_STOP = 40
     EDGE_DECAY = 35
+    OPPORTUNITY_COST = 33  # 2026-08-01: Exit when better opportunity exists
     SCALE_OUT = 30
     TRAIL = 25
     MANUAL = 20
@@ -102,10 +106,7 @@ class ExitDecision:
 
 def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
     """
-    Get priority for a given exit reason.
-    
-    This maps ExitReason enum values to ExitPriority constants.
-    Includes all exits that exist in the ExitReason enum.
+    Map ExitReason to ExitPriority.
     
     Args:
         reason: Exit reason
@@ -113,24 +114,25 @@ def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
     Returns:
         Exit priority value
     """
-    # Map all exits that exist in ExitReason enum
     priority_map = {
         ExitReason.RISK: ExitPriority.RISK,
         ExitReason.AUTO_EXIT_99C: ExitPriority.AUTO_EXIT_99C,
         ExitReason.EXTREME_PROFIT: ExitPriority.EXTREME_PROFIT,
         ExitReason.STALE_DATA: ExitPriority.STALE_DATA,
+        ExitReason.DYNAMIC_TAKE_PROFIT: ExitPriority.DYNAMIC_TAKE_PROFIT,
+        ExitReason.RATCHET_TRIM: ExitPriority.RATCHET_TRIM,
+        ExitReason.RATCHET_FLOOR: ExitPriority.RATCHET_FLOOR,
+        ExitReason.STOP_LOSS: ExitPriority.STOP_LOSS,
+        ExitReason.LOSS_CUT_40PCT: ExitPriority.LOSS_CUT_40PCT,
+        ExitReason.TAKE_PROFIT: ExitPriority.TAKE_PROFIT,
         ExitReason.CANDLE_REVERSAL: ExitPriority.CANDLE_REVERSAL,
         ExitReason.ADAPTIVE_TIMING: ExitPriority.ADAPTIVE_TIMING,
         ExitReason.TIME_STOP: ExitPriority.TIME_STOP,
         ExitReason.EDGE_DECAY: ExitPriority.EDGE_DECAY,
+        ExitReason.OPPORTUNITY_COST: ExitPriority.OPPORTUNITY_COST,
         ExitReason.SCALE_OUT: ExitPriority.SCALE_OUT,
-        ExitReason.MANUAL: ExitPriority.MANUAL,
-        ExitReason.STOP_LOSS: ExitPriority.STOP_LOSS,
-        ExitReason.TAKE_PROFIT: ExitPriority.TAKE_PROFIT,
-        ExitReason.DYNAMIC_TAKE_PROFIT: ExitPriority.DYNAMIC_TAKE_PROFIT,
-        ExitReason.RATCHET_TRIM: ExitPriority.RATCHET_TRIM,
-        ExitReason.RATCHET_FLOOR: ExitPriority.RATCHET_FLOOR,
         ExitReason.TRAIL: ExitPriority.TRAIL,
+        ExitReason.MANUAL: ExitPriority.MANUAL,
     }
     
     return priority_map.get(reason, ExitPriority.MANUAL)

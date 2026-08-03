@@ -264,10 +264,10 @@ class KalshiClientV2:
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
         
-        # Add 10000ms buffer to prevent "header timestamp expired" errors
-        # Based on Kalshi API research: timestamps too far in future are rejected
-        # 10s buffer handles network latency while avoiding "timestamp out of range" errors
-        ts_ms = str(int(time.time() * 1000) + 10000)
+        # Use system time (assumes NTP-synced clock)
+        # Modern systems typically have NTP sync, so complex clock skew calculation is unnecessary
+        # If clock skew issues occur, ensure system time is synchronized via NTP
+        ts_ms = str(int(time.time() * 1000))
         
         # Use unified message building
         message = build_auth_message(ts_ms, method, path)

@@ -224,10 +224,10 @@ class LocalOrderbook:
             if isinstance(level, (list, tuple)) and len(level) >= 2:
                 price, size = level[0], level[1]
                 if size > 0:
-                    # CRITICAL: Kalshi prices are dollar floats in [0.00, 1.00]
-                    # Convert to cents by multiplying by 100 before rounding
-                    # This preserves sub-cent resolution (e.g., 0.19 -> 19 cents)
-                    price_cents = int(round(price * 100))
+                    # CRITICAL FIX: Prices are already in cents from ingestion point
+                    # (main_15m_lean.py WS-REFRESH and ws_bridge.py REST fallback)
+                    # No conversion needed here - just clamp to valid range
+                    price_cents = int(price) if not isinstance(price, int) else price
                     # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
                     # Clamp to valid range to handle rounding edge cases
                     price_cents = max(1, min(99, price_cents))
@@ -239,9 +239,10 @@ class LocalOrderbook:
             if isinstance(level, (list, tuple)) and len(level) >= 2:
                 price, size = level[0], level[1]
                 if size > 0:
-                    # CRITICAL: Kalshi prices are dollar floats in [0.00, 1.00]
-                    # Convert to cents by multiplying by 100 before rounding
-                    price_cents = int(round(price * 100))
+                    # CRITICAL FIX: Prices are already in cents from ingestion point
+                    # (main_15m_lean.py WS-REFRESH and ws_bridge.py REST fallback)
+                    # No conversion needed here - just clamp to valid range
+                    price_cents = int(price) if not isinstance(price, int) else price
                     # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
                     # Clamp to valid range to handle rounding edge cases
                     price_cents = max(1, min(99, price_cents))
@@ -443,6 +444,7 @@ class LocalOrderbook:
             )
             return None
         
+        # Convert to YES-equivalent ask
         yes_equivalent = 100 - best_no_price
         
         # Validate the derived price is in valid range
@@ -452,14 +454,6 @@ class LocalOrderbook:
                 yes_equivalent, best_no_price
             )
             return None
-        
-        # REMOVED: Extreme price threshold check causing false positives
-        # The extreme price check was incorrectly flagging liquid markets as illiquid
-        # when prices were near extremes (e.g., YES=99c from NO=1c). For 15-minute crypto
-        # markets, heavily skewed prices are common and valid, with high liquidity.
-        # Market liquidity should be determined by depth and spread, not price level.
-        # This check was causing false positives for all 5 crypto assets despite
-        # thousands of dollars trading every 15 minutes.
         
         return (yes_equivalent, self.no_levels[best_no_price])
 

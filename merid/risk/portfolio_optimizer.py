@@ -1,10 +1,12 @@
 """
 Portfolio Optimizer for MERID Advanced Risk Management
 
-Provides comprehensive portfolio optimization with modern portfolio theory,
-risk parity, and US-compliant configuration.
+CRITICAL: The 15m Kalshi crypto system uses a fixed $1 global exposure cap
+(MERID_FIXED_EXPOSURE_CAP_USD). This optimizer is DEPRECATED for the production
+15m crypto stack and should NOT be used. The production system uses slot-based
+allocation via GlobalSlotAllocator with a hard $1 cap across all assets.
 
-Features:
+Legacy Features (NOT USED IN PRODUCTION):
 - Mean-variance optimization
 - Risk parity allocation
 - Maximum diversification
@@ -84,6 +86,10 @@ class PortfolioOptimizer:
     """
     Advanced portfolio optimization system for MERID.
     
+    DEPRECATED: This class is NOT used in the 15m Kalshi crypto production stack.
+    The production system uses fixed $1 slot allocation (GlobalSlotAllocator)
+    instead of percentage-based portfolio optimization.
+    
     Provides multiple optimization methods with risk management
     and US-compliant configuration.
     """
@@ -108,6 +114,8 @@ class PortfolioOptimizer:
         ])
         
         # Constraints
+        # DEPRECATED: These percentage-based constraints are not used in production
+        # The 15m crypto stack uses fixed $1 slot allocation instead
         self.default_constraints = {
             "weight_sum": 1.0,
             "min_weight": 0.0,

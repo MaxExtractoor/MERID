@@ -49,17 +49,22 @@ class TestOrderRouterExitPolicy:
         assert result.trailing_giveback_cents == 5  # 5 cent giveback
     
     def test_tp_r_multiple_by_regime(self):
-        """Verify TP R-multiple varies by regime."""
+        """Verify TP R-multiple varies by regime.
+        
+        CRITICAL FIX 2026-07-16: Updated to align with 2:1 risk/reward ratio (80% TP, 40% SL)
+        Previous values (0.75, 1.0, 1.2) were based on old exit policy
+        New values (0.6, 0.8, 0.96) align with 80% TP base, adjusted by regime
+        """
         conservative = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="conservative")
         normal = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="normal")
         aggressive = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="aggressive")
         
-        # Conservative should have lower TP
-        assert conservative.tp_r_multiple == 0.75
-        # Normal should have baseline TP
-        assert normal.tp_r_multiple == 1.0
-        # Aggressive should have higher TP
-        assert aggressive.tp_r_multiple == 1.2
+        # Conservative should have lower TP (0.8 * 0.75 = 0.6)
+        assert conservative.tp_r_multiple == pytest.approx(0.6)
+        # Normal should have baseline TP (0.8 base from profile)
+        assert normal.tp_r_multiple == pytest.approx(0.8)
+        # Aggressive should have higher TP (0.8 * 1.2 = 0.96)
+        assert aggressive.tp_r_multiple == pytest.approx(0.96)
     
     def test_asset_specific_adjustments(self):
         """Verify tier 2 assets (SOL, XRP, DOGE) have wider TP thresholds."""

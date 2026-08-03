@@ -1114,7 +1114,9 @@ class PortfolioRiskAgent:
         
         # If product is specified and it's a crypto asset, use per-asset exposure
         if product and category == "crypto":
-            asset = product.upper().replace("_15M", "").replace("_15m", "")
+            # CRITICAL FIX (2026-07-21): Use canonical identity helper for asset extraction
+            from merid.utils.kalshi_identity import extract_asset
+            asset = extract_asset(product)
             if asset in self._latest_snapshot.notional_per_asset:
                 asset_notional = float(self._latest_snapshot.notional_per_asset[asset])
                 bankroll = float(self._latest_snapshot.starting_bankroll_usd)

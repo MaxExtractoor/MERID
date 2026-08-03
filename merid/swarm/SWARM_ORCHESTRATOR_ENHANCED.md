@@ -21,8 +21,8 @@ The SwarmOrchestrator has been enhanced with Kalshi 15m crypto-specific intent v
 """
 Expected intent keys for Kalshi 15m crypto:
   - venue: "kalshi"
-  - lane_id: "BTC_15M" | "ETH_15M" | "SOL_15M" | "XRP_15M"
-  - symbol: "BTC" | "ETH" | "SOL" | "XRP"
+  - lane_id: "BTC_15M" | "ETH_15M" | "SOL_15M" | "XRP_15M" | "DOGE_15M"
+  - symbol: "BTC" | "ETH" | "SOL" | "XRP" | "DOGE"
   - market_id: Kalshi market identifier
   - series_ticker: e.g. "KXBTC15M"
   - timeframe: "15m"
@@ -343,7 +343,7 @@ The SwarmOrchestrator is now **specialized for Kalshi 15m crypto operations** wi
 
 - **Explicit Intent Schema**: Complete specification for Kalshi 15m crypto intents
 - **Guardrails Enforcement**: Edge, Kelly fraction, and position size limits
-- **Symbol-Specific Limits**: Different caps per crypto asset (BTC, ETH, SOL, XRP)
+- **Symbol-Specific Limits**: Different caps per crypto asset (BTC, ETH, SOL, XRP, DOGE)
 - **Lane State Overrides**: Dynamic adjustments based on performance metrics
 - **Detailed Logging**: Complete audit trail with structured reasons
 

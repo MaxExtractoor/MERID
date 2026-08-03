@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+@pytest.mark.skip(reason="2026-07-18: Panic fade disabled - causing losses by betting against trend")
 class TestPanicFadeStrategy:
     """Test panic fade strategy."""
     

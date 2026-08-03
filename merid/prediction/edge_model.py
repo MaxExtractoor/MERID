@@ -164,7 +164,7 @@ class EdgeModel:
                         if window_strike is not None and window_strike > 0:
                             strike_price = window_strike
                             logger.debug(
-                                "[EDGE-MODEL] ticker=%s using window_strike_price=%.2f (dual-source capture)",
+                                "[EDGE-MODEL] ticker=%s using window_strike_price=%.4f (dual-source capture)",
                                 ticker, strike_price
                             )
                         else:

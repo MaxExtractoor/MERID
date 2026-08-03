@@ -349,7 +349,7 @@ class Crypto15mProfile:
     trailing_stop_enabled: bool = True  # CRITICAL FIX: Default to True to match YAML config (was False - trailing stops were disabled)
     trailing_stop_trailing_distance_cents: int = 5
     trailing_stop_trailing_distance_cents_profit_zone: int = 2  # CRITICAL FIX: 2026-07-06 - Aggressive trailing in 80-85c profit zone
-    trailing_stop_min_profit_cents: int = 12  # Updated from 3 to 12 (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
+    trailing_stop_min_profit_cents: int = 10  # 2026-08-01: Reduced from 12 to 10 (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
     trailing_stop_activation_delay_sec: int = 30
     trailing_stop_profit_zone_activation_cents: int = 80  # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing at 80c
     trailing_stop_giveback_cents: int = 5  # CRITICAL FIX: 2026-07-13 - Giveback amount in cents (40-50% of 12¢ activation threshold per 2026 research)
@@ -366,16 +366,24 @@ class Crypto15mProfile:
     ratchet_profit_floor_enabled: bool = True  # Enable ratchet profit floor mechanism
     ratchet_activation_threshold_cents: int = 85  # Activate ratchet when price hits this threshold
     ratchet_floor_offset_cents: int = 5  # Set floor X cents below activation (e.g., 85¢ activation → 80¢ floor)
-    ratchet_force_exit_on_floor_breach: bool = True  # Mandatory exit if price drops to floor
-    ratchet_min_hold_after_activation_sec: int = 30  # Prevent immediate exit on noise (seconds)
+    ratchet_force_exit_on_floor_breach: bool = False  # 2026-08-01: Changed to false - exit only if thesis broken
+    ratchet_min_hold_after_activation_sec: int = 60  # 2026-08-01: Increased from 30s to 60s for more robust hold
     # CRITICAL FIX: 2026-07-06 - Removed ratchet_mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
     ratchet_trim_position_enabled: bool = True  # 2026-07-05: Trim position when >1 contract and price >80c
     ratchet_trim_threshold_cents: int = 80  # 2026-07-05: Trim when price crosses this threshold
     ratchet_trim_to_contracts: int = 1  # 2026-07-05: Trim to 1 contract to lock in profits
+    ratchet_thesis_validation_enabled: bool = True  # 2026-08-01: Only exit floor breach if thesis broken
     
     # Position Management: Dynamic Take Profit Zones Configuration
     # 2026-07-06: Laddered exit targets based on entry price for consistent profit taking
     dynamic_take_profit: dict = field(default_factory=dict)  # Full dynamic take profit config dict
+    
+    # Position Management: Scale-Out Configuration
+    # 2026-08-01: "Pay Yourself" strategy - close 50% at 1.5-2R to lock profits
+    scale_out_enabled: bool = True  # Enable scale-out strategy
+    scale_out_trigger_r_multiple: float = 1.5  # Scale out at 1.5R profit
+    scale_out_percent_to_close: int = 50  # Close 50% of position
+    scale_out_min_contracts_for_scale: int = 2  # Only scale if position has at least 2 contracts
     
     # Position Management: Dynamic Sizing Configuration
     dynamic_sizing_enabled: bool = True  # 2026-07-15: Re-enabled with slot-model compatibility
@@ -409,14 +417,17 @@ class Crypto15mProfile:
     # Research shows BTC typically has 2c spreads in middle of window, other assets slightly wider
     # 20c threshold allows realistic trading while blocking extreme illiquidity
     market_microstructure_enabled: bool = True  # Enable market microstructure filters
-    market_microstructure_max_spread_cents: float = 20.0  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto
+    market_microstructure_max_spread_cents: float = 60.0  # 2026-08-02: INCREASED from 20c to 60c based on spread distribution analysis - accommodates wider spreads in less liquid assets (SOL, XRP, DOGE) and time-bucket variations
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold
     # 2026-07-24: Edge-aware microstructure gate (NEW)
     use_edge_aware_microstructure_gate: bool = True  # Use edge-aware gate with spread/edge ratio instead of fixed spread threshold
     min_executable_edge_cents: float = 3.0  # Minimum executable edge threshold for edge-aware gate
-    max_spread_to_edge_ratio: float = 0.4  # Max spread/edge ratio (40%) for edge-aware gate
+    # CRITICAL FIX (2026-07-27): Increased from 0.4 to 0.8 to match YAML canonical configuration
+    # Previous 0.4 threshold was too strict for current market conditions where spread/edge ratios
+    # are frequently 0.8-1.1 due to wider spreads and moderate edges.
+    max_spread_to_edge_ratio: float = 0.8  # Max spread/edge ratio (80%) for edge-aware gate
 
     # Phase 2: Strategy definitions for multi-strategy support
     strategies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -472,10 +483,15 @@ class Crypto15mProfile:
 
     # Price range configuration for entry band restrictions
     # 2026-07-12: Canonical price band (10c-75c) - aligned with GlobalSlotAllocator
+    # 2026-08-01: CRITICAL FIX - Updated to 5c-85c for 15m crypto volatility
+    # NOTE - This is the canonical range used for risk management, distinct from side-aware ranges
+    # used in prediction agents for signal generation (YES: 1c-75c, NO: 25c-99c)
+    # The canonical range is appropriate for position sizing and risk limits, while side-aware ranges
+    # prevent systematic bias in signal generation by accounting for YES/NO duality.
     price_range: 'PriceRange' = field(default_factory=lambda: PriceRange(
-        min_price_cents=10,
-        max_price_cents=75,
-        description='Valid price range in cents for order execution (10c-75c canonical band)'
+        min_price_cents=5,
+        max_price_cents=85,
+        description='Valid price range in cents for order execution (5c-85c canonical band - risk management layer)'
     ))
     
     # Exit policy configuration (2026-07-15)
@@ -579,6 +595,10 @@ class SpreadConfig:
     """Spread configuration for dynamic thresholds."""
     max_cents: int
     min_gate_cents: int
+    # CRITICAL FIX (2026-07-27): Increased from 0.4 to 0.8 to match YAML canonical configuration
+    # Previous 0.4 threshold was too strict for current market conditions where spread/edge ratios
+    # are frequently 0.8-1.1 due to wider spreads and moderate edges.
+    max_spread_to_edge_ratio: float = 0.8  # Maximum spread/edge ratio (80% - relaxed for current market conditions)
 
 
 @dataclass
@@ -598,7 +618,8 @@ class CanonicalConfig:
     ))
     spread: SpreadConfig = field(default_factory=lambda: SpreadConfig(
         max_cents=30,
-        min_gate_cents=30
+        min_gate_cents=30,
+        max_spread_to_edge_ratio=0.8  # CRITICAL FIX (2026-07-27): Increased from 0.4 to 0.8 to match YAML canonical configuration
     ))
     liquidity: LiquidityConfig = field(default_factory=lambda: LiquidityConfig(
         min_volume_24h=500,
@@ -611,12 +632,13 @@ class CanonicalConfig:
 class CrisisConfig:
     """Crisis thresholds for extreme volatility (13% of market time)."""
     price_range: PriceRangeConfig = field(default_factory=lambda: PriceRangeConfig(
-        min_cents=5,
-        max_cents=95
+        min_cents=5,  # 2026-07-26: Expanded for late-entry YES at 3-6c
+        max_cents=95  # 2026-07-26: Expanded for late-entry NO at 94-97c
     ))
     spread: SpreadConfig = field(default_factory=lambda: SpreadConfig(
         max_cents=100,
-        min_gate_cents=30
+        min_gate_cents=30,
+        max_spread_to_edge_ratio=1.5  # 150% - relaxed for wide spreads in crisis
     ))
     liquidity: LiquidityConfig = field(default_factory=lambda: LiquidityConfig(
         min_volume_24h=500,
@@ -1104,7 +1126,7 @@ class Crypto15mProfileAdapter:
                 # Confidence
                 confidence_use_crypto_threshold_matrix=confidence.get('use_crypto_threshold_matrix', True),
                 confidence_profile_name=confidence.get('profile_name', 'modern_tradeable_kalshi_v1'),
-                confidence_min_confidence_threshold=confidence.get('min_confidence_threshold', 0.65),  # 2026-07-06: Primary threshold from YAML
+                confidence_min_confidence_threshold=confidence.get('min_confidence_threshold', 0.50),  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation
                 confidence_kelly_multiplier_no_trade=confidence.get('kelly_multiplier_no_trade', 0.0),
                 confidence_kelly_multiplier_cautious=confidence.get('kelly_multiplier_cautious', 0.5),
                 confidence_kelly_multiplier_quick_win=confidence.get('kelly_multiplier_quick_win', 0.6),
@@ -1289,7 +1311,8 @@ class Crypto15mProfileAdapter:
                 # 2026-07-24: Edge-aware microstructure gate configuration
                 use_edge_aware_microstructure_gate=raw.get('market_microstructure', {}).get('use_edge_aware_microstructure_gate', True),
                 min_executable_edge_cents=raw.get('market_microstructure', {}).get('min_executable_edge_cents', 3.0),
-                max_spread_to_edge_ratio=raw.get('market_microstructure', {}).get('max_spread_to_edge_ratio', 0.4),
+                # CRITICAL FIX (2026-07-27): Increased default from 0.4 to 0.8 to match YAML configuration
+                max_spread_to_edge_ratio=raw.get('market_microstructure', {}).get('max_spread_to_edge_ratio', 0.8),
                 # Position Management: Offset Hedging Configuration
                 offset_hedging_enabled=raw.get('offset_hedging', {}).get('enabled', False),
                 offset_hedging_hedge_ratio=raw.get('offset_hedging', {}).get('hedge_ratio', 0.30),
@@ -1543,7 +1566,9 @@ class Crypto15mProfileAdapter:
             ),
             spread=SpreadConfig(
                 max_cents=spread_raw.get('max_cents', 30),
-                min_gate_cents=spread_raw.get('min_gate_cents', 30)
+                min_gate_cents=spread_raw.get('min_gate_cents', 30),
+                # CRITICAL FIX (2026-07-27): Increased default from 0.4 to 0.8 to match YAML canonical configuration
+                max_spread_to_edge_ratio=spread_raw.get('max_spread_to_edge_ratio', 0.8)  # 80% - relaxed for current market conditions
             ),
             liquidity=LiquidityConfig(
                 min_volume_24h=liquidity_raw.get('min_volume_24h', 500),
@@ -1565,7 +1590,8 @@ class Crypto15mProfileAdapter:
             ),
             spread=SpreadConfig(
                 max_cents=spread_raw.get('max_cents', 100),
-                min_gate_cents=spread_raw.get('min_gate_cents', 30)
+                min_gate_cents=spread_raw.get('min_gate_cents', 30),
+                max_spread_to_edge_ratio=spread_raw.get('max_spread_to_edge_ratio', 1.5)  # 150% - relaxed for crisis
             ),
             liquidity=LiquidityConfig(
                 min_volume_24h=liquidity_raw.get('min_volume_24h', 500),
@@ -1873,7 +1899,7 @@ def is_profile_active() -> bool:
     # CRITICAL FIX: Case-sensitive validation with logging
     is_active = profile_name == 'kalshi_crypto_15m_v2'
     if is_active:
-        logger.info("[PROFILE-ACTIVE] kalshi_crypto_15m_v2 profile is active")
+        logger.debug("[PROFILE-ACTIVE] kalshi_crypto_15m_v2 profile is active")
     elif profile_name.startswith('kalshi_crypto'):
         logger.warning("[PROFILE-ACTIVE] Similar profile detected: %s (not kalshi_crypto_15m_v2)", profile_name)
     

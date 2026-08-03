@@ -120,9 +120,9 @@ class TestCanonicalDefaultAlignment:
         
         config = TTERegimeConfig()
         
-        # TTE thresholds should be tighter (5-10c) than canonical default (30c)
-        # This is intentional because markets close to expiry have less time to recover
-        assert config.normal_max_spread_cents < 30, "TTE normal threshold should be tighter than canonical default"
+        # TTE normal threshold aligned with canonical default (30c) on 2026-07-12
+        # Terminal threshold still tighter (5c) because markets close to expiry have less time to recover
+        assert config.normal_max_spread_cents <= 30, "TTE normal threshold should be <= canonical default (30c, aligned 2026-07-12)"
         assert config.terminal_max_spread_cents < 30, "TTE terminal threshold should be tighter than canonical default"
 
     def test_profile_guardrails_aligned(self):

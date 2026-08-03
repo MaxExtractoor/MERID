@@ -26,7 +26,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with zero price should be allowed
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 0, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 0, 0.0, 0, is_exit_order=True)
         assert exit_req.entry_price_cents == 0
         assert exit_req.is_exit_order == True
         
@@ -37,7 +37,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with negative price should be allowed (bypasses validation)
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", -10, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", -10, 0.0, 0, is_exit_order=True)
         assert exit_req.entry_price_cents == -10
         assert exit_req.is_exit_order == True
         
@@ -48,7 +48,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with extreme price should be allowed
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 9999, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 9999, 0.0, 0, is_exit_order=True)
         assert exit_req.entry_price_cents == 9999
         assert exit_req.is_exit_order == True
         
@@ -60,11 +60,11 @@ class TestExitOrderEdgeCases:
         
         # Entry order at 9c should be rejected (below minimum)
         with pytest.raises(ValueError, match="Entry price.*outside allowed range"):
-            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 9, 2.0, 5, False)
+            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 9, 2.0, 5, is_exit_order=False)
         
-        # Entry order at 51c should be rejected (above maximum)
+        # Entry order at 76c should be rejected (above 75c canonical maximum)
         with pytest.raises(ValueError, match="Entry price.*outside allowed range"):
-            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 51, 2.0, 5, False)
+            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 76, 2.0, 5, is_exit_order=False)
         
         print("✓ Entry order rejects boundary prices test passed")
     
@@ -77,10 +77,10 @@ class TestExitOrderEdgeCases:
         allocator = get_global_slot_allocator()
         
         # Fill to exactly $1.00
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 25, 2.0, 5, False)
-        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 25, 2.0, 5, False)
-        req3 = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, False)
-        req4 = AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 25, 2.0, 5, False)
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 25, 2.0, 5, is_exit_order=False)
+        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 25, 2.0, 5, is_exit_order=False)
+        req3 = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, is_exit_order=False)
+        req4 = AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 25, 2.0, 5, is_exit_order=False)
         
         allocated1, _, _ = allocator.request_allocation(req1)
         allocated2, _, _ = allocator.request_allocation(req2)
@@ -92,7 +92,7 @@ class TestExitOrderEdgeCases:
         assert abs(allocator.get_available_exposure() - 0.00) < 0.01
         
         # Exit order should still bypass
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, is_exit_order=True)
         allocated_exit, reason_exit, _ = allocator.request_allocation(exit_req)
         assert allocated_exit
         assert reason_exit == "EXIT_ORDER_BYPASS"
@@ -108,14 +108,14 @@ class TestExitOrderEdgeCases:
         allocator = get_global_slot_allocator()
         
         # Allocate a slot
-        req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 30, 2.0, 5, False)
+        req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 30, 2.0, 5, is_exit_order=False)
         allocated, _, slot_id = allocator.request_allocation(req)
         assert allocated
         
         # Multiple exit orders should all bypass
-        exit_req1 = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
-        exit_req2 = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 55, 0.0, 0, True)
-        exit_req3 = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 60, 0.0, 0, True)
+        exit_req1 = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, is_exit_order=True)
+        exit_req2 = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 55, 0.0, 0, is_exit_order=True)
+        exit_req3 = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 60, 0.0, 0, is_exit_order=True)
         
         allocated1, reason1, _ = allocator.request_allocation(exit_req1)
         allocated2, reason2, _ = allocator.request_allocation(exit_req2)
@@ -138,7 +138,7 @@ class TestExitOrderEdgeCases:
         allocator = get_global_slot_allocator()
         
         # Exit order for asset with no position should still bypass allocation
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, is_exit_order=True)
         allocated, reason, _ = allocator.request_allocation(exit_req)
         
         assert allocated
@@ -154,7 +154,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with negative edge should be allowed
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, -5.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, -5.0, 0, is_exit_order=True)
         assert exit_req.edge_pct == -5.0
         assert exit_req.is_exit_order == True
         
@@ -165,7 +165,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with zero spread should be allowed
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, is_exit_order=True)
         assert exit_req.spread_cents == 0
         assert exit_req.is_exit_order == True
         
@@ -176,7 +176,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with large spread should be allowed
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 100, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 100, is_exit_order=True)
         assert exit_req.spread_cents == 100
         assert exit_req.is_exit_order == True
         
@@ -230,7 +230,7 @@ class TestExitOrderEdgeCases:
         results = []
         
         def allocate_request(price_cents):
-            req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", price_cents, 2.0, 5, False)
+            req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", price_cents, 2.0, 5, is_exit_order=False)
             allocated, _, _ = allocator.request_allocation(req)
             results.append(allocated)
         
@@ -259,14 +259,14 @@ class TestExitOrderEdgeCases:
         allocator = get_global_slot_allocator()
         
         # Allocate some exposure
-        req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, False)
+        req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, is_exit_order=False)
         allocated, _, _ = allocator.request_allocation(req)
         assert allocated
         
         initial_exposure = allocator.get_total_exposure()
         
         # Process exit order
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, is_exit_order=True)
         allocated_exit, _, _ = allocator.request_allocation(exit_req)
         assert allocated_exit
         
@@ -280,7 +280,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with empty agent_id should be allowed
-        exit_req = AllocationRequest("", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("", "BTC", "KXBTC15M-1", 50, 0.0, 0, is_exit_order=True)
         assert exit_req.agent_id == ""
         assert exit_req.is_exit_order == True
         
@@ -291,7 +291,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with empty asset should be allowed
-        exit_req = AllocationRequest("monitor", "", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "", "KXBTC15M-1", 50, 0.0, 0, is_exit_order=True)
         assert exit_req.asset == ""
         assert exit_req.is_exit_order == True
         
@@ -302,7 +302,7 @@ class TestExitOrderEdgeCases:
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Exit order with empty ticker should be allowed
-        exit_req = AllocationRequest("monitor", "BTC", "", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "", 50, 0.0, 0, is_exit_order=True)
         assert exit_req.ticker == ""
         assert exit_req.is_exit_order == True
         

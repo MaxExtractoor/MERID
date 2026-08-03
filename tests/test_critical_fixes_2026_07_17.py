@@ -69,6 +69,31 @@ class TestPositionMonitorExitSourceWhitelist:
         else:
             pytest.fail("Unauthorized source should be blocked")
 
+    def test_position_monitor_exit_recognized_as_exit_order(self):
+        """Test that position_monitor_exit is recognized as an exit order by exit_order_utils.
+        
+        CRITICAL FIX (2026-07-20): position_monitor_exit must be in EXIT_ORDER_MARKERS
+        so that exit orders from PositionMonitor bypass risk checks and cash out profitable positions.
+        """
+        from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source, EXIT_ORDER_MARKERS
+        
+        # Verify position_monitor_exit is in EXIT_ORDER_MARKERS
+        assert "position_monitor_exit" in EXIT_ORDER_MARKERS, \
+            "position_monitor_exit must be in EXIT_ORDER_MARKERS for exit orders to bypass risk checks"
+        
+        # Verify is_exit_order_from_source returns True for position_monitor_exit
+        assert is_exit_order_from_source("position_monitor_exit") is True, \
+            "is_exit_order_from_source should return True for position_monitor_exit"
+        
+        # Verify other exit markers are still recognized
+        assert is_exit_order_from_source("take_profit") is True
+        assert is_exit_order_from_source("stop_loss") is True
+        assert is_exit_order_from_source("ratchet") is True
+        
+        # Verify non-exit sources return False
+        assert is_exit_order_from_source("merid.prediction.agent_grid_15m") is False
+        assert is_exit_order_from_source("unauthorized_source") is False
+
 
 class TestOrderResultSuccessProperty:
     """Test OrderResult.success property fix."""

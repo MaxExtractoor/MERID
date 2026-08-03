@@ -304,9 +304,45 @@ async def _kalshi_place_order(
     model_prob: Optional[float] = None,
     edge_pct: Optional[float] = None,
     confidence: Optional[float] = None,
+    # INTENT VERIFICATION: Signal metadata for audit chain
+    signal_id: Optional[str] = None,
+    signal_hash: Optional[str] = None,
 ) -> ToolResult:
-    """Place a YES/NO order on Kalshi."""
+    """Place a YES/NO order on Kalshi.
+    
+    CRITICAL DEPRECATION (2026-07-21): This function bypasses router validation gates.
+    All orders MUST go through order_router.route_order_async to enforce:
+    - Asset-window duplicate checks
+    - Global $1 exposure cap
+    - One-contract-per-asset-per-15-minute rule
+    - Position cache and resting order monitor validation
+    
+    This function is only allowed in test environments. Production calls will be rejected.
+    """
     t0 = time.time()
+
+    # CRITICAL FIX (2026-07-21): Block direct execution in production
+    from merid.settings import settings as _settings
+    env = _settings.MERID_ENV if hasattr(_settings, 'MERID_ENV') else "development"
+    pm_profile = _settings.MERID_PM_PROFILE if hasattr(_settings, 'MERID_PM_PROFILE') else "baseline"
+    is_production = env == "production" or pm_profile == "production"
+    
+    # Check feature flag for direct execution
+    allow_direct_execution = os.getenv('ALLOW_DIRECT_EXECUTION', 'False').lower() == 'true'
+    
+    if is_production and not allow_direct_execution:
+        logger.critical(
+            "[ROUTER-BYPASS-ATTEMPT] CRITICAL: _kalshi_place_order called in production environment. "
+            "This bypasses all router validation gates (asset-window checks, $1 cap, position cache, resting monitor). "
+            "caller=%s ticker=%s side=%s action=%s price=%dc count=%d. "
+            "Set ALLOW_DIRECT_EXECUTION=true to override (DANGEROUS - only for emergency debugging).",
+            agent_name, ticker, side, action, price_cents, count
+        )
+        return ToolResult.fail(
+            ToolErrorCode.PERMISSION_DENIED,
+            "Direct order execution blocked in production. Use order_router.route_order_async instead.",
+            tool_name="kalshi_place_order",
+        )
 
     if not ticker:
         return ToolResult.fail(
@@ -657,9 +693,9 @@ async def _kalshi_place_order(
             # MID-SPREAD ENTRY OPTIMIZATION (2026-07-04): Respect calculated entry price from agent_grid
             # The agent_grid_15m.py now calculates optimal entry prices using mid-spread strategy
             # This clamp is a safety rail to ensure we never submit orders outside valid range
-            # CRITICAL FIX: 2026-07-12 - Use canonical 10-75c range (expanded for market conditions)
+            # CRITICAL FIX (2026-08-01): Use canonical 5c-85c range (expanded for 15m crypto volatility)
             original_price = int(price_cents or 50)
-            _pc = max(10, min(75, original_price))
+            _pc = max(5, min(85, original_price))
             
             # Liquidity validation: check if clamped price has sufficient orderbook depth
             try:
@@ -694,7 +730,7 @@ async def _kalshi_place_order(
             # Log if price was clamped (indicates mid-spread optimization may need adjustment)
             if _pc != original_price:
                 logger.warning(
-                    "[KALSHI-TOOLS-PRICE-CLAMP] ticker=%s original_price=%d clamped_to=%d (safety rail 10-75c per profile YAML)",
+                    "[KALSHI-TOOLS-PRICE-CLAMP] ticker=%s original_price=%d clamped_to=%d (safety rail 5-85c per profile YAML)",
                     ticker, original_price, _pc
                 )
             else:
@@ -802,7 +838,15 @@ async def _kalshi_place_order(
                 confidence=confidence,
                 # CRITICAL FIX (2026-07-12): Add rationale to prevent fee_aware_gate rejection
                 rationale=f"momentum_fvg_signal_{_agent_name}" if _agent_name else "kalshi_tools_order",
+                # INTENT VERIFICATION: Wire signal_id and signal_hash for audit chain
+                source_signal_id=signal_id,
+                source_signal_hash=signal_hash,
             )
+            
+            # CRITICAL FIX (2026-07-19): Set client_tag to enable TP target registration
+            # order_router only registers TP targets if client_tag is set AND TP/SL values exist
+            # Without client_tag, positions have no TP targets and exit policies fail
+            intent.client_tag = intent.intent_id
 
             logger.info(
                 "[kalshi_tools] Routing to order_router: %s | %s %s on %s count=%d price=%d¢",
@@ -1196,20 +1240,27 @@ def build_live_route_order_intent(
         pc = 0
         otype = "market"
     else:
-        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
-        pc = max(10, min(75, int(price_cents)))
+        # CRITICAL FIX (2026-08-01): Clamp to canonical 5c-85c range (expanded for 15m crypto volatility)
+        pc = max(5, min(85, int(price_cents)))
         otype = "limit"
 
     # Compute default TP/SL for 15m crypto entry orders if not provided
+    # CRITICAL FIX (2026-07-31): Side-aware TP/SL calculation for binary options
+    # YES contracts: TP above entry, SL below entry (long probability)
+    # NO contracts: TP below entry, SL above entry (short probability)
+    # Previous bug: treated both sides identically, causing NO contracts to have inverted TP/SL
     if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
         if take_profit_price_cents is None and take_profit_r_multiple is None:
             try:
                 from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
                 engine = DynamicTakeProfitEngine()
                 
-                # Default SL: 5 cents below entry (conservative)
+                # Default SL: side-aware 5 cent offset
                 if stop_loss_price_cents is None:
-                    stop_loss_price_cents = max(1, pc - 5)
+                    if side == "yes":
+                        stop_loss_price_cents = max(1, pc - 5)  # YES: SL below entry
+                    else:
+                        stop_loss_price_cents = min(99, pc + 5)  # NO: SL above entry
                 
                 # Compute dynamic TP with default confidence
                 tp_plan = engine.compute_tp(
@@ -1221,10 +1272,13 @@ def build_live_route_order_intent(
                 
                 take_profit_r_multiple = tp_plan.tp_r_multiple
             except Exception:
-                # Fallback to 1R if TP computation fails
+                # Fallback to 1R if TP computation fails (side-aware)
                 take_profit_r_multiple = 1.0
                 if stop_loss_price_cents is None:
-                    stop_loss_price_cents = max(1, pc - 5)
+                    if side == "yes":
+                        stop_loss_price_cents = max(1, pc - 5)  # YES: SL below entry
+                    else:
+                        stop_loss_price_cents = min(99, pc + 5)  # NO: SL above entry
 
     # CRITICAL FIX: Clamp count to asset-specific max_contracts limit to prevent overspending
     # Read from kalshi_crypto_15m_v2.yaml assets.{asset}.max_contracts (default 2)

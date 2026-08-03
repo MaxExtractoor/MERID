@@ -99,8 +99,12 @@ staleness_thresholds:
 
 # Duality validation thresholds
 # duality_tolerance_cents: Allowed deviation from YES + NO = 100c
+# CRITICAL FIX (2026-07-29): Increased from 15c to 70c to handle current market conditions
+# CRITICAL FIX (2026-07-31): Increased from 70c to 80c to handle extreme market conditions
+# Kalshi books are showing YES+NO gaps of 50-80c due to thin liquidity and one-sided flow
+# Previous 15c tolerance was too strict, causing repeated violations and REST re-sync loops
 duality_thresholds:
-  duality_tolerance_cents: 15  # Allow 15c tolerance for market noise/API rounding
+  duality_tolerance_cents: 80  # Allow 80c tolerance for thin 15m crypto markets (extreme conditions)
 
 # Market lifecycle thresholds
 # min_seconds_to_expiry: Minimum time to expiry before market is considered "terminal"

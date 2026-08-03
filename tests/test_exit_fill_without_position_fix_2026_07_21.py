@@ -103,8 +103,10 @@ class TestExitFillWithoutPositionFix:
         # Add an existing NO position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="XRP_15M",
             contracts=10,
             side="no",
+            thesis_side="no",
             avg_price_cents=4000,
             realized_pnl_usd=Decimal("0"),
             unrealized_pnl_usd=Decimal("0")
@@ -633,8 +635,10 @@ class TestCrossAssetExitInvariant:
         # Entry fill
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id=f"{asset}_15M",
             contracts=10,
             side=side,
+            thesis_side=side,
             avg_price_cents=5000 if side == "yes" else 4000,
             realized_pnl_usd=Decimal("0"),
             unrealized_pnl_usd=Decimal("0")

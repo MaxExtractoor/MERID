@@ -191,25 +191,27 @@ else:
 
 **Implementation**:
 ```python
-# Check which sides are within 10c-50c sweet spot
-yes_in_range = (10 <= yes_price_cents <= 50)
-no_in_range = (10 <= no_price_cents <= 50)
+# Check which sides are within side-aware ranges
+# YES: 1c-75c, NO: 25c-99c (accounts for YES/NO duality)
+yes_in_range = is_price_in_side_aware_range(yes_price_cents, "yes")
+no_in_range = is_price_in_side_aware_range(no_price_cents, "no")
 
 # If neither side is in range, skip trading
 if not yes_in_range and not no_in_range:
     logger.info(
-        "[PRICE-FILTER-REJECT] asset=%s both sides outside 10c-50c range (yes=%dc, no=%dc) -> SKIP",
+        "[PRICE-FILTER-REJECT] asset=%s both sides outside side-aware ranges (yes=%dc, no=%dc) -> SKIP",
         asset, yes_price_cents, no_price_cents
     )
     return None
 ```
 
 **Analysis**:
-- YES price filter: `yes_in_range = (10 <= yes_price_cents <= 50)`
-- NO price filter: `no_in_range = (10 <= no_price_cents <= 50)`
-- Both filters are applied independently
+- YES price filter: `yes_in_range = is_price_in_side_aware_range(yes_price_cents, "yes")` (1c-75c)
+- NO price filter: `no_in_range = is_price_in_side_aware_range(no_price_cents, "no")` (25c-99c)
+- Both filters are applied independently using side-aware ranges
 - If neither side is in range, trade is skipped
-- **PASS**: Both sides are filtered independently and correctly
+- **PASS**: Both sides are filtered independently and correctly using side-aware ranges
+- **NOTE**: Updated 2026-08-01 to use side-aware ranges instead of canonical ranges to prevent misleading log messages
 
 #### Momentum_FVG Strategy
 **Location**: `merid/prediction/agent_grid_15m.py`, lines 2260-2336

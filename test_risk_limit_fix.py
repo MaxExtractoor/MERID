@@ -99,6 +99,7 @@ def test_unified_sizing_direct():
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
     except Exception as e:
         print(f"\n[ERROR] compute_order_size failed: {e}")

@@ -107,7 +107,8 @@ class TestAssetConfigs(unittest.TestCase):
         from merid.signals.asset_configs import get_asset_config
         cfg = get_asset_config("BTC")
         self.assertEqual(cfg.beta_15m, 1.0)
-        self.assertEqual(cfg.rsi_period, 8)
+        # CRITICAL FIX: 2026-07-12 - RSI period changed from 8 to 14 for 15-minute markets
+        self.assertEqual(cfg.rsi_period, 14)
         self.assertEqual(cfg.atr_min_move_pct, 0.0003)
 
     def test_sol_config(self):

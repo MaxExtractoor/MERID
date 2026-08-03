@@ -54,6 +54,7 @@ class TestSizingFlowIntegration:
         mock_profile.guardrails_min_post_fee_edge = Decimal("0.02")
         mock_profile.per_asset_max_notional_pct = {"BTC": Decimal("0.03")}
         mock_profile.per_asset_max_contracts = {"BTC": 100}
+        mock_profile.risk_policy_fixed_exposure_cap_usd = 1.00  # 2026-07-12: Fixed $1 exposure cap
         
         # Mock asset_configs to return proper structure
         mock_asset_config = Mock()
@@ -65,19 +66,19 @@ class TestSizingFlowIntegration:
         mock_is_active.return_value = True
         
         # Mock the actual helper functions that exist in the module
-        with patch('merid.prediction.unified_sizing._get_min_edge_risk_pct', return_value=Decimal("0.02")):
-            with patch('merid.prediction.unified_sizing._get_per_asset_risk_pct', return_value=Decimal("0.03")):
-                with patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=100):
-                    with patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=False):
-                        with patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.05")):
-                            with patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")):
-                                count, notional, metadata = compute_order_size(
-                                    bankroll_usd=Decimal("100.0"),
-                                    price_cents=50,
-                                    asset="BTC",
-                                    edge_pct=Decimal("0.05"),
-                                    confidence=Decimal("0.7")
-                                )
+        with patch('merid.prediction.unified_sizing._get_per_asset_risk_pct', return_value=Decimal("0.03")):
+            with patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=100):
+                with patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=False):
+                    with patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.05")):
+                        with patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")):
+                            count, notional, metadata = compute_order_size(
+                                bankroll_usd=Decimal("100.0"),
+                                price_cents=50,
+                                asset="BTC",
+                                edge_pct=Decimal("0.05"),
+                                confidence=Decimal("0.7"),
+                                model_prob=0.60  # 2026-07-12: Kelly Criterion integration
+                            )
         
         assert count >= 1
         assert notional > 0

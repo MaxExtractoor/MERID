@@ -173,6 +173,41 @@ async def kalshi_readiness():
         }
 
 
+@router.get("/thesis-side-monitor")
+async def thesis_side_monitor_metrics():
+    """Thesis side monitor metrics - inversion, sync errors, legacy mapping usage"""
+    try:
+        from merid.event_venues.kalshi.thesis_side_monitor import get_thesis_side_monitor
+        
+        monitor = get_thesis_side_monitor()
+        metrics = monitor.get_metrics()
+        
+        # Check thresholds for alerts
+        threshold_check = monitor.check_thresholds(inversion_threshold=1, sync_error_threshold=1)
+        
+        return {
+            "status": "healthy" if not threshold_check["has_critical_alerts"] else "critical",
+            "timestamp": time.time(),
+            "metrics": metrics,
+            "threshold_check": threshold_check,
+            "summary": {
+                "total_inversions": metrics["total_inversions"],
+                "total_sync_errors": metrics["total_sync_errors"],
+                "total_legacy_mapping_usage": metrics["total_legacy_mapping_usage"],
+                "has_critical_alerts": threshold_check["has_critical_alerts"],
+                "alert_count": threshold_check["alert_count"]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Thesis side monitor metrics failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": str(e)
+        }
+
+
 @router.get("/system")
 async def system_health():
     """Overall system health check"""

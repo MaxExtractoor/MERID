@@ -234,6 +234,9 @@ async def place_hedge_order(
             source="offset_hedging",
             decision_trace_id="hedge",
             sentiment_driven=False,
+            # CRITICAL FIX (2026-08-01): Hedge orders reduce net exposure and should be treated as exit orders
+            entry_or_exit="exit",
+            exit_reason="OFFSET_HEDGE",
         )
         
         logger.info(
@@ -292,7 +295,7 @@ async def handle_fill_for_hedging(
     )
     
     if not should_hedge:
-        logger.info("[OFFSET-HEDGING] No hedge needed: ticker=%s reason=%s", ticker, reason)
+        logger.debug("[OFFSET-HEDGING] No hedge needed: ticker=%s reason=%s", ticker, reason)
         return True
     
     # Determine hedge side (opposite of fill side)

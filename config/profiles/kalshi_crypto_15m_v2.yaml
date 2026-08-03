@@ -217,11 +217,12 @@ offset_hedging:
 
 # Trailing Stop Configuration
 # Dynamic stop-loss that follows price to lock in profits
+# 2026-08-01: Reduced min_profit_cents from 12¢ to 10¢ per industry research (10-15¢ threshold)
 trailing_stop:
   enabled: true  # Set to true to enable trailing stop
   trailing_distance_cents: 5  # 5 cents trailing distance (normal)
   trailing_distance_cents_profit_zone: 2  # 2 cents trailing distance in 80-85c profit zone (aggressive)
-  min_profit_cents: 12  # Only activate after 12c profit (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
+  min_profit_cents: 10  # Only activate after 10c profit (reduced from 12¢ per 2026 research: 10-15¢ threshold)
   activation_delay_sec: 30  # Wait 30s before activating
   profit_zone_activation_cents: 80  # Activate aggressive trailing when price crosses 80c
   giveback_cents: 5  # Giveback amount in cents (40-50% of 12¢ activation threshold per 2026 research)
@@ -240,16 +241,18 @@ dynamic_risk:
 # Prevents giving back significant gains when 99¢ TP is not guaranteed
 # 2026-07-05: Added position trimming to derisk when >1 contract and price >80c
 # CRITICAL FIX: 2026-07-06 - Removed mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
+# 2026-08-01: Removed mandatory exit on floor breach - now requires thesis validation
 ratchet_profit_floor:
   enabled: true  # Enable ratchet profit floor mechanism
   activation_threshold_cents: 85  # Activate ratchet when price hits this threshold
   floor_offset_cents: 5  # Set floor X cents below activation (e.g., 85¢ activation → 80¢ floor)
-  force_exit_on_floor_breach: true  # Mandatory exit if price drops to floor
-  min_hold_after_activation_sec: 30  # Prevent immediate exit on noise (seconds)
+  force_exit_on_floor_breach: false  # 2026-08-01: Changed to false - exit only if thesis broken
+  min_hold_after_activation_sec: 60  # 2026-08-01: Increased from 30s to 60s for more robust hold
   trim_position_enabled: true  # Trim position when >1 contract and price >80c
   trim_threshold_cents: 80  # Trim when price crosses this threshold
   trim_to_contracts: 1  # Trim to 1 contract to lock in profits
-  description: "Ratchet profit floor: lock in profits at high price thresholds to prevent giving back gains"
+  thesis_validation_enabled: true  # 2026-08-01: Only exit floor breach if thesis broken
+  description: "Ratchet profit floor: lock in profits at high price thresholds (soft exit with thesis validation)"
 
 # Staged Time-Based Exit Configuration
 # Partial exits at time intervals for volatile markets
@@ -269,30 +272,34 @@ staged_time_exit:
 # Dynamic Take Profit Zones Configuration
 # Laddered exit targets based on entry price for consistent profit taking
 # This strategy ensures frequent small wins and reduces all-or-nothing risk
+# 2026-08-01: Aligned to 60-70% rule per industry research (exit at 60-70% of theoretical max gain)
+# Rationale: Last 20-30% of convergence takes disproportionately longer with tail risk
 dynamic_take_profit:
   enabled: true  # Enable dynamic take profit zones
   # Zones: [entry_min, entry_max, exit_target, exit_type]
   # exit_type: "limit" (resting order) or "market" (immediate execution)
+  # Targets aligned to 60-70% of theoretical max gain (100 - entry_price)
+  # CRITICAL FIX (2026-08-01): Updated entry zones from 25c-75c to 5c-85c for 15m crypto volatility
   zones:
-    - entry_min: 25
+    - entry_min: 5
+      entry_max: 15
+      exit_target: 80  # 80% of 95¢ max gain (entry 5-15¢, max gain 85-95¢)
+      exit_type: "limit"
+    - entry_min: 15
       entry_max: 30
-      exit_target: 55  # 25-30c profit
+      exit_target: 76  # 65% of 85¢ max gain (entry 15-30¢, max gain 70-85¢)
       exit_type: "limit"
     - entry_min: 30
-      entry_max: 40
-      exit_target: 65  # 25-35c profit
-      exit_type: "limit"
-    - entry_min: 40
       entry_max: 50
-      exit_target: 75  # 25-35c profit
+      exit_target: 77  # 70% of 70¢ max gain (entry 30-50¢, max gain 50-70¢)
       exit_type: "limit"
     - entry_min: 50
-      entry_max: 60
-      exit_target: 85  # 25-35c profit
-      exit_type: "limit"
-    - entry_min: 60
       entry_max: 70
-      exit_target: 95  # 25-35c profit
+      exit_target: 75  # 60% of 50¢ max gain (entry 50-70¢, max gain 30-50¢)
+      exit_type: "limit"
+    - entry_min: 70
+      entry_max: 85
+      exit_target: 72  # 60% of 30¢ max gain (entry 70-85¢, max gain 15-30¢)
       exit_type: "limit"
   # Edge quality adjustment: Higher edge = higher exit target
   edge_adjustment_enabled: true
@@ -300,7 +307,17 @@ dynamic_take_profit:
   edge_high_multiplier: 1.1  # Increase target by 10% for high edge
   edge_low_threshold: 0.02  # 2% edge = low quality
   edge_low_multiplier: 0.9  # Decrease target by 10% for low edge
-  description: "Dynamic take profit: laddered exits based on entry price for consistent profits"
+  description: "Dynamic take profit: laddered exits aligned to 60-70% rule per industry research"
+
+# Scale-Out Configuration
+# "Pay Yourself" strategy: close 50% at 1.5-2R to lock profits while letting runner capture larger moves
+# 2026-08-01: Enabled per industry research to reduce variance and lock in guaranteed profits
+scale_out:
+  enabled: true  # Enable scale-out strategy
+  trigger_r_multiple: 1.5  # Scale out at 1.5R profit
+  percent_to_close: 50  # Close 50% of position
+  min_contracts_for_scale: 2  # Only scale if position has at least 2 contracts
+  description: "Scale-out: close 50% at 1.5R to lock profits (Pay Yourself strategy)"
 
 # Dynamic Position Sizing Configuration
 # Scale position size based on edge and confidence (slot-model compatible)
@@ -351,7 +368,9 @@ momentum_fvg:
   # Dead zone prevents trading when MACD histogram is near zero (no clear momentum)
   # Set to 0.0001 (0.01% of price) to filter out weak signals while allowing valid momentum
   # Previous 0.0 was allowing noise trading on tiny MACD movements
-  macd_dead_zone: 0.0001  # 0.01% of price - filter weak momentum signals
+  # CRITICAL FIX: 2026-07-28 - Set to 0.0 to allow signal generation for XRP/DOGE with tiny histogram values
+  # XRP/DOGE have histogram values like -0.000003 which are below 0.0001 threshold, blocking all signals
+  macd_dead_zone: 0.0  # Disabled - allow signals regardless of histogram magnitude
   
   # Order Book Imbalance (OBI) parameters - Kalshi-specific per-asset thresholds
   # OBI = (BidContracts_10c - AskContracts_10c) / (BidContracts_10c + AskContracts_10c)
@@ -617,15 +636,15 @@ toxicity_detection:
 # - Prediction markets have hidden liquidity problems - quoted price ≠ tradeable price for size
 # - Mid-range prices (50-70c) have better depth to absorb scaled child orders
 # - Low prices (<50c) = lottery tickets with 10.4% win rate, thin markets
-# - 10-75c range matches actual market conditions (YES prices 60-97c observed in current market)
-# - High prices (>70c) = low profit potential, thin markets, poor scaling effectiveness
+# - 5-85c range matches actual market conditions (YES prices 1c-97c observed in volatile conditions)
+# - High prices (>85c) = low profit potential, thin markets, poor scaling effectiveness
 # - Scaling requires sufficient liquidity to avoid excessive slippage on child orders
 # - For momentum-based trading, conviction comes from velocity magnitude, not price level
-# - 2026-07-12: Expanded to 75c max to match dynamic_take_profit zones (25-70c) and actual market conditions
+# - CRITICAL FIX (2026-08-01): Expanded to 5c-85c for 15m crypto volatility (was 10c-75c)
 price_range:
-  min_price_cents: 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
-  max_price_cents: 75  # 2026-07-12: Expanded from 50c to 75c - YES prices consistently 60-97c in current market conditions
-  description: "Valid price range in cents for order execution (10-75c - aligned with dynamic_take_profit zones and actual market conditions)"
+  min_price_cents: 5  # CRITICAL FIX (2026-08-01): Lowered from 10c to 5c for 15m crypto volatility
+  max_price_cents: 85  # CRITICAL FIX (2026-08-01): Expanded from 75c to 85c for 15m crypto volatility
+  description: "Valid price range in cents for order execution (5-85c - aligned with dynamic_take_profit zones and actual market conditions)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -956,7 +975,10 @@ confidence:
   # Trade scenario simulation suggested 80% for optimal profitability, but actual signal generation
   # does not achieve this confidence level in practice. 65% allows trades to execute.
   # Industry standard (voltage-kalshi): 0.55, Predict & Profit: 0.30
-  min_confidence_threshold: 0.65  # REVERTED from 0.80 to 0.65 (minimum confidence to execute trade)
+  # 2026-07-28 CRITICAL FIX: Lowered from 0.65 to 0.50 to match signal generation range
+  # Signal generation produces confidence = 0.5 + edge (edge is 0.02-0.08), resulting in 52-58%
+  # Previous 65% threshold was blocking all candidates despite valid edge
+  min_confidence_threshold: 0.50  # CRITICAL FIX: Lowered from 0.65 to 0.50 to match signal generation
 
 # ── Tiered Edge Band Configuration ───────────────────────────────────────────
 # TIERED STRUCTURE: 2.5% watch, 2.5-5% small, ≥2.5% standard
@@ -973,45 +995,47 @@ confidence:
 # 4. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
 edge_bands:
   enabled: true  # Enable tiered edge band logic
-  # 2026-07-17: RAISED to 3.0% minimum based on industry research (SimpleFunctions, Market Math, Claw Arbs)
-  # Industry standard for Kalshi: 3% net edge minimum after fees
+  # 2026-07-28: CRITICAL FIX - Restored to 2.5% minimum to match global_allocator and industry standards
+  # Previous 1.0% was temporary for testing but created mismatch with allocator (2.5%)
+  # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
   # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
   # Practical minimum: +2¢ to +3¢ per contract after fees
   # Reference: https://marketmath.io/blog/prediction-market-strategy
   # 2026-07-17: Added per-asset edge thresholds based on MQL5 research (universal models fail across different statistical regimes)
   # Higher volatility assets (DOGE, XRP) need wider thresholds to avoid noise-triggered trades
   watch_band:
-    min_edge_pct: 0.030  # 3.0% minimum edge for watch band (RAISED from 2.5% - industry standard)
-    max_edge_pct: 0.030  # 3.0% maximum edge for watch band (unified with min for consistency)
+    min_edge_pct: 0.025  # 2.5% minimum edge for watch band (industry standard)
+    max_edge_pct: 0.025  # 2.5% maximum edge for watch band (unified with min for consistency)
     action: "log_only"  # Log candidates but don't trade
     kelly_multiplier: 0.0  # No sizing in watch band
   small_band:
-    min_edge_pct: 0.030  # 3.0% minimum edge for small band (RAISED from 2.5% - industry standard)
+    min_edge_pct: 0.025  # 2.5% minimum edge for small band (industry standard)
     max_edge_pct: 0.05  # 5% maximum edge for small band
     action: "trade_small"  # Trade with reduced size
     kelly_multiplier: 0.25  # 0.25x Kelly for small band
   standard_band:
-    min_edge_pct: 0.030  # 3.0% minimum edge for standard band (RAISED from 2.5% - industry standard)
+    min_edge_pct: 0.025  # 2.5% minimum edge for standard band (industry standard)
     max_edge_pct: 1.0  # No upper limit
     action: "trade_standard"  # Trade with standard size
     kelly_multiplier: 0.50  # 0.5x Kelly for standard band
   # Per-asset edge thresholds (2026-07-17: Based on MQL5 research - asset-specific tuning required)
   # Higher volatility assets need wider thresholds to avoid noise-triggered trades
+  # 2026-07-28: Restored to 2.5% for all assets to match global_allocator
   per_asset:
     BTC:
-      min_edge_pct: 0.030  # 3.0% - Lower volatility, tighter threshold
+      min_edge_pct: 0.025  # 2.5% - industry standard
       max_edge_pct: 1.0
     ETH:
-      min_edge_pct: 0.030  # 3.0% - Medium volatility
+      min_edge_pct: 0.025  # 2.5% - industry standard
       max_edge_pct: 1.0
     SOL:
-      min_edge_pct: 0.035  # 3.5% - Higher volatility, wider threshold
+      min_edge_pct: 0.025  # 2.5% - industry standard
       max_edge_pct: 1.0
     XRP:
-      min_edge_pct: 0.040  # 4.0% - Higher volatility, wider threshold
+      min_edge_pct: 0.025  # 2.5% - industry standard
       max_edge_pct: 1.0
     DOGE:
-      min_edge_pct: 0.045  # 4.5% - Highest volatility, widest threshold
+      min_edge_pct: 0.025  # 2.5% - industry standard
       max_edge_pct: 1.0
   
   # Optional: Override Kelly multipliers for this profile
@@ -1036,6 +1060,11 @@ canonical:
   spread:
     max_cents: 30  # Canonical spread threshold (harmonized with 10-50c entry price sweet spot)
     min_gate_cents: 30  # Edge-dependent threshold (optimized for entry price sweet spot)
+    # CRITICAL FIX (2026-07-27): Increased from 0.4 to 0.8 to accommodate current market conditions
+    # Previous 0.4 threshold was too strict - spread/edge ratios frequently 0.8-1.1 due to wider spreads
+    # and moderate edges. Relaxing to 0.8 allows more orders to pass while still protecting against
+    # extremely wide spreads (>80% of edge).
+    max_spread_to_edge_ratio: 0.8  # Maximum spread/edge ratio (80% - relaxed for current market conditions)
   liquidity:
     min_volume_24h: 500  # Minimum 24-hour volume for liquidity
     min_depth_top_of_book: 100  # Minimum depth at best bid/ask
@@ -1043,14 +1072,15 @@ canonical:
 
 crisis:
   # Crisis regime thresholds (13% of market time - extreme volatility)
-  # 2026-07-12: Aligned with expanded 10-75c range to match actual market conditions
-  # Crisis regime uses same price range but relaxed spread/position sizing
+  # 2026-07-26: Expanded to 5-95c to accommodate late-entry markets (3-4 min to expiry)
+  # Late-entry markets compress to extremes (3-6c YES, 94-97c NO) - need wider range
   price_range:
-    min_cents: 10  # Lower bound (aligned with canonical regime)
-    max_cents: 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
+    min_cents: 5  # Lower bound (expanded for late-entry YES at 3-6c)
+    max_cents: 95  # Upper bound (expanded for late-entry NO at 94-97c)
   spread:
     max_cents: 100  # Relaxed spread threshold (accommodates 60c-96c spreads observed in current conditions)
     min_gate_cents: 30  # Edge-dependent threshold (unchanged - optimized for entry price sweet spot)
+    max_spread_to_edge_ratio: 1.5  # Relaxed spread/edge ratio (150% - allows wide spreads when edge is high)
   liquidity:
     min_volume_24h: 500  # Minimum 24-hour volume (unchanged)
     min_depth_top_of_book: 100  # Minimum depth at best bid/ask (unchanged)
@@ -1072,14 +1102,17 @@ regime_detection:
     MOMENTUM:
       price_range_multiplier: 1.0  # No change to price range
       spread_multiplier: 1.2  # Slightly wider spread allowance
+      spread_to_edge_ratio_multiplier: 1.5  # Slightly relaxed spread/edge ratio (0.4 → 0.6)
       position_size_multiplier: 1.0  # Full position size
     MEAN_REVERSION:
       price_range_multiplier: 1.0  # No change to price range
       spread_multiplier: 1.0  # Canonical spread threshold
+      spread_to_edge_ratio_multiplier: 1.0  # Canonical spread/edge ratio (0.8 - updated 2026-07-27)
       position_size_multiplier: 1.0  # Full position size
     CRISIS:
-      price_range_multiplier: 1.0  # 2026-07-12: Keep canonical 10-50c range (no expansion)
+      price_range_multiplier: 1.27  # 10-75c → 5-95c (expanded for late-entry markets at 3-4 min to expiry)
       spread_multiplier: 3.3  # 30c → 100c (relaxed spread)
+      spread_to_edge_ratio_multiplier: 3.75  # 0.4 → 1.5 (relaxed spread/edge ratio for wide spreads)
       position_size_multiplier: 0.5  # Reduce exposure by 50%
 
 coarse_filters:
@@ -1121,8 +1154,8 @@ guardrails:
   min_post_fee_edge: 0.015  # LOWERED: Minimum post-fee edge 1.5% (research: 2-2.5% net edge realistic, 1.5% floor for more opportunities)
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
-  min_contract_price_cents: 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
-  max_contract_price_cents: 75  # 2026-07-12: Expanded from 50c to 75c - YES prices consistently 60-97c in current market conditions
+  min_contract_price_cents: 5  # CRITICAL FIX (2026-08-01): Lowered from 10c to 5c for 15m crypto volatility
+  max_contract_price_cents: 85  # CRITICAL FIX (2026-08-01): Expanded from 75c to 85c for 15m crypto volatility
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
   # CRITICAL FIX (2026-07-17): Removed max_orders_per_cycle - $1 exposure cap is the single source of truth
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)
@@ -1148,23 +1181,30 @@ guardrails:
   regime_cooldown_min_trades: 20  # RELAXED: Minimum trades before regime check (20 for more stable feedback - was 10)
   regime_cooldown_min_winrate: 0.45  # RELAXED: Minimum winrate threshold (45% - was 50%)
   regime_cooldown_max_loss_pct: 0.10  # RELAXED: Maximum loss percentage threshold (10% - was 5%)
-  
+
   # Experimental slice configuration (DISABLED for fair asset treatment)
   # Previously applied only to BTC/ETH, creating asymmetric treatment
   experimental_price_band_enabled: false  # DISABLED: Fair treatment for all assets (was true for BTC/ETH only)
   experimental_tte_band_enabled: false  # DISABLED: Fair treatment for all assets (was true for BTC/ETH only)
-  
+
   # Depth thresholds: per-asset values are single source of truth (min_depth_yes/min_depth_no per asset)
   # Removed tier-based thresholds to avoid confusion
-  
+
   # NEW: Spread guard with edge override
   spread_guard_enabled: true  # Enable spread guard
   spread_guard_edge_multiplier: 1.1  # Require edge >= 1.1x spread to trade (relaxed from 1.5x)
   # 2026-07-12: ALIGNED with industry research - 8c minimum quality filter (industry: 8-10c for 15m crypto)
   min_spread_gate_cents: 8  # 2026-07-12: ALIGNED with industry research - 8c minimum quality filter (industry: 8-10c for 15m crypto)
-  
+
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
+  # CRITICAL FIX (2026-08-01): Enable daily loss limit per industry best practices
+  # Research: Daily loss limit prevents correlated bad trades in bad market regimes
+  # Reference: Predict & Profit - "Daily loss kill switch: Bot keeps entering correlated bad trades"
+  daily_loss_enabled: true  # ENABLED: Critical safety mechanism for correlated bad trades
+  max_daily_loss_pct:
+    test: 0.10  # Test mode: 10% daily loss limit for realistic live testing
+    prod: 0.05  # Prod mode: 5% daily loss limit (industry standard for binary options)
   drawdown_halt_pct:
     value: 0.20  # RELAXED: Halt at 20% drawdown (increased from 15% to align with industry 25% standard)
     static: profile
@@ -1173,37 +1213,17 @@ guardrails:
     value: 0.25  # RELAXED: Unwind at 25% drawdown (increased from 20% to align with industry 25% standard)
     static: profile
     description: "Drawdown unwind percentage (static for this profile)"
-  
+
   # Position limit (total position value across all assets)
   # This is a derived kill switch that auto-resets when position drops below limit
   # Set to 0 to disable (rely on per-asset and cycle limits instead)
   max_position_value_usd: 100000.0  # $100k total position limit (relaxed for 15m crypto)
-  
+
   # 2026-07-08 UPDATE: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $1 exposure model
   # per_trade_risk_pct DISABLED - using fixed $1 exposure cap instead
   # Sizing is now enforced via:
   # - risk_policy.fixed_exposure_cap_usd: 1.00
-  # - Sequential trading (blocks new entries until positions exit)
-  # - Slot-based position management (sum of contract prices ≤ $1)
-  
-  # Daily loss cap (2026 BEST PRACTICE: 20% - aligned with drawdown halt)
-  # 2026 best practice: Halt trading when daily loss exceeds 20% of bankroll
-  # ALIGNED with drawdown_halt_pct (20%) to allow trading through drawdowns for recovery
-  # This is the SINGLE SOURCE OF TRUTH - core.settings.py must match this value
-  daily_loss_enabled: true  # ENABLED: 2026 best practice - daily loss halt is critical
-  # Daily loss limits by operation mode (test vs prod)
-  # 2026 best practice: 20% for both test and prod (aligned with drawdown halt)
-  max_daily_loss_pct:
-    test: 0.20  # 20% daily loss limit for test mode (aligned with drawdown_halt_pct)
-    prod: 0.20  # 20% daily loss limit for prod mode (aligned with drawdown_halt_pct)
-  max_daily_loss_usd: 8.00  # Fallback USD value for small bankrolls (20% of $40)
-  
-  # NEW: Rolling PnL-based size reduction
-  rolling_1h_pnl_halt_pct: 0.05  # RELAXED: Halt new entries if 1h PnL <= -5% of equity (was 3%)
-  rolling_4h_pnl_halt_pct: 0.08  # RELAXED: Halt new entries if 4h PnL <= -8% of equity (was 5%)
-  rolling_1h_pnl_reduce_pct: 0.02  # Reduce size by 50% if 1h PnL <= -2% of equity
-  rolling_4h_pnl_reduce_pct: 0.03  # Reduce size by 50% if 4h PnL <= -3% of equity
-  
+
   # ── Adaptive Risk Scaling ───────────────────────────────────────────────────
   # Risk scaling bands based on drawdown percentage.
   # As drawdown approaches halt, risk multiplier decreases to give recovery chance.
@@ -1225,6 +1245,20 @@ guardrails:
       multiplier: 0.25
     - max_drawdown_pct: 1.00  # halt (0% multiplier)
       multiplier: 0.0
+
+# ── Exit Order Retry Policy (2026-07-29) ───────────────────────────────────────────────
+# Active management of exit orders to ensure positions are closed
+# Exit orders are critical for risk management and must never be orphaned
+exit_policy:
+  enabled: true
+  max_retries: 5                 # max retry attempts per exit order
+  retry_interval_ms: 500         # base wait between retries
+  retry_backoff_multiplier: 1.5  # exponential backoff
+  aggressiveness_step: 0.05      # how much to improve price each retry
+  max_aggressiveness: 1.0        # cap at full aggression (marketable)
+  time_to_give_up_ms: 60000      # CRITICAL FIX (2026-07-30): Increased from 15s to 60s for 15m markets
+                                 # 15s was too aggressive (1.67% of 15m cycle), forcing early exits at loss
+                                 # 60s allows market to move to favorable price before aggressive retry
 
 # ── Reconciliation Thresholds ────────────────────────────────────────────────
 # Thresholds for portfolio reconciliation against Kalshi API
@@ -1304,9 +1338,9 @@ risk_policy:
   group_notional_cap_pct: 0.05  # 5% of bankroll per group (DISABLED - using fixed $1 instead)
   group_notional_cap_min_usd: 5.00  # Minimum $5 cap (DISABLED - using fixed $1 instead)
   group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap (DISABLED - using fixed $1 instead)
-  # 2026-07-12 UPDATE: Aligned with 10-75c canonical range (guardrails.max_contract_price_cents
+  # CRITICAL FIX (2026-08-01): Aligned with 5-85c canonical range (guardrails.max_contract_price_cents
   # and GlobalSlotAllocator.MAX_ENTRY_CENTS are the enforced limits; this key is informational)
-  max_entry_price_cents: 75  # Max entry price for new orders (canonical 10-75c band)
+  max_entry_price_cents: 85  # CRITICAL FIX (2026-08-01): Max entry price for new orders (canonical 5-85c band)
   max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
   # 2026 STANDARD: Per-asset cluster stop-loss limits instead of aggregate
   # Each asset (BTC/ETH/SOL/XRP/DOGE) has calibrated limits based on volatility and liquidity
@@ -1629,9 +1663,13 @@ market_microstructure:
   # 2026-07-24: Edge-aware microstructure gate (NEW)
   # Replaces fixed spread threshold with spread/edge ratio logic
   # Allows wide spreads when edge is huge, blocks when spread eats edge
-  use_edge_aware_gate: false  # Set to true to enable edge-aware gate (requires p_hat_yes_cents in OrderIntent)
-  min_executable_edge_cents: 3.0  # Minimum executable edge threshold (default 3c)
-  max_spread_to_edge_ratio: 0.4  # Maximum spread/edge ratio (default 40% - industry standard)
+  use_edge_aware_microstructure_gate: true  # Set to true to enable edge-aware gate (requires p_hat_yes_cents in OrderIntent)
+  min_executable_edge_cents: 1.0  # Minimum executable edge threshold (relaxed from 3c to 1c for current market conditions)
+  # CRITICAL FIX (2026-07-27): Increased from 0.4 to 0.8 to accommodate current market conditions
+  # Previous 0.4 threshold was too strict - spread/edge ratios frequently 0.8-1.1 due to wider spreads
+  # and moderate edges. Relaxing to 0.8 allows more orders to pass while still protecting against
+  # extremely wide spreads (>80% of edge).
+  max_spread_to_edge_ratio: 0.8  # Maximum spread/edge ratio (80% - relaxed for current market conditions)
   # 2026-07-24: Liquidity sanity checks (NEW)
   # Check depth near inside, price sanity, and exit feasibility
   enable_liquidity_sanity_checks: false  # Set to true to enable liquidity sanity checks

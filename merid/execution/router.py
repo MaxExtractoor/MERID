@@ -382,6 +382,16 @@ class ExecutionRouter:
                 # Unexpected error - log with traceback but don't break portfolio aggregation
                 logger.exception(f"Unexpected error getting positions from {venue}: {e}")
                 venue_positions[venue] = []
+            except Exception as e:
+                # Fail-fast for non-retryable errors (auth, permission, config)
+                error_msg = str(e).lower()
+                non_retryable_keywords = ["authentication", "unauthorized", "forbidden", "permission", "credential", "config", "invalid"]
+                if any(keyword in error_msg for keyword in non_retryable_keywords):
+                    logger.critical(f"Non-retryable error getting positions from {venue}: {e}. Failing fast.")
+                    raise RuntimeError(f"Non-retryable error in {venue}: {e}") from e
+                # Other unexpected errors - log and continue
+                logger.exception(f"Unexpected error getting positions from {venue}: {e}")
+                venue_positions[venue] = []
         return await self._portfolio_aggregator.aggregate(venue_positions)
 
     def _publish_event(self, event_type: str, payload: Dict[str, Any]) -> None:

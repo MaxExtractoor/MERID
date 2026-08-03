@@ -42,8 +42,12 @@ AGENT_CYCLE_COMPLETED = "agent_cycle_completed"
 STRATEGY_DECISION = "strategy_decision"
 RISK_CHECKED = "risk_checked"
 ORDER_SUBMITTED = "order_submitted"
+ORDER_ACCEPTED = "order_accepted"
+ORDER_RESTING = "order_resting"
 ORDER_REJECTED = "order_rejected"
 FILL_RECEIVED = "fill_received"
+FILL_PARTIAL = "fill_partial"
+FILL_COMPLETE = "fill_complete"
 TICK_SUMMARY = "tick_summary"
 TICK_ERROR = "tick_error"
 STOP_LOSS_TRIGGERED = "stop_loss_triggered"
@@ -105,8 +109,12 @@ class TickSummary:
 
     # Execution phase
     orders_submitted: int = 0
+    orders_accepted: int = 0
+    orders_resting: int = 0
     orders_rejected: int = 0
     fills_confirmed: int = 0
+    fills_partial: int = 0
+    fills_complete: int = 0
 
     # Stop-loss
     stop_losses_triggered: int = 0
@@ -135,8 +143,12 @@ class TickSummary:
             "risk_allowed": self.risk_allowed,
             "risk_blocked": self.risk_blocked,
             "orders_submitted": self.orders_submitted,
+            "orders_accepted": self.orders_accepted,
+            "orders_resting": self.orders_resting,
             "orders_rejected": self.orders_rejected,
             "fills_confirmed": self.fills_confirmed,
+            "fills_partial": self.fills_partial,
+            "fills_complete": self.fills_complete,
             "stop_losses_triggered": self.stop_losses_triggered,
             "error": self.error,
         }
@@ -168,8 +180,12 @@ class TickContext:
         self.risk_allowed: int = 0
         self.risk_blocked: int = 0
         self.orders_submitted: int = 0
+        self.orders_accepted: int = 0
+        self.orders_resting: int = 0
         self.orders_rejected: int = 0
         self.fills_confirmed: int = 0
+        self.fills_partial: int = 0
+        self.fills_complete: int = 0
         self.stop_losses_triggered: int = 0
         self.error: str = ""
 
@@ -242,6 +258,28 @@ class TickContext:
             order_id=order_id,
         )
 
+    def emit_order_accepted(self, market_id: str, order_id: str, side: str, contracts: int, price_cents: int) -> TickEvent:
+        self.orders_accepted += 1
+        return self._base_event(
+            ORDER_ACCEPTED,
+            market_id=market_id,
+            order_id=order_id,
+            side=side,
+            contracts=contracts,
+            price_cents=price_cents,
+        )
+
+    def emit_order_resting(self, market_id: str, order_id: str, side: str, contracts: int, price_cents: int) -> TickEvent:
+        self.orders_resting += 1
+        return self._base_event(
+            ORDER_RESTING,
+            market_id=market_id,
+            order_id=order_id,
+            side=side,
+            contracts=contracts,
+            price_cents=price_cents,
+        )
+
     def emit_order_rejected(self, market_id: str, reason: str) -> TickEvent:
         self.orders_rejected += 1
         return self._base_event(
@@ -255,6 +293,29 @@ class TickContext:
         return self._base_event(
             FILL_RECEIVED,
             market_id=market_id,
+            side=side,
+            contracts=contracts,
+            fill_price_cents=fill_price_cents,
+        )
+
+    def emit_fill_partial(self, market_id: str, order_id: str, side: str, contracts_filled: int, contracts_remaining: int, fill_price_cents: int) -> TickEvent:
+        self.fills_partial += 1
+        return self._base_event(
+            FILL_PARTIAL,
+            market_id=market_id,
+            order_id=order_id,
+            side=side,
+            contracts_filled=contracts_filled,
+            contracts_remaining=contracts_remaining,
+            fill_price_cents=fill_price_cents,
+        )
+
+    def emit_fill_complete(self, market_id: str, order_id: str, side: str, contracts: int, fill_price_cents: int) -> TickEvent:
+        self.fills_complete += 1
+        return self._base_event(
+            FILL_COMPLETE,
+            market_id=market_id,
+            order_id=order_id,
             side=side,
             contracts=contracts,
             fill_price_cents=fill_price_cents,
@@ -297,8 +358,12 @@ class TickContext:
             risk_allowed=self.risk_allowed,
             risk_blocked=self.risk_blocked,
             orders_submitted=self.orders_submitted,
+            orders_accepted=self.orders_accepted,
+            orders_resting=self.orders_resting,
             orders_rejected=self.orders_rejected,
             fills_confirmed=self.fills_confirmed,
+            fills_partial=self.fills_partial,
+            fills_complete=self.fills_complete,
             stop_losses_triggered=self.stop_losses_triggered,
             error=self.error,
         )

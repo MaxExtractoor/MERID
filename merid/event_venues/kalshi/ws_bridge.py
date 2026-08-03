@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import time as _time
+from collections import OrderedDict
 from typing import Dict, Any, Callable, Optional
 
 # CRITICAL FIX: 2026-07-16 - Wire FVG integration to WebSocket orderbook data
@@ -38,6 +39,16 @@ try:
 except ImportError:
     _FVG_INTEGRATION_AVAILABLE = False
     logging.getLogger(__name__).warning("[WS-BRIDGE] FVG integration not available - FVG signals will be disabled")
+
+# CRITICAL FIX (2026-08-02): Import side mapping validator
+# This addresses high-leverage bug #4 (WebSocket fill side derivation)
+try:
+    from merid.event_venues.kalshi.side_mapping_validator import (
+        validate_fill_side_consistency,
+    )
+    SIDE_MAPPING_VALIDATOR_AVAILABLE = True
+except ImportError:
+    SIDE_MAPPING_VALIDATOR_AVAILABLE = False
 
 
 class WSBridgeHealth:
@@ -134,6 +145,15 @@ import asyncio  # For asyncio.Queue in dual-queue pattern
 
 # CRITICAL DIAGNOSTIC: Log module load to confirm code version
 from utils.logger import get_logger
+
+# Import canonical YES/NO price space model for consistent price transformations
+from merid.event_venues.kalshi.binary_price_space import (
+    yes_to_no_price,
+    no_to_yes_price,
+    derive_yes_ask_from_no_bid,
+    derive_no_ask_from_yes_bid,
+)
+
 logger = get_logger("kalshi.ws_bridge")
 
 def log_ws_bridge_version() -> None:
@@ -433,9 +453,10 @@ class KalshiWebSocketBridge:
         self._dead_letter_last_alert_ts: float = 0.0  # Last alert timestamp to prevent spam
         
         # DIAGNOSTIC: Track first orderbook message per ticker for WS flow verification
-        self._first_orderbook_seen: set = set()
-        # DIAGNOSTIC: Track first state store write per ticker to reduce log spam
-        self._first_state_write_seen: set = set()
+        # BUG FIX: Changed from set to OrderedDict for bounded LRU eviction
+        self._first_orderbook_seen_max = 1000  # Max tickers to track
+        self._first_orderbook_seen: OrderedDict[str, float] = OrderedDict()
+        # REMOVED: _first_state_write_seen was unused dead code
         
         # DIAGNOSTIC: WebSocket traffic tracker for message counting
         from merid.diagnostics.ws_raw_vs_parsed import get_ws_tracker
@@ -517,7 +538,9 @@ class KalshiWebSocketBridge:
         # Uses REST polling when WebSocket is unhealthy or not receiving events
         # This provides resilience during startup, reconnection, or WebSocket issues
         # WebSocket is primary mode; REST is fallback when WS is degraded
-        self._rest_fallback_mode: bool = False  # Start in WS mode, fallback to REST if needed
+        # TEMPORARY FIX 2026-07-29: Enable REST fallback by default due to WebSocket orderbook subscription issues
+        # WebSocket is not receiving live orderbook events, causing extreme spreads and trade rejections
+        self._rest_fallback_mode: bool = True  # Start in REST fallback mode until WebSocket is fixed
         
         # DIAGNOSTIC: Counter for enqueue diagnostic logging
         self._events_enqueued: int = 0
@@ -1052,10 +1075,19 @@ class KalshiWebSocketBridge:
                             continue
                         
                         orderbook_fp = data.get("orderbook_fp", {})
-                        if "no_dollars" in orderbook_fp:
-                            no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
+                        # CRITICAL FIX (2026-07-30): Fix NO levels corruption
+                        # The API's "no_dollars" field contains YES asks, not NO bids
+                        # This was causing placeholder pattern [99,98,97,96,95] in NO levels
+                        # Correct approach: Derive NO bids from YES asks using canonical duality
+                        # NO_bid = 100 - YES_ask (in cents) or NO_bid = 1.00 - YES_ask (in dollars)
                         if "yes_dollars" in orderbook_fp:
                             yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
+                            # Derive NO bids from YES asks using canonical duality
+                            # YES asks are selling YES prices, so NO bids = 1.00 - YES_ask
+                            no_levels = [[1.0 - float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
+                        else:
+                            # Fallback: empty NO levels if yes_dollars not available
+                            no_levels = []
 
                         # SNAPSHOT-FETCH-TRACKING: Log fetch details
                         logger.info(
@@ -1205,8 +1237,10 @@ class KalshiWebSocketBridge:
             
             logger.info("[WS-BOOT] config OK (key=%s..., key_file=%s)",
                        cfg.api_key_id[:8] if cfg.api_key_id else 'None', cfg.private_key_path)
-            logger.debug("[WS-DEBUG-POST-CONFIG] About to check circuit breaker and start connection loop")
-            logger.debug("[WS-DEBUG] Circuit breaker tripped=%s", self._circuit_breaker_tripped)
+            logger.info("[WS-DEBUG-POST-CONFIG] About to check circuit breaker and start connection loop")
+            logger.info("[WS-DEBUG] Circuit breaker tripped=%s", self._circuit_breaker_tripped)
+            logger.info("[WS-DEBUG] About to enter connection loop - tickers=%d", len(tickers) if tickers else 0)
+            logger.info("[WS-DEBUG] tickers list: %s", tickers[:5] if tickers else "N/A")
 
             # PHASE-2: Check circuit breaker before attempting connection
             if self._circuit_breaker_tripped:
@@ -1412,26 +1446,64 @@ class KalshiWebSocketBridge:
                         orderbook = await client.get_orderbook(ticker)
                         if orderbook:
                             # Convert REST orderbook to WS message format with "yes"/"no" keys
-                            # Handle both object attributes (price, size) and tuple format (price, size)
+                            # CRITICAL FIX: Kalshi REST API client already does the conversion:
+                            # - yes_dollars → YES bids → orderbook.bids
+                            # - no_dollars → NO bids → orderbook.asks (equivalent to YES asks)
+                            # So we just need to convert dollars to cents and use directly
                             yes_levels = []
                             if orderbook.bids:
                                 for b in orderbook.bids:
+                                    bid_price = None
+                                    bid_size = None
                                     if isinstance(b, tuple) and len(b) == 2:
                                         # Tuple format: (price, size)
-                                        yes_levels.append([float(b[0]), float(b[1])])
+                                        bid_price = float(b[0])
+                                        bid_size = float(b[1])
                                     elif hasattr(b, 'price') and hasattr(b, 'size'):
                                         # Object format with price/size attributes
-                                        yes_levels.append([float(b.price), float(b.size)])
+                                        bid_price = float(b.price)
+                                        bid_size = float(b.size)
+                                    
+                                    if bid_price is not None and bid_size is not None:
+                                        # REST API returns prices in DOLLARS, convert to cents
+                                        bid_price_cents = bid_price * 100.0
+                                        yes_levels.append([bid_price_cents, bid_size])
                             
+                            # CRITICAL DIAGNOSTIC: Log raw NO levels from REST API before conversion
+                            logger.info(
+                                "[REST-FALLBACK-DIAG] ticker=%s raw_no_levels_count=%d first_3_no_levels=%s",
+                                ticker, len(orderbook.asks) if orderbook.asks else 0,
+                                list(orderbook.asks[:3]) if orderbook.asks else "N/A"
+                            )
+                            
+                            # CRITICAL FIX (2026-08-01): Use actual NO bid data from orderbook.asks
+                            # The client now correctly parses no_dollars from the API into orderbook.asks
+                            # Previous derivation from YES bids was incorrect - no_dollars contains valid NO bids
                             no_levels = []
                             if orderbook.asks:
                                 for a in orderbook.asks:
+                                    ask_price = None
+                                    ask_size = None
                                     if isinstance(a, tuple) and len(a) == 2:
                                         # Tuple format: (price, size)
-                                        no_levels.append([float(a[0]), float(a[1])])
+                                        ask_price = float(a[0])
+                                        ask_size = float(a[1])
                                     elif hasattr(a, 'price') and hasattr(a, 'size'):
                                         # Object format with price/size attributes
-                                        no_levels.append([float(a.price), float(a.size)])
+                                        ask_price = float(a.price)
+                                        ask_size = float(a.size)
+                                    
+                                    if ask_price is not None and ask_size is not None:
+                                        # REST API returns prices in DOLLARS, convert to cents
+                                        ask_price_cents = ask_price * 100.0
+                                        no_levels.append([ask_price_cents, ask_size])
+                            
+                            # CRITICAL DIAGNOSTIC: Log converted NO levels
+                            logger.info(
+                                "[REST-FALLBACK-DIAG] ticker=%s converted_no_levels_count=%d first_3_no_levels_cents=%s",
+                                ticker, len(no_levels),
+                                no_levels[:3] if no_levels else "N/A"
+                            )
                             
                             msg = {
                                 "type": "orderbook_snapshot",
@@ -1458,8 +1530,85 @@ class KalshiWebSocketBridge:
                 # Mark as subscribed even though using REST fallback
                 self._subscribed_tickers = ut
                 logger.info("[WS-FALLBACK] REST polling fallback initialized for %d tickers", len(ut))
-                logger.info("[WS-FALLBACK] REST polling will be handled by main_15m_lean.py refresh mechanism")
-                # Skip WebSocket subscriptions since we're using REST fallback
+                logger.info("[WS-FALLBACK] Starting REST polling loop to keep orderbooks fresh")
+                
+                # CRITICAL FIX: Don't return early - start REST polling loop instead
+                # The WS bridge task must run continuously to keep market data fresh
+                # Periodically refresh orderbooks via REST API
+                import time as _time
+                rest_refresh_interval_s = 5.0  # Refresh every 5 seconds
+                logger.info("[WS-FALLBACK] Starting REST polling loop with %.1fs interval", rest_refresh_interval_s)
+                
+                while not self._ensure_shutdown_event().is_set():
+                    try:
+                        # Sleep for interval, but check shutdown event periodically
+                        for _ in range(int(rest_refresh_interval_s)):
+                            if self._ensure_shutdown_event().is_set():
+                                logger.info("[WS-FALLBACK] Shutdown event set, exiting REST polling loop")
+                                break
+                            await asyncio.sleep(1)
+                        if self._ensure_shutdown_event().is_set():
+                            break
+                        
+                        # Refresh orderbooks for all tickers
+                        logger.debug("[WS-FALLBACK] Refreshing orderbooks for %d tickers", len(ut))
+                        for ticker in ut:
+                            try:
+                                orderbook = await client.get_orderbook(ticker)
+                                if orderbook:
+                                    yes_levels = []
+                                    if orderbook.bids:
+                                        for b in orderbook.bids:
+                                            bid_price = None
+                                            bid_size = None
+                                            if isinstance(b, tuple) and len(b) == 2:
+                                                bid_price = float(b[0])
+                                                bid_size = float(b[1])
+                                            elif hasattr(b, 'price') and hasattr(b, 'size'):
+                                                bid_price = float(b.price)
+                                                bid_size = float(b.size)
+                                            
+                                            if bid_price is not None and bid_size is not None:
+                                                bid_price_cents = bid_price * 100.0
+                                                yes_levels.append([bid_price_cents, bid_size])
+                                    
+                                    no_levels = []
+                                    if orderbook.asks:
+                                        for a in orderbook.asks:
+                                            ask_price = None
+                                            ask_size = None
+                                            if isinstance(a, tuple) and len(a) == 2:
+                                                ask_price = float(a[0])
+                                                ask_size = float(a[1])
+                                            elif hasattr(a, 'price') and hasattr(a, 'size'):
+                                                ask_price = float(a.price)
+                                                ask_size = float(a.size)
+                                            
+                                            if ask_price is not None and ask_size is not None:
+                                                ask_price_cents = ask_price * 100.0
+                                                no_levels.append([ask_price_cents, ask_size])
+                                    
+                                    msg = {
+                                        "type": "orderbook_snapshot",
+                                        "ticker": ticker,
+                                        "sequence": 0,
+                                        "yes": yes_levels,
+                                        "no": no_levels,
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                    store.apply_orderbook_message(msg, "ws_fallback")
+                            except Exception as e:
+                                logger.error("[WS-FALLBACK] Failed to refresh orderbook for %s: %s", ticker, e)
+                        
+                        logger.debug("[WS-FALLBACK] REST polling refresh completed")
+                    except asyncio.CancelledError:
+                        logger.info("[WS-FALLBACK] REST polling loop cancelled")
+                        raise
+                    except Exception as e:
+                        logger.error("[WS-FALLBACK] REST polling loop error: %s", e, exc_info=True)
+                        # Continue polling despite errors
+                
+                logger.info("[WS-FALLBACK] REST polling loop exited")
                 return
             else:
                 logger.debug("[WS-SKIPPING-REST-FALLBACK] Skipping REST fallback, using WebSocket mode")
@@ -1671,10 +1820,10 @@ class KalshiWebSocketBridge:
                         if symbol in ticker.upper():
                             subscribed_assets.add(symbol)
                             break
-                
+
                 missing_assets = expected_assets - subscribed_assets
                 has_subscriptions = len(self._subscribed_tickers) > 0
-                
+
                 logger.info(
                     "[WS-SUBSCRIPTION-CHECK] markets=%d tickers has_subscriptions=%s subscribed_assets=%s missing_assets=%s",
                     len(self._subscribed_tickers),
@@ -1682,12 +1831,87 @@ class KalshiWebSocketBridge:
                     sorted(subscribed_assets) if subscribed_assets else [],
                     sorted(missing_assets) if missing_assets else []
                 )
-                
+
+                # CRITICAL FIX 2026-08-03: Retry logic to ensure all assets are subscribed
+                # This addresses the universe invariant violation (catalog=5, ws=2, intersection=2)
                 if missing_assets:
                     logger.warning(
                         "[WS-SUBSCRIPTION-WARNING] Missing critical assets in subscriptions: %s - may cause trading gaps",
                         sorted(missing_assets)
                     )
+
+                    # Retry subscription for missing assets
+                    max_retries = 3
+                    for retry in range(1, max_retries + 1):
+                        logger.info(
+                            "[WS-SUBSCRIPTION-RETRY] Attempt %d/%d to subscribe missing assets: %s",
+                            retry, max_retries, sorted(missing_assets)
+                        )
+
+                        # Get tickers for missing assets
+                        missing_tickers = []
+                        for ticker in ut:
+                            for symbol in missing_assets:
+                                if symbol in ticker.upper():
+                                    missing_tickers.append(ticker)
+                                    break
+
+                        if missing_tickers:
+                            try:
+                                # Retry subscription for missing tickers
+                                ch = KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE
+                                for i in range(0, len(missing_tickers), ch):
+                                    batch = missing_tickers[i : i + ch]
+                                    logger.info("[WS-SUBSCRIPTION-RETRY] sent: orderbooks (CRITICAL) markets=%s", batch[:5])
+
+                                    try:
+                                        await self._ws.subscribe_orderbooks_batch(batch)
+                                        # Map subscription IDs to tickers for event logging
+                                        for ticker in batch:
+                                            sub_id = self._generate_subscription_id(ticker)
+                                            self._sub_id_to_ticker[sub_id] = ticker
+                                        logger.debug("[WS-SUBSCRIPTION-RETRY] Successfully subscribed orderbooks batch=%s", batch[:5])
+                                    except Exception as e:
+                                        logger.error("[WS-SUBSCRIPTION-RETRY-CRASH] Failed to subscribe orderbooks batch=%s: %s", batch, e, exc_info=True)
+                                        raise
+
+                                    await asyncio.sleep(_stagger_delay)
+
+                                # Recheck subscribed assets after retry
+                                subscribed_assets = set()
+                                for ticker in self._subscribed_tickers:
+                                    for symbol in expected_assets:
+                                        if symbol in ticker.upper():
+                                            subscribed_assets.add(symbol)
+                                            break
+
+                                missing_assets = expected_assets - subscribed_assets
+
+                                if not missing_assets:
+                                    logger.info(
+                                        "[WS-SUBSCRIPTION-RETRY] Successfully subscribed all assets after retry %d",
+                                        retry
+                                    )
+                                    break
+                            except Exception as e:
+                                logger.error(
+                                    "[WS-SUBSCRIPTION-RETRY] Attempt %d/%d failed: %s",
+                                    retry, max_retries, e, exc_info=True
+                                )
+                                if retry < max_retries:
+                                    await asyncio.sleep(2 ** retry)  # Exponential backoff
+
+                    # Final check after all retries
+                    if missing_assets:
+                        logger.error(
+                            "[WS-SUBSCRIPTION-ERROR] Failed to subscribe all assets after %d retries: missing=%s",
+                            max_retries, sorted(missing_assets)
+                        )
+                        # Trigger universe invariant violation alert
+                        logger.error(
+                            "[UNIVERSE-INVARIANT-ALERT] Critical: Failed to subscribe all assets: missing=%s",
+                            sorted(missing_assets)
+                        )
                 
                 # CRITICAL FIX: REST bootstrap is REQUIRED because WS snapshots are not arriving
                 # Kalshi docs say snapshots arrive automatically, but in practice they don't
@@ -2294,15 +2518,10 @@ class KalshiWebSocketBridge:
                                     # Object format with price/size attributes
                                     yes_levels.append([float(bid.price), float(bid.size)])
                         
-                        # Handle asks (no side)
-                        if orderbook.asks:
-                            for ask in orderbook.asks:
-                                if isinstance(ask, tuple) and len(ask) == 2:
-                                    # Tuple format: (price, size)
-                                    no_levels.append([float(ask[0]), float(ask[1])])
-                                elif hasattr(ask, 'price') and hasattr(ask, 'size') and not isinstance(ask, tuple):
-                                    # Object format with price/size attributes
-                                    no_levels.append([float(ask.price), float(ask.size)])
+                        # CRITICAL FIX (2026-07-30): Derive NO levels from YES bids using canonical duality
+                        # NO_bid = 1.00 - YES_bid (mathematically correct: YES + NO = 100c)
+                        # This avoids corrupted NO levels from orderbook.asks (placeholder 99c values)
+                        no_levels = [[1.0 - float(price), float(size)] for price, size in yes_levels]
                         
                         msg = {
                             "type": "orderbook_snapshot",
@@ -2551,17 +2770,10 @@ class KalshiWebSocketBridge:
                                         logger.debug("[WS-FALLBACK] BID object: price=%s size=%s", bid.price, bid.size)
                                         yes_levels.append([float(bid.price), float(bid.size)])
                             
-                            # Handle asks (no side)
-                            if orderbook.asks:
-                                for ask in orderbook.asks:
-                                    if isinstance(ask, tuple) and len(ask) == 2:
-                                        # Tuple format: (price, size)
-                                        logger.debug("[WS-FALLBACK] ASK tuple: %s", ask)
-                                        no_levels.append([float(ask[0]), float(ask[1])])
-                                    elif hasattr(ask, 'price') and hasattr(ask, 'size') and not isinstance(ask, tuple):
-                                        # Object format with price/size attributes
-                                        logger.debug("[WS-FALLBACK] ASK object: price=%s size=%s", ask.price, ask.size)
-                                        no_levels.append([float(ask.price), float(ask.size)])
+                            # CRITICAL FIX (2026-07-30): Derive NO levels from YES bids using canonical duality
+                            # NO_bid = 1.00 - YES_bid (mathematically correct: YES + NO = 100c)
+                            # This avoids corrupted NO levels from orderbook.asks (placeholder 99c values)
+                            no_levels = [[1.0 - float(price), float(size)] for price, size in yes_levels]
                             
                             # Check if orderbook is empty
                             if not yes_levels and not no_levels:
@@ -2654,6 +2866,31 @@ class KalshiWebSocketBridge:
                     "[WS-FILL-SIDE-FIX] Failed to derive side from intent for fill_id=%s client_order_id=%s: %s",
                     fill_id, client_order_id, e
                 )
+        
+        # CRITICAL FIX (2026-08-02): Validate fill side consistency
+        # This addresses high-leverage bug #4 (WebSocket fill side derivation)
+        if SIDE_MAPPING_VALIDATOR_AVAILABLE and intent and intent.side:
+            try:
+                intent_side = "yes" if "YES" in intent.side else "no"
+                is_valid, validation_error = validate_fill_side_consistency(
+                    derived_side, intent_side, str(fill_id), client_order_id or "unknown"
+                )
+                if not is_valid:
+                    logger.error(
+                        "[WS-FILL-SIDE-VALIDATION] %s - rejecting fill due to side inconsistency",
+                        validation_error
+                    )
+                    return  # Reject fill with inconsistent side
+                logger.debug(
+                    "[WS-FILL-SIDE-VALIDATION] fill_id=%s - side consistency validated: derived=%s intent=%s",
+                    str(fill_id), derived_side, intent_side
+                )
+            except Exception as validation_err:
+                logger.warning(
+                    "[WS-FILL-SIDE-VALIDATION] fill_id=%s - validation failed (fail-open): %s",
+                    str(fill_id), validation_err
+                )
+                # Fail-open: allow fill if validation fails (don't block on new validation)
         
         ws_fill: Dict[str, Any] = {
             "fill_id": str(fill_id),
@@ -3749,7 +3986,11 @@ class KalshiWebSocketBridge:
                 
                 # DIAGNOSTIC: Log first orderbook message per ticker only
                 if ticker not in self._first_orderbook_seen:
-                    self._first_orderbook_seen.add(ticker)
+                    self._first_orderbook_seen[ticker] = _time.time()
+                    if len(self._first_orderbook_seen) > self._first_orderbook_seen_max:
+                        evict_count = len(self._first_orderbook_seen) // 2
+                        for _ in range(evict_count):
+                            self._first_orderbook_seen.popitem(last=False)
                     logger.info(
                         "[WS-FIRST-ORDERBOOK] ticker=%s event_type=%s",
                         ticker, event_type
@@ -4394,13 +4635,14 @@ def get_live_prices(market_id: str) -> Optional[Dict[str, Any]]:
             return None
 
         best_bid_cents = max(p for p, _ in bids)
-        # Best ask on a binary market = 100 - best_no_bid.
+        # Best ask on a binary market = 100 - best_no_bid (canonical duality).
         # If no_levels are absent fall back to best_bid + 1.
         no_levels = snapshot.get("no", [])
         if no_levels:
             no_bids = [(int(p), int(s)) for p, s in no_levels if int(s) > 0]
             best_no_bid = max(p for p, _ in no_bids) if no_bids else None
-            best_ask_cents = (100 - best_no_bid) if best_no_bid is not None else best_bid_cents + 1
+            # Use canonical duality function: YES_ask = 100 - NO_bid
+            best_ask_cents = derive_yes_ask_from_no_bid(best_no_bid) if best_no_bid is not None else best_bid_cents + 1
         else:
             best_ask_cents = best_bid_cents + 1
 

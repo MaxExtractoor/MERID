@@ -35,8 +35,10 @@ class TestApplyFillActionAware(unittest.TestCase):
         from merid.event_venues.kalshi.position_cache import CachedPosition
         return CachedPosition(
             market_id="KXBTC-T106",
+            agent_id="test_agent",
             contracts=10,
             side="yes",
+            thesis_side="yes",
             avg_price_cents=50,
         )
 

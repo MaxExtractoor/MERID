@@ -369,12 +369,9 @@ class UnifiedRiskEngine:
                 from merid.risk.sentiment_risk import get_sentiment_risk
                 sentiment_risk = get_sentiment_risk()
                 
-                # Extract asset from ticker (e.g., KXBTC15M-... -> BTC)
-                asset = None
-                for prefix in ["KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"]:
-                    if request.ticker.startswith(prefix):
-                        asset = prefix.replace("KX", "")
-                        break
+                # CRITICAL FIX (2026-07-21): Use canonical identity helper for asset extraction
+                from merid.utils.kalshi_identity import extract_asset
+                asset = extract_asset(request.ticker)
                 
                 # SENTIMENT DECOUPLING (2026-05-14): Removed sentiment cap rejection
                 # Sentiment should not gate trading via risk engine

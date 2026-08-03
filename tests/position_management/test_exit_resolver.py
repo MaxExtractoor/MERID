@@ -349,6 +349,16 @@ class TestGetPriorityForReason:
         assert get_priority_for_reason(ExitReason.TIME_STOP) == ExitPriority.TIME_STOP
         assert get_priority_for_reason(ExitReason.EDGE_DECAY) == ExitPriority.EDGE_DECAY
     
+    def test_position_level_mapping(self):
+        """Test priority mapping for position-level exits."""
+        assert get_priority_for_reason(ExitReason.EXTREME_PROFIT) == ExitPriority.EXTREME_PROFIT
+        assert get_priority_for_reason(ExitReason.DYNAMIC_TAKE_PROFIT) == ExitPriority.DYNAMIC_TAKE_PROFIT
+        assert get_priority_for_reason(ExitReason.RATCHET_TRIM) == ExitPriority.RATCHET_TRIM
+        assert get_priority_for_reason(ExitReason.RATCHET_FLOOR) == ExitPriority.RATCHET_FLOOR
+        assert get_priority_for_reason(ExitReason.STOP_LOSS) == ExitPriority.STOP_LOSS
+        assert get_priority_for_reason(ExitReason.TAKE_PROFIT) == ExitPriority.TAKE_PROFIT
+        assert get_priority_for_reason(ExitReason.TRAIL) == ExitPriority.TRAIL
+    
     def test_other_mapping(self):
         """Test priority mapping for other exits."""
         assert get_priority_for_reason(ExitReason.SCALE_OUT) == ExitPriority.SCALE_OUT

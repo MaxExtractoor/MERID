@@ -29,8 +29,9 @@ class ExitReason(str, Enum):
     2. STALE_DATA - Exit when market data becomes stale (P0 safety fix)
     3. CANDLE_REVERSAL - Momentum reversal signal
     4. ADAPTIVE_TIMING - Historical performance-based optimal exit timing
-    5. TIME_STOP - Volatility-adjusted time-based exit
+    5. TIME_STOP - Volatility-adjusted time-based exit (only for positions with R >= 0.5)
     6. EDGE_DECAY - Exit when computed edge drops below threshold
+    7. OPPORTUNITY_COST - Exit when better opportunity exists (2026-08-01)
     
     POSITION-LEVEL EXITS (handled in position_monitor before policy evaluation):
     - AUTO_EXIT_99C - 99c YES / 99c NO (cash out at near-settlement, highest priority after RISK)
@@ -40,8 +41,10 @@ class ExitReason(str, Enum):
     - RATCHET_FLOOR - Profit protection
     - STOP_LOSS - Stop loss trigger
     - TAKE_PROFIT - Take profit trigger
+    - SCALE_OUT - Partial close at 1.5-2R (Pay Yourself strategy)
+    - LOSS_CUT_40PCT - -40% loss cut when thesis changes (2026-08-01)
     
-    NOTE: SCALE_OUT and MANUAL are supported but not evaluated by default policy logic.
+    NOTE: MANUAL is supported but not evaluated by default policy logic.
     """
     RISK = "risk"
     STALE_DATA = "stale_data"
@@ -49,6 +52,7 @@ class ExitReason(str, Enum):
     ADAPTIVE_TIMING = "adaptive_timing"
     TIME_STOP = "time_stop"
     EDGE_DECAY = "edge_decay"
+    OPPORTUNITY_COST = "opportunity_cost"  # 2026-08-01: Exit when better opportunity exists
     SCALE_OUT = "scale_out"
     MANUAL = "manual"
     STOP_LOSS = "stop_loss"
@@ -59,6 +63,7 @@ class ExitReason(str, Enum):
     RATCHET_TRIM = "ratchet_trim"
     RATCHET_FLOOR = "ratchet_floor"
     TRAIL = "trail"
+    LOSS_CUT_40PCT = "loss_cut_40pct"  # 2026-08-01: -40% loss cut when thesis changes
 
 
 @dataclass
@@ -118,10 +123,14 @@ class ExitPolicy:
         
         Exit if:
         - time_since_entry >= effective_max_hold (volatility-adjusted) AND
-        - r_multiple < 0.5 (position not making meaningful progress)
+        - r_multiple >= 0.5 (position making progress but taking too long)
         
-        This preserves the "don't exit winners too early" principle while making
-        the threshold explicit and unambiguous.
+        CRITICAL FIX (2026-07-31): Reversed logic to prevent systematic loss exits
+        Previous logic exited losers (R < 0.5), causing systematic losses
+        New logic exits slow winners (R >= 0.5) to free capital while protecting losers
+        
+        This preserves the "don't exit winners too early" principle by requiring
+        at least 0.5R progress before time-based exit can trigger.
         
         Returns:
             True if time stop should trigger
@@ -131,8 +140,9 @@ class ExitPolicy:
         if self.time_since_entry_seconds < effective_max_hold:
             return False
         
-        # Exit if position is not making meaningful progress (< 0.5R)
-        return self.r_multiple < 0.5
+        # Exit if position is making progress (>= 0.5R) but taking too long
+        # This prevents systematic loss exits while freeing capital from stalled winners
+        return self.r_multiple >= 0.5
     
     
     def evaluate_candle_reversal(self, candles: Optional[List] = None) -> bool:

@@ -79,6 +79,8 @@ class AutoExitConfig:
     close_hedge_when_alpha_closed: bool = True
     max_hedge_hold_minutes: int = 120
     reduce_on_exposure_flip: bool = True
+    # CRITICAL FIX (2026-07-29): Resting exit fallback for hedge positions
+    resting_exit_enabled: bool = False  # Disabled by default until tested
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,7 @@ def load_hedge_config(path: Optional[str] = None) -> HedgeConfig:
         close_hedge_when_alpha_closed=bool(ae_cfg.get("close_hedge_when_alpha_closed", True)),
         max_hedge_hold_minutes=int(ae_cfg.get("max_hedge_hold_minutes", 120)),
         reduce_on_exposure_flip=bool(ae_cfg.get("reduce_on_exposure_flip", True)),
+        resting_exit_enabled=bool(ae_cfg.get("resting_exit_enabled", False)),
     )
 
     return HedgeConfig(

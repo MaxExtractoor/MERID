@@ -28,6 +28,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from utils.logger import get_logger
 
+# Import invariant checker for production logging
+from merid.validation.spot_strike_distance_invariants import (
+    SpotStrikeDistanceInvariantChecker,
+)
+
 logger = get_logger("merid.prediction.spot_strike")
 
 # LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
@@ -237,6 +242,16 @@ def log_crypto_spot_strike(
 ) -> None:
     if not should_emit_trace_line(agent_name, market_id):
         return
+    
+    # Emit structured SPOT-STRIKE invariant log for production suite parsing
+    if spot is not None and strike is not None:
+        spot_float = float(spot)
+        strike_float = float(strike)
+        trade_emitted = net_edge is not None and net_edge > 0
+        logger.info(
+            "SPOT-STRIKE: spot=%.2f strike=%.2f trade=%s market=%s",
+            spot_float, strike_float, str(trade_emitted).lower(), market_id
+        )
     payload: Dict[str, Any] = {
         "agent": agent_name,
         "asset": asset,

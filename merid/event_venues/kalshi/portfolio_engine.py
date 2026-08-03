@@ -307,7 +307,7 @@ class PortfolioEngine:
         if order_id in self._open_orders:
             del self._open_orders[order_id]
         
-        logger.debug("Cancelled order: %s released %dc", order_id, order.reserved_cash_cents)
+        logger.debug(f"Cancelled order: {order_id} released {order.reserved_cash_cents}c")
     
     def _apply_settlement_event(self, event: PortfolioEvent) -> None:
         """Apply a settlement event to realize PnL."""

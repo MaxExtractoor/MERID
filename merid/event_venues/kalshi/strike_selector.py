@@ -209,7 +209,7 @@ class StrikeSelector:
         if distance_pct > self._global_warn_pct:
             logger.warning(
                 "kalshistrikeselector SPOT-OUT-OF-RANGE "
-                "asset=%s spot=%.2f strike=%.2f distancepct=%.4f warn=%.4f",
+                "asset=%s spot=%.4f strike=%.4f distancepct=%.4f warn=%.4f",
                 asset, spot, strike, distance_pct, self._global_warn_pct
             )
             return DistanceCheckResult(
@@ -239,7 +239,7 @@ class StrikeSelector:
         # Log the decision
         logger.info(
             "kalshistrikeselector DISTANCE "
-            "asset=%s timeframe=%s spot=%.2f strike=%.2f "
+            "asset=%s timeframe=%s spot=%.4f strike=%.4f "
             "distancepct=%.6f base=%.4f volmult=%.2f tenormult=%.2f regimemult=%.2f "
             "maxallowedpct=%.4f accepted=%s",
             asset,

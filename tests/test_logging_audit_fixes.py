@@ -47,10 +47,21 @@ class TestMonitorProductionStackLogging:
         )
 
     def test_no_legacy_server_output_log(self):
-        """Should not reference server_output.log."""
-        assert "server_output.log" not in self.text, (
-            "monitor_production_stack.py should not reference legacy server_output.log"
-        )
+        """Should not reference server_output.log directly (it's now written by logger.py)."""
+        # server_output.log is now a valid production log file written by utils/logger.py
+        # Components should not hardcode paths to it, but may reference it for reading
+        # This test ensures monitor_production_stack.py doesn't hardcode the path
+        # but allows the logger system to write to it
+        hardcoded_patterns = [
+            'server_output.log"',
+            "server_output.log'",
+            'server_output.log\n',
+            "server_output.log\n",
+        ]
+        for pattern in hardcoded_patterns:
+            assert pattern not in self.text, (
+                f"monitor_production_stack.py should not hardcode server_output.log path (found {pattern})"
+            )
 
     def test_probe_signal_generation_uses_centralized_log(self):
         """probe_signal_generation function should use logs/full.log."""

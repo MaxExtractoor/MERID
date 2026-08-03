@@ -52,6 +52,7 @@ class TestSignalToSideMappingConsistency:
                 if 'mean_reversion' not in context.lower():
                     pytest.fail(f"Found inversion at line {i}: velocity > 0 mapping to NO without mean_reversion context")
     
+    @pytest.mark.skip(reason="2026-07-18: Panic fade disabled - causing losses by betting against trend")
     def test_panic_fade_signal_mapping(self):
         """Verify panic fade signal uses correct side/action mapping."""
         with open('merid/prediction/agent_grid_15m.py', 'r') as f:

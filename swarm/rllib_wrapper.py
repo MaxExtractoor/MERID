@@ -111,9 +111,12 @@ def train_rllib_marl(
     num_gpus: int = 0,
     training_iterations: int = 100,
     algorithm: str = "PPO",
+    seed: int = 42,
 ) -> Any:
     """
     Train MARL using Ray RLlib with distributed workers.
+    
+    CRITICAL FIX (2026-07-23): Integrated SeedManager for deterministic reproducibility.
     
     Args:
         num_agents: Number of agents in swarm
@@ -121,6 +124,7 @@ def train_rllib_marl(
         num_gpus: Number of GPUs to use
         training_iterations: Number of training iterations
         algorithm: Algorithm (PPO, APPO, IMPALA, APEX_DQN)
+        seed: Random seed for reproducibility
     
     Returns:
         Trained algorithm instance
@@ -135,6 +139,19 @@ def train_rllib_marl(
     except ImportError:
         logger.error("Ray RLlib not installed. Run: pip install ray[rllib]")
         return None
+    
+    # CRITICAL FIX (2026-07-23): Use SeedManager for deterministic training
+    try:
+        from merid.ml.seed_manager import get_seed_manager
+        seed_manager = get_seed_manager()
+        seed_manager.set_seed(seed, "training", "rllib_marl", "model_init")
+        logger.info(f"[SEED-MANAGER] Set seed={seed} for RLlib MARL training")
+    except ImportError:
+        logger.warning("[SEED-MANAGER] SeedManager not available, using direct seed")
+        import random
+        import numpy as np
+        random.seed(seed)
+        np.random.seed(seed)
     
     # Initialize Ray
     if not ray.is_initialized():

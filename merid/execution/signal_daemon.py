@@ -29,7 +29,7 @@ def _handle_sigterm(signum, frame):
 def _load_config_from_env() -> ExecutionConfig:
     """Load execution bridge configuration from environment variables"""
     return ExecutionConfig(
-        min_confidence=float(os.getenv("MERID_EXECUTION_MIN_CONFIDENCE", "0.6")),
+        min_confidence=float(os.getenv("MERID_EXECUTION_MIN_CONFIDENCE", "0.5")),
         min_strength=float(os.getenv("MERID_EXECUTION_MIN_STRENGTH", "0.4")),
         max_notional=float(os.getenv("MERID_EXECUTION_MAX_NOTIONAL", "1000.0")),
         lookback_minutes=int(os.getenv("MERID_EXECUTION_LOOKBACK_MINUTES", "60")),

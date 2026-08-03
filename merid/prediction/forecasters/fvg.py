@@ -346,21 +346,24 @@ class FVGForecaster(Forecaster):
         active_fvgs = self._store.get_active_fvgs(asset, timeframe)
         
         if not active_fvgs:
-            # No FVGs detected yet - neutral signal
+            # No FVGs detected yet - neutral signal with minimum confidence floor
+            # CRITICAL FIX: Never return 0.0 confidence - use 0.3 (30%) minimum per industry standards
             return ForecastResult(
                 forecaster_id=self.forecaster_id,
                 p_model=implied_yes,
-                confidence=0.0,
+                confidence=0.3,  # Minimum confidence floor for neutral state
                 components={"fvg_active": 0, "fvg_fill_signal": 0.0},
             )
         
         # Find nearest FVG and calculate fill signal
         nearest_fvg = self._store.get_nearest_fvg(asset, timeframe, current_price)
         if not nearest_fvg:
+            # No nearest FVG - use minimum confidence floor
+            # CRITICAL FIX: Never return 0.0 confidence - use 0.3 (30%) minimum per industry standards
             return ForecastResult(
                 forecaster_id=self.forecaster_id,
                 p_model=implied_yes,
-                confidence=0.0,
+                confidence=0.3,  # Minimum confidence floor when no nearest FVG
                 components={"fvg_active": len(active_fvgs), "fvg_fill_signal": 0.0},
             )
         
@@ -387,7 +390,8 @@ class FVGForecaster(Forecaster):
             # Price is away from FVG - use confluence across timeframes
             confluence = self._store.get_fvg_confluence_score(asset, current_price)
             fill_signal = confluence * 0.5  # Weaker signal from confluence
-            confidence = abs(confluence) * 0.4
+            # CRITICAL FIX: Apply minimum confidence floor (0.3) even when confluence is low
+            confidence = max(0.3, abs(confluence) * 0.4)
         
         # Convert fill signal to probability adjustment
         # Bullish FVG fill signal -> higher YES probability

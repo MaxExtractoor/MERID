@@ -16,12 +16,15 @@ class MockPosition:
     market_id: str = "KXBTC15M"
     series_ticker: str = "KXBTC15M"
     avg_entry_price_cents: int = 50
+    side: str = "yes"
 
 
 @dataclass
 class MockEdgeResult:
     """Mock edge result."""
     edge_pct: float = 0.05
+    edge: float = 0.05
+    edge_fee_adjusted: float = 0.05
     confidence: float = 0.8
     net_edge_cents: float = 5.0
 
@@ -30,6 +33,8 @@ class MockEdgeResult:
 class MockSpotData:
     """Mock spot data."""
     price: float = 50000.0
+    price_usd: float = 50000.0
+    source: str = "unified_spot_service"
 
 
 class TestEdgeBasedExitEvaluator:

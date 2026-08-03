@@ -32,15 +32,20 @@ class TestAgentGridConfigAlignment:
         assert config.max_entry_price_yes == 0.70, "max_entry_price_yes should be 0.70 (aligned with profile YAML)"
         assert config.min_entry_price_no == 0.30, "min_entry_price_no should be 0.30 (aligned with profile YAML)"
     
-    def test_max_orders_per_15m_window_aligned_with_profile_yaml(self):
-        """Test that max_orders_per_15m_window is aligned with profile YAML (24)."""
+    def test_max_orders_per_15m_window_removed(self):
+        """Test that max_orders_per_15m_window was removed (CRITICAL FIX 2026-07-17).
+        
+        CRITICAL FIX (2026-07-17): Removed per_strip_order_limit and max_orders_per_15m_window 
+        - $1 exposure cap is now the limit
+        - GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+        """
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
         )
         
-        # Verify max orders per 15m window matches profile YAML (2026-07-11: updated to 24)
-        assert config.max_orders_per_15m_window == 24, "max_orders_per_15m_window should be 24 (aligned with profile YAML)"
+        # Verify max_orders_per_15m_window no longer exists (removed 2026-07-17)
+        assert not hasattr(config, 'max_orders_per_15m_window'), "max_orders_per_15m_window should be removed (replaced by $1 exposure cap)"
     
     def test_per_asset_cooldown_aligned_with_profile_yaml(self):
         """Test that per_asset_cooldown_s is aligned with profile YAML (3 seconds)."""

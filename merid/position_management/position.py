@@ -54,9 +54,11 @@ class Position:
     break_even_price_cents: Optional[int] = None  # Entry price when break-even triggered
     
     # Partial scale-out tracking (research: close 50% at 1.5-2R, trail remainder)
+    # 2026-08-01: "Pay Yourself" strategy - lock profits at 1.5R while letting runner capture larger moves
     scale_out_price_cents: Optional[int] = None  # Price at which to scale out 50%
     scale_out_triggered: bool = False
     scale_out_remaining_size: int = 0  # Size after scale-out
+    scale_out_r_multiple: Optional[float] = None  # R-multiple trigger for scale-out (from profile)
     
     # Trailing stop configuration
     trailing_type: TrailingType = TrailingType.NONE
@@ -103,10 +105,44 @@ class Position:
     # Initial risk for R-multiple calculation
     initial_risk_cents: int = 0  # |entry_price - stop_loss_price| if stop_loss set
     
+    # CRITICAL FIX (2026-08-01): Entry metadata for analysis and audit
+    vol_regime: str = "unknown"  # Volatility regime at entry time (unknown/low/normal/high/extreme)
+    confidence: str = "unknown"  # Signal confidence at entry time (unknown/low/medium/high)
+    
     def __post_init__(self):
-        """Calculate initial risk after initialization."""
+        """Calculate initial risk and set defaults if missing."""
         if self.stop_loss_price_cents and self.avg_entry_price_cents:
             self.initial_risk_cents = abs(self.avg_entry_price_cents - self.stop_loss_price_cents)
+        
+        # CRITICAL FIX: 2026-07-31 - Set default TP if not set to prevent asymmetric risk
+        # CRITICAL FIX (2026-07-31): Side-aware TP/SL defaults for binary options
+        # YES contracts: TP above entry, SL below entry (long probability)
+        # NO contracts: TP below entry, SL above entry (short probability)
+        # Positions without TP targets can only exit on losses, never on profits
+        # This ensures all positions have a profit-taking capability
+        if self.take_profit_price_cents is None and self.avg_entry_price_cents > 0:
+            if self.initial_risk_cents > 0:
+                # Default to 1R take profit if risk is known (side-aware)
+                if self.side == PositionSide.YES:
+                    self.take_profit_price_cents = self.avg_entry_price_cents + self.initial_risk_cents
+                else:
+                    self.take_profit_price_cents = max(1, self.avg_entry_price_cents - self.initial_risk_cents)
+                self.take_profit_r_multiple = 1.0
+            else:
+                # Fallback: 5 cent risk if no SL set (side-aware)
+                default_risk_cents = 5
+                if self.side == PositionSide.YES:
+                    self.take_profit_price_cents = self.avg_entry_price_cents + default_risk_cents
+                else:
+                    self.take_profit_price_cents = max(1, self.avg_entry_price_cents - default_risk_cents)
+                self.take_profit_r_multiple = 1.0
+                # Also set SL if not set for consistency (side-aware)
+                if self.stop_loss_price_cents is None:
+                    if self.side == PositionSide.YES:
+                        self.stop_loss_price_cents = max(1, self.avg_entry_price_cents - default_risk_cents)
+                    else:
+                        self.stop_loss_price_cents = min(99, self.avg_entry_price_cents + default_risk_cents)
+                    self.initial_risk_cents = default_risk_cents
     
     def update_runtime_state(
         self,
@@ -346,6 +382,73 @@ class Position:
         # CRITICAL FIX (2026-07-16): Side-space — SL sits BELOW entry in own-side cents
         # for BOTH sides; trigger when own-side price falls to or below it
         return current_price_cents <= self.stop_loss_price_cents
+    
+    def should_trigger_40_percent_loss(self, current_price_cents: int) -> bool:
+        """
+        Check if position has lost 40% of entry value.
+        
+        2026-08-01: Added -40% loss cut rule per industry research.
+        Research shows cutting losers at -40% when thesis changes is critical for capital preservation.
+        Arithmetic: -40% cut requires 67% recovery vs 100% if held to zero.
+        
+        Args:
+            current_price_cents: Current market price in cents
+            
+        Returns:
+            True if position has lost 40% or more of entry value
+        """
+        if self.avg_entry_price_cents == 0:
+            return False
+        
+        loss_pct = (self.avg_entry_price_cents - current_price_cents) / self.avg_entry_price_cents
+        return loss_pct >= 0.40
+    
+    def should_cut_loss(self, current_price_cents: int, thesis_intact: bool) -> bool:
+        """
+        Check if loss should be cut based on -40% rule and thesis validation.
+        
+        2026-08-01: Added thesis-validated loss cutting per industry research.
+        Only cut loss if -40% threshold is reached AND thesis has changed.
+        This prevents cutting on market noise while protecting against thesis breaks.
+        
+        Args:
+            current_price_cents: Current market price in cents
+            thesis_intact: True if original thesis is still valid
+            
+        Returns:
+            True if loss should be cut (-40% threshold reached AND thesis broken)
+        """
+        if not self.should_trigger_40_percent_loss(current_price_cents):
+            return False
+        
+        # Only cut if thesis is broken
+        return not thesis_intact
+    
+    def is_liquidity_sufficient(self, market_id: str) -> bool:
+        """
+        Check if market has sufficient liquidity for exit.
+        
+        2026-08-01: Added liquidity check before exit triggers per industry research.
+        Exits in thin markets incur excessive slippage. Minimum 50 contracts depth required.
+        
+        Args:
+            market_id: Market ID to check liquidity for
+            
+        Returns:
+            True if market has sufficient liquidity (>=50 contracts depth)
+        """
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            store = get_kalshi_market_state_store()
+            state = store.get(market_id)
+            if not state:
+                return False
+            depth_yes = getattr(state, 'depth_10c_yes', 0)
+            depth_no = getattr(state, 'depth_10c_no', 0)
+            total_depth = depth_yes + depth_no
+            return total_depth >= 50  # Minimum 50 contracts
+        except Exception:
+            return False  # Fail-safe: assume insufficient if check fails
     
     def should_trigger_take_profit(self, current_price_cents: int) -> bool:
         """

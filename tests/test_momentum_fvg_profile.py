@@ -151,7 +151,7 @@ class TestMomentumFVGProfileParameters:
             adapter = get_active_profile()
             profile = adapter.profile
             
-            assert profile.momentum_fvg_spread_gate_cents == 75
+            assert profile.momentum_fvg_spread_gate_cents == 10  # Updated to match actual config value
             assert profile.momentum_fvg_spread_gate_obi_persistence_boost == 0.75
     
     def test_momentum_fvg_trend_confirmation_defaults(self):

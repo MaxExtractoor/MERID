@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import threading
+import json
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from decimal import Decimal
@@ -37,6 +39,9 @@ _WINDOW_TRACKING_STATE: Dict[str, Any] = {
     "asset_exposure_usd": {},  # CRITICAL FIX 2026-07-08: asset -> cumulative executed notional this window (for tracking, not enforcement)
 }
 
+# FIX 10: Persistent risk envelope state file path
+_WINDOW_STATE_FILE = os.getenv("MERID_WINDOW_STATE_FILE", "data/window_exposure_state.json")
+
 
 def _reset_shared_window_state_for_testing() -> None:
     """
@@ -58,14 +63,14 @@ def _reset_shared_window_state_for_testing() -> None:
 def force_reset_window_exposure(envelope=None, reason="startup") -> None:
     """
     Force reset window exposure tracking state.
-    
+
     CRITICAL: This is for recovery when window exposure gets stuck due to
     missing position closure events (e.g., positions closed outside the system,
     or shutdown before closure events were processed).
-    
+
     This should be called during startup if exposure is non-zero but position
     cache shows zero open positions (stale exposure condition).
-    
+
     Args:
         envelope: Optional envelope instance to sync instance fields after reset.
                   If provided, instance fields will be updated to match shared state.
@@ -73,13 +78,13 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
     """
     import time
     current_ts = time.time()
-    
+
     # Capture stale exposure before reset for logging
     with _WINDOW_TRACKING_LOCK:
         stale_agent_exposure = dict(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
         stale_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         stale_window_start = _WINDOW_TRACKING_STATE["window_start_ts"]
-        
+
         _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
@@ -88,13 +93,13 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
         _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = 0.0
         _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {}
         venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
-    
+
     # Sync instance fields if envelope provided
     if envelope:
         envelope.window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
         envelope.agent_window_exposure_usd = {}
         envelope.total_window_exposure_usd = venue_total
-    
+
     logger.warning(
         f"[WINDOW-TRACKING] FORCE RESET at ts={current_ts:.0f} - "
         f"reason={reason} "
@@ -103,6 +108,103 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
         f"stale_window_start={stale_window_start:.0f} "
         f"new_window_start={_WINDOW_TRACKING_STATE['window_start_ts']:.0f}"
     )
+
+
+def save_window_state() -> bool:
+    """
+    FIX 10: Save window exposure tracking state to persistent storage.
+
+    This prevents stale exposure after process restart by persisting the
+    module-level shared state to a JSON file.
+
+    Returns:
+        True if save succeeded, False otherwise
+    """
+    try:
+        with _WINDOW_TRACKING_LOCK:
+            state_to_save = {
+                "window_start_ts": _WINDOW_TRACKING_STATE["window_start_ts"],
+                "agent_exposure_usd": _WINDOW_TRACKING_STATE["agent_exposure_usd"],
+                "total_exposure_usd": _WINDOW_TRACKING_STATE["total_exposure_usd"],
+                "agent_resting_exposure_usd": _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"],
+                "total_resting_exposure_usd": _WINDOW_TRACKING_STATE["total_resting_exposure_usd"],
+                "peak_bankroll_usd": _WINDOW_TRACKING_STATE["peak_bankroll_usd"],
+                "asset_exposure_usd": _WINDOW_TRACKING_STATE["asset_exposure_usd"],
+                "saved_at": time.time(),
+            }
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(_WINDOW_STATE_FILE), exist_ok=True)
+
+        with open(_WINDOW_STATE_FILE, "w") as f:
+            json.dump(state_to_save, f, indent=2)
+
+        logger.info(
+            f"[WINDOW-TRACKING-PERSIST] Saved window state to {_WINDOW_STATE_FILE}: "
+            f"total_exposure=${state_to_save['total_exposure_usd']:.2f} "
+            f"window_start={state_to_save['window_start_ts']:.0f}"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"[WINDOW-TRACKING-PERSIST] Failed to save window state: {e}")
+        return False
+
+
+def load_window_state() -> bool:
+    """
+    FIX 10: Load window exposure tracking state from persistent storage.
+
+    This restores the module-level shared state from a JSON file on startup,
+    preventing stale exposure after process restart.
+
+    Returns:
+        True if load succeeded, False otherwise
+    """
+    try:
+        if not os.path.exists(_WINDOW_STATE_FILE):
+            logger.info(f"[WINDOW-TRACKING-PERSIST] No saved state file found at {_WINDOW_STATE_FILE}, starting fresh")
+            return False
+
+        with open(_WINDOW_STATE_FILE, "r") as f:
+            loaded_state = json.load(f)
+
+        # Validate loaded state has required fields
+        required_fields = ["window_start_ts", "agent_exposure_usd", "total_exposure_usd"]
+        for field in required_fields:
+            if field not in loaded_state:
+                logger.warning(f"[WINDOW-TRACKING-PERSIST] Invalid state file: missing field {field}")
+                return False
+
+        # Check if state is stale (older than 1 hour)
+        saved_at = loaded_state.get("saved_at", 0)
+        state_age_seconds = time.time() - saved_at
+        if state_age_seconds > 3600:
+            logger.warning(
+                f"[WINDOW-TRACKING-PERSIST] State file is stale ({state_age_seconds:.0f}s old), "
+                f"resetting to fresh state"
+            )
+            return False
+
+        # Load state into module-level shared state
+        with _WINDOW_TRACKING_LOCK:
+            _WINDOW_TRACKING_STATE["window_start_ts"] = loaded_state["window_start_ts"]
+            _WINDOW_TRACKING_STATE["agent_exposure_usd"] = loaded_state["agent_exposure_usd"]
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = loaded_state["total_exposure_usd"]
+            _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = loaded_state.get("agent_resting_exposure_usd", {})
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = loaded_state.get("total_resting_exposure_usd", 0.0)
+            _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = loaded_state.get("peak_bankroll_usd", 0.0)
+            _WINDOW_TRACKING_STATE["asset_exposure_usd"] = loaded_state.get("asset_exposure_usd", {})
+
+        logger.info(
+            f"[WINDOW-TRACKING-PERSIST] Loaded window state from {_WINDOW_STATE_FILE}: "
+            f"total_exposure=${_WINDOW_TRACKING_STATE['total_exposure_usd']:.2f} "
+            f"window_start={_WINDOW_TRACKING_STATE['window_start_ts']:.0f} "
+            f"age={state_age_seconds:.0f}s"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"[WINDOW-TRACKING-PERSIST] Failed to load window state: {e}")
+        return False
 
 
 def _window_bucket_start(current_ts: float) -> float:
@@ -211,7 +313,7 @@ class KalshiCrypto15mRiskEnvelope:
     max_total_notional_usd: float
     
     # Max concurrent trades (from profile agent_defaults)
-    max_concurrent_trades: int
+    # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
     
     # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ───────────────────────────────
     # Each asset has its own notional cap as percentage of capital
@@ -476,23 +578,19 @@ class KalshiCrypto15mRiskEnvelope:
         agent_id: str,
         order_notional_usd: float,
         current_ts: float,
-        custom_per_agent_limit_pct: Optional[float] = None,
-        custom_total_venue_limit_pct: Optional[float] = None,
         asset: Optional[str] = None,
     ) -> tuple[bool, str]:
         """Check if order would exceed window-based risk limits (HARD STOP).
         
-        CRITICAL FIX 2026-07-08: 
-        - Uses peak bankroll at window start for consistent 5% calculation
-        - Adds 3% per-asset window limit enforcement
+        CRITICAL FIX (2026-07-23): Removed percentage-based parameters.
+        This function now enforces ONLY absolute-dollar limits based on the fixed $1.00 exposure cap.
+        No percentage-based overrides are allowed to prevent drift above the fixed cap.
         
         Args:
             agent_id: Agent identifier (e.g., "BTC_15M", "ETH_15M")
             order_notional_usd: Notional value of order in USD
             current_ts: Current timestamp
-            custom_per_agent_limit_pct: Override per-agent limit (e.g., for exit orders)
-            custom_total_venue_limit_pct: Override total venue limit (e.g., for exit orders)
-            asset: Asset symbol (e.g., "BTC", "ETH") for per-asset limit check
+            asset: Asset symbol (e.g., "BTC", "ETH") for per-asset exposure tracking
             
         Returns:
             Tuple of (allowed, reason)
@@ -501,9 +599,11 @@ class KalshiCrypto15mRiskEnvelope:
         """
         # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
         assert self.live_bankroll_usd > 0, "Bankroll must be positive for window limit check"
+        # CRITICAL FIX (2026-07-23): Allow zero notional in check_window_limit for zero-fill orders
+        # Zero notional orders are valid (e.g., IOC orders that don't fill)
         # 2026-07-08: DISABLED percentage-based assertions - using fixed $1 exposure model
         # Percentage-based limits are obsolete; system uses MERID_FIXED_EXPOSURE_CAP_USD=$1.00
-        assert order_notional_usd > 0, "Order notional must be positive"
+        assert order_notional_usd >= 0, "Order notional must be non-negative"
         assert agent_id, "Agent ID must be provided"
         
         # CRITICAL (2026-07-06): Read cumulative exposure from module-level shared
@@ -529,7 +629,7 @@ class KalshiCrypto15mRiskEnvelope:
         # Global slot allocator is the single source of truth for $1.00 total cap enforcement
         import os
         fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-        total_venue_limit_usd = custom_total_venue_limit_pct if custom_total_venue_limit_pct else fixed_exposure_cap_usd
+        total_venue_limit_usd = fixed_exposure_cap_usd  # No percentage overrides allowed
         
         # Per-agent and per-asset limit checks are DISABLED
         # The global slot allocator (global_slot_allocator.py) enforces $1.00 total cap
@@ -567,17 +667,26 @@ class KalshiCrypto15mRiskEnvelope:
         asset: Optional[str] = None,
     ) -> None:
         """Record order execution in window tracking.
-        
+
         CRITICAL FIX 2026-07-08: Added asset parameter for per-asset exposure tracking.
-        
+        CRITICAL FIX (2026-07-23): Handle zero notional (zero-fill orders) gracefully.
+
         Args:
             agent_id: Agent identifier
             order_notional_usd: Notional value of executed order in USD
             asset: Asset symbol (e.g., "BTC", "ETH") for per-asset tracking
         """
+        # CRITICAL FIX (2026-07-23): Short-circuit on zero notional (zero-fill orders)
+        # Zero-fill orders are normal outcomes and should not trigger errors
+        if order_notional_usd <= 0:
+            logger.info(
+                "[WINDOW-RECORD] Skipping exposure record for zero-fill order: agent=%s asset=%s notional=$%.2f",
+                agent_id, asset or "N/A", order_notional_usd
+            )
+            return
+
         # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
         assert self.live_bankroll_usd > 0, "Bankroll must be positive for recording execution"
-        assert order_notional_usd > 0, "Order notional must be positive for recording"
         assert agent_id, "Agent ID must be provided for recording"
         
         # CRITICAL (2026-07-06): Write to module-level shared state so the
@@ -918,14 +1027,13 @@ def compute_kalshi_crypto_15m_risk_envelope(
     max_single_order_notional_usd = fixed_exposure_cap_usd
     max_total_notional_usd = fixed_exposure_cap_usd  # Total exposure cap = $1
     
-    max_concurrent_trades = agent_defaults.get('max_concurrent_trades', 8)  # FIXED: Default 8 to match YAML (2026-07-16 fix)
+    # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
     
     # 2026-07-08: DISABLED percentage-based venue caps - using fixed $1 exposure model
     logger.info(
         f"[RISK-ENVELOPE] Venue caps: "
         f"max_single_order=${max_single_order_notional_usd:.2f}, "
-        f"max_total=${max_total_notional_usd:.2f}, "
-        f"max_concurrent={max_concurrent_trades}"
+        f"max_total=${max_total_notional_usd:.2f}"
     )
     
     # ── Compute Per-Asset Caps ────────────────────────────────────────────────
@@ -1154,7 +1262,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         profile_capital_usd=profile_capital,
         max_single_order_notional_usd=max_single_order_notional_usd,
         max_total_notional_usd=max_total_notional_usd,
-        max_concurrent_trades=max_concurrent_trades,
+        # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
         asset_max_notional_usd=asset_max_notional_usd,
         asset_depth_thresholds=asset_depth_thresholds,
         agent_max_notional_usd=agent_max_notional_usd,
@@ -1190,21 +1298,21 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # CRITICAL FIX: 2026-07-10 - Removed profile_capital and sum_caps from snapshot
     # profile_capital is only used in validation mode, not production
     # sum_caps is no longer relevant since global allocator enforces $1.00 total cap
-    logger.info(
+    logger.debug(
         "[RISK-ENVELOPE-SNAPSHOT] "
         f"live_bankroll=${live_bankroll_usd:.2f} "
         f"effective_capital=${effective_capital:.2f} "
         f"venue_cap=${max_total_notional_usd:.2f}"
     )
-    logger.info(
+    logger.debug(
         f"[RISK-ENVELOPE-SNAPSHOT] CRITICAL: ${fixed_exposure_cap_usd:.2f} is the TOTAL exposure cap across ALL 5 assets (BTC+ETH+SOL+XRP+DOGE)"
     )
-    logger.info(
+    logger.debug(
         f"[RISK-ENVELOPE-SNAPSHOT] Per-asset upper bounds below are NOT individual caps - slot allocator enforces ${fixed_exposure_cap_usd:.2f} TOTAL"
     )
     for asset_symbol, cap in asset_max_notional_usd.items():
         # 2026-07-08: DISABLED percentage-based snapshot - using fixed $1 exposure model
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE-SNAPSHOT] {asset_symbol}: "
             f"upper_bound=${cap:.2f} (NOT a per-asset cap - total cap is ${fixed_exposure_cap_usd:.2f} across all assets)"
         )
@@ -1225,7 +1333,7 @@ def get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd: Optional[float] = Non
     Raises:
         RuntimeError: If bankroll service fails or returns invalid data
     """
-    logger.info("[RISK-ENVELOPE] get_kalshi_crypto_15m_risk_envelope() called")
+    logger.debug("[RISK-ENVELOPE] get_kalshi_crypto_15m_risk_envelope() called")
     
     # Use test bankroll if provided (for testing)
     if test_bankroll_usd is not None:

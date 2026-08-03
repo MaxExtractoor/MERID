@@ -94,6 +94,15 @@ def get_live_bankroll(*args, **kwargs):
 
 def get_live_bankroll_async(*args, **kwargs):
     return _lazy_import_kalshi_risk()[10](*args, **kwargs)
+
+# CRITICAL FIX (2026-07-17): Continuous position reconciliation
+from merid.event_venues.kalshi.continuous_reconciliation import (
+    ContinuousReconciler,
+    PositionMismatch,
+    ReconciliationAction,
+    get_continuous_reconciler,
+)
+
 # LEGACY: Old bankroll service moved to legacy/
 # Use bankroll_service_v2 instead
 # from merid.event_venues.kalshi.legacy.bankroll_service import ...

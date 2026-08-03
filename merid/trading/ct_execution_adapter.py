@@ -119,13 +119,20 @@ class CTExecutionAdapter:
         take_profit_r_multiple = None
         stop_loss_price_cents = None
         
+        # CRITICAL FIX (2026-07-31): Side-aware TP/SL calculation for binary options
+        # YES contracts: TP above entry, SL below entry (long probability)
+        # NO contracts: TP below entry, SL above entry (short probability)
+        # Previous bug: treated both sides identically, causing NO contracts to have inverted TP/SL
         if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
             try:
                 from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
                 engine = DynamicTakeProfitEngine()
                 
-                # Default SL: 5 cents below entry (conservative)
-                stop_loss_price_cents = max(1, price_cents - 5)
+                # Default SL: side-aware 5 cent offset
+                if side == "yes":
+                    stop_loss_price_cents = max(1, price_cents - 5)  # YES: SL below entry
+                else:
+                    stop_loss_price_cents = min(99, price_cents + 5)  # NO: SL above entry
                 
                 # Compute dynamic TP with default confidence
                 tp_plan = engine.compute_tp(
@@ -137,14 +144,17 @@ class CTExecutionAdapter:
                 
                 take_profit_r_multiple = tp_plan.tp_r_multiple
                 logger.info(
-                    "[CT-ADAPTER-TP] Computed default TP for %s: R=%.2f",
-                    ticker, tp_plan.tp_r_multiple
+                    "[CT-ADAPTER-TP] Computed default TP for %s: R=%.2f side=%s SL=%dc",
+                    ticker, tp_plan.tp_r_multiple, side, stop_loss_price_cents
                 )
             except Exception as tp_exc:
                 logger.warning("[CT-ADAPTER-TP] Failed to compute default TP: %s", tp_exc)
-                # Fallback to 1R
+                # Fallback to 1R (side-aware)
                 take_profit_r_multiple = 1.0
-                stop_loss_price_cents = max(1, price_cents - 5)
+                if side == "yes":
+                    stop_loss_price_cents = max(1, price_cents - 5)  # YES: SL below entry
+                else:
+                    stop_loss_price_cents = min(99, price_cents + 5)  # NO: SL above entry
 
         # Build canonical OrderIntent
         intent = OrderIntent(
@@ -167,6 +177,10 @@ class CTExecutionAdapter:
             take_profit_price_cents=take_profit_price_cents,
             take_profit_r_multiple=take_profit_r_multiple,
             stop_loss_price_cents=stop_loss_price_cents,
+            # 2026-07-25: Dual-side p_hat fields for edge-aware gate compatibility
+            # CT adapter doesn't have model probability, so set None to fall back to legacy gate
+            p_hat_yes_cents=None,
+            p_hat_no_cents=None,
         )
         return intent
 

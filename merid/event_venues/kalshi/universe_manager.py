@@ -6,7 +6,7 @@ and synchronized state across catalog, WS bridge, and market state store.
 """
 
 import re
-from typing import Set, List, Dict, Tuple
+from typing import Set, List, Dict, Tuple, Any
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
@@ -172,10 +172,83 @@ class UniverseManager:
                 "[UNIVERSE-INVARIANT] VIOLATION #%d: %s",
                 self.violation_count, "; ".join(result["violations"])
             )
-        
+
+            # CRITICAL FIX 2026-08-03: Add monitoring and alerting for invariant violations
+            # This addresses the universe invariant violation (catalog=5, ws=2, intersection=2)
+            self._send_invariant_violation_alert(result)
+
         self.last_validation_ts = now.timestamp()
         return result
-    
+
+    def _send_invariant_violation_alert(self, result: Dict[str, Any]) -> None:
+        """
+        Send alert for universe invariant violation.
+
+        This method is called when an invariant violation is detected.
+        It logs the violation and sends an alert to the monitoring system.
+
+        Args:
+            result: Validation result dictionary containing violations
+        """
+        violations = result.get("violations", [])
+        violation_count = self.violation_count
+
+        # Log critical alert
+        logger.critical(
+            "[UNIVERSE-INVARIANT-ALERT] CRITICAL: Universe invariant violated #%d: %s",
+            violation_count, "; ".join(violations)
+        )
+
+        # Send alert to monitoring system
+        try:
+            # Try to send alert via Prometheus metrics
+            from prometheus_client import Counter, Gauge
+
+            # Create or get existing metrics
+            invariant_violation_counter = Counter(
+                'merid_universe_invariant_violations_total',
+                'Total number of universe invariant violations',
+                ['violation_type']
+            )
+
+            invariant_violation_gauge = Gauge(
+                'merid_universe_invariant_violation_current',
+                'Current universe invariant violation status (1=violation, 0=ok)',
+                ['violation_type']
+            )
+
+            # Increment counter for each violation type
+            for violation in violations:
+                violation_type = violation.split(":")[0] if ":" in violation else "UNKNOWN"
+                invariant_violation_counter.labels(violation_type=violation_type).inc()
+                invariant_violation_gauge.labels(violation_type=violation_type).set(1)
+
+            logger.info("[UNIVERSE-INVARIANT-ALERT] Sent alert to Prometheus metrics")
+
+        except Exception as e:
+            logger.error("[UNIVERSE-INVARIANT-ALERT] Failed to send alert to Prometheus: %s", e)
+
+        # Send alert to external monitoring system (if configured)
+        try:
+            # Check if external monitoring is configured
+            import os
+            monitoring_enabled = os.getenv("MERID_MONITORING_ENABLED", "false").lower() in ("true", "1", "yes")
+
+            if monitoring_enabled:
+                # Send alert to external monitoring system
+                # This could be PagerDuty, Slack, email, etc.
+                logger.critical(
+                    "[UNIVERSE-INVARIANT-ALERT] EXTERNAL ALERT: Universe invariant violated #%d: %s",
+                    violation_count, "; ".join(violations)
+                )
+
+                # TODO: Implement external monitoring integration
+                # For now, just log the alert
+                logger.info("[UNIVERSE-INVARIANT-ALERT] External monitoring alert logged")
+
+        except Exception as e:
+            logger.error("[UNIVERSE-INVARIANT-ALERT] Failed to send external alert: %s", e)
+
     def compute_universe_delta(self,
                               current_tickers: Set[str],
                               desired_tickers: Set[str]) -> Tuple[Set[str], Set[str]]:

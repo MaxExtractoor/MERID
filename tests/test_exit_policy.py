@@ -47,12 +47,13 @@ class TestExitPolicyEngine:
         engine = ExitPolicyEngine(config)
         
         # Entry at 50 cents, current at 90 cents (80% profit) - CRITICAL FIX 2026-07-16: Updated for new TP threshold
+        # CRITICAL FIX 2026-07-30: Updated minutes_held from 3.0 to 6.0 to meet new min_hold_minutes=5.0
         signal = engine.evaluate_exit(
             entry_price_cents=50,
             current_price_cents=90,
             edge_pct=0.05,
             confidence=0.8,
-            minutes_held=3.0,
+            minutes_held=6.0,  # Above min_hold_minutes (5.0)
             side="yes",
         )
         
@@ -67,12 +68,13 @@ class TestExitPolicyEngine:
         engine = ExitPolicyEngine(config)
         
         # Entry at 50 cents, current at 10 cents (80% profit for NO) - CRITICAL FIX 2026-07-16: Updated for new TP threshold
+        # CRITICAL FIX 2026-07-30: Updated minutes_held from 3.0 to 6.0 to meet new min_hold_minutes=5.0
         signal = engine.evaluate_exit(
             entry_price_cents=50,
             current_price_cents=10,
             edge_pct=0.05,
             confidence=0.8,
-            minutes_held=3.0,
+            minutes_held=6.0,  # Above min_hold_minutes (5.0)
             side="no",
         )
         
@@ -84,12 +86,13 @@ class TestExitPolicyEngine:
         engine = ExitPolicyEngine()
         
         # Profitable but held for less than minimum time - CRITICAL FIX 2026-07-16: Updated for new TP threshold
+        # CRITICAL FIX 2026-07-30: Updated comment from 2.0 to 5.0 min threshold
         signal = engine.evaluate_exit(
             entry_price_cents=50,
             current_price_cents=90,
             edge_pct=0.05,
             confidence=0.8,
-            minutes_held=0.5,  # Below 2.0 min threshold
+            minutes_held=0.5,  # Below 5.0 min threshold
             side="yes",
         )
         
@@ -218,12 +221,13 @@ class TestExitPolicyAllAssets:
         engine = ExitPolicyEngine(config)
         
         # Entry at 50 cents, current at 90 cents (80% profit) - CRITICAL FIX 2026-07-16: Updated for new TP threshold
+        # CRITICAL FIX 2026-07-30: Updated minutes_held from 3.0 to 6.0 to meet new min_hold_minutes=5.0
         signal = engine.evaluate_exit(
             entry_price_cents=50,
             current_price_cents=90,
             edge_pct=0.05,
             confidence=0.8,
-            minutes_held=3.0,
+            minutes_held=6.0,  # Above min_hold_minutes (5.0)
             side="yes",
         )
         
@@ -258,12 +262,13 @@ class TestExitPolicyBothSides:
         engine = ExitPolicyEngine(config)
         
         # YES: Entry 50c, current 90c = 80% profit - CRITICAL FIX 2026-07-16: Updated for new TP threshold
+        # CRITICAL FIX 2026-07-30: Updated minutes_held from 3.0 to 6.0 to meet new min_hold_minutes=5.0
         signal = engine.evaluate_exit(
             entry_price_cents=50,
             current_price_cents=90,
             edge_pct=0.05,
             confidence=0.8,
-            minutes_held=3.0,
+            minutes_held=6.0,  # Above min_hold_minutes (5.0)
             side="yes",
         )
         
@@ -276,12 +281,13 @@ class TestExitPolicyBothSides:
         engine = ExitPolicyEngine(config)
         
         # NO: Entry 50c, current 10c = 80% profit (price moved down) - CRITICAL FIX 2026-07-16: Updated for new TP threshold
+        # CRITICAL FIX 2026-07-30: Updated minutes_held from 3.0 to 6.0 to meet new min_hold_minutes=5.0
         signal = engine.evaluate_exit(
             entry_price_cents=50,
             current_price_cents=10,
             edge_pct=0.05,
             confidence=0.8,
-            minutes_held=3.0,
+            minutes_held=6.0,  # Above min_hold_minutes (5.0)
             side="no",
         )
         

@@ -96,9 +96,10 @@ class TestExitPrecedence:
         with open(position_monitor_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Verify EXTREME_PROFIT is checked first (highest priority)
-        assert "EXTREME-PROFIT" in content, \
-            "EXTREME_PROFIT should be checked in position_monitor"
+        # Verify AUTO_EXIT_99C is checked first (highest priority after RISK)
+        # 2026-08-01: EXTREME_PROFIT was consolidated to AUTO_EXIT_99C
+        assert "AUTO_EXIT_99C" in content or "auto_exit_99c" in content, \
+            "AUTO_EXIT_99C should be checked in position_monitor"
         
         # Verify RATCHET is checked
         assert "RATCHET" in content, \
@@ -117,11 +118,12 @@ class TestExitPrecedence:
         
         # Verify RATCHET-99C-MANDATORY is not present (consolidated)
         assert "RATCHET-99C-MANDATORY" not in content, \
-            "RATCHET-99C-MANDATORY should not be present (consolidated to position-level extreme profit)"
+            "RATCHET-99C-MANDATORY should not be present (consolidated to position-level auto exit)"
         
-        # Verify position-level extreme profit check is used
-        assert "should_trigger_extreme_profit" in content, \
-            "should_trigger_extreme_profit should be used for 99c exit"
+        # Verify position-level auto exit check is used
+        # 2026-08-01: should_trigger_extreme_profit was consolidated to should_trigger_auto_exit_99c
+        assert "should_trigger_auto_exit_99c" in content, \
+            "should_trigger_auto_exit_99c should be used for 99c exit"
 
 
 if __name__ == "__main__":

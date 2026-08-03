@@ -1505,77 +1505,69 @@ class KalshiMarketCatalog:
         # This is critical for MD health reporting (minutes_to_expiry calculation)
         logger.info("[BOOT-TRACE] Catalog → MarketStateStore async feed starting (expiry fields for SLA)")
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-        # CRITICAL FIX (2026-08-02): Skip catalog feed on first refresh to prevent deadlock
-        # The catalog refresh thread cannot safely call apply_rest_market during first refresh
-        # State store will be populated by WS bridge and subsequent catalog refreshes
-        if not self._first_refresh_completed.is_set():
-            logger.info("[CATALOG-FEED] Skipping feed loop on first refresh to prevent deadlock - state store will be populated by WS bridge")
-            feed_count = 0
-            missing_expiry_count = 0
+        # CRITICAL FIX (2026-08-02): Use injected state store if available, otherwise get singleton
+        # This prevents race condition when catalog refresh thread calls get_kalshi_market_state_store()
+        # from a different thread than where it was initialized
+        if hasattr(self, '_state_store') and self._state_store is not None:
+            store = self._state_store
+            logger.info("[CATALOG-FEED] Using injected state store to prevent thread race")
         else:
-            # CRITICAL FIX (2026-08-02): Use injected state store if available, otherwise get singleton
-            # This prevents race condition when catalog refresh thread calls get_kalshi_market_state_store()
-            # from a different thread than where it was initialized
-            if hasattr(self, '_state_store') and self._state_store is not None:
-                store = self._state_store
-                logger.info("[CATALOG-FEED] Using injected state store to prevent thread race")
-            else:
-                store = get_kalshi_market_state_store()
-                logger.info("[CATALOG-FEED] Using singleton state store (no injection)")
-            
-            # Feed expiry data synchronously to avoid lock hang
-            # Only populate REST-owned fields (expiry, volume, OI, strikes)
-            # WS-owned fields (bid/ask) are handled by WS bridge
-            feed_count = 0
-            missing_expiry_count = 0
-            logger.info(f"[CATALOG-FEED] Starting feed loop for {len(enriched)} enriched markets")
-            
-            # CRITICAL DIAGNOSTIC: Log first 5 tickers to verify time window filtering
-            sample_tickers = [cm.market.market_id for cm in enriched[:5]]
-            logger.info(
-                f"[CATALOG-FEED] Sample tickers being fed to state store: {sample_tickers}"
-            )
-            
-            for idx, cm in enumerate(enriched):
-                ticker = cm.market.market_id
-                logger.info(f"[CATALOG-FEED] Processing market {idx+1}/{len(enriched)}: ticker={ticker} asset={cm.asset}")
-                try:
-                    # EventMarket uses end_date, not close_time
-                    expiry_dt = cm.market.end_date
-                    if expiry_dt is None:
-                        logger.error(
-                            f"[CATALOG-FEED] MISSING_EXPIRY_FOR_15M_MARKET: ticker={ticker} "
-                            f"asset={cm.asset} has no end_date - cannot compute seconds_to_expiry"
-                        )
-                        missing_expiry_count += 1
-                        continue
-                    
-                    market_data = {
-                        "ticker": cm.market.market_id,
-                        "expiration_time": expiry_dt.isoformat(),
-                        "expected_expiration_time": expiry_dt.isoformat(),
-                        "latest_expiration_time": expiry_dt.isoformat(),
-                        "volume_24h": int(cm.market.volume) if cm.market.volume else 0,
-                        "open_interest": int(cm.market.open_interest) if cm.market.open_interest else 0,
-                        "notional_value": 0,  # Not available in EventMarket
-                        "underlying": cm.asset,
-                        "strike_price": cm.strike_price,
+            store = get_kalshi_market_state_store()
+            logger.info("[CATALOG-FEED] Using singleton state store (no injection)")
+        
+        # Feed expiry data synchronously to avoid lock hang
+        # Only populate REST-owned fields (expiry, volume, OI, strikes)
+        # WS-owned fields (bid/ask) are handled by WS bridge
+        feed_count = 0
+        missing_expiry_count = 0
+        logger.info(f"[CATALOG-FEED] Starting feed loop for {len(enriched)} enriched markets")
+        
+        # CRITICAL DIAGNOSTIC: Log first 5 tickers to verify time window filtering
+        sample_tickers = [cm.market.market_id for cm in enriched[:5]]
+        logger.info(
+            f"[CATALOG-FEED] Sample tickers being fed to state store: {sample_tickers}"
+        )
+        
+        for idx, cm in enumerate(enriched):
+            ticker = cm.market.market_id
+            logger.info(f"[CATALOG-FEED] Processing market {idx+1}/{len(enriched)}: ticker={ticker} asset={cm.asset}")
+            try:
+                # EventMarket uses end_date, not close_time
+                expiry_dt = cm.market.end_date
+                if expiry_dt is None:
+                    logger.error(
+                        f"[CATALOG-FEED] MISSING_EXPIRY_FOR_15M_MARKET: ticker={ticker} "
+                        f"asset={cm.asset} has no end_date - cannot compute seconds_to_expiry"
+                    )
+                    missing_expiry_count += 1
+                    continue
+                
+                market_data = {
+                    "ticker": cm.market.market_id,
+                    "expiration_time": expiry_dt.isoformat(),
+                    "expected_expiration_time": expiry_dt.isoformat(),
+                    "latest_expiration_time": expiry_dt.isoformat(),
+                    "volume_24h": int(cm.market.volume) if cm.market.volume else 0,
+                    "open_interest": int(cm.market.open_interest) if cm.market.open_interest else 0,
+                    "notional_value": 0,  # Not available in EventMarket
+                    "underlying": cm.asset,
+                    "strike_price": cm.strike_price,
                         "floor_strike": cm.floor_strike,
                         "cap_strike": cm.cap_strike,
                         "status": "open" if cm.market.active else "closed",
                     }
                     # Apply REST data to state store (async-safe)
-                    logger.info(f"[CATALOG-FEED] About to call apply_rest_market for ticker={ticker}")
-                    store.apply_rest_market(market_data)
-                    feed_count += 1
-                    logger.info(f"[CATALOG-FEED] Successfully fed ticker={ticker} (count={feed_count})")
-                except Exception as e:
-                    logger.error(
-                        f"[CATALOG-FEED] Failed to feed market {ticker}: {e}",
-                        exc_info=True
-                    )
-                    # Continue to next ticker instead of breaking
-                    continue
+                logger.info(f"[CATALOG-FEED] About to call apply_rest_market for ticker={ticker}")
+                store.apply_rest_market(market_data)
+                feed_count += 1
+                logger.info(f"[CATALOG-FEED] Successfully fed ticker={ticker} (count={feed_count})")
+            except Exception as e:
+                logger.error(
+                    f"[CATALOG-FEED] Failed to feed market {ticker}: {e}",
+                    exc_info=True
+                )
+                # Continue to next ticker instead of breaking
+                continue
         
         logger.info(f"[BOOT-TRACE] Catalog → MarketStateStore async feed completed: {feed_count}/{len(enriched)} markets fed successfully")
 

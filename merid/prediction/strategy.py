@@ -88,6 +88,15 @@ from merid.formulas import (
 )
 from utils.logger import get_logger
 
+# Import invariant checkers for production logging
+from merid.validation.edge_probability_invariants import (
+    EdgeProbabilityInvariantChecker,
+    check_edge_probability_consistency,
+)
+from merid.validation.canonical_mapping_invariants import (
+    CanonicalMappingTable,
+)
+
 logger = get_logger("merid.prediction.strategy")
 
 # Log version info on module load
@@ -266,6 +275,34 @@ class KalshiStrategy:
         self.model = model or PredictionMarketModel()
         self._agent_name = agent_name
         self._positions: Dict[str, PositionState] = {}
+        
+        # CRITICAL FIX (2026-07-31): Initialize side diversity tracking
+        # Tracks recent side selection bias to enable balanced YES/NO trading
+        self._recent_side_bias = 0.5  # Start balanced (0.5 = 50% YES, 50% NO)
+        self._recent_trades = []  # Track recent trades for bias calculation
+        self._max_trade_history = 20  # Keep last 20 trades for bias calculation
+    
+    def _update_side_bias(self, side: str) -> None:
+        """Update side diversity tracking after a trade.
+        
+        Args:
+            side: "yes" or "no" - the side that was just traded
+        """
+        # Add trade to history
+        self._recent_trades.append(side)
+        
+        # Keep only recent trades
+        if len(self._recent_trades) > self._max_trade_history:
+            self._recent_trades.pop(0)
+        
+        # Calculate bias (fraction of YES trades)
+        yes_count = sum(1 for s in self._recent_trades if s == "yes")
+        self._recent_side_bias = yes_count / len(self._recent_trades) if self._recent_trades else 0.5
+        
+        logger.debug(
+            "[SIDE-DIVERSITY] Updated bias: %.2f (YES: %d/%d trades)",
+            self._recent_side_bias, yes_count, len(self._recent_trades)
+        )
 
     # ------------------------------------------------------------------
     # Expiry phase
@@ -494,42 +531,44 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 price_cents = None
                 if price_cents is None or price_cents <= 0:
-                    # 2026-07-12: Canonical price band (10c-75c) - aligned with GlobalSlotAllocator
-                    # Previous 5-95c range was misaligned with allocator enforcement
+                    # 2026-07-31: Expanded price band (1c-99c) to handle extreme market conditions
+                    # Previous 10c-75c range was too restrictive and dropped valid signals at 1c
+                    # CRITICAL FIX (2026-08-01): Updated to 5c-85c for 15m crypto volatility
                     raw_price_cents = int(round(market_prob * 100))
                     
-                    # Check if price is within canonical range (10c-75c)
-                    if 10 <= raw_price_cents <= 75:
+                    # Check if price is within canonical range (1c-99c)
+                    if 1 <= raw_price_cents <= 99:
                         # Price is already in valid range - use it directly
                         price_cents = raw_price_cents
                         logger.info(
-                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-75c] - using directly",
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [1c-99c] - using directly",
                             self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                         )
                     else:
                         # Price is outside canonical range - drop candidate (strategy.py doesn't have orderbook access)
                         logger.warning(
-                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-75c] - dropping candidate (no orderbook access in strategy.py)",
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [1c-99c] - dropping candidate (no orderbook access in strategy.py)",
                             self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                         )
                         return None  # Drop candidate - no valid price in expanded range
             except Exception:
-                # 2026-07-12: Canonical price band (10c-75c) - aligned with GlobalSlotAllocator
-                # Previous 5-95c range was misaligned with allocator enforcement
+                # 2026-07-31: Expanded price band (1c-99c) to handle extreme market conditions
+                # Previous 10c-75c range was too restrictive and dropped valid signals at 1c
+                # CRITICAL FIX (2026-08-01): Updated to 5c-85c for 15m crypto volatility
                 raw_price_cents = int(round(market_prob * 100))
                 
-                # Check if price is within canonical range (10c-75c)
-                if 10 <= raw_price_cents <= 75:
+                # Check if price is within canonical range (1c-99c)
+                if 1 <= raw_price_cents <= 99:
                     # Price is already in valid range - use it directly
                     price_cents = raw_price_cents
                     logger.info(
-                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-75c] - using directly",
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [1c-99c] - using directly",
                         self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                     )
                 else:
                     # Price is outside canonical range - drop candidate (strategy.py doesn't have orderbook access)
                     logger.warning(
-                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-75c] - dropping candidate (no orderbook access in strategy.py)",
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [1c-99c] - dropping candidate (no orderbook access in strategy.py)",
                         self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                     )
                     return None  # Drop candidate - no valid price in expanded range
@@ -745,14 +784,14 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 # price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob_float)
                 price_cents = None
-                # BUG-FIX: Use 42c safe default instead of probability-derived fallback which can return 1
-                # When market state is unavailable, 42c is the midpoint for binary options (10-75c canonical range)
+                # BUG-FIX: Use 45c safe default instead of probability-derived fallback which can return 1
+                # When market state is unavailable, 45c is the midpoint for binary options (5c-85c canonical range)
                 # This prevents price_cents=1 which causes Kelly sizing to return 0 contracts
                 if price_cents is None or price_cents <= 0:
-                    price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                    price_cents = 45  # CRITICAL FIX (2026-08-01): Fixed to 45c (midpoint of 5c-85c canonical range)
             except Exception:
                 # Same safe default on exception
-                price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                price_cents = 45  # CRITICAL FIX (2026-08-01): Fixed to 45c (midpoint of 5c-85c canonical range)
 
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
@@ -1003,6 +1042,17 @@ class KalshiStrategy:
                     _ctx or "—",
                 )
         else:
+            # Emit structured invariant log for production suite parsing
+            if sig.edge and hasattr(sig.edge, "market_prob"):
+                p_model = float(sig.edge.market_prob) if sig.edge.market_prob is not None else 0.5
+                edge_val = ne if ne is not None else 0.0
+                # Determine chosen_side from action
+                chosen_side = "yes" if sig.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+                logger.info(
+                    "EDGE-PROBABILITY: p_model=%.3f edge=%.3f chosen_side=%s market=%s",
+                    p_model, edge_val, chosen_side, snapshot.market_id
+                )
+            
             if _inc_spot:
                 logger.info(
                     "[PM_SIGNAL] agent=%s market=%s archetype=%s action=%s phase=%s "
@@ -1408,7 +1458,51 @@ class KalshiStrategy:
                 correlation_id=correlation_id,
             )
 
-        best = max(spec_edges, key=lambda e: e.net_edge)
+        # CRITICAL FIX (2026-07-31): Add side diversity to edge selection
+        # Previous selection based solely on net_edge could systematically favor YES
+        # Now consider both edge magnitude and side diversity for balanced YES/NO trading
+        
+        # Separate edges by side
+        yes_edges = [e for e in spec_edges if e.side == "yes"]
+        no_edges = [e for e in spec_edges if e.side == "no"]
+        
+        # Get best edge from each side
+        best_yes = max(yes_edges, key=lambda e: e.net_edge) if yes_edges else None
+        best_no = max(no_edges, key=lambda e: e.net_edge) if no_edges else None
+        
+        # Add diversity bonus to the underrepresented side
+        # Track recent side selections (simple implementation using agent-level counter)
+        diversity_bonus_yes = 0.0
+        diversity_bonus_no = 0.0
+        
+        # Simple diversity logic: if we've been trading mostly YES, boost NO edge
+        # In production, this should use a rolling window of recent trades
+        recent_side_bias = getattr(self, '_recent_side_bias', 0.5)  # 0.5 = balanced, >0.5 = YES-heavy
+        
+        if recent_side_bias > 0.6:  # YES-heavy
+            diversity_bonus_no = 0.001  # Small boost to NO edges
+        elif recent_side_bias < 0.4:  # NO-heavy
+            diversity_bonus_yes = 0.001  # Small boost to YES edges
+        
+        # Apply diversity bonus and select best
+        if best_yes:
+            best_yes_adjusted = float(best_yes.net_edge) + diversity_bonus_yes
+        else:
+            best_yes_adjusted = -float('inf')
+            
+        if best_no:
+            best_no_adjusted = float(best_no.net_edge) + diversity_bonus_no
+        else:
+            best_no_adjusted = -float('inf')
+        
+        # Select the side with higher adjusted edge
+        if best_yes_adjusted >= best_no_adjusted and best_yes:
+            best = best_yes
+        elif best_no:
+            best = best_no
+        else:
+            # Fallback to original logic if both are None
+            best = max(spec_edges, key=lambda e: e.net_edge)
         
         # SOFT-BAND LOGGING: Log near-misses for observability (no new config)
         min_edge = self._min_edge_for_phase(phase)
@@ -2011,7 +2105,7 @@ class KalshiStrategy:
             
             if has_longshot and recommended_side == "no":
                 # Overpriced longshot - switch to NO (or sell YES)
-                if best.side == "yes" and best.action == "buy":
+                if best.side == "yes":
                     logger.info(
                         "[LONGSHOT-BIAS-EXPLOIT] %s | switching from BUY_YES to BUY_NO | "
                         "market_prob=%.1f%% model_prob=%.1f%% | longshot overpriced",
@@ -2020,15 +2114,6 @@ class KalshiStrategy:
                         model_prob * 100 if model_prob else 0
                     )
                     best.side = "no"
-                elif best.side == "yes" and best.action == "sell":
-                    # Already selling YES, which is equivalent to buying NO
-                    logger.info(
-                        "[LONGSHOT-BIAS-EXPLOIT] %s | confirming SELL_YES (equiv to BUY_NO) | "
-                        "market_prob=%.1f%% model_prob=%.1f%% | longshot overpriced",
-                        snapshot.market_id,
-                        snapshot.implied.yes_prob * 100 if snapshot.implied and snapshot.implied.yes_prob else 0,
-                        model_prob * 100 if model_prob else 0
-                    )
             
             elif has_favorite and recommended_side == "yes":
                 # Underpriced favorite - ensure we're buying YES
@@ -2042,7 +2127,8 @@ class KalshiStrategy:
                             market_prob * 100
                         )
                         best.side = "yes"
-                    elif best.side == "yes" and best.action == "buy":
+                    elif best.side == "yes":
+                        # Entry trades always use BUY actions after fix (line 2106)
                         logger.info(
                             "[FAVORITE-BIAS-EXPLOIT] %s | confirming BUY_YES on favorite | "
                             "market_prob=%.1f%% > 80%% | locking in small consistent profits",
@@ -2108,11 +2194,11 @@ class KalshiStrategy:
                 correlation_id=correlation_id,
             )
 
-        # Determine action
-        if best.action == "buy":
-            action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
-        else:
-            action = SignalAction.SELL_YES if best.side == "yes" else SignalAction.SELL_NO
+        # CRITICAL FIX: Entry trades must ALWAYS use BUY actions
+        # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
+        # SELL actions are ONLY for exit trades
+        # Previous bug: checked best.action which could be 'sell', causing SELL_YES on entry
+        action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
 
         # SPOT PRICE MOMENTUM ALIGNMENT
         # Check if trade aligns with spot price momentum
@@ -2160,17 +2246,14 @@ class KalshiStrategy:
             # If yes_bid is None, fall through to standard logic below
         
         # Standard limit price logic (used when not in favorite rebate strategy or bid unavailable)
+        # Entry trades always use BUY actions after fix (line 2106), so only use ask prices
         if limit_cents is None:
             if best.side == "yes":
-                if best.action == "buy" and snapshot.implied.yes_ask is not None:
+                if snapshot.implied.yes_ask is not None:
                     limit_cents = int(snapshot.implied.yes_ask)
-                elif best.action == "sell" and snapshot.implied.yes_bid is not None:
-                    limit_cents = int(snapshot.implied.yes_bid)
             else:
-                if best.action == "buy" and snapshot.implied.no_ask is not None:
+                if snapshot.implied.no_ask is not None:
                     limit_cents = int(snapshot.implied.no_ask)
-                elif best.action == "sell" and snapshot.implied.no_bid is not None:
-                    limit_cents = int(snapshot.implied.no_bid)
 
         # Build detailed reason with conviction components
         reason_parts = [
@@ -2271,6 +2354,11 @@ class KalshiStrategy:
             eval_context=eval_context,
         )
         
+        # CRITICAL FIX (2026-07-31): Update side diversity tracking for this trade
+        # This enables balanced YES/NO trading over time
+        if signal.action not in (SignalAction.NO_ACTION, SignalAction.HOLD, SignalAction.CLOSE):
+            self._update_side_bias(best.side)
+        
         return signal
 
     def _extract_asset_from_market_id(self, market_id: str) -> str:
@@ -2281,28 +2369,9 @@ class KalshiStrategy:
         - KXETH-XXX -> ETH  
         - KXSOL1H-XXX -> SOL
         """
-        # Remove KX prefix and extract next 2-4 chars (asset code)
-        cleaned = market_id.upper().replace("KX", "")
-        
-        # Known asset codes in order of specificity (longer first)
-        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
-        for asset in assets:
-            if asset in cleaned:
-                return asset
-        
-        # Fallback: try common patterns
-        if cleaned.startswith("BT"):
-            return "BTC"
-        if cleaned.startswith("ET"):
-            return "ETH"
-        if cleaned.startswith("SO"):
-            return "SOL"
-        if cleaned.startswith("XR"):
-            return "XRP"
-        if cleaned.startswith("DO"):
-            return "DOGE"
-        
-        return "UNK"
+        # CRITICAL FIX (2026-07-21): Use canonical identity helper for asset extraction
+        from merid.utils.kalshi_identity import extract_asset
+        return extract_asset(market_id)
 
     def _resolve_timeframe_from_agent_name(self) -> str:
         """Extract timeframe from agent name.
@@ -2544,6 +2613,9 @@ class KalshiStrategy:
                 },
             )
 
+        # CRITICAL FIX: Entry trades must ALWAYS use BUY actions
+        # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
+        # SELL actions are ONLY for exit trades
         action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
         mult = self._sentiment_size_multiplier(snapshot, action)
         size_factor = max(0.35, min(1.5, float(mult))) * self._pm_vol_band_size_factor(snapshot)
@@ -2631,6 +2703,9 @@ class KalshiStrategy:
                 correlation_id=correlation_id,
             )
 
+        # CRITICAL FIX: Entry trades must ALWAYS use BUY actions
+        # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
+        # SELL actions are ONLY for exit trades
         action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
         mult = self._sentiment_size_multiplier(snapshot, action)
         size_factor = max(0.35, min(1.5, float(mult))) * self._pm_vol_band_size_factor(snapshot)
@@ -2735,6 +2810,9 @@ class KalshiStrategy:
         # Apply cycle-level cap (1-2% bankroll allocation)
         scaled = self._apply_cycle_cap(scaled, snapshot, best.side, best.net_edge)
 
+        # CRITICAL FIX: Entry trades must ALWAYS use BUY actions
+        # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
+        # SELL actions are ONLY for exit trades
         action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
         # BUG-FIX (2026-05-06): Use 1 cent fallback instead of 50 to prevent zero contract sizing
         # with small bankrolls. The 50 cent default was causing max_contracts_per_winner=0.

@@ -215,8 +215,8 @@ def test_portfolio_risk_agent_fixed_exposure():
 
 
 def test_max_entry_price_lowered():
-    """Test that max entry price is lowered to 50c for easier loss recovery."""
-    print("\n=== TEST 8: Max Entry Price Lowered ===")
+    """Test that max entry price is expanded to 75c for current market conditions (2026-07-12)."""
+    print("\n=== TEST 8: Max Entry Price Expanded to 75c ===")
     
     try:
         from merid.event_venues.kalshi.risk_parameters import (
@@ -224,17 +224,17 @@ def test_max_entry_price_lowered():
             MAX_OPEN_PRICE_CENTS
         )
         
-        # Check DEEP_OTM_EXPENSIVE_CENTS is 50c
-        assert DEEP_OTM_EXPENSIVE_CENTS == 50, \
-            f"Expected DEEP_OTM_EXPENSIVE_CENTS=50, got {DEEP_OTM_EXPENSIVE_CENTS}"
+        # Check DEEP_OTM_EXPENSIVE_CENTS is 75c (2026-07-12: expanded from 50c to 75c)
+        assert DEEP_OTM_EXPENSIVE_CENTS == 75, \
+            f"Expected DEEP_OTM_EXPENSIVE_CENTS=75, got {DEEP_OTM_EXPENSIVE_CENTS}"
         print(f"  DEEP_OTM_EXPENSIVE_CENTS: {DEEP_OTM_EXPENSIVE_CENTS}c - PASS")
         
-        # Check MAX_OPEN_PRICE_CENTS is 50c
-        assert MAX_OPEN_PRICE_CENTS == 50, \
-            f"Expected MAX_OPEN_PRICE_CENTS=50, got {MAX_OPEN_PRICE_CENTS}"
+        # Check MAX_OPEN_PRICE_CENTS is 75c (2026-07-12: expanded from 50c to 75c)
+        assert MAX_OPEN_PRICE_CENTS == 75, \
+            f"Expected MAX_OPEN_PRICE_CENTS=75, got {MAX_OPEN_PRICE_CENTS}"
         print(f"  MAX_OPEN_PRICE_CENTS: {MAX_OPEN_PRICE_CENTS}c - PASS")
         
-        print(f"  [PASS] Max entry price lowered to 50c")
+        print(f"  [PASS] Max entry price expanded to 75c")
         return True
         
     except Exception as e:

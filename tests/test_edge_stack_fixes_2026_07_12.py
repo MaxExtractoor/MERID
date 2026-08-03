@@ -146,42 +146,42 @@ class TestThresholdAlignment:
         """Test that centralized validate_edge function works correctly."""
         from merid.event_venues.kalshi.risk_parameters import validate_edge
         
-        # Test valid edge (meets edge_bands threshold of 0.5%)
-        is_valid, reason = validate_edge(0.02, "BTC")  # 2% > 0.5% threshold
+        # Test valid edge (meets edge_bands threshold of 2.5%)
+        is_valid, reason = validate_edge(0.03, "BTC")  # 3% > 2.5% threshold
         assert is_valid is True
         assert "meets edge_bands threshold" in reason.lower()
         
-        # Test edge exactly at threshold (0.5% should pass)
-        is_valid, reason = validate_edge(0.005, "BTC")  # 0.5% = threshold
+        # Test edge exactly at threshold (2.5% should pass)
+        is_valid, reason = validate_edge(0.025, "BTC")  # 2.5% = threshold
         assert is_valid is True
         assert "meets edge_bands threshold" in reason.lower()
         
         # Test invalid edge (below threshold)
-        is_valid, reason = validate_edge(0.004, "BTC")  # 0.4% < 0.5% threshold
+        is_valid, reason = validate_edge(0.024, "BTC")  # 2.4% < 2.5% threshold
         assert is_valid is False
         assert "below edge_bands threshold" in reason.lower()
         
         # Test contrarian signal (negative edge)
-        is_valid, reason = validate_edge(-0.02, "BTC")  # -2% meets threshold
+        is_valid, reason = validate_edge(-0.03, "BTC")  # -3% meets threshold
         assert is_valid is True
         assert "meets edge_bands threshold" in reason.lower()
     
     def test_loop_15m_uses_unified_edge_bands_threshold(self):
-        """Test that validate_edge uses unified edge_bands threshold (0.5%) for all assets."""
+        """Test that validate_edge uses unified edge_bands threshold (2.5%) for all assets."""
         from merid.event_venues.kalshi.risk_parameters import validate_edge
         
-        # Test that all assets use the same unified threshold (0.5%)
+        # Test that all assets use the same unified threshold (2.5%)
         assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
         
         for asset in assets:
-            # Edge at threshold (0.5%) should pass for all assets
-            is_valid, reason = validate_edge(0.005, asset)
-            assert is_valid is True, f"{asset} should accept 0.5% edge"
+            # Edge at threshold (2.5%) should pass for all assets
+            is_valid, reason = validate_edge(0.025, asset)
+            assert is_valid is True, f"{asset} should accept 2.5% edge"
             assert "meets edge_bands threshold" in reason.lower()
             
-            # Edge below threshold (0.4%) should fail for all assets
-            is_valid, reason = validate_edge(0.004, asset)
-            assert is_valid is False, f"{asset} should reject 0.4% edge"
+            # Edge below threshold (2.4%) should fail for all assets
+            is_valid, reason = validate_edge(0.024, asset)
+            assert is_valid is False, f"{asset} should reject 2.4% edge"
             assert "below edge_bands threshold" in reason.lower()
 
 
@@ -209,11 +209,12 @@ class TestConfidenceThresholdAlignment:
             MIN_SENTIMENT_CONFIDENCE
         )
         
-        # These constants should exist but are marked as DEPRECATED
-        # Their values may differ from profile (0.65) but should not be used in new code
-        assert CONFIDENCE_NO_TRADE == 0.60
-        assert CONFIDENCE_CAUTIOUS == 0.75
-        assert CONFIDENCE_CONFIDENT == 0.75
+        # These constants exist but are marked as DEPRECATED
+        # Their values differ from profile (0.65) and should not be used in new code
+        # Profile YAML confidence.min_confidence_threshold (0.65) is the single source of truth
+        assert CONFIDENCE_NO_TRADE == 0.60  # DEPRECATED - use profile.confidence_min_confidence_threshold (0.65)
+        assert CONFIDENCE_CAUTIOUS == 0.75  # DEPRECATED - use profile.confidence_min_confidence_threshold (0.65)
+        assert CONFIDENCE_CONFIDENT == 0.75  # DEPRECATED - use profile.confidence_min_confidence_threshold (0.65)
         assert KELLY_CONFIDENCE_FLOOR == 0.65
         assert MIN_SENTIMENT_CONFIDENCE == 0.70
     

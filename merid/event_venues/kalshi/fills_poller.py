@@ -743,23 +743,16 @@ class FillsPoller:
     def _get_client(self):
         """Get KalshiVenueClient if available."""
         try:
-            from merid.event_venues.kalshi.client import KalshiVenueClient
-            from merid.settings import settings
+            from merid.event_venues.kalshi.client import get_kalshi_client
             from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
             
-            # Check if credentials are configured
-            key_path = settings.KALSHI_PRIVATE_KEY_PATH
-            if key_path == "change_me":
-                key_path = None
-            
-            if not settings.KALSHI_API_KEY_ID or (not key_path and not settings.KALSHI_PRIVATE_KEY_PEM):
-                return None
-            
-            # FIX: Use singleton client to prevent garbage collection warning
-            # The singleton is properly managed by close_kalshi_client() during shutdown
+            # CRITICAL FIX: Always pass config to ensure correct credentials
+            # The singleton pattern ignores config if client already exists, BUT
+            # we need to ensure the singleton is created with the correct config
+            # from the start. By always passing get_kalshi_config(), we ensure
+            # that if the singleton doesn't exist yet, it's created with the
+            # correct environment-specific credentials (KALSHI_LIVE_* fallback to KALSHI_*).
             if not hasattr(self, '_client'):
-                from merid.event_venues.kalshi.client import get_kalshi_client
-                # Use unified config
                 config = get_kalshi_config()
                 self._client = get_kalshi_client(config)
 

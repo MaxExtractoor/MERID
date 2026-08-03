@@ -6,6 +6,8 @@ HTTP poller and private WebSocket ``fill`` channel.
 
 from __future__ import annotations
 
+import time
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Set
 
 from utils.logger import get_logger
@@ -16,7 +18,8 @@ if TYPE_CHECKING:
 logger = get_logger("merid.event_venues.kalshi.fill_bus")
 
 # Recent fill_ids already announced (dedupe HTTP + WS ingestion)
-_recent_order_filled_ids: Set[str] = set()
+# BUG FIX: Changed from set to OrderedDict to track insertion order for proper LRU eviction
+_recent_order_filled_ids: OrderedDict[str, float] = OrderedDict()
 _MAX_DEDUPE: int = 2000
 
 
@@ -24,14 +27,12 @@ def _remember(fill_id: str) -> bool:
     """Return True if this is the first announcement for fill_id in-process."""
     if fill_id in _recent_order_filled_ids:
         return False
-    _recent_order_filled_ids.add(fill_id)
+    _recent_order_filled_ids[fill_id] = time.time()
     if len(_recent_order_filled_ids) > _MAX_DEDUPE:
-        # Evict oldest half by dropping an arbitrary subset (set has no ordering)
+        # Evict oldest half by insertion order (OrderedDict maintains order)
         evict_count = len(_recent_order_filled_ids) // 2
-        it = iter(_recent_order_filled_ids)
-        to_remove = [next(it) for _ in range(evict_count)]
-        for fid in to_remove:
-            _recent_order_filled_ids.discard(fid)
+        for _ in range(evict_count):
+            _recent_order_filled_ids.popitem(last=False)
     return True
 
 

@@ -59,14 +59,19 @@ class RiskLimits:
     to ensure single source of truth across all risk components.
     """
     
-    # Bankroll-based limits (aligned with profile YAML)
-    max_cycle_risk_pct: float = 0.05  # 5% (was 0.25 - aligned with profile)
-    max_total_risk_pct: float = 0.15  # 15% (was 0.30 - aligned with profile)
-    daily_loss_pct: float = 0.20  # 20% (aligned with drawdown halt, was 0.05)
+    # Fixed exposure cap (SINGLE SOURCE OF TRUTH: global slot allocator $1 model)
+    # Mirrors MERID_FIXED_EXPOSURE_CAP_USD used by global_slot_allocator and risk envelope.
+    fixed_exposure_cap_usd: float = 1.00
+    
+    # Bankroll-based limits (DISABLED 2026-07-16: pct==0.0 defers to fixed $1 exposure cap)
+    # Percentage-based allocation contradicts the $1 global slot allocator model.
+    max_cycle_risk_pct: float = 0.0  # DISABLED - fixed $1 cap via global slot allocator
+    max_total_risk_pct: float = 0.0  # DISABLED - fixed $1 cap via global slot allocator
+    daily_loss_pct: float = 0.20  # 20% (loss guardrail, aligned with drawdown halt - NOT allocation)
     cluster_stop_pct: float = 0.025
     
-    # Category caps
-    category_crypto_max_notional_pct: float = 0.30
+    # Category caps (DISABLED 2026-07-16: pct==0.0 defers to fixed $1 exposure cap)
+    category_crypto_max_notional_pct: float = 0.0  # DISABLED - fixed $1 cap via global slot allocator
     category_crypto_min_cap_usd: float = 100.0
     
     # Correlated stack caps
@@ -80,16 +85,16 @@ class RiskLimits:
     per_asset_enabled: bool = False
     per_asset_min_cap_usd: float = 5.0
     
-    # Per-trade limits (aligned with profile YAML)
-    per_trade_max_notional_pct: float = 0.03  # 3% (increased from 2% for better trade buffer)
-    per_trade_max_contracts: int = 1  # CRITICAL FIX (2026-07-08): Reduced from 2 to 1 to enforce 3% risk limit (matches profile max_contracts=1)
+    # Per-trade limits (DISABLED 2026-07-16: pct==0.0 defers to fixed $1 exposure cap)
+    per_trade_max_notional_pct: float = 0.0  # DISABLED - fixed $1 cap via global slot allocator
+    per_trade_max_contracts: int = 1  # Matches slot model MAX_CONTRACTS_PER_ORDER=1
     
     # Drawdown limits (aligned with profile YAML)
     drawdown_halt_pct: float = 0.20  # 20% (was 0.10 - aligned with profile)
     drawdown_unwind_pct: float = 0.25  # 25% (was 0.15 - aligned with profile)
     
     # Rate limiting
-    rate_limit_max_trades_per_hour: int = 20
+    rate_limit_max_trades_per_hour: int = 30  # Aligned with profile (30/hour)
     rate_limit_min_time_between_trades: float = 60.0
     
     # Emergency controls
@@ -184,16 +189,23 @@ class UnifiedRiskManager:
             
             limits = RiskLimits()
             
-            # Bankroll limits
-            if 'bankroll' in config:
-                limits.max_cycle_risk_pct = config['bankroll'].get('max_cycle_risk_pct', 0.05)  # CRITICAL FIX: 5% - aligned with profile
-                limits.max_total_risk_pct = config['bankroll'].get('max_total_risk_pct', 0.15)  # CRITICAL FIX: 15% - aligned with profile (was 0.30)
-                limits.daily_loss_pct = config['bankroll'].get('daily_loss_pct', 0.20)  # CRITICAL FIX: 20% - aligned with drawdown halt (was 0.05)
-                limits.cluster_stop_pct = config['bankroll'].get('cluster_stop_pct', 0.025)  # CRITICAL FIX: 2.5% - aligned with profile (was 0.015)
+            # Fixed exposure cap (env override wins - same convention as global_slot_allocator)
+            import os
+            limits.fixed_exposure_cap_usd = float(
+                os.getenv('MERID_FIXED_EXPOSURE_CAP_USD',
+                          str(config.get('fixed_exposure_cap_usd', 1.00)))
+            )
             
-            # Category caps
+            # Bankroll limits (DISABLED defaults: 0.0 defers to fixed $1 exposure cap)
+            if 'bankroll' in config:
+                limits.max_cycle_risk_pct = config['bankroll'].get('max_cycle_risk_pct', 0.0)  # DISABLED - fixed $1 model
+                limits.max_total_risk_pct = config['bankroll'].get('max_total_risk_pct', 0.0)  # DISABLED - fixed $1 model
+                limits.daily_loss_pct = config['bankroll'].get('daily_loss_pct', 0.20)  # Loss guardrail (not allocation)
+                limits.cluster_stop_pct = config['bankroll'].get('cluster_stop_pct', 0.025)
+            
+            # Category caps (DISABLED defaults: 0.0 defers to fixed $1 exposure cap)
             if 'categories' in config and 'crypto' in config['categories']:
-                limits.category_crypto_max_notional_pct = config['categories']['crypto'].get('max_notional_pct', 0.30)
+                limits.category_crypto_max_notional_pct = config['categories']['crypto'].get('max_notional_pct', 0.0)
                 limits.category_crypto_min_cap_usd = config['categories']['crypto'].get('min_cap_usd', 100.0)
             
             # Correlated stack caps
@@ -206,10 +218,10 @@ class UnifiedRiskManager:
                 limits.per_asset_enabled = config['per_asset'].get('enabled', False)
                 limits.per_asset_min_cap_usd = config['per_asset'].get('min_cap_usd', 5.0)
             
-            # Per-trade limits
+            # Per-trade limits (DISABLED default: 0.0 defers to fixed $1 exposure cap)
             if 'per_trade' in config:
-                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.03)  # 3% - aligned with profile
-                limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 1)  # CRITICAL FIX (2026-07-08): Default 1 to enforce 3% risk limit
+                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.0)  # DISABLED - fixed $1 model
+                limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 1)  # Slot model: 1 contract per order
             
             # Drawdown limits
             if 'drawdown' in config:
@@ -261,20 +273,34 @@ class UnifiedRiskManager:
             # Log calibrated limits
             logger.info(
                 f"[UNIFIED_RISK] Calibrated from balance: ${self._bankroll_usd:.2f} | "
-                f"Cycle cap: ${self._get_cycle_cap_usd():.2f} ({self._limits.max_cycle_risk_pct*100:.0f}%) | "
-                f"Total cap: ${self._get_total_cap_usd():.2f} ({self._limits.max_total_risk_pct*100:.0f}%) | "
-                f"Correlated cap: ${self._get_correlated_cap_usd():.2f} ({self._limits.correlated_stack_max_notional_pct*100:.0f}%)"
+                f"Cycle cap: ${self._get_cycle_cap_usd():.2f} (fixed $1 model) | "
+                f"Total cap: ${self._get_total_cap_usd():.2f} (fixed $1 model) | "
+                f"Correlated cap: ${self._get_correlated_cap_usd():.2f} (fixed $1 model)"
             )
     
     def _get_cycle_cap_usd(self) -> float:
-        """Get cycle cap in USD."""
+        """Get cycle cap in USD.
+
+        2026-07-16: Percentage-based cycle cap DISABLED (pct==0.0).
+        The $1 global slot allocator is the single source of truth for exposure.
+        """
+        if self._limits.max_cycle_risk_pct == 0.0:
+            return self._limits.fixed_exposure_cap_usd
+        # Legacy fallback for non-15m profiles that still configure a pct
         return max(
             self._bankroll_usd * self._limits.max_cycle_risk_pct,
             0.10  # Minimum $0.10 for very small bankrolls
         )
     
     def _get_total_cap_usd(self) -> float:
-        """Get total cap in USD."""
+        """Get total cap in USD.
+
+        2026-07-16: Percentage-based total cap DISABLED (pct==0.0).
+        The $1 global slot allocator is the single source of truth for exposure.
+        """
+        if self._limits.max_total_risk_pct == 0.0:
+            return self._limits.fixed_exposure_cap_usd
+        # Legacy fallback for non-15m profiles that still configure a pct
         return max(
             self._bankroll_usd * self._limits.max_total_risk_pct,
             1.0  # Minimum $1
@@ -296,8 +322,15 @@ class UnifiedRiskManager:
         )
     
     def _get_category_cap_usd(self, category: str) -> float:
-        """Get category cap in USD."""
+        """Get category cap in USD.
+
+        2026-07-16: Percentage-based category cap DISABLED (pct==0.0).
+        Defers to the fixed $1 exposure cap (global slot allocator model).
+        """
         if category == "crypto":
+            if self._limits.category_crypto_max_notional_pct == 0.0:
+                return self._limits.fixed_exposure_cap_usd
+            # Legacy fallback for non-15m profiles that still configure a pct
             return max(
                 self._bankroll_usd * self._limits.category_crypto_max_notional_pct,
                 self._limits.category_crypto_min_cap_usd
@@ -359,9 +392,13 @@ class UnifiedRiskManager:
                 return False, reason
             
             # Per-trade notional limit
-            per_trade_cap = self._bankroll_usd * self._limits.per_trade_max_notional_pct
-            # 2026-07-06: DISABLED micro-account minimum floor - use uniform percentage-based cap
-            # Risk envelope and unified_sizing handle all sizing logic; no micro-account adjustments
+            # 2026-07-16: Percentage-based per-trade cap DISABLED (pct==0.0).
+            # Defers to the fixed $1 exposure cap (global slot allocator model).
+            if self._limits.per_trade_max_notional_pct == 0.0:
+                per_trade_cap = self._limits.fixed_exposure_cap_usd
+            else:
+                # Legacy fallback for non-15m profiles that still configure a pct
+                per_trade_cap = self._bankroll_usd * self._limits.per_trade_max_notional_pct
             if notional_usd > per_trade_cap:
                 reason = f"PER_TRADE_NOTIONAL: ${notional_usd:.2f} > ${per_trade_cap:.2f}"
                 self._rejections += 1

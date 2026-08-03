@@ -33,7 +33,10 @@ class TestPosition:
         assert position.size == 10
         assert position.avg_entry_price_cents == 50
         assert position.exit_triggered is False
-        assert position.initial_risk_cents == 0  # No SL set, so no initial risk
+        # CRITICAL FIX: 2026-07-31 - Position now sets default 5c risk if no SL set
+        # This ensures all positions have profit-taking capability
+        assert position.initial_risk_cents == 5  # Default 5c risk set in __post_init__
+        assert position.take_profit_price_cents == 55  # Default TP at entry + 5c
     
     def test_position_with_tp_sl(self):
         """Test position with take profit and stop loss."""

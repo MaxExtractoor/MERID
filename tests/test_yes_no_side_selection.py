@@ -164,14 +164,19 @@ class TestYESNOSideSelection:
         self._assert_side_selection(scenario)
     
     @pytest.mark.parametrize("asset", ["BTC", "ETH", "SOL", "XRP", "DOGE"])
-    def test_price_outside_canonical_range_no_candidate(self, asset):
-        """Prices outside 10-75c canonical range should result in no candidate."""
-        # YES price too low (1c)
+    def test_price_outside_side_aware_range_no_candidate(self, asset):
+        """Prices outside side-aware ranges should result in no candidate.
+        
+        Side-aware ranges (2026-08-01 fix):
+        - YES: 1c-75c (expanded low end for late-expiry markets)
+        - NO: 25c-99c (expanded high end for late-expiry markets)
+        """
+        # YES price too high (80c) - outside YES side-aware range
         scenario = IndicatorScenario(
             asset=asset,
             spot_price=66000.0 if asset == "BTC" else 1900.0 if asset == "ETH" else 77.0 if asset == "SOL" else 1.15 if asset == "XRP" else 0.073,
-            yes_price_cents=1,
-            no_price_cents=99,
+            yes_price_cents=80,
+            no_price_cents=20,
             rsi=65.0,
             rsi_zone="neutral",
             macd_line=0.5,
@@ -183,15 +188,15 @@ class TestYESNOSideSelection:
             atr=0.02,
             velocity=0.01,
             expected_side="none",
-            expected_reason="YES price (1c) outside canonical 10-75c range"
+            expected_reason="YES price (80c) outside side-aware range (1c-75c)"
         )
         
         self._assert_side_selection(scenario)
         
-        # NO price too high (99c)
-        scenario.no_price_cents = 99
-        scenario.yes_price_cents = 1
-        scenario.expected_reason = "NO price (99c) outside canonical 10-75c range"
+        # NO price too low (20c) - outside NO side-aware range
+        scenario.no_price_cents = 20
+        scenario.yes_price_cents = 80
+        scenario.expected_reason = "NO price (20c) outside side-aware range (25c-99c)"
         
         self._assert_side_selection(scenario)
     

@@ -122,6 +122,34 @@ class OrchestratorAgentManager:
                 raise RuntimeError("Agent grid not running - lifespan startup failed. Do not use legacy fallback path.")
             else:
                 logger.info("✅ Kalshi agent grid already running (started by lifespan)")
+                
+                # CRITICAL FIX: Start Kalshi15mLoop to ensure PositionMonitor is started
+                # This bypasses the lifespan issue where Uvicorn is not calling the lifespan function
+                # PositionMonitor must be running for exit policies to execute
+                try:
+                    from merid.loop_15m import get_kalshi_15m_loop
+                    from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+                    
+                    logger.info("[CRITICAL-FIX] Starting Kalshi15mLoop directly to ensure PositionMonitor starts")
+                    
+                    # Get required components
+                    bankroll_service = await get_bankroll_service()
+                    risk_config = KalshiRiskConfig()
+                    
+                    # Create and start Kalshi15mLoop
+                    kalshi_loop = get_kalshi_15m_loop(
+                        agent_grid=self.kalshi_agent_grid,
+                        bankroll_service=bankroll_service,
+                        risk_config=risk_config,
+                        cadence_seconds=5.0
+                    )
+                    
+                    await kalshi_loop.start()
+                    logger.info("[CRITICAL-FIX] Kalshi15mLoop started successfully - PositionMonitor should now be running")
+                except Exception as loop_err:
+                    logger.error(f"[CRITICAL-FIX] Failed to start Kalshi15mLoop: {loop_err}", exc_info=True)
+                    logger.error("[CRITICAL-FIX] PositionMonitor may not be running - exit policies may not execute")
         except Exception as exc:
             logger.warning(f"Kalshi agent grid not available (graceful degradation): {exc}")
         

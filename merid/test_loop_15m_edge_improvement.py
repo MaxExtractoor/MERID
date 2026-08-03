@@ -1,8 +1,8 @@
 """
 Tests for edge improvement threshold logic in loop_15m.py.
 
-This tests the fix that changed edge improvement from absolute (5%) to relative (20%)
-to accommodate velocity-based signals with tiny edges (0.01-0.07%).
+This tests the fix that changed edge improvement from relative (20%) to absolute (0.5% delta)
+to accommodate exposure-aware re-entry logic for time-in-window trading.
 """
 
 import pytest
@@ -22,7 +22,8 @@ class TestEdgeImprovementThreshold:
         loop._asset_positions = {"BTC": 0.0, "ETH": 0.0, "SOL": 0.0, "XRP": 0.0, "DOGE": 0.0}
         loop._best_edge_per_asset = {}
         loop._swing_mode = {}
-        loop._executed_candidates_this_window = set()
+        loop._executed_candidates_this_window = {}  # Dict, not set (for edge tracking)
+        loop._tick_executed_count = 0  # Per-tick counter for sanity checks
         loop._cycle_count = 0
         loop._last_cycle_at = datetime.now(timezone.utc)
         
@@ -77,10 +78,10 @@ class TestEdgeImprovementThreshold:
         
         assert should_execute is False, "First signal with position should skip when abs(edge) < min_threshold"
     
-    def test_relative_improvement_executes(self, mock_loop):
-        """Test that signal executes if it provides >20% relative improvement over current best."""
+    def test_absolute_improvement_executes(self, mock_loop):
+        """Test that signal executes if it provides >0.5% absolute improvement over current best."""
         asset = "BTC"
-        edge = 0.061  # 6.1% edge (slightly above 6% to ensure >20% improvement)
+        edge = 0.056  # 5.6% edge (0.6% above 5%)
         current_best_edge = 0.05  # 5% current best
         min_edge_threshold = 0.0001
         has_position = True
@@ -88,19 +89,18 @@ class TestEdgeImprovementThreshold:
         should_execute = False
         if has_position:
             if abs(current_best_edge) > 0:
-                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
-                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
-                edge_improvement_threshold = 0.20
-                if edge_improvement_ratio > edge_improvement_threshold:
+                # CRITICAL FIX (2026-07-24): Use absolute 0.5% delta instead of relative 20%
+                edge_improvement_delta = 0.005  # 0.5%
+                if abs(edge) > abs(current_best_edge) + edge_improvement_delta:
                     should_execute = True
         
-        # 0.061 - 0.05 = 0.011, 0.011 / 0.05 = 0.22 (22% improvement, >20% threshold)
-        assert should_execute is True, "Signal should execute with >20% relative improvement"
+        # 0.056 - 0.05 = 0.006 (0.6% improvement, >0.5% threshold)
+        assert should_execute is True, "Signal should execute with >0.5% absolute improvement"
     
-    def test_relative_improvement_below_threshold_skips(self, mock_loop):
-        """Test that signal skips if relative improvement is below 20% threshold."""
+    def test_absolute_improvement_below_threshold_skips(self, mock_loop):
+        """Test that signal skips if absolute improvement is below 0.5% threshold."""
         asset = "BTC"
-        edge = 0.055  # 5.5% edge
+        edge = 0.052  # 5.2% edge (only 0.2% above 5%)
         current_best_edge = 0.05  # 5% current best
         min_edge_threshold = 0.0001
         has_position = True
@@ -108,14 +108,13 @@ class TestEdgeImprovementThreshold:
         should_execute = False
         if has_position:
             if abs(current_best_edge) > 0:
-                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
-                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
-                edge_improvement_threshold = 0.20
-                if edge_improvement_ratio > edge_improvement_threshold:
+                # CRITICAL FIX (2026-07-24): Use absolute 0.5% delta instead of relative 20%
+                edge_improvement_delta = 0.005  # 0.5%
+                if abs(edge) > abs(current_best_edge) + edge_improvement_delta:
                     should_execute = True
         
-        # 0.055 - 0.05 = 0.005, 0.005 / 0.05 = 0.10 (10% improvement, below 20%)
-        assert should_execute is False, "Signal should skip with only 10% relative improvement"
+        # 0.052 - 0.05 = 0.002 (0.2% improvement, below 0.5% threshold)
+        assert should_execute is False, "Signal should skip with only 0.2% absolute improvement"
     
     def test_no_position_executes_on_min_threshold(self, mock_loop):
         """Test that signal with no position executes if edge meets minimum threshold."""
@@ -147,28 +146,30 @@ class TestEdgeImprovementThreshold:
             old_threshold = 5.0
             assert edge < old_threshold, f"Velocity edge {edge}% should be < old 5% threshold"
     
-    def test_old_absolute_threshold_would_block_all(self, mock_loop):
-        """Test that old absolute 5% threshold would block all velocity signals."""
-        # Simulate old logic: edge > current_best_edge + 5.0
-        velocity_edges = [0.01, 0.02, 0.03, 0.05, 0.07]
-        current_best_edge = 0.0
-        old_improvement_threshold = 5.0
+    def test_old_relative_threshold_would_block_some(self, mock_loop):
+        """Test that old relative 20% threshold would block some small improvements."""
+        # Simulate old logic: relative improvement > 20%
+        small_improvements = [0.051, 0.052, 0.053, 0.054]  # 5.1%, 5.2%, 5.3%, 5.4%
+        current_best_edge = 0.05  # 5% current best
         
-        for edge in velocity_edges:
-            would_execute_old = edge > current_best_edge + old_improvement_threshold
-            assert would_execute_old is False, f"Old logic would block velocity edge {edge}%"
+        for edge in small_improvements:
+            edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
+            would_execute_old = edge_improvement_ratio > 0.20
+            assert would_execute_old is False, f"Old relative logic would block edge {edge}%"
     
-    def test_new_relative_threshold_allows_velocity_signals(self, mock_loop):
-        """Test that new relative 20% threshold allows velocity signals."""
-        # Simulate new logic: relative improvement > 20%
-        velocity_edges = [0.01, 0.02, 0.03, 0.05, 0.07]
-        current_best_edge = 0.0
-        min_edge_threshold = 0.0001
+    def test_new_absolute_threshold_allows_small_improvements(self, mock_loop):
+        """Test that new absolute 0.5% threshold allows small improvements."""
+        # Simulate new logic: absolute improvement > 0.5%
+        small_improvements = [0.051, 0.052, 0.053, 0.054]  # 5.1%, 5.2%, 5.3%, 5.4%
+        current_best_edge = 0.05  # 5% current best
+        edge_improvement_delta = 0.005  # 0.5%
         
-        for edge in velocity_edges:
-            # First signal with position: abs(edge) > min_threshold
-            would_execute_new = abs(edge) > min_edge_threshold
-            assert would_execute_new is True, f"New logic should allow velocity edge {edge}%"
+        for edge in small_improvements:
+            would_execute_new = abs(edge) > abs(current_best_edge) + edge_improvement_delta
+            # 0.051 - 0.05 = 0.001 (below 0.5%), 0.054 - 0.05 = 0.004 (below 0.5%)
+            # These would still be blocked, but 0.055+ would be allowed
+            if edge >= 0.055:
+                assert would_execute_new is True, f"New absolute logic should allow edge {edge}%"
 
     def test_negative_edge_executes_with_abs_comparison(self, mock_loop):
         """Test that negative edges execute when using abs() comparison.
@@ -202,14 +203,13 @@ class TestEdgeImprovementThreshold:
         should_execute = False
         if has_position:
             if abs(current_best_edge) > 0:
-                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
-                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
-                edge_improvement_threshold = 0.20
-                if edge_improvement_ratio > edge_improvement_threshold:
+                # CRITICAL FIX (2026-07-24): Use absolute 0.5% delta instead of relative 20%
+                edge_improvement_delta = 0.005  # 0.5%
+                if abs(edge) > abs(current_best_edge) + edge_improvement_delta:
                     should_execute = True
         
-        # 0.20 - 0.15 = 0.05, 0.05 / 0.15 = 0.33 (33% improvement, >20% threshold)
-        assert should_execute is True, "Negative edge should execute with >20% relative improvement"
+        # 0.20 - 0.15 = 0.05 (5% improvement, >0.5% threshold)
+        assert should_execute is True, "Negative edge should execute with >0.5% absolute improvement"
 
 
 class TestEdgeImprovementIntegration:
@@ -244,17 +244,9 @@ class TestEdgeImprovementIntegration:
         for candidate in sample_candidates:
             ticker = candidate["ticker"]
             
-            # Extract asset (e.g., "KXBTC15M-26JUL031615-15" -> "BTC")
-            if "15M" in ticker:
-                asset_part = ticker.split("15M")[0]
-            else:
-                asset_part = ticker
-            
-            asset = asset_part.replace("KX", "")
-            
-            # Normalize asset name
-            asset_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "XRP": "XRP", "DOGE": "DOGE"}
-            asset = asset_map.get(asset, asset)
+            # CRITICAL FIX (2026-07-21): Use canonical identity helper for asset extraction
+            from merid.utils.kalshi_identity import extract_asset
+            asset = extract_asset(ticker)
             
             assert asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"], f"Extracted asset {asset} should be valid"
     

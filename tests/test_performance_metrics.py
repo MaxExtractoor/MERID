@@ -233,8 +233,8 @@ def test_strategy_config_edge_thresholds():
     assert cfg.min_edge_terminal >= Decimal("0.06"), (
         f"Terminal phase edge floor must be >= 6%, got {cfg.min_edge_terminal}"
     )
-    assert cfg.min_confidence >= Decimal("0.50"), (
-        f"min_confidence must be >= 0.50, got {cfg.min_confidence}"
+    assert cfg.min_confidence >= Decimal("0.65"), (
+        f"min_confidence must be >= 0.65 (profile min_confidence_threshold), got {cfg.min_confidence}"
     )
 
 

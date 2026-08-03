@@ -61,6 +61,12 @@ class HedgePnLRecord:
     # Current status
     status: HedgeStatus = HedgeStatus.ACTIVE
     
+    # CRITICAL FIX (2026-07-29): Hedge fill confirmation tracking
+    # Tracks whether hedge has filled before alpha exits to prevent unhedged exposure
+    hedge_proposed_at: Optional[datetime] = None  # When hedge order was proposed
+    hedge_filled_at: Optional[datetime] = None  # When hedge order filled (None if not filled)
+    hedge_fill_confirmed: bool = False  # True if hedge fill is confirmed
+    
     # Exit tracking (populated when hedge is closed)
     hedge_exit_price_cents: Optional[int] = None
     hedge_exit_count: Optional[int] = None
@@ -156,6 +162,8 @@ class HedgePnLTracker:
         self._records: Dict[str, HedgePnLRecord] = {}  # record_id -> record
         self._alpha_to_hedge: Dict[str, str] = {}  # alpha_fill_id -> record_id
         self._hedge_to_alpha: Dict[str, str] = {}  # hedge_fill_id -> alpha_fill_id
+        # CRITICAL FIX (2026-07-29): Latency metrics tracking
+        self._latency_samples: List[float] = []  # Hedge fill latency samples in ms
         
     def create_record(
         self,
@@ -196,6 +204,8 @@ class HedgePnLTracker:
             hedge_notional_cents=hedge_notional,
             hedge_reason=hedge_reason,
             cost_of_hedge_cents=hedge_notional,
+            # CRITICAL FIX (2026-07-29): Track hedge proposal time
+            hedge_proposed_at=datetime.now(timezone.utc),
         )
         
         self._records[record_id] = record
@@ -210,6 +220,155 @@ class HedgePnLTracker:
         )
         
         return record
+    
+    def confirm_hedge_fill(
+        self,
+        hedge_fill_id: str,
+    ) -> Optional[HedgePnLRecord]:
+        """Confirm that a hedge order has filled.
+        
+        This is called when the hedge order is filled on the exchange.
+        It updates the fill confirmation timestamp and flag.
+        
+        Args:
+            hedge_fill_id: The fill ID of the hedge order
+            
+        Returns:
+            The updated HedgePnLRecord if found, None otherwise
+        """
+        if hedge_fill_id not in self._hedge_to_alpha:
+            logger.warning("[HEDGE-FILL-CONFIRM] Unknown hedge fill: %s", hedge_fill_id)
+            return None
+        
+        alpha_fill_id = self._hedge_to_alpha[hedge_fill_id]
+        record_id = self._alpha_to_hedge.get(alpha_fill_id)
+        
+        if not record_id or record_id not in self._records:
+            return None
+        
+        record = self._records[record_id]
+        record.hedge_filled_at = datetime.now(timezone.utc)
+        record.hedge_fill_confirmed = True
+        
+        # Calculate latency from proposal to fill
+        if record.hedge_proposed_at:
+            fill_latency_ms = (record.hedge_filled_at - record.hedge_proposed_at).total_seconds() * 1000
+            self._latency_samples.append(fill_latency_ms)
+            
+            # Keep only last 1000 samples to prevent unbounded growth
+            if len(self._latency_samples) > 1000:
+                self._latency_samples = self._latency_samples[-1000:]
+            
+            logger.info(
+                "[HEDGE-FILL-CONFIRM] record_id=%s hedge=%s filled_at=%s latency=%.0fms",
+                record_id, hedge_fill_id, record.hedge_filled_at.isoformat(), fill_latency_ms
+            )
+        else:
+            logger.info(
+                "[HEDGE-FILL-CONFIRM] record_id=%s hedge=%s filled_at=%s (no proposal time)",
+                record_id, hedge_fill_id, record.hedge_filled_at.isoformat()
+            )
+        
+        return record
+    
+    def check_hedge_fill_status(
+        self,
+        alpha_fill_id: str,
+    ) -> Dict[str, Any]:
+        """Check if hedge for an alpha position has filled.
+        
+        This is called before alpha exits to ensure hedge is filled.
+        
+        Args:
+            alpha_fill_id: The fill ID of the alpha position
+            
+        Returns:
+            Dict with fill status information
+        """
+        record_id = self._alpha_to_hedge.get(alpha_fill_id)
+        if not record_id or record_id not in self._records:
+            return {
+                "hedge_exists": False,
+                "hedge_fill_confirmed": False,
+                "hedge_filled_at": None,
+            }
+        
+        record = self._records[record_id]
+        return {
+            "hedge_exists": True,
+            "hedge_fill_confirmed": record.hedge_fill_confirmed,
+            "hedge_filled_at": record.hedge_filled_at,
+            "hedge_proposed_at": record.hedge_proposed_at,
+        }
+    
+    def get_latency_metrics(self) -> Dict[str, float]:
+        """Get hedge fill latency statistics.
+        
+        Returns:
+            Dict with latency metrics (p50, p95, p99, mean, max in milliseconds)
+        """
+        if not self._latency_samples:
+            return {
+                "count": 0,
+                "p50_ms": 0,
+                "p95_ms": 0,
+                "p99_ms": 0,
+                "mean_ms": 0,
+                "max_ms": 0,
+            }
+        
+        sorted_samples = sorted(self._latency_samples)
+        count = len(sorted_samples)
+        
+        return {
+            "count": count,
+            "p50_ms": sorted_samples[int(count * 0.5)] if count > 0 else 0,
+            "p95_ms": sorted_samples[int(count * 0.95)] if count > 0 else 0,
+            "p99_ms": sorted_samples[int(count * 0.99)] if count > 0 else 0,
+            "mean_ms": sum(sorted_samples) / count if count > 0 else 0,
+            "max_ms": max(sorted_samples) if count > 0 else 0,
+        }
+    
+    def get_paired_pnl(
+        self,
+        alpha_fill_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get paired PnL data for an alpha-hedge pair.
+        
+        This provides comprehensive PnL attribution showing how much the hedge
+        contributed to the total PnL of the position.
+        
+        Args:
+            alpha_fill_id: The fill ID of the alpha position
+            
+        Returns:
+            Dict with paired PnL data, or None if no hedge exists
+        """
+        record_id = self._alpha_to_hedge.get(alpha_fill_id)
+        if not record_id or record_id not in self._records:
+            return None
+        
+        record = self._records[record_id]
+        
+        # Recalculate PnL to ensure it's up to date
+        record.calculate_pnl()
+        
+        return {
+            "record_id": record_id,
+            "alpha_fill_id": alpha_fill_id,
+            "hedge_fill_id": record.hedge_fill_id,
+            "alpha_pnl_cents": record.alpha_pnl_cents,
+            "hedge_pnl_cents": record.hedge_pnl_cents,
+            "net_pnl_cents": record.net_pnl_cents,
+            "hedge_effectiveness": record.effectiveness_ratio,
+            "cost_of_hedge_cents": record.cost_of_hedge_cents,
+            "benefit_from_hedge_cents": record.benefit_from_hedge_cents,
+            "alpha_entry_price_cents": record.alpha_entry_price_cents,
+            "alpha_exit_price_cents": record.alpha_exit_price_cents,
+            "hedge_entry_price_cents": record.hedge_entry_price_cents,
+            "hedge_exit_price_cents": record.hedge_exit_price_cents,
+            "status": record.status.value,
+        }
     
     def record_hedge_exit(
         self,
@@ -491,6 +650,19 @@ class HedgePnLTracker:
 
         max_minutes = config.auto_exit.max_hedge_hold_minutes
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_minutes)
+        
+        # CRITICAL FIX (2026-07-29): Warn when hedges approach timeout (at 12m)
+        warning_cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_minutes - 3)  # 12m for 15m timeout
+        for record in self._records.values():
+            if record.status != HedgeStatus.ACTIVE:
+                continue
+            if record.created_at < warning_cutoff and record.created_at >= cutoff:
+                logger.warning(
+                    "[HEDGE-TIMEOUT-WARNING] Hedge approaching timeout: record_id=%s hedge=%s age=%.1fm / %dm",
+                    record.record_id, record.hedge_fill_id,
+                    (datetime.now(timezone.utc) - record.created_at).total_seconds() / 60,
+                    max_minutes
+                )
 
         for record in self._records.values():
             if record.status != HedgeStatus.ACTIVE:

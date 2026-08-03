@@ -5,15 +5,15 @@ This module provides the single source of truth for price and distance bucket
 definitions across the entire MERID codebase. All components should import from
 this module to ensure consistency in analysis and reporting.
 
-Canonical Price Range: 10c-75c (enforced across trading system)
+Canonical Price Range: 5c-85c (enforced across trading system)
 """
 
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
 
-# ── Canonical Price Buckets (aligned with 10c-75c trading range) ──────────
+# ── Canonical Price Buckets (aligned with 5c-85c trading range) ──────────
 # These buckets are designed to:
-# 1. Cover the full canonical trading range (10c-75c)
+# 1. Cover the full canonical trading range (5c-85c)
 # 2. Provide granular analysis within the range
 # 3. Be consistent with industry best practices for prediction markets
 # Reference: https://agentbets.ai/guides/prediction-market-microstructure/
@@ -106,7 +106,7 @@ def get_distance_bucket(distance_pct: float) -> str:
 
 def is_in_canonical_range(price_cents: int) -> bool:
     """
-    Check if a price is within the canonical trading range (10c-75c).
+    Check if a price is within the canonical trading range (5c-85c).
     
     Args:
         price_cents: Price in cents
@@ -118,11 +118,13 @@ def is_in_canonical_range(price_cents: int) -> bool:
         >>> is_in_canonical_range(25)
         True
         >>> is_in_canonical_range(80)
-        False
+        True
         >>> is_in_canonical_range(5)
+        True
+        >>> is_in_canonical_range(90)
         False
     """
-    return 10 <= price_cents <= 75
+    return 5 <= price_cents <= 85
 
 
 # ── Data Classes for Bucket Statistics ───────────────────────────────────────

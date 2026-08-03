@@ -42,7 +42,9 @@ class TestAssetLevelPositionLimitFix:
         # Simulate existing position on one BTC market
         pos1 = CachedPosition(
             market_id="KXBTC15M-26JUL022230-30",
+            agent_id="BTC_15M",
             side="yes",
+            thesis_side="yes",
             contracts=1,
             avg_price_cents=42
         )
@@ -87,19 +89,25 @@ class TestAssetLevelPositionLimitFix:
         # Add positions for different BTC markets
         cache._positions["KXBTC15M-26JUL022230-30"] = CachedPosition(
             market_id="KXBTC15M-26JUL022230-30",
+            agent_id="BTC_15M",
             side="yes",
+            thesis_side="yes",
             contracts=1,
             avg_price_cents=42
         )
         cache._positions["KXBTC15M-26JUL022245-30"] = CachedPosition(
             market_id="KXBTC15M-26JUL022245-30",
+            agent_id="BTC_15M",
             side="yes",
+            thesis_side="yes",
             contracts=1,
             avg_price_cents=43
         )
         cache._positions["KXETH15M-26JUL022230-30"] = CachedPosition(
             market_id="KXETH15M-26JUL022230-30",
+            agent_id="ETH_15M",
             side="yes",
+            thesis_side="yes",
             contracts=1,
             avg_price_cents=42
         )
@@ -151,7 +159,9 @@ class TestAssetLevelPositionLimitFix:
         existing_positions = [
             CachedPosition(
                 market_id="KXBTC15M-26JUL022230-30",
+                agent_id="BTC_15M",
                 side="yes",
+                thesis_side="yes",
                 contracts=1,
                 avg_price_cents=42
             )
