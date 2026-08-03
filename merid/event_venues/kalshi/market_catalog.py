@@ -626,6 +626,14 @@ class KalshiMarketCatalog:
         self._refresh_thread: Optional[threading.Thread] = None
         self._refresh_loop_started = threading.Event()
         self._first_refresh_completed = threading.Event()
+        
+        # CRITICAL FIX (2026-08-02): State store injection to prevent thread race
+        # The state store is initialized in the main thread and injected here
+        # This prevents catalog refresh thread from calling get_kalshi_market_state_store()
+        # which creates a race condition when called from a different thread
+        if TYPE_CHECKING:
+            from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
+        self._state_store: Optional['KalshiMarketStateStore'] = None
 
     def _ensure_lock(self) -> asyncio.Lock:
         """Lazy-initialize the asyncio.Lock in the current event loop."""
@@ -1498,7 +1506,15 @@ class KalshiMarketCatalog:
         # This is critical for MD health reporting (minutes_to_expiry calculation)
         logger.info("[BOOT-TRACE] Catalog → MarketStateStore async feed starting (expiry fields for SLA)")
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-        store = get_kalshi_market_state_store()
+        # CRITICAL FIX (2026-08-02): Use injected state store if available, otherwise get singleton
+        # This prevents race condition when catalog refresh thread calls get_kalshi_market_state_store()
+        # from a different thread than where it was initialized
+        if hasattr(self, '_state_store') and self._state_store is not None:
+            store = self._state_store
+            logger.info("[CATALOG-FEED] Using injected state store to prevent thread race")
+        else:
+            store = get_kalshi_market_state_store()
+            logger.info("[CATALOG-FEED] Using singleton state store (no injection)")
         
         # Feed expiry data synchronously to avoid lock hang
         # Only populate REST-owned fields (expiry, volume, OI, strikes)

@@ -3288,6 +3288,12 @@ async def _run_startup_phases_v20260530(app):
     # This ensures catalog uses the same client instance that was configured in P1.3
     catalog = KalshiMarketCatalog(client=kalshi_client)
     
+    # CRITICAL FIX (2026-08-02): Pass the pre-initialized state store to catalog
+    # This prevents catalog refresh thread from calling get_kalshi_market_state_store()
+    # which creates a race condition when called from a different thread
+    catalog._state_store = market_state_store
+    logger.info("[STARTUP] State store injected into catalog to prevent thread race")
+    
     # Phase 2: Trace catalog origin
     from merid.origin_tracer import log_object_origin
     log_object_origin(catalog, "catalog_instance", context="main_15m_lean.py startup")
