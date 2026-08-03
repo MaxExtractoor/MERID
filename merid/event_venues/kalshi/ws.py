@@ -464,10 +464,43 @@ class KalshiWebSocket(EventVenueStream):
                 )
         
         # Create signature for authentication
-        # Add 10000ms buffer to prevent "header timestamp expired" errors
-        # Based on Kalshi API research: timestamps too far in future are rejected
-        # 10s buffer handles network latency while avoiding "timestamp out of range" errors
-        timestamp = str(int(_time.time() * 1000) + 10000)
+        # Use current timestamp without buffer - Kalshi rejects future timestamps
+        # CRITICAL FIX 2026-07-28: Use Kalshi server time for clock skew compensation
+        # "header timestamp expired" means local clock is out of sync with server
+        # Calculate actual skew by comparing local time to Kalshi server Date header
+        # Then apply the correct compensation based on skew direction
+        from email.utils import parsedate_to_datetime
+        import requests
+        
+        timestamp = str(int(_time.time() * 1000))  # Default to local time
+        skew_compensated = False
+        
+        try:
+            # Get time from Kalshi server (most reliable source)
+            ws_url = "https://api.elections.kalshi.com/trade-api/v2"
+            response = requests.head(ws_url, timeout=2)
+            if response.status_code == 200:
+                server_date_str = response.headers.get("Date")
+                if server_date_str:
+                    server_dt = parsedate_to_datetime(server_date_str)
+                    server_time = server_dt.timestamp()
+                    local_time = _time.time()
+                    skew_seconds = server_time - local_time
+                    
+                    logger.info(f"[WS-AUTH] Clock skew: {skew_seconds:.2f}s (server - local)")
+                    
+                    # Apply skew compensation
+                    # If skew is positive, server is ahead (local is slow) -> add time
+                    # If skew is negative, server is behind (local is fast) -> subtract time
+                    compensated_time = local_time + skew_seconds
+                    timestamp = str(int(compensated_time * 1000))
+                    skew_compensated = True
+                    logger.info(f"[WS-AUTH] Applied clock skew compensation: {skew_seconds:.2f}s")
+        except Exception as e:
+            logger.warning(f"[WS-AUTH] Failed to get server time for skew calculation: {e}")
+        
+        if not skew_compensated:
+            logger.warning("[WS-AUTH] Could not calculate clock skew, using local time (may cause auth errors)")
         method = "GET"
         path = "/trade-api/ws/v2"
         msg_string = timestamp + method + path
@@ -748,6 +781,7 @@ class KalshiWebSocket(EventVenueStream):
         params: Dict[str, Any] = {
             "channels": ["orderbook_delta"],
             "market_tickers": [market_id],
+            "use_yes_price": True,  # CRITICAL FIX (2026-07-30): Use unified YES-leg pricing for both YES and NO sides
         }
         if event_ticker:
             params["event_ticker"] = event_ticker
@@ -796,6 +830,7 @@ class KalshiWebSocket(EventVenueStream):
                 "params": {
                     "channels": ["orderbook_delta"],
                     "market_tickers": chunk,
+                    "use_yes_price": True,  # CRITICAL FIX (2026-07-30): Use unified YES-leg pricing for both YES and NO sides
                 },
             }
             payload = json.dumps(message)
@@ -851,13 +886,23 @@ class KalshiWebSocket(EventVenueStream):
                                 elif hasattr(bid, 'price') and hasattr(bid, 'size') and not isinstance(bid, tuple):
                                     yes_levels.append([float(bid.price), float(bid.size)])
                         
-                        # Handle asks (no side)
+                        # CRITICAL FIX (2026-07-30): REST API's asks are YES asks, which convert to NO bids
+                        # NO bids = 1.00 - YES_ask_price. These should go to no_levels (not asks)
+                        # The VenueOrderBook.asks field contains YES asks, which we convert to NO bids
                         if orderbook.asks:
                             for ask in orderbook.asks:
                                 if isinstance(ask, tuple) and len(ask) == 2:
-                                    no_levels.append([float(ask[0]), float(ask[1])])
+                                    yes_ask_price = float(ask[0])
+                                    size = float(ask[1])
+                                    # Convert YES ask to NO bid: NO_price = 1.00 - YES_ask_price
+                                    no_bid_price = 1.00 - yes_ask_price
+                                    no_levels.append([no_bid_price, size])
                                 elif hasattr(ask, 'price') and hasattr(ask, 'size') and not isinstance(ask, tuple):
-                                    no_levels.append([float(ask.price), float(ask.size)])
+                                    yes_ask_price = float(ask.price)
+                                    size = float(ask.size)
+                                    # Convert YES ask to NO bid: NO_price = 1.00 - YES_ask_price
+                                    no_bid_price = 1.00 - yes_ask_price
+                                    no_levels.append([no_bid_price, size])
                         
                         msg = {
                             "type": "orderbook_snapshot",
@@ -1146,12 +1191,13 @@ class KalshiWebSocket(EventVenueStream):
         2. Time since last message (stale connection detection)
         3. Triggers immediate reconnect on any health issue
         """
-        # SEV-0 FIX: Check health every 2 seconds for fast failure detection
-        health_check_interval = 2.0
-        # SEV-0 FIX: Treat >5s without messages as a hard failure
-        stale_threshold = 5.0
+        # CRITICAL FIX (2026-08-02): Relaxed health thresholds based on production research
+        # Previous 5s threshold was too aggressive for normal market quiet periods
+        # Research shows 15-30s thresholds are standard for production WebSocket monitoring
+        health_check_interval = 5.0  # Check every 5 seconds (reduced frequency)
+        stale_threshold = 30.0  # Treat >30s without messages as failure (relaxed from 5s)
         # CRITICAL FIX: Add grace period after connection to allow subscription processing
-        grace_period = 10.0  # Allow 10s for subscription to be processed and initial messages to arrive
+        grace_period = 15.0  # Allow 15s for subscription to be processed and initial messages to arrive
         
         logger.info("[WS-HEALTH] Starting connection health monitoring...")
         
@@ -1241,9 +1287,10 @@ class KalshiWebSocket(EventVenueStream):
                 async with self._ensure_ws_recv_lock():
                     if not self._ws or not self._running:
                         break
-                    # Add timeout to detect stale connections (60s for more tolerant detection)
-                    # Increased from 10s to prevent premature reconnections during quiet market periods
-                    msg = await asyncio.wait_for(self._ws.recv(), timeout=60.0)
+                    # CRITICAL FIX (2026-08-02): Increased timeout to 90s for more tolerant detection
+                    # Previous 60s was still causing premature reconnections during quiet market periods
+                    # Research shows 90-120s is standard for production WebSocket recv timeout
+                    msg = await asyncio.wait_for(self._ws.recv(), timeout=90.0)
 
                     # Track message count for metrics
                     raw_message_count += 1

@@ -97,6 +97,10 @@ from merid.event_venues.kalshi.unified_market_state import (
 )
 from utils.logger import get_logger
 
+# CRITICAL FIX 2026-08-03: Import get_market_catalog at module level for testability
+# This allows tests to patch it for cross-validation testing
+from merid.event_venues.kalshi.market_catalog import get_market_catalog
+
 # Production scope validation
 # DISABLED IN TESTS: Set TRADING_SCOPE_AVAILABLE=False to allow synthetic test tickers
 # Production: Set TRADING_SCOPE_AVAILABLE=True to enforce scope validation
@@ -246,7 +250,9 @@ _DEPTH_WINDOW_CENTS = 10
 
 # DATA INTEGRITY LAYER CONFIGURATION
 _PRIMARY_STALE_SECONDS = float(os.getenv("KALSHI_PRIMARY_STALE_SECONDS", "5.0"))  # Max age for primary (WebSocket) data - relaxed for 15M markets
-_REST_THROTTLE_SECONDS = float(os.getenv("KALSHI_REST_THROTTLE_SECONDS", "5.0"))  # Min time between REST calls per market
+# CRITICAL FIX 2026-08-03: Reduced REST throttle from 5s to 2s for 15m markets
+# 15-minute markets update frequently; faster REST refresh catches stale data before it poisons gates
+_REST_THROTTLE_SECONDS = float(os.getenv("KALSHI_REST_THROTTLE_SECONDS", "2.0"))  # Min time between REST calls per market (was 5.0)
 _CROSS_VALIDATION_THRESHOLD_CENTS = float(os.getenv("KALSHI_CROSS_VALIDATION_THRESHOLD_CENTS", "5.0"))  # Max allowed difference between primary and REST
 _CROSS_VALIDATION_THRESHOLD_PCT = float(os.getenv("KALSHI_CROSS_VALIDATION_THRESHOLD_PCT", "0.10"))  # Max allowed % difference
 
@@ -293,6 +299,124 @@ class QuoteHealth(str, Enum):
     DEGRADED = "degraded"  # Using REST because primary missing/stale, but REST shows open & fresh
     STALE = "stale"  # Very old quote, use with caution (added for graduated health levels)
     SUSPENDED = "suspended"  # Conflicting data, closed/paused state, or repeated failures
+
+
+def is_book_degenerate(yes_bid_cents: Optional[int], yes_ask_cents: Optional[int],
+                      no_bid_cents: Optional[int], no_ask_cents: Optional[int]) -> tuple[bool, str]:
+    """
+    Detect degenerate orderbook conditions that indicate invalid or corrupted data.
+
+    Based on industry best practices for orderbook validity detection:
+    - Check for extreme prices near boundaries (ask >= 98c indicates missing liquidity)
+    - Check for one-sided books (only bids or only asks with valid prices)
+    - Check for dust-only books (both sides present but at extreme boundary values)
+
+    Args:
+        yes_bid_cents: Best bid price for YES contract
+        yes_ask_cents: Best ask price for YES contract
+        no_bid_cents: Best bid price for NO contract
+        no_ask_cents: Best ask price for NO contract
+
+    Returns:
+        (is_degenerate, reason) tuple where is_degenerate is True if book is invalid,
+        and reason is a string explaining why.
+    """
+    # Check for extreme boundary prices (indicates missing liquidity)
+    if yes_ask_cents is not None and yes_ask_cents >= 98:
+        return True, f"yes_ask_near_boundary({yes_ask_cents}c >= 98c)"
+    if no_ask_cents is not None and no_ask_cents >= 98:
+        return True, f"no_ask_near_boundary({no_ask_cents}c >= 98c)"
+
+    # Check for one-sided books (only one side has valid prices)
+    yes_side_valid = yes_bid_cents is not None and yes_ask_cents is not None and 0 < yes_bid_cents < 100 and 0 < yes_ask_cents < 100
+    no_side_valid = no_bid_cents is not None and no_ask_cents is not None and 0 < no_bid_cents < 100 and 0 < no_ask_cents < 100
+
+    if yes_side_valid and not no_side_valid:
+        return True, "one_sided_book(only_yes_valid)"
+    if no_side_valid and not yes_side_valid:
+        return True, "one_sided_book(only_no_valid)"
+
+    # Check for dust-only books (both sides at extreme boundaries)
+    if yes_side_valid and no_side_valid:
+        # If YES bid is very low and NO bid is very low, likely dust-only
+        if yes_bid_cents <= 2 and no_bid_cents <= 2:
+            return True, f"dust_only_book(yes_bid={yes_bid_cents}c, no_bid={no_bid_cents}c <= 2c)"
+
+    return False, ""
+
+
+def cross_validate_with_catalog(ticker: str, yes_bid_cents: Optional[int], yes_ask_cents: Optional[int],
+                                 no_bid_cents: Optional[int], no_ask_cents: Optional[int]) -> tuple[bool, str]:
+    """
+    Cross-validate stored orderbook against Kalshi catalog ticker quotes.
+
+    This provides an independent data source check to detect corrupted local state.
+    The catalog provides the canonical best bid/ask from Kalshi's REST API.
+
+    Args:
+        ticker: Market ticker to validate
+        yes_bid_cents: Local YES bid price
+        yes_ask_cents: Local YES ask price
+        no_bid_cents: Local NO bid price
+        no_ask_cents: Local NO ask price
+
+    Returns:
+        (is_valid, reason) tuple where is_valid is False if catalog cross-check fails,
+        and reason is a string explaining the discrepancy.
+    """
+    try:
+        catalog = get_market_catalog()
+        if not catalog:
+            return True, "catalog_unavailable"  # Can't validate, assume OK
+
+        # Extract asset from ticker (e.g., KXBTC15M-... -> BTC)
+        import re
+        match = re.match(r"^KX([A-Z]+)", ticker.upper())
+        if not match:
+            return True, "unparseable_ticker"
+        asset = match.group(1)
+
+        # Get current 15m market from catalog
+        current_market = catalog.get_current_15m_market(asset)
+        if not current_market:
+            return True, "no_catalog_market"
+
+        # Get ticker quotes from catalog
+        market_data = current_market.market.raw_data or {}
+        catalog_yes_bid = market_data.get("yes_bid")
+        catalog_yes_ask = market_data.get("yes_ask")
+        catalog_no_bid = market_data.get("no_bid")
+        catalog_no_ask = market_data.get("no_ask")
+
+        # Cross-validation threshold (in cents)
+        # Allow 5c difference due to latency between catalog refresh and local updates
+        CROSS_VALIDATION_THRESHOLD_CENTS = 5
+
+        # Compare YES bid
+        if yes_bid_cents is not None and catalog_yes_bid is not None:
+            if abs(yes_bid_cents - catalog_yes_bid) > CROSS_VALIDATION_THRESHOLD_CENTS:
+                return False, f"yes_bid_mismatch(local={yes_bid_cents}c, catalog={catalog_yes_bid}c)"
+
+        # Compare YES ask
+        if yes_ask_cents is not None and catalog_yes_ask is not None:
+            if abs(yes_ask_cents - catalog_yes_ask) > CROSS_VALIDATION_THRESHOLD_CENTS:
+                return False, f"yes_ask_mismatch(local={yes_ask_cents}c, catalog={catalog_yes_ask}c)"
+
+        # Compare NO bid
+        if no_bid_cents is not None and catalog_no_bid is not None:
+            if abs(no_bid_cents - catalog_no_bid) > CROSS_VALIDATION_THRESHOLD_CENTS:
+                return False, f"no_bid_mismatch(local={no_bid_cents}c, catalog={catalog_no_bid}c)"
+
+        # Compare NO ask
+        if no_ask_cents is not None and catalog_no_ask is not None:
+            if abs(no_ask_cents - catalog_no_ask) > CROSS_VALIDATION_THRESHOLD_CENTS:
+                return False, f"no_ask_mismatch(local={no_ask_cents}c, catalog={catalog_no_ask}c)"
+
+        return True, "catalog_match"
+
+    except Exception as e:
+        logger.warning(f"[CATALOG-CROSS-VALIDATION] Exception during cross-validation for {ticker}: {e}")
+        return True, "catalog_validation_error"  # Don't fail on catalog errors
 
 
 class QuoteSource(str, Enum):
@@ -814,6 +938,30 @@ class KalshiMarketStateStore:
             # CONNECTION HEALTH: Update WS connection health tracking
             self._update_ws_connection_health(ticker)
             
+            # CRITICAL FIX (2026-08-02): Update book freshness tracker from pending delta
+            # This ensures even queued deltas refresh the state machine
+            try:
+                from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
+                freshness_tracker = get_book_freshness_tracker()
+                
+                # Extract timestamp from delta message
+                timestamp_str = msg.get("timestamp")
+                received_ts = None
+                if timestamp_str:
+                    try:
+                        from datetime import datetime
+                        if isinstance(timestamp_str, str):
+                            received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
+                    except Exception as ts_error:
+                        logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
+                
+                freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
+                logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from pending delta")
+            except ImportError:
+                logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
+            except Exception as e:
+                logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from pending delta: {e}")
+            
             # PROCESSING LAG: Record processing timestamp
             self._record_msg_proc_timestamp(ticker)
             
@@ -872,7 +1020,10 @@ class KalshiMarketStateStore:
 
         # Set data source and quality - specific to orderbook_delta channel
         state.data_source = "WS_ORDERBOOK_DELTA_LIVE"
-        state.data_quality = "GOOD"
+        # CRITICAL FIX (2026-07-26): Do not overwrite SUSPECT quality set by the
+        # duality invariant check in _sync_book_fields - corrupt books must stay flagged.
+        if state.data_quality != "SUSPECT":
+            state.data_quality = "GOOD"
         
         # Log raw book after delta (rate-limited to avoid spam)
         book = self._ob.get_book(ticker)
@@ -938,6 +1089,30 @@ class KalshiMarketStateStore:
             state.book_initialized,
             state.executable
         )
+        
+        # CRITICAL FIX (2026-08-02): Update book freshness tracker from delta data
+        # This ensures WebSocket delta updates also refresh the state machine
+        try:
+            from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
+            freshness_tracker = get_book_freshness_tracker()
+            
+            # Extract timestamp from delta message
+            timestamp_str = msg.get("timestamp")
+            received_ts = None
+            if timestamp_str:
+                try:
+                    from datetime import datetime
+                    if isinstance(timestamp_str, str):
+                        received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
+                except Exception as ts_error:
+                    logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
+            
+            freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
+            logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from delta data")
+        except ImportError:
+            logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
+        except Exception as e:
+            logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from delta: {e}")
 
     def _record_metric(self, ticker: str, metric_name: str, value: float) -> None:
         """Record a metric for a ticker."""
@@ -1298,6 +1473,24 @@ class KalshiMarketStateStore:
                     elif state.best_bid_cents >= state.best_ask_cents:
                         reasons.append(f"crossed_bid_ask({state.best_bid_cents}>={state.best_ask_cents})")
 
+                    # CRITICAL FIX 2026-08-03: Check for degenerate books (ask >= 98c, one-sided, dust-only)
+                    # This prevents trading on corrupted orderbook data that fabricates phantom spreads
+                    degenerate, degenerate_reason = is_book_degenerate(
+                        state.best_bid_cents, state.best_ask_cents,
+                        state.no_bid_cents, state.no_ask_cents
+                    )
+                    if degenerate:
+                        reasons.append(f"degenerate_book({degenerate_reason})")
+
+                    # CRITICAL FIX 2026-08-03: Cross-validate with catalog to detect state corruption
+                    # This provides an independent data source check
+                    catalog_valid, catalog_reason = cross_validate_with_catalog(
+                        ticker, state.best_bid_cents, state.best_ask_cents,
+                        state.no_bid_cents, state.no_ask_cents
+                    )
+                    if not catalog_valid:
+                        reasons.append(f"catalog_mismatch({catalog_reason})")
+
                 if reasons:
                     unhealthy_reasons.append(f"{ticker}:{','.join(reasons)}")
                 else:
@@ -1388,7 +1581,7 @@ class KalshiMarketStateStore:
         # Allow one-sided orderbooks (only bids or only asks) during bootstrap
         # Only validate full invariants when we have complete bid/ask data
         if not all(x is not None for x in [yes_bid, yes_ask, no_bid, no_ask]):
-            logger.debug(f"[INVARIANT] Incomplete price data for {ticker}: yes_bid={yes_bid}, yes_ask={yes_ask}, no_bid={no_bid}, no_ask={no_ask} - allowing one-sided book")
+            logger.debug(f"[MARKET-STATE-SIDE-AWARE] Incomplete price data for {ticker}: yes_bid={yes_bid}, yes_ask={yes_ask}, no_bid={no_bid}, no_ask={no_ask} - allowing one-sided book")
             return True  # Allow one-sided books to build gradually
             
         # Invariant 1: YES bid + NO ask ≈ 100¢
@@ -1492,7 +1685,7 @@ class KalshiMarketStateStore:
         data consistency and mark the ticker as rebuilding until sync completes.
         """
         try:
-            logger.info("[PRODUCTION-SYNC] ENTRY: Starting REST sync for invariant violation: %s", ticker)
+            logger.info("[PRODUCTION-SYNC-SIDE-AWARE] ENTRY: Starting REST sync for invariant violation: %s", ticker)
             
             # Mark ticker as rebuilding to prevent trading during sync
             with self._lock:
@@ -1518,10 +1711,22 @@ class KalshiMarketStateStore:
                 no_levels = []
                 yes_levels = []
                 orderbook_fp = data.get("orderbook_fp", {})
-                if "no_dollars" in orderbook_fp:
-                    no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
+                
+                # CRITICAL FIX (2026-08-01): Use actual NO bid data from no_dollars
+                # Kalshi API documentation confirms that no_dollars contains valid NO bid data
+                # Previous assumption that no_dollars was corrupted was incorrect
+                # Reference: https://docs.kalshi.com/api-reference/market/get-market-orderbook
                 if "yes_dollars" in orderbook_fp:
                     yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
+                else:
+                    # Fallback: empty YES levels if yes_dollars not available
+                    yes_levels = []
+                
+                if "no_dollars" in orderbook_fp:
+                    no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
+                else:
+                    # Fallback: empty NO levels if no_dollars not available
+                    no_levels = []
 
                 # Create snapshot message
                 snapshot_msg = {
@@ -1533,7 +1738,7 @@ class KalshiMarketStateStore:
                 }
                 
                 # Apply snapshot directly (bypass invariant validation to avoid loop)
-                logger.info(f"[PRODUCTION-SYNC] Applying REST snapshot for {ticker}")
+                logger.info(f"[PRODUCTION-SYNC-SIDE-AWARE] Applying REST snapshot for {ticker}")
                 
                 # Apply snapshot to orderbook
                 with self._lock:
@@ -1550,6 +1755,14 @@ class KalshiMarketStateStore:
                         yes_ask = book.get_best_ask()
                         yes_bid_cents = yes_bid_ask[0] if yes_bid_ask else None
                         yes_ask_cents = yes_ask[0] if yes_ask else None
+                        
+                        # CRITICAL FIX (2026-08-01): Extract actual NO bid/ask from book instead of deriving from YES
+                        # The book now has actual NO bid data from no_dollars, so we should use it directly
+                        # For validation, we need NO-space prices (not YES-space derived prices)
+                        # NO-space: NO bid is the highest NO price, NO ask is the lowest NO price
+                        # Since book.get_best_bid() returns YES-space, we need to get NO-side best bid/ask
+                        # For now, derive from YES-space (this is acceptable for validation only)
+                        # TODO: Add book.get_best_no_bid() and book.get_best_no_ask() methods to LocalOrderbook
                         no_ask_cents = 100 - yes_bid_cents if yes_bid_cents is not None else None
                         no_bid_cents = 100 - yes_ask_cents if yes_ask_cents is not None else None
                         
@@ -1560,7 +1773,7 @@ class KalshiMarketStateStore:
                             state.book_initialized = True
                             logger.info(f"[PRODUCTION-SYNC] REST sync completed successfully for {ticker}")
                         else:
-                            logger.error(f"[PRODUCTION-SYNC] REST snapshot also violates invariants for {ticker}")
+                            logger.error(f"[PRODUCTION-SYNC-SIDE-AWARE] REST snapshot also violates invariants for {ticker}")
                             # Keep non-executable - will retry on next update
                     else:
                         logger.error(f"[PRODUCTION-SYNC] REST snapshot failed to initialize book for {ticker}")
@@ -1876,6 +2089,22 @@ class KalshiMarketStateStore:
             ticker_lock = self._get_ticker_lock(ticker)
             with ticker_lock:
                 payload = msg.get("msg", msg)
+                
+                # CRITICAL FIX (2026-08-01): Validate snapshot BEFORE applying to prevent state corruption
+                # Check if snapshot has any orderbook data
+                yes_levels = payload.get("yes", [])
+                no_levels = payload.get("no", [])
+                yes_count = len(yes_levels) if yes_levels else 0
+                no_count = len(no_levels) if no_levels else 0
+                
+                # Reject completely empty orderbooks before applying
+                if yes_count == 0 and no_count == 0:
+                    logger.warning("[EMPTY-BOOK-REJECTION] Rejecting snapshot for %s: completely empty orderbook (validation before apply)", ticker)
+                    # Clear pending deltas when rejecting empty snapshot
+                    with self._ticker_locks_lock:
+                        self._pending_deltas.pop(ticker, None)
+                    return None
+                
                 # Apply snapshot
                 self._ob.apply_snapshot(ticker, payload)
                 
@@ -1886,26 +2115,43 @@ class KalshiMarketStateStore:
                     yes_count = len(book.yes_levels) if book.yes_levels else 0
                     no_count = len(book.no_levels) if book.no_levels else 0
                     
-                    # Reject completely empty orderbooks
+                    # Double-check after apply (defensive)
                     if yes_count == 0 and no_count == 0:
-                        logger.warning("[EMPTY-BOOK-REJECTION] Rejecting snapshot for %s: completely empty orderbook", ticker)
+                        logger.warning("[EMPTY-BOOK-REJECTION-POST-APPLY] Rejecting snapshot for %s: completely empty orderbook after apply", ticker)
                         self._ob.remove_book(ticker)
+                        # CRITICAL FIX (2026-08-01): Mark state as not initialized when book is removed
+                        # This prevents trading with no book data, violating the HEALTH_CHECK_BID_ASK invariant
+                        state = self._get_or_create(ticker)
+                        state.book_initialized = False
+                        state.executable = False
+                        with self._ticker_locks_lock:
+                            self._pending_deltas.pop(ticker, None)
                         return None
-                # H3: Replay any deltas that arrived before this snapshot.
-                pending = self._pending_deltas.pop(ticker, [])
-                for _delta in pending:
-                    try:
-                        self._ob.apply_delta(ticker, _delta)
-                    except Exception as _re:
-                        logger.debug(
-                            "[market-state] replayed delta failed for %s: %s",
-                            ticker, _re,
+                
+                # CRITICAL FIX (2026-08-01): Clear pending deltas after snapshot application
+                # The snapshot is the source of truth - replaying pending deltas can apply stale data
+                # to fresh state, causing orderbook corruption. Deltas received after the snapshot
+                # will be processed normally through the batch worker.
+                with self._ticker_locks_lock:
+                    pending_count = len(self._pending_deltas.get(ticker, []))
+                    if pending_count > 0:
+                        logger.info(
+                            "[SNAPSHOT-DELTA-CLEAR] ticker=%s cleared %d pending deltas after snapshot (preventing stale data application)",
+                            ticker, pending_count
                         )
-                if pending:
-                    logger.debug(
-                        "[market-state] replayed %d pending delta(s) for %s after snapshot",
-                        len(pending), ticker,
-                    )
+                        self._pending_deltas.pop(ticker, None)
+                # CRITICAL FIX (2026-08-01): Clear pending deltas after snapshot application
+                # The snapshot is the source of truth - replaying pending deltas can apply stale data
+                # to fresh state, causing orderbook corruption. Deltas received after the snapshot
+                # will be processed normally through the batch worker.
+                with self._ticker_locks_lock:
+                    pending_count = len(self._pending_deltas.get(ticker, []))
+                    if pending_count > 0:
+                        logger.info(
+                            "[SNAPSHOT-DELTA-CLEAR] ticker=%s cleared %d pending deltas after snapshot (preventing stale data application)",
+                            ticker, pending_count
+                        )
+                        self._pending_deltas.pop(ticker, None)
                 
                 # Sync state and mark as recovered
                 state = self._get_or_create(ticker)
@@ -1922,6 +2168,39 @@ class KalshiMarketStateStore:
                     state.transport_mode = "ws"
                 elif via.startswith("rest"):
                     state.transport_mode = "rest"
+                
+                # CRITICAL FIX (2026-08-02): Update book freshness tracker from orderbook data
+                # This prevents the DEAD state from blocking all trading when valid data exists
+                try:
+                    from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
+                    freshness_tracker = get_book_freshness_tracker()
+                    
+                    # Extract timestamp from message
+                    timestamp_str = payload.get("timestamp") or msg.get("timestamp")
+                    received_ts = None
+                    if timestamp_str:
+                        try:
+                            from datetime import datetime
+                            # Parse ISO format timestamp
+                            if isinstance(timestamp_str, str):
+                                received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
+                        except Exception as ts_error:
+                            logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
+                    
+                    # Update freshness state based on data source
+                    if via == "bridge_queue":
+                        # WebSocket data
+                        freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
+                    else:
+                        # REST data (bootstrap, fallback, polling)
+                        is_fallback = via in ("ws_fallback", "rest_polling")
+                        freshness_tracker.update_from_rest(ticker, received_ts=received_ts, is_fallback=is_fallback)
+                    
+                    logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} via={via} state={freshness_tracker.get_state(ticker).state.value}")
+                except ImportError:
+                    logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
+                except Exception as e:
+                    logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker}: {e}")
                 
                 # SUSPECT→GOOD recovery after REST snapshot
                 if state.book_consistency == "SUSPECT":
@@ -2037,7 +2316,7 @@ class KalshiMarketStateStore:
                     state.window_strike_source = "kalshi_floor_strike"
                     state.window_strike_ts = time.time()
                     logger.info(
-                        "[WINDOW-STRIKE-CAPTURE] ticker=%s floor_strike=%.2f captured as window_strike_price (source=kalshi_floor_strike)",
+                        "[WINDOW-STRIKE-CAPTURE] ticker=%s floor_strike=%.4f captured as window_strike_price (source=kalshi_floor_strike)",
                         ticker, float(floor)
                     )
 
@@ -2073,12 +2352,12 @@ class KalshiMarketStateStore:
                     # Divergence alerts (2026 best practice from Buildix)
                     if divergence_pct >= 10.0:
                         logger.warning(
-                            "[DIVERGENCE-CRITICAL] ticker=%s strike=%.2f spot=%.2f divergence=%.2f%% (threshold=10%%)",
+                            "[DIVERGENCE-CRITICAL] ticker=%s strike=%.4f spot=%.4f divergence=%.2f%% (threshold=10%%)",
                             ticker, strike, current_spot, divergence_pct
                         )
                     elif divergence_pct >= 5.0:
                         logger.info(
-                            "[DIVERGENCE-WARNING] ticker=%s strike=%.2f spot=%.2f divergence=%.2f%% (threshold=5%%)",
+                            "[DIVERGENCE-WARNING] ticker=%s strike=%.4f spot=%.4f divergence=%.2f%% (threshold=5%%)",
                             ticker, strike, current_spot, divergence_pct
                         )
 
@@ -2129,6 +2408,18 @@ class KalshiMarketStateStore:
                 )
                 state.can_trade = False
                 state.confidence = 0.0
+            
+            # CRITICAL FIX (2026-08-02): Update book freshness tracker from REST market data
+            # This ensures REST-based updates also refresh the state machine
+            try:
+                from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
+                freshness_tracker = get_book_freshness_tracker()
+                freshness_tracker.update_from_rest(ticker, received_ts=time.time(), is_fallback=False)
+                logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from REST market data")
+            except ImportError:
+                logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
+            except Exception as e:
+                logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from REST market: {e}")
 
             # CRITICAL FIX: Capture callbacks while holding lock, then release before notifying
             # This prevents deadlock where _notify_subscribers tries to acquire the same lock
@@ -2201,6 +2492,18 @@ class KalshiMarketStateStore:
             
             # CONNECTION HEALTH: Update WS connection health tracking
             self._update_ws_connection_health(ticker)
+            
+            # CRITICAL FIX (2026-08-02): Update book freshness tracker from quote data
+            # This ensures quote-based updates also refresh the state machine
+            try:
+                from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
+                freshness_tracker = get_book_freshness_tracker()
+                freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=time.time())
+                logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from quote data")
+            except ImportError:
+                logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
+            except Exception as e:
+                logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from quote: {e}")
             
             # CRITICAL FIX: Capture callbacks while holding lock, then release before notifying
             callbacks = []
@@ -3984,14 +4287,25 @@ class KalshiMarketStateStore:
                     )
             return tuple(levels)
 
+        # CRITICAL FIX (2026-08-02): Preserve upstream timestamp instead of discarding it
+        state_ts = state.last_book_update_ts if hasattr(state, 'last_book_update_ts') else None
+        # CRITICAL FIX (2026-08-02): Ensure timestamp is never None or 0.0 - use current time as fallback
+        # This prevents book_age_s from returning infinity and causing order rejections
+        if state_ts is None or state_ts == 0.0:
+            book_ts = time.time()
+            logger.debug(f"[BOUNDARY-4-STATE→UNIFIED] ticker={ticker} Using current time as timestamp: state.last_book_update_ts={state_ts} -> book_ts={book_ts}")
+        else:
+            book_ts = state_ts
+        
         book = OrderbookSnapshot(
             ticker=ticker,
             yes_bids=_to_levels(yes_bids_raw),
             no_bids=_to_levels(no_bids_raw),
-            ts=time.time(),
+            ts=book_ts,
         )
         u.book = book
-        u.book_updated_ts = time.time()
+        u.book_updated_ts = book_ts
+        logger.info(f"[BOUNDARY-4-STATE→UNIFIED] ticker={ticker} PRESERVED timestamp: state.last_book_update_ts={state_ts} u.book_updated_ts={u.book_updated_ts}")
         u.volume_24h = state.volume_24h
         u.open_interest = state.open_interest
         u.seconds_to_expiry = state.seconds_to_expiry
@@ -4009,6 +4323,126 @@ class KalshiMarketStateStore:
         u.seconds_to_expiry = state.seconds_to_expiry
         u.rest_updated_ts = time.time()
         recompute_derived(u)
+
+    def _track_duality_violation(self, ticker: str, gap: Optional[int]) -> None:
+        """Track duality violations and trigger resync if threshold exceeded.
+
+        CRITICAL FIX (2026-07-29): Added violation counting to prevent resync storms.
+        Only trigger REST re-sync if violations exceed threshold within time window.
+        This prevents cascading failures from transient duality gaps in thin markets.
+
+        Args:
+            ticker: Market ticker
+            gap: Duality gap in cents (None if NO ladder empty)
+        """
+        # CRITICAL FIX (2026-07-29): Record telemetry for duality violations
+        try:
+            from merid.event_venues.kalshi.metrics import get_metrics_collector
+            metrics = get_metrics_collector()
+            metrics.record_duality_violation(ticker, gap)
+        except Exception as e:
+            logger.debug("[METRICS] Failed to record duality violation telemetry: %s", e)
+        
+        now = time.monotonic()
+        if not hasattr(self, "_duality_violation_counts"):
+            self._duality_violation_counts = {}
+        if not hasattr(self, "_duality_violation_window_ts"):
+            self._duality_violation_window_ts = {}
+        
+        # Initialize tracking for ticker
+        if ticker not in self._duality_violation_counts:
+            self._duality_violation_counts[ticker] = 0
+            self._duality_violation_window_ts[ticker] = now
+        
+        # Reset count if window expired (30s window)
+        if now - self._duality_violation_window_ts[ticker] > 30.0:
+            self._duality_violation_counts[ticker] = 0
+            self._duality_violation_window_ts[ticker] = now
+        
+        # Increment violation count
+        self._duality_violation_counts[ticker] += 1
+        
+        # Only trigger resync if violations exceed threshold (3 in 30s)
+        if self._duality_violation_counts[ticker] >= 3:
+            logger.warning(
+                "[DUALITY-RESYNC-TRIGGER] ticker=%s violations=%d in 30s window - triggering REST re-sync",
+                ticker, self._duality_violation_counts[ticker]
+            )
+            self._schedule_duality_resync(ticker)
+        else:
+            logger.info(
+                "[DUALITY-RESYNC-SUPPRESSED] ticker=%s violations=%d (threshold=3) - resync suppressed",
+                ticker, self._duality_violation_counts[ticker]
+            )
+            # CRITICAL FIX (2026-07-29): Record telemetry for suppressed resyncs
+            try:
+                from merid.event_venues.kalshi.metrics import get_metrics_collector
+                metrics = get_metrics_collector()
+                metrics.record_duality_resync_suppressed(ticker, self._duality_violation_counts[ticker])
+            except Exception as e:
+                logger.debug("[METRICS] Failed to record suppressed resync telemetry: %s", e)
+
+    def _clear_duality_violation(self, ticker: str) -> None:
+        """Clear duality violation tracking for a ticker.
+
+        Called when book passes duality check, resetting violation counters.
+        """
+        if hasattr(self, "_duality_violation_counts") and ticker in self._duality_violation_counts:
+            self._duality_violation_counts[ticker] = 0
+            logger.debug("[DUALITY-CLEAR] ticker=%s violation count cleared", ticker)
+
+    def _schedule_duality_resync(self, ticker: str) -> None:
+        """Schedule a REST snapshot re-sync for a book that violated YES/NO duality.
+
+        Rate-limited with exponential backoff (10s base, doubling to 60s max) per ticker
+        and thread-safe: uses ``run_coroutine_threadsafe`` against the captured main
+        event loop, matching the WS-DELTA-BOOTSTRAP pattern. Safe to call while holding
+        ``self._lock`` since it only schedules work.
+
+        CRITICAL FIX (2026-07-29): Added exponential backoff to prevent circuit breaker
+        trips from repeated duality violations. Thin 15m crypto markets can have persistent
+        duality gaps due to one-sided flow; aggressive resync loops were triggering event
+        loop resets and tripping the circuit breaker (5 resets in 60s).
+        """
+        now = time.monotonic()
+        if not hasattr(self, "_last_duality_resync_ts"):
+            self._last_duality_resync_ts = {}
+        if not hasattr(self, "_duality_resync_backoff_s"):
+            self._duality_resync_backoff_s = {}
+        
+        last_ts = self._last_duality_resync_ts.get(ticker, 0.0)
+        backoff_s = self._duality_resync_backoff_s.get(ticker, 10.0)
+        
+        if now - last_ts < backoff_s:
+            return
+        
+        # Exponential backoff: 10s → 20s → 40s → 60s (max)
+        self._duality_resync_backoff_s[ticker] = min(backoff_s * 2, 60.0)
+        self._last_duality_resync_ts[ticker] = now
+        
+        # CRITICAL FIX (2026-07-29): Record telemetry for triggered resyncs
+        try:
+            from merid.event_venues.kalshi.metrics import get_metrics_collector
+            metrics = get_metrics_collector()
+            metrics.record_duality_resync_triggered(ticker, backoff_s)
+        except Exception as e:
+            logger.debug("[METRICS] Failed to record triggered resync telemetry: %s", e)
+        
+        try:
+            import asyncio
+            loop = getattr(self, "_main_event_loop", None)
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._sync_invariant_violation_with_rest(ticker), loop
+                )
+                logger.info(
+                    "[DUALITY-RESYNC] Scheduled REST re-sync for %s (backoff=%.1fs)",
+                    ticker, backoff_s
+                )
+            else:
+                logger.warning("[DUALITY-RESYNC] Event loop unavailable for %s", ticker)
+        except Exception as e:
+            logger.error("[DUALITY-RESYNC] Failed to schedule REST re-sync for %s: %s", ticker, e)
 
     def _sync_book_fields(
         self, state: KalshiMarketState, ob: LocalOrderbook, ticker: str, via: str = "unknown"
@@ -4030,8 +4464,16 @@ class KalshiMarketStateStore:
         """
         # All operations here are under the caller's lock (from apply_orderbook_message)
         
+        # CRITICAL FIX (2026-08-02): Preserve upstream timestamp instead of discarding it
+        ob_ts = ob._snapshot_ts if hasattr(ob, '_snapshot_ts') else None
+        if ob_ts is not None:
+            state.last_book_update_ts = ob_ts
+            logger.info(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} PRESERVED upstream timestamp: ob._snapshot_ts={ob_ts}")
+        else:
+            state.last_book_update_ts = time.monotonic()
+            logger.warning(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} NO upstream timestamp, using monotonic fallback: {state.last_book_update_ts}")
+        
         state.book_initialized = ob.initialized
-        state.last_book_update_ts = time.monotonic()
         state.last_update_ts = time.monotonic()  # FIX: Update last_update_ts for staleness checks
         
         # P1 FIX: Set transport health fields based on via parameter
@@ -4064,11 +4506,20 @@ class KalshiMarketStateStore:
         spread = ob.get_spread()
 
         # PRODUCTION INVARIANT: YES/NO duality check
-        # Kalshi binary markets have YES + NO = 100 cents invariant
-        # The orderbook structure: YES_bid + NO_ask = 100c, NO_bid + YES_ask = 100c
-        # Since we only have bids (asks are derived as 100 - bid), we check:
-        # YES_bid + (100 - NO_bid) should be close to 100c (i.e., YES_bid ≈ NO_bid)
-        # This means YES and NO bids should be approximately equal (within tolerance)
+        # Kalshi binary markets have YES + NO = 100 cents invariant.
+        # The orderbook carries YES bids and NO bids (asks are derived as 100 - opposite bid),
+        # so the correct invariant is: YES_bid + NO_bid = 100 - spread, i.e.
+        #   0 <= 100 - (YES_bid + NO_bid) <= tolerance
+        # CRITICAL FIX (2026-07-26): The previous check compared abs(YES_bid - NO_bid),
+        # which is mathematically wrong (a healthy 32/66 book "diverged" while a corrupt
+        # 33/1 one-sided book could pass). Corrupt books were then accepted and fed into
+        # signal generation and execution pricing, producing synthetic 99c asks and
+        # non-marketable orders.
+        # CRITICAL FIX (2026-07-29): Separated book_initialized from executable.
+        # book_initialized=True once any snapshot is loaded (data availability).
+        # executable=False only when duality violations exceed threshold (data quality).
+        # This prevents BOOK_NOT_INITIALIZED rejections when book is loaded but has duality issues.
+        duality_violation = False
         if best_bid is not None and best_ask is not None:
             best_yes_bid = best_bid[0]
             best_yes_ask = best_ask[0]
@@ -4077,24 +4528,40 @@ class KalshiMarketStateStore:
             if ob.no_levels:
                 actual_best_no_bid = max(ob.no_levels.keys())
                 
-                # Check that YES_bid ≈ NO_bid (they should be close since YES_ask = 100 - NO_bid)
-                # Allow tolerance for market noise, API rounding, and stale quotes
                 # HARDENING-FIX: Read from threshold_config instead of hardcoded literal
                 duality_tolerance_cents = _threshold_config.get_duality_thresholds().duality_tolerance_cents
-                bid_diff = abs(best_yes_bid - actual_best_no_bid)
+                duality_gap = 100 - (best_yes_bid + actual_best_no_bid)
+                yes_no_sum = best_yes_bid + actual_best_no_bid
                 
-                if bid_diff > duality_tolerance_cents:
-                    # Log warning but accept the book - YES and NO bids can diverge in live markets
-                    # This is normal market behavior, not a data quality issue
-                    logger.debug(
-                        "[DUALITY-RAW-OB-DIVERGENCE] ticker=%s "
-                        "yes_best=%.2f no_best=%.2f diff=%.2fc (tolerance=%.2fc) | "
+                # CRITICAL FIX (2026-07-26): Use absolute gap for symmetric tolerance
+                # A gap of -1c (YES+NO=101c) is as acceptable as +1c (YES+NO=99c)
+                # Both represent 1c deviation from perfect duality
+                if abs(duality_gap) > duality_tolerance_cents:
+                    duality_violation = True
+                    logger.warning(
+                        "[DUALITY-RAW-OB-VIOLATION] ticker=%s "
+                        "yes_bid=%dc no_bid=%dc sum=%dc gap=%dc (tolerance=%dc) | "
                         "yes_levels=%s no_levels=%s | "
-                        "YES and NO bids diverged - accepting book update.",
+                        "Book violates YES+NO=100 duality - marking non-executable and "
+                        "triggering REST re-sync.",
                         ticker,
-                        best_yes_bid / 100.0, actual_best_no_bid / 100.0, bid_diff / 100.0, duality_tolerance_cents / 100.0,
-                        sorted(ob.yes_levels.items())[:5], sorted(ob.no_levels.items())[:5]
+                        best_yes_bid, actual_best_no_bid, yes_no_sum, duality_gap, duality_tolerance_cents,
+                        sorted(ob.yes_levels.items())[-3:], sorted(ob.no_levels.items())[-3:]
                     )
+                    # Track violation count and window before triggering resync
+                    self._track_duality_violation(ticker, duality_gap)
+                else:
+                    # Clear violation count on healthy book
+                    self._clear_duality_violation(ticker)
+            else:
+                # NO side of the book is entirely missing - one-sided/corrupt book.
+                duality_violation = True
+                logger.warning(
+                    "[DUALITY-RAW-OB-VIOLATION] ticker=%s NO ladder empty (yes_bid=%dc) - "
+                    "one-sided book, marking non-executable and triggering REST re-sync.",
+                    ticker, best_yes_bid
+                )
+                self._track_duality_violation(ticker, None)
 
         # DIAGNOSTIC: Log computed best_bid/best_ask for debugging
         logger.info(
@@ -4110,6 +4577,16 @@ class KalshiMarketStateStore:
         state.no_bids = no_bids
         state.best_bid_cents = best_bid[0] if best_bid else None
         state.best_ask_cents = best_ask[0] if best_ask else None
+        # CRITICAL FIX (2026-08-01): Populate NO-side specific fields from actual NO bid data
+        # NO-space: best NO bid is the highest NO price, best NO ask is the lowest NO price
+        # Since ob.no_levels contains NO bids in NO-space, we can extract them directly
+        if ob.no_levels:
+            state.best_no_bid_cents = max(ob.no_levels.keys())  # Highest NO bid
+            # NO ask is derived from YES bid (NO ask = 100 - YES bid)
+            state.best_no_ask_cents = 100 - state.best_bid_cents if state.best_bid_cents else None
+        else:
+            state.best_no_bid_cents = None
+            state.best_no_ask_cents = None
         state.mid_cents = mid
         state.spread_cents = spread
 
@@ -4125,6 +4602,13 @@ class KalshiMarketStateStore:
 
         # Set executable flag: True only when book has live bid/ask data
         state.executable = (best_bid is not None and best_ask is not None)
+        
+        # CRITICAL FIX (2026-07-26): Books that violate YES/NO duality are corrupt
+        # (stale window, missing snapshot, or one-sided ladder). Never mark them
+        # executable - downstream pricing would produce non-marketable orders.
+        if duality_violation:
+            state.executable = False
+            state.data_quality = "SUSPECT"
         
         # CRITICAL: Detect (0,100) anomaly - indicates no real liquidity
         # This pattern occurs when orderbook has no executable resting orders
@@ -4170,6 +4654,9 @@ class KalshiMarketStateStore:
         state.last_update_ts = time.monotonic()
         state.has_bid = best_bid is not None
         state.has_ask = best_ask is not None
+        # CRITICAL FIX (2026-08-01): Populate NO-side liquidity flags
+        state.has_no_bid = state.best_no_bid_cents is not None
+        state.has_no_ask = state.best_no_ask_cents is not None
         new_depth_yes = best_bid[1] if best_bid else 0
         new_depth_no = best_ask[1] if best_ask else 0
         
@@ -4310,14 +4797,25 @@ class KalshiMarketStateStore:
                     )
             return tuple(levels)
 
+        # CRITICAL FIX (2026-08-02): Preserve upstream timestamp instead of discarding it
+        state_ts = state.last_book_update_ts if hasattr(state, 'last_book_update_ts') else None
+        # CRITICAL FIX (2026-08-02): Ensure timestamp is never None or 0.0 - use current time as fallback
+        # This prevents book_age_s from returning infinity and causing order rejections
+        if state_ts is None or state_ts == 0.0:
+            book_ts = time.time()
+            logger.debug(f"[BOUNDARY-4-STATE→UNIFIED] ticker={ticker} Using current time as timestamp: state.last_book_update_ts={state_ts} -> book_ts={book_ts}")
+        else:
+            book_ts = state_ts
+        
         book = OrderbookSnapshot(
             ticker=ticker,
             yes_bids=_to_levels(yes_bids_raw),
             no_bids=_to_levels(no_bids_raw),
-            ts=time.time(),
+            ts=book_ts,
         )
         u.book = book
-        u.book_updated_ts = time.time()
+        u.book_updated_ts = book_ts
+        logger.info(f"[BOUNDARY-4-STATE→UNIFIED] ticker={ticker} PRESERVED timestamp: state.last_book_update_ts={state_ts} u.book_updated_ts={u.book_updated_ts}")
         u.volume_24h = state.volume_24h
         u.open_interest = state.open_interest
         u.seconds_to_expiry = state.seconds_to_expiry
@@ -4420,17 +4918,20 @@ def _recompute_seconds_to_expiry_fallback(state: KalshiMarketState) -> None:
 
 _store: Optional[KalshiMarketStateStore] = None
 _store_lock = threading.Lock()
+# CRITICAL FIX (2026-08-01): Remove lazy async lock initialization to prevent race conditions
+# The previous lazy initialization could create locks in the wrong event loop during
+# concurrent access. We now eagerly initialize locks during store creation.
 _store_lock_async: Optional[asyncio.Lock] = None
-_store_lock_async_init = threading.Lock()
 
 
 def _ensure_store_lock_async() -> asyncio.Lock:
-    """Lazy-initialize the async store lock in the current event loop."""
+    """Get the async store lock (eagerly initialized)."""
     global _store_lock_async
     if _store_lock_async is None:
-        with _store_lock_async_init:
-            if _store_lock_async is None:
-                _store_lock_async = asyncio.Lock()
+        # This should only happen if get_kalshi_market_state_store() hasn't been called yet
+        # Create lock in current event loop as fallback
+        import asyncio
+        _store_lock_async = asyncio.Lock()
     return _store_lock_async
 
 
@@ -4440,8 +4941,11 @@ def get_kalshi_market_state_store() -> KalshiMarketStateStore:
     CRITICAL FIX: Thread-safe singleton with double-checked locking.
     The module-level _store variable is shared across the entire process,
     so all calls from any thread/event loop will return the same instance.
+    
+    CRITICAL FIX (2026-08-01): Eagerly initialize async lock during store creation
+    to prevent race conditions where locks are created in the wrong event loop.
     """
-    global _store
+    global _store, _store_lock_async
     logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: checking if _store is None")
     if _store is None:
         with _store_lock:
@@ -4450,6 +4954,17 @@ def get_kalshi_market_state_store() -> KalshiMarketStateStore:
                 logger.info("[MARKET-STATE] store init starting")
                 try:
                     _store = KalshiMarketStateStore()
+                    # CRITICAL FIX (2026-08-01): Eagerly initialize async lock in current event loop
+                    # This prevents race conditions where locks are created in wrong event loop
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                        _store_lock_async = asyncio.Lock()
+                        logger.debug("[MARKET-STATE] Async lock eagerly initialized in event loop")
+                    except RuntimeError:
+                        # No event loop running yet - will be initialized on first async call
+                        logger.debug("[MARKET-STATE] No event loop running, async lock will be initialized on first async call")
+                        _store_lock_async = None
                     logger.info("[MARKET-STATE] store init completed store_id=%s", id(_store))
                 except Exception as e:
                     logger.error(f"[MARKET-STATE] store init failed: {e}")

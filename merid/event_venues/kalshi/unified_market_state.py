@@ -228,7 +228,7 @@ class UnifiedMarketState:
     kelly_fraction_hint: Optional[float] = None   # |edge_basis| / max_loss
 
     # ── Freshness timestamps ──────────────────────────────────────────────
-    book_updated_ts: float = 0.0
+    book_updated_ts: Optional[float] = None  # CRITICAL FIX: Use None to distinguish "never set" from "set to epoch"
     candle_updated_ts: float = 0.0
     rest_updated_ts: float = 0.0
     index_updated_ts: float = 0.0
@@ -260,8 +260,9 @@ class UnifiedMarketState:
 
     @property
     def book_age_s(self) -> float:
-        # 2026 FIX: Handle None timestamp gracefully - return infinity (stale/unknown)
-        if self.book_updated_ts is None:
+        # 2026 FIX: Handle None or 0.0 timestamp gracefully - return infinity (stale/unknown)
+        # None = never set, 0.0 = set to epoch (both indicate missing/invalid timestamp)
+        if self.book_updated_ts is None or self.book_updated_ts == 0.0:
             return float('inf')
         return _time.time() - self.book_updated_ts
 
