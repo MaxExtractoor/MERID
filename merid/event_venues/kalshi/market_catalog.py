@@ -31,6 +31,7 @@ import threading
 import asyncio
 import concurrent.futures
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 # CRITICAL DIAGNOSTIC: Log module load to confirm code version
 from utils.logger import get_logger
@@ -631,9 +632,7 @@ class KalshiMarketCatalog:
         # The state store is initialized in the main thread and injected here
         # This prevents catalog refresh thread from calling get_kalshi_market_state_store()
         # which creates a race condition when called from a different thread
-        if TYPE_CHECKING:
-            from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
-        self._state_store: Optional['KalshiMarketStateStore'] = None
+        self._state_store = None  # Will be injected during startup
 
     def _ensure_lock(self) -> asyncio.Lock:
         """Lazy-initialize the asyncio.Lock in the current event loop."""
