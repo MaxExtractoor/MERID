@@ -2259,6 +2259,13 @@ class KalshiMarketStateStore:
         ticker = data.get("ticker")
         if not ticker:
             return None
+        
+        # CRITICAL FIX (2026-08-02): Fail fast if state store is not properly initialized
+        # This prevents deadlock during early boot when catalog refresh tries to use
+        # state store before it's guaranteed to exist
+        if not hasattr(self, '_states') or not hasattr(self, '_lock'):
+            logger.warning("[APPLY-REST-MARKET] State store not fully initialized, skipping ticker=%s", ticker)
+            return None
 
         logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s", ticker, threading.current_thread().name)
         
