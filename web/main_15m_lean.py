@@ -3039,6 +3039,15 @@ async def _run_startup_phases_v20260530(app):
     """Actual startup logic - linearized phase-based initializer."""
     global loop_task, kalshi_loop, ws_refresh_task, ws_refresh_stop
     
+    # CRITICAL FIX (2026-08-02): Skip startup phases if environment variable is set
+    # This prevents startup hang during complex initialization
+    import os
+    skip_startup_phases = os.getenv("MERID_SKIP_STARTUP_PHASES", "false").lower() == "true"
+    if skip_startup_phases:
+        logger.warning("[STARTUP] Skipping startup phases (MERID_SKIP_STARTUP_PHASES=true) to prevent startup hang")
+        logger.warning("[STARTUP] Server will start with minimal initialization")
+        return
+    
     # P0-12 DIAGNOSTIC: Log function entry
     logger.info("[P1-STARTUP-ENTRY] _run_startup_phases_v20260530 ENTERED")
     
