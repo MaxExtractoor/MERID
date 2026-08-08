@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime as dt, timezone, timedelta, datetime
 
+import math
+
 import time
 
 import uuid
@@ -104,6 +106,26 @@ try:
 except ImportError:
     BTC_SENTIMENT_BIAS_ENABLED = False
     logger.debug("[BTC-SENTIMENT-BIAS] Not available - BTC sentiment bias disabled")
+
+# Import directional bias monitor for signal bias tracking
+try:
+    from merid.prediction.bias_monitor import get_bias_monitor
+    BIAS_MONITOR_ENABLED = True
+except ImportError:
+    BIAS_MONITOR_ENABLED = False
+
+    def get_bias_monitor() -> None:
+        return None
+
+# Import side-aware price range from binary price space (single source of truth)
+try:
+    from merid.event_venues.kalshi.binary_price_space import (
+        is_price_in_side_aware_range,
+    )
+    PRICE_SPACE_AVAILABLE = True
+except ImportError:
+    PRICE_SPACE_AVAILABLE = False
+    logger.debug("[PRICE-SPACE] binary_price_space not available - using fallback manual ranges")
 
 
 
@@ -230,6 +252,44 @@ def calculate_velocity_edge(velocity: float, velocity_threshold: float) -> float
         return 0.0
 
     return abs(velocity / velocity_threshold) * 2.0
+
+
+
+# Sanity bounds for strike/spot prices per asset (USD).
+# Used to reject corrupt market metadata (bad ticks, unit errors, stale feeds)
+# before a strike target feeds signal generation.
+_STRIKE_TARGET_BOUNDS = {
+    "BTC": (1_000.0, 200_000.0),
+    "ETH": (50.0, 10_000.0),
+    "SOL": (1.0, 1_000.0),
+    "XRP": (0.10, 10.0),
+    "DOGE": (0.0001, 2.0),
+}
+
+
+def _is_valid_strike_target(price, asset: str) -> bool:
+    """Validate a strike/spot price for an asset.
+
+    Rejects None, non-numeric, NaN/inf, zero, and negative prices.
+    Known assets must fall within sane USD bounds; unknown assets get a
+    positive-only check (asset match is case-sensitive by design).
+
+    Args:
+        price: Candidate price (float) - may be None
+        asset: Asset symbol (e.g., "BTC")
+
+    Returns:
+        True if the price is usable as a strike target.
+    """
+    if price is None or not isinstance(price, (int, float)) or isinstance(price, bool):
+        return False
+    if math.isnan(price) or math.isinf(price) or price <= 0:
+        return False
+    bounds = _STRIKE_TARGET_BOUNDS.get(asset)
+    if bounds is None:
+        return True  # Unknown asset: positive check only
+    low, high = bounds
+    return low <= price <= high
 
 
 
@@ -873,7 +933,7 @@ class LeanAgentConfig:
 
     # to ensure single source of truth across the stack
 
-    # Note: min_edge_pct removed - velocity-based signal doesn't use edge filtering
+    # NO min_edge check for velocity-based signals: min_edge_pct removed
 
 
 
@@ -1019,6 +1079,10 @@ class LeanAgent15m:
 
         self._calibration_min_samples = getattr(config, 'calibration_min_samples', 100)
 
+        self._calibration_fit_interval_hours = getattr(config, 'calibration_fit_interval_hours', 24)
+
+        self._calibration_regularization = getattr(config, 'calibration_regularization', 0.0001)
+
         
 
         # Phase 6: Initialize regime detector for adaptive strategy switching
@@ -1127,7 +1191,10 @@ class LeanAgent15m:
 
             from merid.risk.probability.platt_scaler import PlattScaler
 
-            self._platt_scaler = PlattScaler(regularization=self._calibration_regularization)
+            self._platt_scaler = PlattScaler(
+                regularization=self._calibration_regularization,
+                min_samples=self._calibration_min_samples,
+            )
 
             self._calibration_logits: List[float] = []
 
@@ -4696,9 +4763,11 @@ class LeanAgent15m:
 
                 best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
 
-                yes_price_cents = best_bid if best_bid > 0 else 0
+                # YES price is the ASK (price to *buy* YES)
+                yes_price_cents = best_ask if best_ask > 0 else 0
 
-                no_price_cents = (100 - best_bid) if best_bid > 0 else 0
+                # NO price is the NO ask = 100 - best YES bid
+                no_price_cents = 100 - best_bid
 
         except Exception as e:
 
@@ -4756,11 +4825,19 @@ class LeanAgent15m:
                     # CRITICAL: Never use 0.0 as strike target - this invalidates all pricing logic
                     # Raise exception to prevent trading with invalid strike target
                     raise ValueError(f"Cannot determine strike target for {asset} - all data sources unavailable")
-        
+
+        # Sanity-validate the strike target (rejects corrupt metadata / unit errors)
+        if strike_target is not None and not _is_valid_strike_target(strike_target, asset):
+            logger.error(
+                "[STRIKE-TARGET-INVALID] asset=%s strike_target=%r failed sanity bounds - rejecting (corrupt market metadata?)",
+                asset, strike_target
+            )
+            strike_target = None
+
         # Check price band ONLY for thesis_side using side-aware ranges
-        # CRITICAL FIX 2026-08-03: Align with global allocator side-aware ranges
-        # YES: 10c-75c (lower bound 10c to avoid extreme cheapness, upper bound 75c for reasonable YES prices)
-        # NO: 25c-99c (lower bound 25c to avoid extreme cheapness, upper bound 99c for high-probability NO entries)
+        # CRITICAL FIX 2026-08-07: Single source of truth from binary_price_space.
+        # YES: 1c-75c (expanded low end for late-expiry markets)
+        # NO: 25c-99c (expanded high end for late-expiry markets)
         # This fixes the inconsistency where agent-grid rejected NO theses at 78-86c that allocator would accept
 
         # CRITICAL FIX 2026-08-03: Add diagnostic logging to verify thesis_side detection
@@ -4768,8 +4845,8 @@ class LeanAgent15m:
             "[THESIS-SIDE-DEBUG] asset=%s thesis_side=%s yes_price=%dc no_price=%dc "
             "thesis_in_range_check=%s range_str=%s",
             asset, thesis_side, yes_price_cents, no_price_cents,
-            "YES:10-75c" if thesis_side == "yes" else "NO:25-99c",
-            "10c-75c" if thesis_side == "yes" else "25c-99c"
+            "YES:1-75c" if thesis_side == "yes" else "NO:25-99c",
+            "1c-75c" if thesis_side == "yes" else "25c-99c"
         )
 
         # Verify thesis_side is correctly normalized
@@ -4781,9 +4858,12 @@ class LeanAgent15m:
             return None
 
         if thesis_side == "yes":
-            thesis_in_range = (10 <= yes_price_cents <= 75)
             thesis_price_cents = yes_price_cents
-            range_str = "10c-75c"
+            if PRICE_SPACE_AVAILABLE:
+                thesis_in_range = is_price_in_side_aware_range(yes_price_cents, "yes")
+            else:
+                thesis_in_range = (1 <= yes_price_cents <= 75)
+            range_str = "1c-75c"
             logger.info(
                 "[PRICE-SIDE-CHECK] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
                 "yes_price=%dc no_price=%dc selected_side=%s selected_price=%dc price_range_ok=%s strict_mode=%s "
@@ -4793,8 +4873,11 @@ class LeanAgent15m:
                 thesis_in_range, strict_mode_enabled, range_str
             )
         else:  # thesis_side == "no"
-            thesis_in_range = (25 <= no_price_cents <= 99)
             thesis_price_cents = no_price_cents
+            if PRICE_SPACE_AVAILABLE:
+                thesis_in_range = is_price_in_side_aware_range(no_price_cents, "no")
+            else:
+                thesis_in_range = (25 <= no_price_cents <= 99)
             range_str = "25c-99c"
             logger.info(
                 "[PRICE-SIDE-CHECK] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
@@ -4832,9 +4915,16 @@ class LeanAgent15m:
                 return None
         
         # Log both sides for diagnostic purposes (but only thesis_side matters for gating)
-        yes_in_range = (10 <= yes_price_cents <= 75)
-        no_in_range = (10 <= no_price_cents <= 75)
-        
+        # CRITICAL FIX 2026-08-07: Use side-aware ranges to match thesis_side check
+        # YES: 1c-75c (expanded low end for late-expiry markets)
+        # NO: 25c-99c (expanded high end for late-expiry markets)
+        if PRICE_SPACE_AVAILABLE:
+            yes_in_range = is_price_in_side_aware_range(yes_price_cents, "yes")
+            no_in_range = is_price_in_side_aware_range(no_price_cents, "no")
+        else:
+            yes_in_range = (1 <= yes_price_cents <= 75)
+            no_in_range = (25 <= no_price_cents <= 99)
+
         logger.info(
             "[MOMENTUM-FVG-PRICE-RANGE] asset=%s yes_price=%dc yes_in_range=%s no_price=%dc no_in_range=%s thesis_side=%s",
             asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, thesis_side
@@ -4962,10 +5052,17 @@ class LeanAgent15m:
                 )
                 return None
         
-        # Recalculate range checks after reconstruction
-        yes_in_range = (10 <= yes_price_cents <= 75)
-        no_in_range = (10 <= no_price_cents <= 75)
-        
+        # Recalculate side-aware range checks after reconstruction
+        # CRITICAL FIX 2026-08-07: Use side-aware ranges to match thesis_side check
+        # YES: 1c-75c (expanded low end for late-expiry markets)
+        # NO: 25c-99c (expanded high end for late-expiry markets)
+        if PRICE_SPACE_AVAILABLE:
+            yes_in_range = is_price_in_side_aware_range(yes_price_cents, "yes")
+            no_in_range = is_price_in_side_aware_range(no_price_cents, "no")
+        else:
+            yes_in_range = (1 <= yes_price_cents <= 75)
+            no_in_range = (25 <= no_price_cents <= 99)
+
         # CRITICAL FIX: 2026-07-24 - Always calculate edges, never return N/A
         # Edge calculation should happen regardless of range - range gating happens later
         # This prevents yes_edge=N/A or no_edge=N/A in logs
@@ -5043,35 +5140,38 @@ class LeanAgent15m:
         
         yes_edge = side_edges.get("yes")
         no_edge = side_edges.get("no")
-        
+
+        # Side-aware candidate filter: only consider sides whose current market price is
+        # in the executable range. This prevents the edge model from selecting an
+        # out-of-range side (e.g. YES at 99c or NO at 1c) that would later be rejected.
         candidates = []
-        
-        if yes_edge and yes_edge > 0:
+        if yes_edge and yes_edge > 0 and yes_in_range:
             candidates.append(("yes", yes_edge))
-        
-        if no_edge and no_edge > 0:
+        if no_edge and no_edge > 0 and no_in_range:
             candidates.append(("no", no_edge))
-        
+
         if not candidates:
             logger.info(
-                "[DUAL-SIDE-REJECT] asset=%s yes_edge=%.4f no_edge=%.4f -> NO TRADE "
-                "(no positive edge on either side)",
-                asset, yes_edge or 0.0, no_edge or 0.0
+                "[DUAL-SIDE-REJECT] asset=%s yes_edge=%.4f no_edge=%.4f "
+                "yes_in_range=%s no_in_range=%s -> NO TRADE (no executable side)",
+                asset, yes_edge or 0.0, no_edge or 0.0, yes_in_range, no_in_range
             )
             return None
-        
-        # Hybrid selection: prefer velocity-aligned side unless opposite side has significantly better edge
-        # Edge ratio threshold: allow opposite side only if it's 1.5x better than velocity-aligned side
+
+        candidate_edges = dict(candidates)
+
+        # Hybrid selection: prefer velocity-aligned side unless opposite side has
+        # significantly better edge. Restrict to executable (in-range) candidates.
         EDGE_RATIO_THRESHOLD = 1.5
-        
+
         velocity_aligned_side = thesis_side  # thesis_side is derived from velocity sign
-        velocity_aligned_edge = side_edges.get(velocity_aligned_side)
         opposite_side = "no" if velocity_aligned_side == "yes" else "yes"
-        opposite_edge = side_edges.get(opposite_side)
-        
+        velocity_aligned_edge = candidate_edges.get(velocity_aligned_side)
+        opposite_edge = candidate_edges.get(opposite_side)
+
         if velocity_aligned_edge and opposite_edge:
             edge_ratio = opposite_edge / velocity_aligned_edge if velocity_aligned_edge > 0 else float('inf')
-            
+
             if edge_ratio >= EDGE_RATIO_THRESHOLD:
                 # Opposite side has significantly better edge - select it despite velocity misalignment
                 signal_side = opposite_side
@@ -5093,10 +5193,10 @@ class LeanAgent15m:
                     opposite_side, opposite_edge, edge_ratio, EDGE_RATIO_THRESHOLD
                 )
         else:
-            # One side missing - select the available side
+            # Only one executable side - select it
             signal_side, selected_edge = max(candidates, key=lambda x: x[1])
             logger.info(
-                "[HYBRID-SELECTION-FALLBACK] asset=%s one side missing - selected=%s edge=%.4f",
+                "[HYBRID-SELECTION-FALLBACK] asset=%s one executable side - selected=%s edge=%.4f",
                 asset, signal_side, selected_edge
             )
         
@@ -5228,10 +5328,22 @@ class LeanAgent15m:
             asset, velocity, velocity_threshold, macd_histogram, rsi, rsi_zone,
             long_score, short_score, fvg_direction, fvg_confidence, obi, obi_strong
         )
-
+        
         # Use selected_edge from dual-side evaluation (already computed)
 
         edge_pct = selected_edge
+        
+        # Calculate market price from selected side
+        if signal_side == "yes":
+            market_price = yes_price_cents / 100.0
+        else:
+            market_price = no_price_cents / 100.0
+        
+        # BIAS MONITORING: Record signal side for bias detection
+        if BIAS_MONITOR_ENABLED:
+            bias_monitor = get_bias_monitor()
+            if bias_monitor:
+                bias_monitor.record_signal(asset=asset, side=signal_side, edge=edge_pct, price=market_price)
         
         # BTC SENTIMENT BIAS: Apply correlation-based bias adjustment for non-BTC assets
         if self._btc_sentiment_bias_enabled and self._btc_sentiment_bias and asset != "BTC":
@@ -5286,14 +5398,16 @@ class LeanAgent15m:
         if signal_side == "yes":
             # For YES: model_prob is probability of YES outcome (trade wins if event happens)
             # We think YES is more likely than market, so add edge
-            model_prob = min(0.95, market_prob + edge_adjustment)
+            # CRITICAL FIX: Remove 0.95 cap for YES orders to match NO orders
+            model_prob = market_prob + edge_adjustment
         else:
             # For NO: model_prob is probability of NO outcome (trade wins if event doesn't happen)
             # price_cents here is the NO price (dual_side_no_price), so market_prob is ALREADY
             # the market-implied NO probability. Do NOT invert it again (double inversion made
             # model_prob = P(YES)+edge, causing Kelly to reject every NO order at price > ~50c).
             # We think NO is more likely than market, so add edge to NO probability
-            model_prob = min(0.95, market_prob + edge_adjustment)
+            # CRITICAL FIX: Remove 0.95 cap for NO orders
+            model_prob = market_prob + edge_adjustment
 
         
 
@@ -5313,19 +5427,19 @@ class LeanAgent15m:
 
         
 
-        # Check if price is within range (10c-75c)
+        # Check if price is within range (YES: 1c-75c, NO: 25c-99c)
 
-        if 10 <= raw_price_cents <= 75:
+        if (signal_side == "yes" and 1 <= raw_price_cents <= 75) or (signal_side == "no" and 25 <= raw_price_cents <= 99):
 
-            # Price is already in valid range - use it directly
+            # Price is already in the side-appropriate range - use it directly
 
             clamped_price_cents = raw_price_cents
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in range [10c-75c] - using directly",
+                "[PRICE-SELECTION] asset=%s side=%s raw_price_cents=%d in side-aware range - using directly",
 
-                asset, raw_price_cents
+                asset, signal_side, raw_price_cents
 
             )
 
@@ -5335,9 +5449,9 @@ class LeanAgent15m:
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside range [10c-75c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s side=%s raw_price_cents=%d outside side-aware range - searching orderbook",
 
-                asset, raw_price_cents
+                asset, signal_side, raw_price_cents
 
             )
 
@@ -5357,26 +5471,34 @@ class LeanAgent15m:
 
                 if market_state:
 
-                    # Get YES orderbook (ascending by price)
-                    # KalshiMarketState stores bids in yes_bids field (not yes_book)
+                    # Select the opposite-side book to compute the ask for the target side.
+                    # YES ask = 100 - NO bid; NO ask = 100 - YES bid.
 
-                    yes_bids = getattr(market_state, 'yes_bids', [])
+                    if signal_side == "yes":
+                        # Cheapest YES ask = 100 - NO bid; search no_bids.
+                        levels = getattr(market_state, 'no_bids', [])
+                        range_min, range_max = 10, 75
+                    else:
+                        # Cheapest NO ask = 100 - YES bid; search yes_bids.
+                        levels = getattr(market_state, 'yes_bids', [])
+                        range_min, range_max = 25, 99
 
-                    if yes_bids:
+                    if levels:
 
-                        # Find cheapest YES price within [10c, 75c] with size >= 1
+                        # Find cheapest executable price in the side-appropriate range.
+                        # For YES: 100 - no_bid; for NO: 100 - yes_bid.
 
-                        valid_prices = [p for (p, size) in yes_bids if 10 <= p <= 75 and size >= 1]
+                        valid_prices = [100 - p for (p, size) in levels if range_min <= (100 - p) <= range_max and size >= 1]
 
                         if valid_prices:
 
-                            price_cents = min(valid_prices)  # Use cheapest acceptable price
+                            price_cents = min(valid_prices)  # cheapest acceptable executable price
 
                             logger.info(
 
-                                "[PRICE-SELECTION] asset=%s found %d valid prices in canonical range, using cheapest=%d",
+                                "[PRICE-SELECTION] asset=%s side=%s found %d valid prices in [%dc-%dc], using cheapest=%d",
 
-                                asset, len(valid_prices), price_cents
+                                asset, signal_side, len(valid_prices), range_min, range_max, price_cents
 
                             )
 
@@ -5384,21 +5506,21 @@ class LeanAgent15m:
 
                             logger.warning(
 
-                                "[PRICE-SELECTION] asset=%s no YES prices in range [10c-75c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s side=%s no executable prices in [%dc-%dc] - dropping candidate",
 
-                                asset
+                                asset, signal_side, range_min, range_max
 
                             )
 
-                            return None  # Drop candidate - no valid price in canonical range
+                            return None  # Drop candidate - no valid price in side-aware range
 
                     else:
 
                         logger.warning(
 
-                            "[PRICE-SELECTION] asset=%s orderbook not available (yes_bids empty) - dropping candidate",
+                            "[PRICE-SELECTION] asset=%s side=%s orderbook not available - dropping candidate",
 
-                            asset
+                            asset, signal_side
 
                         )
 
@@ -5434,17 +5556,25 @@ class LeanAgent15m:
 
         
 
-        # Final validation - ensure we have a valid price in the range (10c-75c)
+        # Final validation - side-aware canonical range
+        # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
+        # single 10c-75c range rejected all NO candidates above 75c even though NO contracts
+        # naturally trade at high prices (implied probability of event NOT happening).
+        side_lower = signal_side.lower() if isinstance(signal_side, str) else 'yes'
+        if side_lower == 'no':
+            price_min, price_max = 25, 99
+            range_str = "25c-99c"
+        else:
+            price_min, price_max = 1, 75
+            range_str = "1c-75c"
 
-        # CRITICAL FIX: 2026-07-12 - Use expanded 10-75c range to match current market conditions
-
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 75):
+        if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in range [10c-75c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s side=%s final price_cents=%d not in range [%s] - dropping candidate",
 
-                asset, clamped_price_cents
+                asset, signal_side, clamped_price_cents, range_str
 
             )
 
@@ -5454,9 +5584,9 @@ class LeanAgent15m:
 
         logger.info(
 
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-75c])",
+            "[PRICE-SELECTION] asset=%s side=%s final entry price=%d (within canonical range [%s])",
 
-            asset, clamped_price_cents
+            asset, signal_side, clamped_price_cents, range_str
 
         )
 
@@ -5568,7 +5698,7 @@ class LeanAgent15m:
 
             "edge_pct": edge_pct,
 
-            "model_prob": model_prob,
+            "model_prob": max(0.05, min(0.95, model_prob)),  # Clamped to valid range [0.05, 0.95]
 
             "signal_mode": "momentum_fvg",
 
@@ -5639,7 +5769,7 @@ class LeanAgent15m:
                 trace = CandidateTrace(
                     candidate_id=candidate_id,
                     signal_timestamp=time.time(),
-                    signal_model_prob=model_prob,
+                    signal_model_prob=max(0.05, min(0.95, model_prob)),
                     signal_side=trace_side,
                     signal_edge_pct=edge_pct,
                     ticker=asset,  # Use asset as ticker for now
@@ -5764,8 +5894,9 @@ class LeanAgent15m:
 
                 if market_state:
 
-                    # Use mid price from market state (attributes are best_bid_cents, best_ask_cents)
-
+                    # Side-appropriate prices (not mid) for edge and side selection.
+                    # YES price = best YES ask = cost to buy YES.
+                    # NO price = best NO ask = 100 - best YES bid = cost to buy NO.
                     best_bid = getattr(market_state, 'best_bid_cents', 0) or 0
 
                     best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
@@ -5773,10 +5904,15 @@ class LeanAgent15m:
                     # Calculate spread width for observability
                     spread_width_cents = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0
 
-                    # Determine market price type for observability
-                    market_price_type = "none"
+                    yes_market_price_cents = best_ask if best_ask > 0 else best_bid
+                    no_market_price_cents = 100 - best_bid if best_bid > 0 else 100 - best_ask
+
+                    yes_market_price = yes_market_price_cents / 100.0
+                    no_market_price = no_market_price_cents / 100.0
+
+                    # Log a mid-style reference price for observability, but edges use side-appropriate prices.
                     if best_bid > 0 and best_ask > 0:
-                        market_price = (best_bid + best_ask) / 200.0  # Convert cents to price
+                        market_price = (best_bid + best_ask) / 200.0
                         market_price_type = "mid"
                     elif best_bid > 0:
                         market_price = best_bid / 100.0
@@ -5784,16 +5920,20 @@ class LeanAgent15m:
                     elif best_ask > 0:
                         market_price = best_ask / 100.0
                         market_price_type = "ask_only"
+                    else:
+                        market_price = 0.0
+                        market_price_type = "none"
 
-                    logger.info(f"[PRICE-BASED-DEBUG] asset={asset} ticker={ticker} best_bid_cents={best_bid} best_ask_cents={best_ask} spread_width={spread_width_cents}c market_price_type={market_price_type}")
+                    logger.info(f"[PRICE-BASED-DEBUG] asset={asset} ticker={ticker} best_bid_cents={best_bid} best_ask_cents={best_ask} spread_width={spread_width_cents}c yes_market_price={yes_market_price:.2f} no_market_price={no_market_price:.2f}")
 
-                    # CRITICAL FIX: Validate market price is in reasonable range [0.01, 0.99]
+                    # CRITICAL FIX: Validate side-appropriate prices are in reasonable range [0.01, 0.99]
 
                     # Prices outside this range indicate data corruption or calculation error
 
-                    if market_price < 0.01 or market_price > 0.99:
+                    if (yes_market_price < 0.01 or yes_market_price > 0.99 or
+                            no_market_price < 0.01 or no_market_price > 0.99):
 
-                        logger.warning("[PRICE-BASED-ERROR] asset=%s ticker=%s invalid market_price=%.2f (expected 0.01-0.99), rejecting signal", asset, ticker, market_price)
+                        logger.warning("[PRICE-BASED-ERROR] asset=%s ticker=%s invalid side prices (yes=%.2f no=%.2f), rejecting signal", asset, ticker, yes_market_price, no_market_price)
 
                         return None
 
@@ -5850,9 +5990,11 @@ class LeanAgent15m:
         yes_model_prob = buy_threshold  # Our fair probability estimate for YES
         no_model_prob = 1.0 - sell_threshold  # Our fair probability estimate for NO
         
-        # Calculate canonical edges: edge = model_prob - market_price
-        yes_edge_pct = yes_model_prob - market_price
-        no_edge_pct = no_model_prob - (1.0 - market_price)  # NO edge = model_prob_NO - market_price_NO
+        # Calculate canonical edges using side-appropriate market prices.
+        # YES edge = fair YES prob - cost to buy YES.
+        # NO edge = fair NO prob - cost to buy NO.
+        yes_edge_pct = yes_model_prob - yes_market_price
+        no_edge_pct = no_model_prob - no_market_price
         
         # Apply minimum edge threshold (2% = 0.02 fraction)
         # This is a quality gate, not a transformation of the edge formula
@@ -5906,6 +6048,16 @@ class LeanAgent15m:
                 asset, market_price, yes_edge_pct, no_edge_pct
             )
 
+        # CRITICAL FIX 2026-08-04: Use side-appropriate market price for confidence,
+        # model probability, and the actual order price.  YES uses the YES ask;
+        # NO uses the YES bid (because buying NO means selling YES at the bid).
+        if signal_side == "yes":
+            market_price = yes_market_price
+            entry_price_cents = yes_market_price_cents
+        else:
+            market_price = 1.0 - no_market_price  # YES bid in probability terms
+            entry_price_cents = no_market_price_cents
+
         # CRITICAL INVARIANT (2026-07-23): If no_edge > yes_edge, candidate_side must be NO
         # This catches structural YES bias in side arbitration
         if no_edge_pct > yes_edge_pct and signal_side != "no":
@@ -5913,6 +6065,11 @@ class LeanAgent15m:
                 "[SIDE-ARB-INVARIANT-VIOLATION] asset=%s no_edge=%.4f > yes_edge=%.4f but selected_side=%s (expected NO) - STRUCTURAL YES BIAS DETECTED",
                 asset, no_edge_pct, yes_edge_pct, signal_side
             )
+            # Record bias event to bias monitor
+            if BIAS_MONITOR_ENABLED:
+                bias_monitor = get_bias_monitor()
+                if bias_monitor:
+                    bias_monitor.record_signal(asset=asset, side=signal_side, edge=edge_pct, price=market_price)
             # Return None to block the trade - this is a critical bug
             return None
 
@@ -6002,7 +6159,8 @@ class LeanAgent15m:
 
             edge_prob_adjustment = min(edge_pct, 0.20)  # Cap at 20% adjustment (edge_pct already in FRACTION)
 
-            model_prob = min(0.95, market_price + edge_prob_adjustment)
+            # CRITICAL FIX: Remove 0.95 cap for YES orders to match NO orders (symmetric treatment)
+            model_prob = market_price + edge_prob_adjustment
 
         elif signal_side == "no" and signal_action == "buy":
 
@@ -6025,7 +6183,8 @@ class LeanAgent15m:
             edge_prob_adjustment = min(edge_pct, 0.20)  # Cap at 20% adjustment (edge_pct already in FRACTION)
 
             no_market_prob = 1.0 - market_price
-            model_prob = min(0.95, no_market_prob + edge_prob_adjustment)
+            # CRITICAL FIX: Remove 0.95 cap for NO orders
+            model_prob = no_market_prob + edge_prob_adjustment
 
         
 
@@ -6045,23 +6204,23 @@ class LeanAgent15m:
 
         # If no prices exist in 10-75c range, drop the candidate (no trade).
 
-        raw_price_cents = int(market_price * 100)
+        raw_price_cents = int(entry_price_cents)
 
         
 
-        # Check if price is within range (10c-75c)
+        # Check if price is within range (YES: 1c-75c, NO: 25c-99c)
 
-        if 10 <= raw_price_cents <= 75:
+        if (signal_side == "yes" and 1 <= raw_price_cents <= 75) or (signal_side == "no" and 25 <= raw_price_cents <= 99):
 
-            # Price is already in valid range - use it directly
+            # Price is already in the side-appropriate range - use it directly
 
             clamped_price_cents = raw_price_cents
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in range [10c-75c] - using directly",
+                "[PRICE-SELECTION] asset=%s side=%s raw_price_cents=%d in side-aware range - using directly",
 
-                asset, raw_price_cents
+                asset, signal_side, raw_price_cents
 
             )
 
@@ -6071,9 +6230,9 @@ class LeanAgent15m:
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside range [10c-75c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s side=%s raw_price_cents=%d outside side-aware range - searching orderbook",
 
-                asset, raw_price_cents
+                asset, signal_side, raw_price_cents
 
             )
 
@@ -6093,26 +6252,34 @@ class LeanAgent15m:
 
                 if market_state:
 
-                    # Get YES orderbook (ascending by price)
-                    # KalshiMarketState stores bids in yes_bids field (not yes_book)
+                    # Select the opposite-side book to compute the ask for the target side.
+                    # YES ask = 100 - NO bid; NO ask = 100 - YES bid.
 
-                    yes_bids = getattr(market_state, 'yes_bids', [])
+                    if signal_side == "yes":
+                        # Cheapest YES ask = 100 - NO bid; search no_bids.
+                        levels = getattr(market_state, 'no_bids', [])
+                        range_min, range_max = 10, 75
+                    else:
+                        # Cheapest NO ask = 100 - YES bid; search yes_bids.
+                        levels = getattr(market_state, 'yes_bids', [])
+                        range_min, range_max = 25, 99
 
-                    if yes_bids:
+                    if levels:
 
-                        # Find cheapest YES price within [10c, 75c] with size >= 1
+                        # Find cheapest executable price in the side-appropriate range.
+                        # For YES: 100 - no_bid; for NO: 100 - yes_bid.
 
-                        valid_prices = [p for (p, size) in yes_bids if 10 <= p <= 75 and size >= 1]
+                        valid_prices = [100 - p for (p, size) in levels if range_min <= (100 - p) <= range_max and size >= 1]
 
                         if valid_prices:
 
-                            price_cents = min(valid_prices)  # Use cheapest acceptable price
+                            price_cents = min(valid_prices)  # cheapest acceptable executable price
 
                             logger.info(
 
-                                "[PRICE-SELECTION] asset=%s found %d valid prices in canonical range, using cheapest=%d",
+                                "[PRICE-SELECTION] asset=%s side=%s found %d valid prices in [%dc-%dc], using cheapest=%d",
 
-                                asset, len(valid_prices), price_cents
+                                asset, signal_side, len(valid_prices), range_min, range_max, price_cents
 
                             )
 
@@ -6120,21 +6287,21 @@ class LeanAgent15m:
 
                             logger.warning(
 
-                                "[PRICE-SELECTION] asset=%s no YES prices in range [10c-75c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s side=%s no executable prices in [%dc-%dc] - dropping candidate",
 
-                                asset
+                                asset, signal_side, range_min, range_max
 
                             )
 
-                            return None  # Drop candidate - no valid price in canonical range
+                            return None  # Drop candidate - no valid price in side-aware range
 
                     else:
 
                         logger.warning(
 
-                            "[PRICE-SELECTION] asset=%s orderbook not available (yes_bids empty) - dropping candidate",
+                            "[PRICE-SELECTION] asset=%s side=%s orderbook not available - dropping candidate",
 
-                            asset
+                            asset, signal_side
 
                         )
 
@@ -6170,17 +6337,25 @@ class LeanAgent15m:
 
         
 
-        # Final validation - ensure we have a valid price in the range (10c-75c)
+        # Final validation - side-aware canonical range
+        # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
+        # single 10c-75c range rejected all NO candidates above 75c even though NO contracts
+        # naturally trade at high prices (implied probability of event NOT happening).
+        side_lower = signal_side.lower() if isinstance(signal_side, str) else 'yes'
+        if side_lower == 'no':
+            price_min, price_max = 25, 99
+            range_str = "25c-99c"
+        else:
+            price_min, price_max = 1, 75
+            range_str = "1c-75c"
 
-        # CRITICAL FIX: 2026-07-12 - Use expanded 10-75c range to match current market conditions
-
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 75):
+        if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in range [10c-75c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s side=%s final price_cents=%d not in range [%s] - dropping candidate",
 
-                asset, clamped_price_cents
+                asset, signal_side, clamped_price_cents, range_str
 
             )
 
@@ -6190,9 +6365,9 @@ class LeanAgent15m:
 
         logger.info(
 
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-75c])",
+            "[PRICE-SELECTION] asset=%s side=%s final entry price=%d (within canonical range [%s])",
 
-            asset, clamped_price_cents
+            asset, signal_side, clamped_price_cents, range_str
 
         )
 
@@ -6204,7 +6379,7 @@ class LeanAgent15m:
             "action": signal_action,
             "price_cents": clamped_price_cents,  # CRITICAL: Use selected price
             "confidence": confidence,  # Dynamic edge-based confidence (not hardcoded)
-            "model_prob": model_prob,  # Clamped to valid range [0.05, 0.95]
+            "model_prob": max(0.05, min(0.95, model_prob)),  # Clamped to valid range [0.05, 0.95]
             "edge_pct": edge_pct,  # CRITICAL: Calculate edge for price-based strategy
             # CRITICAL FIX: 2026-07-19 - Include both edge_yes and edge_no for parity checker
             "edge_yes": edge_yes,  # YES edge for downstream parity checks
@@ -7064,6 +7239,8 @@ class LeanAgent15m:
 
         try:
 
+            # Allow per-agent min_samples to override the scaler default at runtime
+            self._platt_scaler.min_samples = self._calibration_min_samples
             self._platt_scaler.fit(self._calibration_logits, self._calibration_outcomes)
 
             self._last_fit_time = current_time
@@ -7124,11 +7301,17 @@ class LeanAgent15m:
 
                 "num_samples": metrics.num_samples,
 
+                "sample_count": metrics.num_samples,
+
                 "brier_score": metrics.brier_score,
 
                 "expected_calibration_error": metrics.expected_calibration_error,
 
+                "ece": metrics.expected_calibration_error,
+
                 "maximum_calibration_error": metrics.maximum_calibration_error,
+
+                "mce": metrics.maximum_calibration_error,
 
                 "platt_a": params[0] if params else None,
 
@@ -8163,31 +8346,23 @@ class LeanAgent15m:
 
         # ENTRY MATRIX: Per-asset minimum entry price (based on trade history analysis)
 
-        # Updated 2026-07-07: Aligned to 10c to match profile guardrails_min_contract_price_cents
-
-        # Previous 15c minimum was blocking valid 10-19c entries that profile allows
-
-        # - Entry prices < $0.10 are rejected by DEEP_OTM_POLICY (lottery zone)
-
-        # - Entry band [10c, 75c] per 2026-07-12 expansion to match current market conditions
-
-        # - This aligns agent grid with profile, order_gate, and order_router (all 10c minimum)
+        # Updated 2026-08-04: Aligned to 5c to match v2 profile price_range.
 
         min_entry_prices = {
 
-            'BTC': 10,
+            'BTC': 5,
 
-            'ETH': 10,
+            'ETH': 5,
 
-            'SOL': 10,
+            'SOL': 5,
 
-            'XRP': 10,
+            'XRP': 5,
 
-            'DOGE': 10
+            'DOGE': 5
 
         }
 
-        min_price_cents = min_entry_prices.get(asset, 10)  # Default to 10c
+        min_price_cents = min_entry_prices.get(asset, 5)  # Default to 5c
 
         
 
@@ -8215,17 +8390,17 @@ class LeanAgent15m:
 
                 
 
-                # YES price is the bid (price to buy YES)
+                # YES price is the ASK (price to *buy* YES)
 
-                yes_price_cents = best_bid if best_bid > 0 else 0
+                yes_price_cents = best_ask if best_ask > 0 else 0
 
                 
 
-                # NO price is derived from YES price: NO = 100 - YES
+                # NO price is the NO ask = 100 - best YES bid
 
                 # In binary markets, YES + NO = 100 cents
 
-                no_price_cents = (100 - best_bid) if best_bid > 0 else 0
+                no_price_cents = 100 - best_bid
 
                 
 
@@ -8243,15 +8418,17 @@ class LeanAgent15m:
 
         
 
-        # Check which sides are within 10c-75c canonical range (2026-07-12 expanded for market conditions)
+        # Check which sides are within their side-aware ranges.
+        # Single source of truth is merid.event_venues.kalshi.binary_price_space.
+        # YES: 1c-75c (expanded low end for late-expiry markets)
+        # NO: 25c-99c (expanded high end for late-expiry markets)
 
-        # Previous 10c-50c range was too restrictive for current market conditions
-
-        # Expanded range allows trading in high-conviction (YES > 50c) and low-conviction (NO > 50c) markets
-
-        yes_in_range = (10 <= yes_price_cents <= 75)
-
-        no_in_range = (10 <= no_price_cents <= 75)
+        if PRICE_SPACE_AVAILABLE:
+            yes_in_range = is_price_in_side_aware_range(yes_price_cents, "yes")
+            no_in_range = is_price_in_side_aware_range(no_price_cents, "no")
+        else:
+            yes_in_range = (1 <= yes_price_cents <= 75)
+            no_in_range = (25 <= no_price_cents <= 99)
 
         # Determine expiry bucket for observability
         expiry_bucket = "unknown"
@@ -8263,7 +8440,7 @@ class LeanAgent15m:
             expiry_bucket = "10-15min"
 
         logger.info(
-            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc in_range=%s no_price=%dc in_range=%s expiry_bucket=%s",
+            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc yes_in_1_75=%s no_price=%dc no_in_25_99=%s expiry_bucket=%s",
             asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, expiry_bucket
         )
 
@@ -8275,7 +8452,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-FILTER-REJECT] asset=%s both sides outside 10c-75c range (yes=%dc, no=%dc) -> SKIP",
+                "[PRICE-FILTER-REJECT] asset=%s both sides outside side-aware ranges (yes=%dc not in 1c-75c, no=%dc not in 25c-99c) -> SKIP",
 
                 asset, yes_price_cents, no_price_cents
 
@@ -8291,7 +8468,7 @@ class LeanAgent15m:
 
                     no_price_cents=no_price_cents,
 
-                    reason="both sides outside 10c-75c range",
+                    reason="both sides outside side-aware ranges (YES 1c-75c, NO 25c-99c)",
 
                     market_id=getattr(market, 'market_id', None),
 
@@ -10527,7 +10704,10 @@ class LeanAgent15m:
 
         # Only trade when edge > fee (net edge after fees)
 
-        price_cents = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
+        if signal_side == "yes":
+            price_cents = best_ask if best_ask > 0 else best_bid
+        else:
+            price_cents = 100 - best_bid
 
         if price_cents > 0:
 
@@ -10621,7 +10801,10 @@ class LeanAgent15m:
 
         # Higher volatility assets (SOL, DOGE) need stricter multipliers
 
-        price_cents = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
+        if signal_side == "yes":
+            price_cents = best_ask if best_ask > 0 else best_bid
+        else:
+            price_cents = 100 - best_bid
 
         price_edge_multiplier = 1.0
 
@@ -10899,19 +11082,19 @@ class LeanAgent15m:
 
         
 
-        # Check if price is within range (10c-75c)
+        # Check if price is within range (YES: 1c-75c, NO: 25c-99c)
 
-        if 10 <= raw_price_cents <= 75:
+        if (signal_side == "yes" and 1 <= raw_price_cents <= 75) or (signal_side == "no" and 25 <= raw_price_cents <= 99):
 
-            # Price is already in valid range - use it directly
+            # Price is already in the side-appropriate range - use it directly
 
             clamped_price_cents = raw_price_cents
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in range [10c-75c] - using directly",
+                "[PRICE-SELECTION] asset=%s side=%s raw_price_cents=%d in side-aware range - using directly",
 
-                asset, raw_price_cents
+                asset, signal_side, raw_price_cents
 
             )
 
@@ -10921,9 +11104,9 @@ class LeanAgent15m:
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside range [10c-75c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s side=%s raw_price_cents=%d outside side-aware range - searching orderbook",
 
-                asset, raw_price_cents
+                asset, signal_side, raw_price_cents
 
             )
 
@@ -10943,26 +11126,34 @@ class LeanAgent15m:
 
                 if market_state:
 
-                    # Get YES orderbook (ascending by price)
-                    # KalshiMarketState stores bids in yes_bids field (not yes_book)
+                    # Select the opposite-side book to compute the ask for the target side.
+                    # YES ask = 100 - NO bid; NO ask = 100 - YES bid.
 
-                    yes_bids = getattr(market_state, 'yes_bids', [])
+                    if signal_side == "yes":
+                        # Cheapest YES ask = 100 - NO bid; search no_bids.
+                        levels = getattr(market_state, 'no_bids', [])
+                        range_min, range_max = 10, 75
+                    else:
+                        # Cheapest NO ask = 100 - YES bid; search yes_bids.
+                        levels = getattr(market_state, 'yes_bids', [])
+                        range_min, range_max = 25, 99
 
-                    if yes_bids:
+                    if levels:
 
-                        # Find cheapest YES price within [10c, 75c] with size >= 1
+                        # Find cheapest executable price in the side-appropriate range.
+                        # For YES: 100 - no_bid; for NO: 100 - yes_bid.
 
-                        valid_prices = [p for (p, size) in yes_bids if 10 <= p <= 75 and size >= 1]
+                        valid_prices = [100 - p for (p, size) in levels if range_min <= (100 - p) <= range_max and size >= 1]
 
                         if valid_prices:
 
-                            price_cents = min(valid_prices)  # Use cheapest acceptable price
+                            price_cents = min(valid_prices)  # cheapest acceptable executable price
 
                             logger.info(
 
-                                "[PRICE-SELECTION] asset=%s found %d valid prices in canonical range, using cheapest=%d",
+                                "[PRICE-SELECTION] asset=%s side=%s found %d valid prices in [%dc-%dc], using cheapest=%d",
 
-                                asset, len(valid_prices), price_cents
+                                asset, signal_side, len(valid_prices), range_min, range_max, price_cents
 
                             )
 
@@ -10970,21 +11161,21 @@ class LeanAgent15m:
 
                             logger.warning(
 
-                                "[PRICE-SELECTION] asset=%s no YES prices in range [10c-75c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s side=%s no executable prices in [%dc-%dc] - dropping candidate",
 
-                                asset
+                                asset, signal_side, range_min, range_max
 
                             )
 
-                            return None  # Drop candidate - no valid price in canonical range
+                            return None  # Drop candidate - no valid price in side-aware range
 
                     else:
 
                         logger.warning(
 
-                            "[PRICE-SELECTION] asset=%s orderbook not available (yes_bids empty) - dropping candidate",
+                            "[PRICE-SELECTION] asset=%s side=%s orderbook not available - dropping candidate",
 
-                            asset
+                            asset, signal_side
 
                         )
 
@@ -11020,17 +11211,25 @@ class LeanAgent15m:
 
         
 
-        # Final validation - ensure we have a valid price in the range (10c-75c)
+        # Final validation - side-aware canonical range
+        # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
+        # single 10c-75c range rejected all NO candidates above 75c even though NO contracts
+        # naturally trade at high prices (implied probability of event NOT happening).
+        side_lower = signal_side.lower() if isinstance(signal_side, str) else 'yes'
+        if side_lower == 'no':
+            price_min, price_max = 25, 99
+            range_str = "25c-99c"
+        else:
+            price_min, price_max = 1, 75
+            range_str = "1c-75c"
 
-        # CRITICAL FIX: 2026-07-12 - Use expanded 10-75c range to match current market conditions
-
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 75):
+        if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in range [10c-75c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s side=%s final price_cents=%d not in range [%s] - dropping candidate",
 
-                asset, clamped_price_cents
+                asset, signal_side, clamped_price_cents, range_str
 
             )
 
@@ -11040,9 +11239,9 @@ class LeanAgent15m:
 
         logger.info(
 
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-75c])",
+            "[PRICE-SELECTION] asset=%s side=%s final entry price=%d (within canonical range [%s])",
 
-            asset, clamped_price_cents
+            asset, signal_side, clamped_price_cents, range_str
 
         )
 
@@ -11092,11 +11291,11 @@ class LeanAgent15m:
 
         except Exception as e:
 
-            logger.warning("[SIGNAL-GEN] Failed to load dynamic price range: %s, using fallback 10-75c", e)
+            logger.warning("[SIGNAL-GEN] Failed to load dynamic price range: %s, using fallback 5-85c", e)
 
-            ENTRY_MIN_PRICE_CENTS = 10  # Canonical lower bound
+            ENTRY_MIN_PRICE_CENTS = 5  # Canonical lower bound (v2 profile)
 
-            ENTRY_MAX_PRICE_CENTS = 75  # Canonical upper bound (2026-07-12: expanded from 50c to 75c)
+            ENTRY_MAX_PRICE_CENTS = 85  # Canonical upper bound (v2 profile)
             # 2026 BEST PRACTICE: Track fallback activation
             self._fallback_activations["dynamic_range_fallback"] += 1
             self._fallback_timestamps["dynamic_range_fallback"].append(time.time())
@@ -11685,13 +11884,20 @@ class LeanAgent15m:
 
                     position_count = len(open_positions)
 
-                    
+                    # CRITICAL FIX (2026-08-03): Log ASSET-SCOPED totals.
+                    # get_all_positions() spans every asset, so the old log showed
+                    # e.g. agent=ETH_15M total_positions=1 (actually BTC's position)
+                    # next to open_positions=0 - looked like a counting bug.
+                    asset_position_count = sum(
+                        1 for k, v in all_positions.items()
+                        if v.contracts > 0 and asset in k.upper()
+                    )
 
                     logger.info(
 
-                        "[POSITION-LIMIT] agent=%s total_positions=%d open_positions=%d current_window=%s",
+                        "[POSITION-LIMIT] agent=%s asset_positions=%d open_positions=%d current_window=%s (all_assets_total=%d)",
 
-                        self.config.name, len(all_positions), position_count, current_window_ticker or "N/A"
+                        self.config.name, asset_position_count, position_count, current_window_ticker or "N/A", len(all_positions)
 
                     )
 
@@ -13624,16 +13830,10 @@ class LeanAgentGrid15m:
                             break
                     
                     if original_candidate:
-                        # Add TP/SL metadata to candidate
-                        stop_loss_price_cents = max(1, order.price_cents - 5)
-                        take_profit_r_multiple = 1.0
-                        risk_cents = abs(order.price_cents - stop_loss_price_cents)
-                        take_profit_price_cents = order.price_cents + int(risk_cents * take_profit_r_multiple)
-                        
-                        original_candidate['stop_loss_price_cents'] = stop_loss_price_cents
-                        original_candidate['take_profit_price_cents'] = take_profit_price_cents
-                        original_candidate['take_profit_r_multiple'] = take_profit_r_multiple
-                        
+                        # 2026-08-05: Do NOT inject TP/SL metadata here. Exit policy resolution in
+                        # loop_15m._execute_candidate (via resolve_exit_policy) is the single source
+                        # of truth for TP/SL. Injecting tight 1c targets from the allocator was
+                        # overriding the policy and causing premature exits.
                         candidates.append(original_candidate)
                         logger.info(
                             "[GLOBAL-ALLOCATOR-RETURN] asset=%s ticker=%s side=%s price=%dc count=%d edge=%.1f%%",
@@ -13654,3 +13854,8 @@ class LeanAgentGrid15m:
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
         return candidates
+
+
+# Canonical fee alias for backward-compatible imports and regression tests.
+# Tests expect a fee function with signature (contracts, price_cents) returning an int.
+from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as canonical_calculate_kalshi_fee_cents

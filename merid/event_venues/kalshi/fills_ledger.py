@@ -419,6 +419,8 @@ class OrderIntent:
     expected_fee_role: Optional[str] = None  # Expected fee role
     estimated_fee_cents: Optional[int] = None  # Estimated fee in cents
     snapshot_age_ms: float = 0.0  # Age of signal snapshot in milliseconds
+    # CRITICAL FIX (2026-07-29): Metadata dict for alpha-hedge pairing and other tracking
+    metadata: Optional[Dict[str, Any]] = None
     
     def add_fill(self, fill_id: str, fill_count: int) -> None:
         """Add a fill to this intent and update status.
@@ -4429,7 +4431,7 @@ class KalshiFillsLedger:
             no_price_dollars=no_price_dollars,
             fee_cost=fee_decimal,
             proceeds_dollars=proceeds,
-            client_order_id=raw.get("client_order_id") or raw.get("client_order_id") or fill_id,  # CRITICAL FIX (2026-08-01): Use fill_id as fallback if client_order_id missing
+            client_order_id=raw.get("client_order_id") or None,  # Preserve None so orphan detection can identify fills without linked intents
             subaccount_number=raw.get("subaccount_number"),
             created_time=created_time,
             idempotency_key=raw.get("idempotency_key"),
