@@ -699,9 +699,10 @@ def check_market_microstructure_edge_aware(
 
     # CRITICAL FIX 2026-07-29: Log final executable order parameters before router handoff
     # This provides observability into the exact economics used for router decision
+    order_price_log = f"{order_price_cents:.2f}c" if order_price_cents is not None else "None"
     logger.info(
-        "[ROUTER-HANDOFF-TELEMETRY] ticker=%s side=%s order_price_cents=%.2fc raw_edge=%.2fc spread_cents=%.2fc spread_cost_cents=%.2fc taker_fee_cents=%.2fc executable_edge=%.2fc use_maker_economics=%s aggressiveness=%.2f",
-        ticker, order_side, order_price_cents, edge_metrics.raw_edge_cents, edge_metrics.spread_cents, edge_metrics.spread_cost_cents, edge_metrics.taker_fee_cents, edge_metrics.executable_edge_cents, use_maker_economics, aggressiveness
+        "[ROUTER-HANDOFF-TELEMETRY] ticker=%s side=%s order_price_cents=%s raw_edge=%.2fc spread_cents=%.2fc spread_cost_cents=%.2fc taker_fee_cents=%.2fc executable_edge=%.2fc use_maker_economics=%s aggressiveness=%.2f",
+        ticker, order_side, order_price_log, edge_metrics.raw_edge_cents, edge_metrics.spread_cents, edge_metrics.spread_cost_cents, edge_metrics.taker_fee_cents, edge_metrics.executable_edge_cents, use_maker_economics, aggressiveness
     )
     
     # CRITICAL FIX 2026-07-28: Compute dynamic threshold if asset is available
@@ -3705,7 +3706,7 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
 
                                 # Allow orders if book is in LIVE or DEGRADED state
                                 # Only reject if DEAD or MARKET_CLOSED
-                                if book_state in [BookState.LIVE, BookState.DEGRADED, BookState.FALLBACK]:
+                                if book_state.state in [BookState.LIVE, BookState.DEGRADED, BookState.FALLBACK]:
                                     logger.info(
                                         f"[MICROSTRUCTURE-GATE] Book state acceptable for routing: ticker={intent.ticker} "
                                         f"state={book_state.state.value} - proceeding with current book data"
@@ -3713,7 +3714,7 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                                     # Use current book data even if degenerate (state machine already validated freshness)
                                     # Don't attempt refresh if state is acceptable
                                     _refresh_attempted = False
-                                elif book_state == BookState.STALE:
+                                elif book_state.state == BookState.STALE:
                                     logger.warning(
                                         f"[MICROSTRUCTURE-GATE] Book state STALE: ticker={intent.ticker} "
                                         f"age_seconds={book_state.age_seconds:.1f}s - attempting refresh"
@@ -3752,7 +3753,7 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                                     gate_no_ask_cents = _fresh_no_ask
                                 else:
                                     # CRITICAL FIX: Don't hard fail - use current book if state machine says it's acceptable
-                                    if BOOK_FRESHNESS_AVAILABLE and book_state in [BookState.LIVE, BookState.DEGRADED]:
+                                    if BOOK_FRESHNESS_AVAILABLE and book_state.state in [BookState.LIVE, BookState.DEGRADED]:
                                         logger.info(
                                             "[MICROSTRUCTURE-GATE] Refresh failed but book state acceptable: "
                                             "ticker=%s state=%s - proceeding with current book data",
@@ -3768,7 +3769,7 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                                             _fresh_yes_bid, _fresh_yes_ask, _fresh_no_bid, _fresh_no_ask, _refresh_reason
                                         )
                                         # Only reject if state machine says book is unacceptable
-                                        if not BOOK_FRESHNESS_AVAILABLE or book_state not in [BookState.LIVE, BookState.DEGRADED]:
+                                        if not BOOK_FRESHNESS_AVAILABLE or book_state.state not in [BookState.LIVE, BookState.DEGRADED]:
                                             return f"book_degenerate_refresh_failed:{intent.ticker}"
                         except Exception as _refresh_err:
                             logger.warning(
@@ -3918,6 +3919,24 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                                 intent.ticker, intent.side, intent.p_hat_yes_cents, intent.p_hat_no_cents
                             )
                             return f"microstructure_gate_failed:missing_p_hat_field_for_edge_aware_gate"
+                        
+                        # CRITICAL FIX 2026-08-08: compute_per_side_edges expects the canonical
+                        # YES probability (p_hat_yes_cents), not the order-side-specific probability.
+                        # Passing p_hat_cents (which is p_hat_no for BUY_NO orders) as p_hat_yes_cents
+                        # inverts the probability and yields a negative NO edge, rejecting valid orders.
+                        if PROBABILITY_MODEL_INTEGRATION_AVAILABLE and hasattr(intent, "_binary_probability"):
+                            p_hat_yes_cents_for_edge = intent._binary_probability.yes_cents
+                        elif intent.p_hat_yes_cents is not None:
+                            p_hat_yes_cents_for_edge = intent.p_hat_yes_cents
+                        elif intent.p_hat_no_cents is not None:
+                            p_hat_yes_cents_for_edge = 100.0 - intent.p_hat_no_cents
+                        else:
+                            # Final fallback: infer from side-specific p_hat_cents computed above
+                            order_side_lower = (intent.side or "").lower()
+                            if order_side_lower in ("no", "buy_no"):
+                                p_hat_yes_cents_for_edge = 100.0 - p_hat_cents
+                            else:
+                                p_hat_yes_cents_for_edge = p_hat_cents
                         
                         # LOG CONTRACT: Ensure p_hat is in valid range (0-100 cents)
                         assert 0.0 <= p_hat_cents <= 100.0, f"p_hat_cents must be in [0,100], got {p_hat_cents} for ticker={intent.ticker} side={intent.side}"
@@ -4083,7 +4102,7 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                         passes, reason = check_market_microstructure_edge_aware(
                             yes_bid_cents=intent.yes_bid_cents or 0,
                             no_bid_cents=no_bid_cents or 0,
-                            p_hat_yes_cents=p_hat_cents,  # Use side-specific p_hat
+                            p_hat_yes_cents=p_hat_yes_cents_for_edge,  # CRITICAL FIX 2026-08-08: Pass canonical YES probability
                             order_side=intent.side,
                             order_price_cents=intent.price_cents,  # CRITICAL FIX: Use actual order price for edge calculation
                             yes_depth=yes_depth,
@@ -4099,8 +4118,8 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                             intent=intent  # CRITICAL FIX 2026-08-02: Pass intent for maker/taker policy decision access
                         )
                         logger.info(
-                            "[EDGE-AWARE-GATE] ticker=%s side=%s p_hat=%.1fc passes=%s reason=%s",
-                            intent.ticker, intent.side, p_hat_cents, passes, reason
+                            "[EDGE-AWARE-GATE] ticker=%s side=%s p_hat_side=%.1fc p_hat_yes=%.1fc passes=%s reason=%s",
+                            intent.ticker, intent.side, p_hat_cents, p_hat_yes_cents_for_edge, passes, reason
                         )
                     else:
                         # Use legacy gate (fixed spread threshold)

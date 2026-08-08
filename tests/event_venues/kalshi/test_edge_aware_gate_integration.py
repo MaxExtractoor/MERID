@@ -62,7 +62,8 @@ class TestEdgeAwareGateIntegration:
             yes_depth=50,
             no_depth=50,
             min_executable_edge_cents=3.0,
-            max_spread_to_edge_ratio=0.4
+            max_spread_to_edge_ratio=0.4,
+            aggressiveness=0.5  # Taker economics to enforce spread/edge ratio
         )
         
         # YES: raw = 30c, spread = 20c, exec = 8c, ratio = 0.67 (exceeds 0.4 threshold)
@@ -80,7 +81,8 @@ class TestEdgeAwareGateIntegration:
             no_depth=50,
             min_executable_edge_cents=3.0,
             max_spread_to_edge_ratio=1.0,  # Allow high ratio to test absolute cap
-            max_spread_cents=25  # Absolute spread cap
+            max_spread_cents=25,  # Absolute spread cap
+            aggressiveness=0.5  # Taker economics to enforce absolute spread cap
         )
         
         # Spread = 30c, exceeds 25c cap
