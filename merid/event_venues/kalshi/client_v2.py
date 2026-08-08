@@ -319,17 +319,20 @@ class KalshiClientV2:
         
         client = await self._get_client()
         headers = kwargs.pop("headers", {})
-        if self._api_key_id:
-            # Kalshi expects full API path in signature including /trade-api/v2
-            # Even though base_url has /trade-api/v2, path doesn't, so we prepend it
-            full_api_path = f"/trade-api/v2{path}"
-            headers.update(self._sign_request(method, full_api_path))
+        # Kalshi expects full API path in signature including /trade-api/v2
+        # Even though base_url has /trade-api/v2, path doesn’t, so we prepend it
+        full_api_path = f"/trade-api/v2{path}" if self._api_key_id else None
         headers.setdefault("Content-Type", "application/json")
-        
+
         # Retry loop with exponential backoff and proper 429 handling
+        # CRITICAL FIX (2026-08-08): Re-sign on every attempt so a long rate-limiter wait
+        # or retry backoff does not make the KALSHI-ACCESS-TIMESTAMP expire before the
+        # request is actually sent. Kalshi rejects requests with stale timestamps.
         last_error = None
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             self._requests_total += 1
+            if full_api_path:
+                headers.update(self._sign_request(method, full_api_path))
             try:
                 response = await client.request(method, path, headers=headers, **kwargs)
                 
