@@ -6229,6 +6229,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         
         # Check book freshness using the new layered state machine
         # This replaces the fail-closed policy with explicit state-based gating
+        # CRITICAL FIX (2026-08-08): Always define book_age so downstream logging
+        # does not raise UnboundLocalError when the new freshness state machine path is used.
+        book_age = state.book_age_s if (state is not None and hasattr(state, 'book_age_s')) else float('inf')
         if BOOK_FRESHNESS_AVAILABLE and state is not None:
             tracker = get_book_freshness_tracker()
             freshness_state = tracker.get_state(intent.ticker)
@@ -6262,6 +6265,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
 
             # DIAGNOSTIC: Log state after update
             diagnostic_after = freshness_state.get_diagnostic_info()
+            book_age = diagnostic_after.get("age_seconds", book_age)
             logger.info(
                 f"[order-router] Freshness state AFTER update: ticker={intent.ticker} "
                 f"state={freshness_state.state.value} age_seconds={diagnostic_after['age_seconds']:.1f} "
