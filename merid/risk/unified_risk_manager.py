@@ -583,13 +583,34 @@ class UnifiedRiskManager:
     @classmethod
     def reset_for_tests(cls) -> None:
         """Reset the singleton instance for test isolation.
-        
-        This clears the singleton so each test gets a fresh instance.
+
+        This clears the module-level singleton so each test gets a fresh
+        instance through get_unified_risk_manager().
         """
+        global _unified_risk_manager
         with cls._lock:
             cls._instance = None
+            _unified_risk_manager = None
             logger.info("[UNIFIED_RISK] Singleton reset for tests")
     
+    def reconcile_category_exposure(self, category: str, confirmed_open_notional_usd: float) -> None:
+        """Set a category's exposure to the value confirmed by an external source.
+
+        This is used during startup reconciliation when we fetch open orders and
+        positions from the venue.  It does NOT blindly zero exposure; it sets the
+        tracked exposure equal to the confirmed open notional.  Any difference is
+        logged so operators can audit the correction.
+        """
+        with self._lock:
+            old = self._category_exposure.get(category, 0.0)
+            delta = confirmed_open_notional_usd - old
+            if abs(delta) > 0.001:
+                logger.warning(
+                    "[UNIFIED_RISK] Reconciling %s exposure: %.2f -> %.2f (delta=%+.2f)",
+                    category, old, confirmed_open_notional_usd, delta
+                )
+            self._category_exposure[category] = max(0.0, confirmed_open_notional_usd)
+
     def get_current_exposure(self) -> Dict[str, float]:
         """Get current exposure tracking state.
         

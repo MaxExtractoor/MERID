@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import random
 import threading
@@ -40,6 +41,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from merid.intent_types import ExposureChange
 from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.trading_mode import TradingMode
 from utils.logger import get_logger
@@ -657,18 +659,31 @@ def check_market_microstructure_edge_aware(
     # Compute canonical spreads using Kalshi's orderbook semantics
     spread_metrics = compute_canonical_spreads(yes_bid_cents, no_bid_cents)
     
-    # CRITICAL FIX 2026-08-02: Derive economics mode from maker/taker policy decision
-    # The maker/taker policy engine (apply_maker_taker_policy) already determined the optimal role
-    # based on edge, spread, and market conditions. We should respect that decision instead of
-    # using aggressiveness alone. Fallback to aggressiveness-based logic if policy decision unavailable.
-    # Policy decision priority: intent.expected_role > intent.fee_type > aggressiveness-based fallback
-    if hasattr(intent, 'expected_role') and intent.expected_role:
+    # CRITICAL FIX 2026-08-09: Derive economics mode from the same execution-mode
+    # contract used by repricing and validation.  ``staged_ioc`` is treated as
+    # taker economics until the two-stage lifecycle is implemented.
+    # Policy decision priority: intent.execution_mode > intent.liquidity_role >
+    # intent.expected_role > intent.fee_type > aggressiveness-based fallback
+    resolved_mode = _resolve_execution_mode(intent) if intent is not None else None
+    if resolved_mode in ("taker", "staged_ioc"):
+        use_maker_economics = False
+        logger.info(
+            "[ECONOMICS-SELECTION] ticker=%s using execution_mode: mode=%s -> use_maker_economics=%s",
+            ticker, resolved_mode, use_maker_economics
+        )
+    elif resolved_mode in ("maker", "passive_quote"):
+        use_maker_economics = True
+        logger.info(
+            "[ECONOMICS-SELECTION] ticker=%s using execution_mode: mode=%s -> use_maker_economics=%s",
+            ticker, resolved_mode, use_maker_economics
+        )
+    elif hasattr(intent, 'expected_role') and intent.expected_role and intent.expected_role.lower() in ("maker", "taker"):
         use_maker_economics = (intent.expected_role.lower() == "maker")
         logger.info(
             "[ECONOMICS-SELECTION] ticker=%s using policy decision: expected_role=%s -> use_maker_economics=%s",
             ticker, intent.expected_role, use_maker_economics
         )
-    elif hasattr(intent, 'fee_type') and intent.fee_type:
+    elif hasattr(intent, 'fee_type') and intent.fee_type and intent.fee_type.lower() in ("maker", "taker"):
         use_maker_economics = (intent.fee_type.lower() == "maker")
         logger.info(
             "[ECONOMICS-SELECTION] ticker=%s using fee_type: fee_type=%s -> use_maker_economics=%s",
@@ -944,6 +959,37 @@ def _effective_post_only(post_only: bool, aggressiveness: float) -> bool:
     return bool(post_only) and float(aggressiveness or 0.0) == 0.0
 
 
+def _resolve_execution_mode(intent: OrderIntent) -> str:
+    """Return the canonical execution-mode string for an intent.
+
+    Resolution order:
+      1. Explicit ``intent.execution_mode`` if it is a known mode.
+      2. Explicit ``intent.liquidity_role`` / ``intent.fee_type`` if set to ``maker`` or ``taker``.
+      3. Legacy posture flags (post_only, aggressiveness).
+
+    ``staged_ioc`` is preserved as a distinct mode because callers may want the
+    staged lifecycle; downstream repricing and validation treat it as taker/IOC
+    until the two-stage state machine is implemented.
+    """
+    mode = getattr(intent, "execution_mode", None)
+    if mode in ("maker", "taker", "staged_ioc", "passive_quote"):
+        return mode
+
+    role = getattr(intent, "liquidity_role", None) or getattr(intent, "fee_type", None) or getattr(intent, "expected_role", None)
+    if role in ("maker", "taker"):
+        return role
+
+    post_only = bool(getattr(intent, "post_only", False))
+    aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
+    if post_only:
+        return "passive_quote"
+    if aggressiveness == 0.0:
+        return "maker"
+    if aggressiveness >= 1.0:
+        return "taker"
+    return "staged_ioc"
+
+
 def _apply_execution_mode(intent: OrderIntent) -> tuple:
     """Apply execution mode to order parameters.
     
@@ -959,23 +1005,57 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
     Returns:
         (post_only, aggressiveness, order_type, time_in_force)
     """
-    execution_mode = intent.execution_mode
-    
+    # Exits must never be passive/maker.  If an exit intent explicitly carries an
+    # entry-oriented execution_mode flag (e.g. "maker"), force it to an aggressive,
+    # marketable IOC so the position can actually close.  When no execution_mode
+    # is set, the caller's time_in_force and aggressiveness are respected, so a
+    # non-reduce-only GTC exit can still rest its unfilled remainder.
+    explicit_mode = getattr(intent, "execution_mode", None)
+    if _is_exit_order(intent) and explicit_mode in ("maker", "passive_quote"):
+        intent.execution_mode = "taker"
+        resolved_tif = _resolve_tif(intent)
+        return False, 1.0, "limit", resolved_tif.tif
+
+    execution_mode = _resolve_execution_mode(intent)
+    intent.execution_mode = execution_mode
+
     if execution_mode == "maker":
-        # Passive limit order - rest on book
-        return True, 0.0, "limit", "gtc"
+        post_only, aggressiveness = True, 0.0
     elif execution_mode == "taker":
-        # Aggressive market order - cross spread immediately
-        return False, 1.0, "limit", "ioc"
+        post_only, aggressiveness = False, 1.0
     elif execution_mode == "staged_ioc":
-        # Staged immediate-or-cancel - partial fills allowed
-        return False, 0.5, "limit", "ioc"
+        # CRITICAL FIX 2026-08-09: staged_ioc is routed as IOC taker until the
+        # two-stage maker-then-taker state machine exists.  See _adjust_order_price_for_fill_rate
+        # and _validate_price_against_orderbook for the matching placement logic.
+        post_only, aggressiveness = False, 0.5
     elif execution_mode == "passive_quote":
-        # Quote inside spread - post_only to avoid crossing
-        return True, 0.0, "limit", "gtc"
+        post_only, aggressiveness = True, 0.0
     else:
-        # Default: use existing intent values
-        return intent.post_only, intent.aggressiveness, intent.order_type, intent.time_in_force
+        # Unknown mode: respect existing values but never default to GTC when aggressive.
+        post_only = bool(getattr(intent, "post_only", False))
+        aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
+        if aggressiveness > 0.0:
+            post_only = False
+
+    resolved_tif = _resolve_tif(intent)
+    return post_only, aggressiveness, "limit", resolved_tif.tif
+
+
+def _apply_exit_marketable_ioc(intent: OrderIntent, state: Optional[Any] = None) -> None:
+    """Force an exit order to be an aggressive, marketable IOC.
+
+    Exits must execute immediately at the specified price to close a position.
+    Unlike the generic execution-mode resolver, this helper is explicit: it
+    sets post_only=False, aggressiveness=1.0, order_type=limit, time_in_force=ioc,
+    and leaves the price unchanged (it is the caller's responsibility to pass
+    a marketable price, e.g. at or through the inside quote).
+    """
+    intent.post_only = False
+    intent.aggressiveness = 1.0
+    intent.order_type = "limit"
+    intent.time_in_force = "ioc"
+    intent.execution_mode = "taker"
+    intent.liquidity_role = "taker"
 
 
 def _check_strip_cooldown(intent: OrderIntent) -> Optional[str]:
@@ -1107,12 +1187,9 @@ def _check_duplicate_order(intent: OrderIntent) -> Optional[str]:
     Returns:
         Rejection reason string if duplicate, None if OK
     """
-    import warnings
-    warnings.warn(
-        "_check_duplicate_order is deprecated. Use OrderDeduplicationCache from order_deduplication.py instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
+    # Note: the runtime DeprecationWarning was removed to stop log/test spam.
+    # The function is still used by legacy tests and internal guards; the
+    # deprecation notice remains in the docstring above.
     # Extract price in cents (OrderIntent uses price_cents, not price)
     price_cents = intent.price_cents if hasattr(intent, 'price_cents') else 0
     
@@ -1955,28 +2032,25 @@ async def handle_order_group_triggered(group_id: str, group_data: Dict[str, Any]
     Returns:
         Dict with canceled order IDs and status
     """
-    from merid.event_venues.kalshi.client import get_kalshi_client
+    from merid.event_venues.kalshi.port import get_kalshi_execution_port
 
     logger.info(f"[order-router] Order group {group_id} triggered - initiating auto-cancel (normal operation)")
 
-    client = get_kalshi_client()
-    if not client:
-        return {"error": "Kalshi client not available", "canceled": []}
+    try:
+        port = get_kalshi_execution_port()
+    except Exception as exc:
+        return {"error": f"Kalshi execution port not available: {exc}", "canceled": []}
 
     try:
-        await client.connect()
+        await port.connect()
 
-        # Get all open orders
-        result = await client.get_open_orders_result()
-        if not result.success:
-            return {"error": str(result.error), "canceled": []}
+        # Get all open orders (normalized port Order objects)
+        all_orders = await port.get_open_orders()
 
-        all_orders = result.data or []
-
-        # Filter orders by group_id
+        # Filter orders by group_id (port.Order.order_group_id, populated from raw_data)
         group_orders = [
             o for o in all_orders
-            if o.get("order_group_id") == group_id or o.get("group_id") == group_id
+            if o.order_group_id == group_id or o.raw_data.get("group_id") == group_id
         ]
 
         if not group_orders:
@@ -1988,12 +2062,12 @@ async def handle_order_group_triggered(group_id: str, group_data: Dict[str, Any]
         failed = []
 
         for order in group_orders:
-            order_id = order.get("order_id")
+            order_id = order.order_id
             if not order_id:
                 continue
 
             try:
-                cancel_result = await client.cancel_order_result(order_id)
+                cancel_result = await port.cancel_order(order_id)
                 if cancel_result.success:
                     canceled.append(order_id)
                     logger.info(f"[order-router] Auto-canceled order {order_id} from triggered group {group_id}")
@@ -2059,10 +2133,10 @@ class OrderIntent:
         trace_id: TradeTrace ID for feed lag calibration (P1)
     """
     ticker: str
-    side: str
-    action: str
     price_cents: int
     count: int
+    side: str = ""
+    action: str = ""
     mode: Optional[TradingMode] = None
     order_type: str = "limit"
     time_in_force: str = "gtc"
@@ -2151,6 +2225,7 @@ class OrderIntent:
     risk_tier: Optional[str] = None  # Risk tier (A/B/C) from ExitPolicyResolution
     trailing_enabled: Optional[str] = None  # Whether trailing stop is enabled
     max_hold_seconds: Optional[int] = None  # Max hold time from ExitPolicyResolution
+    max_rest_seconds: Optional[int] = 180  # Max time a maker/passive order may rest on the book before expiration
     
     # ENTRY/EXIT DIRECTION CONTRACT: Formal direction and exit reason tracking
     entry_or_exit: Optional[str] = None  # "entry" or "exit" - direction classification
@@ -2176,6 +2251,48 @@ class OrderIntent:
     source_signal_hash: Optional[str] = None  # Hash of original signal from SignalSnapshot
     intent_hash: Optional[str] = None  # Deterministic hash over intent's core executable fields
     intent_stage: str = "constructed"  # Stage: "constructed", "validated", "submitted", "executed"
+    
+    # EXIT/STRATEGY METADATA: extra fields used by exit policy and downstream tools
+    kalshi_side: Optional[str] = None  # Kalsi-format side/action, e.g. "BUY_YES", "SELL_NO"
+    exposure_change: Optional[ExposureChange] = None  # Leg/direction/magnitude of the exposure change
+    strategy_intent: Optional[str] = None  # Higher-level intent label (e.g. "exit", "open")
+    is_exit_order: bool = False  # Explicit exit flag for downstream routing
+    reduce_only: bool = False  # CRITICAL FIX (2026-08-08): Exit orders must reduce exposure only
+
+    def __post_init__(self):
+        # Derive canonical side/action from Kalshi-format side if needed
+        if self.kalshi_side and (not self.side or not self.action):
+            ks = self.kalshi_side.upper().replace("_", "")
+            if "YES" in ks:
+                self.side = "yes"
+            elif "NO" in ks:
+                self.side = "no"
+            if "BUY" in ks and not self.action:
+                self.action = "buy"
+            elif "SELL" in ks and not self.action:
+                self.action = "sell"
+
+        # EXIT/REDUCE-ONLY GUARD: set is_exit_order when an order is explicitly
+        # marked as an exit or reduce_only. This prevents entry-side logic from
+        # being applied to close orders.
+        if not self.is_exit_order:
+            if self.reduce_only or self.entry_or_exit == "exit":
+                self.is_exit_order = True
+
+        # Kalshi contracts trade in whole cents.  Normalize cent-denominated
+        # fields so downstream arithmetic and API submissions never see
+        # fractional or numpy-scalar values such as 31.5c.
+        self.price_cents = int(round(self.price_cents))
+        self.count = int(round(self.count))
+        self.size_contracts = int(round(self.size_contracts))
+        if self.take_profit_price_cents is not None:
+            self.take_profit_price_cents = int(round(self.take_profit_price_cents))
+        if self.stop_loss_price_cents is not None:
+            self.stop_loss_price_cents = int(round(self.stop_loss_price_cents))
+        if self.pre_position_size is not None:
+            self.pre_position_size = int(round(self.pre_position_size))
+        if self.expected_post_position_size is not None:
+            self.expected_post_position_size = int(round(self.expected_post_position_size))
 
 
 def _is_exit_order(intent: OrderIntent) -> bool:
@@ -2199,6 +2316,122 @@ def _is_exit_order(intent: OrderIntent) -> bool:
     from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_intent
     
     return is_exit_order_from_intent(intent)
+
+
+def _build_create_order_request(
+    intent: "OrderIntent",
+    *,
+    normalized_ticker: str,
+    final_price_cents: int,
+    effective_order_type: str,
+    effective_tif: str,
+    expiration_ts: Optional[int],
+    post_only: bool,
+):
+    """Build a normalized ``CreateOrderRequest`` for the KalshiExecutionPort.
+
+    This is the single place where an ``OrderIntent`` plus the router's final
+    routing decisions (normalized ticker, final price, effective order type /
+    TIF, expiration, post-only) are converted into the port wire format.
+
+    Rules enforced here (mirroring the production invariants in ``_route_live``):
+    - YES/NO + buy/sell are normalized into ``side`` ("buy"/"sell") and
+      ``outcome`` ("yes"/"no").
+    - Limit prices must be in 1..99 cents.  The sub-10c band is an entry guard:
+      reduce-only / exit orders may close at any valid price (see the
+      ``min_price_violation`` exit allowance in ``route_order_async``).
+    - IOC/FOK orders never carry an expiration; passive GTC/GTT orders must
+      carry an explicit expiration timestamp.
+    - ``client_order_id`` is ``intent.client_order_id`` (stable per logical
+      intent), so retries are idempotent at the venue.
+    """
+    from merid.event_venues.kalshi.port import CreateOrderRequest
+
+    # ── Normalize YES/NO action into side/outcome ────────────────────────
+    side_lower = (intent.side or "").lower()
+    action_lower = (intent.action or "").lower()
+
+    if "buy" in side_lower:
+        side = "buy"
+    elif "sell" in side_lower:
+        side = "sell"
+    elif action_lower in ("buy", "sell"):
+        side = action_lower
+    else:
+        side = "buy"
+
+    if "yes" in side_lower:
+        outcome = "yes"
+    elif "no" in side_lower:
+        outcome = "no"
+    elif side_lower in ("yes", "no"):
+        outcome = side_lower
+    else:
+        outcome = "yes"
+
+    # ── TIF / expiration invariants ──────────────────────────────────────
+    tif = (effective_tif or "GTC").strip().upper()
+    if tif in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
+        # IOC/FOK are terminal TIFs and must never carry an expiration.
+        expiration_ts = None
+    elif tif in ("GTC", "GTT", "GOOD_TILL_CANCELED", "GOOD_TILL_TIME"):
+        # Passive (resting) intent must have an explicit expiration so orders
+        # cannot rest on the book forever.
+        is_passive = bool(post_only) or float(getattr(intent, "aggressiveness", 0.0) or 0.0) == 0.0
+        if is_passive and expiration_ts is None:
+            raise ValueError(
+                f"passive {tif} order requires explicit expiration_ts "
+                f"(ticker={intent.ticker})"
+            )
+
+    # ── Price bounds ─────────────────────────────────────────────────────
+    if (effective_order_type or "limit") != "market":
+        price = int(final_price_cents)
+        if not (1 <= price <= 99):
+            raise ValueError(
+                f"invalid_price_cents:{price}:must_be_1-99_cents "
+                f"(ticker={intent.ticker})"
+            )
+        # Sub-10c is an entry guard only; reduce-only exits may close lower.
+        if price < 10 and not (_is_exit_order(intent) or getattr(intent, "reduce_only", False)):
+            raise ValueError(
+                f"min_price_violation:price_cents={price}<10 "
+                f"(ticker={intent.ticker})"
+            )
+
+    # ── Correlation metadata ─────────────────────────────────────────────
+    metadata: Dict[str, Any] = {
+        "intent_id": intent.intent_id,
+        "ticker": intent.ticker,
+        "side": intent.side,
+        "action": intent.action,
+        "count": intent.count,
+        "price_cents": int(final_price_cents),
+        "snapshot_ts": intent.snapshot_ts,
+        "data_version": getattr(intent, "data_version", None),
+        "policy_version": getattr(intent, "policy_version", None) or getattr(intent, "policy_mode", None),
+    }
+
+    return CreateOrderRequest(
+        ticker=normalized_ticker,
+        side=side,
+        outcome=outcome,
+        size=Decimal(intent.count),
+        price_cents=int(final_price_cents) if (effective_order_type or "limit") != "market" else None,
+        order_type=effective_order_type or "limit",
+        time_in_force=tif,
+        expiration_ts=expiration_ts,
+        client_order_id=intent.client_order_id,
+        idempotency_key=intent.idempotency_key,
+        post_only=bool(post_only),
+        reduce_only=bool(getattr(intent, "reduce_only", False)),
+        order_group_id=intent.order_group_id,
+        self_trade_prevention_type=intent.self_trade_prevention_type,
+        source=intent.source or "agent_grid",
+        take_profit_price_cents=intent.take_profit_price_cents,
+        stop_loss_price_cents=intent.stop_loss_price_cents,
+        metadata=metadata,
+    )
 
 
 def _price_for_side(
@@ -2484,90 +2717,186 @@ def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMo
     )
 
 
-def _resolve_tif(intent: OrderIntent) -> tuple[str, Optional[int]]:
-    """Resolve Kalshi time-in-force and optional GTT expiration.
+@dataclass
+class ResolvedTIF:
+    """Canonical time-in-force resolution with an absolute Kalshi API expiration.
 
-    Uses ``KalshiMarketState.seconds_to_expiry`` when near expiry forces IOC.
-    Public helper (imported by tests); keep signature stable.
-    
-    CRITICAL FIX (2026-07-17): For 15m crypto entry orders, use short-lived TIF (60s GTT)
-    to reduce resting-order spam. Exit orders keep GTC to ensure fills.
+    ``expiration_time`` is a Unix-epoch *timestamp* in seconds, not a duration.
+    It is only meaningful for ``good_till_canceled`` orders.  IOC/FOK never carry
+    an expiration.  The class is iterable for backward compatibility with the
+    legacy ``tif, exp = _resolve_tif(intent)`` tuple unpacking.
+    """
+    tif: str
+    expiration_time: Optional[int] = None
+
+    def __iter__(self):
+        return iter((self.tif, self.expiration_time))
+
+    @property
+    def is_ioc(self) -> bool:
+        return self.tif == "IOC"
+
+
+def _now_unix_s() -> int:
+    """Current wall-clock time as a Unix epoch timestamp in seconds."""
+    return int(_time.time())
+
+
+def _resolve_rest_seconds(intent: OrderIntent) -> int:
+    """Resolve the number of seconds a resting GTC order may remain on the book."""
+    if intent.max_rest_seconds is not None and intent.max_rest_seconds > 0:
+        return intent.max_rest_seconds
+    if intent.max_hold_seconds is not None and intent.max_hold_seconds > 0:
+        # Do not rest longer than the position hold time, but cap at a sensible maximum.
+        return min(intent.max_hold_seconds, 600)
+    return 180
+
+
+def _resolve_gtc_expiration(intent: OrderIntent) -> int:
+    """Resolve an absolute GTC expiration timestamp.
+
+    Priority:
+      1. Explicit ``intent.order_expiration_ts`` if it is in the future.
+      2. ``intent.max_rest_seconds`` or ``intent.max_hold_seconds`` added to now.
+    """
+    exp_ts = getattr(intent, "order_expiration_ts", None)
+    now = _now_unix_s()
+    if exp_ts and int(exp_ts) > now:
+        return int(exp_ts)
+    return now + _resolve_rest_seconds(intent)
+
+
+def _resolve_max_slippage_cents() -> int:
+    """Resolve the maximum allowed slippage in cents from active profile."""
+    default = 5
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        adapter = get_active_profile()
+        if adapter and adapter.profile:
+            return int(getattr(adapter.profile, 'guardrails_max_slippage_cents', default))
+    except Exception:
+        pass
+    return default
+
+
+def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
+    """Resolve Kalshi time-in-force and absolute GTC expiration.
+
+    Resolves the canonical TIF from the intent's explicit ``execution_mode``,
+    ``aggressiveness`` / ``post_only`` flags, or the legacy ``time_in_force``
+    field.  Returns ``ResolvedTIF``; for backward compatibility it also unpacks
+    as ``(tif, expiration_time)``.
+
+    Rules:
+      - ``reduce_only`` (exits) -> IOC.
+      - ``execution_mode`` in ``{"taker", "staged_ioc"}`` -> IOC.
+      - ``execution_mode`` in ``{"maker", "passive_quote"}`` -> GTC with an
+        absolute ``expiration_time = now + _resolve_rest_seconds(intent)``.
+      - Legacy ``time_in_force`` values (ioc/fok/gtc/gtt) are honored; ``gtt``
+        requires a future ``order_expiration_ts`` or is treated as GTC with the
+        configured rest horizon.
+      - Orders near expiry (<= ``ioc_threshold`` seconds) are forced to IOC.
     """
     from merid.event_venues.kalshi.market_state import (
         get_kalshi_market_state_store,
-        IOC_AUTO_BELOW_SECONDS,  # Fallback if profile not available
+        IOC_AUTO_BELOW_SECONDS,
     )
 
-    # Try to get IOC threshold from profile (Task 31: Single source of truth)
-    ioc_threshold = IOC_AUTO_BELOW_SECONDS  # Default fallback
+    ioc_threshold = IOC_AUTO_BELOW_SECONDS
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
         adapter = get_active_profile()
         if adapter is not None and adapter.profile is not None:
             ioc_threshold = float(adapter.profile.venue_invariants_ioc_auto_below_seconds)
     except Exception:
-        # Fallback to deprecated constant if profile unavailable
         pass
 
-    raw = (intent.time_in_force or "gtc").strip().lower()
-    exp_ts = intent.order_expiration_ts
+    # Reduce-only / exit orders must be IOC so they either fill immediately or cancel.
+    if getattr(intent, "reduce_only", False):
+        return ResolvedTIF("IOC")
 
-    if raw == "fill_or_kill":
-        norm = "fok"
-    elif raw in ("gtc", "ioc", "fok"):
-        norm = raw
-    else:
-        norm = "gtc"
-
+    # Near expiry: don't rest a limit order; force IOC regardless of role.
     secs: Optional[float] = None
     try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
         store = get_kalshi_market_state_store()
-        st = store.get(intent.ticker)
+        st = store.get(intent.ticker) if store else None
         if st is not None and st.seconds_to_expiry is not None:
             secs = float(st.seconds_to_expiry)
     except Exception:
         secs = None
+    if secs is not None and secs <= ioc_threshold:
+        return ResolvedTIF("IOC")
 
-    near = secs is not None and secs <= ioc_threshold
+    # Explicit legacy time_in_force takes precedence over execution-mode inference
+    # for IOC/FOK, because these are terminal TIF choices from the caller.
+    raw = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
+    if raw == "ioc":
+        return ResolvedTIF("IOC")
+    if raw == "fok":
+        return ResolvedTIF("FOK")
 
-    if norm == "ioc":
-        return "IOC", None
-    if norm == "fok":
-        return "FOK", None
+    # Resolve execution mode: explicit -> aggressiveness/post_only heuristic.
+    execution_mode = getattr(intent, "execution_mode", None)
+    if not execution_mode:
+        post_only = bool(getattr(intent, "post_only", False))
+        aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
+        if post_only:
+            execution_mode = "passive_quote"
+        elif aggressiveness == 0.0:
+            execution_mode = "maker"
+        elif aggressiveness >= 1.0:
+            execution_mode = "taker"
+        else:
+            execution_mode = "staged_ioc"
 
-    if near:
-        return "IOC", None
-    if exp_ts is not None:
-        return "GTT", int(exp_ts)
-    
-    # CRITICAL FIX (2026-07-17): Short-lived TIF for 15m crypto entry orders
-    # Detect 15m crypto markets by ticker pattern (KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M)
-    is_15m_crypto = any(
-        intent.ticker.startswith(prefix)
-        for prefix in ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]
+    # Explicit execution-mode mapping.
+    if execution_mode in ("taker", "staged_ioc"):
+        return ResolvedTIF("IOC")
+    if execution_mode in ("maker", "passive_quote"):
+        return ResolvedTIF("GTC", _resolve_gtc_expiration(intent))
+
+    # Legacy time_in_force fallback.
+    raw = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
+    if raw == "ioc":
+        return ResolvedTIF("IOC")
+    if raw == "fok":
+        return ResolvedTIF("FOK")
+    if raw == "gtc" or raw == "gtt" or raw == "good_till_time":
+        return ResolvedTIF("GTC", _resolve_gtc_expiration(intent))
+
+    # Unknown TIF -> safe GTC with a short rest horizon, log a warning.
+    logger.warning(
+        "[kalshi] unknown time_in_force=%r for ticker=%s; defaulting to GTC with rest horizon",
+        raw,
+        intent.ticker,
     )
-    
-    # Apply short-lived TIF (60s GTT) for entry orders on 15m crypto markets
-    # Exit orders (entry_or_exit="exit") keep GTC to ensure fills
-    if is_15m_crypto and intent.entry_or_exit != "exit":
-        # Use 60-second GTT for entry orders to reduce resting-order spam
-        # This prevents stale GTC orders from accumulating on the book
-        return "GTT", 60
-    
-    return "GTC", None
+    return ResolvedTIF("GTC", _now_unix_s() + _resolve_rest_seconds(intent))
 
 
 @dataclass
 class OrderResult:
-    """Result of order routing.
+    """Result of order routing with split request/execution semantics.
+
+    ``success`` and the new ``request_completed``/``has_execution`` properties
+    separate two ideas that used to collapse together:
+
+    - ``request_completed`` = the venue accepted and terminally processed the
+      request (filled, partial, accepted, submitted, resting, unfilled_ioc,
+      rejected, canceled, expired).
+    - ``has_execution`` = at least one contract was actually filled.
+    - ``unfilled_ioc`` is a completed request with **zero** execution and must
+      never be treated as a successful trade, position, or execution metric.
 
     Attributes:
-        status: ``"filled_mock"`` | ``"filled_paper"`` | ``"filled_live"`` | ``"partial_live"`` | 
-                ``"accepted_live"`` | ``"submitted_live"`` | ``"rejected"`` | ``"duplicate_unknown"``
+        status: terminal or non-terminal outcome of the routing attempt
         mode: Resolved trading mode
-        fill: Fill details (if filled)
-        reason: Rejection reason (if rejected)
+        fill: Fill details (if any); should carry ``count``/``filled_count``,
+              ``remaining_count``, and ``requested_count`` when present
+        reason: Rejection/ambiguous reason (if rejected or unknown)
         latency_ms: Routing latency
+        order_id: Venue order id (when known)
+        error: Machine-readable error tag
     """
     status: str
     mode: TradingMode
@@ -2577,10 +2906,158 @@ class OrderResult:
     order_id: Optional[str] = None
     error: Optional[str] = None
 
+    # Successful *execution* / accepted request.  Does NOT include
+    # ``unfilled_ioc`` because a zero-fill IOC is not an execution success.
     @property
     def success(self) -> bool:
-        """Check if order was successful (filled, accepted, or submitted)."""
-        return self.status in ["filled_mock", "filled_paper", "filled_live", "partial_live", "accepted_live", "submitted_live"]
+        """True when the order was filled, accepted, or is resting on the book.
+
+        For explicit execution success, prefer ``has_execution``.
+        """
+        return self.status in {
+            "filled_mock",
+            "filled_paper",
+            "filled_live",
+            "partial_live",
+            "partial_fill",
+            "accepted_live",
+            "submitted_live",
+            "resting",
+        }
+
+    # ── Split semantic API ──────────────────────────────────────────────
+
+    @property
+    def request_completed(self) -> bool:
+        """The order request was accepted and terminally processed by the venue."""
+        return self.status in {
+            "filled_mock",
+            "filled_paper",
+            "filled_live",
+            "partial_live",
+            "partial_fill",
+            "accepted_live",
+            "submitted_live",
+            "resting",
+            "unfilled_ioc",
+            "rejected",
+            "canceled",
+            "expired",
+        }
+
+    @property
+    def executed_count(self) -> int:
+        """Actual filled contracts from this order attempt."""
+        if not self.fill:
+            return 0
+        for key in ("filled_count", "count", "filled_contracts"):
+            value = self.fill.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    pass
+        return 0
+
+    @property
+    def remaining_count(self) -> int:
+        """Remaining/unfilled contracts for this order (0 when unknown)."""
+        if not self.fill:
+            return 0
+        remaining = self.fill.get("remaining_count")
+        if remaining is not None:
+            try:
+                return int(remaining)
+            except Exception:
+                pass
+        requested = self.fill.get("requested_count")
+        if requested is not None:
+            try:
+                return int(requested) - self.executed_count
+            except Exception:
+                pass
+        return 0
+
+    @property
+    def has_execution(self) -> bool:
+        """At least one contract was actually filled/executed."""
+        return self.executed_count > 0
+
+    @property
+    def is_terminal(self) -> bool:
+        """No further fills are expected; exposure reservations can be released."""
+        return self.status in {
+            "filled_mock",
+            "filled_paper",
+            "filled_live",
+            "partial_live",
+            "partial_fill",
+            "unfilled_ioc",
+            "rejected",
+            "canceled",
+            "expired",
+        }
+
+    @property
+    def requires_recovery(self) -> bool:
+        """Outcome is unknown; background reconciliation must resolve before sizing."""
+        return self.status in ("submission_unknown", "duplicate_unknown")
+
+
+# ── Typed rejections and execution plan ───────────────────────────────────
+
+class RepriceWouldCross(Exception):
+    """Raised when price adjustment would cross the spread for the intended role.
+    
+    This is a typed rejection for the repricing/planning stage. It carries enough
+    context to release the slot reservation exactly once and log the failure.
+    """
+    def __init__(
+        self,
+        ticker: str,
+        side: str,
+        action: str,
+        role: str,
+        attempted_price: int,
+        side_bid: Optional[int],
+        side_ask: Optional[int],
+        reason: str,
+    ):
+        self.ticker = ticker
+        self.side = side
+        self.action = action
+        self.role = role
+        self.attempted_price = attempted_price
+        self.side_bid = side_bid
+        self.side_ask = side_ask
+        self.reason = reason
+        super().__init__(
+            f"[REPRICE-WOULD-CROSS] {ticker} {role} {action} {side} "
+            f"attempted={attempted_price}c bid={side_bid}c ask={side_ask}c: {reason}"
+        )
+
+
+@dataclass
+class ExecutionPlan:
+    """Pure, testable plan for a single order.
+    
+    The planner normalizes the YES/NO book, resolves the intended liquidity role,
+    produces an executable limit price, and computes the expected economics *once*
+    before any reservation or submission happens.
+    """
+    role: str  # "maker" or "taker"
+    side: str  # "yes" or "no"
+    action: str  # "buy" or "sell"
+    limit_price_cents: int
+    post_only: bool
+    tif: str
+    expected_fee_cents: int
+    expected_fill_price_cents: int
+    side_bid_cents: Optional[int] = None
+    side_ask_cents: Optional[int] = None
+    mid_cents: Optional[int] = None
+    slippage_to_touch_cents: int = 0
+    rationale: str = ""
 
 
 # ── Paper fill simulation ─────────────────────────────────────────────────
@@ -4444,20 +4921,80 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     # If no state available, return original price
     if state is None:
         return intent.price_cents
-    
+
+    # Snapshot freshness / sequence validation before trusting any price level.
+    # A stale or un-initialized book must never be used for repricing.
+    _max_snapshot_age_ms = 5000
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        _profile_adapter = get_active_profile()
+        if _profile_adapter and _profile_adapter.profile:
+            _max_snapshot_age_ms = int(getattr(_profile_adapter.profile, 'guardrails_max_snapshot_age_ms', 5000))
+    except Exception:
+        pass
+
+    _book_initialized = bool(getattr(state, 'book_initialized', False))
+    _snapshot_age_ms = getattr(intent, 'snapshot_age_ms', None)
+    if _snapshot_age_ms is None:
+        _last_update = getattr(state, 'last_book_update_wall_ts', None)
+        if _last_update:
+            _snapshot_age_ms = int((_time.time() - _last_update) * 1000)
+
+    if not _book_initialized:
+        raise RepriceWouldCross(
+            ticker=intent.ticker,
+            side=("no" if "no" in (intent.side or "").lower() else "yes"),
+            action=intent.action or "buy",
+            role="taker",
+            attempted_price=int(round(intent.price_cents)),
+            side_bid=getattr(state, 'best_bid_cents', None),
+            side_ask=getattr(state, 'best_ask_cents', None),
+            reason="book_not_initialized",
+        )
+
+    if _snapshot_age_ms is not None and _snapshot_age_ms > _max_snapshot_age_ms:
+        raise RepriceWouldCross(
+            ticker=intent.ticker,
+            side=("no" if "no" in (intent.side or "").lower() else "yes"),
+            action=intent.action or "buy",
+            role="taker",
+            attempted_price=int(round(intent.price_cents)),
+            side_bid=getattr(state, 'best_bid_cents', None),
+            side_ask=getattr(state, 'best_ask_cents', None),
+            reason=f"stale_snapshot: age_ms={_snapshot_age_ms} > max={_max_snapshot_age_ms}",
+        )
+
     # Get current market data
     mid_cents = getattr(state, 'mid_cents', None)
     best_bid_cents = getattr(state, 'best_bid_cents', None)
     best_ask_cents = getattr(state, 'best_ask_cents', None)
-    
+
     # If no market data available, return original price
     if mid_cents is None:
-        return intent.price_cents
-    
+        return int(round(intent.price_cents))
+
+    # Kalshi contract prices are whole cents; derived mid-prices from the orderbook
+    # may be floats (e.g. 32.5c). Round them to the nearest integer cent so all
+    # downstream price arithmetic stays integral and we do not submit fractional
+    # limit prices like 31.5c.
+    mid_cents = int(round(mid_cents))
+
+    # Slippage budget: never cross more than max_slippage cents away from the
+    # fair value (market mid).  For NO-side orders this is the NO-side mid.
+    max_slippage_cents = _resolve_max_slippage_cents()
+
+    def _next_valid_tick_at_or_above(value: float) -> int:
+        return int(math.ceil(value))
+
+    def _next_valid_tick_at_or_below(value: float) -> int:
+        return int(math.floor(value))
+
     # CRITICAL FIX (2026-07-31): Use side-appropriate mid-price for NO orders
     # For NO orders, use NO mid-price (100 - YES_mid) instead of YES mid-price
     side_lower = intent.side.lower() if intent.side else ""
     is_no_side = "no" in side_lower
+    outcome_side = "no" if is_no_side else "yes"
+    is_buy = intent.action == "buy"
     if is_no_side:
         # For NO orders, use NO mid-price for price adjustment logic
         original_yes_mid = mid_cents
@@ -4467,30 +5004,280 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             intent.ticker, intent.side, mid_cents, original_yes_mid
         )
     
-    original_price = intent.price_cents
+    # CRITICAL FIX 2026-08-08: Side-aware best bid/ask for the outcome side.
+    # YES bid/ask are primary. NO-specific fields are preferred when available;
+    # otherwise derive NO prices from YES duality:
+    #   NO_ask = 100 - YES_bid, NO_bid = 100 - YES_ask.
+    if is_no_side:
+        side_bid = getattr(state, 'best_no_bid_cents', None)
+        side_ask = getattr(state, 'best_no_ask_cents', None)
+        if side_ask is None and best_bid_cents is not None:
+            side_ask = 100 - best_bid_cents
+        if side_bid is None and best_ask_cents is not None:
+            side_bid = 100 - best_ask_cents
+    else:
+        side_bid = best_bid_cents
+        side_ask = best_ask_cents
+
+    # Side-aware displayed size for tick-aware crossing.
+    # YES: ask size is the YES ask size; bid size is YES bid size.
+    # NO:  NO-ask size is the YES bid size (NO ask = 100 - YES bid);
+    #      NO-bid size is the YES ask size (NO bid = 100 - YES ask).
+    if is_no_side:
+        displayed_ask_size = int(getattr(state, 'best_bid_size', 0) or 0)
+        displayed_bid_size = int(getattr(state, 'best_ask_size', 0) or 0)
+    else:
+        displayed_ask_size = int(getattr(state, 'best_ask_size', 0) or 0)
+        displayed_bid_size = int(getattr(state, 'best_bid_size', 0) or 0)
+
+    # Reject a crossed book immediately (bid > ask). A locked book (bid == ask)
+    # still admits a coherent maker/taker price, so we let the role clamps decide.
+    if side_bid is not None and side_ask is not None and side_bid > side_ask:
+        raise RepriceWouldCross(
+            ticker=intent.ticker,
+            side=outcome_side,
+            action=intent.action,
+            role=(intent.liquidity_role if intent.liquidity_role in ("maker", "taker") else "maker"),
+            attempted_price=int(round(intent.price_cents)),
+            side_bid=side_bid,
+            side_ask=side_ask,
+            reason=f"crossed_book: side_bid={side_bid}c > side_ask={side_ask}c",
+        )
+
+    original_price = int(round(intent.price_cents))
     adjusted_price = original_price
-    
-    # SAFETY: Only adjust by 25% of distance to mid (reduced from 50%)
-    # This reduces risk of crossing spread in fast-moving markets
-    adjustment_factor = 0.25
-    
-    # For buy orders: move price up towards mid (but not above mid)
-    if intent.action == "buy":
-        # If current price is below mid, move it closer
-        if original_price < mid_cents:
-            # Move price to 25% of the distance to mid (reduced from 50%)
+
+    # CRITICAL FIX 2026-08-09: Resolve the intended execution mode once, before any
+    # price is chosen.  ``staged_ioc`` is treated as taker/IOC for repricing and
+    # validation until the two-stage state machine exists.
+    execution_mode = _resolve_execution_mode(intent)
+    if execution_mode == "staged_ioc":
+        role = "taker"
+        intent.execution_mode = "staged_ioc"
+    elif execution_mode in ("maker", "passive_quote"):
+        role = "maker"
+    elif execution_mode == "taker":
+        role = "taker"
+    elif intent.liquidity_role in ("maker", "taker"):
+        role = intent.liquidity_role
+    else:
+        effective_post_only, effective_aggressiveness, _, _ = _apply_execution_mode(intent)
+        if effective_post_only and float(effective_aggressiveness or 0.0) == 0.0:
+            role = "maker"
+        elif float(effective_aggressiveness or 0.0) > 0.0:
+            role = "taker"
+        else:
+            role = "maker"  # aggressiveness == 0 means resting/maker by default
+
+    # For maker orders, gently improve the limit price toward the mid (25% of the
+    # distance) so it sits inside the spread and has a better chance of being hit.
+    # Taker orders are priced from the current book and slippage budget instead; the
+    # input price is treated as the model's fair value, not a resting target.
+    if role == "maker":
+        adjustment_factor = 0.25
+        if is_buy and original_price < mid_cents:
             adjusted_price = int(original_price + (mid_cents - original_price) * adjustment_factor)
-            # Ensure we don't go above mid
             adjusted_price = min(adjusted_price, mid_cents - 1)
-    
-    # For sell orders: move price down towards mid (but not below mid)
-    elif intent.action == "sell":
-        # If current price is above mid, move it closer
-        if original_price > mid_cents:
-            # Move price to 25% of the distance to mid (reduced from 50%)
+        elif not is_buy and original_price > mid_cents:
             adjusted_price = int(original_price - (original_price - mid_cents) * adjustment_factor)
-            # Ensure we don't go below mid
             adjusted_price = max(adjusted_price, mid_cents + 1)
+
+    # Resolve the canonical execution-mode values once and freeze them on the
+    # intent. This prevents _apply_execution_mode, _route_live, or any later
+    # submission path from recomputing role/post_only/aggressiveness/order_type/TIF
+    # after the price has been chosen with those exact economics.
+    effective_post_only, effective_aggressiveness, effective_order_type, effective_tif = _apply_execution_mode(intent)
+    intent.liquidity_role = role
+    intent.post_only = effective_post_only
+    intent.aggressiveness = float(effective_aggressiveness or 0.0)
+    intent.order_type = effective_order_type
+    # Store TIF in lowercase to match OrderIntent default and downstream comparisons.
+    intent.time_in_force = effective_tif
+    try:
+        from merid.prediction.kalshi_maker_taker_contract import (
+            compute_expected_fee,
+            LiquidityRole,
+        )
+        intent.estimated_fee_cents = compute_expected_fee(
+            LiquidityRole(role), intent.price_cents, getattr(intent, 'count', 1) or 1
+        )
+        intent.fee_type = role
+    except Exception:
+        pass
+    
+    if is_buy:
+        if side_ask is not None:
+            if role == "maker":
+                # Maker buy: rest on the book, at or below ask-1.
+                # The user-required invariant is adjusted_price <= side_ask.
+                adjusted_price = min(adjusted_price, side_ask - 1)
+                if adjusted_price >= side_ask:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=adjusted_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"maker buy price {adjusted_price}c is at/above side ask {side_ask}c",
+                    )
+            elif role == "taker":
+                # Taker buy: price at or through the displayed ask.  If the displayed
+                # ask has zero/unknown size, cross one valid tick above it.  Never
+                # cross beyond the fair cap (mid + max slippage budget).
+                taker_target = side_ask
+                if not displayed_ask_size:
+                    taker_target = _next_valid_tick_at_or_above(side_ask + 1)
+
+                fair_cap = mid_cents + max_slippage_cents
+                if side_ask > fair_cap:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=side_ask,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"taker buy: displayed ask {side_ask}c beyond fair cap {fair_cap}c (slippage > {max_slippage_cents}c)",
+                    )
+
+                taker_target = min(taker_target, fair_cap)
+                # Use the more aggressive of the model fair value and the executable
+                # ask, then clamp to the slippage cap so a high input price never
+                # crosses the model's max taker budget.
+                adjusted_price = min(max(adjusted_price, taker_target), fair_cap)
+
+                try:
+                    from merid.prediction.kalshi_maker_taker_contract import (
+                        compute_expected_fee,
+                        LiquidityRole,
+                    )
+                    taker_fee_cents = compute_expected_fee(
+                        LiquidityRole.TAKER, adjusted_price, getattr(intent, 'count', 1) or 1
+                    )
+                    logger.info(
+                        "[PRICE-ADJUSTMENT] ticker=%s taker BUY at %dc (side_ask=%dc target=%dc ask_size=%s) "
+                        "expected_fee_cents=%d slippage_to_ask=%dc fair_cap=%dc",
+                        intent.ticker, adjusted_price, side_ask, taker_target, displayed_ask_size,
+                        taker_fee_cents, max(0, adjusted_price - side_ask), fair_cap
+                    )
+                except Exception:
+                    pass
+            else:
+                # Default fill-rate improvement: do not cross the ask.
+                adjusted_price = min(adjusted_price, side_ask - 1)
+            # Role-consistent invariant for buy paths.
+            if side_ask is not None:
+                if role == "maker" and adjusted_price >= side_ask:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=adjusted_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"maker buy price {adjusted_price}c at/above side ask {side_ask}c",
+                    )
+                elif role == "taker" and adjusted_price < side_ask:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=adjusted_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"taker buy price {adjusted_price}c below side ask {side_ask}c",
+                    )
+    else:
+        if side_bid is not None:
+            if role == "maker":
+                # Maker sell: rest on the book, strictly above the bid.
+                adjusted_price = max(adjusted_price, side_bid + 1)
+                if adjusted_price <= side_bid:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=adjusted_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"maker sell price {adjusted_price}c at/below side bid {side_bid}c",
+                    )
+            elif role == "taker":
+                # Taker sell: price at or through the displayed bid.  If the displayed
+                # bid has zero/unknown size, cross one valid tick below it.  Never
+                # cross below the fair floor (mid - max slippage budget).
+                taker_target = side_bid
+                if not displayed_bid_size:
+                    taker_target = _next_valid_tick_at_or_below(side_bid - 1)
+
+                fair_floor = mid_cents - max_slippage_cents
+                if side_bid < fair_floor:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=side_bid,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"taker sell: displayed bid {side_bid}c below fair floor {fair_floor}c (slippage > {max_slippage_cents}c)",
+                    )
+
+                taker_target = max(taker_target, fair_floor)
+                # Use the more aggressive of the model fair value and the executable
+                # bid, then clamp to the slippage floor so a low input price never
+                # crosses the model's max taker budget.
+                adjusted_price = max(min(adjusted_price, taker_target), fair_floor)
+
+                try:
+                    from merid.prediction.kalshi_maker_taker_contract import (
+                        compute_expected_fee,
+                        LiquidityRole,
+                    )
+                    taker_fee_cents = compute_expected_fee(
+                        LiquidityRole.TAKER, adjusted_price, getattr(intent, 'count', 1) or 1
+                    )
+                    logger.info(
+                        "[PRICE-ADJUSTMENT] ticker=%s taker SELL at %dc (side_bid=%dc target=%dc bid_size=%s) "
+                        "expected_fee_cents=%d slippage_to_bid=%dc fair_floor=%dc",
+                        intent.ticker, adjusted_price, side_bid, taker_target, displayed_bid_size,
+                        taker_fee_cents, max(0, side_bid - adjusted_price), fair_floor
+                    )
+                except Exception:
+                    pass
+            else:
+                # Default fill-rate improvement: do not cross the bid.
+                adjusted_price = max(adjusted_price, side_bid + 1)
+            # Role-consistent invariant for sell paths.
+            if side_bid is not None:
+                if role == "maker" and adjusted_price <= side_bid:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=adjusted_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"maker sell price {adjusted_price}c at/below side bid {side_bid}c",
+                    )
+                elif role == "taker" and adjusted_price > side_bid:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=adjusted_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason=f"taker sell price {adjusted_price}c above side bid {side_bid}c",
+                    )
     
     # Log if price was adjusted
     if adjusted_price != original_price:
@@ -4538,9 +5325,40 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                 "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc outside canonical range for side=%s - suppressing adjustment, using original price %dc",
                 intent.ticker, adjusted_price, canonical_side, original_price
             )
-            return original_price  # Suppress adjustment, return original price
-    
-    return adjusted_price
+            return int(round(original_price))  # Suppress adjustment, return original price as whole cents
+
+    # Final role-consistent validation after all clamping. Uses the same
+    # invariant contract that downstream submission will use, so any repricing
+    # that violates the intended role is rejected before sizing/reservation.
+    if side_bid is not None and side_ask is not None:
+        try:
+            from merid.prediction.kalshi_maker_taker_contract import (
+                LiquidityRole,
+                validate_price_placement_invariant,
+            )
+            is_valid, error = validate_price_placement_invariant(
+                role=LiquidityRole(role),
+                side=outcome_side,
+                action=intent.action,
+                price_cents=adjusted_price,
+                best_bid=side_bid,
+                best_ask=side_ask,
+            )
+            if not is_valid:
+                raise RepriceWouldCross(
+                    ticker=intent.ticker,
+                    side=outcome_side,
+                    action=intent.action,
+                    role=role,
+                    attempted_price=adjusted_price,
+                    side_bid=side_bid,
+                    side_ask=side_ask,
+                    reason=error or "final_validate_price_placement_invariant_failed",
+                )
+        except ImportError:
+            pass
+
+    return int(round(adjusted_price))
 
 
 def _check_market_liquidity(intent: OrderIntent, state: Optional[Any]) -> Optional[str]:
@@ -4715,26 +5533,79 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any],
             intent.ticker, best_ask_cents, best_bid_cents, validation_ask_cents, validation_bid_cents
         )
     
-    # Check 2: For buy orders, price should not be above ask (would cross spread)
-    # TEST FIX: Only check this if price is NOT too far from mid (to match test expectations)
-    # Also skip if deviation check already failed (to avoid returning wrong error)
-    if intent.action == "buy" and validation_ask_cents is not None:
-        if order_price > validation_ask_cents and abs(order_price - validation_mid_cents) <= max_deviation_cents:
-            logger.warning(
-                "[PRICE-VALIDATION] ticker=%s buy order price=%dc above ask=%dc (would cross spread)",
-                intent.ticker, order_price, validation_ask_cents
-            )
-            return f"price_validation:buy_above_ask:price={order_price}c,ask={validation_ask_cents}c"
-    
-    # Check 3: For sell orders, price should not be below bid (would cross spread)
-    if intent.action == "sell" and validation_bid_cents is not None:
-        if order_price < validation_bid_cents:
-            logger.warning(
-                "[PRICE-VALIDATION] ticker=%s sell order price=%dc below bid=%dc (would cross spread)",
-                intent.ticker, order_price, validation_bid_cents
-            )
-            return f"price_validation:sell_below_bid:price={order_price}c,bid={validation_bid_cents}c"
-    
+    is_buy = intent.action == "buy"
+
+    # CRITICAL FIX 2026-08-09: Mode-aware price validation.
+    # - maker/passive_quote: limit must not cross the inside quote.
+    # - taker/staged_ioc: limit may be at or through the inside quote, but is
+    #   bounded by the fair cap/floor (mid +/- max_slippage) as an extra guard.
+    execution_mode = _resolve_execution_mode(intent)
+    if execution_mode == "staged_ioc":
+        execution_mode = "taker"
+
+    max_slippage_cents = _resolve_max_slippage_cents()
+    snapshot_age_ms = getattr(intent, "snapshot_age_ms", None)
+    book_age_ms = None
+    if state is not None:
+        last_update = getattr(state, "last_book_update_wall_ts", None)
+        if last_update:
+            book_age_ms = int((_time.time() - last_update) * 1000)
+
+    logger.info(
+        "[PRICE-VALIDATION-MODE] ticker=%s mode=%s tif=%s price=%dc outcome=%s "
+        "bid=%s ask=%s mid=%d snapshot_age_ms=%s book_age_ms=%s",
+        intent.ticker, execution_mode, intent.time_in_force, order_price, outcome_side,
+        validation_bid_cents, validation_ask_cents, validation_mid_cents,
+        snapshot_age_ms, book_age_ms,
+    )
+
+    if execution_mode in ("taker",):
+        if is_buy:
+            if validation_ask_cents is not None and order_price < validation_ask_cents:
+                logger.warning(
+                    "[PRICE-VALIDATION] ticker=%s taker BUY price=%dc below ask=%dc (non-marketable IOC)",
+                    intent.ticker, order_price, validation_ask_cents,
+                )
+                return f"taker_buy_below_ask:price={order_price}c,ask={validation_ask_cents}c"
+            fair_cap = validation_mid_cents + max_slippage_cents
+            if order_price > fair_cap:
+                logger.warning(
+                    "[PRICE-VALIDATION] ticker=%s taker BUY price=%dc above fair cap=%dc (slippage > %dc)",
+                    intent.ticker, order_price, fair_cap, max_slippage_cents,
+                )
+                return f"taker_buy_above_slippage_cap:price={order_price}c,cap={fair_cap}c"
+        else:
+            if validation_bid_cents is not None and order_price > validation_bid_cents:
+                logger.warning(
+                    "[PRICE-VALIDATION] ticker=%s taker SELL price=%dc above bid=%dc (non-marketable IOC)",
+                    intent.ticker, order_price, validation_bid_cents,
+                )
+                return f"taker_sell_above_bid:price={order_price}c,bid={validation_bid_cents}c"
+            fair_floor = validation_mid_cents - max_slippage_cents
+            if order_price < fair_floor:
+                logger.warning(
+                    "[PRICE-VALIDATION] ticker=%s taker SELL price=%dc below fair floor=%dc (slippage > %dc)",
+                    intent.ticker, order_price, fair_floor, max_slippage_cents,
+                )
+                return f"taker_sell_below_slippage_floor:price={order_price}c,floor={fair_floor}c"
+
+    else:
+        # maker / passive_quote / unknown default
+        if is_buy:
+            if validation_ask_cents is not None and order_price >= validation_ask_cents:
+                logger.warning(
+                    "[PRICE-VALIDATION] ticker=%s maker BUY price=%dc at/above ask=%dc (would cross spread)",
+                    intent.ticker, order_price, validation_ask_cents,
+                )
+                return f"price_validation:buy_above_ask:price={order_price}c,ask={validation_ask_cents}c"
+        else:
+            if validation_bid_cents is not None and order_price <= validation_bid_cents:
+                logger.warning(
+                    "[PRICE-VALIDATION] ticker=%s maker SELL price=%dc at/below bid=%dc (would cross spread)",
+                    intent.ticker, order_price, validation_bid_cents,
+                )
+                return f"price_validation:sell_below_bid:price={order_price}c,bid={validation_bid_cents}c"
+
     return None
 
 
@@ -4980,7 +5851,19 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
     # This ensures symmetric execution for both YES and NO orders
     side_lower = intent.side.lower() if intent.side else ""
     is_no_side = "no" in side_lower
+    is_buy_order = bool(intent.action and intent.action.lower() == "buy")
     mid_cents = getattr(state, 'mid_cents', 50) or 50
+    
+    # CRITICAL FIX 2026-08-08: Bypass all SWEET-SPOT-EXECUTION price mutation.
+    # The role-aware, side-aware repricer in _adjust_order_price_for_fill_rate is
+    # the single place that may move a limit price. _apply_execution_mode decides
+    # order_type/time-in-force from the explicit execution role. This removes the
+    # BUY/SELL asymmetry and avoids blind 40c/48c -> 55c rewrites.
+    logger.info(
+        "[SWEET-SPOT-EXECUTION] %s %s bypassed for ticker=%s price=%dc - role-aware repricer takes over",
+        "BUY" if is_buy_order else "SELL", "NO" if is_no_side else "YES", intent.ticker, intent.price_cents
+    )
+    return "limit", intent.time_in_force or "gtc"
     
     # Convert to YES space for range checking (duality: YES + NO = 100)
     if is_no_side:
@@ -5033,40 +5916,26 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
     
     # Check if current price is below optimal range - place limit order at sweet spot
     if range_check_mid < optimal_min:
-        # Calculate sweet spot price in appropriate space
-        # CRITICAL FIX 2026-08-01: Don't clamp to optimal range - use current price + small increment
-        # This prevents jumping from 20c to 40c which would cross the spread
-        if is_no_side:
-            # For NO orders, sweet spot is in NO space (55-60c range)
-            # Use current price + 5c, but don't clamp to optimal range
-            sweet_spot_price = range_check_mid + 5
-            logger.debug(
-                "[SWEET-SPOT-EXECUTION] ticker=%s side=%s NO price=%dc below optimal - placing limit order at sweet spot %dc",
-                intent.ticker, intent.side, range_check_mid, sweet_spot_price
-            )
-        else:
-            # For YES orders, sweet spot is in YES space (40-45c range)
-            # Use current price + 5c, but don't clamp to optimal range
-            sweet_spot_price = range_check_mid + 5
-            logger.debug(
-                "[SWEET-SPOT-EXECUTION] ticker=%s side=%s YES price=%dc below optimal - placing limit order at sweet spot %dc",
-                intent.ticker, intent.side, range_check_mid, sweet_spot_price
-            )
+        # Candidate sweet spot: current price + small increment, then clamp to the
+        # side-appropriate sweet-spot band and cap/floor to the current bid/ask
+        # so the limit order does not cross the spread.
+        candidate_sweet = range_check_mid + 5
+        sweet_spot_price = max(sweet_spot_min, min(sweet_spot_max, candidate_sweet))
+        logger.debug(
+            "[SWEET-SPOT-EXECUTION] ticker=%s side=%s price=%dc below optimal - candidate=%dc band=[%dc,%dc]",
+            intent.ticker, intent.side, range_check_mid, sweet_spot_price, sweet_spot_min, sweet_spot_max
+        )
         
         # Track original price for comparison (in the same space as sweet_spot_price)
         original_price = intent.price_cents
         
-        # CRITICAL FIX 2026-07-31: Validate sweet spot price against side-appropriate market prices
-        # For buy orders, ensure limit price doesn't exceed ask price (would cross spread)
-        # For sell orders, ensure limit price doesn't go below bid price
-        # CRITICAL: For NO orders, use NO ask/bid (derived from YES bid/ask)
+        # Validate sweet spot price against side-appropriate market prices
+        # For buy orders, the limit price may not exceed ask (placing at ask is marketable)
+        # For sell orders, the limit price may not be below bid
+        # For NO orders, convert YES bid/ask to NO-side prices first
         ask_cents = getattr(state, 'ask_cents', None)
         bid_cents = getattr(state, 'bid_cents', None)
         
-        # Derive NO-side prices if needed (NO_ask = 100 - YES_bid, NO_bid = 100 - YES_ask)
-        # CRITICAL FIX 2026-08-01: Use correct price conversion for NO orders
-        # For NO orders: NO_ask = 100 - YES_bid, NO_bid = 100 - YES_ask
-        # This is the inverse of the YES orderbook relationship
         if is_no_side:
             no_ask_cents = 100 - bid_cents if bid_cents is not None else None
             no_bid_cents = 100 - ask_cents if ask_cents is not None else None
@@ -5074,31 +5943,24 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
                 "[SWEET-SPOT-EXECUTION] ticker=%s side=%s using NO prices (ask=%dc, bid=%dc) derived from YES (ask=%dc, bid=%dc)",
                 intent.ticker, intent.side, no_ask_cents, no_bid_cents, ask_cents, bid_cents
             )
-            # Use NO-side prices for validation
             ask_cents = no_ask_cents
             bid_cents = no_bid_cents
         
-        # Determine if this is a buy order (BUY_YES or BUY_NO)
-        is_buy_order = intent.side in ('BUY_YES', 'BUY_NO')
+        # Use the action (not the side format) to determine buy vs sell
+        is_buy_order = bool(intent.action and intent.action.lower() == "buy")
         
-        # CRITICAL FIX 2026-08-01: If sweet spot would cross spread, use current price instead
-        # This prevents the order from being rejected by price validation
         if is_buy_order and ask_cents is not None:
-            # For buy orders, if sweet spot >= ask, use current price instead
-            if sweet_spot_price >= ask_cents:
-                logger.info(
-                    "[SWEET-SPOT-EXECUTION] ticker=%s sweet spot %dc would cross spread (ask=%dc) - using current price %dc instead",
-                    intent.ticker, sweet_spot_price, ask_cents, original_price
-                )
-                sweet_spot_price = original_price
+            sweet_spot_price = min(sweet_spot_price, ask_cents)
+            logger.debug(
+                "[SWEET-SPOT-EXECUTION] ticker=%s side=%s buy limit capped to ask=%dc -> %dc",
+                intent.ticker, intent.side, ask_cents, sweet_spot_price
+            )
         elif not is_buy_order and bid_cents is not None:
-            # For sell orders, if sweet spot <= bid, use current price instead
-            if sweet_spot_price <= bid_cents:
-                logger.info(
-                    "[SWEET-SPOT-EXECUTION] ticker=%s sweet spot %dc would cross spread (bid=%dc) - using current price %dc instead",
-                    intent.ticker, sweet_spot_price, bid_cents, original_price
-                )
-                sweet_spot_price = original_price
+            sweet_spot_price = max(sweet_spot_price, bid_cents)
+            logger.debug(
+                "[SWEET-SPOT-EXECUTION] ticker=%s side=%s sell limit floored to bid=%dc -> %dc",
+                intent.ticker, intent.side, bid_cents, sweet_spot_price
+            )
         
         # Only update intent price if sweet spot is different from current price and valid
         if sweet_spot_price != original_price and sweet_spot_price > 0:
@@ -6004,7 +6866,331 @@ def _record_price_execution(intent: OrderIntent) -> None:
     # The duplicate recording here has been removed to avoid double-counting exposure.
 
 
-async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
+def _prepare_order_for_gate(
+    intent: OrderIntent, mode: TradingMode, t0: float
+) -> tuple[Optional[OrderResult], Optional[Any]]:
+    """Plan price, role, order_type, TIF, and sizing before the pre-trade gate.
+
+    This helper performs all execution planning before a PENDING gate record is
+    inserted, so the gate sees the final price and count.  It does NOT release
+    any gate record on rejection because the record does not exist yet.
+
+    Returns:
+        (rejection, None) or (None, state)
+    """
+    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+
+    _is_exit = _is_exit_order(intent)
+
+    # Snapshot staleness gate
+    try:
+        _SNAPSHOT_MAX_AGE_S = float(os.getenv("KALSHI_ORDER_SNAPSHOT_MAX_AGE_S", "90"))
+    except NameError as ne:
+        logger.error(f"[DEBUG] NameError at line 1879: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
+        raise
+    _snap_age = _time.time() - intent.snapshot_ts
+    if _snap_age > _SNAPSHOT_MAX_AGE_S:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.warning(
+            "[order-router] Order rejected — stale snapshot: ticker=%s age=%.1fs > %.0fs",
+            intent.ticker, _snap_age, _SNAPSHOT_MAX_AGE_S,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"stale_snapshot:{intent.ticker}:age={_snap_age:.1f}s",
+            latency_ms=round(latency, 2),
+        ), None
+
+    # Market state / executable / freshness checks
+    store = get_kalshi_market_state_store()
+    state = store.get(intent.ticker)
+
+    if state is None:
+        if _is_exit:
+            logger.warning(
+                "[order-router] EXIT ORDER: market state missing for %s - proceeding without state gates (exit must not be trapped)",
+                intent.ticker,
+            )
+        elif _is_live_mode(mode):
+            latency = (_time.monotonic() - t0) * 1000
+            logger.warning(
+                "[order-router] Live order rejected — market state not found (fail-closed): ticker=%s",
+                intent.ticker,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="state_not_found:fail_closed_policy",
+                latency_ms=round(latency, 2),
+            ), None
+
+    if state is not None and not _is_exit:
+        if not state.book_initialized:
+            if _is_live_mode(mode):
+                latency = (_time.monotonic() - t0) * 1000
+                logger.warning(
+                    "[order-router] Live order rejected — book not initialized: ticker=%s book_initialized=%s",
+                    intent.ticker, state.book_initialized,
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"book_not_initialized:{intent.ticker}:book_not_ready",
+                    latency_ms=round(latency, 2),
+                ), None
+
+        if not state.executable:
+            if _is_live_mode(mode):
+                latency = (_time.monotonic() - t0) * 1000
+                logger.warning(
+                    "[order-router] Live order rejected — book not executable (duality violation): ticker=%s executable=%s",
+                    intent.ticker, state.executable,
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"book_not_executable:{intent.ticker}:duality_violation",
+                    latency_ms=round(latency, 2),
+                ), None
+
+        # Book freshness using the layered state machine
+        if _is_live_mode(mode):
+            book_age = state.book_age_s if hasattr(state, 'book_age_s') else float('inf')
+            if BOOK_FRESHNESS_AVAILABLE:
+                tracker = get_book_freshness_tracker()
+                freshness_state = tracker.get_state(intent.ticker)
+
+                diagnostic_before = freshness_state.get_diagnostic_info()
+                logger.info(
+                    f"[order-router] Freshness state BEFORE update: ticker={intent.ticker} "
+                    f"state={freshness_state.state.value} age_seconds={diagnostic_before['age_seconds']:.1f} "
+                    f"source={diagnostic_before['source']}"
+                )
+
+                now = _time.time()
+                exchange_ts = None
+                received_ts = now
+                if hasattr(state, 'book_updated_ts') and state.book_updated_ts:
+                    exchange_ts = state.book_updated_ts
+                elif hasattr(state, 'last_update_ts') and state.last_update_ts:
+                    exchange_ts = state.last_update_ts
+                elif hasattr(state, 'timestamp') and state.timestamp:
+                    exchange_ts = state.timestamp
+
+                freshness_state.update_from_ws(
+                    exchange_ts=exchange_ts,
+                    received_ts=received_ts
+                )
+
+                diagnostic_after = freshness_state.get_diagnostic_info()
+                book_age = diagnostic_after.get("age_seconds", book_age)
+                logger.info(
+                    f"[order-router] Freshness state AFTER update: ticker={intent.ticker} "
+                    f"state={freshness_state.state.value} age_seconds={diagnostic_after['age_seconds']:.1f} "
+                    f"source={diagnostic_after['source']}"
+                )
+
+                if not freshness_state.is_tradable():
+                    latency = (_time.monotonic() - t0) * 1000
+                    diagnostic = freshness_state.get_diagnostic_info()
+                    logger.warning(
+                        "[order-router] Order rejected based on freshness state: ticker=%s state=%s age=%.1fs source=%s",
+                        intent.ticker, diagnostic["state"], diagnostic["age_seconds"], diagnostic["source"]
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"book_freshness_{freshness_state.state.value}:{intent.ticker}",
+                        latency_ms=round(latency, 2),
+                    ), None
+            else:
+                book_age = state.book_age_s if hasattr(state, 'book_age_s') else float('inf')
+                if book_age == float('inf') and hasattr(state, 'book_updated_ts') and state.book_updated_ts in (None, 0.0):
+                    import time as _time2
+                    state.book_updated_ts = _time2.time()
+                    if hasattr(state, 'book_age_s'):
+                        state.book_age_s = 0.0
+                    book_age = 0.0
+
+                if book_age == float('inf'):
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.warning(
+                        "[order-router] Live order rejected — book timestamp missing (fail-closed): ticker=%s book_initialized=%s",
+                        intent.ticker, state.book_initialized,
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason="book_timestamp_missing:fail_closed_policy",
+                        latency_ms=round(latency, 2),
+                    ), None
+                elif book_age > 30.0:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.warning(
+                        "[order-router] Live order rejected — book too stale: ticker=%s book_age=%.1fs",
+                        intent.ticker, book_age,
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"book_stale:{intent.ticker}:book_age={book_age:.1f}s",
+                        latency_ms=round(latency, 2),
+                    ), None
+
+    # Execution planning
+    original_order_type = intent.order_type
+    original_tif = intent.time_in_force
+    original_count = intent.count
+    original_price = intent.price_cents
+
+    intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
+
+    try:
+        intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
+    except RepriceWouldCross as e:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.error(
+            "[REPRICE-WOULD-CROSS] Rejecting order: %s | ticker=%s | role=%s | action=%s | side=%s | attempted=%dc | bid=%s | ask=%s",
+            e.reason, e.ticker, e.role, e.action, e.side, e.attempted_price, e.side_bid, e.side_ask
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"reprice_would_cross:{e.reason}",
+            latency_ms=round(latency, 2),
+        ), None
+
+    # Sizing: risk before depth, then risk again to cap
+    intent.count = _apply_risk_based_order_sizing(intent)
+    if intent.count > 0:
+        intent.count = _apply_depth_based_order_sizing(intent, state)
+        intent.count = _apply_risk_based_order_sizing(intent)
+
+    # Recompute expected fee using the planned price and final size
+    try:
+        from merid.prediction.kalshi_maker_taker_contract import (
+            compute_expected_fee,
+            LiquidityRole,
+        )
+        intent.estimated_fee_cents = compute_expected_fee(
+            LiquidityRole(intent.liquidity_role),
+            intent.price_cents,
+            intent.count or 1,
+        )
+    except Exception:
+        pass
+
+    # Liquidity-role price placement invariant
+    if intent.liquidity_role and state and not _is_exit:
+        try:
+            from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
+            side_lower = intent.side.lower() if intent.side else ""
+            if "yes" in side_lower:
+                outcome_side = "yes"
+            elif "no" in side_lower:
+                outcome_side = "no"
+            else:
+                outcome_side = side_lower
+            if outcome_side == "yes":
+                best_bid = state.best_bid_cents
+                best_ask = state.best_ask_cents
+            else:
+                best_bid = state.best_no_bid_cents if state.best_no_bid_cents else (100 - state.best_ask_cents if state.best_ask_cents else None)
+                best_ask = state.best_no_ask_cents if state.best_no_ask_cents else (100 - state.best_bid_cents if state.best_bid_cents else None)
+
+            is_valid, error = validate_price_placement_invariant(
+                role=intent.liquidity_role,
+                side=intent.side,
+                action=intent.action,
+                price_cents=intent.price_cents,
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
+            if not is_valid:
+                latency = (_time.monotonic() - t0) * 1000
+                logger.error(
+                    f"[LIQUIDITY-ROLE-INVARIANT] Rejected order: {error} | ticker={intent.ticker} | "
+                    f"liquidity_role={intent.liquidity_role} | price={intent.price_cents}c"
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"liquidity_role_invariant:{error}",
+                    latency_ms=round(latency, 2),
+                ), None
+            else:
+                logger.debug(
+                    f"[LIQUIDITY-ROLE-VALID] ticker={intent.ticker} | liquidity_role={intent.liquidity_role} | "
+                    f"price={intent.price_cents}c - invariant check passed"
+                )
+        except ImportError:
+            logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
+
+    # Staleness SLO checks (snapshot_age_ms and computed_age_ms)
+    STALENESS_SLO_MS = 5000.0
+    if intent.snapshot_age_ms > STALENESS_SLO_MS and not _is_exit:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.error(
+            f"[STALENESS-SLO] Rejected order: book snapshot too old | ticker={intent.ticker} | "
+            f"snapshot_age_ms={intent.snapshot_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"staleness_slo:book_snapshot_age_{intent.snapshot_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+            latency_ms=round(latency, 2),
+        ), None
+
+    current_time = _time.time()
+    computed_age_ms = (current_time - intent.snapshot_ts) * 1000.0
+    intent.snapshot_age_ms = computed_age_ms
+    if computed_age_ms > STALENESS_SLO_MS and not _is_exit:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.error(
+            f"[STALENESS-SLO] Rejected order: computed snapshot age too old | ticker={intent.ticker} | "
+            f"computed_age_ms={computed_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"staleness_slo:computed_age_{computed_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+            latency_ms=round(latency, 2),
+        ), None
+
+    # Reject order if slot-based sizing returned 0
+    if intent.count == 0 and not _is_exit:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.warning(
+            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count=%d price=%dc",
+            intent.ticker, original_count, original_price
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count},price={original_price}c",
+            latency_ms=round(latency, 2),
+        ), None
+
+    if (intent.order_type != original_order_type or
+        intent.time_in_force != original_tif or
+        intent.count != original_count or
+        intent.price_cents != original_price):
+        logger.info(
+            "[DYNAMIC-ORDER-TYPE] ticker=%s order_type changed from %s to %s, tif from %s to %s, count from %d to %d, price from %dc to %dc based on market conditions",
+            intent.ticker, original_order_type, intent.order_type, original_tif, intent.time_in_force, original_count, intent.count, original_price, intent.price_cents
+        )
+
+    return None, state
+
+
+async def _route_live(
+    intent: OrderIntent,
+    mode: TradingMode,
+    t0: float,
+    prepared_state: Optional[Any] = None,
+    plan_done: bool = False,
+) -> OrderResult:
     """Route LIVE intents through the canonical KalshiVenueClient."""
     # CRITICAL FIX: Initialize _exp_tracker to None to prevent NameError
     # CategoryExposureTracker is deprecated and replaced by UnifiedRiskManager
@@ -6125,294 +7311,28 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     except Exception as e:
         logger.error(f"[KILL-SWITCH] Error in global kill switch check: {e}")
 
-    # Executable gate — 2026-06-29: Relaxed to align with 2026 best practices
-    # Previous implementation rejected orders when executable=False (no live bid/ask)
-    # 2026-08-01: CRITICAL FIX - Fail-closed policy for entry orders, exit orders have override
-    # Entry orders require valid market state to prevent trading on stale/missing data
-    # Exit orders bypass market-state freshness gates to prevent being trapped
+    # Executable gate — planning now happens before the pre-trade gate so the
+    # gate record is inserted with the final price and count.  When the caller
+    # already ran _prepare_order_for_gate, skip duplicated state/planning work.
     try:
-        # CRITICAL FIX (2026-07-22): Exit orders bypass market-state freshness gates.
-        # The stale_data exit reason fires precisely BECAUSE market data is stale;
-        # rejecting the resulting exit for the same staleness (state_not_found /
-        # book_not_initialized / book_stale / stale_market_data) is a circular trap
-        # that leaves positions unclosable (e.g. after window rollover the old
-        # market's state is pruned while the position still needs exiting).
         _is_exit_gate = _is_exit_order(intent)
-        state = store.get(intent.ticker)
-        if state is None and _is_exit_gate:
-            logger.warning(
-                "[order-router] EXIT ORDER: market state missing for %s - proceeding without state gates (exit must not be trapped)",
-                intent.ticker,
-            )
-        elif state is None:
-            # CRITICAL FIX (2026-08-01): Fail-closed policy for missing market state
-            # Entry orders must have valid market state to prevent trading on stale/missing data
-            latency = (_time.monotonic() - t0) * 1000
-            logger.warning(
-                "[order-router] Live order rejected — market state not found (fail-closed): ticker=%s",
-                intent.ticker,
-            )
-            _release_gate_record(intent, f"state_not_found:{intent.ticker}")
-            logger.info(
-                "[ORDER-BLOCKED] ticker=%s reason=STATE_NOT_FOUND side=%s count=%d detail=fail_closed_policy",
-                intent.ticker,
-                intent.side,
-                intent.count,
-            )
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason="state_not_found:fail_closed_policy",
-                latency_ms=round(latency, 2),
-            )
-        
-        # 2026-06-29: Relaxed executable check - allow orders if book is initialized and reasonably fresh
-        # 2026-08-01: CRITICAL FIX - Fail-closed policy for entry orders, exit orders have override
-        # Previous: reject if not state.executable (requires both bid and ask)
-        # New: entry orders require book_initialized=True, exit orders bypass
-        # CRITICAL FIX (2026-07-29): Separated book_initialized from executable.
-        # book_initialized=False: book not loaded (data availability issue)
-        # executable=False: book loaded but duality violation (data quality issue)
-        # This allows distinct handling for data availability vs data quality problems.
-        if state is not None and not state.book_initialized and _is_exit_gate:
-            logger.warning(
-                "[order-router] EXIT ORDER: book not initialized for %s - proceeding (exit must not be trapped)",
-                intent.ticker,
-            )
-        elif state is not None and not state.book_initialized:
-            latency = (_time.monotonic() - t0) * 1000
-            logger.warning(
-                "[order-router] Live order rejected — book not initialized: ticker=%s book_initialized=%s",
-                intent.ticker, state.book_initialized,
-            )
-            _release_gate_record(intent, f"book_not_initialized:{intent.ticker}")
-            logger.info(
-                "[ORDER-BLOCKED] ticker=%s reason=BOOK_NOT_INITIALIZED side=%s count=%d detail=book_not_ready",
-                intent.ticker,
-                intent.side,
-                intent.count,
-            )
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"book_not_initialized:{intent.ticker}:book_not_ready",
-                latency_ms=round(latency, 2),
-            )
-        
-        # CRITICAL FIX (2026-07-29): Check executable flag for duality violations
-        # If book is initialized but not executable (due to duality violation), reject with distinct reason
-        # This allows upstream signal generation to adapt (e.g., skip or reduce size) vs blocking entirely
-        if state is not None and not state.executable and _is_exit_gate:
-            logger.warning(
-                "[order-router] EXIT ORDER: book not executable (duality violation) for %s - proceeding (exit must not be trapped)",
-                intent.ticker,
-            )
-        elif state is not None and not state.executable:
-            latency = (_time.monotonic() - t0) * 1000
-            logger.warning(
-                "[order-router] Live order rejected — book not executable (duality violation): ticker=%s executable=%s",
-                intent.ticker, state.executable,
-            )
-            _release_gate_record(intent, f"book_not_executable:{intent.ticker}")
-            logger.info(
-                "[ORDER-BLOCKED] ticker=%s reason=BOOK_NOT_EXECUTABLE side=%s count=%d detail=duality_violation",
-                intent.ticker,
-                intent.side,
-                intent.count,
-            )
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"book_not_executable:{intent.ticker}:duality_violation",
-                latency_ms=round(latency, 2),
-            )
-        
-        # Check book freshness using the new layered state machine
-        # This replaces the fail-closed policy with explicit state-based gating
-        # CRITICAL FIX (2026-08-08): Always define book_age so downstream logging
-        # does not raise UnboundLocalError when the new freshness state machine path is used.
-        book_age = state.book_age_s if (state is not None and hasattr(state, 'book_age_s')) else float('inf')
-        if BOOK_FRESHNESS_AVAILABLE and state is not None:
-            tracker = get_book_freshness_tracker()
-            freshness_state = tracker.get_state(intent.ticker)
-
-            # DIAGNOSTIC: Log initial state before update
-            diagnostic_before = freshness_state.get_diagnostic_info()
-            logger.info(
-                f"[order-router] Freshness state BEFORE update: ticker={intent.ticker} "
-                f"state={freshness_state.state.value} age_seconds={diagnostic_before['age_seconds']:.1f} "
-                f"source={diagnostic_before['source']}"
-            )
-
-            # Update freshness state from current market state
-            # Try multiple timestamp sources to ensure freshness state is updated
-            now = _time.time()
-            exchange_ts = None
-            received_ts = now
-
-            if hasattr(state, 'book_updated_ts') and state.book_updated_ts:
-                exchange_ts = state.book_updated_ts
-            elif hasattr(state, 'last_update_ts') and state.last_update_ts:
-                exchange_ts = state.last_update_ts
-            elif hasattr(state, 'timestamp') and state.timestamp:
-                exchange_ts = state.timestamp
-
-            # Always update with the best available timestamp
-            freshness_state.update_from_ws(
-                exchange_ts=exchange_ts,
-                received_ts=received_ts
-            )
-
-            # DIAGNOSTIC: Log state after update
-            diagnostic_after = freshness_state.get_diagnostic_info()
-            book_age = diagnostic_after.get("age_seconds", book_age)
-            logger.info(
-                f"[order-router] Freshness state AFTER update: ticker={intent.ticker} "
-                f"state={freshness_state.state.value} age_seconds={diagnostic_after['age_seconds']:.1f} "
-                f"source={diagnostic_after['source']}"
-            )
-
-            # Check if tradable based on freshness state
-            if not freshness_state.is_tradable() and not _is_exit_gate:
-                latency = (_time.monotonic() - t0) * 1000
-                diagnostic = freshness_state.get_diagnostic_info()
-                logger.warning(
-                    "[order-router] Order rejected based on freshness state: ticker=%s state=%s age=%.1fs source=%s",
-                    intent.ticker, diagnostic["state"], diagnostic["age_seconds"], diagnostic["source"]
-                )
-                _release_gate_record(intent, f"book_freshness_{freshness_state.state.value}:{intent.ticker}")
-                logger.info(
-                    "[ORDER-BLOCKED] ticker=%s reason=BOOK_FRESHNESS state=%s side=%s count=%d",
-                    intent.ticker, freshness_state.state.value, intent.side, intent.count,
-                )
-                return OrderResult(
-                    status="rejected",
-                    mode=mode,
-                    reason=f"book_freshness_{freshness_state.state.value}:{intent.ticker}",
-                    latency_ms=round(latency, 2),
-                )
-            elif not freshness_state.is_tradable() and _is_exit_gate:
-                # Exit orders can proceed even with degraded freshness
-                diagnostic = freshness_state.get_diagnostic_info()
-                logger.warning(
-                    "[order-router] EXIT ORDER proceeding with degraded freshness: ticker=%s state=%s age=%.1fs",
-                    intent.ticker, diagnostic["state"], diagnostic["age_seconds"]
-                )
-            else:
-                # Log freshness state for observability
-                diagnostic = freshness_state.get_diagnostic_info()
-                logger.info(
-                    "[order-router] Book freshness check passed: ticker=%s state=%s age=%.1fs source=%s",
-                    intent.ticker, diagnostic["state"], diagnostic["age_seconds"], diagnostic["source"]
-                )
-        else:
-            # Fallback to legacy logic if freshness tracker unavailable
-            # Check book freshness - allow up to 30s staleness (2026 best practice)
-            # 2026-06-29: Handle missing timestamps gracefully - if book_age is infinite, assume fresh
-            # CRITICAL FIX (2026-08-02): Added fallback to current time for missing timestamps to prevent order rejections
-            book_age = state.book_age_s if (state is not None and hasattr(state, 'book_age_s')) else float('inf')
-            
-            # CRITICAL FIX (2026-08-02): If book_age is infinite, try to set a valid timestamp from current time
-            # This prevents the fail-closed policy from blocking orders due to missing timestamps
-            if book_age == float('inf') and state is not None and hasattr(state, 'book_updated_ts'):
-                if state.book_updated_ts is None or state.book_updated_ts == 0.0:
-                    import time as _time2
-                    state.book_updated_ts = _time2.time()
-                    # CRITICAL FIX (2026-08-03): Also update book_age_s in state to prevent rejection
-                    if hasattr(state, 'book_age_s'):
-                        state.book_age_s = 0.0
-                    logger.warning(
-                        "[order-router] FIXED missing book timestamp for %s by setting to current time",
-                        intent.ticker,
-                    )
-                    book_age = 0.0  # Fresh after fix
-            
-            if state is not None and book_age > 30.0 and _is_exit_gate:
-                logger.warning(
-                    "[order-router] EXIT ORDER: book stale (%.1fs) for %s - proceeding (stale data is often WHY we are exiting)",
-                    book_age, intent.ticker,
-                )
-            elif book_age == float('inf'):
-                # CRITICAL FIX (2026-08-01): Fail-closed policy for missing timestamp
-                # Exit orders can proceed (must not be trapped), but entry orders must be rejected
-                if _is_exit_gate:
-                    logger.warning(
-                        "[order-router] EXIT ORDER: Book timestamp missing for %s - proceeding (exit must not be trapped)",
-                        intent.ticker,
-                    )
-                else:
-                    latency = (_time.monotonic() - t0) * 1000
-                    logger.warning(
-                        "[order-router] Live order rejected — book timestamp missing (fail-closed): ticker=%s book_initialized=%s",
-                        intent.ticker, state.book_initialized if state is not None else None,
-                    )
-                    _release_gate_record(intent, f"book_timestamp_missing:{intent.ticker}")
-                    logger.info(
-                        "[ORDER-BLOCKED] ticker=%s reason=BOOK_TIMESTAMP_MISSING side=%s count=%d detail=fail_closed_policy",
-                        intent.ticker,
-                        intent.side,
-                        intent.count,
-                    )
-                    return OrderResult(
-                        status="rejected",
-                        mode=mode,
-                        reason="book_timestamp_missing:fail_closed_policy",
-                        latency_ms=round(latency, 2),
-                    )
-            elif book_age > 30.0 and not _is_exit_gate:
-                latency = (_time.monotonic() - t0) * 1000
-                logger.warning(
-                    "[order-router] Live order rejected — book too stale: ticker=%s book_age=%.1fs",
-                    intent.ticker, book_age,
-                )
-                _release_gate_record(intent, f"book_stale:{intent.ticker}")
-                logger.info(
-                    "[ORDER-BLOCKED] ticker=%s reason=BOOK_STALE side=%s count=%d detail=book_age=%.1fs",
-                    intent.ticker,
-                    intent.side,
-                    intent.count,
-                    book_age,
-                )
-                return OrderResult(
-                    status="rejected",
-                    mode=mode,
-                    reason=f"book_stale:{intent.ticker}:book_age={book_age:.1f}s",
-                    latency_ms=round(latency, 2),
-                )
-        
-        # Log that order passed executable gate with relaxed check
-        logger.info(
-            "[order-router] Order passed executable gate (relaxed): ticker=%s book_initialized=%s book_age=%.1fs executable=%s",
-            intent.ticker,
-            state.book_initialized if state is not None else None,
-            book_age,
-            state.executable if (state is not None and hasattr(state, 'executable')) else None,
-        )
-
-        # Dynamic order type selection based on market conditions
-        # This improves fill rates by using market orders in thin markets or near expiry
         original_order_type = intent.order_type
         original_tif = intent.time_in_force
         original_count = intent.count
         original_price = intent.price_cents
-        intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
-        
-        # CRITICAL FIX: Adjust price BEFORE sizing to ensure slot allocator uses same price
-        # Previous bug: sizing used original price (39c), slot allocator used adjusted price (49c)
-        # This caused "Insufficient exposure" rejections due to price mismatch
-        intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
-        
-        # Enforce $1 fixed exposure cap sizing BEFORE depth-based sizing
-        # This prevents depth-based sizing from increasing count beyond the slot cap
-        intent.count = _apply_risk_based_order_sizing(intent)
-        
-        # Only apply depth-based sizing if risk-based sizing didn't reject the order
-        if intent.count > 0:
-            intent.count = _apply_depth_based_order_sizing(intent, state)
-            # Re-apply slot-based sizing AFTER depth-based sizing
-            # This ensures depth-based sizing cannot increase count beyond the $1 cap
-            intent.count = _apply_risk_based_order_sizing(intent)
-        
+
+        if not plan_done or prepared_state is None:
+            prep_rejection, state = _prepare_order_for_gate(intent, mode, t0)
+            if prep_rejection is not None:
+                return prep_rejection
+        else:
+            state = prepared_state
+
+        logger.info(
+            "[order-router] Order passed executable/planning gate: ticker=%s plan_done=%s",
+            intent.ticker, plan_done,
+        )
+
         # CRITICAL FIX (2026-07-19): Validate price placement matches liquidity role intent
         # This prevents maker orders from incorrectly crossing the spread (incurring taker fees)
         # or taker orders from incorrectly resting (missing execution opportunities)
@@ -6472,86 +7392,87 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 except ImportError:
                     logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
         
-        # CRITICAL FIX (2026-07-19): Staleness SLO check - reject orders with stale book snapshots
-        # This prevents AUTO from making maker/taker decisions based on outdated market data
-        # CRITICAL FIX (2026-07-22): Exit orders bypass staleness SLO - stale snapshots are
-        # often WHY exits fire (stale_data exit reason). Blocking them here is circular.
-        STALENESS_SLO_MS = 5000.0  # 5 second staleness SLO for 15m markets
-        if intent.snapshot_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
-            latency = (_time.monotonic() - t0) * 1000
-            logger.error(
-                f"[STALENESS-SLO] Rejected order: book snapshot too old | ticker={intent.ticker} | "
-                f"snapshot_age_ms={intent.snapshot_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
-            )
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"staleness_slo:book_snapshot_age_{intent.snapshot_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
-                latency_ms=round(latency, 2),
-            )
-        
-        # CRITICAL FIX (2026-07-19): Recompute snapshot age at submission time
-        # This catches race conditions where the book moved between snapshot and submission
-        current_time = _time.time()
-        computed_age_ms = (current_time - intent.snapshot_ts) * 1000.0
-        
-        # Update snapshot_age_ms with computed value for accurate staleness tracking
-        intent.snapshot_age_ms = computed_age_ms
-        
-        # Double-check staleness with computed age
-        # CRITICAL FIX (2026-07-22): Exit orders bypass recomputed staleness SLO.
-        # Stale snapshots are often WHY exits fire - blocking them here is circular.
-        if computed_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
-            latency = (_time.monotonic() - t0) * 1000
-            logger.error(
-                f"[STALENESS-SLO] Rejected order: computed snapshot age too old | ticker={intent.ticker} | "
-                f"computed_age_ms={computed_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
-            )
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"staleness_slo:computed_age_{computed_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
-                latency_ms=round(latency, 2),
-            )
-        
-        # CRITICAL FIX (2026-07-19): Recompute maker/taker classification at submission time
-        # This catches cases where AUTO resolved to maker/taker based on stale data
-        if intent.liquidity_role == "auto" and state:
-            try:
-                from merid.prediction.kalshi_maker_taker_contract import resolve_auto_liquidity_role
-                # Get current market conditions from state
-                edge_pct = getattr(intent, 'edge_pct', 0.0)
-                # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
-                side_lower = intent.side.lower() if intent.side else ""
-                if "yes" in side_lower:
-                    outcome_side = "yes"
-                elif "no" in side_lower:
-                    outcome_side = "no"
-                else:
-                    outcome_side = side_lower
-                orderbook_depth = getattr(state, 'yes_depth', 0) if outcome_side == "yes" else getattr(state, 'no_depth', 0)
-                time_to_expiry_seconds = getattr(intent, 'max_hold_seconds', 600.0) or 600.0
-                is_exit = _is_exit_order(intent)
-                
-                resolved_role = resolve_auto_liquidity_role(
-                    edge_pct=edge_pct,
-                    time_to_expiry_seconds=time_to_expiry_seconds,
-                    orderbook_depth=orderbook_depth,
-                    is_exit=is_exit,
+        if not plan_done:
+            # CRITICAL FIX (2026-07-19): Staleness SLO check - reject orders with stale book snapshots
+            # This prevents AUTO from making maker/taker decisions based on outdated market data
+            # CRITICAL FIX (2026-07-22): Exit orders bypass staleness SLO - stale snapshots are
+            # often WHY exits fire (stale_data exit reason). Blocking them here is circular.
+            STALENESS_SLO_MS = 5000.0  # 5 second staleness SLO for 15m markets
+            if intent.snapshot_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
+                latency = (_time.monotonic() - t0) * 1000
+                logger.error(
+                    f"[STALENESS-SLO] Rejected order: book snapshot too old | ticker={intent.ticker} | "
+                    f"snapshot_age_ms={intent.snapshot_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
                 )
-                
-                # Update intent with resolved role
-                original_role = intent.liquidity_role
-                intent.liquidity_role = resolved_role.value
-                
-                logger.info(
-                    f"[LIQUIDITY-ROLE-RECOMPUTE-SIDE-AWARE] Recomputed AUTO at submission | ticker={intent.ticker} | "
-                    f"outcome_side={outcome_side} | original=auto | resolved={resolved_role.value} | edge={edge_pct:.1f}% | "
-                    f"depth={orderbook_depth} | time_to_expiry={time_to_expiry_seconds:.0f}s | is_exit={is_exit}"
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"staleness_slo:book_snapshot_age_{intent.snapshot_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+                    latency_ms=round(latency, 2),
                 )
-            except ImportError:
-                logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping AUTO recompute")
-        
+            
+            # CRITICAL FIX (2026-07-19): Recompute snapshot age at submission time
+            # This catches race conditions where the book moved between snapshot and submission
+            current_time = _time.time()
+            computed_age_ms = (current_time - intent.snapshot_ts) * 1000.0
+            
+            # Update snapshot_age_ms with computed value for accurate staleness tracking
+            intent.snapshot_age_ms = computed_age_ms
+            
+            # Double-check staleness with computed age
+            # CRITICAL FIX (2026-07-22): Exit orders bypass recomputed staleness SLO.
+            # Stale snapshots are often WHY exits fire - blocking them here is circular.
+            if computed_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
+                latency = (_time.monotonic() - t0) * 1000
+                logger.error(
+                    f"[STALENESS-SLO] Rejected order: computed snapshot age too old | ticker={intent.ticker} | "
+                    f"computed_age_ms={computed_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"staleness_slo:computed_age_{computed_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+                    latency_ms=round(latency, 2),
+                )
+            
+            # CRITICAL FIX (2026-07-19): Recompute maker/taker classification at submission time
+            # This catches cases where AUTO resolved to maker/taker based on stale data
+            if intent.liquidity_role == "auto" and state:
+                try:
+                    from merid.prediction.kalshi_maker_taker_contract import resolve_auto_liquidity_role
+                    # Get current market conditions from state
+                    edge_pct = getattr(intent, 'edge_pct', 0.0)
+                    # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
+                    side_lower = intent.side.lower() if intent.side else ""
+                    if "yes" in side_lower:
+                        outcome_side = "yes"
+                    elif "no" in side_lower:
+                        outcome_side = "no"
+                    else:
+                        outcome_side = side_lower
+                    orderbook_depth = getattr(state, 'yes_depth', 0) if outcome_side == "yes" else getattr(state, 'no_depth', 0)
+                    time_to_expiry_seconds = getattr(intent, 'max_hold_seconds', 600.0) or 600.0
+                    is_exit = _is_exit_order(intent)
+                    
+                    resolved_role = resolve_auto_liquidity_role(
+                        edge_pct=edge_pct,
+                        time_to_expiry_seconds=time_to_expiry_seconds,
+                        orderbook_depth=orderbook_depth,
+                        is_exit=is_exit,
+                    )
+                    
+                    # Update intent with resolved role
+                    original_role = intent.liquidity_role
+                    intent.liquidity_role = resolved_role.value
+                    
+                    logger.info(
+                        f"[LIQUIDITY-ROLE-RECOMPUTE-SIDE-AWARE] Recomputed AUTO at submission | ticker={intent.ticker} | "
+                        f"outcome_side={outcome_side} | original=auto | resolved={resolved_role.value} | edge={edge_pct:.1f}% | "
+                        f"depth={orderbook_depth} | time_to_expiry={time_to_expiry_seconds:.0f}s | is_exit={is_exit}"
+                    )
+                except ImportError:
+                    logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping AUTO recompute")
+            
         # CRITICAL FIX (2026-07-19): Assert final payload consistency with latest known best bid/ask
         # This ensures the order price is still valid given current market conditions
         # CRITICAL FIX (2026-07-22): Exit orders bypass payload consistency check.
@@ -6867,12 +7788,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         )
         _release_gate_record(intent, f"non_integer_price_cents:{intent.price_cents}")
         return OrderResult(
-            success=False,
-            ticker=intent.ticker,
-            order_id=None,
-            side=intent.side,
-            price_cents=intent.price_cents,
-            contracts=intent.count,  # CRITICAL FIX: OrderIntent uses 'count' not 'contracts'
+            status="rejected",
             mode=mode,
             reason=f"non_integer_price_cents:{intent.price_cents}:must_be_integer",
             latency_ms=round(latency, 2),
@@ -7412,13 +8328,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     # Order sizing driven purely by EV, risk constraints, and Kelly.
 
     try:
-        from merid.event_venues.base import VenueOrder
         from merid.event_venues.kalshi.client import get_kalshi_client
         from merid.event_venues.kalshi.order_group_manager import OrderGroupRiskManager
+        from merid.event_venues.kalshi.port import get_kalshi_execution_port
         from merid.event_venues.kalshi.ticker_utils import normalize_ticker_for_order
 
+        # All account-affecting order lifecycle operations (create / lookup /
+        # cancel) go through the normalized KalshiExecutionPort.
+        port = get_kalshi_execution_port()
+        await port.connect()
+
+        # The raw client is retained ONLY for public read paths that the port
+        # does not (yet) cover: the WS-vs-REST orderbook divergence check and
+        # the balance probe after fills.  No order mutations go through it.
         client = get_kalshi_client()
-        await client.connect()
 
         # CRITICAL FIX (2026-05-01): Normalize ticker to strip strike suffix before any API calls
         # Market discovery returns tickers with strike levels (e.g., -30, -T80199.99)
@@ -7447,7 +8370,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         _market_check_passed = False
         try:
             from merid.event_venues.kalshi.market_filter import DEFAULT_FILTER_CONFIG
-            _market_result = await client.get_market(_normalized_ticker)
+            _market_result = await port.get_market(_normalized_ticker)
             if not _market_result.success:
                 # Handle 404 / market not found (BUG-404 fix)
                 _error_str = str(_market_result.error or "").lower()
@@ -7461,10 +8384,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                         reason=f"market_not_found:{intent.ticker}",
                         latency_ms=round(latency, 2),
                     )
-            elif _market_result.value is not None and not _is_exit:
+            elif _market_result.market is not None and not _is_exit:
                 # Only run market condition checks for entry orders (not exits)
                 _market_check_passed = True
-                _mkt = _market_result.value
+                _mkt = _market_result.market
                 _bid = int(getattr(_mkt, "best_bid", 0) or 0)
                 _ask = int(getattr(_mkt, "best_ask", 0) or 0)
                 _spread = (_ask - _bid) if (_bid > 0 and _ask > 0) else 0
@@ -7636,223 +8559,230 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 )
         except Exception as gate_err:
             logger.warning("[RISK-GATE] Failed to check trading gate: %s", gate_err)
-        
-        # MARKETABLE LIMIT ORDER LOGIC: Cross spread when aggressiveness justifies immediate execution
-        # aggressiveness=0.0: resting (join spread), aggressiveness=1.0: marketable (cross spread)
-        # This transforms resting liquidity into market-order-like execution while retaining price protection
-        order_type_label = "RESTING" if intent.aggressiveness == 0.0 else "MARKETABLE"
-        
-        if intent.aggressiveness > 0.0 and intent.order_type == "limit":
-            try:
-                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                market_state_store = get_kalshi_market_state_store()
-                base_state = market_state_store.get(intent.ticker) if market_state_store else None
-                
-                if base_state:
-                    # NOTE: KalshiMarketState quotes are YES-space (best_ask_cents is the
-                    # YES-equivalent ask). intent.price_cents is YES-space for YES intents
-                    # and NO-space for NO intents, so convert the book to the intent's
-                    # side-space before repricing.
-                    # CRITICAL FIX (2026-07-26): Previously this block compared YES-space
-                    # quotes against NO-space prices for BUY_NO intents, producing
-                    # non-marketable resting orders that never filled (0% fill rate).
-                    yes_bid_cents = getattr(base_state, 'best_bid_cents', None)
-                    yes_ask_cents = getattr(base_state, 'best_ask_cents', None)
-                    
-                    if yes_bid_cents and yes_ask_cents:
-                        side_upper = (intent.side or "").upper()
-                        is_no_side = "NO" in side_upper
-                        if is_no_side:
-                            # NO-space book: no_bid = 100 - yes_ask, no_ask = 100 - yes_bid
-                            best_bid_cents = 100 - yes_ask_cents
-                            best_ask_cents = 100 - yes_bid_cents
-                            side_space = "NO"
-                        else:
-                            best_bid_cents = yes_bid_cents
-                            best_ask_cents = yes_ask_cents
-                            side_space = "YES"
-                        
-                        # CRITICAL FIX (2026-07-26): action comparison must be
-                        # case-insensitive (live intents carry action="BUY"). Derive the
-                        # effective action from the Kalshi-formatted side when available.
-                        if "BUY" in side_upper:
-                            effective_action = "buy"
-                        elif "SELL" in side_upper:
-                            effective_action = "sell"
-                        else:
-                            effective_action = (intent.action or "").lower()
-                        
-                        original_price = intent.price_cents
-                        adjusted_price = original_price
-                        
-                        # For buy orders: cross spread by setting price >= best_ask
-                        if effective_action == "buy":
-                            # Calculate how many ticks to cross based on aggressiveness
-                            spread_width = best_ask_cents - best_bid_cents
-                            cross_ticks = int(spread_width * intent.aggressiveness)
-                            if cross_ticks < 1:
-                                cross_ticks = 1  # At least cross 1 tick if aggressive
-                            
-                            # Set price at or above best_ask to ensure immediate execution
-                            adjusted_price = best_ask_cents + cross_ticks
-                            
-                            # Cap at original price + 10 ticks to allow crossing wide spreads
-                            max_acceptable = original_price + 10
-                            if adjusted_price > max_acceptable:
-                                adjusted_price = max_acceptable
-                            
-                            logger.info(
-                                "[MARKETABLE-LIMIT-BUY] ticker=%s side_space=%s original=%dc adjusted=%dc "
-                                "best_bid=%dc best_ask=%dc aggressiveness=%.2f cross_ticks=%d",
-                                intent.ticker, side_space, original_price, adjusted_price,
-                                best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
-                            )
-                        
-                        # For sell orders: cross spread by setting price <= best_bid
-                        elif effective_action == "sell":
-                            spread_width = best_ask_cents - best_bid_cents
-                            cross_ticks = int(spread_width * intent.aggressiveness)
-                            if cross_ticks < 1:
-                                cross_ticks = 1
-                            
-                            # Set price at or below best_bid to ensure immediate execution
-                            adjusted_price = best_bid_cents - cross_ticks
-                            
-                            # Cap at original price - 10 ticks to allow crossing wide spreads
-                            min_acceptable = original_price - 10
-                            if adjusted_price < min_acceptable:
-                                adjusted_price = min_acceptable
-                            
-                            logger.info(
-                                "[MARKETABLE-LIMIT-SELL] ticker=%s side_space=%s original=%dc adjusted=%dc "
-                                "best_bid=%dc best_ask=%dc aggressiveness=%.2f cross_ticks=%d",
-                                intent.ticker, side_space, original_price, adjusted_price,
-                                best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
-                            )
-                        
-                        # Clamp to valid Kalshi price range (1-99 cents)
-                        adjusted_price = max(1, min(99, adjusted_price))
-                        
-                        # Update intent price with marketable adjustment
-                        intent.price_cents = adjusted_price
-                        
-            except Exception as marketable_err:
-                # CRITICAL FIX (2026-07-26): Surface repricing failures at warning level.
-                # A silent failure here leaves a stale, potentially non-marketable price.
-                logger.warning("[MARKETABLE-LIMIT] Failed to adjust price for aggressiveness: %s", marketable_err)
-        
-        # Use pre-normalized ticker (stripped of strike suffix) for order submission
-        # PRODUCTION FIX: Convert all "market" orders to aggressive limit orders via dynamic bands
-        # This provides better price control and venue alignment (Kalshi limit orders as primitive)
+
+        # Planning already finalized these values; default them for submission.
         final_price_cents = intent.price_cents
         final_order_type = intent.order_type
-        
-        if intent.order_type == "market":
-            try:
-                from merid.event_venues.kalshi.dynamic_risk import (
-                    get_dynamic_risk_engine,
-                    VolatilityMetrics,
-                    VolatilityRegime,
-                )
-                
-                # Extract asset for band computation (fixes MARKET-BAND-FALLBACK error)
-                asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else "UNKNOWN"
-                
-                # Get market state for band computation
-                best_bid_cents = None
-                best_ask_cents = None
-                spread_cents = None
-                depth_at_top = 10
-                
+        order_type_label = "RESTING" if intent.aggressiveness == 0.0 else "MARKETABLE"
+
+        if not plan_done:
+            # MARKETABLE LIMIT ORDER LOGIC: Cross spread when aggressiveness justifies immediate execution
+            # aggressiveness=0.0: resting (join spread), aggressiveness=1.0: marketable (cross spread)
+            # This transforms resting liquidity into market-order-like execution while retaining price protection
+            order_type_label = "RESTING" if intent.aggressiveness == 0.0 else "MARKETABLE"
+            
+            if intent.aggressiveness > 0.0 and intent.order_type == "limit":
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                     market_state_store = get_kalshi_market_state_store()
                     base_state = market_state_store.get(intent.ticker) if market_state_store else None
+                    
                     if base_state:
-                        best_bid_cents = getattr(base_state, 'best_bid_cents', None)
-                        best_ask_cents = getattr(base_state, 'best_ask_cents', None)
-                        spread_cents = getattr(base_state, 'spread_cents', None)
-                        depth_at_top = int(getattr(base_state, 'best_bid_size', 0) or 0) + int(getattr(base_state, 'best_ask_size', 0) or 0)
-                except Exception as _state_err:
-                    logger.debug("[MARKET-BAND] Failed to fetch market state: %s", _state_err)
-                
-                # Fallback to intent price if market state unavailable
-                if best_bid_cents is None or best_ask_cents is None:
-                    best_bid_cents = intent.price_cents - 1
-                    best_ask_cents = intent.price_cents + 1
-                    spread_cents = 2
-                
-                # Classify volatility regime
-                if spread_cents <= 2:
-                    vol_regime = VolatilityRegime.LOW
-                elif spread_cents <= 5:
-                    vol_regime = VolatilityRegime.NORMAL
-                elif spread_cents <= 8:
-                    vol_regime = VolatilityRegime.HIGH
-                else:
-                    vol_regime = VolatilityRegime.EXTREME
-                
-                vol_metrics = VolatilityMetrics(
-                    regime=vol_regime,
-                    realized_vol_15m=spread_cents / 100.0,
-                    avg_range_cents=spread_cents * 2,
-                    spread_cents=spread_cents,
-                    depth_at_top=depth_at_top,
-                    time_to_expiry_min=5,  # Default: 5 min (not critical for band computation)
-                )
-                
-                # Compute dynamic market band
-                engine = get_dynamic_risk_engine()
-                band_result = engine.compute_market_band(
-                    side=intent.action,
-                    best_bid_cents=best_bid_cents,
-                    best_ask_cents=best_ask_cents,
-                    vol_metrics=vol_metrics,
-                    edge_pct=getattr(intent, 'edge_pct', 0.05),  # Default 5% edge
-                    confidence=getattr(intent, 'confidence', 0.7),  # Default 70% confidence
-                    asset=asset,  # Pass asset for execution feedback lookup
-                )
-                
-                if band_result.should_skip:
-                    logger.warning(
-                        "[MARKET-BAND-SKIP] ticker=%s side=%s skip_reason=%s - rejecting market order",
-                        intent.ticker, intent.action, band_result.skip_reason
+                        # NOTE: KalshiMarketState quotes are YES-space (best_ask_cents is the
+                        # YES-equivalent ask). intent.price_cents is YES-space for YES intents
+                        # and NO-space for NO intents, so convert the book to the intent's
+                        # side-space before repricing.
+                        # CRITICAL FIX (2026-07-26): Previously this block compared YES-space
+                        # quotes against NO-space prices for BUY_NO intents, producing
+                        # non-marketable resting orders that never filled (0% fill rate).
+                        yes_bid_cents = getattr(base_state, 'best_bid_cents', None)
+                        yes_ask_cents = getattr(base_state, 'best_ask_cents', None)
+                        
+                        if yes_bid_cents and yes_ask_cents:
+                            side_upper = (intent.side or "").upper()
+                            is_no_side = "NO" in side_upper
+                            if is_no_side:
+                                # NO-space book: no_bid = 100 - yes_ask, no_ask = 100 - yes_bid
+                                best_bid_cents = 100 - yes_ask_cents
+                                best_ask_cents = 100 - yes_bid_cents
+                                side_space = "NO"
+                            else:
+                                best_bid_cents = yes_bid_cents
+                                best_ask_cents = yes_ask_cents
+                                side_space = "YES"
+                            
+                            # CRITICAL FIX (2026-07-26): action comparison must be
+                            # case-insensitive (live intents carry action="BUY"). Derive the
+                            # effective action from the Kalshi-formatted side when available.
+                            if "BUY" in side_upper:
+                                effective_action = "buy"
+                            elif "SELL" in side_upper:
+                                effective_action = "sell"
+                            else:
+                                effective_action = (intent.action or "").lower()
+                            
+                            original_price = intent.price_cents
+                            adjusted_price = original_price
+                            
+                            # For buy orders: cross spread by setting price >= best_ask
+                            if effective_action == "buy":
+                                # Calculate how many ticks to cross based on aggressiveness
+                                spread_width = best_ask_cents - best_bid_cents
+                                cross_ticks = int(spread_width * intent.aggressiveness)
+                                if cross_ticks < 1:
+                                    cross_ticks = 1  # At least cross 1 tick if aggressive
+                                
+                                # Set price at or above best_ask to ensure immediate execution
+                                adjusted_price = best_ask_cents + cross_ticks
+                                
+                                # Cap at original price + 10 ticks to allow crossing wide spreads
+                                max_acceptable = original_price + 10
+                                if adjusted_price > max_acceptable:
+                                    adjusted_price = max_acceptable
+                                
+                                logger.info(
+                                    "[MARKETABLE-LIMIT-BUY] ticker=%s side_space=%s original=%dc adjusted=%dc "
+                                    "best_bid=%dc best_ask=%dc aggressiveness=%.2f cross_ticks=%d",
+                                    intent.ticker, side_space, original_price, adjusted_price,
+                                    best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
+                                )
+                            
+                            # For sell orders: cross spread by setting price <= best_bid
+                            elif effective_action == "sell":
+                                spread_width = best_ask_cents - best_bid_cents
+                                cross_ticks = int(spread_width * intent.aggressiveness)
+                                if cross_ticks < 1:
+                                    cross_ticks = 1
+                                
+                                # Set price at or below best_bid to ensure immediate execution
+                                adjusted_price = best_bid_cents - cross_ticks
+                                
+                                # Cap at original price - 10 ticks to allow crossing wide spreads
+                                min_acceptable = original_price - 10
+                                if adjusted_price < min_acceptable:
+                                    adjusted_price = min_acceptable
+                                
+                                logger.info(
+                                    "[MARKETABLE-LIMIT-SELL] ticker=%s side_space=%s original=%dc adjusted=%dc "
+                                    "best_bid=%dc best_ask=%dc aggressiveness=%.2f cross_ticks=%d",
+                                    intent.ticker, side_space, original_price, adjusted_price,
+                                    best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
+                                )
+                            
+                            # Clamp to valid Kalshi price range (1-99 cents)
+                            adjusted_price = max(1, min(99, adjusted_price))
+                            
+                            # Update intent price with marketable adjustment
+                            intent.price_cents = adjusted_price
+                            
+                except Exception as marketable_err:
+                    # CRITICAL FIX (2026-07-26): Surface repricing failures at warning level.
+                    # A silent failure here leaves a stale, potentially non-marketable price.
+                    logger.warning("[MARKETABLE-LIMIT] Failed to adjust price for aggressiveness: %s", marketable_err)
+            
+        # Use pre-normalized ticker (stripped of strike suffix) for order submission
+        if not plan_done:
+            # PRODUCTION FIX: Convert all "market" orders to aggressive limit orders via dynamic bands
+            # This provides better price control and venue alignment (Kalshi limit orders as primitive)
+            final_price_cents = intent.price_cents
+            final_order_type = intent.order_type
+            
+            if intent.order_type == "market":
+                try:
+                    from merid.event_venues.kalshi.dynamic_risk import (
+                        get_dynamic_risk_engine,
+                        VolatilityMetrics,
+                        VolatilityRegime,
                     )
-                    latency = (_time.monotonic() - t0) * 1000
-                    _release_gate_record(intent, f"market_band_skip:{band_result.skip_reason}")
+                    
+                    # Extract asset for band computation (fixes MARKET-BAND-FALLBACK error)
+                    asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else "UNKNOWN"
+                    
+                    # Get market state for band computation
+                    best_bid_cents = None
+                    best_ask_cents = None
+                    spread_cents = None
+                    depth_at_top = 10
+                    
+                    try:
+                        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                        market_state_store = get_kalshi_market_state_store()
+                        base_state = market_state_store.get(intent.ticker) if market_state_store else None
+                        if base_state:
+                            best_bid_cents = getattr(base_state, 'best_bid_cents', None)
+                            best_ask_cents = getattr(base_state, 'best_ask_cents', None)
+                            spread_cents = getattr(base_state, 'spread_cents', None)
+                            depth_at_top = int(getattr(base_state, 'best_bid_size', 0) or 0) + int(getattr(base_state, 'best_ask_size', 0) or 0)
+                    except Exception as _state_err:
+                        logger.debug("[MARKET-BAND] Failed to fetch market state: %s", _state_err)
+                    
+                    # Fallback to intent price if market state unavailable
+                    if best_bid_cents is None or best_ask_cents is None:
+                        best_bid_cents = intent.price_cents - 1
+                        best_ask_cents = intent.price_cents + 1
+                        spread_cents = 2
+                    
+                    # Classify volatility regime
+                    if spread_cents <= 2:
+                        vol_regime = VolatilityRegime.LOW
+                    elif spread_cents <= 5:
+                        vol_regime = VolatilityRegime.NORMAL
+                    elif spread_cents <= 8:
+                        vol_regime = VolatilityRegime.HIGH
+                    else:
+                        vol_regime = VolatilityRegime.EXTREME
+                    
+                    vol_metrics = VolatilityMetrics(
+                        regime=vol_regime,
+                        realized_vol_15m=spread_cents / 100.0,
+                        avg_range_cents=spread_cents * 2,
+                        spread_cents=spread_cents,
+                        depth_at_top=depth_at_top,
+                        time_to_expiry_min=5,  # Default: 5 min (not critical for band computation)
+                    )
+                    
+                    # Compute dynamic market band
+                    engine = get_dynamic_risk_engine()
+                    band_result = engine.compute_market_band(
+                        side=intent.action,
+                        best_bid_cents=best_bid_cents,
+                        best_ask_cents=best_ask_cents,
+                        vol_metrics=vol_metrics,
+                        edge_pct=getattr(intent, 'edge_pct', 0.05),  # Default 5% edge
+                        confidence=getattr(intent, 'confidence', 0.7),  # Default 70% confidence
+                        asset=asset,  # Pass asset for execution feedback lookup
+                    )
+                    
+                    if band_result.should_skip:
+                        logger.warning(
+                            "[MARKET-BAND-SKIP] ticker=%s side=%s skip_reason=%s - rejecting market order",
+                            intent.ticker, intent.action, band_result.skip_reason
+                        )
+                        latency = (_time.monotonic() - t0) * 1000
+                        _release_gate_record(intent, f"market_band_skip:{band_result.skip_reason}")
+                        logger.info(
+                            "[ORDER-BLOCKED] ticker=%s reason=MARKET_BAND_SKIP side=%s count=%d detail=%s",
+                            intent.ticker,
+                            intent.side,
+                            intent.count,
+                            band_result.skip_reason,
+                        )
+                        return OrderResult(
+                            status="rejected",
+                            mode=mode,
+                            reason=f"market_band_skip:{band_result.skip_reason}",
+                            latency_ms=round(latency, 2),
+                        )
+                    
+                    # Convert market to aggressive limit
+                    final_price_cents = band_result.limit_price_cents
+                    final_order_type = "limit"  # Always use limit after band computation
+                    
                     logger.info(
-                        "[ORDER-BLOCKED] ticker=%s reason=MARKET_BAND_SKIP side=%s count=%d detail=%s",
-                        intent.ticker,
-                        intent.side,
-                        intent.count,
-                        band_result.skip_reason,
+                        "[MARKET-TO-LIMIT] ticker=%s side=%s original_price=%dc band_price=%dc "
+                        "agg=%.2f ticks=%d vol=%s",
+                        intent.ticker, intent.action, intent.price_cents, final_price_cents,
+                        band_result.aggressiveness_factor, band_result.ticks_from_mid, vol_regime.value
                     )
-                    return OrderResult(
-                        status="rejected",
-                        mode=mode,
-                        reason=f"market_band_skip:{band_result.skip_reason}",
-                        latency_ms=round(latency, 2),
+                    
+                except Exception as band_err:
+                    logger.warning(
+                        "[MARKET-BAND-FALLBACK] ticker=%s dynamic band computation failed, using original price: %s",
+                        intent.ticker, band_err
                     )
-                
-                # Convert market to aggressive limit
-                final_price_cents = band_result.limit_price_cents
-                final_order_type = "limit"  # Always use limit after band computation
-                
-                logger.info(
-                    "[MARKET-TO-LIMIT] ticker=%s side=%s original_price=%dc band_price=%dc "
-                    "agg=%.2f ticks=%d vol=%s",
-                    intent.ticker, intent.action, intent.price_cents, final_price_cents,
-                    band_result.aggressiveness_factor, band_result.ticks_from_mid, vol_regime.value
-                )
-                
-            except Exception as band_err:
-                logger.warning(
-                    "[MARKET-BAND-FALLBACK] ticker=%s dynamic band computation failed, using original price: %s",
-                    intent.ticker, band_err
-                )
-                # Fallback: use original price as limit order
-                final_order_type = "limit"
-        
+                    # Fallback: use original price as limit order
+                    final_order_type = "limit"
+            
         # PHASE1-DUP-2: Dedup cache check before order submission
         # This prevents duplicate orders from being submitted on retry by reusing
         # the same client_order_id when a matching in-flight order is found.
@@ -7948,31 +8878,47 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # CRITICAL FIX 2026-07-29: Apply execution mode to order parameters
         # Regime-based routing determines post_only, aggressiveness, order_type, time_in_force
         effective_post_only, effective_aggressiveness, effective_order_type, effective_tif = _apply_execution_mode(intent)
-        
+
+        # Re-resolve TIF to obtain the authoritative absolute expiration_time for the wire.
+        resolved_tif = _resolve_tif(intent)
+        if effective_tif != resolved_tif.tif:
+            logger.warning(
+                "[EXECUTION-MODE-MISMATCH] _apply_execution_mode returned tif=%s but _resolve_tif returned tif=%s; using resolved tif",
+                effective_tif, resolved_tif.tif,
+            )
+            effective_tif = resolved_tif.tif
+
         logger.info(
-            "[EXECUTION-MODE] intent=%s execution_mode=%s post_only=%s aggressiveness=%.2f order_type=%s tif=%s",
-            intent.intent_id[:16], intent.execution_mode, effective_post_only, effective_aggressiveness, effective_order_type, effective_tif
+            "[EXECUTION-MODE] intent=%s execution_mode=%s post_only=%s aggressiveness=%.2f order_type=%s tif=%s exp_ts=%s",
+            intent.intent_id[:16], intent.execution_mode, effective_post_only, effective_aggressiveness, effective_order_type, effective_tif,
+            resolved_tif.expiration_time,
         )
         
-        # Create VenueOrder with computed price and order_type
-        order = VenueOrder(
-            market_id=_normalized_ticker,
-            side=order_action,  # CRITICAL FIX: Use extracted action from Kalshi side, not intent.action
-            size=Decimal(intent.count),
-            price=Decimal(final_price_cents) / Decimal("100"),
-            order_type=effective_order_type,  # CRITICAL FIX 2026-07-29: Use execution mode order_type
-            outcome_id=outcome_id,
-            time_in_force=effective_tif,  # CRITICAL FIX 2026-07-29: Use execution mode TIF
-            expiration_ts=gtt_exp,
-            client_order_id=intent.client_order_id,  # CRITICAL FIX (2026-07-17): Use client_order_id for duplicate prevention
-            idempotency_key=intent.idempotency_key,  # CRITICAL FIX (2026-07-17): Prevent duplicate orders on retry
-            post_only=effective_post_only,  # CRITICAL FIX 2026-07-29: Use execution mode post_only
-            source="agent_grid",  # Mark as pipeline order
-            # CRITICAL FIX (2026-07-29): Pass TP/SL from OrderIntent to VenueOrder for exit policy enforcement
-            take_profit_price_cents=intent.take_profit_price_cents,
-            take_profit_r_multiple=intent.take_profit_r_multiple,
-            stop_loss_price_cents=intent.stop_loss_price_cents,
-        )
+        # Build the normalized CreateOrderRequest for the execution port.
+        # This replaces the old VenueOrder construction — the request is the
+        # only payload sent to the venue (via port.create_order below).
+        try:
+            create_request = _build_create_order_request(
+                intent,
+                normalized_ticker=_normalized_ticker,
+                final_price_cents=final_price_cents,
+                effective_order_type=effective_order_type,
+                effective_tif=effective_tif,
+                expiration_ts=resolved_tif.expiration_time,
+                post_only=effective_post_only,
+            )
+        except ValueError as _req_err:
+            latency = (_time.monotonic() - t0) * 1000
+            logger.error(
+                "[order-router] CreateOrderRequest validation failed: %s", _req_err,
+            )
+            _release_gate_record(intent, f"invalid_order_request:{_req_err}")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"invalid_order_request:{_req_err}",
+                latency_ms=round(latency, 2),
+            )
 
         # PRODUCTION FIX: Register TP targets with position cache for fill-time lookup
         if intent.client_tag and (
@@ -8238,7 +9184,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             try:
                 from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
                 slot_allocator = get_global_slot_allocator()
-                
+
                 # Extract asset from ticker
                 asset = None
                 ticker_upper = intent.ticker.upper()
@@ -8289,7 +9235,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 # Store slot_id for release if order fails
                 intent._allocated_slot_id = _allocated_slot_id
             except Exception as slot_err:
-                logger.error("[SLOT-ALLOCATOR-PRE-SUBMIT] Slot allocation failed: %s", slot_err)
+                import traceback
+                logger.error("[SLOT-ALLOCATOR-PRE-SUBMIT] Slot allocation failed: %s\n%s", slot_err, traceback.format_exc())
                 # Fail open: if slot allocation fails, reject order to prevent over-trading
                 return OrderResult(
                     status="rejected",
@@ -8402,48 +9349,22 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 if now - last_check_ts > 5.0:
                     _route_live._last_rest_divergence_check_ts[intent.ticker] = now
                     
-                    # Fetch fresh REST orderbook snapshot
-                    rest_result = await asyncio.wait_for(
-                        client._request_with_resilience(
-                            "GET", f"/markets/{intent.ticker}/orderbook",
-                            operation_name=f"ws_rest_divergence_check({intent.ticker})"
-                        ),
+                    # Fetch fresh REST orderbook snapshot through the normalized execution port.
+                    ob_result = await asyncio.wait_for(
+                        port.get_orderbook(intent.ticker),
                         timeout=3.0
                     )
-                    
-                    if rest_result.success and rest_result.data:
-                        # Parse REST orderbook
-                        rest_data = rest_result.data
-                        orderbook_fp = rest_data.get("orderbook_fp", {})
-                        rest_yes_levels = []
-                        rest_no_levels = []
-                        
-                        # DIAGNOSTIC: Log raw orderbook_fp data for divergence debugging
+
+                    if ob_result.success:
+                        # Port returns normalized levels with price in cents; convert back to
+                        # dollars to preserve the existing divergence math.
+                        rest_yes_levels = [[level.price_cents / 100.0, float(level.size)] for level in ob_result.yes_levels]
+                        rest_no_levels = [[level.price_cents / 100.0, float(level.size)] for level in ob_result.no_levels]
+
                         logger.info(
-                            "[WS-REST-DIVERGENCE-DIAG] ticker=%s orderbook_fp keys=%s yes_dollars_count=%d no_dollars_count=%d",
-                            intent.ticker, 
-                            list(orderbook_fp.keys()),
-                            len(orderbook_fp.get("yes_dollars", [])),
-                            len(orderbook_fp.get("no_dollars", []))
-                        )
-                        
-                        # CRITICAL FIX (2026-08-01): Use actual NO bid data from no_dollars
-                        # Kalshi API documentation confirms that no_dollars contains valid NO bid data
-                        # Previous assumption that no_dollars was corrupted was incorrect
-                        # Reference: https://docs.kalshi.com/api-reference/market/get-market-orderbook
-                        if "yes_dollars" in orderbook_fp:
-                            rest_yes_levels = [[float(p), float(s)] for p, s in orderbook_fp["yes_dollars"]]
-                        else:
-                            rest_yes_levels = []
-                        
-                        if "no_dollars" in orderbook_fp:
-                            rest_no_levels = [[float(p), float(s)] for p, s in orderbook_fp["no_dollars"]]
-                        else:
-                            rest_no_levels = []
-                        
-                        logger.info(
-                            "[WS-REST-DIVERGENCE-DIAG] ticker=%s yes_levels_sample=%s no_levels_sample=%s",
+                            "[WS-REST-DIVERGENCE-DIAG] ticker=%s yes_levels_count=%d no_levels_count=%d yes_levels_sample=%s no_levels_sample=%s",
                             intent.ticker,
+                            len(rest_yes_levels), len(rest_no_levels),
                             rest_yes_levels[:3] if rest_yes_levels else [],
                             rest_no_levels[:3] if rest_no_levels else []
                         )
@@ -8542,8 +9463,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                             )
                     else:
                         logger.warning(
-                            "[WS-REST-DIVERGENCE-SKIP] ticker=%s REST fetch failed - skipping divergence check",
-                            intent.ticker
+                            "[WS-REST-DIVERGENCE-SKIP] ticker=%s REST orderbook fetch failed (error=%s) - skipping divergence check",
+                            intent.ticker, ob_result.error
                         )
         except asyncio.TimeoutError:
             logger.warning("[WS-REST-DIVERGENCE-SKIP] ticker=%s REST fetch timeout - skipping divergence check", intent.ticker)
@@ -8556,12 +9477,51 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             intent.intent_id, intent.ticker, intent.side, intent.action, intent.price_cents, intent.count, intent.client_tag
         )
 
-        placed_res = await client.place_order_result(
-            order,
-            order_group_id=intent.order_group_id,
-            self_trade_prevention_type=intent.self_trade_prevention_type,
-        )
+        # Submit through the normalized execution port.  A timeout here means
+        # the ack was lost in flight: the order MAY be live on the exchange.
+        placed_res = None
+        _submit_timed_out = False
+        try:
+            placed_res = await port.create_order(create_request)
+        except asyncio.TimeoutError as _submit_to_exc:
+            _submit_timed_out = True
+            logger.error(
+                "[SUBMIT-TIMEOUT] intent_id=%s ticker=%s client_tag=%s — ack lost in flight: %s",
+                intent.intent_id, intent.ticker, intent.client_tag, _submit_to_exc,
+            )
         latency = (_time.monotonic() - t0) * 1000
+
+        # Timeout-after-submit (or a venue-reported timeout): mark the gate
+        # record SUBMISSION_UNKNOWN and return WITHOUT releasing exposure —
+        # the order may be resting/filled on the exchange and must be
+        # reconciled via port.get_order before risk is released.
+        _timeout_err_str = ""
+        if placed_res is not None and not placed_res.success and placed_res.error:
+            _timeout_err_str = str(placed_res.error).lower()
+        if _submit_timed_out or "timeout" in _timeout_err_str or "timed out" in _timeout_err_str:
+            try:
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate as _get_ptg_unknown
+                _ptg_unknown = _get_ptg_unknown()
+                # SUBMISSION_UNKNOWN is only reachable from SUBMITTED.
+                _ptg_unknown.mark_submitted(intent.client_tag or "", None)
+                _ptg_unknown.mark_submission_unknown(intent.client_tag or "")
+            except Exception as _su_err:
+                logger.debug("[order-router] mark_submission_unknown failed (non-fatal): %s", _su_err)
+            try:
+                from monitoring.metrics import get_metrics_registry
+                get_metrics_registry().counter(
+                    "kalshi_submission_unknown",
+                    "Order submit ack lost in flight (timeout after submit)",
+                    ["ticker"]
+                ).inc(labels={"ticker": intent.ticker})
+            except Exception as _m_err:
+                logger.debug(f"Metric increment failed: {_m_err}")
+            return OrderResult(
+                status="submission_unknown",
+                mode=mode,
+                reason=f"submission_unknown:timeout_after_submit:{intent.client_tag}",
+                latency_ms=round(latency, 2),
+            )
 
         # 2026-07-25: Log ORDER-ACK after submission
         if placed_res and placed_res.success:
@@ -8662,15 +9622,14 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 intent.client_tag,
             )
             try:
-                # Query Kalshi to get current order state
-                lookup_res = await client.get_order_by_client_id_result(intent.client_tag)
-                if lookup_res.success and lookup_res.data:
-                    order_data = lookup_res.data
+                # Query Kalshi (via the port) to reconcile actual exchange state
+                order_data = await port.get_order(client_order_id=intent.client_tag)
+                if order_data is not None:
                     logger.info(
                         "[KALSHI_DUPLICATE_LOOKUP] ticker=%s order_id=%s status=%s — confirmed resting",
                         intent.ticker,
-                        getattr(order_data, "order_id", "unknown"),
-                        getattr(order_data, "status", "unknown"),
+                        order_data.order_id,
+                        order_data.status,
                     )
                     # Order was successfully submitted (on prior attempt) - record in rate limiter
                     _record_successful_order()
@@ -8678,20 +9637,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     try:
                         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
                         _ptg = get_pre_trade_gate()
-                        _ptg.mark_submitted(intent.client_tag, getattr(order_data, "order_id", None))
-                        _filled = getattr(order_data, "filled_size", 0) or getattr(order_data, "filled_count", 0)
+                        _ptg.mark_submitted(intent.client_tag, order_data.order_id)
+                        _filled = int(order_data.filled_size or 0)
                         if _filled:
-                            _ptg.mark_filled(intent.client_tag, int(_filled))
+                            _ptg.mark_filled(intent.client_tag, _filled, fill_id=f"{order_data.order_id}-dup")
                             # CRITICAL: Record price execution to prevent repeat price execution
                             _record_price_execution(intent)
                     except Exception as _dup_gate_err:
                         logger.debug("[order-router] duplicate gate update failed: %s", _dup_gate_err)
-                    
+
                     # PHASE1-DUP-2: Update dedup cache with order_id from duplicate lookup
                     # This ensures the cache entry is marked as completed with the confirmed Kalshi order_id.
                     try:
                         cache = _dedup_cache()
-                        _dup_order_id = getattr(order_data, "order_id", None)
+                        _dup_order_id = order_data.order_id
                         if _dup_order_id:
                             cache.mark_completed(intent.client_tag, _dup_order_id)
                             logger.debug(
@@ -8700,18 +9659,18 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                             )
                     except Exception as dedup_dup_err:
                         logger.warning("[DEDUP-CACHE-ERROR] Failed to update cache on duplicate (non-fatal): %s", dedup_dup_err)
-                    
+
                     # Return synthetic success result (not a rejection)
                     return OrderResult(
-                        status="filled_live" if getattr(order_data, "filled_size", 0) else "submitted_live",
+                        status="filled_live" if int(order_data.filled_size or 0) else "submitted_live",
                         mode=mode,
                         fill={
-                            "order_id": getattr(order_data, "order_id", None),
-                            "filled_count": getattr(order_data, "filled_size", 0),
-                            "remaining_count": getattr(order_data, "remaining_size", 0),
-                            "price_cents": int((getattr(order_data, "price", Decimal(0)) * 100)),
+                            "order_id": order_data.order_id,
+                            "filled_count": int(order_data.filled_size or 0),
+                            "remaining_count": int(order_data.remaining_size or 0),
+                            "price_cents": order_data.price_cents or 0,
                             "client_tag": intent.client_tag,
-                        } if lookup_res.data else None,
+                        },
                         latency_ms=round(latency, 2),
                     )
             except Exception as _dup_lookup_err:
@@ -8744,7 +9703,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 latency_ms=round(latency, 2),
             )
         
-        if not placed_res.success or placed_res.data is None:
+        if not placed_res.success:
             # CRITICAL FIX (2026-07-21): Clear entry window on exchange rejection
             # Since we don't set window until we have exposure, clearing here is defensive
             # to handle any edge cases where window was set
@@ -8853,15 +9812,24 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
 
         # Note: _record_order_placed(intent) already called BEFORE submission to prevent race condition
 
-        placed = placed_res.data
+        # Normalized CreateOrderResponse from the port.
         # CRITICAL FIX (2026-07-12): Kalshi's create-order response may omit/zero `size`.
-        # Fall back to the intent count so fill-pct and filled/partial status logic stay correct.
-        requested_count = _resolve_requested_count(placed.size, intent.count)
-        filled_count = int(placed.filled_size)
-        remaining_count = int(placed.remaining_size) if placed.remaining_size is not None else max(0, requested_count - filled_count)
-        fill_price_cents = int((placed.price or Decimal(intent.price_cents) / Decimal("100")) * 100)
+        # The port response carries filled/remaining sizes; the intent count is
+        # the authoritative requested size for fill reconciliation.
+        requested_count = _resolve_requested_count(None, intent.count)
+        filled_count = int(placed_res.filled_size or 0)
+        remaining_count = int(placed_res.remaining_size) if placed_res.remaining_size is not None else max(0, requested_count - filled_count)
+        fill_price_cents = (
+            placed_res.price_cents
+            if placed_res.price_cents is not None
+            else (
+                placed_res.average_price_cents
+                if placed_res.average_price_cents is not None
+                else int(intent.price_cents)
+            )
+        )
         fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
-        _venue_oid = getattr(placed, "order_id", None) or "unknown"
+        _venue_oid = placed_res.order_id or "unknown"
 
         # CRITICAL FIX (2026-07-13): Notify global_allocator of order submission for pending order tracking
         # This prevents the global_allocator from allowing duplicate orders for the same asset
@@ -8947,11 +9915,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 pos_cache = get_position_cache()
                 internal_exposure = pos_cache.get_total_notional_exposure()
 
-                # Query Kalshi portfolio for comparison
+                # Query Kalshi portfolio for comparison through the normalized port.
                 try:
-                    portfolio_res = await client.get_balance_result()
-                    if portfolio_res.success and portfolio_res.data:
-                        kalshi_balance = float(portfolio_res.data.get('balance', 0))
+                    portfolio_res = await port.get_balance()
+                    if portfolio_res.success and portfolio_res.available_usd is not None:
+                        kalshi_balance = float(portfolio_res.available_usd)
                         # Simple divergence check: if internal exposure differs significantly from bankroll usage
                         # This is a basic check - more sophisticated reconciliation can be added
                         if abs(internal_exposure - kalshi_balance) > 1.0:  # $1 threshold
@@ -9048,46 +10016,19 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         try:
             from merid.event_venues.kalshi.order_gate import get_pre_trade_gate as _get_ptg
             _ptg = _get_ptg()
-            _venue_oid = getattr(placed, "order_id", None)
             _ptg.mark_submitted(intent.client_tag or "", _venue_oid)
             if filled_count > 0:
-                _ptg.mark_filled(intent.client_tag or "", filled_count)
+                _ptg.mark_filled(intent.client_tag or "", filled_count, fill_id=f"{_venue_oid}-0")
                 # CRITICAL: Record price execution to prevent repeat price execution
                 _record_price_execution(intent)
         except Exception as e:
             logger.debug(f"Gate mark submitted/filled failed: {e}")
 
-        # CRITICAL FIX: 2026-07-08 - Record slot exposure after successful venue submission
-        # This is the ONLY place where slot exposure is tracked for live orders
-        # Without this, the fixed $1 exposure cap would not be enforced
-        try:
-            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-            envelope = get_kalshi_crypto_15m_risk_envelope()
-            if envelope:
-                # Use actual filled notional (not requested) for accurate exposure tracking
-                filled_notional_usd = (filled_count * fill_price_cents) / 100.0
-                agent_id = intent.agent_id or "unknown"
-                
-                # CRITICAL FIX (2026-07-08): Resting exposure release moved to position_cache.on_fill()
-                # Resting exposure is now released ONLY in position_cache.on_fill() to prevent double-release
-                # Previous release here caused double-release when position_cache.on_fill() also released
-                # position_cache.on_fill() is the canonical source for resting exposure release on fills
-                # This prevents incorrect exposure tracking for partial fills and ensures consistency
-                
-                # Record execution exposure (actual filled notional)
-                # CRITICAL FIX 2026-07-08: Extract asset for per-asset exposure tracking
-                asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else None
-                envelope.record_order_execution(
-                    agent_id=agent_id,
-                    order_notional_usd=filled_notional_usd,
-                    asset=asset
-                )
-                logger.info(
-                    "[order-router-WINDOW-RECORD] Recorded execution exposure: agent=%s notional=$%.2f filled=%d price=%dc ticker=%s",
-                    agent_id, filled_notional_usd, filled_count, fill_price_cents, intent.ticker
-                )
-        except Exception as e:
-            logger.warning("[order-router-WINDOW-RECORD] Failed to record window exposure: %s", e)
+        # CRITICAL FIX (2026-07-07): Removed duplicate window exposure recording.
+        # position_cache.on_fill() is the canonical source for execution exposure.
+        # The unified_risk_manager.record_fill() call above is the single source of
+        # truth for live risk exposure; the legacy risk-envelope window tracker must
+        # not be updated here to avoid double-counting partial fills.
 
         # DRY-RUN-TRACE: Fill reconciliation
         _partial = filled_count < requested_count and filled_count > 0
@@ -9101,37 +10042,57 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         )
         
         # EXECUTION QUALITY FEEDBACK: Track slippage and fill rate for dynamic risk engine
-        try:
-            from merid.event_venues.kalshi.dynamic_risk import get_dynamic_risk_engine
-            from config.kalshi_crypto_config import kalshi_ticker_to_asset
-            
-            # Extract asset from ticker
-            asset = kalshi_ticker_to_asset(intent.ticker)
-            
-            # Compute slippage (intended price vs actual fill price)
-            intended_price_cents = intent.price_cents
-            slippage_cents = abs(intended_price_cents - fill_price_cents) if fill_price_cents else 0
-            
-            # Update execution metrics
-            engine = get_dynamic_risk_engine()
-            engine.update_execution_metrics(
-                asset=asset,
-                slippage_cents=slippage_cents,
-                filled=(filled_count > 0),
-            )
-            
-            logger.info(
-                "[EXECUTION-FEEDBACK] asset=%s intended=%dc fill=%dc slippage=%dc filled=%s fill_pct=%.1f%%",
-                asset, intended_price_cents, fill_price_cents, slippage_cents,
-                filled_count > 0, _fill_pct
-            )
-        except Exception as feedback_err:
-            logger.debug("[EXECUTION-FEEDBACK] Failed to update metrics: %s", feedback_err)
+        # Only update for actual executions; unfilled_ioc / rejected / unknown paths
+        # must not feed zero-fill rows into execution statistics.
+        if filled_count > 0:
+            try:
+                from merid.event_venues.kalshi.dynamic_risk import get_dynamic_risk_engine
+                from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                
+                # Extract asset from ticker
+                asset = kalshi_ticker_to_asset(intent.ticker)
+                
+                # Compute slippage (intended price vs actual fill price)
+                intended_price_cents = intent.price_cents
+                slippage_cents = abs(intended_price_cents - fill_price_cents) if fill_price_cents else 0
+                
+                # Update execution metrics
+                engine = get_dynamic_risk_engine()
+                engine.update_execution_metrics(
+                    asset=asset,
+                    slippage_cents=slippage_cents,
+                    filled=True,
+                )
+                
+                logger.info(
+                    "[EXECUTION-FEEDBACK] asset=%s intended=%dc fill=%dc slippage=%dc filled=%s fill_pct=%.1f%%",
+                    asset, intended_price_cents, fill_price_cents, slippage_cents,
+                    True, _fill_pct
+                )
+            except Exception as feedback_err:
+                logger.debug("[EXECUTION-FEEDBACK] Failed to update metrics: %s", feedback_err)
 
-        if filled_count >= requested_count and requested_count > 0:
+        # Classify the router result from the normalized port outcome.
+        _resp_status = (placed_res.status or "").lower()
+        _tif_upper = (effective_tif or intent.time_in_force or "").upper()
+        if _resp_status == "filled" or (filled_count >= requested_count and requested_count > 0):
             status = "filled_live"
-        elif filled_count > 0:
-            status = "partial_live"
+        elif _resp_status == "partially_filled" or filled_count > 0:
+            # Partial fill: exposure-affecting, report filled_live with the
+            # partial detail carried in the fill dict (requested/remaining).
+            status = "filled_live"
+        elif _resp_status == "resting":
+            status = "resting"
+        elif _resp_status == "unfilled" and _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
+            status = "unfilled_ioc"
+        elif _resp_status == "unfilled":
+            status = "unfilled_ioc"
+        elif _resp_status == "accepted" and filled_count == 0 and _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
+            # IOC/FOK orders that the port acks without a fill have zero remaining risk.
+            status = "unfilled_ioc"
+        elif _resp_status == "accepted" and filled_count == 0:
+            # GTC/post-only orders that the port acks without a fill are resting on the book.
+            status = "resting"
         
         # CRITICAL FIX (2026-07-18): Window is now set on SUBMISSION, not on fill
         # This prevents multiple submissions even if orders don't fill immediately
@@ -9172,80 +10133,102 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 await monitor.update_order_metrics(filled=True, latency_ms=latency_ms)
             except Exception as monitor_err:
                 pass
-            # PARTIAL FILL: Release reserved exposure for UNFILLED portion
-            # The unfilled contracts never became actual position, so release their notional
-            if _reserved_category and _reserved_underlying and not _is_sell:
+            # IOC/GTC/FOK partial fill: only the filled contracts become position.
+            # The remaining contracts were never executed, so no exposure is recorded
+            # for them and no resting reservation is retained (IOC/FOK are terminal
+            # here; GTC partial fills will be tracked by the resting-order monitor).
+        elif status == "unfilled_ioc":
+            # IOC order returned with fill_count=0 and remaining_count > 0.
+            # This is NOT a rejection and NOT a resting order.  Release all
+            # pending/pessimistic local reservations, clear the allocator pending
+            # slot, and allow a fresh signal on the next cycle.
+            try:
+                # Extract asset from ticker
+                asset = intent.ticker.split("-")[0][2:] if intent.ticker.startswith("KX") else "UNKNOWN"
+                asset = __import__("re").sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
+                from merid.risk.profiles.global_allocator import get_global_allocator
+                allocator = get_global_allocator()
+                if allocator:
+                    allocator.record_order_rejected(asset, _venue_oid)
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR-NOTIFY] IOC no-fill: asset=%s order_id=%s released pending slot",
+                        asset, _venue_oid,
+                    )
+            except Exception as alloc_err:
+                logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to release IOC no-fill allocator slot: %s", alloc_err)
+
+            # Reverse the optimistic order-group reservation.
+            if _og_debited and _og_manager and intent.order_group_id:
                 try:
-                    from merid.risk.unified_risk_manager import get_unified_risk_manager
-                    unified_risk = get_unified_risk_manager()
-                    _unfilled = requested_count - filled_count
-                    _unfilled_notional = _unfilled * fill_price_cents / 100.0
+                    _og_manager.release_reservation(intent.order_group_id, intent.count)
+                    logger.debug(
+                        "[order-router] Released order-group reservation for IOC no-fill %s: %d contracts",
+                        intent.order_group_id, intent.count,
+                    )
+                except Exception as _ogr:
+                    logger.warning("[order-router] og debit rollback (IOC no-fill) failed: %s", _ogr)
+
+            # BUG-03 fix: release the reserved exposure notional on IOC no-fill if any tracker is present.
+            if _exp_tracker and _reserved_category and _reserved_underlying:
+                try:
+                    _exp_tracker.release(_reserved_category, _reserved_underlying, _reserved_notional)
+                except Exception as _re:
+                    logger.debug("[order-router] exposure release (IOC no-fill) failed: %s", _re)
+
+            # Update the pre-trade gate so the client_order_id slot is freed.
+            try:
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                get_pre_trade_gate().mark_rejected(intent.client_tag or "", "UNFILLED_IOC")
+            except Exception as e:
+                logger.debug("Gate mark rejected (UNFILLED_IOC) failed: %s", e)
+
+            logger.info(
+                "[UNFILLED-IOC] ticker=%s order_id=%s requested=%d remaining=%d — no exposure recorded, slot released",
+                intent.ticker, _venue_oid, requested_count, remaining_count,
+            )
+        elif status != "resting":
+            # Fallback for any other accepted-but-unclassified port outcome.
+            status = "accepted_live"
+
+        # Record executed notional in UnifiedRiskManager.  Buys add open exposure;
+        # sells reduce it.  No pre-submission reservation is made, so there is no
+        # unfilled remainder to release for IOC/FOK/GTC partial fills.
+        if filled_count > 0 and _reserved_category and _reserved_underlying:
+            try:
+                from merid.risk.unified_risk_manager import get_unified_risk_manager
+                unified_risk = get_unified_risk_manager()
+                if _is_sell:
                     unified_risk.release(
                         ticker=intent.ticker,
-                        contracts=_unfilled,
+                        contracts=filled_count,
                         price_cents=fill_price_cents,
                         category=_reserved_category,
                         underlying=_reserved_underlying
                     )
                     logger.info(
-                        "[order-router] Partial fill: released %s %s reserved notional for %d unfilled contracts",
-                        _reserved_category, _reserved_underlying, _unfilled
+                        "[UNIFIED-RISK] Sell fill released exposure: ticker=%s contracts=%d price=%dc",
+                        intent.ticker, filled_count, fill_price_cents
                     )
-                except Exception as _partial_re:
-                    logger.warning("[order-router] Partial fill exposure release failed: %s", _partial_re)
-        else:
-            status = "accepted_live"
-
-        # Record fill in UnifiedRiskManager for exposure tracking
-        if filled_count > 0:
-            try:
-                from merid.risk.unified_risk_manager import get_unified_risk_manager
-                unified_risk = get_unified_risk_manager()
-                unified_risk.record_fill(
-                    ticker=intent.ticker,
-                    contracts=filled_count,
-                    price_cents=fill_price_cents,
-                    category=_reserved_category,
-                    underlying=_reserved_underlying
-                )
+                else:
+                    unified_risk.record_fill(
+                        ticker=intent.ticker,
+                        contracts=filled_count,
+                        price_cents=fill_price_cents,
+                        category=_reserved_category,
+                        underlying=_reserved_underlying
+                    )
+                    logger.info(
+                        "[UNIFIED-RISK] Buy fill recorded exposure: ticker=%s contracts=%d price=%dc",
+                        intent.ticker, filled_count, fill_price_cents
+                    )
             except Exception as _rr:
-                logger.debug("UnifiedRiskManager record_fill failed (non-fatal): %s", _rr)
-            
-            # CRITICAL FIX (2026-07-07): Removed duplicate slot exposure recording
-            # Slot exposure is now recorded ONLY in position_cache.on_fill() to prevent double-counting
-            # Previous recording here caused the same fill to be counted twice, effectively halving
-            # the effective exposure cap
-            # position_cache.on_fill() is the canonical source for slot exposure tracking
-
-        # BUG-B fix: sell fills reduce open exposure — release the notional from the
-        # tracker so category caps reflect the true remaining open position.
-        if _is_sell and filled_count > 0 and _reserved_category and _reserved_underlying:
-            try:
-                from merid.risk.unified_risk_manager import get_unified_risk_manager
-                unified_risk = get_unified_risk_manager()
-                _fill_notional = filled_count * fill_price_cents / 100.0
-                unified_risk.release(
-                    ticker=intent.ticker,
-                    contracts=filled_count,
-                    price_cents=fill_price_cents,
-                    category=_reserved_category,
-                    underlying=_reserved_underlying
-                )
-                # DRY-RUN-TRACE: Post-fill exposure update for sells
-                logger.info(
-                    "[DRY-RUN-TRACE] exposure_post_fill | router_path=order_router ticker=%s side=%s action=%s | "
-                    "filled_cost=%.2f fee=%d¢ | released_notional=%.2f",
-                    intent.ticker, intent.side, intent.action,
-                    _fill_notional, fee_cents, _fill_notional
-                )
-            except Exception as _sell_re:
-                logger.debug("[order-router] sell exposure release failed: %s", _sell_re)
+                logger.debug("UnifiedRiskManager fill accounting failed (non-fatal): %s", _rr)
 
         logger.info(
             "[KALSHI_ORDER_RESULT] ticker=%s status=%s order_id=%s filled=%d source=order_router",
             intent.ticker,
             status,
-            getattr(placed, "order_id", ""),
+            _venue_oid,
             filled_count,
         )
         
@@ -9254,7 +10237,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # If an exit order doesn't fill immediately (liquidity issues, spread, etc.), it will rest
         # and needs to be tracked for cancellation/replacement. Exit orders are critical for
         # position management and must never be orphaned on the book.
-        if status == "accepted_live" and remaining_count > 0:
+        if status in ("accepted_live", "resting") and remaining_count > 0:
             try:
                 from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor, RestingOrderRecord
                 from config.kalshi_crypto_config import kalshi_ticker_to_asset
@@ -9265,7 +10248,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 is_exit_order = intent.entry_or_exit == "exit" or (intent.source and "position_monitor_exit" in str(intent.source))
                 
                 if order_type_lower == "limit" and tif_lower in ("gtc", "good_till_canceled") or is_exit_order:
-                    kalshi_order_id = getattr(placed, "order_id", "")
+                    kalshi_order_id = placed_res.order_id or ""
                     if kalshi_order_id:
                         monitor = get_resting_order_monitor()
                         
@@ -9337,17 +10320,28 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             except Exception as _re_exc:
                 logger.warning(f"[RESTING_ORDER_MONITOR] Failed to register order: {_re_exc}")
         
-        try:
-            from merid.prediction.ua_ct_metrics import record_order_accept
+        # ``record_order_accept`` tracks accepted/placed orders, not zero-fill IOCs.
+        # It counts filled, accepted, submitted, and resting states only.
+        if status in {
+            "filled_mock",
+            "filled_paper",
+            "filled_live",
+            "partial_fill",
+            "accepted_live",
+            "submitted_live",
+            "resting",
+        }:
+            try:
+                from merid.prediction.ua_ct_metrics import record_order_accept
 
-            record_order_accept()
-        except Exception as e:
-            logger.debug(f"Order accept metric failed: {e}")
+                record_order_accept()
+            except Exception as e:
+                logger.debug(f"Order accept metric failed: {e}")
 
         return OrderResult(
             status=status,
             mode=mode,
-            order_id=getattr(placed, "order_id", None),
+            order_id=placed_res.order_id,
             fill={
                 "ticker": intent.ticker,
                 "side": intent.side,
@@ -9356,9 +10350,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 "count": filled_count,
                 "requested_count": requested_count,
                 "remaining_count": remaining_count,
+                "partial": 0 < filled_count < requested_count,
                 "fee_cents": fee_cents,
-                "order_id": placed.order_id,
-                "status": placed.status,
+                "order_id": placed_res.order_id,
+                "client_tag": intent.client_tag,
+                "status": placed_res.status,
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "simulated": False,
             },
@@ -9705,6 +10701,11 @@ def route_order(intent: OrderIntent) -> OrderResult:
     # 2026 best practices recommend simpler validation pipelines (3-5 checks max)
     # This gate is unnecessary for profitable 2026 systems
 
+    # ── Execution planning (price / role / order_type / TIF / sizing) ─
+    prep_rejection, state = _prepare_order_for_gate(intent, mode, t0)
+    if prep_rejection is not None:
+        return prep_rejection
+
     # ── Pre-trade gate: lease + dedup + fill-awareness ────────────────
     gate_rejection = _run_pre_trade_gate(intent, mode, t0)
     if gate_rejection:
@@ -9856,6 +10857,8 @@ def _run_pre_trade_gate(
             max_hold_seconds=intent.max_hold_seconds,
             # CRITICAL FIX: Pass entry_or_exit direction to gate for exit order bypass (2026-07-20)
             entry_or_exit=intent.entry_or_exit,
+            # CRITICAL FIX: Pass reduce_only flag so the gate can distinguish entry vs exit (2026-08-09)
+            reduce_only=intent.reduce_only,
         )
         if not verdict.allowed:
             latency = (_time.monotonic() - t0) * 1000
@@ -10574,7 +11577,10 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     # Profile config uses 10-70c range for momentum-based trading
     # Strategy: enter cheap (10-70c) with real edge, avoid risky high-end markets (>70c)
     # Exception: Allow orders below 10c if source is "hedge_engine" (hedge orders have their own checks)
-    if intent.price_cents < 10 and intent.source != "hedge_engine":
+    # CRITICAL FIX (2026-08-08): Reduce-only/exit orders must be allowed below 10c so that
+    # positions can be closed at the prevailing market price; the 10c floor is an entry guard.
+    is_exit = getattr(intent, "reduce_only", False) or getattr(intent, "is_exit_order", False) or getattr(intent, "entry_or_exit", None) == "exit"
+    if intent.price_cents < 10 and intent.source != "hedge_engine" and not is_exit:
         latency = (_time.monotonic() - t0) * 1000
         logger.error(
             f"[MIN-PRICE-VIOLATION] Order rejected: price_cents={intent.price_cents} < 10c minimum | "
@@ -11079,6 +12085,11 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     # 2026 best practices recommend simpler validation pipelines (3-5 checks max)
     # This gate is unnecessary for profitable 2026 systems with small asset universe
 
+    # ── Execution planning (price / role / order_type / TIF / sizing) ─
+    prep_rejection, state = _prepare_order_for_gate(intent, mode, t0)
+    if prep_rejection is not None:
+        return prep_rejection
+
     # ── Pre-trade gate: lease + dedup + fill-awareness ────────────────
     gate_rejection = _run_pre_trade_gate(intent, mode, t0)
     if gate_rejection:
@@ -11120,7 +12131,7 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             return scaling_result
     
     if _is_live_mode(mode):
-        return await _route_live(intent, mode, t0)
+        return await _route_live(intent, mode, t0, prepared_state=state, plan_done=True)
 
     return _route_sync_non_live(intent, mode, t0)
 
