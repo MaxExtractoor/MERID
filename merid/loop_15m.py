@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 # Kalshi 15m Lean Loop - Minimal event loop for kalshi_crypto_15m_v2 profile.
 # This is a clean, minimal loop designed specifically for the 15-minute crypto trading
 # stack on Kalshi. It replaces the complex legacy merid.loop for this profile.
@@ -771,12 +773,14 @@ class Kalshi15mLoop:
             "parity_price_violation": 0,
             "edge_below_threshold": 0,
             "duplicate_order": 0,
+            "edge_improvement_cancel_failed": 0,
             "price_out_of_range": 0,
             "position_exists": 0,
             "resting_order_exists": 0,
             "edge_validation_failed": 0,
             "exit_policy_failed": 0,
             "router_rejected": 0,
+            "router_exception": 0,
             "other": 0
         }
         
@@ -945,7 +949,7 @@ class Kalshi15mLoop:
                 loaded_assets = set(self._asset_positions.keys())
                 expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
                 if loaded_assets == expected_assets:
-                    logger.info("[15m-LOOP] Position tracking loaded from position cache: %s (attempt %d/%d)", self._asset_positions, attempt + 1, max_retries)
+                    logger.info("[15m-LOOP] Position tracking loaded from position cache: %s (attempt %d/%d)", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions), attempt + 1, max_retries)
                     break  # Success, exit retry loop
                 else:
                     missing = expected_assets - loaded_assets
@@ -959,7 +963,7 @@ class Kalshi15mLoop:
                         for asset in expected_assets:
                             if asset not in self._asset_positions:
                                 self._asset_positions[asset] = Decimal('0.0')
-                        logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", self._asset_positions)
+                        logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions))
             except Exception as e:
                 logger.warning("[15m-LOOP] Failed to load positions from position cache (attempt %d/%d): %s", attempt + 1, max_retries, e, exc_info=True)
                 if attempt < max_retries - 1:
@@ -970,7 +974,7 @@ class Kalshi15mLoop:
                     from decimal import Decimal
                     for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
                         self._asset_positions[asset] = Decimal('0.0')
-                    logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", self._asset_positions)
+                    logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions))
         
         # CRITICAL FIX: Reset concurrent trade counter based on actual open positions
         # The counter is incremented on order submission but never decremented, causing false blocking
@@ -1327,8 +1331,9 @@ class Kalshi15mLoop:
             
             # Pass loop_tick for WS_FORWARDER_IMPOSSIBLE_OK invariant check
             # Add timeout to prevent hanging
+            # Use cache=False so the loop always sees fresh readiness.
             snapshot = await asyncio.wait_for(
-                asyncio.to_thread(get_kalshi_health_snapshot, loop_tick=cycle_id),
+                asyncio.to_thread(get_kalshi_health_snapshot, loop_tick=cycle_id, use_cache=False),
                 timeout=5.0  # 5 second timeout
             )
             
@@ -1544,7 +1549,35 @@ class Kalshi15mLoop:
                                 position.position_id[:8], position.market_id, position.size, exit_reason
                             )
                             return
-                        
+
+                        # CRITICAL FIX (2026-08-08): Gate exits by contract liveness. Never place
+                        # orders against expired/closed markets; route to settlement reconciliation.
+                        try:
+                            from merid.event_venues.kalshi.market_filter import parse_expiry_from_ticker
+                            expiry_ts = parse_expiry_from_ticker(position.market_id)
+                            if expiry_ts > 0:
+                                now_ts = datetime.now(timezone.utc).timestamp()
+                                if now_ts > expiry_ts + 60:  # 60s post-expiry settlement buffer
+                                    expiry_iso = datetime.fromtimestamp(expiry_ts, tz=timezone.utc).isoformat()
+                                    logger.warning(
+                                        "[POSITION-MONITOR-CALLBACK] Exit intent suppressed - market expired: position=%s market=%s expiry=%s reason=%s",
+                                        position.position_id[:8], position.market_id, expiry_iso, exit_reason
+                                    )
+                                    # Record terminal state so the position is not retried
+                                    position.exit_triggered = True
+                                    position.exit_reason = ExitReason.MARKET_EXPIRED.value
+                                    position.exited_at = datetime.utcnow()
+                                    if self._position_monitor:
+                                        self._position_monitor.remove_position(position.position_id)
+                                    try:
+                                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                                        get_position_cache().force_delete_phantom_position(position.market_id)
+                                    except Exception as cache_err:
+                                        logger.debug("[POSITION-MONITOR-CALLBACK] Failed to remove expired position from cache: %s", cache_err)
+                                    return
+                        except Exception as expiry_err:
+                            logger.debug("[POSITION-MONITOR-CALLBACK] Could not check market expiry: %s", expiry_err)
+
                         # CRITICAL FIX (2026-07-17): Set cooldown for problematic exits
                         # This prevents re-entries after exits due to stale data, risk limits, low liquidity, or regime halts
                         try:
@@ -1781,14 +1814,27 @@ class Kalshi15mLoop:
             position_id=position.position_id
         )
         
-        # Derive side_str from position for logging (use thesis_side if available, else position.side)
-        if hasattr(position, 'thesis_side') and position.thesis_side:
+        # Derive side_str from position for logging.  Prefer the confirmed canonical
+        # outcome_side (from fills/positions) over the immutable strategy thesis.
+        if getattr(position, 'outcome_side', None):
+            side_str = position.outcome_side
+        elif hasattr(position, 'thesis_side') and position.thesis_side:
             side_str = position.thesis_side
         else:
             side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
-        
+
         assert side_str in ("yes", "no", "YES", "NO"), f"EXIT-ORDER: Invalid side_str={side_str} for {position.market_id}"
-        
+
+        # Derive canonical asset and agent_id for this exit order once.
+        # Use the same asset-prefixed agent_id as entry orders for audit consistency
+        # and to avoid leaking a module name into the agent_id field.
+        lifecycle_asset = "unknown"
+        for _prefix, _asset_name in (("KXBTC", "BTC"), ("KXETH", "ETH"), ("KXSOL", "SOL"), ("KXXRP", "XRP"), ("KXDOGE", "DOGE")):
+            if position.market_id.startswith(_prefix):
+                lifecycle_asset = _asset_name
+                break
+        agent_id = f"{lifecycle_asset}_15M" if lifecycle_asset != "unknown" else "position_monitor"
+
         # CRITICAL: Check venue availability before attempting exit order
         # This prevents exit orders from failing silently when venue is unavailable
         try:
@@ -1879,8 +1925,8 @@ class Kalshi15mLoop:
                 
                 # Create exit order allocation request (bypasses slot allocation)
                 exit_request = AllocationRequest(
-                    agent_id="position_monitor",
-                    asset=asset or "unknown",
+                    agent_id=agent_id,
+                    asset=asset or lifecycle_asset or "unknown",
                     ticker=position.market_id,
                     entry_price_cents=exit_price_cents,
                     edge_pct=0.0,  # Exit orders don't have edge
@@ -1918,70 +1964,77 @@ class Kalshi15mLoop:
                 "[EXIT-ORDER-WINDOW-BYPASS] Exit order routing path: direct route_order_async (bypasses top3 gate window limits)"
             )
             
-            # CRITICAL FIX (2026-07-21): Use pure functions from strategy_positions domain layer
-            # This encapsulates direction mapping in one spot, making it impossible for
-            # cache/REST state to leak into side decisions.
-            # Feature flag USE_LEGACY_DIRECTION_MAPPING controls whether to use new approach
+            # CRITICAL FIX (2026-08-07): Exit direction must be derived from the confirmed
+            # net venue exposure (outcome_side / book_side) and never from the immutable
+            # strategy thesis.  The thesis predicts the market; the position record reports
+            # what the exchange actually filled.
             from merid.event_venues.kalshi.strategy_positions import ThesisSide, build_exit_order
-            
-            # Get thesis_side from position (immutable strategy thesis)
-            # CRITICAL FIX (2026-08-02): Remove mutable state fallback
-            # Previously: fallback to mutable position.side when thesis_side missing
-            # Now: require thesis_side, fail closed if missing (Bug #6 fix)
-            if hasattr(position, 'thesis_side') and position.thesis_side:
-                thesis_side_str = position.thesis_side
-                try:
-                    thesis_side = ThesisSide.from_outcome_side(thesis_side_str)
-                    logger.info(
-                        "[EXIT-ORDER-THESIS] Using thesis_side=%s (immutable strategy thesis) for exit order generation",
-                        thesis_side_str
-                    )
-                except ValueError as e:
-                    logger.error(
-                        "[EXIT-ORDER-THESIS] Invalid thesis_side=%s: %s - CANNOT GENERATE EXIT ORDER",
-                        thesis_side_str, e
-                    )
-                    return  # Fail closed - cannot generate exit order without valid thesis_side
-            else:
-                # CRITICAL FIX: No fallback to mutable position.side
+
+            confirmed_outcome = getattr(position, "outcome_side", None) or position.thesis_side
+            if not confirmed_outcome:
                 logger.error(
-                    "[EXIT-ORDER-THESIS] Position missing thesis_side - CANNOT GENERATE EXIT ORDER "
-                    "(fallback to mutable position.side removed to prevent side inversion - Bug #6 fix)"
+                    "[EXIT-ORDER-CONFIRMED] Position %s has neither outcome_side nor thesis_side - "
+                    "CANNOT GENERATE EXIT ORDER",
+                    position.position_id[:8]
                 )
-                return  # Fail closed - require thesis_side for all positions
+                return
+
+            # If the live confirmed exposure disagrees with the prediction thesis, the
+            # confirmed exposure wins and a mismatch is logged for audit.
+            if (
+                getattr(position, "outcome_side", None)
+                and position.thesis_side
+                and position.outcome_side != position.thesis_side
+            ):
+                logger.critical(
+                    "[EXIT-ORDER-THESIS-MISMATCH] position=%s thesis_side=%s confirmed_outcome=%s - "
+                    "using confirmed exposure for exit",
+                    position.position_id[:8],
+                    position.thesis_side,
+                    position.outcome_side,
+                )
             
             # Initialize action variable to prevent UnboundLocalError
             action = "SELL"
             
             # Build exit order using pure function from domain layer (if feature flag is False)
-            if not USE_LEGACY_DIRECTION_MAPPING and thesis_side:
-                # Create a temporary StrategyPosition for the pure function
-                # This ensures deterministic mapping from thesis to Kalshi format
+            if not USE_LEGACY_DIRECTION_MAPPING and confirmed_outcome:
+                # Create a temporary StrategyPosition for the pure function.
+                # The canonical outcome is the confirmed live exposure, not the thesis.
                 from merid.event_venues.kalshi.strategy_positions import StrategyPosition
+                try:
+                    thesis_side = ThesisSide.from_outcome_side(confirmed_outcome)
+                except ValueError as e:
+                    logger.error(
+                        "[EXIT-ORDER-CONFIRMED] Invalid confirmed outcome_side=%s: %s - CANNOT GENERATE EXIT ORDER",
+                        confirmed_outcome, e
+                    )
+                    return
+
                 temp_position = StrategyPosition(
                     ticker=position.market_id,
+                    agent_id=position.position_id or position.market_id or "",
                     thesis_side=thesis_side,
                     size_fp=position.size,
                     avg_entry_price_cents=int(position.avg_entry_price_cents) if hasattr(position, 'avg_entry_price_cents') else 0
                 )
-                
+
                 try:
                     exit_order = build_exit_order(temp_position, count, exit_price_cents)
                     kalshi_side = exit_order["kalshi_side"]
                     outcome_side = exit_order["outcome_side"]
                     action = exit_order["action"]
-                    
-                    # VERIFICATION: Exit order logging (ticker, thesis_side, exit_outcome_side, action, size_fp)
+
+                    # VERIFICATION: Exit order logging (ticker, confirmed_outcome, exit_outcome_side, action, size_fp)
                     logger.info(
-                        "[EXIT-ORDER-GENERATION] ticker=%s thesis_side=%s exit_outcome_side=%s action=%s kalshi_side=%s size_fp=%d price_cents=%d",
-                        position.market_id, thesis_side.value, outcome_side, action, kalshi_side, count, exit_price_cents
+                        "[EXIT-ORDER-GENERATION] ticker=%s confirmed_outcome=%s exit_outcome_side=%s action=%s kalshi_side=%s size_fp=%d price_cents=%d",
+                        position.market_id, confirmed_outcome, outcome_side, action, kalshi_side, count, exit_price_cents
                     )
-                    thesis_side_str = exit_order["thesis_side"]
-                    
+
                     logger.info(
                         "[EXIT-ORDER-PURE-FUNCTION] Built exit order using pure function: "
-                        "thesis=%s -> kalshi_side=%s count=%d price=%dc",
-                        thesis_side_str, kalshi_side, count, exit_price_cents
+                        "confirmed=%s -> kalshi_side=%s count=%d price=%dc",
+                        confirmed_outcome, kalshi_side, count, exit_price_cents
                     )
                 except ValueError as e:
                     logger.error(
@@ -1990,21 +2043,21 @@ class Kalshi15mLoop:
                     )
                     # CRITICAL FIX: No fallback to legacy logic - fail closed
                     logger.error(
-                        "[EXIT-ORDER-THESIS] Pure function failed - CANNOT GENERATE EXIT ORDER (fallback removed to prevent side inversion - Bug #6 fix)"
+                        "[EXIT-ORDER-CONFIRMED] Pure function failed - CANNOT GENERATE EXIT ORDER (fallback removed to prevent side inversion - Bug #6 fix)"
                     )
-                    return  # Fail closed - cannot generate exit order without valid thesis_side
+                    return  # Fail closed - cannot generate exit order without valid confirmed outcome
             else:
-                # CRITICAL FIX: No legacy fallback - fail closed if thesis_side not available
+                # CRITICAL FIX: No legacy fallback - fail closed if confirmed outcome not available
                 logger.error(
-                    "[EXIT-ORDER-THESIS] thesis_side not available - CANNOT GENERATE EXIT ORDER "
+                    "[EXIT-ORDER-CONFIRMED] Confirmed outcome not available - CANNOT GENERATE EXIT ORDER "
                     "(legacy fallback removed to prevent side inversion - Bug #6 fix)"
                 )
-                return  # Fail closed - require thesis_side for all positions
+                return  # Fail closed - require confirmed outcome for all exits
 
             # AUDIT: Venue-side semantics - log Kalshi order semantics for exit
             logger.info(
                 "[VENUE-SEMANTICS-AUDIT] position=%s market=%s exit_reason=%s "
-                "kalshi_side=%s order_type=limit time_in_force=gtc aggressiveness=1.0 price=%dc count=%d "
+                "kalshi_side=%s order_type=limit time_in_force=ioc aggressiveness=1.0 price=%dc count=%d "
                 "thesis_conversion=%s->%s executable=YES",
                 position.position_id[:8],
                 position.market_id,
@@ -2040,11 +2093,23 @@ class Kalshi15mLoop:
             # Position sizes already calculated and validated in invariant checks above
             # pre_position_size and expected_post_position_size are available from invariant section
             
-            # CRITICAL FIX (2026-08-02): Validate exit price is profitable relative to entry price
-            # This prevents resting sell orders from executing below entry price, causing losses
-            # For YES positions: exit price should be >= entry price (profitable exit)
-            # For NO positions: exit price should be <= entry price (in NO-space, lower = higher probability = profit)
+            # ENHANCEMENT (2026-08-02): Validate exit price is profitable relative to entry price
+            # This prevents resting sell orders from executing below entry price, causing losses.
+            # Profitability is only required for profit-seeking exits. Risk-management exits
+            # (STOP_LOSS, SETTLEMENT_GUARD, TRAILING_STOP, TIME_STOP, RISK, EDGE_DECAY, etc.)
+            # MUST execute even when unprofitable to prevent runaway losses.
             entry_price = position.avg_entry_price_cents
+
+            # Reasons that must always execute, regardless of exit price vs entry.
+            # Stop losses, settlement guards, 99c cashouts, time stops and risk exits are safety
+            # mechanisms, not profit-taking mechanisms.
+            exit_reason_str = str(getattr(exit_reason, 'value', exit_reason)).lower()
+            bypass_profit_check_reasons = {
+                'stop_loss', 'settlement_guard', 'auto_exit_99c', 'trail', 'trailing_stop',
+                'time_stop', 'edge_decay', 'risk', 'stale_data', 'candle_reversal',
+                'adaptive_timing', 'opportunity_cost', 'loss_cut_40pct', 'manual'
+            }
+            enforce_profit_check = exit_reason_str not in bypass_profit_check_reasons
             
             # ENHANCEMENT (2026-08-02): Minimum profit threshold to account for trading fees
             # Based on backtest-kit research: minimum take-profit distance to ensure profit exceeds fees
@@ -2058,9 +2123,9 @@ class Kalshi15mLoop:
             
             if entry_price > 0:
                 # ENHANCEMENT (2026-08-02): Check current market bid-ask spread
-                current_bid_cents = None
-                current_ask_cents = None
-                current_spread_cents = None
+                current_bid_cents = 0
+                current_ask_cents = 0
+                current_spread_cents = -1
                 
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
@@ -2093,8 +2158,10 @@ class Kalshi15mLoop:
                         spread_err
                     )
                 
-                # Determine thesis side for validation
-                if hasattr(position, 'thesis_side') and position.thesis_side:
+                # Determine outcome side for validation (confirmed exposure, not thesis)
+                if getattr(position, 'outcome_side', None):
+                    thesis_side_str = position.outcome_side
+                elif hasattr(position, 'thesis_side') and position.thesis_side:
                     thesis_side_str = position.thesis_side
                 else:
                     thesis_side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
@@ -2124,27 +2191,43 @@ class Kalshi15mLoop:
                         )
                         is_profitable_exit = True  # Allow break-even exits
                     else:
-                        logger.error(
-                            "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s thesis=YES exit_price=%dc < entry_price=%dc "
-                            "REJECTING exit order - would sell below entry price causing loss. "
-                            "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                            position.position_id[:8],
-                            position.market_id,
-                            exit_price_cents,
-                            entry_price,
-                            exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                            position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                            profit_margin_cents,
-                            current_spread_cents
-                        )
-                        return  # Reject this exit order
+                        if enforce_profit_check:
+                            logger.error(
+                                "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s thesis=YES exit_price=%dc < entry_price=%dc "
+                                "REJECTING exit order - would sell below entry price causing loss. "
+                                "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
+                                position.position_id[:8],
+                                position.market_id,
+                                exit_price_cents,
+                                entry_price,
+                                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                                position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
+                                profit_margin_cents,
+                                current_spread_cents
+                            )
+                            return  # Reject this exit order
+                        else:
+                            logger.warning(
+                                "[EXIT-PRICE-VALIDATION-SKIP] position=%s market=%s thesis=YES exit_price=%dc < entry_price=%dc "
+                                "bypassing profitability check for risk exit. "
+                                "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
+                                position.position_id[:8],
+                                position.market_id,
+                                exit_price_cents,
+                                entry_price,
+                                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                                position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
+                                profit_margin_cents,
+                                current_spread_cents
+                            )
                 else:  # NO
-                    # NO positions: profit when price falls in NO-space (exit price <= entry price - margin)
-                    # In NO-space, lower price = higher probability of NO winning = profit
-                    profit_margin_cents = entry_price - exit_price_cents
-                    if exit_price_cents <= (entry_price - MIN_PROFIT_MARGIN_CENTS):
+                    # CRITICAL FIX (2026-08-04): NO positions are LONG their own side.
+                    # Profit = own-side price rising (same as YES). TP/SL are in own-side cents.
+                    # A profitable NO exit has exit_price >= entry_price + margin.
+                    profit_margin_cents = exit_price_cents - entry_price
+                    if exit_price_cents >= (entry_price + MIN_PROFIT_MARGIN_CENTS):
                         is_profitable_exit = True
-                    elif exit_price_cents <= entry_price:
+                    elif exit_price_cents >= entry_price:
                         # At break-even but below minimum margin - log warning but allow
                         logger.warning(
                             "[EXIT-PRICE-VALIDATION-WARNING] position=%s market=%s thesis=NO exit_price=%dc at break-even "
@@ -2160,20 +2243,35 @@ class Kalshi15mLoop:
                         )
                         is_profitable_exit = True  # Allow break-even exits
                     else:
-                        logger.error(
-                            "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s thesis=NO exit_price=%dc > entry_price=%dc "
-                            "REJECTING exit order - would sell above entry price causing loss. "
-                            "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                            position.position_id[:8],
-                            position.market_id,
-                            exit_price_cents,
-                            entry_price,
-                            exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                            position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                            profit_margin_cents,
-                            current_spread_cents
-                        )
-                        return  # Reject this exit order
+                        if enforce_profit_check:
+                            logger.error(
+                                "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s thesis=NO exit_price=%dc < entry_price=%dc "
+                                    "REJECTING exit order - would sell below entry price causing loss. "
+                                    "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
+                                position.position_id[:8],
+                                position.market_id,
+                                exit_price_cents,
+                                entry_price,
+                                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                                position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
+                                profit_margin_cents,
+                                current_spread_cents
+                            )
+                            return  # Reject this exit order
+                        else:
+                            logger.warning(
+                                "[EXIT-PRICE-VALIDATION-SKIP] position=%s market=%s thesis=NO exit_price=%dc < entry_price=%dc "
+                                "bypassing profitability check for risk exit. "
+                                "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
+                                position.position_id[:8],
+                                position.market_id,
+                                exit_price_cents,
+                                entry_price,
+                                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                                position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
+                                profit_margin_cents,
+                                current_spread_cents
+                            )
                 
                 if is_profitable_exit:
                     logger.info(
@@ -2216,17 +2314,18 @@ class Kalshi15mLoop:
             
             intent = OrderIntent(
                 ticker=position.market_id,
-                side=outcome_side,  # CRITICAL FIX (2026-08-01): Use canonical side ("yes"/"no") not Kalshi format
+                side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES/SELL_YES/BUY_NO/SELL_NO)
                 action=action,  # Keep as lowercase "buy"/"sell" for early validation
-                price_cents=exit_price_cents,
+                price_cents=int(round(exit_price_cents)),
                 count=count,
                 order_type="limit",  # Limit order with marketable aggressiveness = marketable-limit
-                time_in_force="gtc",  # Good till canceled - allows order to rest if not immediately filled
+                time_in_force="ioc",  # CRITICAL FIX (2026-08-07): Exits are IOC, never GTC
                 source="position_monitor_exit",
-                agent_id="merid.position_management.position_monitor",
+                agent_id=agent_id,  # CRITICAL: Use asset-prefixed agent_id, not a module name
                 rationale=f"exit_reason:{exit_reason_str}",  # Use rationale for exit reason
                 exit_policy_id=position.exit_policy_id,  # CRITICAL FIX: Required for exit order validation
                 aggressiveness=1.0,  # CRITICAL FIX: Force marketable execution for immediate fill
+                reduce_only=True,  # CRITICAL FIX (2026-08-07): Exits must reduce, never increase, exposure
                 # ENTRY/EXIT DIRECTION CONTRACT FIELDS
                 entry_or_exit="exit",  # Formal direction classification
                 exit_reason=intent_exit_reason.value,  # Mapped exit reason for invariants
@@ -2237,17 +2336,12 @@ class Kalshi15mLoop:
             # LIFECYCLE-EXIT CANONICAL LOG SCHEMA (machine-parseable, single line)
             # Contract: thesis_side in {yes,no}; kalshi_side == SELL_YES iff thesis_side==yes,
             # SELL_NO iff thesis_side==no; size_before > 0; size_after == size_before - count (>= 0).
-            lifecycle_asset = "unknown"
-            for _prefix, _asset_name in (("KXBTC", "BTC"), ("KXETH", "ETH"), ("KXSOL", "SOL"), ("KXXRP", "XRP"), ("KXDOGE", "DOGE")):
-                if position.market_id.startswith(_prefix):
-                    lifecycle_asset = _asset_name
-                    break
             logger.info(
                 "[LIFECYCLE-EXIT] asset=%s ticker=%s agent_id=%s thesis_side=%s action=%s kalshi_side=%s "
                 "size_before=%d size_after=%d count=%d price_cents=%d exit_reason=%s entry_or_exit=exit",
                 lifecycle_asset,
                 position.market_id,
-                "merid.position_management.position_monitor",
+                agent_id,
                 side_str.lower(),
                 action.lower(),
                 kalshi_side,
@@ -2265,12 +2359,16 @@ class Kalshi15mLoop:
 
             # CRITICAL FIX (2026-07-23): Register exit submission in cache before routing
             # This handles websocket lag - order is treated as "exists" even if not yet visible
-            self._position_monitor._register_exit_submission(intent.client_order_id)
+            self._position_monitor._register_exit_submission(
+                intent.client_order_id, position_id=position.position_id
+            )
             
             # Route the exit order
             result = await route_order_async(intent)
 
-            if result.success:
+            # Only treat the exit as successful if contracts were actually filled.
+            # unfilled_ioc / submitted_live / resting must not clear the position.
+            if result and result.has_execution:
                 logger.info(
                     "[EXIT-ORDER] Exit order executed successfully: order_id=%s status=%s",
                     result.order_id, result.status
@@ -2363,6 +2461,30 @@ class Kalshi15mLoop:
             # keep failing (e.g., during market outage or API issues). Limit to 3 retries.
             MAX_EXIT_RETRIES = 3
             if retry_count > MAX_EXIT_RETRIES:
+                # CRITICAL FIX (2026-08-08): If the market is already expired/closed,
+                # stop retrying and route the position to settlement reconciliation.
+                if (
+                    self._position_monitor
+                    and self._position_monitor._is_expired_market(position.market_id)
+                ):
+                    logger.warning(
+                        "[EXIT-ORDER-RETRY] market_expired after retries: position=%s market=%s reason=%s - "
+                        "routing to settlement reconciliation",
+                        position.position_id[:8],
+                        position.market_id,
+                        exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
+                    )
+                    position.exit_triggered = True
+                    position.exit_reason = ExitReason.MARKET_EXPIRED.value
+                    position.exited_at = datetime.utcnow()
+                    self._position_monitor.remove_position(position.position_id)
+                    try:
+                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                        get_position_cache().force_delete_phantom_position(position.market_id)
+                    except Exception as cache_err:
+                        logger.debug("[EXIT-ORDER-RETRY] Failed to remove expired position from cache: %s", cache_err)
+                    return
+
                 logger.error(
                     "[EXIT-ORDER-RETRY] Position exceeded max exit retries (%d): position=%s market=%s reason=%s - "
                     "ABANDONING position to settlement (manual intervention required)",
@@ -2509,7 +2631,7 @@ class Kalshi15mLoop:
                                     market_id, asset, position.contracts, position.avg_price_cents, notional
                                 )
                     
-                    logger.info("[15m-LOOP] Reloaded positions from cache: %s", self._asset_positions)
+                    logger.info("[15m-LOOP] Reloaded positions from cache: %s", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions))
                     
                     # CRITICAL FIX (2026-07-31): Detect 0 exposure bug
                     # If we have positions but all assets show 0 exposure, this indicates a bug
@@ -2780,6 +2902,14 @@ class Kalshi15mLoop:
                                         "[15m-LOOP] Asset has position and swing mode not enabled: asset=%s - skipping",
                                         asset
                                     )
+                                    self._rejection_counters["position_exists"] += 1
+                                    self._log_candidate_lifecycle_event(
+                                        candidate_id=candidate_id,
+                                        from_state="RECEIVED",
+                                        to_state="BLOCKED_POSITION",
+                                        reason="Asset has open position and swing mode not enabled",
+                                        context={"asset": asset, "ticker": ticker}
+                                    )
                                     continue
                                 
                                 if is_swing_reversal:
@@ -2791,16 +2921,11 @@ class Kalshi15mLoop:
                                     self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
                                     logger.info("[SWING-MODE] Disabled for asset=%s after reversal entry", asset)
                                 
-                                # CRITICAL FIX (2026-07-13): Check if this candidate was already executed in current 15-minute window
-                                # This prevents re-executing the same ticker+side+price combination multiple times
-                                # The previous bug only added to the set AFTER execution, allowing duplicates
-                                candidate_key = self._get_candidate_key(candidate)
-                                if candidate_key in self._executed_candidates_this_window:
-                                    logger.debug(
-                                        "[15m-LOOP] Candidate already executed in current window: ticker=%s side=%s - skipping",
-                                        ticker, side
-                                    )
-                                    continue
+                                # CRITICAL FIX (2026-08-05): Removed the ticker+side+price dedup here.
+                                # It silently dropped candidates without lifecycle/counter updates, causing
+                                # the per-tick invariant "candidates=N terminal=0" mismatch. The per-asset-window
+                                # duplicate check below already handles the same window re-entry semantics and
+                                # properly logs a BLOCKED_DUPLICATE terminal state.
                                 
                                 # CRITICAL FIX (2026-07-21): Check if asset already has position or pending order in current 15-minute window
                                 # This enforces one-contract-per-asset-per-15-minute rule at execution time, not just signal time
@@ -2886,6 +3011,8 @@ class Kalshi15mLoop:
                                                     # Get prior order ID from candidate metadata
                                                     prior_order_id = prior_candidate.get("order_id")
                                                     if prior_order_id:
+                                                        # Track the externally-placed order so the manager can cancel it
+                                                        order_manager.track_order(prior_order_id)
                                                         cancel_success = await order_manager.cancel_order(prior_order_id)
                                                         if cancel_success:
                                                             logger.info(
@@ -2915,6 +3042,13 @@ class Kalshi15mLoop:
                                                 self._executed_candidates_this_window[asset_window_key] = candidate
                                             else:
                                                 self._rejection_counters["edge_improvement_cancel_failed"] += 1
+                                                self._log_candidate_lifecycle_event(
+                                                    candidate_id=candidate_id,
+                                                    from_state="RECEIVED",
+                                                    to_state="BLOCKED_DUPLICATE",
+                                                    reason="Edge improvement re-entry failed to cancel prior order",
+                                                    context={"asset": asset, "ticker": ticker, "prior_edge": prior_edge, "current_edge": current_edge}
+                                                )
                                                 logger.warning(
                                                     "[15m-LOOP] Edge improvement blocked: asset=%s ticker=%s - prior order not canceled, blocking re-entry",
                                                     asset, ticker
@@ -2957,6 +3091,8 @@ class Kalshi15mLoop:
                                                 # Get prior order ID from candidate metadata
                                                 prior_order_id = prior_candidate.get("order_id")
                                                 if prior_order_id:
+                                                    # Track the externally-placed order so the manager can cancel it
+                                                    order_manager.track_order(prior_order_id)
                                                     cancel_success = await order_manager.cancel_order(prior_order_id)
                                                     if cancel_success:
                                                         logger.info(
@@ -2986,6 +3122,13 @@ class Kalshi15mLoop:
                                             self._executed_candidates_this_window[asset_window_key] = candidate
                                         else:
                                             self._rejection_counters["edge_improvement_cancel_failed"] += 1
+                                            self._log_candidate_lifecycle_event(
+                                                candidate_id=candidate_id,
+                                                from_state="RECEIVED",
+                                                to_state="BLOCKED_DUPLICATE",
+                                                reason="Edge improvement re-entry failed to cancel prior order",
+                                                context={"asset": asset, "ticker": ticker, "prior_edge": prior_edge, "current_edge": current_edge}
+                                            )
                                             logger.warning(
                                                 "[15m-LOOP] Edge improvement blocked: asset=%s ticker=%s - prior order not canceled, blocking re-entry",
                                                 asset, ticker
@@ -3192,6 +3335,13 @@ class Kalshi15mLoop:
                                         # CRITICAL FIX: Increment rejection counter for sizing failures
                                         # This prevents counter sanity mismatch warnings
                                         self._rejection_counters["other"] += 1
+                                        self._log_candidate_lifecycle_event(
+                                            candidate_id=candidate_id,
+                                            from_state="RECEIVED",
+                                            to_state="REJECTED",
+                                            reason=f"Sizing returned count=0: {metadata.get('rejection_reason', 'unknown')}",
+                                            context={"asset": asset, "ticker": ticker, "notional": float(notional)}
+                                        )
                                         continue
                                     
                                     logger.info(
@@ -3250,13 +3400,25 @@ class Kalshi15mLoop:
                                     self._tick_executed_count += 1
                                 else:
                                     # CRITICAL FIX: 2026-08-02 - Log lifecycle event for REJECTED state
-                                    self._log_candidate_lifecycle_event(
-                                        candidate_id=candidate_id,
-                                        from_state="RECEIVED",
-                                        to_state="REJECTED",
-                                        reason="Order submission failed or blocked",
-                                        context={"ticker": ticker}
-                                    )
+                                    # CRITICAL FIX 2026-08-04: Avoid double-logging a terminal state.
+                                    # _execute_candidate may already have logged a terminal state (e.g. BLOCKED_EDGE_THRESHOLD,
+                                    # BLOCKED_PARITY). If so, do NOT log REJECTED again; that creates a lifecycle mismatch
+                                    # where one candidate produces two terminal events.
+                                    terminal_states = {"EXECUTED", "REJECTED", "BLOCKED_PARITY", "BLOCKED_EDGE_THRESHOLD", "BLOCKED_DUPLICATE", "BLOCKED_POSITION", "BLOCKED_RESTING_ORDER"}
+                                    current_state = self._candidate_lifecycle_states.get(candidate_id, "RECEIVED")
+                                    if current_state not in terminal_states:
+                                        self._log_candidate_lifecycle_event(
+                                            candidate_id=candidate_id,
+                                            from_state="RECEIVED",
+                                            to_state="REJECTED",
+                                            reason="Order submission failed or blocked",
+                                            context={"ticker": ticker}
+                                        )
+                                    else:
+                                        logger.info(
+                                            "[15M-LOOP] Candidate %s already has terminal state %s; skipping duplicate REJECTED lifecycle event",
+                                            candidate_id, current_state
+                                        )
                                     
                                     # CRITICAL FIX (2026-07-31): Do NOT increment "other" counter here
                                     # The rejection is already counted in the specific category (router_rejected, etc.)
@@ -3279,6 +3441,13 @@ class Kalshi15mLoop:
                             except Exception as e:
                                 logger.error("[15m-LOOP] Failed to execute candidate: %s", e, exc_info=True)
                                 self._rejection_counters["other"] += 1
+                                self._log_candidate_lifecycle_event(
+                                    candidate_id=candidate_id,
+                                    from_state="RECEIVED",
+                                    to_state="REJECTED",
+                                    reason=f"Execution exception: {e}",
+                                    context={"asset": asset, "ticker": ticker, "error": str(e)}
+                                )
                     
                     # COUNTER SANITY CHECK: Verify candidate → order flow consistency
                     # Use per-tick counters to avoid cumulative mismatch
@@ -4064,10 +4233,11 @@ class Kalshi15mLoop:
                                                         ticker=quote.ticker,
                                                         side=kalshi_side,  # Kalshi-formatted: BUY_YES, SELL_YES, BUY_NO, SELL_NO
                                                         action=quote.action,  # "buy" or "sell" for early validation
-                                                        price_cents=quote.price_cents,
+                                                        price_cents=int(round(quote.price_cents)),
                                                         count=quote.count,  # Number of contracts
                                                         source="market_maker_15m",
                                                         intent_id=f"mm_{quote.ticker}_{quote.side}_{quote.action}_{_time.monotonic():.0f}",
+                                                        entry_or_exit="entry",  # CRITICAL: Explicitly mark as entry order
                                                     )
                                                     
                                                     # Route quote to order router asynchronously
@@ -5314,7 +5484,7 @@ class Kalshi15mLoop:
                                 market_id, asset, position.contracts, position.avg_price_cents, notional
                             )
                 
-                logger.info("[15M-LOOP] Reloaded positions from cache: %s", self._asset_positions)
+                logger.info("[15M-LOOP] Reloaded positions from cache: %s", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions))
                 
                 # CRITICAL FIX (2026-07-31): Detect 0 exposure bug
                 # If we have positions but all assets show 0 exposure, this indicates a bug
@@ -5789,7 +5959,11 @@ class Kalshi15mLoop:
                 except Exception as e:
                     logger.warning("[15M-LOOP] Failed to get price from market state for %s: %s", ticker, e)
                     price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
-            
+
+            # Kalshi prices are whole cents; normalize any float/numpy scalar that may
+            # have leaked through from market-state arithmetic before building the intent.
+            price_cents = int(round(price_cents))
+
             # CRITICAL FIX: Consolidated sizing path - use count from unified_sizing
             # The count is already computed by compute_order_size in the main loop (line 1565)
             # This removes the dual sizing path inconsistency where _execute_candidate
@@ -6011,13 +6185,23 @@ class Kalshi15mLoop:
                     return False
 
             if strategy_intent:
-                # Calculate net exposure from side+action
-                # +Yes exposure: buy_yes, sell_no
-                # +No exposure: buy_no, sell_yes
-                if kalshi_side in ("BUY_YES", "SELL_NO"):
+                # DIRECTION POLICY (2026-08-07): Entry orders must use BUY actions only
+                # Cross-leg equivalence is prohibited:
+                # +Yes exposure: BUY_YES only
+                # +No exposure: BUY_NO only
+                # SELL actions are only for exits (same-leg close)
+                if kalshi_side == "BUY_YES":
                     net_exposure = "+Yes"
-                elif kalshi_side in ("BUY_NO", "SELL_YES"):
+                elif kalshi_side == "BUY_NO":
                     net_exposure = "+No"
+                elif kalshi_side in ("SELL_YES", "SELL_NO"):
+                    # SELL actions are only for exits - reject as entry
+                    logger.error(
+                        "[DIRECTION-POLICY-BREACH] ticker=%s kalshi_side=%s is a SELL action, which is only allowed for exits. "
+                        "Entry orders must use BUY actions (BUY_YES or BUY_NO). Rejecting candidate.",
+                        ticker, kalshi_side
+                    )
+                    return False
                 else:
                     net_exposure = "unknown"
 
@@ -6053,16 +6237,16 @@ class Kalshi15mLoop:
             
             logger.debug("[15M-LOOP] Converted to Kalshi side: %s", kalshi_side)
             
-            # CRITICAL FIX (2026-07-19): Log one-line intent execution summary for every trade
-            # This provides a greppable, human-readable confirmation that the intent→exposure chain is consistent
+            # DIRECTION POLICY (2026-08-07): Log one-line intent execution summary
+            # Entry orders must use BUY actions only (BUY_YES or BUY_NO)
             if strategy_intent:
-                if kalshi_side in ("BUY_YES", "SELL_NO"):
+                if kalshi_side == "BUY_YES":
                     net_exposure = "+YES"
-                elif kalshi_side in ("BUY_NO", "SELL_YES"):
+                elif kalshi_side == "BUY_NO":
                     net_exposure = "+NO"
                 else:
                     net_exposure = "UNKNOWN"
-                
+
                 logger.info(
                     "[INTENT-EXEC] ticker=%s intent=%s exposure=%s kalshi_side=%s action=%s price=%dc",
                     ticker, strategy_intent.upper(), net_exposure, kalshi_side, action_raw.lower(), price_cents
@@ -6084,64 +6268,33 @@ class Kalshi15mLoop:
             import uuid
             client_tag = f"15m_{ticker}_{uuid.uuid4().hex[:12]}"
             
-            # CRITICAL FIX (2026-07-29): Use TP/SL from candidate if set by global allocator
-            # Global allocator computes TP/SL based on entry price and risk parameters
-            # Only compute from exit_policy if not already set by allocator
-            if candidate.get("take_profit_price_cents") and candidate.get("stop_loss_price_cents"):
-                # Use TP/SL from global allocator
-                take_profit_price_cents = candidate.get("take_profit_price_cents")
-                take_profit_r_multiple = candidate.get("take_profit_r_multiple")
-                stop_loss_price_cents = candidate.get("stop_loss_price_cents")
-                logger.info(f"[15M-LOOP] Using TP/SL from global allocator: tp={take_profit_price_cents}c sl={stop_loss_price_cents}c")
+            # CRITICAL FIX (2026-08-05): Always compute TP/SL from the single source of truth
+            # (resolve_exit_policy) to avoid conflicting exit targets. The global allocator was
+            # previously overriding the policy with extremely tight 1c TP targets, causing
+            # premature exits and exit-policy discrepancies.
+            # Compute TP/SL from exit policy
+            # CRITICAL FIX (2026-08-04): A position is always long its own side.
+            # Both YES and NO use SL below entry and TP above entry in their own price space.
+            if exit_policy and exit_policy.tp_r_multiple:
+                # TP as percentage of entry price (e.g., 15% TP on 42c entry)
+                take_profit_price_cents = min(99, int(price_cents * (1 + exit_policy.tp_r_multiple)))
+                take_profit_r_multiple = exit_policy.tp_r_multiple
             else:
-                # Compute TP/SL from exit policy (fallback path)
-                # For binary options (0-100¢ contracts):
-                # CRITICAL FIX (2026-07-31): Side-aware TP/SL calculation
-                # YES contracts: TP above entry, SL below entry (long probability)
-                # NO contracts: TP below entry, SL above entry (short probability)
-                # Previous bug: treated both sides identically, causing NO contracts to have inverted TP/SL
-                if exit_policy and exit_policy.tp_r_multiple:
-                    # TP as percentage of entry price (e.g., 15% TP on 42c entry)
-                    if kalshi_side.lower() == "yes":
-                        # YES contracts: TP above entry
-                        take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
-                    else:
-                        # NO contracts: TP below entry
-                        take_profit_price_cents = max(1, int(price_cents * (1 - exit_policy.tp_r_multiple)))
-                    take_profit_r_multiple = exit_policy.tp_r_multiple
-                else:
-                    take_profit_price_cents = None
-                    take_profit_r_multiple = None
-                
-                # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
-                # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
-                # CRITICAL FIX (2026-07-31): Side-aware SL calculation for binary options
-                # YES contracts: SL below entry (loss when price goes down)
-                # NO contracts: SL above entry (loss when price goes up)
-                # Previous bug: treated both sides identically, causing NO contracts to have inverted SL
-                if exit_policy and exit_policy.sl_cents:
-                    sl_cents_offset = exit_policy.sl_cents
-                    if kalshi_side.lower() == "yes":
-                        # YES contracts: SL below entry
-                        stop_loss_price_cents = max(1, price_cents - sl_cents_offset)
-                    else:
-                        # NO contracts: SL above entry
-                        stop_loss_price_cents = min(99, price_cents + sl_cents_offset)
-                elif exit_policy and exit_policy.sl_r_multiple:
-                    # Fallback to R-multiple if sl_cents not set (legacy path)
-                    # SL = entry - (entry * sl_r_multiple) in own-side cents for YES
-                    # SL = entry + (entry * sl_r_multiple) in own-side cents for NO
-                    if kalshi_side.lower() == "yes":
-                        stop_loss_price_cents = max(1, int(price_cents * (1 - exit_policy.sl_r_multiple)))
-                    else:
-                        stop_loss_price_cents = min(99, int(price_cents * (1 + exit_policy.sl_r_multiple)))
-                else:
-                    # Default to 5 cent SL if no policy (side-aware)
-                    if kalshi_side.lower() == "yes":
-                        stop_loss_price_cents = max(1, price_cents - 5)
-                    else:
-                        stop_loss_price_cents = min(99, price_cents + 5)
-                logger.info(f"[15M-LOOP] Computed TP/SL from exit policy: tp={take_profit_price_cents}c sl={stop_loss_price_cents}c")
+                take_profit_price_cents = None
+                take_profit_r_multiple = None
+
+            # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
+            # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
+            if exit_policy and exit_policy.sl_cents:
+                sl_cents_offset = exit_policy.sl_cents
+                stop_loss_price_cents = max(1, price_cents - sl_cents_offset)
+            elif exit_policy and exit_policy.sl_r_multiple:
+                # Fallback to R-multiple if sl_cents not set (legacy path)
+                stop_loss_price_cents = max(1, int(price_cents * (1 - exit_policy.sl_r_multiple)))
+            else:
+                # Default to 5 cent SL if no policy
+                stop_loss_price_cents = max(1, price_cents - 5)
+            logger.info(f"[15M-LOOP] Computed TP/SL from exit policy: tp={take_profit_price_cents}c sl={stop_loss_price_cents}c")
             
             # Generate unique trace_id for candidate → order → policy tracking
             import uuid
@@ -6178,7 +6331,7 @@ class Kalshi15mLoop:
             # inverted (e.g. P(NO)=0.81 was stored as p_hat_yes=81c, so the gate valued NO at
             # 100-81=19c and rejected every NO order with a huge negative executable edge).
             model_prob_yes_canonical = model_prob
-            if model_prob is not None and side_raw == "NO":
+            if model_prob is not None and (isinstance(side_raw, str) and side_raw.upper() == "NO"):
                 model_prob_yes_canonical = 1.0 - model_prob
 
             # CRITICAL FIX (2026-08-02): Use unified probability model integration
@@ -6240,7 +6393,7 @@ class Kalshi15mLoop:
                             canonical_yes_prob=model_prob_yes_canonical,
                             canonical_no_prob=1.0 - model_prob_yes_canonical if model_prob_yes_canonical is not None else None,
                             allocator_timestamp=time.time(),
-                            chosen_side=TraceSide.YES if side_raw == "YES" else TraceSide.NO,
+                            chosen_side=TraceSide.YES if (isinstance(side_raw, str) and side_raw.upper() == "YES") else TraceSide.NO,
                             chosen_edge_pct=edge_pct,
                             policy_timestamp=existing_trace.policy_timestamp,
                             policy_intended_role=existing_trace.policy_intended_role,
@@ -6339,10 +6492,29 @@ class Kalshi15mLoop:
             )
             
             # CRITICAL DIAGNOSTIC: Log exit_policy_id being set
-            logger.info("[15M-LOOP] Setting exit_policy_id=%s for ticker=%s (exit_policy=%s)", 
-                       intent.exit_policy_id, 
-                       ticker, 
+            logger.info("[15M-LOOP] Setting exit_policy_id=%s for ticker=%s (exit_policy=%s)",
+                       intent.exit_policy_id,
+                       ticker,
                        "present" if exit_policy else "None")
+
+            # DIRECTION POLICY (2026-08-07): Mandatory event record at loop boundary
+            # Log the canonical direction policy record for auditability
+            from merid.event_venues.kalshi.binary_price_space import parse_kalshi_side
+            outcome_side, _ = parse_kalshi_side(kalshi_side)
+            logger.info(
+                "[DIRECTION-POLICY-RECORD] trace_id=%s ticker=%s lifecycle=%s outcome_side=%s action=%s "
+                "kalshi_side=%s price_cents=%d count=%d position_before=%d position_after_expected=%s",
+                getattr(intent, 'trace_id', 'unknown'),
+                ticker,
+                entry_or_exit,
+                outcome_side,
+                action_raw.lower(),
+                kalshi_side,
+                price_cents,
+                count,
+                pre_position_size,
+                expected_post_position_size
+            )
             
             # LIFECYCLE-ENTRY CANONICAL LOG SCHEMA (machine-parseable, single line)
             # Contract: indicator_side in {yes,no}; entry_action == buy; thesis_side == indicator_side;
@@ -6588,8 +6760,8 @@ class Kalshi15mLoop:
                     )
                     
                     bot_view = BotView(
-                        model_prob_yes=model_prob,
-                        model_prob_no=1.0 - model_prob,
+                        model_prob_yes=model_prob_yes_canonical,
+                        model_prob_no=(1.0 - model_prob_yes_canonical) if model_prob_yes_canonical is not None else None,
                         edge_yes=edge_yes,
                         edge_no=edge_no,
                         chosen_side=chosen_side,
@@ -6710,114 +6882,65 @@ class Kalshi15mLoop:
 
             # Route order
             result = await route_order_async(intent)
+
+            # Post-result accounting and audit log.  Risk/position exposure is recorded
+            # in the single canonical path inside order_router (_route_live) using the
+            # normalized port result.  loop_15m only updates its own lightweight
+            # tracking and emits a per-intent audit line.
+            executed_count = result.executed_count if result else 0
+            fill_price_cents = result.fill.get("price_cents", price_cents) if (result and result.fill) else price_cents
+            executed_notional_usd = (executed_count * fill_price_cents) / 100.0
+            remaining_count = result.remaining_count if result else 0
+            order_id = result.order_id if (result and result.order_id) else None
+            client_order_id = getattr(result, "client_order_id", None) or intent.client_order_id or intent.client_tag or None
+
+            logger.info(
+                "[15M-LOOP-ORDER-RESULT] ticker=%s side=%s action=%s requested=%d executed=%d remaining=%d "
+                "fill_price=%dc order_id=%s client_order_id=%s status=%s has_execution=%s",
+                ticker, kalshi_side, action_raw, count, executed_count, remaining_count,
+                fill_price_cents, order_id, client_order_id,
+                result.status if result else "none", bool(result and result.has_execution)
+            )
+
             if result and result.status == "rejected":
                 self._rejection_counters["router_rejected"] += 1
                 logger.warning("[15M-LOOP-SIDE-AWARE] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s latency_ms=%s",
                                ticker, kalshi_side, count, result.reason, result.latency_ms)
-                return False  # Order rejected - do not track as executed
-            else:
-                logger.info("[15M-LOOP-SIDE-AWARE] Order routed successfully: ticker=%s side=%s count=%d result=%s",
-                            ticker, kalshi_side, count, result)
-                # CRITICAL FIX (2026-07-31): Store order_id in candidate for edge improvement cancellation
-                # This allows the edge improvement logic to cancel the prior order when re-entry is triggered
-                if result and hasattr(result, 'order_id') and result.order_id:
-                    candidate["order_id"] = result.order_id
-                    logger.info("[15M-LOOP] Stored order_id=%s in candidate for ticker=%s", result.order_id, ticker)
-                return True  # Order submitted successfully - track as executed
-            
-            # CRITICAL FIX: Record order in KalshiRiskManager for asset_notional tracking
-            # This ensures per-asset notional exposure is tracked correctly for risk limits
-            if result and result.status and "filled" in result.status:
-                try:
-                    from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
-                    risk_mgr = get_kalshi_risk()
-                    
-                    # Record order with category="crypto" and asset for notional tracking
-                    risk_mgr.record_order(
-                        category="crypto",
-                        contracts=count,
-                        price_cents=price_cents,
-                        fee_cents=0,  # Fee tracking handled elsewhere
-                        asset=asset,  # CRITICAL: Pass asset for per-asset notional tracking
-                    )
-                    logger.info(
-                        "[15M-LOOP] Recorded order in risk manager: asset=%s category=crypto contracts=%d price=%dc",
-                        asset, count, price_cents
-                    )
-                except Exception as risk_err:
-                    logger.warning("[15M-LOOP] Failed to record order in risk manager: %s", risk_err)
-                
-                # CRITICAL FIX: Record trade entry in RealizedEdgeStore for edge tracking
-                # This enables outcome resolution and realized edge calculation after settlement
-                try:
-                    from merid.metrics.realized_edge import get_realized_edge_store
+                return False
 
-                    edge_store = get_realized_edge_store()
-                    
-                    # Calculate implied probability from price
-                    # For YES: implied = price_cents / 100
-                    # For NO: implied = (100 - price_cents) / 100
-                    if side_raw == "YES":
-                        p_implied = price_cents / 100.0
-                    else:  # NO
-                        p_implied = (100 - price_cents) / 100.0
-                    
-                    # Calculate fee (Kalshi fee is 2 cents per contract)
-                    from merid.prediction.agent_grid_15m import calculate_kalshi_fee_cents
-                    fee_cents = calculate_kalshi_fee_cents(count)
-                    
-                    # Get order_id from result for trade_id
-                    trade_id = result.order_id if hasattr(result, 'order_id') else f"{ticker}_{int(time.time())}"
-                    
-                    # Use asset-specific bucket instead of generic "crypto"
-                    bucket = asset  # BTC, ETH, SOL, XRP, DOGE
-                    
-                    # Determine edge_type based on signal rationale
-                    # Velocity-based signals use velocity magnitude as edge, not probability difference
-                    rationale = candidate.get("rationale", "")
-                    edge_type = "velocity" if rationale and "velocity_based" in rationale else "probability"
-                    
-                    # Record trade entry
-                    edge_store.record_trade_entry(
-                        trade_id=trade_id,
-                        forecaster_id=agent_id,
-                        bucket=bucket,
-                        market_id=ticker,
-                        side=side_raw.lower(),  # "yes" or "no"
-                        action=action_raw.lower(),  # "buy" or "sell"
-                        price_cents=price_cents,
-                        p_model=model_prob,
-                        p_implied=p_implied,
-                        contracts=count,
-                        fee_cents=fee_cents,
-                        timestamp=time.time(),
-                        edge_type=edge_type
-                    )
-                    
-                    logger.info(
-                        "[15M-LOOP] Recorded trade entry in RealizedEdgeStore: trade_id=%s bucket=%s asset=%s ticker=%s side=%s price=%dc model_prob=%.4f implied_prob=%.4f",
-                        trade_id, bucket, asset, ticker, side_raw, price_cents, model_prob, p_implied
-                    )
-                except Exception as edge_err:
-                    logger.warning("[15M-LOOP] Failed to record trade entry in RealizedEdgeStore: %s", edge_err)
-            
-            # Update position tracking after successful order
-            # FIX: Only increment active_trades if order was actually FILLED, not just routed
-            # Previously, rejected orders were counted as active trades, causing phantom trade detection
-            if result and asset and result.status and "filled" in result.status:
-                self._asset_positions[asset] = self._asset_positions.get(asset, Decimal('0.0')) + Decimal(str(position_notional_usd))
+            if result and result.status == "unfilled_ioc":
+                logger.info(
+                    "[15M-LOOP-SIDE-AWARE] IOC order did not fill: ticker=%s side=%s count=%d status=%s order_id=%s",
+                    ticker, kalshi_side, count, result.status, result.order_id
+                )
+                return False
+
+            # Store order_id for edge-improvement cancellation / duplicate suppression.
+            if order_id:
+                candidate["order_id"] = order_id
+                logger.info("[15M-LOOP] Stored order_id=%s in candidate for ticker=%s", order_id, ticker)
+
+            # Only actual executions affect loop-level position/trade counters.
+            if result and result.has_execution and asset:
+                position_notional_usd = executed_notional_usd
+                executed_notional_d = Decimal(str(position_notional_usd))
+                if action_raw and action_raw.lower() == "sell":
+                    self._asset_positions[asset] = self._asset_positions.get(asset, Decimal('0.0')) - executed_notional_d
+                else:
+                    self._asset_positions[asset] = self._asset_positions.get(asset, Decimal('0.0')) + executed_notional_d
                 self._active_trades[ticker] = self._active_trades.get(ticker, 0) + 1
                 logger.info(
-                    "[15M-LOOP] Position tracking updated: asset=%s exposure=%.2f ticker=%s active_trades=%d",
-                    asset, self._asset_positions[asset], ticker, self._active_trades[ticker]
+                    "[15M-LOOP] Position tracking updated: asset=%s exposure=%.2f ticker=%s active_trades=%d executed=%d",
+                    asset, self._asset_positions[asset], ticker, self._active_trades[ticker], executed_count
                 )
-            elif result and result.status and "rejected" in result.status:
-                logger.info(
-                    "[15M-LOOP] Order rejected - not updating position tracking: ticker=%s reason=%s",
-                    ticker, result.reason
-                )
+
+            if result and result.success:
+                logger.info("Order routed successfully: ticker=%s status=%s", ticker, result.status)
+                return True
+            return False
             
         except Exception as e:
+            self._rejection_counters["router_exception"] += 1
             logger.error("[15M-LOOP] Failed to execute candidate: %s", e, exc_info=True)
             return False  # Execution failed - do not track as executed
 
@@ -6901,6 +7024,10 @@ class Kalshi15mLoop:
             summary["calibration"] = calibration_metrics
         
         return summary
+
+
+# Backwards-compatible alias used by legacy test suites.
+Loop15M = Kalshi15mLoop
 
 
 def get_kalshi_15m_loop(

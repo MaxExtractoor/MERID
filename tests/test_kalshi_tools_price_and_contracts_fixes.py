@@ -92,19 +92,19 @@ class TestMaxContractsValidation:
             assert intent.count == 1, f"Expected 1 contract, got {intent.count}"
 
     def test_build_live_route_order_intent_uses_default_limit_when_profile_unavailable(self):
-        """Test that build_live_route_order_intent uses default limit (2) when profile unavailable."""
+        """Test that build_live_route_order_intent uses default limit (1) when profile unavailable."""
         from merid.prediction.kalshi_tools import build_live_route_order_intent
-        
+
         with patch('merid.risk.profiles.crypto_15m_profile.get_active_profile', return_value=None):
-            # Test count above default limit should be clamped to 2
+            # Test count above default limit should be clamped to 1 (enforces $1 exposure cap)
             intent = build_live_route_order_intent(
                 ticker="KXBTC15M-26APR191645-45",
                 side="yes",
                 action="buy",
                 price_cents=50,
-                count=5,  # Should be clamped to 2 (default)
+                count=5,  # Should be clamped to 1 (default)
             )
-            assert intent.count == 2, f"Expected 2 contracts (default), got {intent.count}"
+            assert intent.count == 1, f"Expected 1 contract (default), got {intent.count}"
 
     def test_build_live_route_order_intent_respects_different_asset_limits(self):
         """Test that build_live_route_order_intent respects different per-asset limits."""
