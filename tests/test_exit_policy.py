@@ -100,9 +100,9 @@ class TestExitPolicyEngine:
         assert "Holding" in signal.message
     
     def test_stop_loss_trigger_yes(self):
-        """Test stop-loss trigger for YES position."""
+        """Direct stop-loss is suppressed and converted to a StopCandidate path."""
         engine = ExitPolicyEngine()
-        
+
         # Entry at 50 cents, current at 30 cents (40% loss) - CRITICAL FIX 2026-07-16: Updated for new SL threshold
         signal = engine.evaluate_exit(
             entry_price_cents=50,
@@ -112,15 +112,15 @@ class TestExitPolicyEngine:
             minutes_held=2.0,
             side="yes",
         )
-        
-        assert signal.should_exit == True
-        assert signal.reason == ExitReason.STOP_LOSS
-        assert "SL triggered" in signal.message
+
+        assert signal.should_exit == False
+        assert signal.reason is None
+        assert "SL suppressed" in signal.message
     
     def test_stop_loss_trigger_no(self):
-        """Test stop-loss trigger for NO position."""
+        """Direct stop-loss is suppressed and converted to a StopCandidate path."""
         engine = ExitPolicyEngine()
-        
+
         # Entry at 50 cents, current at 70 cents (40% loss for NO) - CRITICAL FIX 2026-07-16: Updated for new SL threshold
         signal = engine.evaluate_exit(
             entry_price_cents=50,
@@ -130,9 +130,10 @@ class TestExitPolicyEngine:
             minutes_held=2.0,
             side="no",
         )
-        
-        assert signal.should_exit == True
-        assert signal.reason == ExitReason.STOP_LOSS
+
+        assert signal.should_exit == False
+        assert signal.reason is None
+        assert "SL suppressed" in signal.message
     
     def test_no_exit_signal(self):
         """Test no exit signal when within thresholds."""
@@ -235,10 +236,10 @@ class TestExitPolicyAllAssets:
         assert signal.reason == ExitReason.TAKE_PROFIT
     
     @pytest.mark.parametrize("asset", ["BTC", "ETH", "SOL", "XRP", "DOGE"])
-    def test_stop_loss_trigger_all_assets(self, asset):
-        """Test stop-loss trigger works for all crypto assets."""
+    def test_stop_loss_suppressed_for_all_assets(self, asset):
+        """Direct stop-loss is suppressed for every crypto asset; StopCandidate path is live."""
         engine = ExitPolicyEngine()
-        
+
         # Entry at 50 cents, current at 30 cents (40% loss) - CRITICAL FIX 2026-07-16: Updated for new SL threshold
         signal = engine.evaluate_exit(
             entry_price_cents=50,
@@ -248,9 +249,10 @@ class TestExitPolicyAllAssets:
             minutes_held=2.0,
             side="yes",
         )
-        
-        assert signal.should_exit == True
-        assert signal.reason == ExitReason.STOP_LOSS
+
+        assert signal.should_exit == False
+        assert signal.reason is None
+        assert "SL suppressed" in signal.message
 
 
 class TestExitPolicyBothSides:
@@ -294,10 +296,10 @@ class TestExitPolicyBothSides:
         assert signal.should_exit == True
         assert signal.reason == ExitReason.TAKE_PROFIT
     
-    def test_yes_position_stop_loss(self):
-        """Test stop-loss for YES position."""
+    def test_yes_position_stop_loss_suppressed(self):
+        """Direct stop-loss for YES is suppressed; StopCandidate path is live."""
         engine = ExitPolicyEngine()
-        
+
         # YES: Entry 50c, current 30c = 40% loss - CRITICAL FIX 2026-07-16: Updated for new SL threshold
         signal = engine.evaluate_exit(
             entry_price_cents=50,
@@ -307,14 +309,15 @@ class TestExitPolicyBothSides:
             minutes_held=2.0,
             side="yes",
         )
-        
-        assert signal.should_exit == True
-        assert signal.reason == ExitReason.STOP_LOSS
-    
-    def test_no_position_stop_loss(self):
-        """Test stop-loss for NO position."""
+
+        assert signal.should_exit == False
+        assert signal.reason is None
+        assert "SL suppressed" in signal.message
+
+    def test_no_position_stop_loss_suppressed(self):
+        """Direct stop-loss for NO is suppressed; StopCandidate path is live."""
         engine = ExitPolicyEngine()
-        
+
         # NO: Entry 50c, current 70c = 40% loss (price moved up) - CRITICAL FIX 2026-07-16: Updated for new SL threshold
         signal = engine.evaluate_exit(
             entry_price_cents=50,
@@ -324,9 +327,10 @@ class TestExitPolicyBothSides:
             minutes_held=2.0,
             side="no",
         )
-        
-        assert signal.should_exit == True
-        assert signal.reason == ExitReason.STOP_LOSS
+
+        assert signal.should_exit == False
+        assert signal.reason is None
+        assert "SL suppressed" in signal.message
 
 
 class TestExitPolicyRiskRewardRatio:

@@ -64,6 +64,9 @@ def assert_exit_delta(pre_position_size: int, count: int, market_id: str, positi
     4. Expected post-size must be non-negative (cannot flip to negative)
     5. Expected post-size must be strictly less than pre-size (must decrease)
     """
+    pre_position_size = int(pre_position_size) if pre_position_size is not None else 0
+    count = int(count) if count is not None else 0
+
     # INVARIANT-1: Position must have positive size (cannot exit from zero)
     if pre_position_size <= 0:
         logger.critical(
@@ -526,6 +529,12 @@ from merid.event_venues.kalshi.order_router import resolve_exit_policy
 # because position_management.exit_policy.ExitReason doesn't have TRAIL member
 # (needed for swing mode logic at line 1251)
 from merid.risk.exit_policy import ExitReason
+from merid.event_venues.kalshi.stop_candidate import (
+    build_stop_candidate,
+    maybe_submit_stop_candidate_sync,
+    record_stop_candidate,
+)
+from merid.event_venues.kalshi.binary_price_space import to_signed_yes_exposure
 _t7 = _import_time.time()
 logger.debug("[LOOP-15M-IMPORT] resolve_exit_policy import took %.3fs", _t7 - _t6)
 
@@ -1541,7 +1550,33 @@ class Kalshi15mLoop:
                             "[POSITION-MONITOR-CALLBACK] Exit intent: position=%s reason=%s price=%dc contracts=%s",
                             position.position_id[:8], exit_reason, exit_price_cents, contracts_to_close or "all"
                         )
-                        
+
+                        # CRITICAL FIX (2026-08-10): Direct STOP_LOSS exits are disabled.
+                        # Convert to a StopCandidate event and return; submission is gated
+                        # until replay tests pass.
+                        reason_str = getattr(exit_reason, "value", str(exit_reason)).lower()
+                        if reason_str == "stop_loss":
+                            position_cc = to_signed_yes_exposure(
+                                position.side.value, position.size
+                            ) * 100
+                            candidate = build_stop_candidate(
+                                market_ticker=position.market_id,
+                                exchange_position_cc=position_cc,
+                                trigger_reason="POSITION_MONITOR_STOP",
+                                entry_price_cents=position.avg_entry_price_cents,
+                                fair_value_cents=None,
+                                executable_exit_cents=exit_price_cents,
+                                quote_age_ms=None,
+                            )
+                            record_stop_candidate(candidate)
+                            maybe_submit_stop_candidate_sync(candidate)
+                            logger.warning(
+                                "[POSITION-MONITOR-CALLBACK] STOP_LOSS converted to StopCandidate "
+                                "for %s - submission disabled until replay tests pass",
+                                position.market_id,
+                            )
+                            return
+
                         # CRITICAL INVARIANT CHECK: Exit orders can only execute on positions with size > 0
                         if position.size <= 0:
                             logger.warning(
@@ -3003,6 +3038,23 @@ class Kalshi15mLoop:
                                             # CRITICAL FIX (2026-07-31): Cancel prior order before allowing edge improvement re-entry
                                             # This prevents multiple contracts per asset when edge improvement is triggered
                                             # Without this, both the prior order and new order can execute, violating risk limits
+                                            # CRITICAL FIX (2026-08-09): Do not attempt to cancel a prior order that has already
+                                            # filled; doing so causes 404 errors and can trip the event-loop circuit breaker.
+                                            if prior_candidate.get("has_execution") or prior_candidate.get("status") in ("filled_live", "partially_filled"):
+                                                self._rejection_counters["duplicate_order"] += 1
+                                                self._log_candidate_lifecycle_event(
+                                                    candidate_id=candidate_id,
+                                                    from_state="RECEIVED",
+                                                    to_state="BLOCKED_DUPLICATE",
+                                                    reason="Edge improvement re-entry blocked - prior order already filled/executed",
+                                                    context={"asset": asset, "ticker": ticker, "prior_edge": prior_edge, "current_edge": current_edge, "prior_status": prior_candidate.get("status")}
+                                                )
+                                                logger.warning(
+                                                    "[15m-LOOP] Edge improvement blocked: prior order for %s already %s - treating as same-side position",
+                                                    ticker, prior_candidate.get("status") or "filled"
+                                                )
+                                                continue
+
                                             prior_order_canceled = False
                                             try:
                                                 from merid.event_venues.kalshi.order_manager import get_order_manager
@@ -3083,6 +3135,23 @@ class Kalshi15mLoop:
                                         # CRITICAL FIX (2026-07-31): Cancel prior order before allowing edge improvement re-entry
                                         # This prevents multiple contracts per asset when edge improvement is triggered
                                         # Without this, both the prior order and new order can execute, violating risk limits
+                                        # CRITICAL FIX (2026-08-09): Do not attempt to cancel a prior order that has already
+                                        # filled; doing so causes 404 errors and can trip the event-loop circuit breaker.
+                                        if prior_candidate.get("has_execution") or prior_candidate.get("status") in ("filled_live", "partially_filled"):
+                                            self._rejection_counters["duplicate_order"] += 1
+                                            self._log_candidate_lifecycle_event(
+                                                candidate_id=candidate_id,
+                                                from_state="RECEIVED",
+                                                to_state="BLOCKED_DUPLICATE",
+                                                reason="Edge improvement re-entry blocked - prior order already filled/executed",
+                                                context={"asset": asset, "ticker": ticker, "prior_edge": prior_edge, "current_edge": current_edge, "prior_status": prior_candidate.get("status")}
+                                            )
+                                            logger.warning(
+                                                "[15m-LOOP] Edge improvement blocked: prior order for %s already %s - treating as same-side position",
+                                                ticker, prior_candidate.get("status") or "filled"
+                                            )
+                                            continue
+
                                         prior_order_canceled = False
                                         try:
                                             from merid.event_venues.kalshi.order_manager import get_order_manager
@@ -5968,7 +6037,7 @@ class Kalshi15mLoop:
             # The count is already computed by compute_order_size in the main loop (line 1565)
             # This removes the dual sizing path inconsistency where _execute_candidate
             # would recalculate count from risk envelope, overwriting the unified_sizing result
-            count = candidate.get("count", 1)
+            count = int(candidate.get("count", 1))
             
             # CRITICAL FIX (2026-08-01): Enforce hard cap of 1 contract for $1 global rule
             # This is a defensive check to prevent any path from violating the $1 exposure cap
@@ -6283,18 +6352,25 @@ class Kalshi15mLoop:
                 take_profit_price_cents = None
                 take_profit_r_multiple = None
 
-            # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
-            # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
-            if exit_policy and exit_policy.sl_cents:
-                sl_cents_offset = exit_policy.sl_cents
-                stop_loss_price_cents = max(1, price_cents - sl_cents_offset)
-            elif exit_policy and exit_policy.sl_r_multiple:
-                # Fallback to R-multiple if sl_cents not set (legacy path)
-                stop_loss_price_cents = max(1, int(price_cents * (1 - exit_policy.sl_r_multiple)))
+            # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch.
+            # When disabled, we keep TP/trailing/ratchet but do not compute or attach a stop-loss.
+            stop_loss_enabled = getattr(exit_policy, "stop_loss_enabled", True)
+            if not stop_loss_enabled:
+                stop_loss_price_cents = None
+                logger.info(f"[15M-LOOP] Stop-loss DISABLED for {ticker}: tp={take_profit_price_cents}c sl=None")
             else:
-                # Default to 5 cent SL if no policy
-                stop_loss_price_cents = max(1, price_cents - 5)
-            logger.info(f"[15M-LOOP] Computed TP/SL from exit policy: tp={take_profit_price_cents}c sl={stop_loss_price_cents}c")
+                # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
+                # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
+                if exit_policy and exit_policy.sl_cents:
+                    sl_cents_offset = exit_policy.sl_cents
+                    stop_loss_price_cents = max(1, price_cents - sl_cents_offset)
+                elif exit_policy and exit_policy.sl_r_multiple:
+                    # Fallback to R-multiple if sl_cents not set (legacy path)
+                    stop_loss_price_cents = max(1, int(price_cents * (1 - exit_policy.sl_r_multiple)))
+                else:
+                    # Default to 5 cent SL if no policy
+                    stop_loss_price_cents = max(1, price_cents - 5)
+                logger.info(f"[15M-LOOP] Computed TP/SL from exit policy: tp={take_profit_price_cents}c sl={stop_loss_price_cents}c")
             
             # Generate unique trace_id for candidate → order → policy tracking
             import uuid
@@ -6319,7 +6395,9 @@ class Kalshi15mLoop:
             
             # CRITICAL FIX: Use aggressiveness from candidate (set by signal generation)
             # Removed redundant aggressiveness calculation since signal generation now computes it
-            aggressiveness = candidate.get("aggressiveness", 0.5)
+            # CRITICAL FIX 2026-08-09: Default missing aggressiveness to full taker (1.0)
+            # so momentum_fvg and other signal modes still reach the book as IOC/marketable.
+            aggressiveness = float(candidate.get("aggressiveness", 1.0) or 0.0)
             logger.info(
                 "[15M-LOOP] Using aggressiveness from candidate: ticker=%s aggressiveness=%.2f",
                 ticker, aggressiveness
@@ -6423,6 +6501,23 @@ class Kalshi15mLoop:
                 except Exception as trace_exc:
                     logger.warning("[CANDIDATE-TRACE] Failed to update trace with canonical probability: %s", trace_exc)
 
+            # CRITICAL FIX 2026-08-09: Resolve execution parameters as the final source of
+            # truth before constructing the canonical OrderIntent.  Aggressiveness=0 -> maker
+            # GTC, 0 < aggressiveness < 1 -> staged IOC taker, >= 1 -> full taker IOC.
+            if aggressiveness <= 0.0:
+                resolved_time_in_force = candidate.get("time_in_force", "gtc")
+                resolved_execution_mode = candidate.get("execution_mode") or "maker"
+                resolved_liquidity_role = "maker"
+            elif aggressiveness >= 1.0:
+                resolved_time_in_force = candidate.get("time_in_force", "ioc")
+                resolved_execution_mode = candidate.get("execution_mode") or "taker"
+                resolved_liquidity_role = "taker"
+            else:
+                resolved_time_in_force = candidate.get("time_in_force", "ioc")
+                resolved_execution_mode = candidate.get("execution_mode") or "staged_ioc"
+                resolved_liquidity_role = "taker"
+            resolved_post_only = bool(candidate.get("post_only", False)) and aggressiveness == 0.0
+
             intent = OrderIntent(
                 ticker=ticker,
                 side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
@@ -6450,21 +6545,27 @@ class Kalshi15mLoop:
                 strategy_type="heuristic_velocity",  # From profile strategies section
                 regime=regime,  # Regime computed from market state (lines 2689-2717)
                 # CRITICAL FIX 2026-07-29: Add execution mode for regime-based routing
-                execution_mode=candidate.get("execution_mode"),  # Execution mode (maker/taker/staged_ioc/passive_quote)
+                # 2026-08-09: Use resolved execution parameters (final source of truth)
+                execution_mode=resolved_execution_mode,
+                liquidity_role=resolved_liquidity_role,
+                time_in_force=resolved_time_in_force,
                 # Phase 5.4: Raw logit for probability calibration outcome recording
                 raw_logit=raw_logit,
                 # CRITICAL FIX: Use order_type from candidate (set by signal generation)
-                order_type=candidate.get("order_type", "limit"),  # Default to limit for maker rebate
+                order_type=candidate.get("order_type", "limit"),  # Default to limit
                 # CRITICAL FIX: Use post_only from candidate (set by signal generation)
-                post_only=candidate.get("post_only", False),  # Default to False to prevent Kalshi API rejection
+                # 2026-08-09: post_only only honored for true resting orders
+                post_only=resolved_post_only,
                 # CRITICAL FIX: Use aggressiveness from candidate (set by signal generation)
-                aggressiveness=candidate.get("aggressiveness", 0.5),  # 0.0=resting, 0.5-1.0=marketable
+                # 2026-08-09: resolved above, defaulting to taker/IOC for missing values
+                aggressiveness=aggressiveness,
                 # CRITICAL FIX: Add client_tag for TP/SL registration with position cache
                 client_tag=client_tag,
                 # CRITICAL FIX: Add exit targets from resolved exit policy
                 take_profit_price_cents=take_profit_price_cents,
                 take_profit_r_multiple=take_profit_r_multiple,
                 stop_loss_price_cents=stop_loss_price_cents,
+                stop_loss_enabled=stop_loss_enabled,
                 # CRITICAL FIX (2026-07-08): exit_policy must be non-None at this point
                 # If exit_policy is None, it should have been rejected earlier in _execute_candidate
                 # This defensive check ensures we fail loudly if there's a bug in the control flow
@@ -6887,8 +6988,8 @@ class Kalshi15mLoop:
             # in the single canonical path inside order_router (_route_live) using the
             # normalized port result.  loop_15m only updates its own lightweight
             # tracking and emits a per-intent audit line.
-            executed_count = result.executed_count if result else 0
-            fill_price_cents = result.fill.get("price_cents", price_cents) if (result and result.fill) else price_cents
+            executed_count = int(result.executed_count) if result else 0
+            fill_price_cents = int(result.fill.get("price_cents", price_cents)) if (result and result.fill) else price_cents
             executed_notional_usd = (executed_count * fill_price_cents) / 100.0
             remaining_count = result.remaining_count if result else 0
             order_id = result.order_id if (result and result.order_id) else None
@@ -6919,6 +7020,12 @@ class Kalshi15mLoop:
             if order_id:
                 candidate["order_id"] = order_id
                 logger.info("[15M-LOOP] Stored order_id=%s in candidate for ticker=%s", order_id, ticker)
+
+            # CRITICAL FIX (2026-08-09): Preserve execution outcome so edge-improvement logic
+            # can avoid canceling an already-filled order (causes 404 / circuit breaker trips).
+            if result:
+                candidate["status"] = result.status
+                candidate["has_execution"] = result.has_execution
 
             # Only actual executions affect loop-level position/trade counters.
             if result and result.has_execution and asset:

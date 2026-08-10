@@ -9,14 +9,32 @@ import logging
 import re
 import threading
 import time
+import traceback
+import uuid
+from decimal import Decimal
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, List, Any
-from merid.position_management.position import Position, PositionSide, TrailingType
+from typing import Dict, Optional, List, Any, Union
+from merid.position_management.position import Position, PositionSide, TrailingType, TrailingState
 from merid.position_management.exit_policy import ExitAction, ExitReason
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver
 from merid.position_management.exit_decision import ExitDecision, ExitSourceLayer, get_priority_for_reason
+from merid.position_management.exit_audit import ExitPriceSnapshot, ExitDecisionRecord
+from merid.event_venues.kalshi.stop_candidate import (
+    STOP_EDGE_HYSTERESIS_CENTS,
+    STOP_EDGE_MIN_CONSECUTIVE,
+    STOP_EDGE_TOTAL_EXIT_COST_CENTS,
+    _book_age_ms,
+    _get_executable_exit_cents,
+    _get_fair_value_cents,
+    build_stop_candidate,
+    evaluate_edge_stop,
+    maybe_submit_stop_candidate_sync,
+    record_stop_candidate,
+)
+from merid.event_venues.kalshi.binary_price_space import to_signed_yes_exposure
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 import os
 print(f"[POSITION-MONITOR-MODULE] Module loaded from {__file__}, thesis side inference fix applied (2026-08-01)")
 logger.info(f"[POSITION-MONITOR-MODULE] Module loaded from {__file__}, thesis side inference fix applied (2026-08-01)")
@@ -25,8 +43,9 @@ logger.info(f"[POSITION-MONITOR-MODULE] Module loaded from {__file__}, thesis si
 def _is_expired_ticker(ticker: str) -> bool:
     """Check if a ticker has expired (market is in the past).
 
-    Parses the date from the ticker format (e.g., KXBTC15M-26JUL022230-30)
-    and checks if the market expiration time is in the past.
+    CRITICAL FIX (2026-08-03): Uses the canonical YYMONDD-HHMM-ET parser
+    (parse_kalshi_15m_window_end_utc). The previous DDMMM-HHMMSS-UTC parsing
+    was off by ~26 days and 4-5h, so expired markets were never filtered.
 
     Args:
         ticker: The market ticker to check
@@ -38,47 +57,63 @@ def _is_expired_ticker(ticker: str) -> bool:
         return False
 
     try:
-        # Parse ticker format: KXBTC15M-26JUL022230-30
-        # Extract date part: 26JUL022230 (DDMMMHHMMSS format - 11 total chars)
-        match = re.search(r'-(\d{2}[A-Z]{3}\d{6})-', ticker)
-        if not match:
-            return False
+        from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_ticker_expiry
+        expiry_dt, is_15m_pattern = parse_kalshi_15m_ticker_expiry(ticker)
+        if expiry_dt is not None:
+            # Check if expired (allow 30s buffer for market close processing)
+            now = datetime.now(timezone.utc)
+            expiry_buffer = timedelta(seconds=30)
+            return expiry_dt < (now - expiry_buffer)
 
-        date_str = match.group(1)
-        day = int(date_str[0:2])
-        month_str = date_str[2:5].upper()
-        hour = int(date_str[5:7])
-        minute = int(date_str[7:9])
-        second = int(date_str[9:11])
-
-        # Map month abbreviation to number
-        months = {
-            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
-        }
-        month = months.get(month_str)
-        if month is None:
-            return False
-
-        # Assume current year (Kalshi tickers are typically current year)
-        current_year = datetime.now(timezone.utc).year
-
-        # Create expiration datetime in UTC
-        try:
-            expiry_dt = datetime(current_year, month, day, hour, minute, second, tzinfo=timezone.utc)
-        except ValueError:
-            # Invalid date (e.g., Feb 30), assume expired
-            return True
-
-        # Check if expired (allow 15 minute buffer for market close processing)
-        now = datetime.now(timezone.utc)
-        expiry_buffer = timedelta(minutes=15)
-
-        return expiry_dt < (now - expiry_buffer)
+        # If the ticker has a recognizable 15m date/time segment but the date is
+        # unparseable/invalid (e.g. 30FEB), treat it as expired for safety.
+        return is_15m_pattern
 
     except Exception as e:
         logger.debug(f"[EXPIRED-TICKER] Exception parsing ticker {ticker}: {e}")
-        return False  # On parse error, don't filter out
+        return "15M" in ticker.upper()
+
+
+def _seconds_to_expiry_from_ticker(ticker: str) -> Optional[float]:
+    """Parse seconds until settlement from a Kalshi ticker.
+
+    CRITICAL FIX (2026-08-03): Uses the canonical YYMONDD-HHMM-ET parser.
+    The previous DDMMM-HHMMSS-UTC parsing returned ~23 days for live 15m
+    tickers, so the T-30s forced-exit settlement guard NEVER fired.
+    Returns None if the ticker cannot be parsed.
+    """
+    if not ticker:
+        return None
+    try:
+        from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_window_end_utc
+        expiry_dt = parse_kalshi_15m_window_end_utc(ticker)
+        if expiry_dt is None:
+            return None
+        return (expiry_dt - datetime.now(timezone.utc)).total_seconds()
+    except Exception:
+        return None
+
+
+# Settlement guard: force exit this many seconds before market settlement
+SETTLEMENT_GUARD_SECONDS = 30
+
+# Position monitor constants
+POLL_INTERVAL_SECONDS = 5.0  # Default polling interval in seconds
+SUBMISSION_CACHE_TTL_SECONDS = 15.0  # Time-to-live for exit submission cache
+STARTUP_GRACE_WINDOW_SECONDS = 30.0  # Grace window for startup race conditions
+EXIT_INTENT_TIMEOUT_SECONDS = 15.0  # Timeout for exit intent completion
+DUPLICATE_WINDOW_SECONDS = 5.0  # Time window to consider orders duplicate
+R_MULTIPLE_THRESHOLD = 0.5  # R-multiple threshold for time-based exits
+TRAILING_ACTIVATION_R = 0.8  # R-multiple to activate trailing stops
+TRAILING_GIVEBACK_CENTS = 5  # Default giveback in cents for trailing stops
+DEFAULT_RISK_CENTS = 5  # Default risk in cents for position sizing
+
+# CRITICAL FIX (2026-08-09): Stop-loss and edge-decay freshness/confirmation guards
+SOFT_STOP_MIN_OBSERVATIONS = int(os.getenv("MERID_SOFT_STOP_MIN_OBSERVATIONS", "2"))  # confirmation polls
+HARD_STOP_EXTRA_BUFFER_CENTS = int(os.getenv("MERID_HARD_STOP_EXTRA_BUFFER_CENTS", "1"))  # extra buffer for taker fee/slippage
+MIN_EDGE_DECAY_HOLD_SECONDS = float(os.getenv("MERID_MIN_EDGE_DECAY_HOLD_SECONDS", "30.0"))  # edge-decay may not fire immediately after fill
+MIN_EXIT_HOLD_SECONDS = float(os.getenv("MERID_MIN_EXIT_HOLD_SECONDS", "2.0"))  # minimum seconds any exit can hold (except hard stop / market close)
+EXIT_PRICE_MAX_AGE_MS = float(os.getenv("MERID_EXIT_PRICE_MAX_AGE_MS", "10000.0"))  # 10s default
 
 
 class PositionMonitor:
@@ -91,7 +126,7 @@ class PositionMonitor:
     
     def __init__(
         self,
-        poll_interval: float = 5.0,  # Check positions every 5 seconds
+        poll_interval: float = POLL_INTERVAL_SECONDS,  # Check positions every 5 seconds
     ):
         """
         Initialize position monitor.
@@ -111,7 +146,8 @@ class PositionMonitor:
         # Tracks exit orders submitted but not yet visible in RestingOrderMonitor
         # Prevents duplicate exits due to exchange confirmation latency
         self._recent_exit_submissions: Dict[str, float] = {}  # client_order_id -> timestamp
-        self._submission_cache_ttl = 10.0  # 10 seconds TTL for submission cache
+        self._submission_cache_ttl = SUBMISSION_CACHE_TTL_SECONDS  # 15 seconds TTL for submission cache
+        self._position_to_client_order: Dict[str, str] = {}  # position_id -> client_order_id
         
         # CRITICAL FIX (2026-07-23): First-class exit registry
         # Tracks exit orders by position_id as source of truth
@@ -128,12 +164,17 @@ class PositionMonitor:
         # Tracks process start time and orders last updated timestamp
         self._process_start_time = time.time()
         self._orders_last_updated_ts: Optional[float] = None
-        self._startup_grace_window_seconds = 30.0  # 30 seconds grace window for startup
+        self._startup_grace_window_seconds = STARTUP_GRACE_WINDOW_SECONDS  # 30 seconds grace window for startup
         
         # CRITICAL FIX (2026-07-23): Edge-triggered execution lock per position
         # Prevents multiple exit triggers (TP + SL) from firing before first exit is placed
-        self._exit_intent_in_flight: Dict[str, float] = {}  # position_id -> timestamp when intent was generated
-        self._exit_intent_timeout_seconds = 15.0  # 15 seconds timeout for exit intent to complete
+        # 2026-08-09: state machine (SUBMITTED / SUBMISSION_UNKNOWN / RECONCILED)
+        self._exit_intent_in_flight: Dict[str, Dict[str, Any]] = {}  # position_id -> {"state": str, "timestamp": float, "client_order_id": Optional[str]}
+        self._exit_intent_timeout_seconds = EXIT_INTENT_TIMEOUT_SECONDS  # 15 seconds timeout for exit intent to complete
+        
+        # CRITICAL FIX (2026-08-09): Durable cleanup queue for capacity/risk/monitor cleanup failures.
+        # A position is removed from active trading immediately; any failed bookkeeping is retried.
+        self._cleanup_pending: List[Dict[str, Any]] = []  # queue of cleanup work items
     
     def _is_expired_market(self, market_id: str) -> bool:
         """Check if a market has expired based on its ticker.
@@ -157,6 +198,17 @@ class PositionMonitor:
         self._exit_intent_callback = callback
         logger.info("[POSITION-MONITOR] Registered exit intent callback")
     
+    @staticmethod
+    def _is_full_ticker(market_id: str) -> bool:
+        """A full 15m market ticker contains a date/time window segment (e.g. KXBTC15M-26AUG100000-00).
+
+        Strip/series keys such as KXBTC15M are not unique across windows and must not be used
+        as position or exit-in-flight identifiers.
+        """
+        if not market_id:
+            return False
+        return "-" in market_id and len(market_id.split("-")) >= 2
+
     def add_position(self, position: Position) -> None:
         """
         Add a new position to monitor.
@@ -164,6 +216,23 @@ class PositionMonitor:
         Args:
             position: Position to add
         """
+        # CRITICAL FIX (2026-08-08): Never monitor positions for expired/closed markets.
+        # These contracts cannot be traded and should route to settlement reconciliation.
+        if self._is_expired_market(position.market_id):
+            logger.warning(
+                "[POSITION-MONITOR] Rejecting position for expired/closed market: %s market=%s",
+                position.position_id[:8], position.market_id
+            )
+            return
+
+        # CRITICAL FIX (2026-08-09): Reject strip/series-only keys to avoid cross-window collisions.
+        if not self._is_full_ticker(position.market_id):
+            logger.error(
+                "[POSITION-MONITOR-KEY-REJECT] Refusing to monitor position keyed by strip/series: %s market=%s",
+                position.position_id[:8], position.market_id
+            )
+            return
+
         with self._lock:
             if position.position_id in self._open_positions:
                 logger.warning(
@@ -188,82 +257,141 @@ class PositionMonitor:
             position.confidence,
         )
     
+    def _resolve_position_id(self, position_id: str) -> Optional[str]:
+        """Resolve either a position_id or a full market_id to the canonical position_id."""
+        with self._lock:
+            if position_id in self._open_positions:
+                return position_id
+            if position_id in self._market_to_position:
+                return self._market_to_position[position_id]
+        return None
+
+    def _record_cleanup_pending(
+        self,
+        position: Position,
+        reason: str,
+        exc: Optional[Exception] = None,
+    ) -> None:
+        """Queue a failed cleanup for idempotent retry. The active position is already gone."""
+        item = {
+            "position_id": position.position_id,
+            "market_id": position.market_id,
+            "side": position.side.value if position.side else None,
+            "size": position.size,
+            "avg_entry_price_cents": position.avg_entry_price_cents,
+            "reason": reason,
+            "traceback": traceback.format_exc() if exc is not None else None,
+            "timestamp": time.time(),
+        }
+        with self._lock:
+            self._cleanup_pending.append(item)
+        logger.exception(
+            "[POSITION-CLEANUP-PENDING] key=%s market=%s; active position already removed",
+            position.position_id[:8],
+            position.market_id,
+            exc_info=exc,
+        )
+
     def remove_position(self, position_id: str) -> None:
         """
         Remove a position from monitoring.
-        
+
+        2026-08-09 redesign:
+        - The canonical position is removed immediately from active trading eligibility.
+        - Capacity/risk/monitor cleanup is attempted idempotently after removal.
+        - If cleanup fails, a `CLEANUP_PENDING` work item is created and retried later.
+        A bookkeeping failure can NEVER resurrect or retain an active position.
+
         Args:
-            position_id: Position ID to remove
+            position_id: Position ID or full market_id to remove
         """
+        resolved_id = self._resolve_position_id(position_id)
+        if resolved_id is None:
+            logger.warning(
+                "[POSITION-MONITOR] Position %s not found, cannot remove",
+                position_id[:8] if len(position_id) > 8 else position_id
+            )
+            return
+
         with self._lock:
-            if position_id not in self._open_positions:
-                logger.warning(
-                    "[POSITION-MONITOR] Position %s not found, cannot remove",
-                    position_id
-                )
+            position = self._open_positions.pop(resolved_id, None)
+            if position is None:
                 return
-
-            position = self._open_positions[position_id]
-
-            # FIX 9: Atomic window capacity release - release BEFORE removing position
-            # This ensures atomicity: if capacity release fails, position is not removed
-            # preventing capacity leaks. Both operations must succeed or both fail.
-            try:
-                # Calculate notional to release
-                notional_usd = (position.size * position.avg_entry_price_cents) / 100.0
-
-                # Release exposure using risk envelope (which has window tracking)
-                try:
-                    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                    envelope = get_kalshi_crypto_15m_risk_envelope()
-                    envelope.record_position_closure(position.market_id, notional_usd)
-                except RuntimeError as e:
-                    # Bankroll not ready - log warning but don't crash
-                    logger.warning(
-                        "[POSITION-MONITOR] Failed to release window exposure: %s (bankroll service unavailable)",
-                        e
-                    )
-                    # FIX 9: If capacity release fails, do NOT remove position to prevent capacity leak
-                    logger.error(
-                        "[POSITION-MONITOR] Atomicity violation: capacity release failed, keeping position to prevent leak: %s",
-                        position_id[:8]
-                    )
-                    return
-
-                logger.info(
-                    "[POSITION-MONITOR] Released window capacity: market=%s notional=$%.2f exit_reason=%s",
-                    position.market_id,
-                    notional_usd,
-                    position.exit_reason,
-                )
-            except RuntimeError as e:
-                # Risk envelope not ready (bankroll not available) - log warning but don't fail
-                # FIX 9: If capacity release fails, do NOT remove position to prevent capacity leak
-                logger.warning(
-                    "[POSITION-MONITOR] Risk envelope not ready, keeping position to prevent capacity leak: %s",
-                    e
-                )
-                return
-            except Exception as e:
-                logger.error(
-                    "[POSITION-MONITOR] Failed to release window capacity, keeping position to prevent leak: %s",
-                    e,
-                    exc_info=True
-                )
-                # FIX 9: If capacity release fails, do NOT remove position to prevent capacity leak
-                return
-
-            # Capacity release succeeded - now remove position from tracking
-            del self._open_positions[position_id]
-            if position.market_id in self._market_to_position:
-                del self._market_to_position[position.market_id]
+            self._market_to_position.pop(position.market_id, None)
+            self._exit_registry.pop(resolved_id, None)
+            self._exit_quantities.pop(resolved_id, None)
+            self._position_exit_locks.pop(resolved_id, None)
+            self._exit_intent_in_flight.pop(resolved_id, None)
+            self._position_to_client_order.pop(resolved_id, None)
 
         logger.info(
-            "[POSITION-MONITOR] Removed position: %s (exit_reason=%s, exit_price=%dc)",
-            position_id[:8],
-            position.exit_reason,
-            position.exit_price_cents,
+            "[POSITION-MONITOR] Removed active position: %s (market=%s, exit_reason=%s, exit_price=%sc)",
+            position.position_id[:8],
+            position.market_id,
+            position.exit_reason or "none",
+            position.exit_price_cents if position.exit_price_cents is not None else "N/A",
         )
+
+        # 2026-08-09: Decimal math for notional; never divide Decimal by float.
+        try:
+            notional_usd = (
+                Decimal(str(position.size)) * Decimal(position.avg_entry_price_cents)
+            ) / Decimal("100")
+        except Exception as e:
+            self._record_cleanup_pending(position, "notional_calculation_failed", e)
+            return
+
+        # Attempt idempotent window capacity release.
+        try:
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+            envelope = get_kalshi_crypto_15m_risk_envelope()
+            # record_position_closure currently uses float-based module state; pass float for compatibility.
+            envelope.record_position_closure(position.market_id, float(notional_usd))
+            logger.info(
+                "[POSITION-CLEANUP] Released window capacity: market=%s notional=$%.2f exit_reason=%s",
+                position.market_id,
+                float(notional_usd),
+                position.exit_reason,
+            )
+        except Exception as e:
+            self._record_cleanup_pending(position, "capacity_release_failed", e)
+
+    def retry_cleanup(self) -> int:
+        """Retry any pending cleanup work items. Returns number of successfully processed items."""
+        successes = 0
+        with self._lock:
+            pending = list(self._cleanup_pending)
+            self._cleanup_pending = []
+
+        remaining = []
+        for item in pending:
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                envelope = get_kalshi_crypto_15m_risk_envelope()
+                size = item.get("size", 0)
+                price = item.get("avg_entry_price_cents", 0)
+                notional_usd = (Decimal(str(size)) * Decimal(price)) / Decimal("100")
+                envelope.record_position_closure(item["market_id"], float(notional_usd))
+                successes += 1
+                logger.info(
+                    "[POSITION-CLEANUP-RETRY] Successfully released capacity: market=%s notional=$%.2f",
+                    item["market_id"], float(notional_usd)
+                )
+            except Exception as e:
+                item["retry_count"] = item.get("retry_count", 0) + 1
+                remaining.append(item)
+                logger.warning(
+                    "[POSITION-CLEANUP-RETRY-FAILED] market=%s retry=%d error=%s",
+                    item["market_id"], item["retry_count"], e
+                )
+
+        with self._lock:
+            self._cleanup_pending = remaining
+        return successes
+
+    def get_cleanup_pending(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return list(self._cleanup_pending)
     
     def get_position(self, position_id: str) -> Optional[Position]:
         """
@@ -599,22 +727,32 @@ class PositionMonitor:
         
         return result
     
-    def _register_exit_submission(self, client_order_id: str) -> None:
+    def _register_exit_submission(
+        self,
+        client_order_id: str,
+        position_id: Optional[str] = None,
+    ) -> None:
         """
         Register a recent exit order submission to handle websocket lag.
-        
+
         CRITICAL FIX (2026-07-23): This prevents duplicate exits when exchange
         confirmation is delayed. Orders in this cache are treated as "exists"
         even if not yet visible in RestingOrderMonitor.
-        
+
+        CRITICAL FIX (2026-08-07): Also map the client_order_id to the position
+        so we can reconcile before a timeout-triggered retry.
+
         Args:
             client_order_id: Client order ID of the submitted exit order
+            position_id: Optional position_id for reconciliation mapping
         """
         with self._lock:
             self._recent_exit_submissions[client_order_id] = time.time()
+            if position_id:
+                self._position_to_client_order[position_id] = client_order_id
             logger.debug(
-                "[EXIT-SUBMISSION-CACHE] Registered exit submission: client_order_id=%s",
-                client_order_id
+                "[EXIT-SUBMISSION-CACHE] Registered exit submission: client_order_id=%s position_id=%s",
+                client_order_id, position_id or ""
             )
     
     def _is_exit_submitted_recently(self, client_order_id: str) -> bool:
@@ -654,7 +792,11 @@ class PositionMonitor:
             ]
             for order_id in expired:
                 del self._recent_exit_submissions[order_id]
-            
+                # Remove the position mapping for this client order.
+                for position_id, mapped_coid in list(self._position_to_client_order.items()):
+                    if mapped_coid == order_id:
+                        del self._position_to_client_order[position_id]
+
             if expired:
                 logger.debug(
                     "[EXIT-SUBMISSION-CACHE] Cleaned up %d expired submissions",
@@ -802,66 +944,216 @@ class PositionMonitor:
         
         return result
     
-    def _mark_exit_intent_in_flight(self, position_id: str) -> None:
+    def _mark_exit_intent_in_flight(
+        self, position_id: str, client_order_id: Optional[str] = None
+    ) -> None:
         """
         Mark an exit intent as in-flight for a position.
-        
+
         CRITICAL FIX (2026-07-23): This prevents multiple exit triggers (TP + SL)
         from firing before the first exit is placed. Only one exit intent can be
         in-flight per position at a time.
-        
+
+        2026-08-09 redesign: state machine (SUBMITTED -> SUBMISSION_UNKNOWN -> RECONCILED).
+        A timeout does NOT allow a new exit until order/position state is reconciled.
+
         Args:
             position_id: Position ID
+            client_order_id: Optional client_order_id for order lookup on timeout
         """
         with self._lock:
-            self._exit_intent_in_flight[position_id] = time.time()
-            logger.debug(
-                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent in-flight: position_id=%s",
-                position_id[:8]
+            self._exit_intent_in_flight[position_id] = {
+                "state": "SUBMITTED",
+                "timestamp": time.time(),
+                "client_order_id": client_order_id,
+            }
+            if client_order_id:
+                self._position_to_client_order[position_id] = client_order_id
+                self._recent_exit_submissions[client_order_id] = time.time()
+            logger.info(
+                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent SUBMITTED: position_id=%s client_order_id=%s",
+                position_id[:8],
+                client_order_id,
             )
-    
+
+    def _mark_exit_intent_reconciled(self, position_id: str, reason: str) -> None:
+        """Mark an exit intent as reconciled (terminal). Safe to call idempotently."""
+        with self._lock:
+            if position_id in self._exit_intent_in_flight:
+                self._exit_intent_in_flight[position_id]["state"] = "RECONCILED"
+                logger.info(
+                    "[EXIT-INTENT-IN-FLIGHT] Exit intent RECONCILED: position_id=%s reason=%s",
+                    position_id[:8], reason
+                )
+            if position_id in self._position_to_client_order:
+                del self._position_to_client_order[position_id]
+
     def _is_exit_intent_in_flight(self, position_id: str) -> bool:
         """
         Check if an exit intent is currently in-flight for a position.
-        
+
+        2026-08-09: A timeout transitions to SUBMISSION_UNKNOWN and blocks new exits
+        until the order and position are reconciled. The intent is NEVER silently dropped.
+
         Args:
             position_id: Position ID
-            
+
         Returns:
-            True if exit intent is in-flight, False otherwise
+            True if exit intent is in-flight (submitted or submission unknown), False if terminal/absent.
         """
         with self._lock:
-            if position_id not in self._exit_intent_in_flight:
+            flight = self._exit_intent_in_flight.get(position_id)
+            if flight is None:
+                # If no in-flight flag but a recent exit submission exists for this
+                # position, keep it in-flight until the submission cache TTL expires.
+                client_order_id = self._position_to_client_order.get(position_id)
+                if client_order_id:
+                    ts = self._recent_exit_submissions.get(client_order_id)
+                    if ts and time.time() - ts < self._submission_cache_ttl:
+                        return True
                 return False
-            
-            # Check if the intent has timed out
-            intent_time = self._exit_intent_in_flight[position_id]
-            if time.time() - intent_time > self._exit_intent_timeout_seconds:
-                # Expired, remove from in-flight tracking
+
+            state = flight["state"]
+            intent_time = flight["timestamp"]
+            client_order_id = flight.get("client_order_id") or self._position_to_client_order.get(position_id)
+
+            if state == "RECONCILED":
+                # Terminal state - remove and allow new exits.
                 del self._exit_intent_in_flight[position_id]
-                logger.warning(
-                    "[EXIT-INTENT-IN-FLIGHT] Exit intent timed out: position_id=%s age=%.2fs",
-                    position_id[:8],
-                    time.time() - intent_time
-                )
+                if position_id in self._position_to_client_order:
+                    del self._position_to_client_order[position_id]
                 return False
-            
+
+            if state == "SUBMISSION_UNKNOWN":
+                # Already timed out. Block duplicate exits until reconciled.
+                logger.warning(
+                    "[EXIT-INTENT-IN-FLIGHT] Exit in SUBMISSION_UNKNOWN: position_id=%s client_order_id=%s; "
+                    "reconciliation required before re-arm",
+                    position_id[:8], client_order_id
+                )
+                return True
+
+            # state == SUBMITTED
+            if time.time() - intent_time > self._exit_intent_timeout_seconds:
+                # Check for a recent submission before moving to SUBMISSION_UNKNOWN.
+                if client_order_id:
+                    ts = self._recent_exit_submissions.get(client_order_id)
+                    if ts and time.time() - ts < self._submission_cache_ttl:
+                        logger.warning(
+                            "[EXIT-INTENT-IN-FLIGHT] Exit intent timed out but recent submission "
+                            "client_order_id=%s for position=%s still in cache; keeping SUBMITTED",
+                            client_order_id, position_id[:8]
+                        )
+                        return True
+
+                flight["state"] = "SUBMISSION_UNKNOWN"
+                logger.error(
+                    "[EXIT-INTENT-IN-FLIGHT] Exit intent timed out -> SUBMISSION_UNKNOWN: position_id=%s "
+                    "client_order_id=%s age=%.2fs. Reconciliation required before new exit.",
+                    position_id[:8], client_order_id, time.time() - intent_time
+                )
+                # Trigger reconciliation asynchronously.
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._reconcile_exit_intent(position_id, client_order_id))
+                except RuntimeError:
+                    # No event loop in synchronous contexts; reconcile will run on next poll.
+                    pass
+                return True
+
             return True
-    
+
+    async def _reconcile_exit_intent(
+        self, position_id: str, client_order_id: Optional[str]
+    ) -> None:
+        """Reconcile an exit intent in SUBMISSION_UNKNOWN by order and exchange position lookup."""
+        try:
+            # Best-effort: if position is already flat, terminalize.
+            with self._lock:
+                position = self._open_positions.get(position_id)
+            if position is None:
+                logger.info(
+                    "[EXIT-INTENT-RECONCILE] position_id=%s is no longer open; terminalizing exit intent",
+                    position_id[:8]
+                )
+                self._mark_exit_intent_reconciled(position_id, "position_closed")
+                return
+
+            # If the position has zero canonical exposure, terminalize.
+            if position.size == 0:
+                logger.info(
+                    "[EXIT-INTENT-RECONCILE] position_id=%s size is zero; terminalizing exit intent",
+                    position_id[:8]
+                )
+                self._mark_exit_intent_reconciled(position_id, "position_size_zero")
+                return
+
+            # CRITICAL FIX: Query exchange for order state to avoid permanent exit blocking.
+            if client_order_id and position.market_id:
+                try:
+                    from merid.event_venues.kalshi.client_v2 import get_kalshi_client
+                    client = get_kalshi_client()
+                    lookup = await client.get_order_by_client_id_result(
+                        client_order_id, market_id=position.market_id
+                    )
+                    order = getattr(lookup, "data", None) if lookup else None
+                    if order:
+                        status = (getattr(order, "status", "") or "").lower()
+                        if status in ("filled", "executed"):
+                            logger.info(
+                                "[EXIT-INTENT-RECONCILE] Order %s is FILLED for position=%s; terminalizing exit intent",
+                                client_order_id[:8], position_id[:8]
+                            )
+                            self._mark_exit_intent_reconciled(position_id, "order_filled")
+                            return
+                        elif status in ("canceled", "rejected"):
+                            logger.info(
+                                "[EXIT-INTENT-RECONCILE] Order %s is %s for position=%s; terminalizing exit intent",
+                                client_order_id[:8], status, position_id[:8]
+                            )
+                            self._mark_exit_intent_reconciled(position_id, f"order_{status}")
+                            return
+                        elif status in ("open", "resting"):
+                            logger.info(
+                                "[EXIT-INTENT-RECONCILE] Order %s is %s for position=%s; exit still live",
+                                client_order_id[:8], status, position_id[:8]
+                            )
+                            # Leave in SUBMISSION_UNKNOWN; the order is still working.
+                            return
+                except Exception as order_exc:
+                    logger.debug(
+                        "[EXIT-INTENT-RECONCILE] Order lookup failed for position=%s: %s",
+                        position_id[:8], order_exc
+                    )
+
+            # Fallback: leave in SUBMISSION_UNKNOWN and alert; a later fill callback should reconcile.
+            logger.warning(
+                "[EXIT-INTENT-RECONCILE] position_id=%s client_order_id=%s requires external "
+                "reconciliation; leaving in SUBMISSION_UNKNOWN",
+                position_id[:8], client_order_id
+            )
+        except Exception as e:
+            logger.exception(
+                "[EXIT-INTENT-RECONCILE] Error reconciling position_id=%s: %s",
+                position_id[:8], e
+            )
+
     def _clear_exit_intent_in_flight(self, position_id: str) -> None:
         """
-        Clear the in-flight flag for a position after exit order is placed.
-        
+        Clear the in-flight flag for a position after exit order is placed or terminalized.
+
         Args:
             position_id: Position ID
         """
         with self._lock:
             if position_id in self._exit_intent_in_flight:
                 del self._exit_intent_in_flight[position_id]
-                logger.debug(
-                    "[EXIT-INTENT-IN-FLIGHT] Cleared exit intent in-flight: position_id=%s",
-                    position_id[:8]
-                )
+            if position_id in self._position_to_client_order:
+                del self._position_to_client_order[position_id]
+            logger.info(
+                "[EXIT-INTENT-IN-FLIGHT] Cleared exit intent in-flight: position_id=%s",
+                position_id[:8]
+            )
     
     def _get_position_lock(self, position_id: str) -> threading.Lock:
         """
@@ -947,43 +1239,122 @@ class PositionMonitor:
                 )
                 return True
     
-    async def _check_position(self, position: Position, current_price_cents: int, poll_count: int = 0) -> None:
+    async def _legacy_check_position(
+        self,
+        position: Position,
+        price_cents: int,
+        poll_count: int = 0,
+    ) -> None:
+        """
+        DEPRECATED (2026-08-10): Test-only adapter that wraps a raw integer price
+        in a synthetic ExitPriceSnapshot.  Production code must pass a real
+        ExitPriceSnapshot from a live or reconstructed order book.
+        """
+        import warnings
+        warnings.warn(
+            "_legacy_check_position is deprecated; use _check_position with an ExitPriceSnapshot",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        snapshot = ExitPriceSnapshot(
+            market_id=position.market_id,
+            position_side=position.side,
+            mid_cents=int(price_cents),
+            own_side_bid_cents=int(price_cents),
+            own_side_ask_cents=int(price_cents),
+            opposite_bid_cents=None,
+            opposite_ask_cents=None,
+            book_age_ms=0,
+            data_source="synthetic",
+            data_quality="GOOD",
+            executable=True,
+            has_bid_size=True,
+            snapshot_id=f"synthetic:{position.position_id[:8]}:{poll_count}",
+            timestamp=time.monotonic(),
+            min_depth_own_side=0,
+        )
+        return await self._check_position(position, snapshot, poll_count)
+
+    async def _check_position(
+        self,
+        position: Position,
+        snapshot: ExitPriceSnapshot,
+        poll_count: int = 0,
+    ) -> None:
         """
         Check a single position for exit conditions.
-        
+
         Args:
             position: Position to check
-            current_price_cents: Current market price in cents
+            snapshot: Executable same-side ExitPriceSnapshot from a live or
+                reconstructed order book.  Raw integers are rejected to ensure
+                every exit trigger carries side, bid/ask, book age, depth, and
+                snapshot ID provenance.
             poll_count: Current poll iteration number for dedupe keys
         """
-        # Update runtime state
+        if not isinstance(snapshot, ExitPriceSnapshot):
+            raise TypeError(
+                f"_check_position requires an ExitPriceSnapshot, got {type(snapshot).__name__}. "
+                "Use _legacy_check_position for deprecated integer test paths."
+            )
+        current_price_cents = snapshot.own_side_bid_cents
+
+        # Update runtime state using the executable liquidation bid
         position.update_runtime_state(current_price_cents)
+        
+        # CRITICAL FIX (2026-08-03): Settlement guard - forced exit at T-30s.
+        # Previously positions rode into settlement unmanaged (the "settlement trap"):
+        # expired markets were simply dropped from monitoring with no exit enforcement.
+        # Force a market exit while there is still a live order book.
+        try:
+            _secs_to_expiry = _seconds_to_expiry_from_ticker(position.market_id)
+            if _secs_to_expiry is not None and 0 < _secs_to_expiry <= SETTLEMENT_GUARD_SECONDS:
+                logger.warning(
+                    "[POSITION-MONITOR] SETTLEMENT-GUARD forced exit: position=%s market=%s side=%s "
+                    "tte=%.1fs <= %ds - exiting before settlement",
+                    position.position_id[:8],
+                    position.market_id,
+                    position.side.value,
+                    _secs_to_expiry,
+                    SETTLEMENT_GUARD_SECONDS,
+                )
+                self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)
+                return
+        except Exception as e:
+            logger.warning("[POSITION-MONITOR] Settlement guard check failed: %s", e)
+
+        # CRITICAL FIX (2026-08-08): Remove positions for markets that have already
+        # expired/closed. Do not wait for an exit trigger; the contract cannot be
+        # traded and the position is routed to settlement reconciliation.
+        if self._is_expired_market(position.market_id):
+            logger.warning(
+                "[POSITION-MONITOR] market_expired: position=%s market=%s side=%s - removing from monitor",
+                position.position_id[:8], position.market_id, position.side.value
+            )
+            position.exit_triggered = True
+            position.exit_reason = ExitReason.MARKET_EXPIRED.value
+            position.exited_at = datetime.utcnow()
+            self.remove_position(position.position_id)
+            return
         
         # CRITICAL FIX: 2026-07-31 - Ensure TP target is set to prevent asymmetric risk
         # If position has no TP target but has entry price, compute default 1R TP
         # This prevents positions from being able to exit on losses but never on profits
+        # CRITICAL FIX (2026-08-04): A position is always long its own side, so profit = own-side price rising.
+        # YES and NO both use TP above entry and SL below entry (in own-side cents).
         if position.take_profit_price_cents is None and position.avg_entry_price_cents > 0:
             if position.initial_risk_cents > 0:
-                # Use existing risk calculation (side-aware)
-                if position.side == PositionSide.YES:
-                    position.take_profit_price_cents = position.avg_entry_price_cents + position.initial_risk_cents
-                else:
-                    position.take_profit_price_cents = max(1, position.avg_entry_price_cents - position.initial_risk_cents)
+                # Use existing risk calculation
+                position.take_profit_price_cents = position.avg_entry_price_cents + position.initial_risk_cents
                 position.take_profit_r_multiple = 1.0
             else:
-                # Default to 5 cent risk if no SL set (side-aware)
-                default_risk_cents = 5
-                if position.side == PositionSide.YES:
-                    position.take_profit_price_cents = position.avg_entry_price_cents + default_risk_cents
-                else:
-                    position.take_profit_price_cents = max(1, position.avg_entry_price_cents - default_risk_cents)
+                # Default to 5 cent risk if no SL set
+                default_risk_cents = DEFAULT_RISK_CENTS
+                position.take_profit_price_cents = min(99, position.avg_entry_price_cents + default_risk_cents)
                 position.take_profit_r_multiple = 1.0
-                # Also set SL if not set for consistency (side-aware)
+                # Also set SL if not set for consistency
                 if position.stop_loss_price_cents is None:
-                    if position.side == PositionSide.YES:
-                        position.stop_loss_price_cents = max(1, position.avg_entry_price_cents - default_risk_cents)
-                    else:
-                        position.stop_loss_price_cents = min(99, position.avg_entry_price_cents + default_risk_cents)
+                    position.stop_loss_price_cents = max(1, position.avg_entry_price_cents - default_risk_cents)
                     position.initial_risk_cents = default_risk_cents
             logger.info(
                 "[POSITION-MONITOR-TP-FALLBACK] Set default TP for position=%s: entry=%dc tp=%dc sl=%dc",
@@ -1092,7 +1463,7 @@ class PositionMonitor:
                 current_price_cents,
                 position.side.value,
             )
-            self._emit_exit_intent(position, ExitReason.AUTO_EXIT_99C, current_price_cents)
+            self._emit_exit_intent(position, ExitReason.AUTO_EXIT_99C, current_price_cents, snapshot=snapshot)
             return
         
         # DYNAMIC TAKE PROFIT: Laddered exits based on entry price for consistent profits
@@ -1134,6 +1505,20 @@ class PositionMonitor:
                                     elif edge_pct <= edge_low_threshold:
                                         base_target = int(base_target * edge_low_multiplier)
                                 
+                                # CRITICAL FIX (2026-07-31): Dynamic TP zone must be ABOVE entry
+                                # for ALL positions. Both YES and NO are long their own side, and
+                                # profit = own-side price rising. A target at or below entry would
+                                # trigger at a loss or breakeven.
+                                if base_target <= entry_price:
+                                    fallback_target = min(99, entry_price + max(1, (100 - entry_price) * 3 // 5))
+                                    logger.error(
+                                        "[DYNAMIC-TP-CONFIG] Zone target %dc <= entry %dc for position=%s - "
+                                        "INVALID (would trigger at breakeven/loss). Using fallback target=%dc. "
+                                        "Fix dynamic_take_profit zones in profile config.",
+                                        base_target, entry_price, position.position_id[:8], fallback_target
+                                    )
+                                    base_target = fallback_target
+
                                 # CRITICAL FIX (2026-07-16): Side-space — entry and current
                                 # prices are in the position's OWN side cents for BOTH sides,
                                 # so zone targets apply directly (no 100-x mirror for NO)
@@ -1145,7 +1530,8 @@ class PositionMonitor:
                                     from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
                                     
                                     # Calculate gross profit
-                                    # CRITICAL FIX (2026-07-16): Side-space — target above entry for BOTH sides
+                                    # CRITICAL FIX (2026-08-04): A position is long its own side. Profit is the
+                                    # distance from entry toward higher own-side price (target > entry for both).
                                     gross_profit = (position.dynamic_tp_target_cents - entry_price) * position.size
                                     
                                     # Calculate round-trip fees
@@ -1219,7 +1605,7 @@ class PositionMonitor:
                                 current_price_cents,
                                 position.dynamic_tp_target_cents,
                             )
-                            self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents)
+                            self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents, snapshot=snapshot)
                             return
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Dynamic take profit check failed: %s", e)
@@ -1233,16 +1619,22 @@ class PositionMonitor:
                 adapter = get_active_profile()
                 profile = adapter.profile
                 if profile.ratchet_profit_floor_enabled:
-                    activation_threshold = profile.ratchet_activation_threshold_cents  # 85c
-                    floor_offset = profile.ratchet_floor_offset_cents  # 5c (floor at 80c)
+                    is_no = position.side == PositionSide.NO
+                    base_activation = profile.ratchet_activation_threshold_cents  # 85c (YES-space)
+                    floor_offset = profile.ratchet_floor_offset_cents  # 5c (floor offset in YES-space)
                     force_exit = profile.ratchet_force_exit_on_floor_breach
                     # CRITICAL FIX: 2026-07-06 - Removed mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
                     trim_enabled = profile.ratchet_trim_position_enabled  # 2026-07-05
-                    trim_threshold = profile.ratchet_trim_threshold_cents  # 2026-07-05: 80c
+                    base_trim_threshold = profile.ratchet_trim_threshold_cents  # 2026-07-05: 80c (YES-space)
                     trim_to_contracts = profile.ratchet_trim_to_contracts  # 2026-07-05: 1 contract
-                    
+
+                    # CRITICAL FIX (2026-08-04): Ratchet thresholds are own-side cents for BOTH sides.
+                    # A position is long its own side. Profit zone is own-side price >= 80c/85c for YES and NO.
+                    activation_threshold = base_activation
+                    trim_threshold = base_trim_threshold
+
                     # Calculate floor price
-                    floor_price = activation_threshold - floor_offset
+                    floor_price = base_activation - floor_offset  # 80c in own-side space
                     
                     # Check if position hit activation threshold
                     if not hasattr(position, 'ratchet_activated'):
@@ -1252,13 +1644,12 @@ class PositionMonitor:
                     if not hasattr(position, 'ratchet_trimmed'):
                         position.ratchet_trimmed = False  # 2026-07-05: Track if position was trimmed
                     
-                    # 2026-07-05: POSITION TRIMMING when >1 contract and price >80c
+                    # 2026-07-05: POSITION TRIMMING when >1 contract and price is deep in profit
                     # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double trim
                     # CRITICAL FIX: 2026-07-07 - Removed early return to cascade other exit checks
                     # After trimming, continue checking other exit conditions (extreme profit, dynamic TP, etc.)
                     # This ensures critical exits like 99c are not delayed by trimming
-                    # CRITICAL FIX (2026-07-16): Side-space — own-side price crossing the trim
-                    # threshold triggers for BOTH sides (no 100-x mirror for NO)
+                    # CRITICAL FIX (2026-07-16): Trim trigger when own-side price rises above threshold (BOTH sides)
                     if trim_enabled and not position.ratchet_trimmed and not position.exit_triggered:
                         if position.size > trim_to_contracts:
                             if current_price_cents >= trim_threshold:
@@ -1274,7 +1665,7 @@ class PositionMonitor:
                                     trim_to_contracts,
                                     contracts_to_close,
                                 )
-                                self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
+                                self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close, snapshot=snapshot)
                                 # CRITICAL FIX: Do NOT update position.size here - wait for fill callback
                                 # Previous code updated position.size prematurely, creating desync with PositionCache.contracts
                                 # Position.size should only be updated via fill callback to ensure consistency
@@ -1282,8 +1673,7 @@ class PositionMonitor:
                     
                     # Activate ratchet when price hits threshold
                     # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double activation
-                    # CRITICAL FIX (2026-07-16): Side-space — own-side price reaching the activation
-                    # threshold triggers for BOTH sides (no 100-x mirror for NO)
+                    # CRITICAL FIX (2026-07-16): Side-space — own-side price >= threshold for BOTH sides
                     if not position.ratchet_activated and not position.exit_triggered:
                         if current_price_cents >= activation_threshold:
                             position.ratchet_activated = True
@@ -1308,8 +1698,7 @@ class PositionMonitor:
                         
                         if can_exit:
                             # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double exit
-                            # CRITICAL FIX (2026-07-16): Side-space — own-side price falling to the
-                            # floor triggers for BOTH sides (no 100-x mirror for NO)
+                            # CRITICAL FIX (2026-07-16): Side-space — breach when own-side price falls to the floor for BOTH sides
                             if current_price_cents <= floor_price and not position.exit_triggered:
                                 # 2026-08-01: Check thesis validation if enabled
                                 thesis_validation_enabled = profile.ratchet_thesis_validation_enabled if hasattr(profile, 'ratchet_thesis_validation_enabled') else False
@@ -1323,7 +1712,7 @@ class PositionMonitor:
                                         current_price_cents,
                                         floor_price,
                                     )
-                                    self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents)
+                                    self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
                                     return
                                 elif thesis_validation_enabled:
                                     # Soft exit: only exit if thesis is broken
@@ -1338,7 +1727,7 @@ class PositionMonitor:
                                             current_price_cents,
                                             floor_price,
                                         )
-                                        self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents)
+                                        self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
                                         return
                                     else:
                                         logger.info(
@@ -1360,28 +1749,34 @@ class PositionMonitor:
             logger.warning("[POSITION-MONITOR] Ratchet profit floor check failed: %s", e)
         
         # Check TP/SL next
-        if position.should_trigger_stop_loss(current_price_cents):
+        # CRITICAL FIX (2026-08-09): Stop-loss must use the executable same-side bid
+        # and a fresh book.  Split hard (catastrophic, immediate) from soft (normal,
+        # requires confirmation).
+        sl_triggered, sl_kind = self._evaluate_stop_loss(position, current_price_cents, snapshot)
+        if sl_triggered:
             # AUDIT: Idempotency - generate dedupe key for this trigger
             dedupe_key = f"{position.position_id[:8]}:stop_loss:{poll_count}"
             # AUDIT: Log trigger evaluation
             logger.info(
-                "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=stop_loss price=%dc sl=%dc side=%s size=%d trigger=true dedupe_key=%s",
+                "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=stop_loss price=%dc sl=%dc side=%s size=%d kind=%s trigger=true dedupe_key=%s",
                 position.position_id[:8],
                 position.market_id,
                 current_price_cents,
                 position.stop_loss_price_cents,
                 position.side.value,
                 position.size,
+                sl_kind,
                 dedupe_key
             )
             logger.info(
-                "[POSITION-MONITOR] STOP-LOSS triggered: position=%s price=%dc sl=%dc R=%.2f",
+                "[POSITION-MONITOR] STOP-LOSS triggered: position=%s price=%dc sl=%dc kind=%s R=%.2f",
                 position.position_id[:8],
                 current_price_cents,
                 position.stop_loss_price_cents,
+                sl_kind,
                 position.r_multiple,
             )
-            self._emit_exit_intent(position, ExitReason.STOP_LOSS, current_price_cents)
+            self._emit_exit_intent(position, ExitReason.STOP_LOSS, current_price_cents, snapshot=snapshot)
             return
         
         if position.should_trigger_take_profit(current_price_cents):
@@ -1405,7 +1800,7 @@ class PositionMonitor:
                 position.take_profit_price_cents,
                 position.r_multiple,
             )
-            self._emit_exit_intent(position, ExitReason.TAKE_PROFIT, current_price_cents)
+            self._emit_exit_intent(position, ExitReason.TAKE_PROFIT, current_price_cents, snapshot=snapshot)
             return
         
         # Research: Check break-even trigger at 1R (capital preservation)
@@ -1498,29 +1893,41 @@ class PositionMonitor:
             # Calculate current profit in cents
             # CRITICAL FIX (2026-07-16): Side-space — profit = own-side price rising for BOTH sides
             profit_cents = current_price_cents - position.avg_entry_price_cents
-            
+
+            # Ensure numeric types (handle Mock objects in tests or missing profile values)
+            if not isinstance(min_profit_cents, (int, float)):
+                min_profit_cents = 12
+            if not isinstance(profit_zone_activation_cents, (int, float)):
+                profit_zone_activation_cents = 80
+            if not isinstance(activation_delay_sec, (int, float)):
+                activation_delay_sec = STARTUP_GRACE_WINDOW_SECONDS  # Default fallback
+
             # Check if profit threshold reached
             if profit_cents >= min_profit_cents:
                 # Record timestamp when threshold first reached
+                now_ts = time.monotonic()
                 if position.trailing_profit_threshold_reached_at is None:
                     position.trailing_profit_threshold_reached_at = datetime.utcnow().timestamp()
+                    position.trail_armed_at = now_ts
+                    position.high_watermark_updated_at = now_ts
+                    position.trailing_state = TrailingState.ARMED
                     logger.info(
                         "[POSITION-MONITOR] TRAILING profit threshold reached: position=%s price=%dc profit=%dc - waiting %ds delay before activation",
                         position.position_id[:8],
                         current_price_cents,
                         profit_cents,
-                        activation_delay_sec,
+                        int(activation_delay_sec),
                     )
-                
+
                 # Check if activation delay has elapsed
                 now = datetime.utcnow().timestamp()
-                # Ensure activation_delay_sec is a float (handle Mock objects in tests)
-                if not isinstance(activation_delay_sec, (int, float)):
-                    activation_delay_sec = 30.0  # Default fallback
                 delay_elapsed = (now - position.trailing_profit_threshold_reached_at) >= activation_delay_sec
                 
                 if delay_elapsed:
                     position.trailing_activated = True
+                    position.trailing_state = TrailingState.TRAILING
+                    if position.trail_started_at is None:
+                        position.trail_started_at = time.monotonic()
                     # CRITICAL FIX: 2026-07-16 - Side-space — profit zone = own-side price >= 80c
                     # for BOTH sides (no 100-x mirror for NO)
                     in_profit_zone = False
@@ -1561,7 +1968,7 @@ class PositionMonitor:
             # This prevents trail level jumping from 83c to 80c when crossing threshold
             if not position.trailing_profit_zone_activated:
                 profit_zone_activation_cents = 80
-                profit_zone_deactivation_cents = 75  # Hysteresis: deactivate 5c below activation
+                profit_zone_deactivation_cents = 75  # Hysteresis: deactivate 5c below activation (in YES-space)
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
                     if is_profile_active():
@@ -1571,12 +1978,12 @@ class PositionMonitor:
                         profit_zone_deactivation_cents = profit_zone_activation_cents - 5  # 5c hysteresis
                 except Exception as e:
                     logger.debug("[POSITION-MONITOR] Could not read profit zone config from profile: %s", e)
-                
+
                 # CRITICAL FIX (2026-07-16): Side-space — own-side price >= activation for BOTH sides
                 if current_price_cents >= profit_zone_activation_cents:
                     position.trailing_profit_zone_activated = True
                     logger.info(
-                        "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s side=%s price=%dc - entered 80-85c profit zone",
+                        "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s side=%s price=%dc - entered profit zone",
                         position.position_id[:8],
                         position.side.value,
                         current_price_cents,
@@ -1593,7 +2000,7 @@ class PositionMonitor:
                         profit_zone_deactivation_cents = profit_zone_activation_cents - 5  # 5c hysteresis
                 except Exception as e:
                     logger.debug("[POSITION-MONITOR] Could not read profit zone config from profile: %s", e)
-                
+
                 # CRITICAL FIX (2026-07-16): Side-space — own-side price < deactivation for BOTH sides
                 if current_price_cents < profit_zone_deactivation_cents:
                     position.trailing_profit_zone_activated = False
@@ -1607,6 +2014,7 @@ class PositionMonitor:
         # Check trailing stop (only if activated)
         if position.trailing_activated and position.should_trigger_trail(current_price_cents):
             trail_level = position.get_trail_level()
+            position.trailing_state = TrailingState.EXIT
             logger.info(
                 "[POSITION-MONITOR] TRAIL triggered: position=%s price=%dc trail=%dc max_fav=%dc R=%.2f",
                 position.position_id[:8],
@@ -1615,7 +2023,7 @@ class PositionMonitor:
                 position.max_favorable_price_cents,
                 position.r_multiple,
             )
-            self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents)
+            self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents, snapshot=snapshot)
             return
         
         # CRITICAL FIX (2026-07-11): Emergency flatten in last 60 seconds
@@ -1642,7 +2050,7 @@ class PositionMonitor:
                     time_to_expiry_seconds,
                     position.unrealized_pnl_cents
                 )
-                self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents)  # Full exit
+                self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, snapshot=snapshot)  # Full exit
                 return  # Exit immediately, don't check other conditions
             else:
                 logger.info(
@@ -1759,7 +2167,7 @@ class PositionMonitor:
                         setattr(position, f"staged_exit_{stage_key}_timestamp", datetime.utcnow())
                         
                         # Emit partial exit intent
-                        self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, contracts_to_close)
+                        self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, contracts_to_close, snapshot=snapshot)
                         
                         # CRITICAL FIX: Do NOT update position.size here - wait for fill callback
                         # Previous code updated position.size prematurely, creating desync with PositionCache.contracts
@@ -1847,23 +2255,33 @@ class PositionMonitor:
             store = get_kalshi_market_state_store()
             state = store.get(position.market_id)
             
-            if state and hasattr(state, 'last_update_ts'):
-                # Calculate MD age in milliseconds
-                import time
-                md_age_ms = int((time.time() - state.last_update_ts) * 1000)
-                
-                # Get timing-aware max age based on time to expiry
-                minutes_to_expiry = time_to_expiry / 60.0 if time_to_expiry else None
-                max_age_seconds = get_md_max_age_seconds(minutes_to_expiry)
-                max_age_ms = max_age_seconds * 1000
-                
-                logger.debug(
-                    "[POSITION-MONITOR] MD staleness check: position=%s age_ms=%d max_age_ms=%d minutes_to_expiry=%.1f",
-                    position.position_id[:8],
-                    md_age_ms,
-                    max_age_ms,
-                    minutes_to_expiry or 0
-                )
+            if state:
+                # CRITICAL FIX (2026-08-09): Use a monotonic timestamp that is actually
+                # comparable with time.monotonic(). last_update_ts and last_book_update_ts
+                # are written with time.monotonic() in market_state.py; mixing time.time()
+                # (wall/epoch) with them produced bogus positive/negative ages and false
+                # STALE_DATA exits on brand-new REST-synced positions.
+                ts = getattr(state, 'last_book_update_ts', None) or getattr(state, 'last_update_ts', None)
+                if isinstance(ts, (int, float)) and ts > 0:
+                    md_age_ms = int((time.monotonic() - ts) * 1000)
+
+                    # Get timing-aware max age based on time to expiry
+                    minutes_to_expiry = time_to_expiry / 60.0 if time_to_expiry else None
+                    max_age_seconds = get_md_max_age_seconds(minutes_to_expiry)
+                    max_age_ms = max_age_seconds * 1000
+
+                    logger.debug(
+                        "[POSITION-MONITOR] MD staleness check: position=%s age_ms=%d max_age_ms=%d minutes_to_expiry=%.1f",
+                        position.position_id[:8],
+                        md_age_ms,
+                        max_age_ms,
+                        minutes_to_expiry or 0
+                    )
+                else:
+                    logger.debug(
+                        "[POSITION-MONITOR] MD timestamp not initialised for %s - skipping stale-data check",
+                        position.position_id[:8]
+                    )
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Could not get MD age for stale data check: %s", e)
         
@@ -1956,7 +2374,27 @@ class PositionMonitor:
             logger.debug("[POSITION-MONITOR] Could not compute real-time edge: %s", e)
             # Fallback to entry edge
             current_edge_pct = getattr(position, 'entry_edge_pct', 0.03)
-        
+
+        # CRITICAL FIX (2026-08-09): Edge-decay hold / model-provenance guard.
+        # For the first MIN_EDGE_DECAY_HOLD_SECONDS after fill, do NOT let a
+        # fresh recomputed (possibly fallback/opposite-side) edge force an exit.
+        # Use the entry edge instead.  This prevents the "BUY 50c -> SELL 42c"
+        # immediate exit where the model prob at exit (2.1%) disagrees with the
+        # entry signal.
+        if position.time_since_entry_seconds < MIN_EDGE_DECAY_HOLD_SECONDS:
+            guarded_edge = float(position.entry_edge_pct)
+            if abs((current_edge_pct or 0) - guarded_edge) > 1e-9:
+                logger.info(
+                    "[EDGE-DECAY-GUARD] position=%s held=%.2fs < %.2fs: using entry_edge=%.4f "
+                    "instead of recomputed edge=%.4f",
+                    position.position_id[:8],
+                    position.time_since_entry_seconds,
+                    MIN_EDGE_DECAY_HOLD_SECONDS,
+                    guarded_edge,
+                    current_edge_pct,
+                )
+                current_edge_pct = guarded_edge
+
         # Resolve exit policy
         policy = resolver.resolve(
             position=position,
@@ -1979,7 +2417,8 @@ class PositionMonitor:
             self._emit_exit_intent(
                 position,
                 policy.reason or ExitReason.MANUAL,
-                current_price_cents
+                current_price_cents,
+                snapshot=snapshot,
             )
         
         return ExitDecision(
@@ -1990,6 +2429,352 @@ class PositionMonitor:
             contracts_to_close=None,
             metadata={}
         )
+
+    def _evaluate_stop_loss(
+        self,
+        position: Position,
+        current_price_cents: int,
+        snapshot: Optional[ExitPriceSnapshot],
+    ) -> tuple[bool, str]:
+        """
+        Evaluate stop-loss as a gated `StopCandidate` event.
+
+        The legacy price-stop path is disabled from direct submission: any
+        predicate that would have fired is converted to a `StopCandidate` and
+        logged.  It may be submitted as a reduce-only IOC close only after the
+        edge stop, settlement, and exchange-position validation gates pass.
+
+        Returns (triggered=False, kind) so the old direct `_emit_exit_intent`
+        path is never exercised.  `kind` is for diagnostics only.
+        """
+        if not position.stop_loss_enabled or position.stop_loss_price_cents is None:
+            return False, "none"
+
+        # Freshness / executability guard for live book snapshots.
+        if snapshot is not None and not snapshot.is_fresh(EXIT_PRICE_MAX_AGE_MS):
+            logger.warning(
+                "[STOP-LOSS-GUARD] position=%s price=%dc: stale book (age=%dms), converting to StopCandidate",
+                position.position_id[:8],
+                current_price_cents,
+                snapshot.book_age_ms if snapshot else None,
+            )
+            return False, "stale-book"
+
+        if snapshot is not None and not snapshot.has_bid_size:
+            logger.warning(
+                "[STOP-LOSS-GUARD] position=%s price=%dc: no displayed bid size, converting to StopCandidate",
+                position.position_id[:8],
+                current_price_cents,
+            )
+            return False, "no-bid-size"
+
+        # Build the signed-YES position from the monitor record (used as the
+        # "system" position for the candidate; submission re-fetches exchange).
+        position_cc = to_signed_yes_exposure(position.side.value, position.size) * 100
+
+        # Edge stop: model fair value has crossed the executable bid + costs.
+        # Falls back to legacy price stop if model fair value is unavailable.
+        fair_value: Optional[int] = None
+        executable_exit: Optional[int] = None
+        book_seq: Optional[int] = None
+        book_age_ms: Optional[int] = None
+        seconds_to_expiry: Optional[float] = None
+        kalshi_state = None
+        unified_state = None
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+
+            store = get_kalshi_market_state_store()
+            kalshi_state = store.get(position.market_id)
+            unified_state = store.get_unified(position.market_id) if hasattr(store, "get_unified") else None
+            if unified_state is not None:
+                fair_value = _get_fair_value_cents(unified_state, position.side.value)
+                seconds_to_expiry = getattr(unified_state, "seconds_to_expiry", None)
+            if kalshi_state is not None:
+                executable_exit = _get_executable_exit_cents(kalshi_state, position.side.value)
+                book_seq = getattr(kalshi_state, "book_sequence", None)
+                book_age_ms = _book_age_ms(kalshi_state)
+                if seconds_to_expiry is None:
+                    seconds_to_expiry = getattr(kalshi_state, "seconds_to_expiry", None)
+        except Exception as exc:
+            logger.debug(
+                "[STOP-LOSS] market state lookup failed for %s: %s", position.market_id, exc
+            )
+
+        # Fallback executable price to the same-side bid from the exit snapshot.
+        if executable_exit is None and snapshot is not None:
+            executable_exit = snapshot.own_side_bid_cents
+            if book_age_ms is None:
+                book_age_ms = snapshot.book_age_ms
+            if seconds_to_expiry is None:
+                seconds_to_expiry = snapshot.seconds_to_expiry
+
+        if fair_value is not None and executable_exit is not None:
+            edge_breached = evaluate_edge_stop(
+                fair_value,
+                executable_exit,
+                total_exit_cost_cents=STOP_EDGE_TOTAL_EXIT_COST_CENTS,
+                hysteresis_cents=STOP_EDGE_HYSTERESIS_CENTS,
+            )
+
+            if edge_breached:
+                position.soft_stop_observations += 1
+            elif position.soft_stop_observations > 0:
+                logger.info(
+                    "[STOP-LOSS-EDGE] position=%s price=%dc - reset soft observation count",
+                    position.position_id[:8],
+                    current_price_cents,
+                )
+                position.soft_stop_observations = 0
+
+            if edge_breached and position.soft_stop_observations >= STOP_EDGE_MIN_CONSECUTIVE:
+                trigger_reason = "EDGE_STOP"
+                candidate = build_stop_candidate(
+                    market_ticker=position.market_id,
+                    exchange_position_cc=position_cc,
+                    trigger_reason=trigger_reason,
+                    entry_price_cents=position.avg_entry_price_cents,
+                    kalshi_state=kalshi_state,
+                    unified_state=unified_state,
+                    quote_age_ms=book_age_ms,
+                    consecutive_edge_below=position.soft_stop_observations,
+                    total_exit_cost_cents=STOP_EDGE_TOTAL_EXIT_COST_CENTS,
+                    hysteresis_cents=STOP_EDGE_HYSTERESIS_CENTS,
+                )
+                record_stop_candidate(candidate)
+                maybe_submit_stop_candidate_sync(candidate)
+
+                logger.info(
+                    "[STOP-LOSS-EDGE-CANDIDATE] position=%s price=%dc fair=%dc exit=%dc "
+                    "consecutive=%d reason=%s - submission gated until replay tests pass",
+                    position.position_id[:8],
+                    current_price_cents,
+                    fair_value,
+                    executable_exit,
+                    position.soft_stop_observations,
+                    trigger_reason,
+                )
+                return False, "edge-candidate"
+
+            if edge_breached:
+                logger.info(
+                    "[STOP-LOSS-EDGE-PENDING] position=%s price=%dc fair=%dc exit=%dc obs=%d/%d",
+                    position.position_id[:8],
+                    current_price_cents,
+                    fair_value,
+                    executable_exit,
+                    position.soft_stop_observations,
+                    STOP_EDGE_MIN_CONSECUTIVE,
+                )
+                return False, "edge-pending"
+
+        # Legacy price stop: still converted to a StopCandidate, never directly submitted.
+        # Hard stop: bid is far below the stop (catastrophic move)
+        hard_stop_level = position.hard_stop_price_cents
+        if hard_stop_level is None:
+            hard_stop_level = position.stop_loss_price_cents - HARD_STOP_EXTRA_BUFFER_CENTS
+            position.hard_stop_price_cents = hard_stop_level
+        if current_price_cents <= hard_stop_level:
+            position.hard_stop_confirmed = True
+            position.soft_stop_observations += 1
+
+            candidate = build_stop_candidate(
+                market_ticker=position.market_id,
+                exchange_position_cc=position_cc,
+                trigger_reason="HARD_STOP",
+                entry_price_cents=position.avg_entry_price_cents,
+                kalshi_state=kalshi_state,
+                unified_state=unified_state,
+                quote_age_ms=book_age_ms,
+                consecutive_edge_below=position.soft_stop_observations,
+            )
+            record_stop_candidate(candidate)
+            maybe_submit_stop_candidate_sync(candidate)
+
+            logger.info(
+                "[STOP-LOSS-HARD-CANDIDATE] position=%s price=%dc sl=%dc - submission gated until replay tests pass",
+                position.position_id[:8],
+                current_price_cents,
+                position.stop_loss_price_cents,
+            )
+            return False, "hard-candidate"
+
+        # Soft stop: bid at or just below the stop, require confirmation
+        if position.should_trigger_stop_loss(current_price_cents):
+            position.soft_stop_observations += 1
+            if position.soft_stop_observations >= SOFT_STOP_MIN_OBSERVATIONS:
+                candidate = build_stop_candidate(
+                    market_ticker=position.market_id,
+                    exchange_position_cc=position_cc,
+                    trigger_reason="SOFT_STOP",
+                    entry_price_cents=position.avg_entry_price_cents,
+                    kalshi_state=kalshi_state,
+                    unified_state=unified_state,
+                    quote_age_ms=book_age_ms,
+                    consecutive_edge_below=position.soft_stop_observations,
+                )
+                record_stop_candidate(candidate)
+                maybe_submit_stop_candidate_sync(candidate)
+
+                logger.info(
+                    "[STOP-LOSS-SOFT-CANDIDATE] position=%s price=%dc sl=%dc - submission gated until replay tests pass",
+                    position.position_id[:8],
+                    current_price_cents,
+                    position.stop_loss_price_cents,
+                )
+                return False, "soft-candidate"
+            else:
+                logger.info(
+                    "[STOP-LOSS-SOFT-PENDING] position=%s price=%dc sl=%dc obs=%d/%d - waiting for confirmation",
+                    position.position_id[:8],
+                    current_price_cents,
+                    position.stop_loss_price_cents,
+                    position.soft_stop_observations,
+                    SOFT_STOP_MIN_OBSERVATIONS,
+                )
+                return False, "soft-pending"
+
+        # Price recovered above stop: reset soft observation count
+        if position.soft_stop_observations > 0:
+            logger.info(
+                "[STOP-LOSS-SOFT] position=%s price=%dc sl=%dc - reset soft observation count",
+                position.position_id[:8],
+                current_price_cents,
+                position.stop_loss_price_cents,
+            )
+            position.soft_stop_observations = 0
+
+        return False, "none"
+
+    def _build_exit_decision_record(
+        self,
+        position: Position,
+        exit_reason: ExitReason,
+        exit_price_cents: int,
+        snapshot: Optional[ExitPriceSnapshot] = None,
+        contracts_to_close: Optional[int] = None,
+        md_age_ms: Optional[int] = None,
+        max_age_ms: Optional[int] = None,
+        time_to_expiry_seconds: Optional[float] = None,
+    ) -> ExitDecisionRecord:
+        """Build an immutable EXIT-DECISION audit record for this trigger."""
+        from merid.position_management.exit_decision import get_priority_for_reason
+        from merid.position_management.exit_conditions import (
+            evaluate_exit_conditions,
+            choose_exit_condition,
+        )
+
+        now = datetime.utcnow().isoformat()
+        now_ts = time.monotonic()
+        trail_level = position.get_trail_level()
+
+        # CRITICAL FIX (2026-08-10): Evaluate every condition for a decision-complete audit.
+        conditions = evaluate_exit_conditions(
+            position,
+            snapshot,
+            now_ts,
+            soft_stop_min_observations=SOFT_STOP_MIN_OBSERVATIONS,
+            hard_stop_extra_buffer_cents=HARD_STOP_EXTRA_BUFFER_CENTS,
+            min_edge_decay_hold_seconds=MIN_EDGE_DECAY_HOLD_SECONDS,
+            min_exit_hold_seconds=MIN_EXIT_HOLD_SECONDS,
+            time_to_expiry_seconds=time_to_expiry_seconds,
+            seconds_to_expiry=time_to_expiry_seconds,
+            md_age_ms=md_age_ms,
+            max_age_ms=max_age_ms,
+        )
+        evaluation = choose_exit_condition(conditions, chosen_reason=exit_reason)
+        eligible_reasons = [c.reason.value for c in evaluation.eligible]
+        suppressed_reasons = [c.reason.value for c in evaluation.suppressed]
+
+        # Hard / soft stop prices.  The hard stop is the soft SL minus the emergency buffer.
+        hard_stop_price = (
+            position.stop_loss_price_cents - HARD_STOP_EXTRA_BUFFER_CENTS
+            if position.stop_loss_price_cents is not None
+            else None
+        )
+        soft_stop_price = position.stop_loss_price_cents
+
+        # Book provenance: entry-side executable bid/ask for the audit table.
+        entry_side_bid = None
+        entry_side_ask = None
+        if snapshot is not None:
+            entry_side_bid = snapshot.own_side_bid_cents
+            entry_side_ask = snapshot.own_side_ask_cents
+
+        record = ExitDecisionRecord(
+            decision_id=f"exit-decision-{uuid.uuid4().hex[:12]}",
+            position_key=position.position_id,
+            market_ticker=position.market_id,
+            position_side=position.side.value,
+            entry_order_id=position.entry_order_id or position.exit_policy_id or "n/a",
+            entry_fill_id=position.entry_fill_id,
+            signal_id=position.entry_signal_id,
+            entry_model=position.entry_model or "n/a",
+            model_version=position.entry_model_version or "n/a",
+            entry_price_cents=position.avg_entry_price_cents,
+            entry_tp_cents=position.take_profit_price_cents,
+            entry_sl_cents=position.stop_loss_price_cents,
+            entry_trail_distance_cents=int(position.trailing_param) if position.trailing_type == TrailingType.FIXED_CENTS else None,
+            entry_trail_activation_cents=None,
+            edge_at_entry_pct=float(position.entry_edge_pct),
+            vol_regime=position.vol_regime,
+            confidence=position.confidence,
+            size=position.size,
+            trigger_time=now,
+            trigger_reason=exit_reason.value,
+            trigger_price_source=snapshot.data_source if snapshot else "synthetic",
+            trigger_mid_cents=snapshot.mid_cents if snapshot else exit_price_cents,
+            trigger_executable_bid_cents=snapshot.own_side_bid_cents if snapshot else exit_price_cents,
+            trigger_executable_ask_cents=snapshot.own_side_ask_cents if snapshot else exit_price_cents,
+            trigger_opposite_bid_cents=snapshot.opposite_bid_cents if snapshot else None,
+            trigger_opposite_ask_cents=snapshot.opposite_ask_cents if snapshot else None,
+            trigger_book_age_ms=snapshot.book_age_ms if snapshot else 0,
+            trigger_book_snapshot_id=snapshot.snapshot_id if snapshot else "n/a",
+            trigger_book_sequence=snapshot.book_sequence if snapshot else None,
+            trigger_yes_bid_cents=snapshot.yes_bid_cents if snapshot else None,
+            trigger_yes_ask_cents=snapshot.yes_ask_cents if snapshot else None,
+            trigger_no_bid_cents=snapshot.no_bid_cents if snapshot else None,
+            trigger_no_ask_cents=snapshot.no_ask_cents if snapshot else None,
+            trigger_yes_depth=snapshot.yes_depth if snapshot else None,
+            trigger_no_depth=snapshot.no_depth if snapshot else None,
+            trigger_entry_side_executable_bid_cents=entry_side_bid,
+            trigger_entry_side_executable_ask_cents=entry_side_ask,
+            trigger_data_source=snapshot.data_source if snapshot else "synthetic",
+            trigger_data_quality=snapshot.data_quality if snapshot else "GOOD",
+            seconds_held=position.time_since_entry_seconds,
+            high_watermark_cents=position.high_watermark_cents,
+            low_watermark_cents=position.low_watermark_cents,
+            current_price_cents=position.current_price_cents,
+            pnl_unrealized_cents=position.unrealized_pnl_cents,
+            r_multiple=position.r_multiple,
+            trailing_stop_level_cents=trail_level,
+            stop_loss_level_cents=soft_stop_price,
+            hard_stop_level_cents=hard_stop_price,
+            take_profit_level_cents=position.take_profit_price_cents,
+            dynamic_tp_target_cents=position.dynamic_tp_target_cents,
+            chosen_exit_reason=exit_reason.value,
+            chosen_exit_priority=get_priority_for_reason(exit_reason).value,
+            chosen_exit_price_cents=exit_price_cents,
+            eligible_exit_reasons=eligible_reasons,
+            suppressed_exit_reasons=suppressed_reasons,
+            order_intent_id=None,
+            order_client_order_id=None,
+            order_exchange_id=None,
+            order_price_cents=None,
+            fill_price_cents=None,
+            fill_id=None,
+            decision_status="CHOSEN",
+            metadata={
+                "contracts_to_close": contracts_to_close,
+                "trailing_type": position.trailing_type.value,
+                "trailing_param": position.trailing_param,
+                "trailing_state": position.trailing_state.value,
+                "hard_stop_price_cents": hard_stop_price,
+                "soft_stop_price_cents": soft_stop_price,
+                "exit_conditions": [c.evidence for c in conditions],
+            },
+        )
+        return record
     
     def _emit_exit_intent(
         self,
@@ -1997,7 +2782,8 @@ class PositionMonitor:
         exit_reason: ExitReason,
         exit_price_cents: int,
         contracts_to_close: Optional[int] = None,
-        bypass_in_flight_check: bool = False
+        bypass_in_flight_check: bool = False,
+        snapshot: Optional[ExitPriceSnapshot] = None,
     ) -> None:
         """
         Emit exit intent via callback.
@@ -2008,9 +2794,25 @@ class PositionMonitor:
             exit_price_cents: Exit price in cents
             contracts_to_close: Number of contracts to close (None = full position)
             bypass_in_flight_check: If True, skip the in-flight check (for expired markets)
+            snapshot: Optional ExitPriceSnapshot used for the trigger
         """
         # AUDIT: Timing correctness - record trigger timestamp
         trigger_timestamp = __import__('time').monotonic()
+
+        # CRITICAL FIX (2026-08-09): Emit a single immutable EXIT-DECISION record.
+        decision = self._build_exit_decision_record(
+            position=position,
+            exit_reason=exit_reason,
+            exit_price_cents=exit_price_cents,
+            snapshot=snapshot,
+            contracts_to_close=contracts_to_close,
+            md_age_ms=snapshot.book_age_ms if snapshot else None,
+            max_age_ms=EXIT_PRICE_MAX_AGE_MS,
+            time_to_expiry_seconds=(
+                snapshot.seconds_to_expiry if snapshot else None
+            ),
+        )
+        logger.info(decision.to_log_line())
 
         # Log exit intent emission with structured schema
         if contracts_to_close is None:
@@ -2154,23 +2956,238 @@ class PositionMonitor:
                     exc_info=True
                 )
     
+    def _get_exit_price_snapshot(
+        self, state, position_side: PositionSide, market_id: str
+    ) -> Optional[ExitPriceSnapshot]:
+        """
+        Build an executable same-side bid/ask snapshot for exit decisions.
+
+        CRITICAL FIX (2026-08-09): Stop-loss, trailing-stop, and edge-decay must
+        evaluate against the price we can actually execute at (the best bid on
+        the side we are long).  Mid prices and opposite-side prices can produce
+        false exits, especially in volatile or one-sided books.
+
+        Returns:
+            ExitPriceSnapshot, or None if the book is stale, non-executable,
+            missing the side we need, or otherwise unfit for an exit decision.
+        """
+        if not state:
+            logger.warning(
+                "[POSITION-MONITOR] No market state for %s; cannot build exit snapshot",
+                market_id,
+            )
+            return None
+
+        # Basic health checks (keep defaults for unit-test Mocks)
+        book_initialized = getattr(state, "book_initialized", True)
+        if book_initialized is False:
+            logger.warning(
+                "[POSITION-MONITOR] Book not initialized for %s; skipping exit snapshot",
+                market_id,
+            )
+            return None
+
+        executable = getattr(state, "executable", True)
+        if executable is False:
+            logger.warning(
+                "[POSITION-MONITOR] State not executable for %s; skipping exit snapshot",
+                market_id,
+            )
+            return None
+
+        data_quality = getattr(state, "data_quality", None)
+        if isinstance(data_quality, str) and data_quality != "GOOD":
+            logger.warning(
+                "[POSITION-MONITOR] data_quality=%s for %s not trusted for exit snapshot",
+                data_quality,
+                market_id,
+            )
+            return None
+
+        # Age check
+        last_book_update_ts = getattr(state, "last_book_update_ts", None)
+        book_age_ms = 0
+        if isinstance(last_book_update_ts, (int, float)) and last_book_update_ts > 0:
+            try:
+                age_s = time.monotonic() - last_book_update_ts
+                max_age_s = EXIT_PRICE_MAX_AGE_MS / 1000.0
+                if age_s > max_age_s:
+                    logger.warning(
+                        "[POSITION-MONITOR] Book age=%.1fs exceeds %.1fs for %s; skipping exit snapshot",
+                        age_s,
+                        max_age_s,
+                        market_id,
+                    )
+                    return None
+                book_age_ms = int(age_s * 1000)
+            except Exception:
+                pass
+
+        # Side-aware bid/ask extraction
+        if position_side == PositionSide.YES:
+            own_bid = getattr(state, "best_bid_cents", None)
+            own_ask = getattr(state, "best_ask_cents", None)
+            opposite_bid = getattr(state, "best_no_bid_cents", None)
+            opposite_ask = getattr(state, "best_no_ask_cents", None)
+            min_depth = getattr(state, "min_depth_yes", 0)
+            has_bid_size = bool(getattr(state, "has_bid", False) and min_depth > 0)
+        else:
+            own_bid = getattr(state, "best_no_bid_cents", None)
+            own_ask = getattr(state, "best_no_ask_cents", None)
+            opposite_bid = getattr(state, "best_bid_cents", None)
+            opposite_ask = getattr(state, "best_ask_cents", None)
+            min_depth = getattr(state, "min_depth_no", 0)
+            has_bid_size = bool(getattr(state, "has_no_bid", False) and min_depth > 0)
+
+        # Fallback for older states that only had YES-side best bid/ask and no no-side fields
+        if own_bid is None or own_ask is None:
+            mid = getattr(state, "mid_cents", None)
+            if mid is not None:
+                spread = getattr(state, "spread_cents", 0) or 1
+                if position_side == PositionSide.YES:
+                    own_bid = mid - spread // 2
+                    own_ask = mid + spread // 2
+                else:
+                    no_mid = 100 - mid
+                    own_bid = no_mid - spread // 2
+                    own_ask = no_mid + spread // 2
+            else:
+                logger.warning(
+                    "[POSITION-MONITOR] No executable prices for %s side=%s; skipping exit snapshot",
+                    market_id,
+                    position_side.value,
+                )
+                return None
+
+        # Canonical price validation
+        if not (0 < own_bid < 100 and 0 < own_ask < 100):
+            logger.warning(
+                "[POSITION-MONITOR] Invalid own-side prices for %s side=%s bid=%s ask=%s",
+                market_id,
+                position_side.value,
+                own_bid,
+                own_ask,
+            )
+            return None
+
+        # Mid for reference
+        mid_cents = getattr(state, "mid_cents", None)
+        if mid_cents is not None and 0 < mid_cents < 100:
+            if position_side == PositionSide.YES:
+                mid = int(mid_cents)
+            else:
+                mid = int(100 - mid_cents)
+        else:
+            mid = (own_bid + own_ask) // 2
+
+        snapshot_id = f"{market_id}:{getattr(state, 'last_book_update_ts', time.monotonic())}"
+        data_source = getattr(state, "data_source", "UNKNOWN")
+        seconds_to_expiry = getattr(state, "seconds_to_expiry", None)
+        book_sequence = getattr(state, "book_sequence", None)
+
+        # YES and NO raw book for attribution.  Asks are derived as 100 - opposite bid.
+        yes_bid = getattr(state, "best_bid_cents", None)
+        yes_ask = getattr(state, "best_ask_cents", None)
+        no_bid = getattr(state, "best_no_bid_cents", None)
+        no_ask = getattr(state, "best_no_ask_cents", None)
+        yes_depth = getattr(state, "depth_10c_yes", None)
+        no_depth = getattr(state, "depth_10c_no", None)
+
+        return ExitPriceSnapshot(
+            market_id=market_id,
+            position_side=position_side,
+            mid_cents=mid,
+            own_side_bid_cents=int(own_bid),
+            own_side_ask_cents=int(own_ask),
+            opposite_bid_cents=int(opposite_bid) if opposite_bid is not None else None,
+            opposite_ask_cents=int(opposite_ask) if opposite_ask is not None else None,
+            # CRITICAL FIX (2026-08-10): Full book provenance for exit attribution
+            book_sequence=book_sequence,
+            yes_bid_cents=int(yes_bid) if yes_bid is not None else None,
+            yes_ask_cents=int(yes_ask) if yes_ask is not None else None,
+            no_bid_cents=int(no_bid) if no_bid is not None else None,
+            no_ask_cents=int(no_ask) if no_ask is not None else None,
+            yes_depth=yes_depth,
+            no_depth=no_depth,
+            entry_side_executable_bid_cents=int(own_bid),
+            entry_side_executable_ask_cents=int(own_ask),
+            book_age_ms=book_age_ms,
+            data_source=data_source,
+            data_quality=data_quality if isinstance(data_quality, str) else "UNKNOWN",
+            executable=executable,
+            has_bid_size=has_bid_size,
+            snapshot_id=snapshot_id,
+            timestamp=time.monotonic(),
+            min_depth_own_side=min_depth,
+            seconds_to_expiry=seconds_to_expiry,
+        )
+
     def _get_side_aware_price(self, state, position_side: PositionSide) -> Optional[int]:
         """
         Get side-aware current price from market state.
-        
+
         CRITICAL FIX: mid_cents is YES-centric. For NO positions, we need to convert
         to NO price (100 - YES mid) to correctly evaluate exit conditions.
-        
+
+        CRITICAL FIX (2026-08-07): Do not trigger exits on stale, uninitialised, or
+        low-quality market data. The monitor has been firing stop-losses from stale
+        WS snapshots that disagreed with fresh REST quotes. Require executable state,
+        GOOD data quality, and a recent book update before using the price.
+
         Args:
             state: UnifiedMarketState for the market
             position_side: PositionSide.YES or PositionSide.NO
-            
+
         Returns:
-            Current price in cents for the position's side
+            Current price in cents for the position's side, or None if state is not
+            trustworthy enough for exit decisions.
         """
-        if not state or not state.mid_cents:
+        if not state or not getattr(state, 'mid_cents', None):
             return None
-        
+
+        # Only trust prices from a healthy, initialised, executable book.
+        # Default to trusting the state when these fields are not present
+        # (e.g. unit tests using plain Mock objects), but reject explicit bad values.
+        book_initialized = getattr(state, 'book_initialized', True)
+        if book_initialized is False:
+            logger.warning(
+                "[POSITION-MONITOR] State not initialised for market; skipping exit price"
+            )
+            return None
+
+        executable = getattr(state, 'executable', True)
+        if executable is False:
+            logger.warning(
+                "[POSITION-MONITOR] State not executable for market; skipping exit price"
+            )
+            return None
+
+        data_quality = getattr(state, 'data_quality', None)
+        if isinstance(data_quality, str) and data_quality != "GOOD":
+            logger.warning(
+                "[POSITION-MONITOR] State data_quality=%s not trusted for exit price",
+                data_quality,
+            )
+            return None
+
+        # Age check: only when the timestamp is present and numeric.
+        last_book_update_ts = getattr(state, 'last_book_update_ts', None)
+        if isinstance(last_book_update_ts, (int, float)) and last_book_update_ts > 0:
+            try:
+                age_s = time.monotonic() - last_book_update_ts
+                max_age_s = float(
+                    os.getenv("MERID_POSITION_MONITOR_MAX_STATE_AGE_S", "10")
+                )
+                if age_s > max_age_s:
+                    logger.warning(
+                        "[POSITION-MONITOR] State age=%.1fs exceeds %.1fs; skipping exit price",
+                        age_s,
+                        max_age_s,
+                    )
+                    return None
+            except Exception:
+                pass
+
         if position_side == PositionSide.YES:
             # YES: use mid_cents directly
             return int(state.mid_cents)
@@ -2250,13 +3267,7 @@ class PositionMonitor:
                             continue
                         
                         state = store.get(position.market_id)
-                        current_price = None
-                        data_source = "unknown"
-                        data_age_s = float('inf')
-                        
-                        # AUDIT: State freshness check - verify inputs are current
-                        now = __import__('time').monotonic()
-                        
+
                         # CRITICAL FIX (2026-07-16): Check if market has expired
                         # If state is None, the market may have expired. Force exit the position.
                         # CRITICAL FIX (2026-07-29): Bypass in-flight check for expired markets to prevent stuck positions
@@ -2268,52 +3279,34 @@ class PositionMonitor:
                             # Force exit with last known price or entry price
                             exit_price = position.current_price_cents if position.current_price_cents else position.avg_entry_price_cents
                             if exit_price > 0:
-                                self._emit_exit_intent(position, ExitReason.TIME_STOP, exit_price, bypass_in_flight_check=True)
+                                self._emit_exit_intent(position, ExitReason.TIME_STOP, exit_price, bypass_in_flight_check=True, snapshot=None)
                             continue
-                        
-                        if state.mid_cents:
-                            # CRITICAL FIX: Use side-aware price for NO positions
-                            current_price = self._get_side_aware_price(state, position.side)
-                            data_source = "ws_mid"
-                            data_age_s = now - (state.last_book_update_ts or 0)
-                        else:
-                            # CRITICAL FIX (2026-07-14): Fallback price handling when market state is stale
-                            # Use position's current_price_cents if available (updated by position cache)
-                            # Otherwise use entry price as last resort to ensure exit conditions can still trigger
-                            if hasattr(position, 'current_price_cents') and position.current_price_cents:
-                                current_price = position.current_price_cents
-                                data_source = "position_cache"
-                                data_age_s = float('inf')  # Unknown age
-                                logger.debug(
-                                    "[POSITION-MONITOR] Using fallback current_price_cents for %s: %dc (market state unavailable)",
-                                    position.market_id, current_price
-                                )
-                            else:
-                                current_price = position.avg_entry_price_cents
-                                data_source = "entry_price"
-                                data_age_s = float('inf')  # Static entry price
-                                logger.warning(
-                                    "[POSITION-MONITOR] Using entry price as fallback for %s: %dc (market state unavailable, no current_price)",
-                                    position.market_id, current_price
-                                )
-                        
-                        # AUDIT: Log state freshness for each position check
-                        logger.info(
-                            "[POSITION-MONITOR-AUDIT] position=%s market=%s data_source=%s data_age_s=%.1f price=%dc side=%s",
-                            position.position_id[:8],
-                            position.market_id,
-                            data_source,
-                            data_age_s,
-                            current_price,
-                            position.side.value
-                        )
-                        
-                        if current_price is not None:
-                            await self._check_position(position, current_price, poll_count)
+
+                        # CRITICAL FIX (2026-08-09): Use an executable same-side bid/ask snapshot.
+                        # _get_exit_price_snapshot returns None for stale/non-executable books.
+                        price_snapshot = self._get_exit_price_snapshot(state, position.side, position.market_id)
+
+                        if price_snapshot is not None:
+                            # AUDIT: Log state freshness for each position check
+                            logger.info(
+                                "[POSITION-MONITOR-AUDIT] position=%s market=%s data_source=%s data_age_ms=%d "
+                                "mid=%dc bid=%dc ask=%dc side=%s executable=%s has_bid_size=%s",
+                                position.position_id[:8],
+                                position.market_id,
+                                price_snapshot.data_source,
+                                price_snapshot.book_age_ms,
+                                price_snapshot.mid_cents,
+                                price_snapshot.own_side_bid_cents,
+                                price_snapshot.own_side_ask_cents,
+                                position.side.value,
+                                price_snapshot.executable,
+                                price_snapshot.has_bid_size,
+                            )
+                            await self._check_position(position, price_snapshot, poll_count)
                         else:
                             logger.warning(
-                                "[POSITION-MONITOR] Could not determine price for %s - skipping exit check",
-                                position.market_id
+                                "[POSITION-MONITOR] Could not determine executable price for %s - skipping exit check",
+                                position.market_id,
                             )
                 
                 except Exception as e:
@@ -2402,10 +3395,10 @@ class PositionMonitor:
                         continue
                     
                     # Create Position object from CachedPosition
-                    # CRITICAL FIX (2026-07-31): Side-aware fallback SL for startup-loaded positions
-                    # YES contracts: SL below entry (loss when price goes down)
-                    # NO contracts: SL above entry (loss when price goes up)
-                    # Previous bug: treated both sides identically, causing NO contracts to have inverted SL
+                    # CRITICAL FIX (2026-08-04): Side-aware fallback SL for startup-loaded positions.
+                    # A position is always long its own side. Both YES and NO use SL below entry.
+                    # Previous bug: NO contracts had SL above entry, causing instant stop-outs.
+                    stop_loss_enabled = getattr(cached_pos, "stop_loss_enabled", True)
                     sl_price = cached_pos.stop_loss_price_cents
                     
                     # CRITICAL FIX (2026-08-01): Skip positions with invalid entry prices
@@ -2419,11 +3412,9 @@ class PositionMonitor:
                         )
                         continue
                     
-                    if sl_price is None:
-                        if position_side == PositionSide.YES:
-                            sl_price = max(1, cached_pos.avg_price_cents - 5)  # 5 cent risk below entry
-                        else:
-                            sl_price = min(99, cached_pos.avg_price_cents + 5)  # 5 cent risk above entry
+                    if stop_loss_enabled and sl_price is None:
+                        # 5 cent risk below entry for both sides (own-side cents)
+                        sl_price = max(1, cached_pos.avg_price_cents - 5)
                         logger.warning(
                             "[POSITION-MONITOR-STARTUP] Missing SL for startup position=%s - using fallback SL=%dc (entry=%dc side=%s)",
                             market_id[:8], sl_price, cached_pos.avg_price_cents, position_side.value
@@ -2436,8 +3427,25 @@ class PositionMonitor:
                         size=cached_pos.contracts,
                         avg_entry_price_cents=cached_pos.avg_price_cents,  # No fallback - already validated above
                         take_profit_price_cents=cached_pos.take_profit_price_cents,
-                        stop_loss_price_cents=sl_price,
+                        stop_loss_enabled=stop_loss_enabled,
+                        stop_loss_price_cents=None if not stop_loss_enabled else sl_price,
                         opened_at=datetime.now(timezone.utc),  # Use current time for existing positions
+                        thesis_side=side_str.lower(),
+                        outcome_side=side_str.lower(),
+                        book_side=cached_pos.book_side or "ask",
+                        # CRITICAL FIX (2026-08-09): Track provenance for startup-loaded positions
+                        fill_source=cached_pos.fill_source or "rest_sync",
+                        entry_signal_id=cached_pos.entry_signal_id or cached_pos.client_order_id or "rest_sync",
+                        # CRITICAL FIX (2026-08-10): Durable entry-model provenance
+                        entry_model=cached_pos.entry_model,
+                        entry_model_version=cached_pos.entry_model_version,
+                        entry_model_probability=cached_pos.entry_model_probability,
+                        entry_market_probability=cached_pos.entry_market_probability,
+                        entry_edge=cached_pos.entry_edge,
+                        entry_book_snapshot_id=cached_pos.entry_book_snapshot_id,
+                        entry_fill_id=cached_pos.entry_fill_id,
+                        entry_order_id=cached_pos.entry_order_id or cached_pos.client_order_id,
+                        entry_execution_mode=cached_pos.entry_execution_mode,
                     )
                     
                     # Add to monitor
