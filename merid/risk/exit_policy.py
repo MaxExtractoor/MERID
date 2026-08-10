@@ -73,6 +73,7 @@ class ExitReason(str, Enum):
     STALE_DATA = "stale_data"
     ADAPTIVE_TIMING = "adaptive_timing"
     LOSS_CAP = "loss_cap"
+    MARKET_EXPIRED = "market_expired"
 
 
 @dataclass
@@ -190,11 +191,20 @@ class ExitPolicyEngine:
         sl_threshold = self._get_sl_threshold(edge_pct, confidence)
         
         # Check stop loss first (risk management priority)
+        # CRITICAL (2026-08-10): Direct stop-loss exits are disabled.  Any SL
+        # predicate that fires is suppressed; the live stop path is now a gated
+        # StopCandidate event handled by the execution layer.
         if self.config.stop_loss_enabled and profit_pct <= -sl_threshold:
+            logger.warning(
+                "[EXIT-POLICY-ENGINE] SL predicate suppressed: %.1f%% loss (threshold %.1f%%) "
+                "- StopCandidate path is disabled until replay tests pass",
+                profit_pct * 100,
+                sl_threshold * 100,
+            )
             return ExitSignal(
-                should_exit=True,
-                reason=ExitReason.STOP_LOSS,
-                message=f"SL triggered: {profit_pct:.1%} loss (threshold: {sl_threshold:.1%})",
+                should_exit=False,
+                reason=None,
+                message=f"SL suppressed: {profit_pct:.1%} loss (threshold: {sl_threshold:.1%})",
                 exit_price_cents=current_price_cents,
                 confidence=confidence,
             )

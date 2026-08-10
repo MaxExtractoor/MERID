@@ -114,18 +114,25 @@ class TestPositionMonitorExitCallback:
         # Callback is stored internally
         assert monitor._exit_intent_callback is callback
     
+    @patch('merid.position_management.position_monitor.record_stop_candidate')
+    @patch('merid.position_management.position_monitor.maybe_submit_stop_candidate_sync')
     @patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope')
-    def test_exit_intent_callback_on_stop_loss(self, mock_get_envelope):
-        """Test callback is triggered on stop loss."""
+    def test_exit_intent_callback_on_stop_loss(
+        self,
+        mock_get_envelope,
+        mock_submit,
+        mock_record,
+    ):
+        """Test stop loss is converted to a StopCandidate event and not directly executed."""
         # Mock risk envelope to allow capacity release
         mock_envelope = Mock()
         mock_get_envelope.return_value = mock_envelope
-        
+
         monitor = PositionMonitor()
-        
+
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
-        
+
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -134,22 +141,26 @@ class TestPositionMonitorExitCallback:
             avg_entry_price_cents=50,
             stop_loss_price_cents=40,
         )
-        
+
         monitor.add_position(position)
-        
+
         # Manually trigger stop loss check
-        asyncio.run(monitor._check_position(position, 35))
-        
-        # Callback should be called
-        callback.assert_called_once()
-        call_args = callback.call_args
-        assert call_args[0][0] is position
-        assert call_args[0][1] == ExitReason.STOP_LOSS
-        assert call_args[0][2] == 35
-        assert call_args[0][3] is None  # contracts_to_close (full exit)
-        
-        # Position should be removed
-        assert len(monitor.get_open_positions()) == 0
+        asyncio.run(monitor._legacy_check_position(position, 35))
+
+        # Direct exit callback must NOT be called while replay tests are in progress.
+        callback.assert_not_called()
+
+        # A StopCandidate event must have been recorded.
+        mock_record.assert_called_once()
+        candidate = mock_record.call_args[0][0]
+        assert candidate.market_ticker == position.market_id
+        assert candidate.position_from_exchange_cc == 1000  # 10 contracts * 100
+        assert candidate.held_contract == "yes"
+        assert candidate.trigger_reason in ("HARD_STOP", "SOFT_STOP")
+        assert candidate.entry_price_cents == 50
+
+        # The position stays under monitor until a validated close is confirmed.
+        assert len(monitor.get_open_positions()) == 1
     
     def test_exit_intent_callback_on_take_profit(self):
         """Test callback is triggered on take profit."""
@@ -170,7 +181,7 @@ class TestPositionMonitorExitCallback:
         monitor.add_position(position)
         
         # Manually trigger take profit check
-        asyncio.run(monitor._check_position(position, 65))
+        asyncio.run(monitor._legacy_check_position(position, 65))
         
         # Callback should be called
         callback.assert_called_once()
@@ -206,7 +217,7 @@ class TestPositionMonitorExitCallback:
         position.trailing_activated = True
         
         # Drop below trail
-        asyncio.run(monitor._check_position(position, 53))
+        asyncio.run(monitor._legacy_check_position(position, 53))
         
         # Callback should be called
         callback.assert_called_once()
@@ -255,13 +266,13 @@ class TestPositionMonitorExitCallback:
             monitor.add_position(position)
             
             # Check position to initialize dynamic TP target
-            asyncio.run(monitor._check_position(position, 30))
+            asyncio.run(monitor._legacy_check_position(position, 30))
             
             # Target should be set to 55c
             assert position.dynamic_tp_target_cents == 55
             
             # When price reaches 55c, exit should trigger
-            asyncio.run(monitor._check_position(position, 55))
+            asyncio.run(monitor._legacy_check_position(position, 55))
             
             # Callback should be called with DYNAMIC_TAKE_PROFIT
             callback.assert_called_once()
@@ -322,7 +333,7 @@ class TestPositionMonitorExitCallback:
             monitor.add_position(position)
             
             # Check position to initialize dynamic TP target (price at 68c, not triggering exit)
-            asyncio.run(monitor._check_position(position, 68))
+            asyncio.run(monitor._legacy_check_position(position, 68))
             
             # Target should be 90c (NO entry 65c matches 60-70 zone, target 90c - side-space convention)
             assert position.dynamic_tp_target_cents == 90
@@ -332,7 +343,7 @@ class TestPositionMonitorExitCallback:
             mock_policy_exit.action = ExitAction.EXIT_MARKET
             mock_policy_exit.reason = ExitReason.DYNAMIC_TAKE_PROFIT
             mock_resolver.resolve.return_value = mock_policy_exit
-            asyncio.run(monitor._check_position(position, 90))
+            asyncio.run(monitor._legacy_check_position(position, 90))
             
             # Callback should be called with DYNAMIC_TAKE_PROFIT
             callback.assert_called_once()
@@ -385,7 +396,7 @@ class TestPositionMonitorExitCallback:
             monitor.add_position(position)
             
             # Check position to initialize dynamic TP target
-            asyncio.run(monitor._check_position(position, 30))
+            asyncio.run(monitor._legacy_check_position(position, 30))
             
             # Target should be adjusted: 55 * 1.1 = 60.5 -> 60c
             assert position.dynamic_tp_target_cents == 60
@@ -427,7 +438,7 @@ class TestPositionMonitorExitCallback:
             monitor.add_position(position)
             
             # Check position
-            asyncio.run(monitor._check_position(position, 55))
+            asyncio.run(monitor._legacy_check_position(position, 55))
             
             # No dynamic TP target should be set
             assert position.dynamic_tp_target_cents is None
@@ -459,7 +470,7 @@ class TestPositionMonitorExitCallback:
         monitor_yes.add_position(position_yes)
         
         # Move price to 99c (extreme profit)
-        asyncio.run(monitor_yes._check_position(position_yes, 99))
+        asyncio.run(monitor_yes._legacy_check_position(position_yes, 99))
         
         # Callback should be called with EXTREME_PROFIT or AUTO_EXIT_99C reason
         callback_yes.assert_called_once()
@@ -486,7 +497,7 @@ class TestPositionMonitorExitCallback:
         monitor_no.add_position(position_no)
         
         # Move price to 99c (extreme profit for NO - side-space convention)
-        asyncio.run(monitor_no._check_position(position_no, 99))
+        asyncio.run(monitor_no._legacy_check_position(position_no, 99))
         
         # Callback should be called with AUTO_EXIT_99C reason (99c triggers this)
         callback_no.assert_called_once()
@@ -596,7 +607,7 @@ class TestPositionMonitorExitCallback:
             monitor.add_position(position)
             
             # Trigger extreme profit exit at 99c
-            await monitor._check_position(position, 99)
+            await monitor._legacy_check_position(position, 99)
             
             # Wait for async task to complete
             await asyncio.sleep(0.1)
@@ -816,6 +827,39 @@ class TestPositionMonitorSideAwarePrice:
             mock_state.mid_cents = yes_mid
             price = monitor._get_side_aware_price(mock_state, PositionSide.NO)
             assert price == expected_no_price, f"YES mid {yes_mid} should convert to NO price {expected_no_price}, got {price}"
+
+    def test_get_side_aware_price_rejects_bad_data_quality(self):
+        """Stop-loss/take-profit checks must not run on stale/low-quality market data."""
+        monitor = PositionMonitor()
+
+        mock_state = Mock()
+        mock_state.mid_cents = 42
+        mock_state.data_quality = "SUSPECT"
+
+        price = monitor._get_side_aware_price(mock_state, PositionSide.YES)
+        assert price is None, "SUSPECT market data should not be used for exit pricing"
+
+    def test_get_side_aware_price_rejects_uninitialised_book(self):
+        """Exit pricing must not use an uninitialised order book."""
+        monitor = PositionMonitor()
+
+        mock_state = Mock()
+        mock_state.mid_cents = 42
+        mock_state.book_initialized = False
+
+        price = monitor._get_side_aware_price(mock_state, PositionSide.YES)
+        assert price is None, "Uninitialised book should not be used for exit pricing"
+
+    def test_get_side_aware_price_rejects_non_executable_state(self):
+        """Exit pricing must not use a non-executable market state."""
+        monitor = PositionMonitor()
+
+        mock_state = Mock()
+        mock_state.mid_cents = 42
+        mock_state.executable = False
+
+        price = monitor._get_side_aware_price(mock_state, PositionSide.YES)
+        assert price is None, "Non-executable state should not be used for exit pricing"
 
 
 class TestPositionMonitorStartupLoading:
@@ -1142,7 +1186,7 @@ class TestExitPolicyEdgeDecayFix:
             mock_get_resolver.return_value = mock_resolver
             
             # Check position with current price
-            asyncio.run(monitor._check_position(position, 50))
+            asyncio.run(monitor._legacy_check_position(position, 50))
             
             # Verify resolver.resolve was called with current_edge_pct
             mock_resolver.resolve.assert_called_once()
@@ -1179,7 +1223,7 @@ class TestExitPolicyEdgeDecayFix:
             mock_get_resolver.return_value = mock_resolver
             
             # Check position
-            asyncio.run(monitor._check_position(position, 50))
+            asyncio.run(monitor._legacy_check_position(position, 50))
             
             # Verify resolver was called with current_edge_pct
             mock_resolver.resolve.assert_called_once()
@@ -1216,7 +1260,7 @@ class TestExitPolicyEdgeDecayFix:
             mock_get_resolver.return_value = mock_resolver
             
             # Check position
-            asyncio.run(monitor._check_position(position, 50))
+            asyncio.run(monitor._legacy_check_position(position, 50))
             
             # Verify resolver was called with default 3% edge
             mock_resolver.resolve.assert_called_once()
@@ -1285,7 +1329,31 @@ class TestPositionMonitorStartupSequence:
 
 class TestPositionMonitorPositionCacheIntegration:
     """Test integration between position_cache and PositionMonitor."""
-    
+
+    def setup_method(self):
+        """Reset singleton state between tests to avoid fill_id/position leakage."""
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        from merid.position_management.position_monitor import get_position_monitor
+
+        cache = get_position_cache()
+        if hasattr(cache, '_applied_fill_ids'):
+            cache._applied_fill_ids.clear()
+        cache._fills_ledger = None
+        if hasattr(cache, '_positions'):
+            cache._positions.clear()
+        if hasattr(cache, '_pending_tp_targets'):
+            cache._pending_tp_targets.clear()
+
+        monitor = get_position_monitor()
+        monitor._open_positions.clear()
+        monitor._market_to_position.clear()
+        monitor._exit_intent_in_flight.clear()
+        monitor._position_to_client_order.clear()
+        monitor._recent_exit_submissions.clear()
+        monitor._exit_registry.clear()
+        monitor._exit_quantities.clear()
+        monitor._cleanup_pending.clear()
+
     def test_position_cache_registers_exit_intent_callback(self):
         """Test that position_cache registers exit intent callback on initialization.
         
@@ -1338,7 +1406,7 @@ class TestPositionMonitorPositionCacheIntegration:
         
         # Mock fills_ledger to avoid database dependency
         mock_ledger = Mock()
-        mock_ledger.get_fill.return_value = None
+        mock_ledger.get_fill_by_id.return_value = None
         
         with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger):
             # Simulate a fill creating a new position
@@ -1420,7 +1488,7 @@ class TestPositionMonitorPositionCacheIntegration:
         
         # Mock fills_ledger to avoid database dependency
         mock_ledger = Mock()
-        mock_ledger.get_fill.return_value = None
+        mock_ledger.get_fill_by_id.return_value = None
         
         with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger):
             # First, create a position in cache
@@ -1507,7 +1575,7 @@ class TestPositionMonitorPositionCacheIntegration:
         
         # Mock fills_ledger to avoid database dependency
         mock_ledger = Mock()
-        mock_ledger.get_fill.return_value = None
+        mock_ledger.get_fill_by_id.return_value = None
         
         # Mock get_kalshi_risk to return our mock risk manager
         with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger), \
@@ -1642,7 +1710,7 @@ class TestPositionMonitorPositionCacheIntegration:
         monitor.add_position(position_yes)
         
         # Trigger extreme profit exit at 99c (use await instead of asyncio.run)
-        await monitor._check_position(position_yes, 99)
+        await monitor._legacy_check_position(position_yes, 99)
         
         # Wait for async task to complete
         await asyncio.sleep(0.1)
@@ -1673,7 +1741,7 @@ class TestPositionMonitorPositionCacheIntegration:
         monitor.add_position(position_no)
         
         # Trigger extreme profit exit at 99c (use await instead of asyncio.run)
-        await monitor._check_position(position_no, 99)
+        await monitor._legacy_check_position(position_no, 99)
         
         # Wait for async task to complete
         await asyncio.sleep(0.1)
@@ -1697,7 +1765,31 @@ class TestPositionMonitorPositionCacheIntegration:
 
 class TestPositionMonitorTrailingStopConfiguration:
     """Test trailing stop configuration aligned with 15m best practices."""
-    
+
+    def setup_method(self):
+        """Reset singleton state between tests to avoid fill_id/position leakage."""
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        from merid.position_management.position_monitor import get_position_monitor
+
+        cache = get_position_cache()
+        if hasattr(cache, '_applied_fill_ids'):
+            cache._applied_fill_ids.clear()
+        cache._fills_ledger = None
+        if hasattr(cache, '_positions'):
+            cache._positions.clear()
+        if hasattr(cache, '_pending_tp_targets'):
+            cache._pending_tp_targets.clear()
+
+        monitor = get_position_monitor()
+        monitor._open_positions.clear()
+        monitor._market_to_position.clear()
+        monitor._exit_intent_in_flight.clear()
+        monitor._position_to_client_order.clear()
+        monitor._recent_exit_submissions.clear()
+        monitor._exit_registry.clear()
+        monitor._exit_quantities.clear()
+        monitor._cleanup_pending.clear()
+
     @pytest.mark.asyncio
     async def test_position_cache_configures_fixed_cents_trailing(self):
         """Test that position_cache configures FIXED_CENTS trailing with 5c trail distance.
@@ -1728,7 +1820,7 @@ class TestPositionMonitorTrailingStopConfiguration:
         
         # Mock fills_ledger to avoid database dependency
         mock_ledger = Mock()
-        mock_ledger.get_fill.return_value = None
+        mock_ledger.get_fill_by_id.return_value = None
         
         with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger):
             # Simulate a fill creating a new position

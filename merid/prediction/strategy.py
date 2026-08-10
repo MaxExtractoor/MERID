@@ -30,6 +30,12 @@ from merid.prediction.model import (
     max_spot_age_seconds,
     PredictionMarketModel,
 )
+from merid.event_venues.kalshi.stop_candidate import (
+    build_stop_candidate,
+    maybe_submit_stop_candidate_sync,
+    record_stop_candidate,
+)
+from merid.event_venues.kalshi.binary_price_space import to_signed_yes_exposure
 
 # Cross-asset top edge arbiter for dynamic floor selection
 # This enables BTC, ETH, SOL, XRP, DOGE to compete for capital on relative edge
@@ -2942,6 +2948,72 @@ class KalshiStrategy:
         """Remove a closed position."""
         self._positions.pop(market_id, None)
 
+    def _record_stop_candidate(
+        self,
+        pos: PositionState,
+        snapshot: MarketSnapshot,
+        pnl_pct: Decimal,
+    ) -> None:
+        """Convert a strategy-level stop-loss trigger to a gated StopCandidate event.
+
+        The legacy SELL signal is suppressed; the candidate is logged and may be
+        submitted later if it passes the edge/settlement/position validation gates.
+        """
+        position_cc = to_signed_yes_exposure(pos.side, pos.contracts) * 100
+
+        fair_value: Optional[int] = None
+        executable_exit: Optional[int] = None
+        if pos.current_price_cents is not None:
+            executable_exit = int(pos.current_price_cents)
+
+        if snapshot.implied is not None:
+            if pos.side == "yes" and snapshot.implied.yes_prob is not None:
+                fair_value = int(round(float(snapshot.implied.yes_prob) * 100))
+            elif pos.side == "no" and snapshot.implied.no_prob is not None:
+                fair_value = int(round(float(snapshot.implied.no_prob) * 100))
+
+        seconds_to_expiry = None
+        if snapshot.time_to_expiry_hours is not None:
+            try:
+                seconds_to_expiry = float(snapshot.time_to_expiry_hours) * 3600.0
+            except (TypeError, ValueError):
+                pass
+
+        entry_price = int(pos.avg_entry_cents) if pos.avg_entry_cents is not None else None
+        predicted_pnl = int(pos.unrealized_pnl_cents) if pos.unrealized_pnl_cents is not None else None
+
+        candidate = build_stop_candidate(
+            market_ticker=pos.market_id,
+            exchange_position_cc=position_cc,
+            trigger_reason="MODEL_INVALIDATION",
+            entry_price_cents=entry_price,
+            fair_value_cents=fair_value,
+            executable_exit_cents=executable_exit,
+            seconds_to_expiry=seconds_to_expiry,
+            quote_age_ms=None,
+            consecutive_edge_below=0,
+        )
+        # predicted PnL from the position is more authoritative than the helper estimate.
+        candidate = candidate.__class__(
+            **{
+                **candidate.to_dict(),
+                "predicted_net_pnl_cents": predicted_pnl,
+            }
+        )
+        record_stop_candidate(candidate)
+        maybe_submit_stop_candidate_sync(candidate)
+
+        logger.warning(
+            "[STRATEGY-STOP-CANDIDATE] market=%s side=%s contracts=%s pnl_pct=%.2f%% "
+            "fair=%s exit=%s - direct stop signal suppressed until replay tests pass",
+            pos.market_id,
+            pos.side,
+            pos.contracts,
+            float(pnl_pct) * 100,
+            fair_value,
+            executable_exit,
+        )
+
     def evaluate_exits(self, snapshots: Dict[str, MarketSnapshot]) -> List[StrategySignal]:
         """Check all open positions for exit conditions.
 
@@ -2980,7 +3052,9 @@ class KalshiStrategy:
                     if pnl_pct >= self.config.profit_target_pct:
                         reason = f"Profit target hit: {pnl_pct:.2%} >= {self.config.profit_target_pct:.2%}."
                     elif pnl_pct <= -self.config.stop_loss_pct:
-                        reason = f"Stop loss hit: {pnl_pct:.2%} <= -{self.config.stop_loss_pct:.2%}."
+                        # Strategy stop loss is disabled from direct SELL signal.
+                        # Record a StopCandidate event and continue (max hold/market close may still fire).
+                        self._record_stop_candidate(pos, snap, pnl_pct)
 
             # Max hold
             if reason is None:
