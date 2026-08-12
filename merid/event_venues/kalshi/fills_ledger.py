@@ -77,7 +77,57 @@ from enum import Enum
 
 from utils.logger import get_logger
 
+try:
+    from merid.event_venues.kalshi.binary_price_space import (
+        yes_delta,
+        from_signed_yes_exposure,
+        fill_to_signed_yes_exposure,
+        normalize_rest_position,
+    )
+    BINARY_PRICE_SPACE_AVAILABLE = True
+except Exception:
+    BINARY_PRICE_SPACE_AVAILABLE = False
+
 logger = get_logger("merid.event_venues.kalshi.fills_ledger")
+
+
+def _json_default(obj: Any) -> Any:
+    """JSON serializer fallback for Decimal and datetime values."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _fill_sort_ts(raw: Dict[str, Any]) -> float:
+    """Return a numeric timestamp for sorting fills chronologically."""
+    ts = raw.get("timestamp")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return float(ts)
+    ts = raw.get("ts")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return float(ts)
+    created = raw.get("created_time") or raw.get("created_at")
+    if isinstance(created, str):
+        try:
+            return datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            pass
+    return 0.0
+
+
+def _deep_json_safe(value: Any) -> Any:
+    """Recursively convert Decimal/datetime in a dict/list structure."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _deep_json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deep_json_safe(v) for v in value]
+    return value
 
 
 def _is_test_ticker(ticker: str) -> bool:
@@ -238,7 +288,8 @@ class KalshiFill:
     market_ticker: str = ""  # e.g., "KXBTC-25DEC-ABOVE-100000"
     side: str = ""  # "yes" or "no"
     action: str = ""  # "buy" or "sell"
-    count_fp: int = 0  # Number of contracts (fixed-point integer)
+    count_fp: Decimal = Decimal("0")  # Exact fixed-point contract count
+    quantity_cc: int = 0  # Integer centi-contracts; canonical for exposure math
     yes_price_dollars: Optional[Decimal] = None  # Price if side=yes
     no_price_dollars: Optional[Decimal] = None  # Price if side=no
     fee_cost: Decimal = Decimal("0")  # Fee paid
@@ -273,12 +324,45 @@ class KalshiFill:
     # Reconciliation tracking
     reconciled: bool = False  # Has been matched to position ledger
     reconciliation_ts: Optional[datetime] = None
-    
+
+    # Intent correlation tracking
+    unmatched: bool = False  # True if this fill could not be durably correlated to an intent
+    unmatched_reason: Optional[str] = None  # Why correlation failed
+
+    # ENTRY/EXIT CLASSIFICATION (CRITICAL 2026-08-09)
+    # These fields are authoritative metadata from the originating OrderIntent.
+    # A fill is an entry only when entry_or_exit == "entry" and reduce_only is False.
+    is_exit: Optional[bool] = None  # None = classification unknown, True = exit, False = entry
+    reduce_only: bool = False  # True if the originating order was reduce-only
+    entry_or_exit: Optional[str] = None  # "entry" or "exit" as set on the originating intent
+
     # Slippage tracking (per-coin statistics)
     slippage_cents: Optional[int] = None  # Slippage in cents (actual - expected)
     expected_price_cents: Optional[int] = None  # Expected price at order time
     asset: Optional[str] = None  # Derived from ticker (BTC, ETH, SOL, XRP, DOGE)
-    
+    # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution
+    entry_signal_id: Optional[str] = None
+    entry_model: Optional[str] = None
+    entry_model_version: Optional[str] = None
+    entry_model_probability: Optional[float] = None
+    entry_market_probability: Optional[float] = None
+    entry_edge: Optional[float] = None
+    entry_book_snapshot_id: Optional[str] = None
+    entry_execution_mode: Optional[str] = None
+
+    # 2026-08-11: Signal economics and settlement telemetry persisted on every fill.
+    # These fields survive replay and let post-trade analysis use the same assumptions
+    # as the signal that produced the trade.
+    all_in_cost_cents: Optional[float] = None
+    ev_net_cents: Optional[float] = None
+    fee_cents: Optional[float] = None
+    slippage_cents: Optional[int] = None
+    time_to_expiry_seconds: Optional[float] = None
+    settlement_input_price: Optional[float] = None
+    cf_rti_basis: Optional[float] = None
+    is_counter_trend: bool = False
+    thesis_side: Optional[str] = None
+
     # Strict mode tracking (production safety)
     derived_id: bool = False  # True if fill_id was synthesized (not from Kalshi)
     confirmed_by_rest: bool = False  # True if this fill was later confirmed by HTTP REST API
@@ -300,7 +384,7 @@ class KalshiFill:
     
     def is_incomplete(self) -> bool:
         """True when size or price is missing/zero — UI should show placeholder, not fake zeros."""
-        if self.count_fp <= 0:
+        if self.quantity_cc <= 0:
             return True
         if self.price_cents <= 0:
             return True
@@ -310,13 +394,16 @@ class KalshiFill:
         """Serialize to dict for API responses."""
         d = asdict(self)
         # Convert Decimal to float for JSON serialization
-        for key in ["yes_price_dollars", "no_price_dollars", "fee_cost"]:
+        for key in ["yes_price_dollars", "no_price_dollars", "fee_cost", "proceeds_dollars"]:
             if d.get(key) is not None:
                 d[key] = float(d[key])
         # Convert datetime to ISO string
         for key in ["created_time", "ingested_at", "reconciliation_ts"]:
             if d.get(key) is not None:
                 d[key] = d[key].isoformat() if isinstance(d[key], datetime) else d[key]
+        # raw_payload may contain Decimals from the Kalshi response; make it JSON-safe
+        if d.get("raw_payload") is not None:
+            d["raw_payload"] = _deep_json_safe(d["raw_payload"])
         # is_live is already bool, no conversion needed
         return d
     
@@ -378,12 +465,13 @@ class OrderIntent:
     
     These serve different purposes and have different fields. Do not consolidate.
     """
-    intent_id: str  # Our internal ID (client_order_id)
+    intent_id: str  # Our internal ID
     ticker: str  # Renamed from market_ticker to match order_router.OrderIntent
     side: str  # "yes" or "no"
     action: str  # "buy" or "sell"
     count: int  # Total intended count
     price_cents: int
+    client_order_id: str = ""  # The client_order_id we place on the wire (may equal intent_id)
     agent_id: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = "pending"  # pending, submitted, filled, cancelled, rejected
@@ -413,6 +501,15 @@ class OrderIntent:
     intent_hash: Optional[str] = None  # Deterministic hash over intent's core executable fields
     broker_order_id: Optional[str] = None  # Kalshi order ID for reconciliation
     execution_report_hash: Optional[str] = None  # Hash of execution report from venue
+    # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution
+    entry_signal_id: Optional[str] = None
+    entry_model: Optional[str] = None
+    entry_model_version: Optional[str] = None
+    entry_model_probability: Optional[float] = None
+    entry_market_probability: Optional[float] = None
+    entry_edge: Optional[float] = None
+    entry_book_snapshot_id: Optional[str] = None
+    entry_execution_mode: Optional[str] = None
     
     # Liquidity and fee tracking for fill reconciliation
     liquidity_role: Optional[str] = None  # "maker" or "taker"
@@ -421,8 +518,31 @@ class OrderIntent:
     snapshot_age_ms: float = 0.0  # Age of signal snapshot in milliseconds
     # CRITICAL FIX (2026-07-29): Metadata dict for alpha-hedge pairing and other tracking
     metadata: Optional[Dict[str, Any]] = None
-    
-    def add_fill(self, fill_id: str, fill_count: int) -> None:
+
+    # ENTRY/EXIT DIRECTION CONTRACT (CRITICAL 2026-08-09)
+    # Must be persisted before the order is sent so fills can be authoritatively
+    # classified on every ingestion path (WebSocket, HTTP poller, backfill, replay).
+    entry_or_exit: Optional[str] = None  # "entry" or "exit"
+    reduce_only: bool = False  # True for reduce-only / exit orders
+
+    # Canonical side/action as placed on the wire. These are immutable once recorded
+    # and are the reference for cross-leg canonicalization (e.g. SELL_YES == BUY_NO).
+    original_side: Optional[str] = None  # Kalshi-format side: BUY_YES, SELL_YES, BUY_NO, SELL_NO
+    original_action: Optional[str] = None  # "buy" or "sell"
+
+    # 2026-08-11: Single-source-of-truth economics and settlement telemetry.
+    # Carried from the signal through sizing into the fill for post-trade attribution.
+    all_in_cost_cents: Optional[float] = None
+    ev_net_cents: Optional[float] = None
+    fee_cents: Optional[float] = None
+    slippage_cents: Optional[int] = None
+    time_to_expiry_seconds: Optional[float] = None
+    settlement_input_price: Optional[float] = None
+    cf_rti_basis: Optional[float] = None
+    is_counter_trend: bool = False
+    thesis_side: Optional[str] = None
+
+    def add_fill(self, fill_id: str, fill_count: Any) -> None:
         """Add a fill to this intent and update status.
         
         This handles partial fills by tracking the cumulative filled quantity.
@@ -498,8 +618,9 @@ class OrderIntent:
                 asset = self.ticker.split("-")[0][2:] if self.ticker.startswith("KX") else "UNKNOWN"
                 asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
                 
-                # Calculate fill notional
-                fill_notional = (fill_count * self.price_cents) / 100.0
+                # Calculate fill notional using quantity_cc to avoid Decimal/float TypeError.
+                fill_quantity_cc = int(Decimal(str(fill_count)) * Decimal("100")) if fill_count is not None else 0
+                fill_notional = (fill_quantity_cc * self.price_cents) / 10000.0
                 
                 allocator.record_order_filled(asset, self.order_id or self.intent_id, fill_notional)
                 logger.info(
@@ -588,6 +709,23 @@ class KalshiFillsLedger:
         
         # Order intents: intent_id -> OrderIntent
         self._intents: Dict[str, OrderIntent] = {}
+
+        # Index order_id -> intent_id so fills without client_order_id can still
+        # be resolved to their originating intent for canonical side/action.
+        self._intents_by_order_id: Dict[str, str] = {}
+
+        # Index client_order_id -> intent_id.  Kalshi echoes the client_order_id
+        # placed on the wire, which may differ from our internal intent_id.
+        self._intents_by_client_order_id: Dict[str, str] = {}
+
+        # Pending orders: recently submitted but not-yet-persisted intents.
+        # Used by the circuit breaker to avoid race-condition halts.
+        self._pending_orders: Dict[str, Dict[str, Any]] = {}
+        self._pending_order_ttl_seconds: float = 30.0
+
+        # Fill IDs that could not be durably correlated to an intent.
+        # These are applied for canonical exposure but never attached to bracket/exit policy.
+        self._unmatched_fill_ids: Set[str] = set()
         
         # Index by order_id for quick lookup
         self._fills_by_order: Dict[str, List[str]] = {}  # order_id -> [fill_id, ...]
@@ -800,7 +938,7 @@ class KalshiFillsLedger:
                 "error_message": str(error)[:500],
                 "market_ticker": fill.market_ticker,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "fill_json": json.dumps(fill.to_dict()) if hasattr(fill, 'to_dict') else str(fill),
+                "fill_json": json.dumps(fill.to_dict(), default=_json_default) if hasattr(fill, 'to_dict') else str(fill),
             }
             
             self._dlq_buffer.append(record)
@@ -1028,10 +1166,10 @@ class KalshiFillsLedger:
             async with aiosqlite.connect(self._db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
-                # Delete incomplete fills (count_fp <= 0 or price data missing)
+                # Delete incomplete fills (quantity_cc <= 0 or price data missing)
                 async with db.execute("""
                     DELETE FROM kalshi_fills
-                    WHERE count_fp <= 0
+                    WHERE (quantity_cc <= 0 OR quantity_cc IS NULL)
                     OR (yes_price_dollars IS NULL AND no_price_dollars IS NULL)
                     OR yes_price_dollars <= 0
                     OR no_price_dollars <= 0
@@ -1110,7 +1248,11 @@ class KalshiFillsLedger:
         new_count = 0
         new_fill_ids: List[str] = []
         merged_duplicate = False
-        
+
+        # Sort chronologically so exit fills are processed after their entry fills.
+        # Kalshi returns newest first and backfills can deliver out-of-order batches.
+        fills = sorted(fills, key=_fill_sort_ts)
+
         mutex = self._ensure_mutex()
         async with mutex:
             for raw in fills:
@@ -1121,7 +1263,9 @@ class KalshiFillsLedger:
                 # CRITICAL FIX: Validate fill data before ingesting (same as on_fill)
                 # This prevents corrupted fill data from entering the ledger via HTTP
                 if fill.count_fp is None or fill.count_fp <= 0:
-                    logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: count_fp=%s (must be > 0) fill_id=%s", fill.count_fp, fill.fill_id)
+                    # Zero-count records from /portfolio/fills are open orders that have
+                    # not yet filled; they are not invalid, just not true fills.
+                    logger.debug("[FILLS-LEDGER] Skipping zero-count HTTP record: count_fp=%s fill_id=%s", fill.count_fp, fill.fill_id)
                     continue
                 
                 if not fill.fill_id or not fill.fill_id.strip():
@@ -1379,12 +1523,14 @@ class KalshiFillsLedger:
                         await cache.on_fill(
                             market_id=fill.market_ticker,
                             contracts=fill.count_fp,
+                            quantity_cc=fill.quantity_cc,
                             price_cents=fill.price_cents,
                             fee_cents=int(fill.fee_cost * 100) if fill.fee_cost else 0,
                             side=fill.side,
                             client_order_id=fill.client_order_id,
                             fill_id=fill.fill_id,
-                            action=fill.action
+                            action=fill.action,
+                            is_exit=fill.is_exit,
                         )
                 logger.debug(f"[FILLS-LEDGER] Notified position cache of {len(new_fill_ids)} new fills from HTTP")
             except Exception as cache_err:
@@ -1621,8 +1767,28 @@ class KalshiFillsLedger:
         
         CRITICAL FIX (2026-07-29): Extract alpha-hedge pairing metadata from intent
         for downstream tracking in hedge fills.
+
+        CRITICAL FIX (2026-08-08): Maintain order_id -> intent_id index so fills
+        ingested by Kalshi order_id alone can be canonicalized to their original
+        side/action. This prevents cross-leg fill misclassification in the
+        position cache (e.g. a taker 'sell no' fill that is actually a MERID
+        'buy yes' being recorded as raw side=no, action=sell).
         """
+        # Preserve the original wire-form side/action for canonicalization and
+        # immutable exit classification across all fill paths.
+        if not getattr(intent, "original_side", None):
+            intent.original_side = intent.side
+        if not getattr(intent, "original_action", None):
+            intent.original_action = intent.action
+
         self._intents[intent.intent_id] = intent
+        if intent.order_id:
+            self._intents_by_order_id[intent.order_id] = intent.intent_id
+        # Index client_order_id -> intent_id.  The client_order_id is what Kalshi
+        # echoes back on fills, so this is the primary correlation boundary.
+        client_order_id = getattr(intent, "client_order_id", None) or intent.intent_id
+        if client_order_id:
+            self._intents_by_client_order_id[client_order_id] = intent.intent_id
         # CRITICAL FIX (2026-07-29): Log hedge pairing metadata for debugging
         if intent.metadata and "paired_alpha_id" in intent.metadata:
             logger.debug(
@@ -1788,18 +1954,30 @@ class KalshiFillsLedger:
             )
         ]
         for iid in to_delete:
+            intent = self._intents[iid]
+            if intent.order_id and intent.order_id in self._intents_by_order_id:
+                del self._intents_by_order_id[intent.order_id]
+            client_order_id = getattr(intent, "client_order_id", None) or iid
+            if client_order_id in self._intents_by_client_order_id:
+                del self._intents_by_client_order_id[client_order_id]
             del self._intents[iid]
         if to_delete:
             logger.debug("Pruned %d stale intents (remaining=%d)", len(to_delete), len(self._intents))
     
-    def update_intent_status(self, intent_id: str, status: str, 
-                            order_id: Optional[str] = None) -> None:
+    def update_intent_status(self, intent_id: str, status: str,
+                            order_id: Optional[str] = None,
+                            client_order_id: Optional[str] = None) -> None:
         """Update intent status (submitted, rejected, etc.)."""
         if intent_id in self._intents:
             intent = self._intents[intent_id]
             intent.status = status
             if order_id:
                 intent.order_id = order_id
+                # CRITICAL FIX (2026-08-08): Index order_id once it is known.
+                self._intents_by_order_id[order_id] = intent.intent_id
+            if client_order_id:
+                intent.client_order_id = client_order_id
+                self._intents_by_client_order_id[client_order_id] = intent.intent_id
             intent.last_update = datetime.now(timezone.utc)
     
     def get_fills(self, 
@@ -2145,114 +2323,95 @@ class KalshiFillsLedger:
         return await asyncio.to_thread(self.compute_net_positions)
 
     def compute_position_from_fills(self, market_ticker: str) -> Optional[Dict[str, Any]]:
-        """Recompute position for a market purely from fills ledger."""
+        """Recompute position for a market purely from fills ledger using signed YES exposure."""
         fill_ids = self._fills_by_market.get(market_ticker, [])
         if not fill_ids:
             return None
-            
-        yes_contracts = 0
-        no_contracts = 0
-        yes_cost = Decimal("0")
-        no_cost = Decimal("0")
-        fees = Decimal("0")
-        
-        for fill_id in fill_ids:
-            fill = self._fills[fill_id]
-            fees += fill.fee_cost
-            
-            if fill.side == "yes":
-                if fill.action == "buy":
-                    yes_contracts += fill.count_fp
-                    yes_cost += fill.notional_usd
-                else:  # sell — reduce cost basis proportionally to maintain correct avg price
-                    if yes_contracts > 0:
-                        yes_cost -= (yes_cost / yes_contracts) * fill.count_fp
-                    yes_contracts -= fill.count_fp
-            else:  # side == "no"
-                if fill.action == "buy":
-                    no_contracts += fill.count_fp
-                    no_cost += fill.notional_usd
-                else:  # sell — reduce cost basis proportionally
-                    if no_contracts > 0:
-                        no_cost -= (no_cost / no_contracts) * fill.count_fp
-                    no_contracts -= fill.count_fp
-        
-        # Net position (positive = long, negative = short)
-        net_contracts = yes_contracts - no_contracts
-        
-        if net_contracts == 0:
-            return None
-            
-        side = "yes" if net_contracts > 0 else "no"
-        avg_price = (
-            (yes_cost / Decimal(yes_contracts) if yes_contracts > 0 else Decimal("0")) if net_contracts > 0
-            else (no_cost / Decimal(no_contracts) if no_contracts > 0 else Decimal("0"))
-        )
-        
-        return {
-            "market_ticker": market_ticker,
-            "side": side,
-            "contracts": abs(net_contracts),
-            "avg_price_dollars": float(avg_price),
-            "avg_price_cents": int(avg_price * 100),
-            "total_fees_usd": float(fees),
-            "computed_from_fills": len(fill_ids),
-        }
+        return self._compute_position_from_fill_ids(market_ticker, fill_ids)
     
     def _compute_position_from_fill_ids(self, market_ticker: str, fill_ids: List[str]) -> Optional[Dict[str, Any]]:
-        """Compute position from a specific list of fill IDs (helper for time-filtered positions)."""
+        """Compute position from a specific list of fill IDs using canonical signed-YES exposure.
+
+        This collapses the four economically-equivalent Kalshi order forms into a
+        single signed exposure curve, so that e.g. ``BUY_NO`` and ``SELL_YES``
+        produce identical deltas and a full exit returns zero exposure.
+        """
         if not fill_ids:
             return None
-            
-        yes_contracts = 0
-        no_contracts = 0
-        yes_cost = Decimal("0")
-        no_cost = Decimal("0")
-        fees = Decimal("0")
-        
+
+        if not BINARY_PRICE_SPACE_AVAILABLE:
+            raise RuntimeError("binary_price_space is required for canonical position computation")
+
+        signed_yes = 0
+        total_fees = Decimal("0")
+        avg_price_cents = 0
+        thesis_side: Optional[str] = None
+
         for fill_id in fill_ids:
             fill = self._fills.get(fill_id)
             if not fill:
                 continue
-            fees += fill.fee_cost
-            
-            if fill.side == "yes":
-                if fill.action == "buy":
-                    yes_contracts += fill.count_fp
-                    yes_cost += fill.notional_usd
-                else:  # sell — reduce cost basis proportionally to maintain correct avg price
-                    if yes_contracts > 0:
-                        yes_cost -= (yes_cost / yes_contracts) * fill.count_fp
-                    yes_contracts -= fill.count_fp
-            else:  # side == "no"
-                if fill.action == "buy":
-                    no_contracts += fill.count_fp
-                    no_cost += fill.notional_usd
-                else:  # sell — reduce cost basis proportionally
-                    if no_contracts > 0:
-                        no_cost -= (no_cost / no_contracts) * fill.count_fp
-                    no_contracts -= fill.count_fp
-        
-        # Net position (positive = long, negative = short)
-        net_contracts = yes_contracts - no_contracts
-        
-        if net_contracts == 0:
+
+            # CRITICAL 2026-08-09: Use canonical centi-contracts for exposure math.
+            # Fallback to count_fp (whole-contract legacy) when quantity_cc is missing or zero.
+            count = fill.quantity_cc or 0
+            if count == 0 and fill.count_fp:
+                count = int(Decimal(str(fill.count_fp)) * Decimal("100"))
+            if count == 0:
+                continue
+
+            # Canonical signed-YES delta (BUY_YES/SELL_NO -> +, SELL_YES/BUY_NO -> -).
+            # This is the exact same math that position_cache.apply_fill uses.
+            fill_yes = fill_to_signed_yes_exposure(fill.action, fill.side, count)
+            if fill_yes == 0:
+                logger.debug(
+                    "[FILLS-LEDGER-COMPUTE] Skipping fill with no exposure delta: %s action=%s side=%s count=%s",
+                    fill.fill_id, fill.action, fill.side, count
+                )
+                continue
+
+            total_fees += fill.fee_cost
+
+            # Determine the price in the current thesis side's price space.
+            fill_price = fill.price_cents
+            if fill_price is None:
+                fill_price = 0
+            if thesis_side is not None and fill.side != thesis_side:
+                # Opposite-side fill price is the dual complement in thesis space.
+                fill_price = 100 - fill_price
+
+            abs_exposure = abs(signed_yes)
+            if abs_exposure == 0:
+                avg_price_cents = fill_price
+            else:
+                # Weighted average of remaining cost and the new fill's cost.
+                total_cost = abs_exposure * avg_price_cents + count * fill_price
+                avg_price_cents = int(total_cost // (abs_exposure + count))
+
+            signed_yes += fill_yes
+
+            # Set thesis side from first non-zero exposure so subsequent fill prices
+            # are interpreted in the same price space.
+            if thesis_side is None and signed_yes != 0:
+                thesis_side, _ = from_signed_yes_exposure(signed_yes)
+
+        if signed_yes == 0:
             return None
-            
-        side = "yes" if net_contracts > 0 else "no"
-        avg_price = (
-            (yes_cost / Decimal(yes_contracts) if yes_contracts > 0 else Decimal("0")) if net_contracts > 0
-            else (no_cost / Decimal(no_contracts) if no_contracts > 0 else Decimal("0"))
-        )
-        
+
+        side, quantity_cc = from_signed_yes_exposure(signed_yes)
+        # Display contracts are fractional whole contracts; signed_yes stays canonical in cc.
+        contracts = Decimal(quantity_cc) / Decimal("100") if quantity_cc else Decimal("0")
+
         return {
             "market_ticker": market_ticker,
             "side": side,
-            "contracts": abs(net_contracts),
-            "avg_price_dollars": float(avg_price),
-            "avg_price_cents": int(avg_price * 100),
-            "total_fees_usd": float(fees),
+            "contracts": contracts,
+            "quantity_cc": quantity_cc,
+            "avg_price_dollars": avg_price_cents / 100.0,
+            "avg_price_cents": avg_price_cents,
+            "total_fees_usd": float(total_fees),
             "computed_from_fills": len(fill_ids),
+            "signed_yes_exposure": signed_yes,
         }
 
     def compute_net_positions(self, since_hours: int = 24) -> Dict[str, Dict[str, Any]]:
@@ -2416,7 +2575,7 @@ class KalshiFillsLedger:
             
             # Percentage diff using Kalshi as reference (avoid div by zero)
             if kalshi_contracts > 0:
-                pct_diff = (contract_diff / kalshi_contracts) * 100.0
+                pct_diff = float(contract_diff / kalshi_contracts) * 100.0
             else:
                 pct_diff = 100.0 if our_contracts > 0 else 0.0
             
@@ -2475,39 +2634,13 @@ class KalshiFillsLedger:
         else:
             self._reconciliation_status = ReconciliationStatus.OK
 
-        # FIX 6: Auto-corrective reconciliation
-        # When divergence is detected and within threshold (< 5 contracts), auto-correct
-        # position cache to match Kalshi REST positions. This reduces manual intervention
-        # and ensures cache stays synchronized with actual Kalshi state.
+        # CRITICAL FIX (2026-08-11): fills_ledger is a diagnostic / immutable record.
+        # It must not independently mutate the position cache.  The single writer of
+        # cache state is the reconciliation coordinator (fills_poller), which calls
+        # cache.sync_from_rest() after reviewing this report.  Any required correction
+        # is reported here as metadata and applied once upstream.
         auto_corrected = False
-        if len(divergences) > 0 and len(divergences) <= 5:  # Only auto-correct small divergences
-            try:
-                from merid.event_venues.kalshi.position_cache import get_position_cache
-                cache = get_position_cache()
 
-                # Build corrected positions from Kalshi REST data
-                corrected_positions = [
-                    {
-                        "market_id": kp.get("market_ticker") or kp.get("ticker"),
-                        "contracts": kp.get("contracts", 0),
-                        "side": kp.get("side", "yes"),
-                        "avg_price_cents": kp.get("avg_price_cents", 0) or kp.get("avg_price", 0),
-                    }
-                    for kp in kalshi_positions
-                    if kp.get("contracts", 0) > 0  # Only include open positions
-                ]
-
-                if corrected_positions:
-                    # Sync corrected positions to cache with force=True
-                    await cache.sync_from_rest(corrected_positions, rest_timestamp=_time.time(), force=True)
-                    auto_corrected = True
-                    logger.info(
-                        "[RECONCILIATION-AUTO-CORRECT] Auto-corrected position cache with %d positions from Kalshi REST",
-                        len(corrected_positions)
-                    )
-            except Exception as auto_correct_err:
-                logger.warning("[RECONCILIATION-AUTO-CORRECT] Failed to auto-correct position cache: %s", auto_correct_err)
-        
         # Purely diagnostic report - all facts, no judgments
         report = {
             "status": self._reconciliation_status.value,
@@ -3152,19 +3285,35 @@ class KalshiFillsLedger:
             fill: New fill to apply
         """
         position["fills"].append(fill.fill_id)
-        
-        # Update weighted average price
+
+        # CRITICAL FIX (2026-08-09): sells must REDUCE the position, not add to it.
+        # Previously both buy and sell were treated as additive, so closing fills never
+        # reduced total_contracts and positions were never marked closed.
         old_contracts = position["total_contracts"]
         old_cost = position["total_cost_cents"]
-        new_contracts = fill.count_fp
-        new_cost = new_contracts * fill.price_cents
-        
-        total_contracts = old_contracts + new_contracts
+
+        if fill.action == "buy":
+            new_cost = fill.count_fp * fill.price_cents
+            total_contracts = old_contracts + fill.count_fp
+            total_cost = old_cost + new_cost
+        else:  # sell
+            # Remove cost basis at average entry to keep remaining contracts' avg correct
+            avg_price = position.get("avg_price_cents") or fill.price_cents or 0
+            removal_cost = fill.count_fp * avg_price
+            total_contracts = old_contracts - fill.count_fp
+            total_cost = old_cost - removal_cost
+
+        position["total_contracts"] = total_contracts
+        position["total_cost_cents"] = total_cost
+
         if total_contracts > 0:
-            position["avg_price_cents"] = (old_cost + new_cost) // total_contracts
-            position["total_contracts"] = total_contracts
-            position["total_cost_cents"] = old_cost + new_cost
-        
+            position["avg_price_cents"] = total_cost // total_contracts
+        elif total_contracts < 0:
+            logger.warning(
+                "[FILLS-LEDGER] Oversold position: market=%s side=%s over_by=%d",
+                fill.market_ticker, fill.side, -total_contracts
+            )
+
         # Add fees
         position["fees_cents"] += int(fill.fee_cost * 100) if fill.fee_cost else 0
     
@@ -3233,6 +3382,19 @@ class KalshiFillsLedger:
         
         if fill.action not in ["buy", "sell"]:
             logger.error("[FILLS-LEDGER] Rejecting invalid fill: action=%s (must be 'buy' or 'sell')", fill.action)
+            return
+        
+        # CRITICAL FIX (2026-08-10): Unmatched/unknown fills are quarantined per AGENTS.md.
+        # They are stored in the ledger but must not create positions, attach TP/SL,
+        # consume or release risk, or update PnL.
+        if getattr(fill, "unmatched", False):
+            logger.warning(
+                "[FILLS-LEDGER-QUARANTINE] fill_id=%s ticker=%s unmatched=True reason=%s - "
+                "skipping position/PnL/risk application",
+                fill.fill_id, fill.market_ticker,
+                getattr(fill, "unmatched_reason", "unknown")
+            )
+            self._processed_fill_ids.add(fill.fill_id)
             return
         
         # Deduplicate fills
@@ -3331,6 +3493,29 @@ class KalshiFillsLedger:
         position = self._open_positions.get(instrument_key)
         
         if position is None:
+            # CRITICAL FIX (2026-08-09): Naked sell with no recorded open position.
+            # This happens on manual closes / sells that the ledger did not have on record
+            # (e.g. missing prior buy fill due to persistence issues). Creating a long
+            # position from a sell is wrong and crashes PositionMonitor logging below.
+            if fill.action == "sell":
+                logger.warning(
+                    "[FILLS-LEDGER] Sell fill with no open position in ledger: market=%s side=%s count=%d price=%dc",
+                    fill.market_ticker, fill.side, fill.count_fp, fill.price_cents
+                )
+                # Best-effort: remove from PositionMonitor if it is still tracked
+                # (position_cache REST sync will also reconcile this).
+                try:
+                    from merid.position_management.position_monitor import get_position_monitor
+                    monitor = get_position_monitor()
+                    monitor.remove_position(fill.market_ticker)
+                    logger.info(
+                        "[FILLS-LEDGER-POSITION-MONITOR] Removed position from monitor on naked sell: market=%s",
+                        fill.market_ticker
+                    )
+                except Exception:
+                    pass
+                return
+
             position = self._create_new_position(fill)
             self._open_positions[instrument_key] = position
             
@@ -3392,21 +3577,20 @@ class KalshiFillsLedger:
                 except Exception as ts_err:
                     logger.debug("[FILLS-LEDGER] Could not read trailing stop config: %s", ts_err)
                 
-                # Assign default SL if missing
+                # CRITICAL FIX (2026-08-11): Do not invent a default SL.  Use the SL
+                # from the original entry intent only.  Missing SL is left None and
+                # the position is monitored without an automatic loss stop.
                 entry_price = position.get("avg_price_cents", 0)
-                sl_price = entry_price
-                if sl_price:
-                    sl_price = max(1, sl_price - 5)
+                sl_price = None
+                risk_cents = 0
                 
-                # Calculate risk for trailing stop and TP target
-                risk_cents = abs(entry_price - sl_price) if sl_price and entry_price else 5
-                
-                # CRITICAL FIX: 2026-07-31 - Look up TP targets from position_cache registry
-                # This ensures that TP targets registered at order placement time are preserved
-                # when fills_ledger creates positions for monitoring
+                # CRITICAL FIX: 2026-07-31 - Look up TP/SL targets from position_cache registry
+                # This ensures that TP/SL registered at order placement time are preserved
+                # when fills_ledger creates positions for monitoring.
                 tp_price = None
                 tp_r_multiple = None
-                
+                tp_targets = {}
+
                 # Try to get client_order_id from fill for TP target lookup
                 client_order_id = getattr(fill, 'client_order_id', None)
                 if not client_order_id and hasattr(fill, 'order_id'):
@@ -3417,18 +3601,29 @@ class KalshiFillsLedger:
                         client_order_id = cache._order_id_to_client_tag.get(fill.order_id)
                     except Exception as lookup_err:
                         logger.debug("[FILLS-LEDGER] Could not look up client_order_id: %s", lookup_err)
-                
-                # Look up TP targets from position_cache registry
+
+                # Look up TP/SL targets from position_cache registry
                 if client_order_id:
                     try:
                         from merid.event_venues.kalshi.position_cache import get_position_cache
                         cache = get_position_cache()
-                        tp_targets = cache._pending_tp_targets.get(client_order_id, {})
+                        tp_targets = cache._pending_tp_targets.get(client_order_id, {}) or {}
                         if tp_targets:
                             registered_tp = tp_targets.get("tp_price")
                             registered_tp_r = tp_targets.get("tp_r")
                             registered_entry = tp_targets.get("entry_price")
-                            
+                            registered_sl = tp_targets.get("sl_price")
+                            registered_sl_enabled = bool(tp_targets.get("sl_enabled", True))
+
+                            # Use registered SL only if it came from the original entry intent
+                            if registered_sl_enabled and registered_sl is not None:
+                                sl_price = registered_sl
+                                risk_cents = abs(entry_price - sl_price) if (entry_price and sl_price) else 0
+                                logger.info(
+                                    "[FILLS-LEDGER-SL-LOOKUP] Found registered SL for client_order_id=%s: sl=%dc entry=%dc",
+                                    client_order_id[:12], sl_price, registered_entry or entry_price
+                                )
+
                             # Use registered TP if available, otherwise compute from entry
                             if registered_tp:
                                 tp_price = registered_tp
@@ -3439,7 +3634,9 @@ class KalshiFillsLedger:
                                 )
                             elif registered_entry and registered_entry > 0:
                                 # Compute TP from registered entry price if no explicit TP
-                                tp_price = registered_entry + risk_cents
+                                # If no SL, use 5 cents as a profit distance fallback.
+                                tp_distance = risk_cents if risk_cents > 0 else 5
+                                tp_price = min(99, registered_entry + tp_distance)
                                 logger.info(
                                     "[FILLS-LEDGER-TP-LOOKUP] Computed TP from registered entry for client_order_id=%s: entry=%dc tp=%dc",
                                     client_order_id[:12], registered_entry, tp_price
@@ -3447,9 +3644,12 @@ class KalshiFillsLedger:
                     except Exception as tp_err:
                         logger.debug("[FILLS-LEDGER] Could not look up TP targets: %s", tp_err)
                 
-                # Fallback: Compute TP from current entry price if no registered TP found
+                # Fallback: Compute TP from current entry price if no registered TP found.
+                # No SL fallback is ever used; a 5 cent profit distance is used only
+                # for TP calculation when no risk is known.
                 if tp_price is None and entry_price and entry_price > 0:
-                    tp_price = entry_price + risk_cents  # 1R take profit target
+                    tp_distance = risk_cents if risk_cents > 0 else 5
+                    tp_price = min(99, entry_price + tp_distance)
                     logger.debug(
                         "[FILLS-LEDGER-TP-FALLBACK] Computed fallback TP for market=%s: entry=%dc tp=%dc",
                         market_id, entry_price, tp_price
@@ -3462,9 +3662,31 @@ class KalshiFillsLedger:
                 # Extract series_ticker from market_id
                 market_id = fill.market_ticker
                 series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
-                
+
+                # CRITICAL FIX (2026-08-11): Use the AT_FILL executable entry book
+                # from the position_cache registry if available.  A fills_ledger
+                # reconstruction that uses a current/REST book is POST_FILL and is
+                # not trusted for spread-only exit invariants.
+                entry_executable_bid_cents = tp_targets.get("entry_executable_bid_cents") if tp_targets else None
+                entry_executable_ask_cents = tp_targets.get("entry_executable_ask_cents") if tp_targets else None
+                entry_book_capture_quality = (
+                    tp_targets.get("entry_book_capture_quality") if tp_targets else None
+                ) or "POST_FILL"
+                entry_book_timestamp = tp_targets.get("entry_book_timestamp") if tp_targets else None
+                entry_book_sequence = tp_targets.get("entry_book_sequence") if tp_targets else None
+                entry_book_source = tp_targets.get("entry_book_source") if tp_targets else None
+
                 side_enum = PositionSide.YES if position.get("side") == "yes" else PositionSide.NO
-                
+
+                # Only claim original SL if we found it in the registered tp_targets.
+                risk_params_state = (
+                    "original_persisted" if (client_order_id and tp_targets and tp_targets.get("sl_price") is not None)
+                    else "unknown"
+                )
+
+                fill_created_at = getattr(fill, "created_time", None)
+                order_id = getattr(fill, "order_id", None)
+
                 monitor_position = Position(
                     position_id=market_id,
                     market_id=market_id,
@@ -3473,7 +3695,24 @@ class KalshiFillsLedger:
                     size=position.get("total_contracts", 1),
                     avg_entry_price_cents=entry_price,
                     take_profit_price_cents=tp_price,  # CRITICAL FIX: Compute TP target instead of None
+                    stop_loss_enabled=sl_price is not None,
                     stop_loss_price_cents=sl_price,
+                    risk_params_state=risk_params_state,
+                    risk_params_schema_version=2,
+                    fill_source="fills_ledger",
+                    entry_fill_id=fill_id,
+                    client_order_id=client_order_id or order_id,
+                    entry_intent_id=client_order_id or order_id,
+                    # fills_ledger reconstructs positions from historical data, so any
+                    # captured book is POST_FILL and is not trusted for spread-only invariants.
+                    entry_book_capture_quality="POST_FILL",
+                    entry_fill_price_cents=entry_price,
+                    entry_fill_timestamp=fill_created_at or datetime.now(timezone.utc),
+                    entry_executable_bid_cents=None,
+                    entry_executable_ask_cents=None,
+                    entry_book_timestamp=None,
+                    entry_book_sequence=None,
+                    entry_book_source=None,
                     trailing_type=trailing_type,
                     trailing_param=trailing_param,
                     exit_policy_id="fills_ledger",
@@ -3484,8 +3723,10 @@ class KalshiFillsLedger:
                 if not is_legacy_position:
                     monitor.add_position(monitor_position)
                     logger.info(
-                        "[FILLS-LEDGER-POSITION-MONITOR] Added position to monitor: market=%s side=%s size=%d entry=%dc TP=%dc SL=%dc",
-                        market_id, position.get("side"), position.get("total_contracts"), entry_price, tp_price, sl_price
+                        "[FILLS-LEDGER-POSITION-MONITOR] Added position to monitor: market=%s side=%s size=%d entry=%dc TP=%s SL=%s",
+                        market_id, position.get("side"), position.get("total_contracts"), entry_price,
+                        f"{tp_price}c" if tp_price is not None else "N/A",
+                        f"{sl_price}c" if sl_price is not None else "N/A",
                     )
                 else:
                     logger.info(
@@ -3523,10 +3764,9 @@ class KalshiFillsLedger:
 
             # Determine exit reason based on fill context
             exit_reason = "SETTLEMENT"  # Default for fills that close positions
-            if fill.side == "sell" and fill.action == "sell":
-                # Could be TP, SL, or manual - infer from price if possible
-                # For now, use SETTLEMENT as default
-                exit_reason = "SETTLEMENT"
+            if fill.action == "sell":
+                # Sells that close the position are manual/TP/SL exits from our side
+                exit_reason = "MANUAL"
 
             # Calculate realized R
             realized_r = 0.0
@@ -3636,8 +3876,8 @@ class KalshiFillsLedger:
         if fill.action == "sell" and fill.proceeds_dollars is not None:
             # Proceeds already account for price and quantity
             exit_proceeds = fill.proceeds_dollars
-            # Calculate cost basis for exited portion
-            avg_entry_price = position["avg_price_cents"] / 100.0
+            # Calculate cost basis for exited portion in USD
+            avg_entry_price = Decimal(position.get("avg_price_cents", 0)) / Decimal("100")
             exit_cost = avg_entry_price * exited_contracts
             exit_fees = fill.fee_cost if fill.fee_cost else Decimal("0")
             return exit_proceeds - exit_cost - exit_fees
@@ -4183,7 +4423,186 @@ class KalshiFillsLedger:
         return result
     
     # ── Private methods ─────────────────────────────────────────────────────
-    
+
+    def record_pending_order(
+        self,
+        *,
+        client_order_id: Optional[str] = None,
+        client_order_ids: Optional[List[str]] = None,
+        order_id: Optional[str] = None,
+        intent_id: Optional[str] = None,
+    ) -> None:
+        """Record an order that has been submitted but not yet filled/reconciled.
+
+        The circuit breaker uses this registry to avoid halting on a fill that
+        raced ahead of durable intent persistence.  Multiple client_order_ids
+        (e.g. wire client_order_id and internal client_tag) may be supplied so
+        that fills from any identity path resolve to the same intent.
+        """
+        keys: List[str] = []
+        if client_order_id:
+            keys.append(client_order_id)
+        if client_order_ids:
+            keys.extend(client_order_ids)
+        if order_id:
+            keys.append(order_id)
+        if intent_id:
+            keys.append(intent_id)
+        if not keys:
+            return
+
+        now = time.time()
+        record = {
+            "client_order_id": client_order_id,
+            "order_id": order_id,
+            "intent_id": intent_id,
+            "submitted_at": now,
+        }
+
+        for key in keys:
+            self._pending_orders[key] = record
+
+        self._prune_pending_orders()
+
+    def _prune_pending_orders(self) -> None:
+        now = time.time()
+        cutoff = now - self._pending_order_ttl_seconds
+        stale = [k for k, v in self._pending_orders.items() if v["submitted_at"] < cutoff]
+        for k in stale:
+            del self._pending_orders[k]
+
+    def lookup_pending_order(
+        self,
+        *,
+        client_order_id: Optional[str] = None,
+        order_id: Optional[str] = None,
+        lookback_seconds: float = 30.0,
+    ) -> bool:
+        """Return True if the identifiers match a recently submitted intent."""
+        self._prune_pending_orders()
+        now = time.time()
+        cutoff = now - lookback_seconds
+
+        for key in (client_order_id, order_id):
+            if not key:
+                continue
+            record = self._pending_orders.get(key)
+            if record and record["submitted_at"] >= cutoff:
+                return True
+        return False
+
+    def _recover_client_order_id_for_order_id(
+        self, order_id: Optional[str]
+    ) -> Optional[str]:
+        """Recover client_order_id from order_id using position_cache mapping.
+
+        Kalshi's HTTP /portfolio/fills payload often omits client_order_id.  The
+        order_router registers the mapping as soon as the exchange order_id is
+        known, so we can bridge back to the intent before the durable
+        fills_ledger intent indices have been updated.
+        """
+        if not order_id:
+            return None
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            if cache is None:
+                return None
+            return cache.get_client_tag_for_order_id(order_id)
+        except Exception:
+            return None
+
+    def _resolve_intent_from_pending_order(
+        self,
+        key: Optional[str],
+        lookback_seconds: float = 30.0,
+    ) -> Optional[str]:
+        """Return the intent_id for a recently-submitted pending order, if any."""
+        if not key:
+            return None
+        record = self._pending_orders.get(key)
+        if not record:
+            return None
+        now = time.time()
+        if record["submitted_at"] < now - lookback_seconds:
+            return None
+        return record.get("intent_id")
+
+    def lookup(
+        self,
+        *,
+        client_order_id: Optional[str] = None,
+        order_id: Optional[str] = None,
+        lookback_seconds: float = 30.0,
+    ) -> bool:
+        """Circuit-breaker compatible lookup (bool result)."""
+        # If only order_id is present, try to recover the client_order_id from
+        # the position_cache mapping before we fall through to pending orders.
+        if order_id and not client_order_id:
+            client_order_id = self._recover_client_order_id_for_order_id(order_id)
+
+        # First try durable intent indices.
+        if client_order_id and client_order_id in self._intents_by_client_order_id:
+            return True
+        if order_id and order_id in self._intents_by_order_id:
+            return True
+        if client_order_id and client_order_id in self._intents:
+            return True
+
+        # Then check recently submitted but not-yet-persisted orders.
+        if self.lookup_pending_order(
+            client_order_id=client_order_id,
+            order_id=order_id,
+            lookback_seconds=lookback_seconds,
+        ):
+            return True
+
+        # Final fallback: resolve an intent_id from a pending-order record and
+        # verify it exists in the durable intent store.  This catches the race
+        # where the HTTP fill arrives before the order_id->intent_id index is
+        # populated, but the client_tag was pre-registered as a pending order.
+        for key in (client_order_id, order_id):
+            if not key:
+                continue
+            resolved_intent_id = self._resolve_intent_from_pending_order(key, lookback_seconds)
+            if resolved_intent_id and resolved_intent_id in self._intents:
+                return True
+        return False
+
+    def _maybe_halt_on_unmatched_fill(
+        self,
+        *,
+        fill_id: Any,
+        ticker: Optional[str],
+        client_order_id: Any,
+        order_id: Any,
+        created_time: Any,
+        source: str,
+    ) -> None:
+        """Halt trading if a live, unmatched fill cannot be resolved to an intent.
+
+        WebSocket fills are authoritative live events.  HTTP fills are only
+        considered live when they are newer than the persisted per-source
+        watermark.  This prevents 7-day backfills and CSV exports from tripping
+        the breaker while still catching newly observed, unlinked fills.
+        """
+        from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
+        if isinstance(created_time, datetime) and created_time.tzinfo is None:
+            created_time = created_time.replace(tzinfo=timezone.utc)
+
+        get_trading_circuit_breaker().require_live_fill_identity(
+            KalshiFill(
+                fill_id=str(fill_id) if fill_id else "",
+                market_ticker=ticker,
+                client_order_id=client_order_id,
+                order_id=order_id,
+                created_time=created_time,
+                ingested_at=datetime.now(timezone.utc),
+                ingestion_source=source,
+            ),
+            intent_lookup=self,
+        )
+
     def _parse_fill(self, raw: Dict[str, Any], source: str) -> KalshiFill:
         """Parse raw fill dict from Kalshi into KalshiFill model."""
         # Handle both HTTP and WS formats
@@ -4191,7 +4610,7 @@ class KalshiFillsLedger:
         derived_id_flag = False
         if not fill_id:
             # Generate deterministic ID from content for safety
-            fill_id = f"derived_{int(hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:8], 16)}"
+            fill_id = f"derived_{int(hashlib.sha256(json.dumps(raw, sort_keys=True, default=_json_default).encode()).hexdigest()[:8], 16)}"
             derived_id_flag = True
             # BUG-FIX: Removed nested 'import os' - os is already imported at module level
             strict_mode = os.environ.get("MERID_STRICT_FILL_ID", "").strip() == "1"
@@ -4248,19 +4667,68 @@ class KalshiFillsLedger:
         
         yes_price_dollars = normalize_price(yes_price) if yes_price else None
         no_price_dollars = normalize_price(no_price) if no_price else None
-        
+
+        # CRITICAL FIX (2026-08-09): WebSocket fills (and some HTTP records) only
+        # carry one leg price. Derive the complement so a NO-side fill priced at
+        # YES=68c correctly reports NO=32c.
+        if yes_price_dollars is not None and no_price_dollars is None:
+            no_price_dollars = Decimal("1") - yes_price_dollars
+        elif no_price_dollars is not None and yes_price_dollars is None:
+            yes_price_dollars = Decimal("1") - no_price_dollars
+
         # CRITICAL FIX (2026-07-21): Use outcome_side as canonical direction field per Kalshi's order-direction semantics
         # outcome_side (yes/no) expresses which outcome the user is long - this is the canonical field
         # Legacy action/side are deprecated and should not drive logic
         # Reference: https://docs.kalshi.com/getting_started/order_direction
         client_order_id = raw.get("client_order_id")
-        
+        order_id = raw.get("order_id")
+
+        # Kalshi's HTTP /portfolio/fills frequently omits client_order_id.  The
+        # order_router registers the exchange order_id -> client_tag mapping with
+        # position_cache as soon as the order_id is known, so we can recover the
+        # idempotency key and link the fill to its intent before the breaker runs.
+        if not client_order_id and order_id:
+            recovered_client_order_id = self._recover_client_order_id_for_order_id(order_id)
+            if recovered_client_order_id:
+                client_order_id = recovered_client_order_id
+
+        # Durable intent correlation: resolve in order of authority.
+        #   1. order_id (the exchange's canonical order identifier)
+        #   2. client_order_id (the idempotency key we placed on the wire)
+        #   3. client_order_id as an old-style intent_id
+        # If none resolve, the fill is canonicalized by its raw fields but flagged
+        # UNMATCHED so no lifecycle/bracket policy is attached to an unrelated intent.
+        resolved_intent_id: Optional[str] = None
+        if order_id and order_id in self._intents_by_order_id:
+            resolved_intent_id = self._intents_by_order_id[order_id]
+        if not resolved_intent_id and client_order_id and client_order_id in self._intents_by_client_order_id:
+            resolved_intent_id = self._intents_by_client_order_id[client_order_id]
+        if not resolved_intent_id and client_order_id and client_order_id in self._intents:
+            resolved_intent_id = client_order_id
+        # Fallback: the HTTP fill may have raced ahead of the durable intent
+        # indices.  The pending-order registry is keyed by client_order_id,
+        # client_tag, and order_id, and is populated before submission.
+        if not resolved_intent_id:
+            for key in (order_id, client_order_id):
+                if key:
+                    resolved_intent_id = self._resolve_intent_from_pending_order(key)
+                    if resolved_intent_id:
+                        break
+
+        # Prefer the resolved intent for canonical side/action, but keep the
+        # original/recovered client_order_id for the KalshiFill record.
+        resolved_client_order_id = client_order_id
+        if resolved_intent_id and resolved_intent_id in self._intents:
+            resolved_client_order_id = resolved_intent_id
+
         # Try to get outcome_side from raw payload (canonical field)
         outcome_side = raw.get("outcome_side") or raw.get("intent_side")
-        
-        # If outcome_side not available, derive from intent using client_order_id
-        if not outcome_side and client_order_id and client_order_id in self._intents:
-            intent = self._intents[client_order_id]
+        intent_action = None
+        intent: Optional[OrderIntent] = None
+
+        # If outcome_side not available, derive from intent using resolved_client_order_id
+        if resolved_client_order_id and resolved_client_order_id in self._intents:
+            intent = self._intents[resolved_client_order_id]
             if intent and intent.side:
                 # Extract outcome_side from Kalshi-formatted intent.side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
                 # BUY_YES, SELL_NO → outcome_side=yes (long YES exposure)
@@ -4272,10 +4740,11 @@ class KalshiFillsLedger:
                 else:
                     # Fallback to intent.side if not in Kalshi format
                     outcome_side = intent.side.lower() if intent.side else "yes"
+                intent_action = (intent.action or "").lower()
                 logger.debug(
-                    "[FILL-OUTCOME-SIDE-DERIVATION] fill_id=%s client_order_id=%s | "
-                    "Derived outcome_side=%s from intent.side=%s",
-                    fill_id, client_order_id, outcome_side, intent.side
+                    "[FILL-OUTCOME-SIDE-DERIVATION] fill_id=%s client_order_id=%s order_id=%s | "
+                    "Derived outcome_side=%s action=%s from intent.side=%s intent.action=%s",
+                    fill_id, resolved_client_order_id, order_id, outcome_side, intent_action, intent.side, intent.action
                 )
         
         # Fallback to legacy side derivation if outcome_side still not available
@@ -4288,7 +4757,19 @@ class KalshiFillsLedger:
                 "[FILL-LEGACY-SIDE-FALLBACK] fill_id=%s | Using legacy side=%s (outcome_side not available)",
                 fill_id, derived_side
             )
-        
+
+        # Canonical guard: side must be "yes" or "no".  Never persist a None/unknown side,
+        # because downstream position/PnL math treats it as a missing outcome and corrupts
+        # the ledger.  Default to "yes" and flag as unmatched so the issue is visible.
+        if outcome_side not in ("yes", "no"):
+            logger.warning(
+                "[FILL-SIDE-CANONICALIZATION] fill_id=%s | Unresolvable side=%r, defaulting to 'yes' and flagging unmatched",
+                fill_id, outcome_side
+            )
+            outcome_side = "yes"
+            is_unmatched = True
+            unmatched_reason = (unmatched_reason or "unresolvable_side")
+
         # Store outcome_side as the canonical direction field
         # This is what should be used for all direction logic going forward
         derived_side = outcome_side  # For backward compatibility with existing code
@@ -4309,17 +4790,23 @@ class KalshiFillsLedger:
         except Exception:
             fee_decimal = Decimal("0")
         
-        # Resolve action: explicit "buy"/"sell" wins; taker_action is fallback.
+        # Resolve action: prefer the originating intent's action (single source of
+        # truth for user-facing buy/sell). Fallback to explicit raw fields.
         # CRITICAL FIX: Kalshi WS fill messages have action nested in "msg" field
         # Format: {"type": "fill", "msg": {"action": "buy", ...}}
         # Extract from "msg" first, then top-level, then taker_action
-        _raw_act = (raw.get("msg", {}).get("action", "") if isinstance(raw.get("msg"), dict) else "") or \
-                   raw.get("action") or raw.get("taker_action") or ""
-        _action = _raw_act if _raw_act in ("buy", "sell") else ""
+        if intent_action and intent_action in ("buy", "sell"):
+            _action = intent_action
+        else:
+            _raw_act = (raw.get("msg", {}).get("action", "") if isinstance(raw.get("msg"), dict) else "") or \
+                       raw.get("action") or raw.get("taker_action") or ""
+            _action = _raw_act if _raw_act in ("buy", "sell") else ""
         
         # FIX: Parse count with explicit None check (not 'or' which treats 0 as falsy)
         # Kalshi API uses various field names across endpoints
         # NEW API FORMAT: count_fp (string), yes_price_dollars (string), no_price_dollars (string)
+        # CRITICAL 2026-08-09: count_fp is fixed-point. Never round to whole contracts.
+        # quantity_cc is the canonical integer centi-contract unit.
         _count_raw = raw.get("count_fp")  # Check new format first
         if _count_raw is None:
             _count_raw = raw.get("count")
@@ -4333,7 +4820,16 @@ class KalshiFillsLedger:
             _count_raw = raw.get("quantity")
         if _count_raw is None:
             _count_raw = raw.get("amount")
-        _count_fp = int(float(_count_raw)) if _count_raw is not None else 0
+        if _count_raw is not None:
+            try:
+                _count_fp = Decimal(str(_count_raw))
+                _quantity_cc = int(_count_fp * Decimal("100"))
+            except Exception:
+                _count_fp = Decimal("0")
+                _quantity_cc = 0
+        else:
+            _count_fp = Decimal("0")
+            _quantity_cc = 0
         
         if not _action:
             from merid.event_venues.kalshi.kalshi_ledger_metrics import inc_fills_missing_action as _inct
@@ -4403,8 +4899,73 @@ class KalshiFillsLedger:
                 f"source={source} - This indicates a serious data integrity issue!"
             )
         
-        # Extract asset from ticker (BTC, ETH, SOL, XRP, DOGE)
+        # Canonical ticker is needed for logging and the return object.
         ticker = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
+
+        # AUTHORITATIVE ENTRY/EXIT CLASSIFICATION (CRITICAL 2026-08-09)
+        # A fill is an exit if and only if the originating intent says so.
+        # A fill is an entry only when the originating intent specifies
+        # entry_or_exit == "entry" and reduce_only is False.
+        # Fills with missing or ambiguous metadata are marked UNMATCHED so the
+        # position cache does not invent a lifecycle/bracket/exit policy for them.
+        fill_is_exit: Optional[bool] = None
+        fill_reduce_only = False
+        fill_entry_or_exit: Optional[str] = None
+        if resolved_intent_id and resolved_intent_id in self._intents:
+            intent = self._intents[resolved_intent_id]
+            if getattr(intent, "entry_or_exit", None):
+                fill_entry_or_exit = intent.entry_or_exit
+                fill_reduce_only = bool(getattr(intent, "reduce_only", False))
+                if fill_reduce_only or fill_entry_or_exit == "exit":
+                    fill_is_exit = True
+                else:
+                    fill_is_exit = False
+            else:
+                # Correlated intent exists but was recorded before the direction
+                # contract was enforced. We cannot safely classify this fill.
+                fill_entry_or_exit = None
+                fill_reduce_only = False
+                fill_is_exit = None
+
+        # Mark unmatched fills: no durable correlation or no usable side/action.
+        is_unmatched = False
+        unmatched_reason = None
+        if not resolved_intent_id and not (raw.get("client_order_id") or raw.get("order_id")):
+            is_unmatched = True
+            unmatched_reason = "no_correlation_ids"
+        elif not resolved_intent_id and not (_action and derived_side in ("yes", "no")):
+            is_unmatched = True
+            unmatched_reason = "no_correlation_and_no_canonical_fields"
+        elif not resolved_intent_id:
+            is_unmatched = True
+            unmatched_reason = "no_matching_intent"
+        elif fill_is_exit is None:
+            # We resolved an intent but it lacks the direction contract metadata.
+            # The fill is canonicalized but we must not attach entry/exit policy.
+            is_unmatched = True
+            unmatched_reason = "intent_missing_entry_or_exit_metadata"
+
+        # The effective client_order_id is the original wire value or the one we
+        # recovered from position_cache.  Pass this to the circuit breaker so the
+        # pending-intent lookup has both order_id and client_order_id to correlate.
+        effective_client_order_id = raw.get("client_order_id") or client_order_id
+
+        if is_unmatched:
+            logger.warning(
+                "[UNMATCHED-FILL] fill_id=%s ticker=%s client_order_id=%s order_id=%s reason=%s - "
+                "QUARANTINED. No position/exposure/PnL will be applied; fill is stored in ledger only.",
+                fill_id, ticker, effective_client_order_id, raw.get("order_id"), unmatched_reason
+            )
+            self._maybe_halt_on_unmatched_fill(
+                fill_id=fill_id,
+                ticker=ticker,
+                client_order_id=effective_client_order_id,
+                order_id=raw.get("order_id"),
+                created_time=created_time,
+                source=source,
+            )
+
+        # Extract asset from ticker (BTC, ETH, SOL, XRP, DOGE)
         asset = None
         if ticker:
             if "KXBTC" in ticker:
@@ -4418,7 +4979,7 @@ class KalshiFillsLedger:
             elif "KXDOGE" in ticker:
                 asset = "DOGE"
         
-        return KalshiFill(
+        kalshi_fill = KalshiFill(
             fill_id=str(fill_id),
             trade_id=raw.get("trade_id"),
             order_id=raw.get("order_id"),
@@ -4427,11 +4988,12 @@ class KalshiFillsLedger:
             side=derived_side,  # CRITICAL FIX: Use derived side from intent, not Kalshi's reported side
             action=_action,
             count_fp=_count_fp,
+            quantity_cc=_quantity_cc,
             yes_price_dollars=yes_price_dollars,
             no_price_dollars=no_price_dollars,
             fee_cost=fee_decimal,
             proceeds_dollars=proceeds,
-            client_order_id=raw.get("client_order_id") or None,  # Preserve None so orphan detection can identify fills without linked intents
+            client_order_id=raw.get("client_order_id") or client_order_id or None,  # Use recovered client_order_id if Kalshi omitted it
             subaccount_number=raw.get("subaccount_number"),
             created_time=created_time,
             idempotency_key=raw.get("idempotency_key"),
@@ -4446,8 +5008,72 @@ class KalshiFillsLedger:
             is_live=is_live_trade,  # CRITICAL: Track if this was a real money trade
             asset=asset,  # Per-coin slippage tracking
             agent_id=raw.get("agent_id"),  # CRITICAL: Extract agent_id from raw payload
-            intent_id=raw.get("intent_id"),  # CRITICAL: Extract intent_id from raw payload
+            intent_id=resolved_intent_id or raw.get("intent_id"),  # Use durable correlation if available
+            unmatched=is_unmatched,
+            unmatched_reason=unmatched_reason,
+            is_exit=fill_is_exit,
+            reduce_only=fill_reduce_only,
+            entry_or_exit=fill_entry_or_exit,
+            # CRITICAL FIX (2026-08-10): Durable entry-model provenance from resolved intent
+            entry_signal_id=(getattr(intent, 'entry_signal_id', None) or getattr(intent, 'client_order_id', None) or raw.get("client_order_id")),
+            entry_model=getattr(intent, 'entry_model', None) if intent else None,
+            entry_model_version=getattr(intent, 'entry_model_version', None) if intent else None,
+            entry_model_probability=getattr(intent, 'entry_model_probability', None) if intent else None,
+            entry_market_probability=getattr(intent, 'entry_market_probability', None) if intent else None,
+            entry_edge=getattr(intent, 'entry_edge', None) if intent else None,
+            entry_book_snapshot_id=getattr(intent, 'entry_book_snapshot_id', None) if intent else None,
+            entry_execution_mode=getattr(intent, 'entry_execution_mode', None) if intent else None,
+            # 2026-08-11: Persist signal economics and settlement telemetry on the fill record.
+            all_in_cost_cents=getattr(intent, 'all_in_cost_cents', None) if intent else None,
+            ev_net_cents=getattr(intent, 'ev_net_cents', None) if intent else None,
+            fee_cents=getattr(intent, 'fee_cents', None) if intent else None,
+            slippage_cents=getattr(intent, 'slippage_cents', None) if intent else None,
+            time_to_expiry_seconds=getattr(intent, 'time_to_expiry_seconds', None) if intent else None,
+            settlement_input_price=getattr(intent, 'settlement_input_price', None) if intent else None,
+            cf_rti_basis=getattr(intent, 'cf_rti_basis', None) if intent else None,
+            is_counter_trend=bool(getattr(intent, 'is_counter_trend', False)) if intent else False,
+            thesis_side=getattr(intent, 'thesis_side', None) if intent else None,
         )
+
+        # Fee audit: log modeled vs. reported fee for every non-zero fill.
+        # This is the shadow comparison that drives whether MIN_FEE_CENTS and
+        # the slippage reserve can safely be adjusted in live trading.
+        if _count_fp > 0:
+            try:
+                from config.kalshi_fee_schedule import get_active_fee_schedule
+                schedule = get_active_fee_schedule()
+                series_multiplier = float(schedule.taker_rate)
+            except Exception:
+                series_multiplier = 0.07
+
+            fill_price_cents = kalshi_fill.price_cents
+            limit_price_cents = getattr(intent, 'price_cents', None) if intent else None
+            modeled_fee_cents = getattr(intent, 'fee_cents', None) if intent else None
+            reported_fee_cents = int(fee_decimal * Decimal("100"))
+            fee_delta_cents = (
+                (modeled_fee_cents - reported_fee_cents)
+                if modeled_fee_cents is not None
+                else None
+            )
+            liquidity_role = getattr(intent, 'liquidity_role', None) if intent else 'taker'
+
+            logger.info(
+                "[FILL-FEE-AUDIT] fill_id=%s ticker=%s order_id=%s side=%s action=%s "
+                "contracts=%s limit_price_cents=%s fill_price_cents=%s "
+                "modeled_fee_cents=%s reported_exchange_fee_cents=%s fee_delta_cents=%s "
+                "series_fee_multiplier=%.4f liquidity_role=%s",
+                fill_id, ticker, raw.get("order_id"), derived_side, _action,
+                str(_count_fp),
+                limit_price_cents if limit_price_cents is not None else "unknown",
+                fill_price_cents,
+                f"{modeled_fee_cents:.2f}" if modeled_fee_cents is not None else "unknown",
+                reported_fee_cents,
+                f"{fee_delta_cents:.2f}" if fee_delta_cents is not None else "unknown",
+                series_multiplier,
+                liquidity_role if liquidity_role is not None else "unknown",
+            )
+
+        return kalshi_fill
     
     def _index_fill(self, fill: KalshiFill) -> None:
         """Add fill to secondary indexes."""
@@ -4495,7 +5121,8 @@ class KalshiFillsLedger:
                     market_ticker TEXT NOT NULL,
                     side TEXT,
                     action TEXT,
-                    count_fp INTEGER,
+                    count_fp TEXT,
+                    quantity_cc INTEGER DEFAULT 0,
                     yes_price_dollars REAL,
                     no_price_dollars REAL,
                     fee_cost REAL,
@@ -4607,6 +5234,29 @@ class KalshiFillsLedger:
                 except Exception as migrate_exc:
                     logger.error(f"Failed to add related_alpha_fill_id column: {migrate_exc}")
             
+            # SCHEMA-FIX-010: Migrate count_fp to TEXT and add canonical quantity_cc (CRITICAL 2026-08-09)
+            if "quantity_cc" not in _cols:
+                try:
+                    logger.info("Migrating kalshi_fills: adding quantity_cc column")
+                    await db.execute("ALTER TABLE kalshi_fills ADD COLUMN quantity_cc INTEGER DEFAULT 0")
+                    await db.commit()
+                    # Backfill quantity_cc from count_fp for legacy whole-contract rows.
+                    try:
+                        await db.execute("UPDATE kalshi_fills SET quantity_cc = CAST(count_fp AS INTEGER) * 100 WHERE quantity_cc = 0 OR quantity_cc IS NULL")
+                        await db.commit()
+                    except Exception as backfill_exc:
+                        logger.warning(f"Could not backfill quantity_cc from count_fp: {backfill_exc}")
+                    logger.info("Migration complete: quantity_cc column added")
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add quantity_cc column: {migrate_exc}")
+            else:
+                # Ensure legacy rows have quantity_cc backfilled.
+                try:
+                    await db.execute("UPDATE kalshi_fills SET quantity_cc = CAST(count_fp AS INTEGER) * 100 WHERE quantity_cc = 0 OR quantity_cc IS NULL")
+                    await db.commit()
+                except Exception as backfill_exc:
+                    logger.debug(f"Could not backfill quantity_cc: {backfill_exc}")
+            
             # Now that all columns exist, create indexes that reference them.
             # Each is wrapped individually so a failure on one does not block others.
             for _idx_sql in (
@@ -4690,7 +5340,10 @@ class KalshiFillsLedger:
                         intent_id TEXT,
                         agent_id TEXT,
                         fill_source TEXT,
-                        raw_response JSONB
+                        raw_response JSONB,
+                        is_exit BOOLEAN,
+                        reduce_only BOOLEAN DEFAULT FALSE,
+                        entry_or_exit TEXT
                     )
                 """)
                 logger.info("Created PostgreSQL kalshi_fills table")
@@ -4710,7 +5363,21 @@ class KalshiFillsLedger:
                         logger.info("Migration complete: created_at column added")
                     except Exception as migrate_exc:
                         logger.error(f"Failed to add created_at column: {migrate_exc}")
-        
+
+                # SCHEMA-FIX-009: Migrate entry/exit classification columns (CRITICAL 2026-08-09)
+                for col, type_ in (
+                    ("is_exit", "BOOLEAN"),
+                    ("reduce_only", "BOOLEAN DEFAULT FALSE"),
+                    ("entry_or_exit", "TEXT"),
+                ):
+                    if col not in existing_col_names:
+                        try:
+                            logger.info("Migrating kalshi_fills: adding %s column", col)
+                            await conn.execute(f"ALTER TABLE kalshi_fills ADD COLUMN {col} {type_}")
+                            logger.info("Migration complete: %s column added", col)
+                        except Exception as migrate_exc:
+                            logger.error(f"Failed to add {col} column: {migrate_exc}")
+
         self._db_initialized = True
         logger.info("PostgreSQL initialized")
     
@@ -4725,28 +5392,38 @@ class KalshiFillsLedger:
         await db.execute("PRAGMA synchronous=NORMAL;")
         
         # Create table if not exists
+        # CRITICAL 2026-08-09: SQLite schema matches _flush_to_sqlite exactly.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS kalshi_fills (
                 fill_id TEXT PRIMARY KEY,
                 trade_id TEXT,
                 order_id TEXT,
                 market_ticker TEXT NOT NULL,
-                side TEXT NOT NULL,
-                action TEXT NOT NULL,
-                count INTEGER NOT NULL,
-                price_cents INTEGER NOT NULL,
+                side TEXT,
+                action TEXT,
+                count_fp TEXT,
+                quantity_cc INTEGER DEFAULT 0,
+                yes_price_dollars REAL,
+                no_price_dollars REAL,
                 fee_cost REAL,
-                created_at TEXT NOT NULL,
-                client_order_id TEXT,
-                intent_id TEXT,
-                agent_id TEXT,
-                fill_source TEXT,
-                raw_response TEXT,
-                decision_trace_id TEXT,
                 proceeds_dollars REAL,
+                client_order_id TEXT,
+                subaccount_number INTEGER,
+                created_time TEXT,
+                ingestion_source TEXT,
+                ingested_at TEXT,
+                agent_id TEXT,
+                intent_id TEXT,
+                reconciled INTEGER DEFAULT 0,
+                raw_payload TEXT,
+                decision_trace_id TEXT,
+                fill_source TEXT,
                 hedge_reason TEXT,
                 hedge_pnl_cents INTEGER DEFAULT 0,
-                related_alpha_fill_id TEXT
+                related_alpha_fill_id TEXT,
+                is_exit INTEGER,
+                reduce_only INTEGER DEFAULT 0,
+                entry_or_exit TEXT
             )
         """)
         
@@ -4763,7 +5440,53 @@ class KalshiFillsLedger:
                 logger.info("Migration complete: created_at column added to SQLite")
             except Exception as migrate_exc:
                 logger.error(f"Failed to add created_at column to SQLite: {migrate_exc}")
-        
+
+        # SCHEMA-FIX-009: Migrate entry/exit classification columns (CRITICAL 2026-08-09)
+        for col in ("is_exit", "reduce_only", "entry_or_exit"):
+            if col not in existing_col_names:
+                try:
+                    logger.info("Migrating kalshi_fills (SQLite): adding %s column", col)
+                    type_ = "TEXT" if col == "entry_or_exit" else "INTEGER"
+                    default = " DEFAULT 0" if col == "reduce_only" else ""
+                    await db.execute(f"ALTER TABLE kalshi_fills ADD COLUMN {col} {type_}{default}")
+                    logger.info("Migration complete: %s column added to SQLite", col)
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add {col} column to SQLite: {migrate_exc}")
+
+        # SCHEMA-FIX-010: Migrate to V2 fixed-point columns (CRITICAL 2026-08-09)
+        v2_cols = {
+            "count_fp": "TEXT",
+            "quantity_cc": "INTEGER DEFAULT 0",
+            "yes_price_dollars": "REAL",
+            "no_price_dollars": "REAL",
+            "proceeds_dollars": "REAL",
+            "ingestion_source": "TEXT",
+            "ingested_at": "TEXT",
+            "subaccount_number": "INTEGER",
+            "market_id": "TEXT",
+            "reconciled": "INTEGER DEFAULT 0",
+        }
+        for col, type_ in v2_cols.items():
+            if col not in existing_col_names:
+                try:
+                    logger.info("Migrating kalshi_fills (SQLite): adding %s column", col)
+                    await db.execute(f"ALTER TABLE kalshi_fills ADD COLUMN {col} {type_}")
+                    await db.commit()
+                    logger.info("Migration complete: %s column added to SQLite", col)
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add {col} column to SQLite: {migrate_exc}")
+        # Backfill quantity_cc and count_fp from legacy count/price_cents if present.
+        if "quantity_cc" in existing_col_names or "count_fp" in existing_col_names:
+            try:
+                if "count" in existing_col_names:
+                    await db.execute("UPDATE kalshi_fills SET quantity_cc = count * 100, count_fp = CAST(count AS TEXT) WHERE (quantity_cc IS NULL OR quantity_cc = 0) AND count > 0")
+                if "price_cents" in existing_col_names:
+                    await db.execute("UPDATE kalshi_fills SET yes_price_dollars = price_cents / 100.0 WHERE yes_price_dollars IS NULL AND side = 'yes'")
+                    await db.execute("UPDATE kalshi_fills SET no_price_dollars = price_cents / 100.0 WHERE no_price_dollars IS NULL AND side = 'no'")
+                await db.commit()
+            except Exception as backfill_exc:
+                logger.warning(f"Could not backfill V2 columns: {backfill_exc}")
+
         # Create indexes
         await db.execute("CREATE INDEX IF NOT EXISTS idx_fills_market ON kalshi_fills(market_ticker)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_fills_created ON kalshi_fills(created_at)")
@@ -5005,11 +5728,12 @@ class KalshiFillsLedger:
                     
                     # PostgreSQL INSERT with ON CONFLICT
                     await conn.execute("""
-                        INSERT INTO kalshi_fills 
-                        (fill_id, trade_id, order_id, market_ticker, side, action, 
-                         count, price_cents, fee_cost, created_at, client_order_id, 
-                         intent_id, agent_id, fill_source, raw_response)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                        INSERT INTO kalshi_fills
+                        (fill_id, trade_id, order_id, market_ticker, side, action,
+                         count, price_cents, fee_cost, created_at, client_order_id,
+                         intent_id, agent_id, fill_source, raw_response,
+                         is_exit, reduce_only, entry_or_exit)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                         ON CONFLICT (fill_id) DO NOTHING
                     """,
                         fill.fill_id,
@@ -5018,15 +5742,18 @@ class KalshiFillsLedger:
                         fill.market_ticker,
                         fill.side,
                         fill.action,
-                        fill.count,
+                        fill.count_fp,
                         fill.price_cents,
                         float(fill.fee_cost) if fill.fee_cost else None,
-                        fill.created_at,
+                        fill.created_time,
                         fill.client_order_id,
                         fill.intent_id,
                         fill.agent_id,
                         fill.fill_source,
-                        json.dumps(fill.raw_payload) if fill.raw_payload else None
+                        json.dumps(fill.raw_payload, default=_json_default) if fill.raw_payload else None,
+                        fill.is_exit,
+                        fill.reduce_only,
+                        fill.entry_or_exit,
                     )
                 except Exception as e:
                     # Classify error
@@ -5083,15 +5810,16 @@ class KalshiFillsLedger:
                     await self._execute_with_retry(_db, """
                         INSERT OR REPLACE INTO kalshi_fills (
                             fill_id, trade_id, order_id, market_ticker, side, action,
-                            count_fp, yes_price_dollars, no_price_dollars, fee_cost,
+                            count_fp, quantity_cc, yes_price_dollars, no_price_dollars, fee_cost,
                             proceeds_dollars, client_order_id, subaccount_number, created_time,
                             ingestion_source, ingested_at, agent_id, intent_id,
                             reconciled, raw_payload, decision_trace_id, fill_source,
-                            hedge_reason, hedge_pnl_cents, related_alpha_fill_id
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            hedge_reason, hedge_pnl_cents, related_alpha_fill_id,
+                            is_exit, reduce_only, entry_or_exit
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         fill.fill_id, fill.trade_id, fill.order_id, fill.market_ticker,
-                        fill.side, fill.action, fill.count_fp,
+                        fill.side, fill.action, str(fill.count_fp), fill.quantity_cc or int(fill.count_fp * 100),
                         float(fill.yes_price_dollars) if fill.yes_price_dollars else None,
                         float(fill.no_price_dollars) if fill.no_price_dollars else None,
                         float(fill.fee_cost),
@@ -5102,12 +5830,15 @@ class KalshiFillsLedger:
                         fill.ingested_at.isoformat(),
                         fill.agent_id, fill.intent_id,
                         1 if fill.reconciled else 0,
-                        json.dumps(fill.raw_payload) if fill.raw_payload else None,
+                        json.dumps(fill.raw_payload, default=_json_default) if fill.raw_payload else None,
                         fill.decision_trace_id,
                         fill.fill_source,
                         fill.hedge_reason,
                         fill.hedge_pnl_cents,
                         fill.related_alpha_fill_id,
+                        1 if fill.is_exit is True else (0 if fill.is_exit is False else None),
+                        1 if fill.reduce_only else 0,
+                        fill.entry_or_exit,
                     ))
                 except Exception as e:
                     # Classify error
@@ -5222,6 +5953,23 @@ class KalshiFillsLedger:
                     pd_raw = row["proceeds_dollars"] if "proceeds_dollars" in row.keys() else None
                     proceeds_dollars = Decimal(str(pd_raw)) if pd_raw else None
                     
+                    # SCHEMA-FIX-009: Load new entry/exit metadata columns with safe defaults
+                    is_exit_raw = row["is_exit"] if "is_exit" in row.keys() else None
+                    if is_exit_raw is None:
+                        is_exit = None
+                    else:
+                        is_exit = bool(is_exit_raw)
+
+                    reduce_only_raw = row["reduce_only"] if "reduce_only" in row.keys() else 0
+                    reduce_only = bool(reduce_only_raw)
+
+                    entry_or_exit = row["entry_or_exit"] if "entry_or_exit" in row.keys() else None
+
+                    count_fp = Decimal(str(row["count_fp"])) if row["count_fp"] is not None else Decimal("0")
+                    quantity_cc = row["quantity_cc"] if "quantity_cc" in row.keys() and row["quantity_cc"] is not None else 0
+                    if not quantity_cc and count_fp:
+                        quantity_cc = int(count_fp * Decimal("100"))
+
                     fill = KalshiFill(
                         fill_id=row["fill_id"],
                         trade_id=row["trade_id"],
@@ -5230,7 +5978,8 @@ class KalshiFillsLedger:
                         market_ticker=row["market_ticker"],
                         side=row["side"],
                         action=row["action"],
-                        count_fp=row["count_fp"],
+                        count_fp=count_fp,
+                        quantity_cc=quantity_cc,
                         yes_price_dollars=Decimal(str(row["yes_price_dollars"])) if row["yes_price_dollars"] else None,
                         no_price_dollars=Decimal(str(row["no_price_dollars"])) if row["no_price_dollars"] else None,
                         fee_cost=Decimal(str(row["fee_cost"])) if row["fee_cost"] else Decimal("0"),
@@ -5245,6 +5994,9 @@ class KalshiFillsLedger:
                         reconciled=bool(row["reconciled"]),
                         raw_payload=raw_payload,
                         decision_trace_id=dtid,
+                        is_exit=is_exit,
+                        reduce_only=reduce_only,
+                        entry_or_exit=entry_or_exit,
                     )
                     self._fills[fill.fill_id] = fill
                     self._index_fill(fill)
