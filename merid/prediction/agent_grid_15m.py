@@ -18,7 +18,7 @@ import asyncio
 
 import os
 
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, List
 
 from dataclasses import dataclass, field
 
@@ -152,6 +152,19 @@ except ImportError:
     PRICE_SPACE_AVAILABLE = False
     logger.debug("[PRICE-SPACE] binary_price_space not available - using fallback manual ranges")
 
+# Import global allocator types used for live-position canonicalization.
+# Local imports inside run_cycle are not visible to helper methods such as
+# _build_canonical_live_positions, which calls the CanonicalLivePosition dataclass.
+try:
+    from merid.risk.profiles.global_allocator import (
+        OrderCandidate,
+        CanonicalLivePosition,
+    )
+    GLOBAL_ALLOCATOR_TYPES_AVAILABLE = True
+except ImportError:
+    GLOBAL_ALLOCATOR_TYPES_AVAILABLE = False
+    logger.warning("[GLOBAL-ALLOCATOR] OrderCandidate/CanonicalLivePosition not available - allocation helpers disabled")
+
 
 
 # Local price formatting function (replaces utils.logger.format_price to avoid import issues)
@@ -190,13 +203,13 @@ def calculate_kalshi_fee_cents(probability: float, price_cents: int) -> float:
 
     Calculate Kalshi fee in cents for a winning trade.
 
-    
+
 
     Formula: fee = 7% × p × (1-p) × contract_price
 
     Capped at $0.0175 (1.75 cents) per contract
 
-    
+
 
     Args:
 
@@ -204,7 +217,7 @@ def calculate_kalshi_fee_cents(probability: float, price_cents: int) -> float:
 
         price_cents: Contract price in cents (0 to 100)
 
-    
+
 
     Returns:
 
@@ -216,25 +229,25 @@ def calculate_kalshi_fee_cents(probability: float, price_cents: int) -> float:
 
     probability = max(0.0, min(1.0, probability))
 
-    
+
 
     # Calculate fee percentage: 7% × p × (1-p)
 
     fee_pct = 0.07 * probability * (1.0 - probability)
 
-    
+
 
     # Calculate fee in cents
 
     fee_cents = fee_pct * price_cents
 
-    
+
 
     # Cap at $0.0175 (1.75 cents) per contract
 
     fee_cents = min(fee_cents, 1.75)
 
-    
+
 
     return fee_cents
 
@@ -248,28 +261,21 @@ def calculate_velocity_edge(velocity: float, velocity_threshold: float) -> float
 
     """
 
-    Calculate edge percentage from velocity magnitude for velocity-based signals.
+    Calculate edge in percentage points from velocity magnitude for
+    velocity-based signals.
 
-    
+    Standard formula: edge_pct = abs(velocity / threshold) * 2.0
 
-    Standard formula: edge = abs(velocity / threshold) * 2.0
-
-    This ensures edge is in 0-100% range for velocity-based signals.
-
-    
+    The result is expressed in percentage points, not as a fraction. Callers
+    that need a probability fraction (e.g., for model_prob or validate_edge)
+    must divide the result by 100.0.
 
     Args:
-
         velocity: Velocity value (can be positive or negative)
-
         velocity_threshold: Velocity threshold for signal generation
 
-    
-
     Returns:
-
-        Edge percentage (0-100%)
-
+        Edge in percentage points (can exceed 100 for strong velocity)
     """
 
     if velocity_threshold == 0:
@@ -338,12 +344,23 @@ MERID_EV_K_TERMINAL = float(os.getenv("MERID_EV_K_TERMINAL", "2.0"))
 def _lookup_displayed_depth(market_state: Any, signal_side: str, price_cents: int) -> Optional[int]:
     """Return displayed size at the executable quote for the selected side.
 
-    In the Kalshi binary ladder, buying YES at price P means crossing the
-    NO-bid side at (100 - P); buying NO at price P means crossing the
-    YES-bid side at (100 - P).
+    For a BUY_YES, the executable liquidity is the YES-ask size (the size of the
+    NO-bid resting at 100 - P).  For a BUY_NO, it is the NO-ask size (the size of
+    the YES-bid resting at 100 - P).  This now uses the explicit
+    ``get_executable_ask_size`` helper on ``KalshiMarketState`` so the depth is
+    bound to ``yes_ask_size`` / ``no_ask_size`` rather than an unlabeled
+    opposite-side lookup.
     """
     if not market_state:
         return None
+    # Prefer the explicit executable-ask-size accessor on KalshiMarketState.
+    get_ask = getattr(market_state, "get_executable_ask_size", None)
+    if get_ask:
+        try:
+            return get_ask(signal_side, price_cents)
+        except Exception:
+            pass
+    # Fallback: scan the opposite-side bid ladder for the complementary price.
     target_price = 100 - price_cents
     raw = None
     if signal_side == "yes":
@@ -464,19 +481,19 @@ def is_warmup(history_length: int) -> bool:
 
     Check if system is in warmup state.
 
-    
+
 
     Warmup is only allowed in first 5 minutes after process start.
 
     After 5 minutes, require minimum history regardless of data gaps.
 
-    
+
 
     Args:
 
         history_length: Length of data history
 
-    
+
 
     Returns:
 
@@ -490,7 +507,7 @@ def is_warmup(history_length: int) -> bool:
 
         return False
 
-    
+
 
     # History-based guard: require minimum history after 5 minutes
 
@@ -566,7 +583,7 @@ class MinimalMarket:
 
     Minimal market object wrapper for FifteenMinuteMarketLocator.
 
-    
+
 
     This provides the interface expected by the existing agent grid code
 
@@ -582,7 +599,7 @@ class MinimalMarket:
 
     minutes_to_expiry: Optional[float] = None  # Normalized minutes to expiry from catalog
 
-    
+
 
     @property
 
@@ -742,7 +759,7 @@ def reset_strip_order_counts() -> None:
 
     """Reset all strip order counts and market ID tracking.
 
-    
+
 
     This is called by the catalog when it detects a market rollover (e.g., 16:15 -> 16:30).
 
@@ -1101,7 +1118,7 @@ class LeanAgent15m:
 
     # Minimal agent for 15m crypto trading with velocity-based signals.
 
-    
+
 
     def __init__(
 
@@ -1133,7 +1150,7 @@ class LeanAgent15m:
 
         self.risk_config = risk_config
 
-        
+
 
         # Phase 1: Store velocity model coefficients for logistic mapping
 
@@ -1141,16 +1158,16 @@ class LeanAgent15m:
 
         self._alpha_1 = config.alpha_1
 
-        logger.info("[AGENT-INIT] %s velocity coefficients: alpha_0=%.2f, alpha_1=%.2f", 
+        logger.info("[AGENT-INIT] %s velocity coefficients: alpha_0=%.2f, alpha_1=%.2f",
 
                     config.name, self._alpha_0, self._alpha_1)
 
-        
+
 
         # CRITICAL FIX (2026-07-17): Optional RollingBuffer integration for bias prevention
         self._rolling_buffer_enabled = getattr(config, 'rolling_buffer_enabled', False)
         self._signal_generator = None
-        
+
         if self._rolling_buffer_enabled:
             try:
                 from merid.prediction import create_crypto_signal_generator
@@ -1159,33 +1176,33 @@ class LeanAgent15m:
             except ImportError:
                 logger.warning("[AGENT-INIT] RollingBuffer requested but module not available, proceeding without")
                 self._rolling_buffer_enabled = False
-        
+
         # CRITICAL FIX (2026-07-23): Dynamic components for bias-free trading
         self._signal_quality_tracker = None
         self._adaptive_liquidity_calculator = None
         self._dynamic_components_enabled = getattr(config, 'dynamic_components_enabled', False)
-        
+
         if self._dynamic_components_enabled:
             try:
                 from merid.prediction.signal_quality_tracker import SignalQualityTracker
                 from merid.prediction.adaptive_liquidity import AdaptiveLiquidityCalculator
-                
+
                 self._signal_quality_tracker = SignalQualityTracker(
                     window_trades=getattr(config, 'signal_quality_window_trades', 50),
                     min_trades=getattr(config, 'signal_quality_min_trades', 10)
                 )
-                
+
                 self._adaptive_liquidity_calculator = AdaptiveLiquidityCalculator(
                     window_minutes=getattr(config, 'liquidity_window_minutes', 60),
                     percentile=getattr(config, 'liquidity_percentile', 0.8)
                 )
-                
+
                 logger.info("[AGENT-INIT] %s Dynamic components enabled for bias-free trading", config.name)
             except ImportError:
                 logger.warning("[AGENT-INIT] Dynamic components requested but modules not available, proceeding without")
                 self._dynamic_components_enabled = False
 
-        
+
 
         # Phase 4.1: Multi-window velocity configuration
 
@@ -1201,11 +1218,11 @@ class LeanAgent15m:
 
         self._zscore_period = getattr(config, 'zscore_period', 20)
 
-        logger.info("[AGENT-INIT] %s multi-window velocity: windows=%s weights=%s ema_period=%d atr_period=%d zscore_period=%d", 
+        logger.info("[AGENT-INIT] %s multi-window velocity: windows=%s weights=%s ema_period=%d atr_period=%d zscore_period=%d",
 
                     config.name, self._velocity_windows, self._momentum_weights, self._velocity_ema_period, self._atr_period, self._zscore_period)
 
-        
+
 
         # Phase 4.4: Logit fusion weights
 
@@ -1213,21 +1230,21 @@ class LeanAgent15m:
 
         self._logit_fusion_mean_reversion_weight = getattr(config, 'logit_fusion_mean_reversion_weight', 0.3)
 
-        logger.info("[AGENT-INIT] %s logit fusion weights: velocity=%.2f mean_reversion=%.2f", 
+        logger.info("[AGENT-INIT] %s logit fusion weights: velocity=%.2f mean_reversion=%.2f",
 
                     config.name, self._logit_fusion_velocity_weight, self._logit_fusion_mean_reversion_weight)
 
-        
+
 
         # Phase 4.5: Near expiry guard
 
         self._near_expiry_guard_sec = getattr(config, 'near_expiry_guard_sec', 300)
 
-        logger.info("[AGENT-INIT] %s near expiry guard: %d seconds", 
+        logger.info("[AGENT-INIT] %s near expiry guard: %d seconds",
 
                     config.name, self._near_expiry_guard_sec)
 
-        
+
 
         # Phase 5.3: Initialize PlattScaler for probability calibration
 
@@ -1241,12 +1258,12 @@ class LeanAgent15m:
 
         self._calibration_regularization = getattr(config, 'calibration_regularization', 0.0001)
 
-        
+
 
         # Phase 6: Initialize regime detector for adaptive strategy switching
 
         self._regime_detector_enabled = getattr(config, 'regime_detector_enabled', True)
-        
+
         # Coinbase external velocity signals (Turbine research #1 winner)
         self._coinbase_velocity_signals: Dict[str, Dict] = {}  # asset -> {velocity, timestamp, signal_type}
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
@@ -1276,7 +1293,7 @@ class LeanAgent15m:
 
             logger.info("[AGENT-INIT] %s regime detector disabled", config.name)
 
-        
+
 
         # Phase 7: Initialize panic fade (volatility reversion) configuration
         # 2026-07-18: DISABLED by default - causing losses by betting against trend
@@ -1286,7 +1303,7 @@ class LeanAgent15m:
         # Also gate by profile_version to prevent drift across profile versions
         panic_fade_config_enabled = getattr(config, 'panic_fade_enabled', False)
         profile_version = getattr(config, 'profile_version', None)
-        
+
         # SSOT Gate: Disable panic fade if profile uses momentum_fvg OR profile is v2.x
         # Profile v2.x explicitly disables panic fade due to losses
         if self.config.signal_mode == "momentum_fvg" or (profile_version and profile_version.startswith("2.")):
@@ -1310,17 +1327,17 @@ class LeanAgent15m:
 
         logger.info("[AGENT-INIT] %s panic fade: enabled=%s threshold=%.4f zscore=%.1f rsi_oversold=%.1f rsi_overbought=%.1f min_velocity=%.4f",
 
-                    config.name, self._panic_fade_enabled, self._panic_fade_threshold, 
+                    config.name, self._panic_fade_enabled, self._panic_fade_threshold,
 
-                    self._panic_fade_zscore_threshold, self._panic_fade_rsi_oversold, 
+                    self._panic_fade_zscore_threshold, self._panic_fade_rsi_oversold,
 
                     self._panic_fade_rsi_overbought, self._panic_fade_min_velocity)
 
         self._calibration_max_samples = getattr(config, 'calibration_max_samples', 1000)
 
         self._calibration_regularization = getattr(config, 'calibration_regularization', 0.0001)
-        
-        
+
+
         # Phase 8: Initialize BTC sentiment bias for correlation tracking
         self._btc_sentiment_bias_enabled = getattr(config, 'btc_sentiment_bias_enabled', False)
         if self._btc_sentiment_bias_enabled and BTC_SENTIMENT_BIAS_ENABLED:
@@ -1343,7 +1360,7 @@ class LeanAgent15m:
             self._btc_sentiment_bias = None
             logger.info("[AGENT-INIT] %s BTC sentiment bias disabled", config.name)
 
-        
+
 
         if self._calibration_enabled:
 
@@ -1374,7 +1391,7 @@ class LeanAgent15m:
 
             logger.info("[AGENT-INIT] %s probability calibration disabled", config.name)
 
-        
+
 
         # Initialize price history for velocity calculation
 
@@ -1388,7 +1405,7 @@ class LeanAgent15m:
 
         self._price_history_window_size = 300  # 5 minutes at 1-second intervals (60 data points at 5s cadence)
 
-        
+
 
         # CRITICAL FIX: 2026-07-07 - Initialize Crypto15mIndicatorStack for 2026 research-based indicators
 
@@ -1456,7 +1473,7 @@ class LeanAgent15m:
 
                    config.name)
 
-        
+
 
         # Initialize for all 5 crypto assets
 
@@ -1464,7 +1481,7 @@ class LeanAgent15m:
 
             self._spot_price_history[asset] = collections.deque(maxlen=self._price_history_window_size)
 
-        
+
 
         # Phase 4.3: Initialize SMA history for mean reversion (2-minute window)
 
@@ -1476,7 +1493,7 @@ class LeanAgent15m:
 
             self._sma_history[asset] = collections.deque(maxlen=self._sma_window_size)
 
-        
+
 
         # Phase 4.1: Initialize EMA history for velocity smoothing
 
@@ -1488,7 +1505,7 @@ class LeanAgent15m:
 
             self._velocity_ema_history[asset] = collections.deque(maxlen=self._ema_window_size)
 
-        
+
 
         # Phase 4.1: Initialize volatility history for ATR-based normalization
 
@@ -1502,7 +1519,7 @@ class LeanAgent15m:
 
             self._volatility_history[asset] = collections.deque(maxlen=self._volatility_window_size)
 
-        
+
 
         # Phase 4.1: Initialize velocity history for Z-score calculation
 
@@ -1514,7 +1531,7 @@ class LeanAgent15m:
 
             self._velocity_zscore_history[asset] = collections.deque(maxlen=self._zscore_window_size)
 
-        
+
 
         # DATA QUALITY: Initialize data quality issue tracking
 
@@ -1536,7 +1553,7 @@ class LeanAgent15m:
 
             }
 
-        
+
 
         # Phase 6: Initialize ADX history for trend filtering (14-period ADX)
 
@@ -1584,7 +1601,7 @@ class LeanAgent15m:
 
             self._prev_adx[asset] = 0.0
 
-        
+
 
         # CRITICAL FIX: 2026-07-01 - Initialize volume history for volume confirmation filter
 
@@ -1600,7 +1617,7 @@ class LeanAgent15m:
 
             self._volume_history[asset] = collections.deque(maxlen=self._volume_window_size)
 
-        
+
 
         # CRITICAL FIX: 2026-07-01 - Initialize multi-timeframe price history for alignment
 
@@ -1622,7 +1639,7 @@ class LeanAgent15m:
 
             self._price_5m_history[asset] = collections.deque(maxlen=self._5m_window_size)
 
-        
+
 
         # CRITICAL FIX: 2026-07-06 - Initialize MACD history for momentum_fvg signal generation
 
@@ -1636,7 +1653,7 @@ class LeanAgent15m:
 
             self._macd_history[asset] = collections.deque(maxlen=self._macd_window_size)
 
-        
+
 
         # Cooldown tracking: last trade timestamp per asset
 
@@ -1658,7 +1675,7 @@ class LeanAgent15m:
 
             self._last_trade_time[asset] = time.monotonic()
 
-        
+
 
         # Per-strip order limit tracking (15m strip = series ticker)
 
@@ -1677,7 +1694,7 @@ class LeanAgent15m:
 
             self._strip_order_counts[ticker] = 0
 
-        
+
 
         # Track current market ID per strip to detect when to reset counters
 
@@ -1687,7 +1704,7 @@ class LeanAgent15m:
 
             self._current_market_ids[ticker] = None
 
-        
+
 
         # 2026 Research-Based Risk Management
 
@@ -1699,7 +1716,7 @@ class LeanAgent15m:
 
         self._session_window_sec: int = 900  # 15 minutes in seconds
 
-        
+
 
         # Consecutive loss tracking (pause after N consecutive losses)
 
@@ -1713,7 +1730,7 @@ class LeanAgent15m:
 
             self._consecutive_loss_pause_until[asset] = 0.0
 
-        
+
 
         # Session risk cap tracking (max 10% risk per session)
 
@@ -1721,7 +1738,7 @@ class LeanAgent15m:
 
         self._session_risk_cap_usd: float = 0.0  # Will be set from profile/capital
 
-        
+
 
         # Initialize session risk cap from profile if available
 
@@ -1741,9 +1758,9 @@ class LeanAgent15m:
 
                     self._session_risk_cap_usd = profile.capital_usd * profile.throttling_max_session_risk_pct
 
-                    logger.info("[AGENT-INIT] %s session_risk_cap=%.2f (capital=%.2f * %.2f%%)", 
+                    logger.info("[AGENT-INIT] %s session_risk_cap=%.2f (capital=%.2f * %.2f%%)",
 
-                               config.name, self._session_risk_cap_usd, profile.capital_usd, 
+                               config.name, self._session_risk_cap_usd, profile.capital_usd,
 
                                profile.throttling_max_session_risk_pct * 100)
 
@@ -1751,7 +1768,7 @@ class LeanAgent15m:
 
             logger.warning("[AGENT-INIT] %s failed to load session risk cap from profile: %s", config.name, e)
 
-        
+
 
         # 2026 Research-Based Risk Management: Portfolio heat tracking
 
@@ -1761,7 +1778,7 @@ class LeanAgent15m:
 
         self._portfolio_heat_threshold_critical: float = 0.85
 
-        
+
 
         # 2026 Research-Based Risk Management: Asset-specific rolling PnL limits
 
@@ -1775,7 +1792,7 @@ class LeanAgent15m:
 
         self._rolling_pnl_limits: Dict[str, Dict[str, float]] = {}  # asset -> {1h_limit_pct, 4h_limit_pct}
 
-        
+
 
         # Initialize rolling PnL history for all assets
 
@@ -1783,7 +1800,7 @@ class LeanAgent15m:
 
             self._rolling_pnl_history[asset] = []
 
-        
+
 
         # Load 2026 risk management parameters from profile
 
@@ -1813,7 +1830,7 @@ class LeanAgent15m:
 
                            self._portfolio_heat_threshold_critical * 100)
 
-                
+
 
                 # Asset-specific rolling PnL limits
 
@@ -1869,7 +1886,7 @@ class LeanAgent15m:
 
             logger.warning("[AGENT-INIT] %s failed to load 2026 risk management parameters: %s", config.name, e)
 
-        
+
 
         # Phase 9: Advanced liquidity / refill / fallback integration
         self._advanced_liquidity_enabled = getattr(config, 'advanced_liquidity_enabled', False)
@@ -1956,7 +1973,7 @@ class LeanAgent15m:
 
         current_time = int(time.time() * 1000)
 
-        
+
 
         # Extract OHLC data if available
 
@@ -1973,18 +1990,18 @@ class LeanAgent15m:
             # CRITICAL FIX: Use price history to construct valid OHLC when spot_data is None
             # This prevents high=low which breaks ATR calculation (TR=0 -> ATR=0)
             # Similar to UnifiedSpotService fallback logic (lines 313-338 in unified_spot_service.py)
-            
+
             history = list(self._spot_price_history[asset])
-            
+
             if len(history) > 0:
                 # Use recent price history to construct OHLC
                 recent_prices = [entry[1] for entry in history[-10:]]  # Last 10 prices
                 recent_prices.append(spot_price)
-                
+
                 open_price = recent_prices[0]  # Oldest price as open
                 high_price = max(recent_prices)  # Highest as high
                 low_price = min(recent_prices)   # Lowest as low
-                
+
                 logger.debug("[OHLC-FALLBACK] asset=%s using price history: O=%s H=%s L=%s C=%s",
                            asset, format_price(asset, open_price), format_price(asset, high_price),
                            format_price(asset, low_price), format_price(asset, spot_price))
@@ -1995,12 +2012,12 @@ class LeanAgent15m:
                 open_price = spot_price
                 high_price = spot_price + spread
                 low_price = spot_price - spread
-                
+
                 logger.debug("[OHLC-FALLBACK] asset=%s using spread proxy: O=%s H=%s L=%s C=%s",
                            asset, format_price(asset, open_price), format_price(asset, high_price),
                            format_price(asset, low_price), format_price(asset, spot_price))
 
-        
+
 
         # Extract volume data if available
 
@@ -2072,7 +2089,7 @@ class LeanAgent15m:
 
                 logger.info(f"[VOLUME-EXTRACTION] asset={asset} volume not available, using OHLC proxy={volume:.2f} (high={high_price:.2f} low={low_price:.2f} spot={spot_price:.2f})")
 
-        
+
 
         # Phase 4.1: Update volatility history for ATR calculation BEFORE appending current price
 
@@ -2080,31 +2097,31 @@ class LeanAgent15m:
 
         self._update_volatility_history(asset, spot_price)
 
-        
+
 
         # Store OHLC data in price history
 
         self._spot_price_history[asset].append((current_time, spot_price, open_price, high_price, low_price))
 
-        
+
 
         # Phase 4.3: Update SMA history for mean reversion
 
         self._sma_history[asset].append((current_time, spot_price))
 
-        
+
 
         # Phase 6: Update ADX history for trend filtering
 
         self._update_adx_history(asset, spot_price, open_price, high_price, low_price)
 
-        
+
 
         # CRITICAL FIX: 2026-07-01 - Update volume history for volume confirmation filter
 
         self._volume_history[asset].append((current_time, volume))
 
-        
+
 
         # CRITICAL FIX: 2026-07-10 - REMOVED old indicator stack update logic from _update_price_history
 
@@ -2114,7 +2131,7 @@ class LeanAgent15m:
 
         # This prevents the bars_available=1 bug by ensuring each stack gets 5 updates per cycle
 
-        
+
 
         # CRITICAL FIX: 2026-07-07 - Update FVG forecaster with OHLC data
 
@@ -2122,9 +2139,9 @@ class LeanAgent15m:
 
         # Without this, fvg_confidence will always be 0.00 because no FVGs are detected
 
-        logger.info("[FVG-UPDATE-DEBUG] asset=%s spot_data=%s has_open=%s has_high=%s has_low=%s", 
+        logger.info("[FVG-UPDATE-DEBUG] asset=%s spot_data=%s has_open=%s has_high=%s has_low=%s",
 
-                    asset, type(spot_data).__name__, 
+                    asset, type(spot_data).__name__,
 
                     hasattr(spot_data, 'open') if spot_data else False,
 
@@ -2162,9 +2179,9 @@ class LeanAgent15m:
 
             )
 
-            logger.info("[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%s H=%s L=%s C=%s", 
+            logger.info("[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%s H=%s L=%s C=%s",
 
-                        asset, format_price(asset, open_price), format_price(asset, high_price), 
+                        asset, format_price(asset, open_price), format_price(asset, high_price),
 
                         format_price(asset, low_price), format_price(asset, spot_price))
 
@@ -2172,7 +2189,7 @@ class LeanAgent15m:
 
             logger.warning("[FVG-UPDATE] asset=%s failed to update FVG forecaster: %s", asset, e)
 
-        
+
 
         # CRITICAL FIX: 2026-07-01 - Update multi-timeframe price history for alignment
 
@@ -2180,13 +2197,13 @@ class LeanAgent15m:
 
         self._price_5m_history[asset].append((current_time, spot_price))
 
-    
+
 
     def _track_data_quality_issue(self, asset: str, issue_type: str, detail: str) -> None:
 
         """Track data quality issues for metrics and auditing.
 
-        
+
 
         Args:
 
@@ -2210,13 +2227,13 @@ class LeanAgent15m:
 
             )
 
-    
+
 
     def get_data_quality_metrics(self) -> Dict[str, Dict[str, int]]:
 
         """Get data quality metrics for all assets.
 
-        
+
 
         Returns:
 
@@ -2228,7 +2245,7 @@ class LeanAgent15m:
 
         return copy.deepcopy(self._data_quality_issues)
 
-    
+
 
     def _update_volatility_history(self, asset: str, spot_price: float) -> None:
 
@@ -2250,13 +2267,13 @@ class LeanAgent15m:
 
         history = list(self._spot_price_history[asset])
 
-        
+
 
         if len(history) < 1:
 
             return  # No previous price data yet
 
-        
+
 
         # Calculate percentage change as proxy for high-low range
 
@@ -2266,15 +2283,15 @@ class LeanAgent15m:
 
             return
 
-        
+
 
         price_change_pct = abs(spot_price - prev_price) / prev_price
 
-        
+
 
         self._volatility_history[asset].append((current_time, price_change_pct))
 
-    
+
 
     def _calculate_atr(self, asset: str) -> float:
 
@@ -2290,19 +2307,19 @@ class LeanAgent15m:
 
         tr_history = list(self._tr_history[asset])
 
-        
+
 
         # During warmup (less than 3 data points), return 0.0 to trigger fallback
 
         if len(tr_history) < 3:
 
-            logger.debug("[ATR-CALC] asset=%s warmup insufficient history (%d < 3), returning 0.0", 
+            logger.debug("[ATR-CALC] asset=%s warmup insufficient history (%d < 3), returning 0.0",
 
                          asset, len(tr_history))
 
             return 0.0
 
-        
+
 
         # Get current close price for normalization
 
@@ -2314,13 +2331,13 @@ class LeanAgent15m:
 
         current_close = price_history[-1][1]  # Close price
 
-        
+
 
         # During warmup (3-13 data points), use available data for faster startup
 
         if len(tr_history) < self._atr_period:
 
-            logger.info("[ATR-CALC] asset=%s warmup using available history (%d < %d)", 
+            logger.info("[ATR-CALC] asset=%s warmup using available history (%d < %d)",
 
                        asset, len(tr_history), self._atr_period)
 
@@ -2334,29 +2351,29 @@ class LeanAgent15m:
 
             recent_tr = [entry[1] for entry in tr_history[-self._atr_period:] if len(entry) >= 2]
 
-        
+
 
         # Calculate ATR as average of recent True Range values
 
         atr = sum(recent_tr) / len(recent_tr)
 
-        
+
 
         # Normalize ATR as percentage of current close price
 
         atr_pct = atr / current_close if current_close > 0 else 0.0
 
-        
 
-        logger.debug("[ATR-CALC] asset=%s atr_period=%d atr=%.6f atr_pct=%.6f (%.4f%%)", 
+
+        logger.debug("[ATR-CALC] asset=%s atr_period=%d atr=%.6f atr_pct=%.6f (%.4f%%)",
 
                      asset, self._atr_period, atr, atr_pct, atr_pct * 100)
 
-        
+
 
         return atr_pct
 
-    
+
 
     def _calculate_dynamic_cooldown(self, asset: str) -> float:
 
@@ -2374,29 +2391,29 @@ class LeanAgent15m:
 
         # Returns cooldown in seconds from profile config.
 
-        
+
 
         # Use static cooldown from profile (now 3s per kalshi_crypto_15m_v2.yaml)
 
         static_cooldown = float(self.config.per_asset_cooldown_s)
 
-        
+
 
         logger.debug("[STATIC-COOLDOWN] asset=%s cooldown=%.1fs (from profile config)",
 
                      asset, static_cooldown)
 
-        
+
 
         return static_cooldown
 
-    
+
 
     def update_cooldown_on_fill(self, asset: str, pnl_usd: float = 0.0, trade_risk_usd: float = 0.0) -> None:
 
         """Update cooldown timestamp when a trade actually executes (fills).
 
-        
+
 
         This should be called from the fill handler (position_cache.on_fill) to ensure
 
@@ -2404,7 +2421,7 @@ class LeanAgent15m:
 
         is generated. This prevents perpetual cooldown blocks.
 
-        
+
 
         Args:
 
@@ -2418,7 +2435,7 @@ class LeanAgent15m:
 
         self._last_trade_time[asset] = time.monotonic()
 
-        
+
 
         # 2026 Research-Based Risk Management: Increment session order count
 
@@ -2426,7 +2443,7 @@ class LeanAgent15m:
 
         logger.info("[SESSION-ORDER] agent=%s session_orders=%d", self.config.name, self._session_order_count)
 
-        
+
 
         # 2026 Research-Based Risk Management: Track session risk
 
@@ -2434,11 +2451,11 @@ class LeanAgent15m:
 
             self._session_risk_usd += trade_risk_usd
 
-            logger.info("[SESSION-RISK] agent=%s session_risk=%.2f (added %.2f) cap=%.2f", 
+            logger.info("[SESSION-RISK] agent=%s session_risk=%.2f (added %.2f) cap=%.2f",
 
                        self.config.name, self._session_risk_usd, trade_risk_usd, self._session_risk_cap_usd)
 
-        
+
 
         # 2026 Research-Based Risk Management: Track consecutive losses
 
@@ -2446,11 +2463,11 @@ class LeanAgent15m:
 
             self._consecutive_losses[asset] += 1
 
-            logger.info("[CONSECUTIVE-LOSS] agent=%s asset=%s consecutive_losses=%d", 
+            logger.info("[CONSECUTIVE-LOSS] agent=%s asset=%s consecutive_losses=%d",
 
                        self.config.name, asset, self._consecutive_losses[asset])
 
-            
+
 
             # Check if consecutive loss threshold reached
 
@@ -2466,7 +2483,7 @@ class LeanAgent15m:
 
                     "[CONSECUTIVE-LOSS-PAUSE] agent=%s asset=%s consecutive_losses=%d >= threshold=%d, pausing for %d seconds",
 
-                    self.config.name, asset, self._consecutive_losses[asset], 
+                    self.config.name, asset, self._consecutive_losses[asset],
 
                     self.config.consecutive_loss_pause, pause_duration
 
@@ -2484,7 +2501,7 @@ class LeanAgent15m:
 
                 self._consecutive_losses[asset] = 0
 
-        
+
 
         # 2026 Research-Based Risk Management: Track rolling PnL for asset-specific limits
 
@@ -2508,11 +2525,11 @@ class LeanAgent15m:
 
                        self.config.name, asset, pnl_usd, len(self._rolling_pnl_history[asset]))
 
-        
+
 
         logger.info("[COOLDOWN-UPDATE] asset=%s cooldown timestamp updated on fill", asset)
 
-    
+
 
     def _check_portfolio_heat(self) -> tuple[bool, str]:
 
@@ -2520,13 +2537,13 @@ class LeanAgent15m:
 
         Check if portfolio heat exceeds thresholds.
 
-        
+
 
         2026 Research-Based Risk Management: Portfolio heat tracking monitors
 
         correlation-adjusted exposure across all assets to prevent over-concentration.
 
-        
+
 
         Returns:
 
@@ -2538,7 +2555,7 @@ class LeanAgent15m:
 
             return True, "portfolio_heat_disabled"
 
-        
+
 
         try:
 
@@ -2550,7 +2567,7 @@ class LeanAgent15m:
 
                 return True, "no_position_cache"
 
-            
+
 
             # Get all open positions
 
@@ -2559,7 +2576,7 @@ class LeanAgent15m:
             # CRITICAL FIX: Filter positions by current window to prevent counting stale positions
             # Extract asset from agent name (e.g., BTC_15M -> BTC)
             asset = self.config.name.split('_')[0].upper() if '_' in self.config.name else self.config.name.upper()
-            
+
             # Get current window ticker from market catalog
             current_window_ticker = None
             try:
@@ -2571,24 +2588,24 @@ class LeanAgent15m:
                         current_window_ticker = current_market.market.market_id
             except Exception as ticker_err:
                 logger.warning("[HEAT-CHECK] Failed to get current window ticker: %s", ticker_err)
-            
+
             # Filter to only current window positions
             if current_window_ticker:
-                open_positions = {k: v for k, v in all_positions.items() 
+                open_positions = {k: v for k, v in all_positions.items()
                                 if v.contracts > 0 and k == current_window_ticker}
             else:
                 # Fallback: filter by asset if we can't get the exact ticker
-                open_positions = {k: v for k, v in all_positions.items() 
+                open_positions = {k: v for k, v in all_positions.items()
                                 if v.contracts > 0 and asset in k.upper()}
                 logger.warning("[HEAT-CHECK] Using asset-based filtering (fallback) for %s", asset)
 
-            
+
 
             if not open_positions:
 
                 return True, "no_open_positions"
 
-            
+
 
             # Calculate total exposure (simplified: sum of contract values)
             # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
@@ -2597,7 +2614,7 @@ class LeanAgent15m:
                 for pos in open_positions.values()
             )
 
-            
+
 
             # Get capital from profile for heat calculation
 
@@ -2627,7 +2644,7 @@ class LeanAgent15m:
 
                 heat_ratio = 0.0
 
-            
+
 
             # Check thresholds
 
@@ -2673,7 +2690,7 @@ class LeanAgent15m:
 
             return True, "portfolio_heat_error"
 
-    
+
 
     def _check_rolling_pnl_limit(self, asset: str) -> tuple[bool, str]:
 
@@ -2681,13 +2698,13 @@ class LeanAgent15m:
 
         Check if asset-specific rolling PnL limits are exceeded.
 
-        
+
 
         2026 Research-Based Risk Management: Asset-specific rolling PnL limits
 
         halt trading for an asset if losses exceed thresholds over 1h or 4h windows.
 
-        
+
 
         Returns:
 
@@ -2699,7 +2716,7 @@ class LeanAgent15m:
 
             return True, "rolling_pnl_disabled"
 
-        
+
 
         try:
 
@@ -2707,13 +2724,13 @@ class LeanAgent15m:
 
             asset_history = self._rolling_pnl_history.get(asset, [])
 
-            
+
 
             if not asset_history:
 
                 return True, "no_pnl_history"
 
-            
+
 
             # Calculate rolling PnL for 1h and 4h windows
 
@@ -2721,7 +2738,7 @@ class LeanAgent15m:
 
             pnl_4h = sum(pnl for ts, pnl in asset_history if current_time - ts < self._rolling_pnl_4h_window)
 
-            
+
 
             # Get limits for this asset
 
@@ -2731,7 +2748,7 @@ class LeanAgent15m:
 
             limit_4h_pct = limits["4h_limit_pct"]
 
-            
+
 
             # Get capital for percentage calculation
 
@@ -2769,7 +2786,7 @@ class LeanAgent15m:
 
                 limit_4h_usd = 0.0
 
-            
+
 
             # Check 4h limit first (more conservative)
 
@@ -2785,7 +2802,7 @@ class LeanAgent15m:
 
                 return False, f"rolling_pnl_4h_exceeded_{pnl_4h:.2f}"
 
-            
+
 
             # Check 1h limit
 
@@ -2801,7 +2818,7 @@ class LeanAgent15m:
 
                 return False, f"rolling_pnl_1h_exceeded_{pnl_1h:.2f}"
 
-            
+
 
             logger.debug(
 
@@ -2819,7 +2836,7 @@ class LeanAgent15m:
 
             return True, "rolling_pnl_error"
 
-    
+
 
     def _apply_time_of_day_risk_scaling(self, asset: str) -> float:
 
@@ -2827,25 +2844,25 @@ class LeanAgent15m:
 
         Apply time-of-day risk scaling multiplier.
 
-        
+
 
         2026 Research-Based Risk Management: Adjust position sizing based on
 
         trading session (US market, Asian, European, weekend).
 
-        
+
 
         CURRENT STATUS: DISABLED via profile YAML (time_of_day_risk_scaling.enabled: false)
 
         This function returns 1.0 (no scaling) when disabled.
 
-        
+
 
         FUTURE RE-ENABLEMENT: When re-enabling, must also update unified_sizing.py to
 
         apply the same multiplier, and ensure risk envelope respects the scaled limits.
 
-        
+
 
         Returns:
 
@@ -2863,7 +2880,7 @@ class LeanAgent15m:
 
                 return 1.0
 
-            
+
 
             profile = profile_adapter._profile
 
@@ -2873,7 +2890,7 @@ class LeanAgent15m:
 
                 return 1.0
 
-            
+
 
             from datetime import datetime, timezone
 
@@ -2883,7 +2900,7 @@ class LeanAgent15m:
 
             current_time_utc = current_utc_hour + current_utc_minute / 60.0
 
-            
+
 
             # Parse session windows from profile (format: "HH:MM-HH:MM ET")
 
@@ -2893,7 +2910,7 @@ class LeanAgent15m:
 
             et_offset = 4
 
-            
+
 
             def parse_time_range(time_str: str) -> tuple[float, float]:
 
@@ -2915,7 +2932,7 @@ class LeanAgent15m:
 
                 return start_utc + start_m / 60.0, end_utc + end_m / 60.0
 
-            
+
 
             us_market_start, us_market_end = parse_time_range(profile.time_of_day_risk_scaling_us_market_hours)
 
@@ -2923,7 +2940,7 @@ class LeanAgent15m:
 
             european_start, european_end = parse_time_range(profile.time_of_day_risk_scaling_european_session)
 
-            
+
 
             # Determine current session
 
@@ -2933,13 +2950,13 @@ class LeanAgent15m:
 
             in_european = european_start <= current_time_utc < european_end
 
-            
+
 
             # Check if weekend (Saturday/Sunday in UTC)
 
             is_weekend = datetime.now(timezone.utc).weekday() >= 5
 
-            
+
 
             # Apply multiplier based on session
 
@@ -2973,7 +2990,7 @@ class LeanAgent15m:
 
                 session_name = "other"
 
-            
+
 
             logger.info(
 
@@ -2991,7 +3008,7 @@ class LeanAgent15m:
 
             return 1.0
 
-    
+
 
     def _check_volume_confirmation(self, asset: str) -> bool:
 
@@ -2999,19 +3016,19 @@ class LeanAgent15m:
 
         Check if current volume is above 1.2x EMA20 threshold.
 
-        
+
 
         Industry standard: volume > 1.2x EMA20(volume) confirms signal validity.
 
         Reference: https://github.com/PapaDaCodr/kryptic-gopha/blob/main/research/hft_analysis.md
 
-        
+
 
         Args:
 
             asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
 
-            
+
 
         Returns:
 
@@ -3037,7 +3054,7 @@ class LeanAgent15m:
 
                 return False
 
-        
+
 
         volume_history = list(self._volume_history[asset])
 
@@ -3049,7 +3066,7 @@ class LeanAgent15m:
 
             if is_warmup(len(volume_history)):
 
-                logger.debug("[VOLUME-CONFIRMATION] asset=%s insufficient history (%d < 20), bypassing filter (warmup)", 
+                logger.debug("[VOLUME-CONFIRMATION] asset=%s insufficient history (%d < 20), bypassing filter (warmup)",
 
                             asset, len(volume_history))
 
@@ -3057,13 +3074,13 @@ class LeanAgent15m:
 
             else:
 
-                logger.warning("[VOLUME-CONFIRMATION] asset=%s insufficient history (%d < 20), rejecting (warmup expired)", 
+                logger.warning("[VOLUME-CONFIRMATION] asset=%s insufficient history (%d < 20), rejecting (warmup expired)",
 
                             asset, len(volume_history))
 
                 return False
 
-        
+
 
         # Calculate EMA20 of volume
 
@@ -3073,7 +3090,7 @@ class LeanAgent15m:
 
         k = 2.0 / (20.0 + 1.0)
 
-        
+
 
         recent_volumes = [entry[1] for entry in volume_history[-20:]]
 
@@ -3083,17 +3100,17 @@ class LeanAgent15m:
 
             ema20 = (volume * k) + (ema20 * (1 - k))
 
-        
+
 
         current_volume = recent_volumes[-1]
 
         volume_threshold = ema20 * 1.2  # 1.2x threshold
 
-        
+
 
         volume_confirmed = current_volume > volume_threshold
 
-        
+
 
         logger.info(
 
@@ -3103,11 +3120,11 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         return volume_confirmed
 
-    
+
 
     def _calculate_rsi(self, asset: str, period: int = 9) -> float:
 
@@ -3115,13 +3132,13 @@ class LeanAgent15m:
 
         Calculate RSI (Relative Strength Index) for panic fade detection.
 
-        
+
 
         RSI measures momentum and identifies overbought (>70) and oversold (<30) conditions.
 
         For panic fade, we use more extreme thresholds: oversold < 25, overbought > 75.
 
-        
+
 
         2026 OPTIMIZATION: Changed default period from 14 to 9 for 15-minute scalping.
 
@@ -3133,7 +3150,7 @@ class LeanAgent15m:
 
         Reference: https://arxum.com/rsi-settings/ - "For 15-minute charts I use RSI(9)"
 
-        
+
 
         Args:
 
@@ -3141,7 +3158,7 @@ class LeanAgent15m:
 
             period: RSI calculation period (default 9, optimized for 15m scalping)
 
-            
+
 
         Returns:
 
@@ -3153,19 +3170,19 @@ class LeanAgent15m:
 
         if len(history) < period + 1:
 
-            logger.debug("[RSI-CALC] asset=%s insufficient history (%d < %d), returning 0.0", 
+            logger.debug("[RSI-CALC] asset=%s insufficient history (%d < %d), returning 0.0",
 
                          asset, len(history), period + 1)
 
             return 0.0
 
-        
+
 
         # Extract close prices
 
         closes = [entry[1] for entry in history[-(period + 1):]]
 
-        
+
 
         # Calculate price changes
 
@@ -3189,7 +3206,7 @@ class LeanAgent15m:
 
                 losses.append(abs(change))
 
-        
+
 
         # Calculate average gains and losses
 
@@ -3197,25 +3214,25 @@ class LeanAgent15m:
 
         avg_loss = sum(losses) / period
 
-        
+
 
         if avg_loss == 0:
 
             return 100.0  # No losses, RSI = 100
 
-        
+
 
         rs = avg_gain / avg_loss
 
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        
+
 
         logger.debug("[RSI-CALC] asset=%s RSI=%.2f (period=%d)", asset, rsi, period)
 
         return rsi
 
-    
+
 
     def _calculate_price_zscore(self, asset: str, period: int = 20) -> float:
 
@@ -3223,7 +3240,7 @@ class LeanAgent15m:
 
         Calculate Z-score for statistical extreme detection (panic fade).
 
-        
+
 
         Z-score measures how many standard deviations price is from the mean.
 
@@ -3231,7 +3248,7 @@ class LeanAgent15m:
 
         Z-score < -2.0 indicates statistical extreme (oversold).
 
-        
+
 
         Args:
 
@@ -3239,7 +3256,7 @@ class LeanAgent15m:
 
             period: Z-score calculation period (default 20)
 
-            
+
 
         Returns:
 
@@ -3251,19 +3268,19 @@ class LeanAgent15m:
 
         if len(history) < period:
 
-            logger.debug("[ZSCORE-CALC] asset=%s insufficient history (%d < %d), returning 0.0", 
+            logger.debug("[ZSCORE-CALC] asset=%s insufficient history (%d < %d), returning 0.0",
 
                          asset, len(history), period)
 
             return 0.0
 
-        
+
 
         # Extract close prices
 
         closes = [entry[1] for entry in history[-period:]]
 
-        
+
 
         # Calculate mean and standard deviation
 
@@ -3273,25 +3290,25 @@ class LeanAgent15m:
 
         std_dev = variance ** 0.5
 
-        
+
 
         if std_dev == 0:
 
             return 0.0  # No variance, Z-score = 0
 
-        
+
 
         current_price = closes[-1]
 
         zscore = (current_price - mean_price) / std_dev
 
-        
+
 
         logger.debug("[ZSCORE-CALC] asset=%s Z-score=%.2f (period=%d)", asset, zscore, period)
 
         return zscore
 
-    
+
 
     def _detect_market_regime(self, asset: str, spot_price: float, market_price: float) -> str:
 
@@ -3299,7 +3316,7 @@ class LeanAgent15m:
 
         Detect market regime using ADX, price position, and velocity.
 
-        
+
 
         Regime classification based on 2026 research:
 
@@ -3311,7 +3328,7 @@ class LeanAgent15m:
 
         - neutral: insufficient data or mixed signals
 
-        
+
 
         Args:
 
@@ -3321,7 +3338,7 @@ class LeanAgent15m:
 
             market_price: Current market price (YES/NO implied probability)
 
-            
+
 
         Returns:
 
@@ -3333,13 +3350,13 @@ class LeanAgent15m:
 
         adx = self._calculate_adx(asset)
 
-        
+
 
         # Calculate recent velocity for direction confirmation
 
         velocity = self._calculate_multi_window_velocity(asset, spot_price)
 
-        
+
 
         # Regime classification
 
@@ -3359,7 +3376,7 @@ class LeanAgent15m:
 
             regime = "neutral"
 
-        
+
 
         logger.info(
 
@@ -3369,199 +3386,11 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         return regime
 
-    
 
-    def _calculate_adx(self, asset: str, period: int = 14) -> float:
-
-        """
-
-        Calculate Average Directional Index (ADX) for trend strength.
-
-        
-
-        ADX measures trend strength regardless of direction:
-
-        - ADX > 25: Strong trend
-
-        - ADX 15-25: Moderate trend
-
-        - ADX < 15: Weak trend / range-bound
-
-        
-
-        Args:
-
-            asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
-
-            period: ADX calculation period (default 14)
-
-            
-
-        Returns:
-
-            ADX value, or 0.0 if insufficient data
-
-        """
-
-        history = list(self._spot_price_history[asset])
-
-        if len(history) < period + 1:
-
-            logger.debug("[ADX-CALC] asset=%s insufficient history (%d < %d), returning 0.0",
-
-                         asset, len(history), period + 1)
-
-            return 0.0
-
-        
-
-        # Extract prices and timestamps
-
-        prices = [entry[1] for entry in history[-(period + 1):]]
-
-        
-
-        # Calculate True Range
-
-        true_ranges = []
-
-        for i in range(1, len(prices)):
-
-            high = prices[i]
-
-            low = prices[i]
-
-            prev_close = prices[i - 1]
-
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-
-            true_ranges.append(tr)
-
-        
-
-        # Calculate Directional Movement
-
-        plus_dm = []
-
-        minus_dm = []
-
-        for i in range(1, len(prices)):
-
-            high = prices[i]
-
-            low = prices[i]
-
-            prev_high = prices[i - 1]
-
-            prev_low = prices[i - 1]
-
-            
-
-            up = high - prev_high
-
-            down = prev_low - low
-
-            
-
-            if up > down and up > 0:
-
-                plus_dm.append(up)
-
-            else:
-
-                plus_dm.append(0)
-
-            
-
-            if down > up and down > 0:
-
-                minus_dm.append(down)
-
-            else:
-
-                minus_dm.append(0)
-
-        
-
-        # Smooth using Wilder's EMA (alpha = 1/period)
-
-        alpha = 1.0 / period
-
-        
-
-        # Smooth True Range
-
-        atr = true_ranges[0]
-
-        for tr in true_ranges[1:]:
-
-            atr = alpha * tr + (1 - alpha) * atr
-
-        
-
-        # Smooth +DM and -DM
-
-        plus_di = plus_dm[0]
-
-        minus_di = minus_dm[0]
-
-        for pd, md in zip(plus_dm[1:], minus_dm[1:]):
-
-            plus_di = alpha * pd + (1 - alpha) * plus_di
-
-            minus_di = alpha * md + (1 - alpha) * minus_di
-
-        
-
-        # Calculate DX (Directional Index)
-
-        if atr == 0:
-
-            return 0.0
-
-        
-
-        plus_di_smooth = (plus_di / atr) * 100
-
-        minus_di_smooth = (minus_di / atr) * 100
-
-        
-
-        di_diff = abs(plus_di_smooth - minus_di_smooth)
-
-        di_sum = plus_di_smooth + minus_di_smooth
-
-        
-
-        if di_sum == 0:
-
-            dx = 0.0
-
-        else:
-
-            dx = (di_diff / di_sum) * 100
-
-        
-
-        # Smooth DX to get ADX
-
-        adx = dx
-
-        # For simplicity, use current DX as ADX (would normally smooth over period)
-
-        # This is a simplified ADX calculation suitable for real-time trading
-
-        
-
-        logger.debug("[ADX-CALC] asset=%s ADX=%.2f (period=%d)", asset, adx, period)
-
-        return adx
-
-    
 
     def _check_panic_fade_conditions(self, asset: str, velocity: float) -> Optional[Dict[str, Any]]:
 
@@ -3569,7 +3398,7 @@ class LeanAgent15m:
 
         Check if panic fade (volatility reversion) conditions are met.
 
-        
+
 
         Panic fade strategy (Turbine research winner):
 
@@ -3581,7 +3410,7 @@ class LeanAgent15m:
 
         - Regime is choppy/range-bound (not trending)
 
-        
+
 
         When conditions are met, fade the panic:
 
@@ -3589,7 +3418,7 @@ class LeanAgent15m:
 
         - Overbought (RSI > 75, Z-score > +2.0, positive velocity) -> BUY NO (expect reversion down)
 
-        
+
 
         Args:
 
@@ -3597,7 +3426,7 @@ class LeanAgent15m:
 
             velocity: Current velocity (percentage change per second)
 
-            
+
 
         Returns:
 
@@ -3609,7 +3438,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Check velocity magnitude (must be panic-level move)
 
@@ -3623,7 +3452,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Calculate RSI and Z-score
 
@@ -3631,7 +3460,7 @@ class LeanAgent15m:
 
         zscore = self._calculate_price_zscore(asset)
 
-        
+
 
         # Skip if indicators unavailable (insufficient data)
 
@@ -3643,7 +3472,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Check statistical extreme conditions
 
@@ -3651,7 +3480,7 @@ class LeanAgent15m:
 
         is_overbought = (rsi > self._panic_fade_rsi_overbought) and (zscore > self._panic_fade_zscore_threshold)
 
-        
+
 
         if not is_oversold and not is_overbought:
 
@@ -3661,7 +3490,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Determine signal side based on extreme type
 
@@ -3689,7 +3518,7 @@ class LeanAgent15m:
 
                        asset, rsi, zscore, velocity)
 
-        
+
         # CRITICAL FIX (2026-07-19): Add upstream invariant check for panic_fade
         # Validate that the derived side/action matches the strategy intent
         # CORRECT MAPPING (2026-07-23): Panic fade is a mean reversion strategy: oversold → expect up (BULLISH_EVENT), overbought → expect down (BEARISH_EVENT)
@@ -3742,7 +3571,7 @@ class LeanAgent15m:
 
         }
 
-    
+
 
     def _check_multi_timeframe_alignment(self, asset: str) -> bool:
 
@@ -3750,23 +3579,23 @@ class LeanAgent15m:
 
         Check if 1m and 5m timeframes are aligned for signal confirmation.
 
-        
+
 
         Industry standard: 1m + 5m confirmation for +10-20 pp win rate.
 
         Reference: https://github.com/PapaDaCodr/kryptic-gopha/blob/main/research/hft_analysis.md
 
-        
+
 
         Both timeframes must show the same directional momentum for confirmation.
 
-        
+
 
         Args:
 
             asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
 
-            
+
 
         Returns:
 
@@ -3792,7 +3621,7 @@ class LeanAgent15m:
 
                 return False
 
-        
+
 
         if not hasattr(self, '_price_5m_history') or asset not in self._price_5m_history:
 
@@ -3812,13 +3641,13 @@ class LeanAgent15m:
 
                 return False
 
-        
+
 
         price_1m = list(self._price_1m_history[asset])
 
         price_5m = list(self._price_5m_history[asset])
 
-        
+
 
         if len(price_1m) < 10 or len(price_5m) < 10:
 
@@ -3842,7 +3671,7 @@ class LeanAgent15m:
 
                 return False
 
-        
+
 
         # Calculate 1m momentum (current vs 10 periods ago)
 
@@ -3850,7 +3679,7 @@ class LeanAgent15m:
 
         momentum_1m = (recent_1m[-1] - recent_1m[0]) / recent_1m[0] if recent_1m[0] > 0 else 0.0
 
-        
+
 
         # Calculate 5m momentum (current vs 10 periods ago)
 
@@ -3858,7 +3687,7 @@ class LeanAgent15m:
 
         momentum_5m = (recent_5m[-1] - recent_5m[0]) / recent_5m[0] if recent_5m[0] > 0 else 0.0
 
-        
+
 
         # Check alignment: both positive or both negative
 
@@ -3876,7 +3705,7 @@ class LeanAgent15m:
 
             aligned = (momentum_1m > 0 and momentum_5m > 0) or (momentum_1m < 0 and momentum_5m < 0)
 
-        
+
 
         logger.info(
 
@@ -3886,11 +3715,11 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         return aligned
 
-    
+
 
     def _calculate_dynamic_velocity_threshold(self, asset: str) -> float:
 
@@ -3910,7 +3739,7 @@ class LeanAgent15m:
 
         # This adapts to market conditions for optimal trade capture.
 
-        
+
 
         # Get base threshold from config (per-asset)
 
@@ -3928,7 +3757,7 @@ class LeanAgent15m:
 
         }
 
-        
+
 
         # Use per-asset thresholds from profile if available
 
@@ -3940,7 +3769,7 @@ class LeanAgent15m:
 
             profile = profile_adapter.profile
 
-            
+
 
             asset_threshold_map = {
 
@@ -3962,31 +3791,31 @@ class LeanAgent15m:
 
             base_threshold = base_threshold_map.get(asset, 0.0002)
 
-        
+
 
         # Calculate ATR for current asset (now returns percentage)
 
         atr_pct = self._calculate_atr(asset)
 
-        
+
 
         if atr_pct <= 0:
 
             # No ATR data, use base threshold
 
-            logger.warning("[DYNAMIC-THRESHOLD] asset=%s ATR=%.6f (no data), using base_threshold=%.6f", 
+            logger.warning("[DYNAMIC-THRESHOLD] asset=%s ATR=%.6f (no data), using base_threshold=%.6f",
 
                           asset, atr_pct, base_threshold)
 
             return base_threshold
 
-        
+
 
         # Calculate ADX for trend strength adjustment
 
         adx = self._calculate_adx(asset)
 
-        
+
 
         # Define volatility regimes for threshold adjustment (2026 industry standards for 15m crypto)
 
@@ -4002,13 +3831,13 @@ class LeanAgent15m:
 
         # High volatility: ATR >= 1.2% -> increase threshold to avoid false signals
 
-        
+
 
         low_volatility_threshold = 0.004  # 0.4% - aligned with velocity thresholds (BTC/ETH: 0.6%)
 
         high_volatility_threshold = 0.012  # 1.2% - aligned with velocity thresholds (DOGE: 1.0%)
 
-        
+
 
         # Base adjustment factor from ATR (volatility)
 
@@ -4062,7 +3891,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # ADX-based trend strength adjustment (2026 industry best practice for 15m crypto)
 
@@ -4148,7 +3977,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # Combine ATR and ADX adjustments (multiplicative)
 
@@ -4158,7 +3987,7 @@ class LeanAgent15m:
 
         combined_adjustment = atr_adjustment * adx_multiplier
 
-        
+
 
         dynamic_threshold = base_threshold * combined_adjustment
 
@@ -4170,145 +3999,17 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         return dynamic_threshold
 
-    
 
-    def _calculate_velocity(self, asset: str, current_price: float) -> float:
-
-        # Calculate multi-window velocity with noise floor to prevent exact zeros.
-
-        # Uses 10s, 30s, 60s windows weighted by momentum (0.2, 0.3, 0.5) per industry best practices.
-
-        # Adds minimum epsilon (1e-9) to prevent velocity=0.000000 which blocks all trading.
-
-        # Returns velocity as percentage change.
-
-        # CRITICAL FIX: Use milliseconds to match UnifiedSpotService timestamp format
-
-        history = list(self._spot_price_history[asset])
-
-        if len(history) < 2:
-
-            logger.debug("[VELOCITY-CALC] asset=%s insufficient history (%d < 2), returning 0.0", 
-
-                         asset, len(history))
-
-            return 0.0
-
-        
-
-        current_time = int(time.time() * 1000)  # Milliseconds to match spot service
-
-        weighted_velocity = 0.0
-
-        total_weight = 0.0
-
-        
-
-        # Multi-window velocity calculation (industry standard: 10s, 30s, 60s)
-
-        velocity_windows = [10.0, 30.0, 60.0]
-
-        momentum_weights = [0.2, 0.3, 0.5]
-
-        
-
-        for window_sec, weight in zip(velocity_windows, momentum_weights):
-
-            target_time = current_time - int(window_sec * 1000)  # Convert seconds to milliseconds
-
-            
-
-            prev_price = None
-
-            # Handle OHLC format: (timestamp, close, open, high, low)
-
-            for entry in reversed(history):
-
-                if len(entry) >= 2:
-
-                    ts = entry[0]
-
-                    price = entry[1]  # Use close price for velocity
-
-                    if ts <= target_time:
-
-                        prev_price = price
-
-                        break
-
-            
-
-            if prev_price is None or prev_price <= 0:
-
-                continue  # Skip this window if no data
-
-            
-
-            window_velocity = (current_price - prev_price) / prev_price
-
-            weighted_velocity += weight * window_velocity
-
-            total_weight += weight
-
-        
-
-        # If no windows had data, return 0
-
-        if total_weight == 0:
-
-            logger.debug("[VELOCITY-CALC] asset=%s no valid windows, returning 0.0", asset)
-
-            return 0.0
-
-        
-
-        # Normalize by total weight
-
-        velocity = weighted_velocity / total_weight
-
-        
-
-        # CRITICAL FIX: 2026-07-06 - Fix bias bug: use history[-1][1] instead of history[-2][1]
-
-        # Previous code used history[-2][1] (second-to-last price) which created incorrect trend comparison
-
-        # history[-1][1] is the most recent price in history, history[-2][1] is the price before that
-
-        # This caused systematic bias in epsilon direction, leading to only BUY_NO signals
-
-        # This prevents the vicious cycle: velocity=0 -> no trade -> no price update -> velocity=0
-
-        # Epsilon of 1e-9 (0.0000001%) is negligible for trading but prevents exact zero
-
-        # Add tiny noise in direction of recent price trend if available
-
-        if len(history) >= 1:
-
-            recent_trend = (current_price - history[-1][1]) / history[-1][1]
-
-            velocity = velocity + (1e-9 if recent_trend >= 0 else -1e-9)
-
-        else:
-
-            # No trend data available - add small positive epsilon
-
-            velocity = velocity + 1e-9
-
-        
-
-        return velocity
-
-    
 
     def _generate_momentum_fvg_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
 
         """MOMENTUM_FVG STRATEGY: Combines velocity, MACD, RSI, OBI, and FVG for enhanced signals.
 
-        
+
 
         CRITICAL FIX: 2026-07-06 - Wires MACD/RSI into momentum_fvg signal generation
 
@@ -4342,7 +4043,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Calculate velocity (multi-window with EMA smoothing)
 
@@ -4350,7 +4051,7 @@ class LeanAgent15m:
 
         velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
 
-        
+
 
         # CRITICAL FIX: 2026-07-08 - Check for sufficient warmup data before calculating indicators
 
@@ -4385,13 +4086,13 @@ class LeanAgent15m:
                 logger.warning("[MOMENTUM-FVG] asset=%s indicator stack unavailable - skipping signal generation", asset)
                 return None
 
-        
+
 
         # Initialize indicator variables with defaults
 
         macd_slope = 0.0
 
-        
+
 
         # CRITICAL FIX: 2026-07-08 - Use Crypto15mIndicatorStack for 2026 research-based indicators
 
@@ -4403,7 +4104,7 @@ class LeanAgent15m:
 
                 indicator_snap = self._indicator_stacks[asset].snapshot()
 
-                
+
 
                 # CRITICAL FIX: 2026-07-11 - Explicit warmup tracking
                 # CRITICAL FIX: 2026-07-12 - Updated to 26 bars for MACD(8,21,5) initialization
@@ -4433,13 +4134,13 @@ class LeanAgent15m:
 
                     logger.info(
 
-                        "[MOMENTUM-FVG-INDICATOR-STACK] asset=%s bars_available=%d macd_line=%.6f macd_histogram=%.6f rsi=%.1f", 
+                        "[MOMENTUM-FVG-INDICATOR-STACK] asset=%s bars_available=%d macd_line=%.6f macd_histogram=%.6f rsi=%.1f",
 
                         asset, indicator_snap.bars_available, indicator_snap.macd_line, indicator_snap.macd_histogram, indicator_snap.rsi
 
                     )
 
-                
+
 
                 # Extract 2026 research-based indicators from indicator stack
 
@@ -4465,7 +4166,7 @@ class LeanAgent15m:
 
                 macd_slope = getattr(indicator_snap, 'macd_slope', 0.0)
 
-                
+
 
                 logger.debug(
 
@@ -4475,11 +4176,11 @@ class LeanAgent15m:
 
                 )
 
-                
+
 
                 # Apply 2026 research-based filters
 
-                
+
 
                 # 1. EMA(200) macro trend filter - only trade in direction of macro trend
 
@@ -4497,7 +4198,7 @@ class LeanAgent15m:
 
                     logger.debug("[EMA200-FILTER] asset=%s in bull regime (price above EMA200), prefer long signals", asset)
 
-                
+
 
                 # 2. Regime-based RSI threshold shifting
 
@@ -4529,7 +4230,7 @@ class LeanAgent15m:
 
                     rsi_overbought = 70.0
 
-                
+
 
                 # Recalculate RSI zone with regime-based thresholds
 
@@ -4545,7 +4246,7 @@ class LeanAgent15m:
 
                     rsi_zone = "neutral"
 
-                
+
 
                 # 3. MACD zero-line filter - only take longs if MACD > 0, shorts if MACD < 0
 
@@ -4562,7 +4263,7 @@ class LeanAgent15m:
                     # For now, store the MACD value for later direction-specific check
                     pass  # Filter disabled in profile, skip check
 
-                
+
 
                 # 4. MACD histogram momentum filter - require histogram expansion
 
@@ -4578,7 +4279,7 @@ class LeanAgent15m:
 
                     # Don't skip signal entirely, but note the filter (histogram expansion is confirmation, not a hard gate)
 
-                
+
 
                 # 5. RSI+MACD confluence scoring - boost confidence when both agree
 
@@ -4600,7 +4301,7 @@ class LeanAgent15m:
 
                     logger.debug("[RSI-MACD-CONFLUENCE] asset=%s short confluence (RSI=%.1f>50, MACD hist=%.6f<0)", asset, rsi, macd_histogram)
 
-                
+
 
                 # Extreme confluence (highest confidence)
 
@@ -4616,7 +4317,7 @@ class LeanAgent15m:
 
                     logger.debug("[RSI-MACD-CONFLUENCE] asset=%s EXTREME short confluence (RSI overbought, MACD negative and expanding)", asset)
 
-                
+
 
             except Exception as e:
 
@@ -4658,7 +4359,7 @@ class LeanAgent15m:
 
             macd_histogram_expanding = False
 
-        
+
 
         # Get FVG signal from FVG forecaster
 
@@ -4668,7 +4369,7 @@ class LeanAgent15m:
 
         fvg_direction = "neutral"
 
-        
+
 
         try:
 
@@ -4682,7 +4383,7 @@ class LeanAgent15m:
 
             market_state = self.market_state_store.get(ticker) if self.market_state_store else None
 
-            
+
 
             # Extract market parameters
 
@@ -4698,7 +4399,7 @@ class LeanAgent15m:
 
             ask = getattr(market_state, 'ask', None) if market_state else None
 
-            
+
 
             # Get FVG prediction with correct arguments
 
@@ -4750,7 +4451,7 @@ class LeanAgent15m:
 
             logger.warning("[MOMENTUM-FVG] Failed to get FVG signal: %s", e)
 
-        
+
 
         # Get OBI (Order Book Imbalance) from market state
 
@@ -4774,7 +4475,7 @@ class LeanAgent15m:
 
                 depth_no = getattr(market_state, 'depth_10c_no', 0) or 0
 
-                
+
 
                 # CRITICAL FIX: Check for valid depth data before calculating OBI
 
@@ -4808,7 +4509,7 @@ class LeanAgent15m:
 
                     obi_strong = abs(obi) >= asset_obi_strong
 
-                    
+
 
                     # CRITICAL FIX: Log extreme OBI values for debugging
 
@@ -4828,7 +4529,7 @@ class LeanAgent15m:
 
             logger.warning("[MOMENTUM-FVG] Failed to get OBI: %s", e)
 
-        
+
 
         # Combine signals for momentum_fvg decision
 
@@ -4842,13 +4543,13 @@ class LeanAgent15m:
 
         # 4. OBI positive (buying pressure) OR FVG bullish confluence
 
-        
+
 
         min_macd_hist_long = getattr(momentum_fvg_config, 'min_macd_hist_long', 0)
 
         min_macd_hist_short = getattr(momentum_fvg_config, 'min_macd_hist_short', 0)
 
-        
+
 
         # CRITICAL FIX: 2026-07-08 - Read momentum RSI thresholds from profile YAML (single source of truth)
 
@@ -4860,7 +4561,7 @@ class LeanAgent15m:
 
         momentum_rsi_short_max = getattr(momentum_fvg_config, 'momentum_rsi_short_max', 45.0)
 
-        
+
 
         # CRITICAL FIX: 2026-07-08 - Read macd_dead_zone from profile YAML (single source of truth)
 
@@ -4874,7 +4575,7 @@ class LeanAgent15m:
 
         macd_dead_zone = getattr(momentum_fvg_config, 'macd_dead_zone', 0.0)
 
-        
+
 
         # Check if indicator stack has sufficient data (warmup complete)
 
@@ -4892,7 +4593,7 @@ class LeanAgent15m:
 
                     macd_dead_zone = 0.0  # Disable dead zone during warmup
 
-                    logger.debug("[MOMENTUM-FVG] asset=%s warmup mode (bars=%d < 20), disabled MACD dead zone", 
+                    logger.debug("[MOMENTUM-FVG] asset=%s warmup mode (bars=%d < 20), disabled MACD dead zone",
 
                                asset, indicator_snap.bars_available)
 
@@ -4902,7 +4603,7 @@ class LeanAgent15m:
 
                 macd_dead_zone = 0.0  # Disable dead zone on error to allow signals
 
-        
+
 
         if abs(macd_histogram) < macd_dead_zone:
 
@@ -4916,7 +4617,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         long_conditions = [
 
@@ -4932,7 +4633,7 @@ class LeanAgent15m:
 
         ]
 
-        
+
 
         short_conditions = [
 
@@ -4948,7 +4649,7 @@ class LeanAgent15m:
 
         ]
 
-        
+
 
         # Count conditions met
 
@@ -4956,7 +4657,7 @@ class LeanAgent15m:
 
         short_score = sum(short_conditions)
 
-        
+
 
         # CRITICAL FIX: 2026-07-09 - Dual-side edge evaluation for momentum_fvg
 
@@ -4964,7 +4665,7 @@ class LeanAgent15m:
 
         # Both YES and NO get evaluated, then select side with higher positive edge
 
-        
+
 
         # Get prices for both sides
 
@@ -4998,26 +4699,29 @@ class LeanAgent15m:
 
             logger.warning("[MOMENTUM-FVG] asset=%s failed to get market price: %s", asset, e)
 
-        
+
 
         # CRITICAL FIX: 2026-07-24 - Determine thesis_side BEFORE evaluating cheapness
         # Cheapness must only be evaluated on the thesis_side leg, not both sides
         # This prevents "cheap but wrong side" candidates from being generated
-        
+
         # Determine thesis_side from velocity (directional signal)
         thesis_side = "yes" if velocity > 0 else "no"
-        
+
         # STRICT MODE: Check for suspicious cheapness (feature flag)
         # In strict mode, reject candidates when thesis_side price is suspiciously cheap
         # This protects against "cheap but wrong" under bad data/stale books
         strict_mode_enabled = os.getenv("MERID_PRICE_SIDE_STRICT_MODE", "false").lower() == "true"
-        
+
         # Extract strike_target from market metadata if available
         # CRITICAL FIX: Use window_strike_price instead of non-existent strike_target field
         # KalshiMarketState has window_strike_price, not strike_target
         # CRITICAL FIX: 2026-07-24 - Use previous 15m candle close as authoritative strike target
         # Kalshi's 15-minute markets use the closing price of the previous 15-minute candle
         # as the strike price for the new window
+        # CRITICAL FIX 2026-08-12: Threshold markets (e.g., "Will XRP be above $1.00?")
+        # expose strike_price, not floor_strike. The agent must fall back through all
+        # available strike fields before giving up.
         strike_target = getattr(market_state, 'window_strike_price', None) if market_state else None
         if strike_target is None and market_state is not None:
             # Primary fallback: Kalshi's floor_strike is the authoritative 15m reference.
@@ -5028,6 +4732,15 @@ class LeanAgent15m:
                     asset, strike_target
                 )
 
+        if strike_target is None and market_state is not None:
+            # Threshold markets expose strike_price as the single reference level.
+            strike_target = getattr(market_state, 'strike_price', None)
+            if strike_target is not None:
+                logger.info(
+                    "[STRIKE-TARGET-FALLBACK] asset=%s window/floor_strike unavailable, using market_state.strike_price=%.4f",
+                    asset, strike_target
+                )
+
         if strike_target is None:
             # Secondary fallback: load the strike from the catalog for the current window.
             try:
@@ -5035,12 +4748,19 @@ class LeanAgent15m:
                 catalog = get_market_catalog()
                 if catalog:
                     current_market = catalog.get_current_15m_market(asset)
-                    if current_market and current_market.floor_strike is not None:
-                        strike_target = float(current_market.floor_strike)
-                        logger.info(
-                            "[STRIKE-TARGET-FALLBACK] asset=%s window_strike_price/floor_strike unavailable, using catalog floor_strike=%.2f",
-                            asset, strike_target
-                        )
+                    if current_market:
+                        if current_market.floor_strike is not None:
+                            strike_target = float(current_market.floor_strike)
+                            logger.info(
+                                "[STRIKE-TARGET-FALLBACK] asset=%s market state unavailable, using catalog floor_strike=%.2f",
+                                asset, strike_target
+                            )
+                        elif current_market.strike_price is not None:
+                            strike_target = float(current_market.strike_price)
+                            logger.info(
+                                "[STRIKE-TARGET-FALLBACK] asset=%s market state unavailable, using catalog strike_price=%.4f",
+                                asset, strike_target
+                            )
             except Exception as e:
                 logger.warning("[STRIKE-TARGET-FALLBACK] asset=%s catalog lookup failed: %s", asset, e)
 
@@ -5126,7 +4846,7 @@ class LeanAgent15m:
                 thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_price_cents, range_str
             )
             return None
-        
+
         # STRICT MODE: Reject suspiciously cheap thesis_side prices
         # This protects against stale book data or market disequilibrium
         if strict_mode_enabled:
@@ -5140,7 +4860,7 @@ class LeanAgent15m:
                     thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_price_cents, suspicious_cheap_threshold
                 )
                 return None
-        
+
         # Log both sides for diagnostic purposes (but only thesis_side matters for gating)
         # CRITICAL FIX 2026-08-07: Use side-aware ranges to match thesis_side check
         # YES: 1c-85c (expanded low end for late-expiry markets)
@@ -5157,7 +4877,7 @@ class LeanAgent15m:
             asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, thesis_side
         )
 
-        
+
 
         # Build edges for both YES and NO using scores as inputs
 
@@ -5171,7 +4891,7 @@ class LeanAgent15m:
 
             # Instead, use a lower base edge for scores below threshold
 
-            
+
 
             if score < 3:
 
@@ -5181,14 +4901,14 @@ class LeanAgent15m:
 
                 return 0.5  # Minimal edge for insufficient conditions
 
-            
+
 
             # CRITICAL FIX: Velocity influences edge as a feature, not a direction gate
             # Use absolute velocity magnitude for edge strength, not velocity * velocity_sign
             # This allows velocity to boost edge on both sides based on conviction strength
             velocity_magnitude = abs(velocity)
             base_edge = calculate_velocity_edge(velocity_magnitude, velocity_threshold)
-            
+
             # Apply velocity alignment bonus: if velocity aligns with side, boost edge
             # If velocity opposes side, reduce edge (but don't zero it out)
             velocity_alignment_bonus = 0.0
@@ -5200,22 +4920,22 @@ class LeanAgent15m:
                 velocity_alignment_bonus = -abs(velocity) * 500  # Penalty for counter-trend
             elif velocity_sign < 0 and velocity > 0:
                 velocity_alignment_bonus = -abs(velocity) * 500  # Penalty for counter-trend
-            
+
             base_edge = max(base_edge + velocity_alignment_bonus, 1.0)  # Minimum 1% edge after adjustment
 
-            
+
 
             # MACD contribution
 
             edge = base_edge + abs(macd_hist) * 10.0
 
-            
+
 
             # Score-based scaling: more aligned conditions → larger edge
 
             edge *= 1.0 + (score - 3) * 0.1  # Scale by score above minimum
 
-            
+
 
             # RSI strength (fade at extremes)
 
@@ -5227,7 +4947,7 @@ class LeanAgent15m:
 
                 edge += 1.0  # Bonus for overbought fade
 
-            
+
 
             # FVG confluence bonus
 
@@ -5237,18 +4957,18 @@ class LeanAgent15m:
 
                     edge += fvg_conf * 2.0
 
-            
+
 
             # Cap edge at reasonable maximum
 
             return min(edge, 15.0)
 
-        
+
 
         # Calculate edges for both sides with validation
         edge_yes_pct = None
         edge_no_pct = None
-        
+
         # CRITICAL FIX: Validate both sides have valid prices before edge calculation
         # If one side is N/A, reconstruct from the other side using duality (NO = 100 - YES)
         if yes_price_cents is None or yes_price_cents <= 0:
@@ -5264,7 +4984,7 @@ class LeanAgent15m:
                     asset
                 )
                 return None
-        
+
         if no_price_cents is None or no_price_cents <= 0:
             if yes_price_cents and yes_price_cents > 0:
                 no_price_cents = 100 - yes_price_cents
@@ -5278,7 +4998,7 @@ class LeanAgent15m:
                     asset
                 )
                 return None
-        
+
         # Recalculate side-aware range checks after reconstruction
         # CRITICAL FIX 2026-08-07: Use side-aware ranges to match thesis_side check
         # YES: 1c-85c (expanded low end for late-expiry markets)
@@ -5296,7 +5016,7 @@ class LeanAgent15m:
         edge_yes_pct = fvg_edge(long_score, 1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
         edge_no_pct = fvg_edge(short_score, -1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
 
-        
+
 
         # Log dual-side evaluation with enhanced diagnostic detail
         logger.info(
@@ -5315,7 +5035,7 @@ class LeanAgent15m:
             macd_histogram, rsi, fvg_direction, fvg_confidence, obi, obi_strong
         )
 
-        
+
 
         # Select side with higher positive edge
 
@@ -5329,7 +5049,7 @@ class LeanAgent15m:
 
             side_edges["no"] = edge_no_pct
 
-        
+
 
         if not side_edges:
 
@@ -5343,7 +5063,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # CRITICAL FIX: 2026-07-09 - Add midpoint preference (~25c bonus) to momentum_fvg
 
@@ -5359,12 +5079,12 @@ class LeanAgent15m:
 
             return max(0.0, midpoint_bonus_max - dist * midpoint_bonus_slope)
 
-        
+
 
         # CRITICAL FIX: 2026-07-24 - Replace thesis_side invariant with hybrid edge-based selection
         # Select side with higher positive edge, but apply velocity alignment threshold
         # This preserves directional bias without killing opportunity when opposite side has much better edge
-        
+
         yes_edge = side_edges.get("yes")
         no_edge = side_edges.get("no")
 
@@ -5426,7 +5146,7 @@ class LeanAgent15m:
                 "[HYBRID-SELECTION-FALLBACK] asset=%s one executable side - selected=%s edge=%.4f",
                 asset, signal_side, selected_edge
             )
-        
+
         # Apply midpoint bonus to selected side
         if signal_side == "yes" and yes_in_range:
             selected_edge_with_bonus = selected_edge + midpoint_bonus(yes_price_cents)
@@ -5434,11 +5154,11 @@ class LeanAgent15m:
             selected_edge_with_bonus = selected_edge + midpoint_bonus(no_price_cents)
         else:
             selected_edge_with_bonus = selected_edge
-        
+
         # Log dual-side selection with diagnostic detail
         edge_ratio = (yes_edge / no_edge) if yes_edge and no_edge and no_edge > 0 else float('inf')
         velocity_aligned = (signal_side == thesis_side)
-        
+
         logger.info(
             "[DUAL-SIDE-SELECTION] asset=%s velocity=%.6f thesis_side=%s "
             "yes_edge=%.4f no_edge=%.4f selected_side=%s selected_edge=%.4f "
@@ -5468,7 +5188,7 @@ class LeanAgent15m:
         # These were referenced but not defined, causing "name 'expected_side' is not defined" error
         expected_side = velocity_expected_side
         expected_side_edge = velocity_expected_edge
-        
+
         # Determine hypothetical best side (unconstrained dual-side selection)
         if expected_side_edge > opposite_side_edge:
             hypothetical_best_side = expected_side
@@ -5512,7 +5232,7 @@ class LeanAgent15m:
         except Exception as metrics_err:
             logger.warning("[SHADOW-DUAL-SIDE-METRICS] Failed to log to metrics monitor: %s", metrics_err)
 
-        
+
 
         # Minimum edge threshold (per-asset aligned with risk_parameters.py market entry thresholds)
 
@@ -5522,12 +5242,16 @@ class LeanAgent15m:
 
         signal_action = "buy"
 
-        confidence = 0.5 + selected_edge  # selected_edge in FRACTION units
+        # CRITICAL 2026-08-13: selected_edge is in percentage points (from
+        # calculate_velocity_edge and the bonus stack).  validate_edge expects
+        # a fraction and confidence is on [0,1], so convert before using.
+        edge_pct_for_threshold = selected_edge / 100.0
+
+        confidence = 0.5 + edge_pct_for_threshold
 
         confidence = min(0.95, confidence)
 
-        # selected_edge is now in FRACTION units (no conversion needed)
-        is_valid, reason = validate_edge(selected_edge, asset, confidence)
+        is_valid, reason = validate_edge(edge_pct_for_threshold, asset, confidence)
 
         if not is_valid:
             logger.info(
@@ -5536,13 +5260,13 @@ class LeanAgent15m:
             )
             return None
 
-        
+
 
         logger.info(
             "[MOMENTUM-FVG-SELECTION] asset=%s selected_side=%s edge=%.6f confidence=%.2f (all_edges=%s)",
             asset, signal_side, selected_edge, confidence, side_edges
         )
-        
+
         # CRITICAL FIX: 2026-07-24 - Removed thesis_side invariant check
         # Hybrid selection now allows counter-trend trades when opposite side has better edge
         # signal_side may differ from thesis_side (velocity-derived) when edge_ratio >= threshold
@@ -5555,23 +5279,23 @@ class LeanAgent15m:
             asset, velocity, velocity_threshold, macd_histogram, rsi, rsi_zone,
             long_score, short_score, fvg_direction, fvg_confidence, obi, obi_strong
         )
-        
+
         # Use selected_edge from dual-side evaluation (already computed)
 
         edge_pct = selected_edge
-        
+
         # Calculate market price from selected side
         if signal_side == "yes":
             market_price = yes_price_cents / 100.0
         else:
             market_price = no_price_cents / 100.0
-        
+
         # BIAS MONITORING: Record signal side for bias detection
         if BIAS_MONITOR_ENABLED:
             bias_monitor = get_bias_monitor()
             if bias_monitor:
                 bias_monitor.record_signal(asset=asset, side=signal_side, edge=edge_pct, price=market_price)
-        
+
         # BTC SENTIMENT BIAS: Apply correlation-based bias adjustment for non-BTC assets
         if self._btc_sentiment_bias_enabled and self._btc_sentiment_bias and asset != "BTC":
             try:
@@ -5589,7 +5313,7 @@ class LeanAgent15m:
             except Exception as bias_exc:
                 logger.warning("[BTC-SENTIMENT-BIAS-ERROR] asset=%s error=%s", asset, bias_exc)
 
-        
+
 
         # CRITICAL FIX: 2026-07-16 - Use actual market prices from dual-side evaluation instead of hardcoded 42c
         # The dual-side evaluation (lines 4400-4410) already retrieved yes_price_cents and no_price_cents
@@ -5608,7 +5332,7 @@ class LeanAgent15m:
         logger.info("[PRICE-CENTS-DEBUG] asset=%s signal_side=%s price_cents=%d source=%s (using dual-side evaluation prices)",
                     asset, signal_side, price_cents, price_source)
 
-        
+
 
         # Calculate model probability from selected edge
         # CRITICAL FIX (2026-08-11): edge_pct is in percentage points; convert to a
@@ -5694,7 +5418,7 @@ class LeanAgent15m:
 
         logger.info("[PRICE-CENTS-DEBUG] asset=%s final_price_cents=%d source=%s", asset, price_cents, price_source)
 
-        
+
 
         # 2026-07-12: Expanded price range 10c-75c to match actual market conditions (YES prices 60-97c)
 
@@ -5702,7 +5426,7 @@ class LeanAgent15m:
 
         raw_price_cents = price_cents
 
-        
+
 
         # Check if price is within range (YES: 1c-85c, NO: 15c-99c)
 
@@ -5732,7 +5456,7 @@ class LeanAgent15m:
 
             )
 
-            
+
 
             # Try to find a price in the canonical range from the orderbook
 
@@ -5744,7 +5468,7 @@ class LeanAgent15m:
 
                 market_state = self.market_state_store.get(ticker) if self.market_state_store else None
 
-                
+
 
                 if market_state:
 
@@ -5827,11 +5551,11 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             clamped_price_cents = price_cents
 
-        
+
 
         # Final validation - side-aware canonical range
         # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
@@ -5857,7 +5581,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         logger.info(
 
@@ -5867,13 +5591,13 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         # Kalshi contracts trade in whole cents.  Guard against any float or numpy
         # scalar leaking through from market-state arithmetic.
         price_cents = int(round(clamped_price_cents))
 
-        
+
 
         # CRITICAL FIX: 2026-07-19 - Add SignalFusion microstructure signals to signal output
         # These signals provide additional confirmation for trades via orderflow and on-chain activity
@@ -5891,7 +5615,7 @@ class LeanAgent15m:
             try:
                 from merid.prediction.intent_contract import StrategyIntent, validate_intent_exposure_consistency
                 strategy_intent = StrategyIntent.BULLISH_EVENT if signal_side == "yes" else StrategyIntent.BEARISH_EVENT
-                
+
                 # CRITICAL FIX: 2026-07-19 - Add upstream invariant check for momentum_fvg
                 # Validate that the derived side/action matches the strategy intent
                 is_valid, error = validate_intent_exposure_consistency(
@@ -5919,7 +5643,7 @@ class LeanAgent15m:
         # INTENT VERIFICATION: Generate signal_id and create snapshot
         signal_id = f"sig-{int(time.time())}-{asset}"
         signal_hash = None
-        
+
         if SIGNAL_SNAPSHOT_AVAILABLE:
             try:
                 # Collect raw features for snapshot
@@ -5938,10 +5662,10 @@ class LeanAgent15m:
                     "orderflow_bias": orderflow_bias,
                     "onchain_velocity": onchain_velocity,
                 }
-                
+
                 # Get market_id from market
                 market_id = market.market.market_id if hasattr(market, 'market') else market.market_id
-                
+
                 # Create signal snapshot
                 snapshot = create_signal_snapshot(
                     signal_id=signal_id,
@@ -5963,10 +5687,10 @@ class LeanAgent15m:
                 )
             except Exception as snap_exc:
                 logger.warning(f"[SIGNAL-SNAPSHOT] Failed to create snapshot: {snap_exc}")
-        
+
         # CRITICAL FIX 2026-08-02: Add candidate tracing for end-to-end validation
         candidate_id = str(uuid.uuid4()) if CANDIDATE_TRACE_AVAILABLE else None
-        
+
         is_counter_trend = (signal_side != thesis_side)
 
         if _SETTLEMENT_INPUT_AVAILABLE and get_settlement_input_price is not None:
@@ -6044,12 +5768,18 @@ class LeanAgent15m:
             "settlement_input_price": settlement_input_price,
             "cf_rti_basis": cf_rti_basis,
 
+            # CRITICAL FIX 2026-08-13: Bind executable liquidity explicitly to the
+            # ask side for both YES and NO.  These are the canonical sizes used by
+            # the EV-gate displayed_depth and the candidate trace invariant.
+            "yes_ask_size": getattr(market_state, "yes_ask_size", None) if market_state else None,
+            "no_ask_size": getattr(market_state, "no_ask_size", None) if market_state else None,
+
         }
 
         # CRITICAL FIX: 2026-07-19 - Add strategy_intent to signal if available
         if strategy_intent:
             signal_dict["strategy_intent"] = strategy_intent.value
-        
+
         # CRITICAL FIX (2026-07-23): Add signal quality score if dynamic components enabled
         if self._dynamic_components_enabled and self._signal_quality_tracker is not None:
             try:
@@ -6080,6 +5810,10 @@ class LeanAgent15m:
                         "time_to_expiry_seconds": minutes_to_expiry * 60.0,
                         "settlement_input_price": settlement_input_price,
                         "cf_rti_basis": cf_rti_basis,
+                        "yes_ask_size": getattr(market_state, "yes_ask_size", None) if market_state else None,
+                        "no_ask_size": getattr(market_state, "no_ask_size", None) if market_state else None,
+                        "quote_price_cents": price_cents,
+                        "quote_source": price_source,
                     }
                 )
                 get_trace_store().add_trace(trace)
@@ -6098,7 +5832,7 @@ class LeanAgent15m:
 
         """Check if 5m and 1h trends are aligned for signal confirmation.
 
-        
+
 
         CRITICAL FIX: 2026-07-06 - Integrated trend alignment as confirmation filter
 
@@ -6108,7 +5842,7 @@ class LeanAgent15m:
 
         - NO alignment: 5 of 5 profitable, mean P&L +$3,773
 
-        
+
 
         Returns:
 
@@ -6122,7 +5856,7 @@ class LeanAgent15m:
 
             trend_strategy = get_trend_alignment_strategy()
 
-            
+
 
             # Update price history
 
@@ -6130,7 +5864,7 @@ class LeanAgent15m:
 
             trend_strategy.update_price(asset, spot_price, current_time)
 
-            
+
 
             # Calculate short (5m) and medium (1h) trends
 
@@ -6138,7 +5872,7 @@ class LeanAgent15m:
 
             medium_trend = trend_strategy._calculate_trend(asset, 3600, current_time)  # 1 hour
 
-            
+
 
             # Check if trends agree and are not neutral
 
@@ -6184,7 +5918,7 @@ class LeanAgent15m:
 
         # Simple strategy that works best on thin 15-min books
 
-        
+
 
         # Get current market price from market state
 
@@ -6254,7 +5988,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         if market_price <= 0:
 
@@ -6262,13 +5996,13 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         buy_threshold = self.config.price_based_buy_threshold
 
         sell_threshold = self.config.price_based_sell_threshold
 
-        
+
 
         logger.info(
 
@@ -6278,11 +6012,11 @@ class LeanAgent15m:
 
         )
 
-        
+
         # CRITICAL FIX: 2026-07-25 - Use canonical edge formula for price-based strategy
         # This ensures alignment with compute_canonical_edges() in canonical_edge.py
         # Canonical formula: edge = model_prob - market_price
-        # 
+        #
         # Previous threshold-based formula: edge = (threshold - market_price) / threshold
         # This was inconsistent with canonical edge and caused allocator vs parity mismatch
         #
@@ -6290,31 +6024,31 @@ class LeanAgent15m:
         # 1. Derive model_prob from price thresholds (our "fair price" estimate)
         # 2. Compute edge as model_prob - market_price (canonical formula)
         # 3. This ensures consistency across allocator, parity block, and microstructure gate
-        
+
         # Derive model probabilities from thresholds (our fair price estimates)
         # If price is at buy_threshold, we think fair probability = buy_threshold
         # If price is below buy_threshold, we think it's undervalued (positive edge)
         yes_model_prob = buy_threshold  # Our fair probability estimate for YES
         no_model_prob = 1.0 - sell_threshold  # Our fair probability estimate for NO
-        
+
         # Calculate canonical edges using side-appropriate market prices.
         # YES edge = fair YES prob - cost to buy YES.
         # NO edge = fair NO prob - cost to buy NO.
         yes_edge_pct = yes_model_prob - yes_market_price
         no_edge_pct = no_model_prob - no_market_price
-        
+
         # Apply minimum edge threshold (2% = 0.02 fraction)
         # This is a quality gate, not a transformation of the edge formula
         if yes_edge_pct > 0:
             yes_edge_pct = max(yes_edge_pct, 0.02)
         else:
             yes_edge_pct = 0.0  # Negative edge → no trade
-        
+
         if no_edge_pct > 0:
             no_edge_pct = max(no_edge_pct, 0.02)
         else:
             no_edge_pct = 0.0  # Negative edge → no trade
-        
+
         # CRITICAL: Only select sides with POSITIVE edges
         # This is the root cause fix for WINNER_MISMATCH parity failures
         if yes_edge_pct <= 0 and no_edge_pct <= 0:
@@ -6323,7 +6057,7 @@ class LeanAgent15m:
                 asset, market_price, yes_edge_pct, no_edge_pct
             )
             return None
-        
+
         # Select side with maximum positive edge
         # CORRECT MAPPING (2026-07-23): yes_edge > no_edge → BULLISH_EVENT, no_edge > yes_edge → BEARISH_EVENT
         if yes_edge_pct > no_edge_pct:
@@ -6423,7 +6157,7 @@ class LeanAgent15m:
             )
         except Exception as metrics_err:
             logger.warning("[SHADOW-DUAL-SIDE-METRICS] Failed to log to metrics monitor: %s", metrics_err)
-        
+
         # CRITICAL FIX (2026-07-19): Add upstream invariant check
         # Validate that the derived side/action matches the strategy intent
         if UNIFIED_TERMINOLOGY_AVAILABLE and strategy_intent:
@@ -6449,7 +6183,7 @@ class LeanAgent15m:
             except ImportError:
                 logger.warning("[INTENT-CONTRACT] Not available - skipping upstream invariant check")
 
-        
+
 
         # Return signal
 
@@ -6549,7 +6283,7 @@ class LeanAgent15m:
         logger.info("[PRICE-BASED-CONFIDENCE] asset=%s action=%s price=%.2f edge_pct=%.4f confidence=%.2f",
                     asset, signal_action, market_price, edge_pct, confidence)
 
-        
+
 
         # 2026-07-12: Expanded price range 10c-75c to match actual market conditions (YES prices 60-97c)
 
@@ -6557,7 +6291,7 @@ class LeanAgent15m:
 
         raw_price_cents = int(round(entry_price_cents))
 
-        
+
 
         # Check if price is within range (YES: 1c-85c, NO: 15c-99c)
 
@@ -6587,7 +6321,7 @@ class LeanAgent15m:
 
             )
 
-            
+
 
             # Try to find a price in the canonical range from the orderbook
 
@@ -6599,7 +6333,7 @@ class LeanAgent15m:
 
                 market_state = self.market_state_store.get(ticker) if self.market_state_store else None
 
-                
+
 
                 if market_state:
 
@@ -6682,11 +6416,11 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             clamped_price_cents = price_cents
 
-        
+
 
         # Final validation - side-aware canonical range
         # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
@@ -6712,7 +6446,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         logger.info(
 
@@ -6722,7 +6456,7 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         # CRITICAL FIX (2026-07-19): Include strategy_intent in signal for exposure validation
         selected_price_cents = int(round(clamped_price_cents))
@@ -6755,13 +6489,13 @@ class LeanAgent15m:
             "settlement_input_price": settlement_input_price,
             "cf_rti_basis": cf_rti_basis,
         }
-        
+
         if UNIFIED_TERMINOLOGY_AVAILABLE:
             signal_dict["strategy_intent"] = strategy_intent.value
-        
+
         return signal_dict
 
-    
+
 
     def _calculate_multi_window_velocity(self, asset: str, current_price: float) -> float:
 
@@ -6776,7 +6510,7 @@ class LeanAgent15m:
         # Returns weighted average velocity as percentage change.
 
         # CRITICAL FIX: Use milliseconds to match UnifiedSpotService timestamp format
-        
+
         # PRIORITY: Use external Coinbase velocity when available (Turbine research #1 winner)
         # Coinbase 1-minute velocity was the top-performing strategy (+$19,451 P&L)
         if hasattr(self, '_coinbase_velocity_signals') and asset in self._coinbase_velocity_signals:
@@ -6799,19 +6533,19 @@ class LeanAgent15m:
 
             return 0.0
 
-        
+
 
         current_time = int(time.time() * 1000)  # Milliseconds to match spot service
 
         weighted_velocity = 0.0
 
-        
+
 
         for window_sec, weight in zip(self._velocity_windows, self._momentum_weights):
 
             target_time = current_time - int(window_sec * 1000)  # Convert seconds to milliseconds
 
-            
+
 
             prev_price = None
 
@@ -6831,7 +6565,7 @@ class LeanAgent15m:
 
                         break
 
-            
+
 
             if prev_price is None or prev_price <= 0:
 
@@ -6839,37 +6573,37 @@ class LeanAgent15m:
 
                 continue
 
-            
+
 
             window_velocity = (current_price - prev_price) / prev_price
 
             weighted_velocity += weight * window_velocity
 
-        
+
 
         # Apply EMA smoothing to reduce noise
 
         ema_velocity = self._apply_ema_smoothing(asset, weighted_velocity)
 
-        
+
 
         # Apply ATR-based volatility normalization
 
         atr_normalized_velocity = self._apply_atr_normalization(asset, ema_velocity)
 
-        
+
 
         # Update Z-score history with the normalized velocity
 
         self._velocity_zscore_history[asset].append((current_time, atr_normalized_velocity))
 
-        
+
 
         # Apply Z-score filter for extreme detection (monitoring only)
 
         final_velocity = self._apply_zscore_filter(asset, atr_normalized_velocity)
 
-        
+
 
         # CRITICAL FIX: 2026-07-06 - Fix bias bug: use history[-1][1] instead of history[-2][1]
 
@@ -6901,11 +6635,11 @@ class LeanAgent15m:
 
             final_velocity = final_velocity + 1e-5
 
-        
+
 
         return final_velocity
 
-    
+
 
     def _apply_ema_smoothing(self, asset: str, raw_velocity: float) -> float:
 
@@ -6919,13 +6653,13 @@ class LeanAgent15m:
 
             return raw_velocity  # No smoothing if period is 1 or less
 
-        
+
 
         alpha = 2.0 / (self._velocity_ema_period + 1.0)
 
         ema_history = list(self._velocity_ema_history[asset])
 
-        
+
 
         if len(ema_history) == 0:
 
@@ -6941,17 +6675,17 @@ class LeanAgent15m:
 
             smoothed_velocity = (raw_velocity * alpha) + (previous_ema * (1.0 - alpha))
 
-        
+
 
         # Store EMA value for next calculation
 
         self._velocity_ema_history[asset].append(smoothed_velocity)
 
-        
+
 
         return smoothed_velocity
 
-    
+
 
     def _apply_atr_normalization(self, asset: str, velocity: float) -> float:
 
@@ -6969,7 +6703,7 @@ class LeanAgent15m:
 
         return velocity
 
-    
+
 
     def _calculate_zscore(self, asset: str, value: float) -> float:
 
@@ -6987,7 +6721,7 @@ class LeanAgent15m:
 
             return 0.0  # Not enough data for Z-score
 
-        
+
 
         # Get recent values
 
@@ -6995,7 +6729,7 @@ class LeanAgent15m:
 
         recent_values = [entry[1] for entry in history[-self._zscore_period:] if len(entry) >= 2]
 
-        
+
 
         # Calculate mean and standard deviation
 
@@ -7005,23 +6739,23 @@ class LeanAgent15m:
 
         std_val = statistics.stdev(recent_values) if len(recent_values) > 1 else 0.0
 
-        
+
 
         if std_val <= 0.0001:  # Avoid division by zero
 
             return 0.0
 
-        
+
 
         # Calculate Z-score
 
         zscore = (value - mean_val) / std_val
 
-        
+
 
         return zscore
 
-    
+
 
     def _apply_zscore_filter(self, asset: str, velocity: float) -> float:
 
@@ -7033,7 +6767,7 @@ class LeanAgent15m:
 
         zscore = self._calculate_zscore(asset, velocity)
 
-        
+
 
         # Log Z-score for monitoring
 
@@ -7041,7 +6775,7 @@ class LeanAgent15m:
 
             logger.info("[Z-SCORE-EXTREME] asset=%s zscore=%.2f (overbought/oversold detected)", asset, zscore)
 
-        
+
 
         # Return the original velocity (Z-score is used for monitoring/filtering, not normalization)
 
@@ -7049,7 +6783,7 @@ class LeanAgent15m:
 
         return velocity
 
-    
+
 
     def _update_adx_history(self, asset: str, current_price: float, open_price: float, high_price: float, low_price: float) -> None:
 
@@ -7069,19 +6803,19 @@ class LeanAgent15m:
 
         # CRITICAL FIX: Use OHLC data for proper True Range and Directional Movement calculation
 
-        
+
 
         current_time = int(time.time() * 1000)
 
         history = list(self._spot_price_history[asset])
 
-        
+
 
         if len(history) < 2:
 
             return
 
-        
+
 
         # Get previous OHLC data
 
@@ -7091,7 +6825,7 @@ class LeanAgent15m:
 
         prev_low = history[-2][4] if len(history[-2]) > 4 else history[-2][1]  # Previous low or fallback to close
 
-        
+
 
         # Calculate True Range (TR) using OHLC data
 
@@ -7107,7 +6841,7 @@ class LeanAgent15m:
 
         self._tr_history[asset].append((current_time, tr))
 
-        
+
 
         # Calculate Directional Movement (DM) using OHLC data
 
@@ -7119,7 +6853,7 @@ class LeanAgent15m:
 
         downward_move = prev_low - low_price
 
-        
+
 
         if upward_move > downward_move and upward_move > 0:
 
@@ -7139,13 +6873,13 @@ class LeanAgent15m:
 
             minus_dm = 0.0
 
-        
+
 
         self._plus_dm_history[asset].append((current_time, plus_dm))
 
         self._minus_dm_history[asset].append((current_time, minus_dm))
 
-        
+
 
         # CRITICAL FIX: Calculate DX immediately once we have enough TR history for DI calculation
 
@@ -7163,7 +6897,7 @@ class LeanAgent15m:
 
             minus_dm_history = list(self._minus_dm_history[asset])
 
-            
+
 
             current_tr = tr_history[-1][1]
 
@@ -7171,7 +6905,7 @@ class LeanAgent15m:
 
             current_minus_dm = minus_dm_history[-1][1]
 
-            
+
 
             # Calculate smoothed TR using Wilder's smoothing
 
@@ -7185,7 +6919,7 @@ class LeanAgent15m:
 
                 smoothed_tr = (self._prev_smoothed_tr[asset] * (self._adx_window_size - 1) + current_tr) / self._adx_window_size
 
-            
+
 
             # Calculate smoothed +DM using Wilder's smoothing
 
@@ -7199,7 +6933,7 @@ class LeanAgent15m:
 
                 smoothed_plus_dm = (self._prev_smoothed_plus_dm[asset] * (self._adx_window_size - 1) + current_plus_dm) / self._adx_window_size
 
-            
+
 
             # Calculate smoothed -DM using Wilder's smoothing
 
@@ -7213,7 +6947,7 @@ class LeanAgent15m:
 
                 smoothed_minus_dm = (self._prev_smoothed_minus_dm[asset] * (self._adx_window_size - 1) + current_minus_dm) / self._adx_window_size
 
-            
+
 
             # Update previous smoothed values for next iteration
 
@@ -7223,7 +6957,7 @@ class LeanAgent15m:
 
             self._prev_smoothed_minus_dm[asset] = smoothed_minus_dm
 
-            
+
 
             # Calculate +DI and -DI (Directional Indicators)
 
@@ -7239,7 +6973,7 @@ class LeanAgent15m:
 
                 minus_di = 0.0
 
-            
+
 
             # Calculate DX (Directional Index)
 
@@ -7251,15 +6985,15 @@ class LeanAgent15m:
 
                 dx = 0.0
 
-            
 
-            
+
+
 
             # Store DX in history for ADX calculation
 
             self._adx_history[asset].append((current_time, dx))
 
-    
+
 
     def _calculate_adx(self, asset: str) -> float:
 
@@ -7281,19 +7015,19 @@ class LeanAgent15m:
 
         adx_history = list(self._adx_history[asset])
 
-        
+
 
         if len(adx_history) < self._adx_window_size:
 
             return 0.0  # Not enough DX history for ADX calculation
 
-        
+
 
         # Get current DX (most recent)
 
         current_dx = adx_history[-1][1]
 
-        
+
 
         # Calculate ADX using Wilder's smoothing
 
@@ -7319,11 +7053,11 @@ class LeanAgent15m:
 
             self._prev_adx[asset] = adx
 
-        
+
 
         return adx
 
-    
+
 
     def _is_trading_session_active(self) -> bool:
 
@@ -7337,13 +7071,13 @@ class LeanAgent15m:
 
             return True  # Session filter disabled, always allow trading
 
-        
+
 
         from datetime import datetime, timezone
 
         current_utc_hour = datetime.now(timezone.utc).hour
 
-        
+
 
         # Define active trading windows
 
@@ -7355,7 +7089,7 @@ class LeanAgent15m:
 
         # Asian session (00:00-08:00 UTC): Low liquidity (avoid)
 
-        
+
 
         is_us_europe_overlap = (
 
@@ -7375,11 +7109,11 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         is_active = is_us_europe_overlap or is_us_session or is_european_morning
 
-        
+
 
         session_name = "UNKNOWN"
 
@@ -7399,7 +7133,7 @@ class LeanAgent15m:
 
             session_name = "Asian session (low liquidity, disabled)"
 
-        
+
 
         logger.info(
 
@@ -7409,11 +7143,11 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         return is_active
 
-    
+
 
     def _calculate_mean_reversion(self, asset: str, current_price: float) -> float:
 
@@ -7429,7 +7163,7 @@ class LeanAgent15m:
 
             return 0.0
 
-        
+
 
         # Calculate 2-minute SMA
 
@@ -7437,7 +7171,7 @@ class LeanAgent15m:
 
         target_time = current_time - 120000  # 2 minutes ago in milliseconds
 
-        
+
 
         prices_in_window = []
 
@@ -7455,17 +7189,17 @@ class LeanAgent15m:
 
                     prices_in_window.append(price)
 
-        
+
 
         if len(prices_in_window) < 2:
 
             return 0.0
 
-        
+
 
         sma = sum(prices_in_window) / len(prices_in_window)
 
-        
+
 
         # Calculate deviation from SMA as percentage
 
@@ -7473,9 +7207,9 @@ class LeanAgent15m:
 
         return deviation_pct
 
-    
 
-    def _apply_logit_fusion(self, velocity_logit: float, mean_reversion_logit: float, 
+
+    def _apply_logit_fusion(self, velocity_logit: float, mean_reversion_logit: float,
 
                            minutes_to_expiry: float) -> float:
 
@@ -7495,17 +7229,17 @@ class LeanAgent15m:
 
             return velocity_logit
 
-        
+
 
         # Apply weighted fusion
 
-        fused_logit = (self._logit_fusion_velocity_weight * velocity_logit + 
+        fused_logit = (self._logit_fusion_velocity_weight * velocity_logit +
 
                       self._logit_fusion_mean_reversion_weight * mean_reversion_logit)
 
         return fused_logit
 
-    
+
 
     def record_outcome(self, logit: float, outcome: int) -> None:
 
@@ -7513,13 +7247,13 @@ class LeanAgent15m:
 
         Record a prediction outcome for calibration.
 
-        
+
 
         Phase 5.3: Records the logit and binary outcome for Platt scaling calibration.
 
         Automatically fits calibration when sufficient data is available and auto-fit is enabled.
 
-        
+
 
         Args:
 
@@ -7533,7 +7267,7 @@ class LeanAgent15m:
 
             return
 
-        
+
 
         # Add to calibration history
 
@@ -7541,7 +7275,7 @@ class LeanAgent15m:
 
         self._calibration_outcomes.append(outcome)
 
-        
+
 
         # Maintain rolling window
 
@@ -7551,13 +7285,13 @@ class LeanAgent15m:
 
             self._calibration_outcomes.pop(0)
 
-        
+
 
         logger.debug("[CALIBRATION] Recorded outcome: logit=%.4f outcome=%d (total samples=%d)",
 
                     logit, outcome, len(self._calibration_logits))
 
-        
+
 
         # Auto-fit if enabled and sufficient data
 
@@ -7565,7 +7299,7 @@ class LeanAgent15m:
 
             self._fit_calibration()
 
-    
+
 
     def _fit_calibration(self) -> None:
 
@@ -7573,7 +7307,7 @@ class LeanAgent15m:
 
         Fit Platt scaling calibration with current data.
 
-        
+
 
         Phase 5.3: Fits the Platt scaler when sufficient data is available.
 
@@ -7585,13 +7319,13 @@ class LeanAgent15m:
 
             return
 
-        
+
 
         import time
 
         current_time = time.time()
 
-        
+
 
         # Check fit interval (default 24 hours)
 
@@ -7603,7 +7337,7 @@ class LeanAgent15m:
 
             return
 
-        
+
 
         try:
 
@@ -7613,7 +7347,7 @@ class LeanAgent15m:
 
             self._last_fit_time = current_time
 
-            
+
 
             # Evaluate calibration metrics
 
@@ -7629,7 +7363,7 @@ class LeanAgent15m:
 
             logger.error("[CALIBRATION] Failed to fit PlattScaler: %s", e)
 
-    
+
 
     def get_calibration_metrics(self) -> Optional[dict]:
 
@@ -7637,11 +7371,11 @@ class LeanAgent15m:
 
         Get current calibration metrics.
 
-        
+
 
         Phase 5.5: Returns calibration metrics for monitoring and API exposure.
 
-        
+
 
         Returns:
 
@@ -7653,7 +7387,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         try:
 
@@ -7661,7 +7395,7 @@ class LeanAgent15m:
 
             params = self._platt_scaler.get_parameters()
 
-            
+
 
             return {
 
@@ -7695,7 +7429,7 @@ class LeanAgent15m:
 
             return None
 
-    
+
 
     def _classify_volatility_regime(self, ticker: str) -> tuple[str, float]:
 
@@ -7703,13 +7437,13 @@ class LeanAgent15m:
 
         Classify volatility regime and return (regime_name, current_volatility).
 
-        
+
 
         2026 best practice: Use short-horizon volatility to map to spread width.
 
         Three regimes: calm, elevated, violent with corresponding spread thresholds.
 
-        
+
 
         Returns:
 
@@ -7725,7 +7459,7 @@ class LeanAgent15m:
 
                 return "calm", 0.001  # Default to calm regime
 
-            
+
 
             market_state = self.market_state_store.get(ticker)
 
@@ -7733,7 +7467,7 @@ class LeanAgent15m:
 
                 return "calm", 0.001
 
-            
+
 
             # Get recent mid prices from market state history
 
@@ -7741,7 +7475,7 @@ class LeanAgent15m:
 
             volatility_window = self.config.volatility_window_s  # 300s = 5 minutes
 
-            
+
 
             # Calculate realized volatility from price changes
 
@@ -7751,13 +7485,13 @@ class LeanAgent15m:
 
             spot_service = get_unified_spot_service()
 
-            
+
 
             asset = self.config.name.replace("_15M", "")  # Extract asset name
 
             spot_data = spot_service.get_spot_history(asset, window_s=volatility_window)
 
-            
+
 
             if not spot_data or len(spot_data) < 2:
 
@@ -7769,7 +7503,7 @@ class LeanAgent15m:
 
                 return "calm", 0.001
 
-            
+
 
             # Calculate realized volatility (standard deviation of returns)
 
@@ -7777,19 +7511,19 @@ class LeanAgent15m:
 
             returns = [(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices))]
 
-            
+
 
             if not returns:
 
                 return "calm", 0.001
 
-            
+
 
             import statistics
 
             volatility = statistics.stdev(returns) if len(returns) > 1 else 0.001
 
-            
+
 
             # Classify regime based on volatility thresholds
 
@@ -7805,17 +7539,17 @@ class LeanAgent15m:
 
                 regime = "violent"
 
-            
+
 
             logger.debug("[VOLATILITY-REGIME] asset=%s ticker=%s regime=%s volatility=%.4f",
 
                         self.config.name, ticker, regime, volatility)
 
-            
+
 
             return regime, volatility
 
-            
+
 
         except Exception as e:
 
@@ -7823,7 +7557,7 @@ class LeanAgent15m:
 
             return "calm", 0.001
 
-    
+
 
     def _get_dynamic_spread_threshold(self, ticker: str) -> int:
 
@@ -7831,7 +7565,7 @@ class LeanAgent15m:
 
         Calculate dynamic spread threshold based on volatility regime and asset class.
 
-        
+
 
         Phase 1A (2026-07-09): Asset-specific overrides for Kalshi microstructure
 
@@ -7839,17 +7573,17 @@ class LeanAgent15m:
 
         - SOL/XRP/DOGE: Thinner books, looser thresholds (350bp calm, 450bp elevated, 700bp violent)
 
-        
+
 
         2026 best practice: "Blow your spreads out when the market's volatility does"
 
         Uses continuous interpolation between regime anchors for smooth transitions.
 
-        
+
 
         Formula: spread_t = base_width * (sigma_t / sigma_bar)^lambda
 
-        
+
 
         Returns:
 
@@ -7859,7 +7593,7 @@ class LeanAgent15m:
 
         regime, volatility = self._classify_volatility_regime(ticker)
 
-        
+
 
         # Phase 1A: Determine asset class for per-asset thresholds
 
@@ -7867,7 +7601,7 @@ class LeanAgent15m:
 
         is_major_asset = asset_symbol in ["BTC", "ETH"]
 
-        
+
 
         # Get regime-specific thresholds with asset-specific overrides
 
@@ -7901,7 +7635,7 @@ class LeanAgent15m:
 
                 threshold_bp = self.config.violent_spread_threshold_bp_sol_xrp_doge
 
-        
+
 
         # Apply continuous interpolation for smooth transitions
 
@@ -7911,7 +7645,7 @@ class LeanAgent15m:
 
         elevated_threshold = self.config.elevated_volatility_threshold
 
-        
+
 
         if regime == "calm":
 
@@ -7953,17 +7687,17 @@ class LeanAgent15m:
 
         # violent regime uses maximum threshold
 
-        
+
 
         logger.debug("[DYNAMIC-SPREAD] asset=%s ticker=%s regime=%s is_major=%s threshold=%dbp volatility=%.4f",
 
                     self.config.name, ticker, regime, is_major_asset, threshold_bp, volatility)
 
-        
+
 
         return threshold_bp
 
-    
+
 
     def _classify_regime(self, ticker: str) -> str:
 
@@ -7979,7 +7713,7 @@ class LeanAgent15m:
 
                 return regime
 
-            
+
 
             market_state = self.market_state_store.get(ticker)
 
@@ -8017,7 +7751,7 @@ class LeanAgent15m:
 
                     regime = "no_liquidity"
 
-                logger.debug("[REGIME-CLASSIFY] ticker=%s regime=%s (yes_depth=%d no_depth=%d)", 
+                logger.debug("[REGIME-CLASSIFY] ticker=%s regime=%s (yes_depth=%d no_depth=%d)",
 
                            ticker, regime, min_depth_yes, min_depth_no)
 
@@ -8027,11 +7761,11 @@ class LeanAgent15m:
 
             regime = "normal"
 
-        
+
 
         return regime
 
-    
+
 
     def _validate_market_state(self, market: Any) -> bool:
 
@@ -8045,39 +7779,39 @@ class LeanAgent15m:
 
             return False
 
-        
+
 
         # Get market state from store
 
         ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
 
-        
+
 
         # Check if market_state_store is available
 
         if not self.market_state_store:
 
-            logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s market_state_store is None", 
+            logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s market_state_store is None",
 
                          self.config.name, ticker)
 
             return False
 
-        
+
 
         market_state = self.market_state_store.get(ticker)
 
-        
+
 
         if not market_state:
 
-            logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s no market state", 
+            logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s no market state",
 
                          self.config.name, ticker)
 
             return False
 
-        
+
 
         # FIXED: Removed duality check from agent_grid
 
@@ -8095,7 +7829,7 @@ class LeanAgent15m:
 
         # Agent grid should only use validated prices from market_state
 
-        
+
 
         # Check staleness (default 15 seconds from profile)
 
@@ -8113,11 +7847,11 @@ class LeanAgent15m:
 
             pass
 
-        
+
 
         staleness_threshold_ms = venue_staleness * 1000
 
-        
+
 
         # Calculate staleness from last_update_ts (KalshiMarketState doesn't have staleness_ms)
 
@@ -8125,7 +7859,7 @@ class LeanAgent15m:
 
         last_update = getattr(market_state, 'last_update_ts', 0.0)
 
-        
+
 
         # If last_update_ts is 0 or very old (uninitialized), treat as fresh
 
@@ -8139,7 +7873,7 @@ class LeanAgent15m:
 
             staleness_ms = int((now - last_update) * 1000)
 
-        
+
 
         if staleness_ms > staleness_threshold_ms:
 
@@ -8149,7 +7883,7 @@ class LeanAgent15m:
 
             return False
 
-        
+
 
         # Check liquidity (depth) with one-sided regime classification
 
@@ -8169,7 +7903,7 @@ class LeanAgent15m:
 
         min_depth_no_threshold = 1
 
-        
+
 
         try:
 
@@ -8187,7 +7921,7 @@ class LeanAgent15m:
 
             min_depth_no_threshold = depth_thresholds.get('min_depth_no', 1)
 
-            
+
 
             logger.info(
 
@@ -8215,13 +7949,13 @@ class LeanAgent15m:
 
             logger.warning("[DEPTH-THRESHOLD] Failed to load from envelope: %s, using defaults", e)
 
-        
+
 
         min_depth_yes = getattr(market_state, 'min_depth_yes', 0)
 
         min_depth_no = getattr(market_state, 'min_depth_no', 0)
 
-        
+
 
         # Classify book regime
 
@@ -8229,7 +7963,7 @@ class LeanAgent15m:
 
         has_no = min_depth_no >= min_depth_no_threshold
 
-        
+
 
         if has_yes and has_no:
 
@@ -8247,7 +7981,7 @@ class LeanAgent15m:
 
             regime = "no_liquidity"
 
-        
+
 
         # Reject if no liquidity on either side
 
@@ -8259,7 +7993,7 @@ class LeanAgent15m:
 
             return False
 
-        
+
 
         # CRITICAL FIX: Relaxed one-sided rejection for 15-minute markets
 
@@ -8283,7 +8017,7 @@ class LeanAgent15m:
 
                 close_time = getattr(market.market, 'close_time', 0)
 
-            
+
 
             if close_time > 0:
 
@@ -8291,7 +8025,7 @@ class LeanAgent15m:
 
                 minutes_to_expiry = (close_time - now) / 60.0
 
-                
+
 
                 # Only reject one-sided books in last 30 seconds (terminal phase)
 
@@ -8335,7 +8069,7 @@ class LeanAgent15m:
 
                 )
 
-        
+
 
         # Log regime for visibility
 
@@ -8343,7 +8077,7 @@ class LeanAgent15m:
 
                    self.config.name, ticker, regime, min_depth_yes, min_depth_no, min_depth_yes_threshold, min_depth_no_threshold)
 
-        
+
 
         # Check spread - RELAXED for one-sided books (common in 15m crypto)
         # NOTE: This is a coarse market-level filter before signal generation.
@@ -8373,7 +8107,7 @@ class LeanAgent15m:
                 logger.warning(f"[MARKET-VALIDATION] asset={self.config.name} ticker={ticker} spread exceeds coarse filter={coarse_filter_threshold}c (spread={spread_cents}c) - rejecting as pathological")
                 return False
 
-            
+
 
             # CRITICAL FIX: Remove basis point validation for binary options
 
@@ -8409,7 +8143,7 @@ class LeanAgent15m:
 
                        self.config.name, ticker, best_bid, best_ask)
 
-        
+
 
         logger.info("[MARKET-VALIDATION] asset=%s ticker=%s VALID regime=%s depth_yes=%d depth_no=%d staleness=%dms",
 
@@ -8417,7 +8151,7 @@ class LeanAgent15m:
 
         return True
 
-    
+
 
     def _generate_signal(
 
@@ -8435,7 +8169,7 @@ class LeanAgent15m:
 
         logger.debug("[GENERATE-SIGNAL-ENTRY] spot_price=%s market_type=%s minutes_to_expiry=%s", spot_price, type(market), minutes_to_expiry)
 
-        
+
 
         # CRITICAL FIX (2026-07-17): Update RollingBuffer with spot_price for bias prevention
         if self._rolling_buffer_enabled and self._signal_generator is not None:
@@ -8444,7 +8178,7 @@ class LeanAgent15m:
                 logger.debug("[ROLLING-BUFFER] Updated spot_price=%s", spot_price)
             except Exception as exc:
                 logger.warning("[ROLLING-BUFFER] Failed to update spot_price: %s", exc)
-        
+
         # CRITICAL FIX (2026-07-23): Update adaptive liquidity with market depth
         if self._dynamic_components_enabled and self._adaptive_liquidity_calculator is not None:
             try:
@@ -8458,7 +8192,7 @@ class LeanAgent15m:
             except Exception as exc:
                 logger.warning("[ADAPTIVE-LIQUIDITY] Failed to update depth: %s", exc)
 
-        
+
 
         # Phase 6: Check if trading session is active
 
@@ -8484,7 +8218,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Extract asset from market (must be done before time window filter for logging)
 
@@ -8520,7 +8254,7 @@ class LeanAgent15m:
 
                 asset = 'DOGE'
 
-        
+
 
         if not asset:
 
@@ -8528,7 +8262,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # ENTRY MATRIX: Time window entry rules (CRITICAL FIX: 2026-07-08 - Use profile YAML as single source of truth)
 
@@ -8544,7 +8278,7 @@ class LeanAgent15m:
 
         # - guardrails.cutoff_minutes_before_expiry: stop trading N minutes before expiry (0min - no cutoff)
 
-        
+
 
         # Get timing configuration from profile YAML
 
@@ -8554,7 +8288,7 @@ class LeanAgent15m:
 
         cutoff_mins = 0.0  # Default from guardrails.cutoff_minutes_before_expiry (no cutoff)
 
-        
+
 
         try:
 
@@ -8602,7 +8336,7 @@ class LeanAgent15m:
 
             cutoff_mins = 0.0  # CRITICAL FIX: 2026-07-13 - Changed from 2.0 to 0.0 for full window trading
 
-        
+
 
         time_edge_multiplier = 1.0
 
@@ -8622,7 +8356,7 @@ class LeanAgent15m:
                 )
             return None
 
-        
+
 
         # Check if within trading window
 
@@ -8726,7 +8460,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # ENTRY MATRIX: Per-asset minimum entry price (based on trade history analysis)
 
@@ -8748,7 +8482,7 @@ class LeanAgent15m:
 
         min_price_cents = min_entry_prices.get(asset, 5)  # Default to 5c
 
-        
+
 
         # Get current market price for BOTH YES and NO sides
 
@@ -8772,13 +8506,13 @@ class LeanAgent15m:
 
                 best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
 
-                
+
 
                 # YES price is the ASK (price to *buy* YES)
 
                 yes_price_cents = best_ask if best_ask > 0 else 0
 
-                
+
 
                 # NO price is the NO ask = 100 - best YES bid
 
@@ -8786,7 +8520,7 @@ class LeanAgent15m:
 
                 no_price_cents = 100 - best_bid
 
-                
+
 
                 logger.info(
 
@@ -8800,7 +8534,7 @@ class LeanAgent15m:
 
             logger.warning("[PRICE-FILTER-ERROR] asset=%s failed to get market price: %s", asset, e)
 
-        
+
 
         # Check which sides are within their side-aware ranges.
         # Single source of truth is merid.event_venues.kalshi.binary_price_space.
@@ -8828,7 +8562,7 @@ class LeanAgent15m:
             asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, expiry_bucket
         )
 
-        
+
 
         # If neither side is in range, skip trading
 
@@ -8860,7 +8594,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Determine which side to evaluate based on price range
 
@@ -8878,7 +8612,7 @@ class LeanAgent15m:
 
             sides_to_evaluate.append("no")
 
-        
+
 
         logger.info(
 
@@ -8888,7 +8622,7 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         # Price-bucket EV diagnostic logging for both sides
         # Use canonical bucket definition for consistency
@@ -8907,7 +8641,7 @@ class LeanAgent15m:
 
                 )
 
-        
+
 
         # CRITICAL FIX: Update price history (including ADX) in _generate_signal path
 
@@ -8919,7 +8653,7 @@ class LeanAgent15m:
 
         _, spot_data = self._get_spot_cached(asset)
 
-        
+
 
         # Update price history (including ADX) in _generate_signal path
 
@@ -8931,13 +8665,13 @@ class LeanAgent15m:
 
         self._update_price_history(asset, spot_price, spot_data)
 
-        
+
 
         # Price history already updated in collect_order_candidate (before calling _generate_signal)
 
         # This prevents the vicious cycle: no signal -> no price update -> velocity=0 -> no signal
 
-        
+
 
         # PRICE-BASED STRATEGY (Turbine research winner: +56.6% ROI)
 
@@ -8947,7 +8681,7 @@ class LeanAgent15m:
 
             return self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
 
-        
+
 
         # VOLATILITY_REVERSION STRATEGY (Turbine research winner: 93/96 profitable, +4.90% mean ROI)
         # 2026-07-17: Fade extreme panic moves - same as price_based (panic_fade)
@@ -8956,7 +8690,7 @@ class LeanAgent15m:
 
             return self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
 
-        
+
 
         # HYBRID STRATEGY: Combine momentum_fvg with price_based (panic fade)
         # 2026-07-15: Enable both strategies - prefer price_based when panic conditions met
@@ -8970,7 +8704,7 @@ class LeanAgent15m:
             logger.info("[HYBRID-SIGNAL] asset=%s falling back to momentum_fvg", asset)
             return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
 
-        
+
 
         # CRITICAL FIX: 2026-07-06 - Wire MACD/RSI into momentum_fvg signal generation
 
@@ -8980,7 +8714,7 @@ class LeanAgent15m:
 
             return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
 
-        
+
 
         # CRITICAL FIX: 2026-07-16 - Add fallback for unsupported signal modes
 
@@ -9000,7 +8734,7 @@ class LeanAgent15m:
 
             return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
 
-        
+
 
         # CRITICAL FIX: 2026-07-06 - Integrate trend alignment as confirmation filter
 
@@ -9044,7 +8778,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # CRITICAL FIX: Use multi-window velocity for both threshold comparison AND logit calculation
 
@@ -9056,7 +8790,7 @@ class LeanAgent15m:
 
         velocity = self._calculate_multi_window_velocity(asset, spot_price)
 
-        
+
 
         logger.info(
 
@@ -9066,7 +8800,7 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         # VELOCITY-BASED SIGNAL DECISION (2026 #1 winner)
 
@@ -9080,7 +8814,7 @@ class LeanAgent15m:
 
         velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)  # Dynamic threshold based on ATR
 
-        
+
 
         # Get market price and strike price for price-based confirmation
 
@@ -9114,7 +8848,7 @@ class LeanAgent15m:
 
                     market_price = best_ask / 100.0
 
-                
+
 
                 # CRITICAL: Use window_strike_price (captured at market activation from Kalshi's floor_strike)
 
@@ -9124,7 +8858,7 @@ class LeanAgent15m:
 
                 window_strike_source = getattr(market_state, 'window_strike_source', "")
 
-                
+
 
                 # Capture candle_open_price from spot feed for validation
 
@@ -9150,7 +8884,7 @@ class LeanAgent15m:
 
                     candle_open = spot_price
 
-                
+
 
                 if window_strike is not None and window_strike > 0:
 
@@ -9204,7 +8938,7 @@ class LeanAgent15m:
                     self._fallback_activations["strike_fallback"] += 1
                     self._fallback_timestamps["strike_fallback"].append(time.time())
 
-                
+
 
                 # Validation: Log divergence if both window_strike and candle_open are available
 
@@ -9252,7 +8986,7 @@ class LeanAgent15m:
 
                         )
 
-                
+
 
                 if strike_price:
 
@@ -9268,7 +9002,7 @@ class LeanAgent15m:
 
             logger.warning("[PRICE-CONFIRMATION-ERROR] asset=%s failed to get market price/strike: %s", asset, e)
 
-        
+
 
         # Priority 3: Volatility-adjusted velocity threshold
 
@@ -9298,7 +9032,7 @@ class LeanAgent15m:
 
                     realized_vol_annual = realized_vol * (525600 ** 0.5)
 
-                    
+
 
                     # Normalize to 25% annual vol baseline
 
@@ -9306,13 +9040,13 @@ class LeanAgent15m:
 
                     vol_multiplier = max(0.5, min(2.0, vol_multiplier))  # Clamp 0.5x-2.0x
 
-                    
+
 
                     # Apply volatility adjustment
 
                     velocity_threshold = base_velocity_threshold * vol_multiplier
 
-                    
+
 
                     logger.info(
 
@@ -9336,7 +9070,7 @@ class LeanAgent15m:
 
             velocity_threshold = base_velocity_threshold
 
-        
+
 
         # Phase 6: Update regime detector with current price
 
@@ -9376,7 +9110,7 @@ class LeanAgent15m:
 
                 )
 
-                
+
 
                 # CRITICAL FIX: Update canonical ops.regime_detection via adapter
 
@@ -9410,7 +9144,7 @@ class LeanAgent15m:
 
                         logger.warning("[REGIME-ADAPTER] Failed to update canonical regime: %s", e)
 
-        
+
 
         # Priority 4: Regime-aware threshold adjustment
 
@@ -9448,11 +9182,11 @@ class LeanAgent15m:
 
                 regime_multiplier = 1.0
 
-            
+
 
             velocity_threshold = velocity_threshold * regime_multiplier
 
-            
+
 
             logger.info(
 
@@ -9462,7 +9196,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # REMOVED: Restrictive price confirmation thresholds
 
@@ -9470,7 +9204,7 @@ class LeanAgent15m:
 
         # System now trades based purely on velocity/momentum signals (industry standard for 15m binary options)
 
-        
+
 
         # 2026 FIX: Lowered ADX threshold from 20 to 2 for 15-minute crypto trading
 
@@ -9522,7 +9256,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # Volume confirmation filter - use proper EMA20 comparison
 
@@ -9544,7 +9278,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Phase 7: Check panic fade (volatility reversion) conditions
         # 2026-07-24: CRITICAL SSOT FIX - Skip entirely when signal_mode is momentum_fvg or profile is v2.x
@@ -9615,7 +9349,7 @@ class LeanAgent15m:
 
                 )
 
-        
+
 
         # CRITICAL FIX: 2026-07-01 - Add market hour optimization based on industry research
 
@@ -9633,7 +9367,7 @@ class LeanAgent15m:
 
             session_active = False
 
-            
+
 
             # US-Europe overlap (13:00-17:00 UTC): Highest liquidity
 
@@ -9667,7 +9401,7 @@ class LeanAgent15m:
 
                 session_name = "Asian session (low liquidity)"
 
-            
+
 
             if not session_active:
 
@@ -9691,7 +9425,7 @@ class LeanAgent15m:
 
                 )
 
-        
+
 
         # ENTRY MATRIX: Momentum agreement check (based on Turbine research)
 
@@ -9715,7 +9449,7 @@ class LeanAgent15m:
 
             spot_direction = "up" if velocity > 0 else "down"
 
-            
+
 
             logger.info(
 
@@ -9725,7 +9459,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # HYBRID MODE PRICE CAPS (2026 Optimized)
         # REMOVED: Hybrid mode now properly combines price_based and momentum_fvg (line 7610)
@@ -9741,7 +9475,7 @@ class LeanAgent15m:
 
         # - Kalshi sets the strike/target price for each 15-minute window (e.g., BTC 15m: $58,697 target)
 
-        # 
+        #
 
         # Decision logic:
 
@@ -9753,7 +9487,7 @@ class LeanAgent15m:
 
         # 4. If expected < strike -> BUY NO (expect price below target)
 
-        
+
 
         # Calculate expected price move based on velocity (15-minute projection)
 
@@ -9767,7 +9501,7 @@ class LeanAgent15m:
 
         expected_price_move_pct = velocity * 900  # Project velocity to 15-minute window
 
-        
+
 
         # Cap expected move to realistic range (max 5% for 15 minutes)
 
@@ -9777,11 +9511,11 @@ class LeanAgent15m:
 
         expected_price_move_pct = max(-max_expected_move_pct, min(max_expected_move_pct, expected_price_move_pct))
 
-        
+
 
         expected_price = spot_price * (1 + expected_price_move_pct)
 
-        
+
 
         logger.info(
 
@@ -9791,7 +9525,7 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         # CRITICAL FIX: Use velocity threshold logic exclusively for 15-minute crypto scalping
 
@@ -9807,7 +9541,7 @@ class LeanAgent15m:
 
         # Strike-based logic is inappropriate for 15m crypto scalping and has been removed
 
-        
+
 
         # CRITICAL FIX: Apply regime-aware velocity-to-side mapping with dual-side evaluation
 
@@ -9821,7 +9555,7 @@ class LeanAgent15m:
 
         # This allows the indicator stack to determine which side has better EV, not forced YES/NO decision
 
-        
+
 
         # 2026-07-04: CRITICAL FIX - Removed NO-side conviction multiplier for symmetry
 
@@ -9851,7 +9585,7 @@ class LeanAgent15m:
 
         no_conviction_multiplier = 1.0  # NO side now uses same threshold as YES (symmetric)
 
-        
+
 
         # Calculate edge for both YES and NO sides based on velocity
 
@@ -9863,7 +9597,7 @@ class LeanAgent15m:
 
         side_edges = {}
 
-        
+
 
         if not panic_fade_signal:
 
@@ -9873,7 +9607,7 @@ class LeanAgent15m:
 
             is_marginal_negative = False  # DISABLED: No marginal zone
 
-            
+
 
             # CRITICAL FIX: 2026-07-09 - Symmetric signal strength for dual-side evaluation
 
@@ -9919,7 +9653,7 @@ class LeanAgent15m:
 
                 no_signal_strength = signal_mag
 
-            
+
 
             # CRITICAL FIX: 2026-07-09 - Dual-side probability-based edge calculation
 
@@ -9927,7 +9661,7 @@ class LeanAgent15m:
 
             # Direction is encoded in probabilities, not by zeroing one side
 
-            
+
 
             # Market-implied probabilities from prices
 
@@ -9935,13 +9669,13 @@ class LeanAgent15m:
 
             p_mkt_no = no_price_cents / 100.0 if no_price_cents > 0 else 0.5
 
-            
+
 
             # Base probability (neutral starting point)
 
             base_prob = 0.5
 
-            
+
 
             # Direction bias from velocity (encodes trend_following vs mean_reversion)
             # CRITICAL FIX: Use unified terminology for consistent direction bias calculation
@@ -9960,7 +9694,7 @@ class LeanAgent15m:
                     direction_bias = -0.1 * signal_mag  # Bump NO probability
                 else:  # mean_reversion
                     direction_bias = 0.1 * signal_mag  # Bump YES probability
-            
+
             # Validate direction bias logic against unified terminology
             if UNIFIED_TERMINOLOGY_AVAILABLE:
                 expected_side = Side.from_velocity_and_mode(velocity, strategy_mode)
@@ -9976,13 +9710,13 @@ class LeanAgent15m:
                         f"strategy_mode={strategy_mode} expected_side=NO but direction_bias={direction_bias} > 0"
                     )
 
-            
+
 
             # Model probabilities with direction bias
             p_model_yes = max(0.05, min(0.95, base_prob + direction_bias))
             p_model_no = 1.0 - p_model_yes  # Symmetry: p_model_no = 1 - p_model_yes
 
-            
+
 
             # Calculate symmetric edges for both sides
 
@@ -10018,7 +9752,7 @@ class LeanAgent15m:
 
                     )
 
-            
+
 
             # CRITICAL FIX: 2026-07-13 - Add midpoint preference (~42.5c bonus for 10-75c range)
 
@@ -10036,7 +9770,7 @@ class LeanAgent15m:
 
                 return max(0.0, midpoint_bonus_max - dist * midpoint_bonus_slope)
 
-            
+
 
             # CRITICAL FIX: 2026-07-19 - Only select sides with positive original edges
             # Midpoint bonus should break ties, not override negative edges
@@ -10045,14 +9779,14 @@ class LeanAgent15m:
             for side, edge in side_edges.items():
                 if edge is not None and edge > 0:
                     positive_sides[side] = edge
-            
+
             if not positive_sides:
                 logger.info(
                     "[EDGE-SELECTION] asset=%s no positive edges (edge_yes=%.4f edge_no=%.4f) -> NO TRADE",
                     asset, side_edges.get("yes", 0), side_edges.get("no", 0)
                 )
                 return None
-            
+
             # CRITICAL FIX: Determine expected side from velocity and strategy_mode BEFORE edge selection
             # This prevents YES/NO inversion where edge-based selection picks wrong side
             if UNIFIED_TERMINOLOGY_AVAILABLE:
@@ -10063,14 +9797,14 @@ class LeanAgent15m:
                     expected_side = "yes" if velocity > 0 else "no"
                 else:  # mean_reversion
                     expected_side = "no" if velocity > 0 else "yes"
-            
+
             # PHASE 1: Shadow dual-side evaluation for missed opportunity analysis
             # Log both sides' edges to measure structural bias from expected_side gating
             # This allows us to quantify the opportunity cost of single-side evaluation
             expected_side_edge = side_edges.get(expected_side) if side_edges.get(expected_side) is not None else 0.0
             opposite_side = "no" if expected_side == "yes" else "yes"
             opposite_side_edge = side_edges.get(opposite_side) if side_edges.get(opposite_side) is not None else 0.0
-            
+
             # Determine hypothetical best side (unconstrained dual-side selection)
             # Use tie-breaking favoring NO to match the momentum_fvg fix
             if expected_side_edge > opposite_side_edge:
@@ -10083,7 +9817,7 @@ class LeanAgent15m:
                 # Equal edges - prefer NO for bias correction
                 hypothetical_best_side = "no"
                 hypothetical_best_edge = expected_side_edge
-            
+
             # Log shadow dual-side evaluation for analysis
             logger.info(
                 "[SHADOW-DUAL-SIDE] asset=%s velocity=%.6f mode=%s expected_side=%s expected_edge=%.4f "
@@ -10093,7 +9827,7 @@ class LeanAgent15m:
                 opposite_side, opposite_side_edge, hypothetical_best_side, hypothetical_best_edge,
                 yes_in_range, no_in_range
             )
-            
+
             # Log to shadow dual-side metrics monitor for analysis
             try:
                 from merid.metrics.shadow_dual_side_metrics import get_shadow_dual_side_monitor
@@ -10113,7 +9847,7 @@ class LeanAgent15m:
                 )
             except Exception as metrics_err:
                 logger.warning("[SHADOW-DUAL-SIDE-METRICS] Failed to log to metrics monitor: %s", metrics_err)
-            
+
             # Only evaluate edges for the expected side to prevent inversion
             if expected_side == "yes" and yes_in_range and "yes" in positive_sides:
                 signal_side = "yes"
@@ -10128,10 +9862,10 @@ class LeanAgent15m:
                     asset, expected_side, side_edges.get("yes", 0), side_edges.get("no", 0)
                 )
                 return None
-            
+
             signal_action = "buy"
 
-            
+
 
             # Set market_price based on selected side for backward compatibility
 
@@ -10145,7 +9879,7 @@ class LeanAgent15m:
 
                 market_price = no_price_cents / 100.0
 
-            
+
 
             logger.info(
 
@@ -10155,7 +9889,7 @@ class LeanAgent15m:
 
             )
 
-            
+
 
             # Log the velocity-based rationale
             # CRITICAL FIX: Use unified terminology to prevent signal inversion
@@ -10215,7 +9949,7 @@ class LeanAgent15m:
 
                     )
 
-        
+
 
         # 2026-07-05 INDUSTRY ALIGNMENT: 15M Noise Filters
 
@@ -10223,7 +9957,7 @@ class LeanAgent15m:
 
         # Add filters to reject noise and improve signal quality
 
-        
+
 
         # Filter 1: Minimum move threshold
 
@@ -10271,7 +10005,7 @@ class LeanAgent15m:
 
         self._last_price[asset] = spot_price
 
-        
+
 
         # Filter 2: Volume spike confirmation
 
@@ -10295,7 +10029,7 @@ class LeanAgent15m:
 
         logger.debug("[NOISE-FILTER-VOLUME] DISABLED - broken filter removed (was comparing 60s candle volume to 1M threshold)")
 
-        
+
 
         # Filter 3: Sustained signal
 
@@ -10319,7 +10053,7 @@ class LeanAgent15m:
 
             self._velocity_history[asset].pop(0)
 
-        
+
 
         # Check if velocity has been sustained in the same direction
 
@@ -10361,7 +10095,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # Filter 4: Wick filter
 
@@ -10385,7 +10119,7 @@ class LeanAgent15m:
 
                 candle_close = spot_data.close
 
-                
+
 
                 # Calculate wick percentage
 
@@ -10395,7 +10129,7 @@ class LeanAgent15m:
 
                 wick_size = total_range - body_size
 
-                
+
 
                 if total_range > 0:
 
@@ -10427,7 +10161,7 @@ class LeanAgent15m:
 
             logger.warning("[NOISE-FILTER-WICK] Failed to check wick: %s, skipping filter", e)
 
-        
+
 
         # 2026 OPTIMIZATION: Order Book Imbalance (OBI) Filter
 
@@ -10443,7 +10177,7 @@ class LeanAgent15m:
 
             obi_filter = get_obi_filter()
 
-            
+
 
             # Get depth from market state
 
@@ -10451,7 +10185,7 @@ class LeanAgent15m:
 
             depth_no = market_state.depth_no if market_state and market_state.depth_no else 0
 
-            
+
 
             # Check OBI filter with asset parameter for per-asset thresholds
 
@@ -10469,7 +10203,7 @@ class LeanAgent15m:
 
             )
 
-            
+
 
             if obi_context.recommendation == "HOLD":
 
@@ -10517,7 +10251,7 @@ class LeanAgent15m:
 
                     obi_signal_direction = "sell"
 
-                
+
 
                 # Check if OBI signal aligns with velocity signal
 
@@ -10529,7 +10263,7 @@ class LeanAgent15m:
 
                 )
 
-                
+
 
                 if not signals_aligned:
 
@@ -10543,7 +10277,7 @@ class LeanAgent15m:
 
                     return None
 
-                
+
 
                 logger.info(
 
@@ -10559,7 +10293,7 @@ class LeanAgent15m:
 
             # Continue without OBI filter if it fails (non-critical)
 
-        
+
 
         # 2026 OPTIMIZATION: News Event Avoidance
 
@@ -10573,11 +10307,11 @@ class LeanAgent15m:
 
             news_avoidance = get_news_avoidance()
 
-            
+
 
             status = news_avoidance.should_avoid_trading()
 
-            
+
 
             if status.should_avoid:
 
@@ -10591,7 +10325,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             if status.upcoming_events:
 
@@ -10609,7 +10343,7 @@ class LeanAgent15m:
 
             # Continue without news avoidance if it fails (non-critical)
 
-        
+
 
         # 2026 VELOCITY-BASED SIDE SELECTION: Side is determined by velocity direction
 
@@ -10619,7 +10353,7 @@ class LeanAgent15m:
 
         # Edge is calculated for confidence/risk but does NOT override velocity side decision
 
-        
+
 
         # CRITICAL FIX: Read bid/ask from KalshiMarketStateStore instead of catalog
 
@@ -10641,7 +10375,7 @@ class LeanAgent15m:
 
             ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
 
-            
+
 
             # Check if market_state_store is available
 
@@ -10653,7 +10387,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             market_state = self.market_state_store.get(ticker)
 
@@ -10669,7 +10403,7 @@ class LeanAgent15m:
 
                            asset, ticker, best_bid, best_ask, price_source)
 
-                
+
 
                 # CRITICAL FIX: 2026-07-02 - Market quality validation to prevent 1¢ orders
 
@@ -10717,7 +10451,7 @@ class LeanAgent15m:
 
                     )
 
-                
+
 
                 # Only reject truly corrupted data (best_ask > 99¢, which is impossible for YES/NO duality)
 
@@ -10743,11 +10477,11 @@ class LeanAgent15m:
 
             logger.warning("[MARKET-STATE-READ] asset=%s failed to read market state: %s", asset, str(e))
 
-        
+
 
         logger.info("[BEFORE-PROFILE-LOAD] asset=%s market_id=%s", asset, getattr(market, 'market_id', 'N/A'))
 
-        
+
 
         # Load profile for risk limits
 
@@ -10765,7 +10499,7 @@ class LeanAgent15m:
 
             venue_staleness = profile.venue_invariants_max_book_staleness_ms / 1000.0  # Convert ms to seconds
 
-            logger.info("[PROFILE-LOAD] asset=%s strategy_staleness=%s venue_staleness=%s", 
+            logger.info("[PROFILE-LOAD] asset=%s strategy_staleness=%s venue_staleness=%s",
 
                        asset, strategy_staleness, venue_staleness)
 
@@ -10777,7 +10511,7 @@ class LeanAgent15m:
 
             venue_staleness = 15
 
-        
+
 
         # Phase 1: Compute model probability using logistic mapping from velocity
 
@@ -10787,7 +10521,7 @@ class LeanAgent15m:
 
         import math
 
-        
+
 
         # Calculate market probability from bid/ask (p_mkt)
 
@@ -10805,13 +10539,13 @@ class LeanAgent15m:
 
             p_mkt = best_ask / 100.0
 
-        
+
 
         # Clamp p_mkt to valid range [0.05, 0.95] (Kalshi venue invariant)
 
         p_mkt = max(0.05, min(0.95, p_mkt))
 
-        
+
 
         # Calculate raw logit from velocity using coefficients
 
@@ -10825,19 +10559,19 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Phase 4.1: Use multi-window velocity for better signal quality
 
         multi_window_velocity = self._calculate_multi_window_velocity(asset, spot_price)
 
-        
+
 
         # Phase 4.3: Calculate mean reversion signal
 
         mean_reversion_deviation = self._calculate_mean_reversion(asset, spot_price)
 
-        
+
 
         # Phase 4.4: Calculate separate logits for velocity and mean reversion
 
@@ -10845,13 +10579,13 @@ class LeanAgent15m:
 
         mean_reversion_logit = self._alpha_0 + self._alpha_1 * (-mean_reversion_deviation * 0.5)
 
-        
+
 
         # Phase 4.4: Apply logit fusion to combine signals
 
         raw_logit = self._apply_logit_fusion(velocity_logit, mean_reversion_logit, minutes_to_expiry)
 
-        
+
 
         # CRITICAL FIX: Clamp raw_logit to prevent sigmoid overflow/underflow
 
@@ -10865,7 +10599,7 @@ class LeanAgent15m:
 
         if raw_logit < LOGIT_CLAMP_MIN:
 
-            logger.warning("[LOGIT-CLAMP] asset=%s raw_logit=%.4f clamped to %.4f (too negative)", 
+            logger.warning("[LOGIT-CLAMP] asset=%s raw_logit=%.4f clamped to %.4f (too negative)",
 
                          asset, raw_logit, LOGIT_CLAMP_MIN)
 
@@ -10873,13 +10607,13 @@ class LeanAgent15m:
 
         elif raw_logit > LOGIT_CLAMP_MAX:
 
-            logger.warning("[LOGIT-CLAMP] asset=%s raw_logit=%.4f clamped to %.4f (too positive)", 
+            logger.warning("[LOGIT-CLAMP] asset=%s raw_logit=%.4f clamped to %.4f (too positive)",
 
                          asset, raw_logit, LOGIT_CLAMP_MAX)
 
             raw_logit = LOGIT_CLAMP_MAX
 
-        
+
 
         # Apply numerically stable logistic function to get model probability
 
@@ -10909,13 +10643,13 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # Clamp p_model to valid range [0.01, 0.99] (slightly wider than venue invariant)
 
         p_model = max(0.01, min(0.99, p_model))
 
-        
+
 
         # Phase 5.3: Apply probability calibration if enabled and fitted
 
@@ -10937,7 +10671,7 @@ class LeanAgent15m:
 
                              asset, cal_err)
 
-        
+
 
         # CRITICAL FIX: Apply horizon-aware calibration based on 2026 research
 
@@ -10965,13 +10699,13 @@ class LeanAgent15m:
 
                 horizon_factor = 1.0 + 0.08 * math.log(max(0.1, horizon_hours))
 
-                
+
 
                 # Apply domain-specific slope for crypto (research: ~1.08 for crypto)
 
                 crypto_slope = 1.08
 
-                
+
 
                 # Recalibrate probability using horizon-aware formula
 
@@ -10981,13 +10715,13 @@ class LeanAgent15m:
 
                 horizon_calibrated_p = 1.0 / (1.0 + math.exp(-adjusted_logit))
 
-                
+
 
                 # Clamp to valid range
 
                 horizon_calibrated_p = max(0.01, min(0.99, horizon_calibrated_p))
 
-                
+
 
                 logger.info("[HORIZON-CALIBRATION] asset=%s horizon=%.2fh factor=%.3f p_model=%.4f -> %.4f",
 
@@ -11001,7 +10735,7 @@ class LeanAgent15m:
 
                              asset, horizon_err)
 
-        
+
 
         # CROSS-PHASE: Validate p_model is in reasonable range
 
@@ -11013,7 +10747,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # 2026-07-05 RESEARCH NOTE: A previous iteration replaced probability edge with raw
 
@@ -11029,7 +10763,7 @@ class LeanAgent15m:
 
         # uncertain-zone gate so we only buy contracts cheap enough to run to the 99c exit.
 
-        
+
 
         # Calculate edge for logging and execution
 
@@ -11049,7 +10783,7 @@ class LeanAgent15m:
 
         edge_no_pct = ((1.0 - p_model) - (1.0 - p_mkt))  # FRACTION units
 
-        
+
 
         # EDGE GATE 1: Only trade the uncertain zone (market-implied prob 10%-90%).
 
@@ -11063,7 +10797,7 @@ class LeanAgent15m:
 
         # 2026-07-05 FIX: Disabled to allow momentum signals to execute when velocity exceeds threshold.
 
-        
+
 
         if signal_side == "yes":
 
@@ -11073,7 +10807,7 @@ class LeanAgent15m:
 
             edge_pct = edge_no_pct
 
-        
+
 
         # 2026-07-05 INDUSTRY ALIGNMENT: Add explicit Kalshi fee modeling
 
@@ -11092,19 +10826,19 @@ class LeanAgent15m:
 
             fee_cents = calculate_kalshi_fee_cents(p_mkt, int(price_cents))
 
-            
+
 
             # Convert fee to percentage of contract value
 
             fee_pct = (fee_cents / price_cents) * 100.0 if price_cents > 0 else 0.0
 
-            
+
 
             # Calculate net edge after fees
 
             net_edge_pct = edge_pct - fee_pct
 
-            
+
 
             # CRITICAL FIX: 2026-07-05 - Disabled min net edge filter to enable fills
 
@@ -11118,7 +10852,7 @@ class LeanAgent15m:
 
             min_net_edge_pct = (min_net_edge_cents / price_cents) * 100.0 if price_cents > 0 else 0.0
 
-            
+
 
             logger.info(
 
@@ -11128,7 +10862,7 @@ class LeanAgent15m:
 
             )
 
-            
+
 
             # 2026-07-05 FIX: Disabled net edge sign check for momentum-based trading
 
@@ -11152,19 +10886,19 @@ class LeanAgent15m:
 
             #     return None
 
-            
+
 
             # Use net edge for downstream calculations
 
             edge_pct = net_edge_pct
 
-        
+
 
         # ENTRY MATRIX: Time window multiplier raises the REQUIRED edge for late entries
 
         # (edge decay). Applied to the requirement below, not to the measured edge.
 
-        
+
 
         # ENTRY MATRIX: Apply price band edge multiplier (based on CEPR/KarlWhelan research)
 
@@ -11185,7 +10919,7 @@ class LeanAgent15m:
 
         price_edge_multiplier = 1.0
 
-        
+
 
         if price_cents > 0:
 
@@ -11263,7 +10997,7 @@ class LeanAgent15m:
 
                     price_edge_multiplier = 1.5  # Near max price
 
-        
+
 
         # EDGE GATE 2: Minimum edge requirement (per-asset, aligned with profile min_edge_early:
 
@@ -11279,7 +11013,7 @@ class LeanAgent15m:
 
         # 2026-07-05 FIX: Disabled to allow momentum signals to execute when velocity exceeds threshold.
 
-        
+
 
         logger.info(
 
@@ -11289,7 +11023,7 @@ class LeanAgent15m:
 
         )
 
-        
+
 
  # REMOVED: Negative edge check for momentum-based trading
 
@@ -11305,7 +11039,7 @@ class LeanAgent15m:
 
         # 2026-07-05 FIX: Removed to allow momentum signals to execute based on velocity threshold
 
-        
+
 
         # Sanity check only: reject extreme edges that indicate data errors
 
@@ -11325,7 +11059,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         # 2026-07-05 FIX: Removed confidence filter for momentum-based trading
 
@@ -11339,7 +11073,7 @@ class LeanAgent15m:
 
         # produce p_model values very close to 0.5, resulting in confidence_pct < 2%
 
-        
+
 
         # Compute confidence as distance from 0.5 (neutral probability)
 
@@ -11347,7 +11081,7 @@ class LeanAgent15m:
 
         confidence = min(0.99, 0.50 + 2.0 * abs(p_model - 0.5))
 
-        
+
 
         # For backward compatibility, set model_prob to p_model
         # p_model is the probability of the YES (up) outcome. Downstream consumers
@@ -11355,13 +11089,13 @@ class LeanAgent15m:
         # side-specific price_cents, so for NO signals pass the NO win probability.
         model_prob = p_model if signal_side == "yes" else (1.0 - p_model)
 
-        
+
 
         logger.info("[SIGNAL-GEN] asset=%s velocity=%.6f raw_logit=%.4f p_mkt=%.4f p_model=%.4f edge_pct=%.2f confidence=%.2f",
 
                     asset, velocity, raw_logit, p_mkt, p_model, edge_pct, confidence)
 
-        
+
 
         # Phase 2: Classify regime from market state
 
@@ -11369,7 +11103,7 @@ class LeanAgent15m:
 
         regime = self._classify_regime(ticker)
 
-        
+
 
         # CRITICAL FIX: Calculate correct price_cents based on side
 
@@ -11401,13 +11135,13 @@ class LeanAgent15m:
 
                 price_cents = int((no_bid + no_ask) / 2)
 
-                
+
 
                 logger.info("[PRICE-CALC-NO] asset=%s YES_bid=%d YES_ask=%d -> NO_bid=%d NO_ask=%d NO_mid=%d",
 
                            asset, best_bid, best_ask, no_bid, no_ask, price_cents)
 
-                
+
 
                 # 2026-07-05 FIX: REMOVED price clamping to [50, 70] range
 
@@ -11449,7 +11183,7 @@ class LeanAgent15m:
 
             price_cents = 42  # 2026-07-14: Changed from 25 to 42 (midpoint of 10-75c canonical range)
 
-        
+
 
         # 2026-07-12: Expanded price range 10c-75c to match actual market conditions (YES prices 60-97c)
 
@@ -11457,7 +11191,7 @@ class LeanAgent15m:
 
         raw_price_cents = price_cents
 
-        
+
 
         # Check if price is within range (YES: 1c-85c, NO: 15c-99c)
 
@@ -11487,7 +11221,7 @@ class LeanAgent15m:
 
             )
 
-            
+
 
             # Try to find a price in the canonical range from the orderbook
 
@@ -11499,7 +11233,7 @@ class LeanAgent15m:
 
                 market_state = self.market_state_store.get(ticker) if self.market_state_store else None
 
-                
+
 
                 if market_state:
 
@@ -11582,11 +11316,11 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             clamped_price_cents = price_cents
 
-        
+
 
         # Final validation - side-aware canonical range
         # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
@@ -11612,7 +11346,7 @@ class LeanAgent15m:
 
             return None
 
-        
+
 
         logger.info(
 
@@ -11622,13 +11356,13 @@ class LeanAgent15m:
 
         )
 
-        
+
 
         # Kalshi contracts trade in whole cents.  Guard against any float or numpy
         # scalar leaking through from market-state arithmetic.
         price_cents = int(round(clamped_price_cents))
 
-        
+
 
         # MAKER-FIRST ENTRY PRICING (2026-07-05 RESEARCH FIX)
 
@@ -11679,11 +11413,11 @@ class LeanAgent15m:
             self._fallback_activations["dynamic_range_fallback"] += 1
             self._fallback_timestamps["dynamic_range_fallback"].append(time.time())
 
-        
+
 
         MARKETABLE_EDGE_PCT = 4.0  # matches EDGE_MARKET_ENTRY_* (0.04) in risk_parameters.py
 
-        
+
 
         def calculate_optimal_entry_price(
 
@@ -11703,7 +11437,7 @@ class LeanAgent15m:
 
             Maker-first entry price in the side's own price space.
 
-            
+
 
             Returns None when no entry inside the profile price_range [5c, 95c] is possible,
 
@@ -11715,7 +11449,7 @@ class LeanAgent15m:
 
                 return None  # No two-sided book: cannot price a resting entry safely
 
-            
+
 
             # Convert to the traded side's price space
 
@@ -11727,7 +11461,7 @@ class LeanAgent15m:
 
                 side_bid, side_ask = 100 - best_ask, 100 - best_bid
 
-            
+
 
             if side_bid <= 0 or side_ask <= 0 or side_ask <= side_bid:
 
@@ -11737,7 +11471,7 @@ class LeanAgent15m:
 
                 side_ask = max(side_bid + 1, min(max(side_ask, side_bid + 1), 99))
 
-            
+
 
             # Spread-aware execution: only cross TIGHT spreads. On wide books (thin
 
@@ -11751,7 +11485,7 @@ class LeanAgent15m:
 
             TIGHT_SPREAD_MAX_CENTS = 10
 
-            
+
 
             if edge_pct >= MARKETABLE_EDGE_PCT and spread_cents <= TIGHT_SPREAD_MAX_CENTS:
 
@@ -11785,7 +11519,7 @@ class LeanAgent15m:
 
                 entry_mode = "resting"
 
-            
+
 
             # Sweet-spot band enforcement: entries must land in [10c, 75c].
 
@@ -11835,7 +11569,7 @@ class LeanAgent15m:
 
                     return None
 
-            
+
 
             logger.info(
 
@@ -11847,7 +11581,7 @@ class LeanAgent15m:
 
             return int(optimal_price)
 
-        
+
 
         # Apply maker-first entry pricing
 
@@ -11881,7 +11615,7 @@ class LeanAgent15m:
 
             price_cents = optimal_entry
 
-        
+
 
         # 2026-07-05 INDUSTRY ALIGNMENT: Relax entry band restriction for near-expiry trading
 
@@ -11893,7 +11627,7 @@ class LeanAgent15m:
 
         # Late window: Relax band to allow trading on convergence with fee-adjusted edge
 
-        
+
 
         if minutes_to_expiry > 3.0:
 
@@ -11925,7 +11659,7 @@ class LeanAgent15m:
 
             )
 
-        
+
 
         # CRITICAL FIX: Compute order aggressiveness at signal generation time
         # This ensures execution semantics are decided by the signal stack, not overridden by loop
@@ -12003,7 +11737,7 @@ class LeanAgent15m:
 
         }
 
-        
+
 
         # Add panic fade metadata if applicable
 
@@ -12015,7 +11749,7 @@ class LeanAgent15m:
 
             signal["zscore"] = panic_fade_signal.get("zscore")
 
-        
+
 
         # CRITICAL FIX: 2026-07-13 - REMOVED pre-fill slot allocation from signal generation
         # Previous behavior: Slot was allocated during signal generation (pre-fill), causing phantom exposure
@@ -12034,7 +11768,7 @@ class LeanAgent15m:
 
         return signal
 
-    
+
 
     async def collect_order_candidate(self, tick: int) -> Optional[Dict[str, Any]]:
 
@@ -12050,7 +11784,7 @@ class LeanAgent15m:
 
             logger.info("[COLLECT-ASSET] agent=%s asset=%s", self.config.name, asset)
 
-            
+
 
             # CRITICAL: Re-enabled cooldown to prevent over-trading
 
@@ -12064,13 +11798,13 @@ class LeanAgent15m:
 
             time_since_last_trade = time.monotonic() - last_trade_time
 
-            
 
-            logger.info("[COLLECT-COOLDOWN] agent=%s asset=%s time_since_last=%.1fs cooldown=%.1fs", 
+
+            logger.info("[COLLECT-COOLDOWN] agent=%s asset=%s time_since_last=%.1fs cooldown=%.1fs",
 
                        self.config.name, asset, time_since_last_trade, cooldown_seconds)
 
-            
+
 
             if time_since_last_trade < cooldown_seconds:
 
@@ -12084,7 +11818,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # 2026 Research-Based Risk Management: Session limit (max 5 trades per 15m window)
 
@@ -12106,12 +11840,12 @@ class LeanAgent15m:
 
                 logger.info("[SESSION-RESET] agent=%s session window reset (order_count=0, session_risk=0, consecutive_losses=0)", self.config.name)
 
-            
+
 
             # CRITICAL FIX (2026-07-17): Removed max_orders_per_15m_window check - $1 exposure cap is the limit
             # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
 
-            
+
 
             # 2026 Research-Based Risk Management: Consecutive loss pause
 
@@ -12129,7 +11863,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # 2026 Research-Based Risk Management: Session risk cap (10% of capital)
 
@@ -12145,7 +11879,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # 2026 Research-Based Risk Management: Portfolio heat tracking
 
@@ -12163,7 +11897,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # 2026 Research-Based Risk Management: Asset-specific rolling PnL limits
 
@@ -12181,7 +11915,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # 2026 Research-Based Risk Management: Time-of-day risk scaling
 
@@ -12211,7 +11945,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # 2026 FIX: Check max concurrent positions limit to prevent over-accumulation
 
@@ -12236,7 +11970,7 @@ class LeanAgent15m:
                     # Positions from previous windows should not count against current window limits
                     # Extract asset from agent name (e.g., BTC_15M -> BTC)
                     asset = self.config.name.split('_')[0].upper() if '_' in self.config.name else self.config.name.upper()
-                    
+
                     # Get current window ticker from market catalog
                     current_window_ticker = None
                     try:
@@ -12248,16 +11982,16 @@ class LeanAgent15m:
                                 current_window_ticker = current_market.market.market_id
                     except Exception as ticker_err:
                         logger.warning("[POSITION-LIMIT] Failed to get current window ticker: %s", ticker_err)
-                    
+
                     # Filter positions: only count those matching current window ticker
                     if current_window_ticker:
                         # Filter to only positions from the current window
-                        open_positions = {k: v for k, v in all_positions.items() 
+                        open_positions = {k: v for k, v in all_positions.items()
                                         if v.contracts > 0 and k == current_window_ticker}
                     else:
                         # Fallback: filter by asset if we can't get the exact ticker
                         # This is less precise but prevents complete failure
-                        open_positions = {k: v for k, v in all_positions.items() 
+                        open_positions = {k: v for k, v in all_positions.items()
                                         if v.contracts > 0 and asset in k.upper()}
                         logger.warning("[POSITION-LIMIT] Using asset-based filtering (fallback) for %s", asset)
 
@@ -12280,7 +12014,7 @@ class LeanAgent15m:
 
                     )
 
-                    
+
 
                     if position_count >= self.config.max_concurrent_positions:
 
@@ -12298,7 +12032,7 @@ class LeanAgent15m:
 
                 logger.warning("[POSITION-LIMIT] agent=%s position check failed: %s", self.config.name, str(e))
 
-            
+
 
             spot_price, spot_data = self._get_spot_cached(asset)
 
@@ -12308,7 +12042,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # CRITICAL FIX: Update price history BEFORE signal generation
 
@@ -12322,7 +12056,7 @@ class LeanAgent15m:
 
             self._update_price_history(asset, spot_price, spot_data)
 
-            
+
 
             # Get market from market state store - use available markets instead of computing from time
 
@@ -12334,13 +12068,13 @@ class LeanAgent15m:
 
                 asset = self.config.name.split("_")[0]
 
-                
+
 
                 # Query market state store for available markets for this asset
 
                 # This works with whatever markets are actually subscribed via WebSocket
 
-                logger.info("[COLLECT-MARKET-STORE] agent=%s asset=%s market_state_store=%s", 
+                logger.info("[COLLECT-MARKET-STORE] agent=%s asset=%s market_state_store=%s",
 
                            self.config.name, asset, self.market_state_store is not None)
 
@@ -12350,37 +12084,37 @@ class LeanAgent15m:
 
                     all_tickers = list(self.market_state_store._states.keys())
 
-                    logger.info("[COLLECT-ALL-TICKERS] agent=%s total_tickers=%d", 
+                    logger.info("[COLLECT-ALL-TICKERS] agent=%s total_tickers=%d",
 
                                self.config.name, len(all_tickers))
 
-                    
+
 
                     # Log sample tickers for diagnostics
 
                     if all_tickers:
 
-                        logger.info("[COLLECT-SAMPLE-TICKERS] agent=%s sample_tickers=%s", 
+                        logger.info("[COLLECT-SAMPLE-TICKERS] agent=%s sample_tickers=%s",
 
                                    self.config.name, all_tickers[:10])
 
-                    
+
 
                     # Find tickers matching this asset's series
 
                     series_prefix = self.config.series_tickers[0] if self.config.series_tickers else f"KX{asset}15M"
 
-                    logger.info("[COLLECT-SERIES-PREFIX] agent=%s series_prefix=%s", 
+                    logger.info("[COLLECT-SERIES-PREFIX] agent=%s series_prefix=%s",
 
                                self.config.name, series_prefix)
 
                     matching_tickers = [t for t in all_tickers if t.startswith(series_prefix)]
 
-                    logger.info("[COLLECT-MATCHING-TICKERS] agent=%s matching=%d tickers=%s", 
+                    logger.info("[COLLECT-MATCHING-TICKERS] agent=%s matching=%d tickers=%s",
 
                                self.config.name, len(matching_tickers), matching_tickers[:5])
 
-                    
+
 
                     # CRITICAL: Alert if expected series is missing (indicates WebSocket subscription failure)
 
@@ -12400,7 +12134,7 @@ class LeanAgent15m:
 
                         )
 
-                    
+
 
                     if matching_tickers:
 
@@ -12422,7 +12156,7 @@ class LeanAgent15m:
 
                         best_time_to_expiry = 0.0  # Initialize to 0 to select maximum (newest market)
 
-                        
+
 
                         for ticker_candidate in matching_tickers:
 
@@ -12450,11 +12184,11 @@ class LeanAgent15m:
 
                                     continue
 
-                                
+
 
                                 time_to_expiry = close_time_ts - current_time
 
-                                
+
 
                                 # Select the contract with time_to_expiry within the ENTRY window
 
@@ -12476,7 +12210,7 @@ class LeanAgent15m:
 
                                         best_time_to_expiry = time_to_expiry
 
-                                
+
 
                                 logger.info(
 
@@ -12486,7 +12220,7 @@ class LeanAgent15m:
 
                                 )
 
-                        
+
 
                         if best_ticker:
 
@@ -12588,11 +12322,11 @@ class LeanAgent15m:
 
                             return None
 
-                        
+
 
                         market_state = self.market_state_store.get(ticker)
 
-                        
+
 
                         if market_state:
 
@@ -12632,7 +12366,7 @@ class LeanAgent15m:
 
                                 close_time_ts = time.time() + 900
 
-                             
+
 
                             # CRITICAL FIX: Implement min_decision_minute from profile
 
@@ -12646,7 +12380,7 @@ class LeanAgent15m:
 
                             max_trading_window = 900  # full 15m window
 
-                            
+
 
                             # Get min_decision_minute from profile (per-asset configuration)
 
@@ -12672,13 +12406,13 @@ class LeanAgent15m:
 
                                 profile_path = Path(__file__).parent.parent.parent / "config" / "profiles" / profile_filename
 
-                                
+
 
                                 with open(profile_path, 'r', encoding='utf-8') as f:
 
                                     profile_yaml = yaml.safe_load(f)
 
-                                
+
 
                                 min_decision_minute_config = profile_yaml.get("min_decision_minute", {})
 
@@ -12700,13 +12434,13 @@ class LeanAgent15m:
 
                                 logger.warning("[MIN-DECISION-MINUTE] Failed to load from profile YAML: %s, using default 0", e)
 
-                            
+
 
                             min_time_to_expiry = min_decision_minute * 60  # convert to seconds
                             # Hard production floor: profile/YAML cannot disable the 90s entry cutoff.
                             min_time_to_expiry = max(min_time_to_expiry, MERID_HARD_MIN_ENTRY_TTE_SECONDS)
 
-                            
+
 
                             if time_to_expiry > max_trading_window:
 
@@ -12742,7 +12476,7 @@ class LeanAgent15m:
 
                                 )
 
-                             
+
 
                             market = MinimalMarket(
 
@@ -12782,7 +12516,7 @@ class LeanAgent15m:
 
                 logger.warning("[MARKET-STATE-STORE-ERROR] asset=%s error=%s", self.config.name, str(e), exc_info=True)
 
-            
+
 
             if not market:
 
@@ -12790,7 +12524,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # CRITICAL FIX: Block trading during warmup to prevent trades based on insufficient data
             # Market validation requires sufficient depth and fresh data, which may not be available
@@ -12798,20 +12532,20 @@ class LeanAgent15m:
             # REDUCED warmup from 2 to 1 for immediate 15m trading start (spot service refreshes every 5s)
             # 1 data point sufficient for immediate velocity-based trading
             price_history_len = len(list(self._spot_price_history.get(asset, [])))
-            
+
             if price_history_len < 1:
                 logger.warning(
                     "[MARKET-VALIDATION-SKIP] asset=%s price_history=%d < 1, BLOCKING TRADE during warmup (insufficient data)",
                     self.config.name, price_history_len
                 )
                 return None  # Block trading during warmup
-            
+
             # Validate market state (single call after warmup check)
             if not self._validate_market_state(market):
                 logger.info("[MARKET-VALIDATION-FAILED] asset=%s market validation failed", self.config.name)
                 return None
 
-            
+
 
             # Check per-strip order limit
 
@@ -12841,7 +12575,7 @@ class LeanAgent15m:
 
                     strip_ticker = self.config.series_tickers[0]
 
-            
+
 
             if strip_ticker:
 
@@ -12857,7 +12591,7 @@ class LeanAgent15m:
 
                     current_market_id = market.market.market_id
 
-                
+
 
                 # DIAGNOSTIC: Log market ID tracking
 
@@ -12871,7 +12605,7 @@ class LeanAgent15m:
 
                 )
 
-                
+
 
                 # Reset counter if market ID changed (new 15m strip)
 
@@ -12889,14 +12623,14 @@ class LeanAgent15m:
 
                     self._current_market_ids[strip_ticker] = current_market_id
 
-                
+
 
                 current_strip_orders = self._strip_order_counts.get(strip_ticker, 0)
 
                 # CRITICAL FIX (2026-07-17): Removed per_strip_order_limit check - $1 exposure cap is the limit
                 # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
 
-            
+
 
             # CRITICAL FIX: Use normalized minutes_to_expiry from market object
 
@@ -12932,7 +12666,7 @@ class LeanAgent15m:
 
                 now = time.time()
 
-                
+
 
                 # Handle different close_time types (datetime, timestamp string, or float)
 
@@ -12966,11 +12700,11 @@ class LeanAgent15m:
 
                     close_time_ts = float(close_time) if close_time else now + 900
 
-                
+
 
                 minutes_to_expiry = (close_time_ts - now) / 60
 
-            
+
 
             # For 15-minute rolling markets, only reject if expired (<= 0)
 
@@ -12986,7 +12720,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # Generate signal
 
@@ -12998,7 +12732,7 @@ class LeanAgent15m:
 
                 return None
 
-            
+
 
             # REMOVED (2026-07-23): FINAL-INVERSION layer was causing YES bias
             # Signal generation already produces correct side/intent mappings
@@ -13077,7 +12811,7 @@ class LeanAgent15m:
 
             }
 
-            
+
 
             # Populate market microstructure data from market state store
 
@@ -13133,13 +12867,21 @@ class LeanAgent15m:
 
                             candidate["no_depth"] = getattr(market_state, 'min_depth_no', None)
 
+                        # CRITICAL FIX 2026-08-13: Carry the executable ask sizes into the
+                        # candidate so downstream gates use the same liquidity binding as
+                        # the SIGNAL-EV-GATE displayed_depth.
+                        candidate["yes_ask_size"] = getattr(market_state, 'yes_ask_size', None)
+                        candidate["no_ask_size"] = getattr(market_state, 'no_ask_size', None)
+                        candidate["yes_bid_size"] = getattr(market_state, 'yes_bid_size', None)
+                        candidate["no_bid_size"] = getattr(market_state, 'no_bid_size', None)
+
                         # Add distance band calculation using spot price and strike price
                         # This enables analysis of edge performance by distance from strike
                         try:
                             from merid.metrics.canonical_buckets import get_distance_bucket
                             import sqlite3
                             from pathlib import Path
-                            
+
                             # Load spot price for asset
                             spot_data_db = Path("c:/Dev/MERID/data/spot_prices.db")
                             if spot_data_db.exists():
@@ -13151,7 +12893,7 @@ class LeanAgent15m:
                                 """, (self.config.name,))
                                 row = cursor.fetchone()
                                 conn.close()
-                                
+
                                 if row:
                                     spot_price = row[0]
                                     strike_price = getattr(market_state, 'strike_price_usd', None)
@@ -13177,7 +12919,7 @@ class LeanAgent15m:
 
                 logger.warning("[CANDIDATE-MICROSTRUCTURE] Failed to populate microstructure data: %s", e)
 
-            
+
 
             # CRITICAL BUG FIX: Do NOT update cooldown timestamp here
 
@@ -13193,7 +12935,7 @@ class LeanAgent15m:
 
             # or in the execution confirmation handler after successful order submission
 
-            
+
 
             # CRITICAL FIX (2026-07-12): Strip order count should only increment on EXECUTED orders, not candidates
             # Previously this incremented on every candidate generation, causing misleading counts
@@ -13207,10 +12949,10 @@ class LeanAgent15m:
             candidate["generation_timestamp_ms"] = int(time.time() * 1000)
             candidate["lifecycle_state"] = "GENERATED"
 
-            logger.info("[CANDIDATE-GENERATED] asset=%s side=%s strategy_intent=%s candidate_id=%s", 
+            logger.info("[CANDIDATE-GENERATED] asset=%s side=%s strategy_intent=%s candidate_id=%s",
                        self.config.name, signal["side"], signal.get("strategy_intent", "N/A"), candidate_id)
 
-            
+
 
             # 2026-07-09: DISABLED direct execution in individual agents
 
@@ -13220,7 +12962,7 @@ class LeanAgent15m:
 
             # The global allocator sorts candidates by edge and selects best ones under $1 cap
 
-            
+
 
             # Set price_cents and count in candidate for allocator
 
@@ -13228,13 +12970,13 @@ class LeanAgent15m:
 
             candidate["count"] = int(signal.get("count", 1))
 
-            
+
 
             # Return candidate without execution (grid level will execute)
 
             return candidate
 
-            
+
 
         except Exception as e:
 
@@ -13300,6 +13042,15 @@ class LeanAgentGrid15m:
 
         self._rest_sync_interval = 30.0  # seconds
 
+        # CRITICAL FIX (2026-08-12): Cache the most recent exchange snapshot for
+        # canonical-live-position construction in the allocator.  This prevents a
+        # stale asset-level position in the cache from blocking a candidate in the
+        # current window.
+
+        self._last_exchange_positions: List[Dict[str, Any]] = []
+
+        self._last_open_orders: List[Dict[str, Any]] = []
+
         # CRITICAL FIX (2026-07-13): Track executed candidates to prevent duplicate executions
         # This prevents multiple orders with same ticker/side/price from executing in consecutive cycles
         self._executed_candidates: Set[str] = set()
@@ -13319,7 +13070,7 @@ class LeanAgentGrid15m:
 
         logger.info("[AGENT-GRID-INIT] LeanAgentGrid15m initialized with %d agents and fallback tracking", len(agents))
 
-    
+
 
     def set_market_state_store(self, market_state_store: Any) -> None:
 
@@ -13337,7 +13088,7 @@ class LeanAgentGrid15m:
 
         logger.info("[AGENT-GRID] Market state store set for %d agents", len(self._agents))
 
-    
+
 
     def set_position_cache(self, position_cache: Any) -> None:
 
@@ -13354,7 +13105,7 @@ class LeanAgentGrid15m:
         # Used in global allocator to track which candidates have been executed
         return f"{ticker}_{side}_{price_cents}c"
 
-    
+
 
     async def start(self) -> None:
 
@@ -13373,7 +13124,7 @@ class LeanAgentGrid15m:
 
         logger.info("[AGENT-GRID-START] LeanAgentGrid15m started - strip order counts reset")
 
-    
+
 
     async def stop(self) -> None:
 
@@ -13383,13 +13134,13 @@ class LeanAgentGrid15m:
 
         logger.info("[AGENT-GRID-STOP] LeanAgentGrid15m stopped")
 
-    
+
 
     def reset_strip_order_counts(self) -> None:
 
         """Reset all strip order counts and market ID tracking.
 
-        
+
 
         This is called when the catalog detects a market rollover (e.g., 16:15 -> 16:30).
 
@@ -13414,7 +13165,7 @@ class LeanAgentGrid15m:
 
     def get_fallback_metrics(self) -> Dict[str, Any]:
         """Get fallback activation metrics for degradation monitoring (2026 best practice).
-        
+
         Returns:
             Dict with fallback activation counts and recent timestamps
         """
@@ -13424,7 +13175,7 @@ class LeanAgentGrid15m:
         for key, timestamps in self._fallback_timestamps.items():
             recent_count = sum(1 for ts in timestamps if now - ts < 300)
             recent_fallbacks[key] = recent_count
-        
+
         return {
             "total_activations": dict(self._fallback_activations),
             "recent_activations_5m": recent_fallbacks,
@@ -13433,32 +13184,32 @@ class LeanAgentGrid15m:
 
     def _select_best_edge_per_asset(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Select the best edge candidate per asset.
-        
+
         This ensures only 1 contract per asset per 15-minute window is executed,
         selecting the optimal combination of edge quality and price efficiency.
-        
+
         Based on prediction market execution research:
         - Edge is the primary signal (model probability vs market probability)
         - Among similar edges, cheaper contracts provide better risk-adjusted returns
         - Lower capital exposure improves Kelly criterion sizing and reduces tail risk
-        
+
         Args:
             candidates: List of candidate dictionaries with keys including:
                 - agent_id: Agent identifier (e.g., "BTC_15M")
                 - asset: Asset symbol (e.g., "BTC")
                 - edge_pct: Edge percentage (e.g., 0.05 for 5%)
                 - price_cents: Contract price in cents
-        
+
         Returns:
             Filtered list with at most 1 candidate per asset
         """
         if not candidates:
             return []
-        
+
         # Group candidates by asset
         asset_candidates: Dict[str, List[Dict[str, Any]]] = {}
         valid_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
-        
+
         for candidate in candidates:
             # Extract asset from agent_id or asset field
             asset = candidate.get('asset')
@@ -13467,41 +13218,41 @@ class LeanAgentGrid15m:
                 if agent_id:
                     # Handle common formats: "BTC_15M", "ETH_15m", "SOL_15M", etc.
                     asset = agent_id.split('_')[0].upper() if '_' in agent_id else agent_id.upper()
-            
+
             # Only process valid crypto assets
             if asset and asset in valid_assets:
                 if asset not in asset_candidates:
                     asset_candidates[asset] = []
                 asset_candidates[asset].append(candidate)
-        
+
         # Select best candidate for each asset
         filtered_candidates = []
         edge_similarity_threshold = 0.01  # 1% threshold
-        
+
         for asset, asset_cands in asset_candidates.items():
             if not asset_cands:
                 continue
-            
+
             # Sort by edge_pct descending (higher edge is better)
             asset_cands.sort(key=lambda c: c.get('edge_pct', 0), reverse=True)
-            
+
             # Get the best edge
             best_edge = asset_cands[0]
             best_edge_pct = best_edge.get('edge_pct', 0)
-            
+
             # Find candidates with similar edges (within threshold)
             similar_edges = [c for c in asset_cands if abs(c.get('edge_pct', 0) - best_edge_pct) <= edge_similarity_threshold]
-            
+
             # Among similar edges, select the cheapest (lowest price_cents)
             if len(similar_edges) > 1:
                 similar_edges.sort(key=lambda c: c.get('price_cents', 999))
                 filtered_candidates.append(similar_edges[0])
             else:
                 filtered_candidates.append(best_edge)
-        
+
         return filtered_candidates
 
-    
+
 
     async def sync_from_rest(self, tick: int) -> None:
 
@@ -13515,23 +13266,23 @@ class LeanAgentGrid15m:
 
         current_time = time.time()
 
-        
+
 
         # Check if enough time has passed since last sync
 
         if current_time - self._last_rest_sync_time < self._rest_sync_interval:
 
-            logger.info("[AGENT-GRID] Skipping REST sync - last sync %.1fs ago, interval is %.1fs", 
+            logger.info("[AGENT-GRID] Skipping REST sync - last sync %.1fs ago, interval is %.1fs",
 
                        current_time - self._last_rest_sync_time, self._rest_sync_interval)
 
             return
 
-        
+
 
         logger.info("[AGENT-GRID] BEFORE sync_from_rest tick=%d", tick)
 
-        
+
 
         # Force sync position cache from REST API to clear stale data
 
@@ -13557,7 +13308,18 @@ class LeanAgentGrid15m:
 
                 await client.connect()
 
-                kalshi_positions = await client.get_positions()
+                positions_result = await client.get_positions_result()
+
+                if not positions_result.success:
+
+                    logger.warning(
+                        "[AGENT-GRID] Kalshi position query failed (will not wipe cache on transient error): %s",
+                        positions_result.error
+                    )
+
+                    return
+
+                kalshi_positions = positions_result.unwrap_or([])
 
                 # Convert VenuePosition list to format expected by sync_from_rest
 
@@ -13587,9 +13349,80 @@ class LeanAgentGrid15m:
 
                         })
 
-                # Force sync to bypass staleness guard
+                # Snapshot open orders first so sync_from_rest can use them for
+                # authoritative stale/phantom cleanup without removing a market that has
+                # a live order resting on the exchange.
 
-                await position_cache.sync_from_rest(rest_positions, force=True)
+                open_order_list = []
+
+                open_orders_fetched_ok = False
+
+                try:
+
+                    open_orders_result = await client.get_open_orders_result()
+
+                    if open_orders_result.success:
+
+                        open_orders_fetched_ok = True
+
+                        for order in open_orders_result.unwrap_or([]):
+
+                            if not order.market_id:
+
+                                continue
+
+                            if order.status and order.status.lower() in ("filled", "cancelled", "canceled", "rejected", "expired"):
+
+                                continue
+
+                            open_order_list.append({
+
+                                "market_id": order.market_id,
+
+                                "side": order.side or "yes",
+
+                                "contracts": int(order.size) if order.size else 0,
+
+                                "price_cents": int(float(order.price) * 100) if order.price else 0,
+
+                                "order_id": order.order_id or "",
+
+                            })
+
+                        logger.info("[AGENT-GRID] Snapshot open orders: %d", len(open_order_list))
+
+                    else:
+
+                        logger.warning(
+                            "[AGENT-GRID] Kalshi open-order query failed: %s. "
+                            "Proceeding with position sync but will not run stale cleanup without open orders.",
+                            open_orders_result.error
+                        )
+
+                except Exception as open_orders_err:
+
+                    logger.warning("[AGENT-GRID] Failed to snapshot open orders: %s", open_orders_err)
+
+                # Only run stale cleanup when both position and open-order snapshots were
+                # successfully fetched.  This prevents a transient API failure from being
+                # misinterpreted as an authoritative empty exchange state.
+
+                cleanup_stale = positions_result.success and open_orders_fetched_ok
+
+                # Force sync to bypass staleness guard; pass open orders for safe cleanup.
+
+                await position_cache.sync_from_rest(
+                    rest_positions,
+                    force=True,
+                    open_orders=open_order_list,
+                    cleanup_stale=cleanup_stale,
+                )
+
+                # Cache exchange snapshot for canonical live position construction.
+
+                self._last_exchange_positions = rest_positions
+
+                self._last_open_orders = open_order_list
 
                 self._last_rest_sync_time = current_time
 
@@ -13599,19 +13432,172 @@ class LeanAgentGrid15m:
 
             logger.warning("[AGENT-GRID] Failed to force sync position cache: %s", e)
 
-        
+
 
         logger.info("[AGENT-GRID] AFTER sync_from_rest tick=%d", tick)
 
-    
+    def _build_canonical_live_positions(
+        self,
+        assets: List[str]
+    ) -> List[CanonicalLivePosition]:
+        """Build an authoritative per-ticker live-position list.
+
+        Combines:
+        - position_cache.get_all_positions() (internal state)
+        - the most recent exchange position snapshot (_last_exchange_positions)
+        - the most recent open-order snapshot (_last_open_orders)
+
+        A position is marked ``exchange_confirmed_open`` only when its market_id is
+        present in the exchange snapshot.  An open order is marked
+        ``pending_order_open`` when its market_id and side match a candidate market.
+        Stale cache entries that do not appear on exchange and have no pending order
+        are still listed for observability but ``is_open`` is False, so they do not
+        block new allocation.
+        """
+        canonical: List[CanonicalLivePosition] = []
+        if not self.position_cache:
+            return canonical
+
+        try:
+            positions = self.position_cache.get_all_positions(validate_freshness=False)
+        except Exception as e:
+            logger.warning("[AGENT-GRID] Failed to get positions for canonical live list: %s", e)
+            return canonical
+
+        exchange_market_ids = {
+            p.get("market_id") for p in self._last_exchange_positions if p.get("market_id")
+        }
+
+        open_orders_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
+        for o in self._last_open_orders:
+            ticker = o.get("market_id")
+            if not ticker:
+                continue
+            open_orders_by_ticker.setdefault(ticker, []).append(o)
+
+        def _asset_from_ticker(ticker: str) -> Optional[str]:
+            for asset in assets:
+                if asset.lower() in ticker.lower():
+                    return asset
+            return None
+
+        for pos_ticker, pos_obj in positions.items():
+            if not pos_obj or pos_obj.contracts <= 0:
+                continue
+
+            asset = _asset_from_ticker(pos_ticker)
+            if not asset:
+                continue
+
+            exchange_confirmed = pos_ticker in exchange_market_ids
+
+            # Pending open order on the same market / side.
+            pending_order_open = False
+            pending_contracts = 0
+            pending_price_cents = pos_obj.avg_price_cents or pos_obj.current_price_cents or 0
+            order_side = (pos_obj.thesis_side or pos_obj.side or "yes").lower()
+            if pos_ticker in open_orders_by_ticker:
+                for o in open_orders_by_ticker[pos_ticker]:
+                    if (o.get("side") or "").lower() == order_side:
+                        pending_order_open = True
+                        pending_contracts += o.get("contracts", 0)
+                        if o.get("price_cents"):
+                            pending_price_cents = o.get("price_cents")
+                        break
+
+            if pending_order_open:
+                contracts = max(pending_contracts, pos_obj.contracts)
+                price_cents = pending_price_cents or pos_obj.avg_price_cents or pos_obj.current_price_cents or 50
+            else:
+                contracts = pos_obj.contracts
+                price_cents = pos_obj.avg_price_cents or pos_obj.current_price_cents or 50
+
+            notional = (contracts * price_cents) / 100.0
+
+            canonical.append(CanonicalLivePosition(
+                asset=asset,
+                ticker=pos_ticker,
+                side=order_side,
+                contracts=contracts,
+                avg_price_cents=price_cents,
+                notional_usd=notional,
+                exchange_confirmed_open=exchange_confirmed,
+                pending_order_open=pending_order_open,
+            ))
+
+        # Add any exchange positions not currently in the cache (e.g., recovered
+        # positions that sync_from_rest has not yet materialised for this cycle).
+        for ep in self._last_exchange_positions:
+            ticker = ep.get("market_id")
+            if not ticker or any(p.ticker == ticker for p in canonical):
+                continue
+
+            asset = _asset_from_ticker(ticker)
+            if not asset:
+                continue
+
+            contracts = ep.get("contracts", 0)
+            price_cents = ep.get("avg_price_cents", 0) or 50
+            side = (ep.get("side") or "yes").lower()
+            notional = (contracts * price_cents) / 100.0
+
+            canonical.append(CanonicalLivePosition(
+                asset=asset,
+                ticker=ticker,
+                side=side,
+                contracts=contracts,
+                avg_price_cents=price_cents,
+                notional_usd=notional,
+                exchange_confirmed_open=True,
+                pending_order_open=False,
+            ))
+
+        # Add any open orders for markets that are not already represented by a
+        # cached or exchange-confirmed position, so the allocator treats a resting
+        # order on the candidate's ticker as live exposure.
+        for o in self._last_open_orders:
+            ticker = o.get("market_id")
+            if not ticker or any(p.ticker == ticker for p in canonical):
+                continue
+
+            asset = _asset_from_ticker(ticker)
+            if not asset:
+                continue
+
+            contracts = o.get("contracts", 0)
+            price_cents = o.get("price_cents", 0) or 50
+            side = (o.get("side") or "yes").lower()
+            notional = (contracts * price_cents) / 100.0
+
+            canonical.append(CanonicalLivePosition(
+                asset=asset,
+                ticker=ticker,
+                side=side,
+                contracts=contracts,
+                avg_price_cents=price_cents,
+                notional_usd=notional,
+                exchange_confirmed_open=False,
+                pending_order_open=True,
+            ))
+
+        logger.info(
+            "[AGENT-GRID] Canonical live positions: %d (exchange_confirmed=%d, pending=%d)",
+            len(canonical),
+            sum(1 for p in canonical if p.exchange_confirmed_open),
+            sum(1 for p in canonical if p.pending_order_open),
+        )
+
+        return canonical
+
+
 
     async def run_cycle(self, tick: int, allow_new_entries: bool = True, coinbase_velocity: Dict = None) -> list[Dict[str, Any]]:
 
         # Run a single trading cycle across all agents.
-        
+
         # coinbase_velocity: External spot velocity signals from Coinbase WebSocket (Turbine research #1 winner)
         # Format: {asset: {velocity: float, timestamp: float, signal_type: str}}
-        
+
         # Store Coinbase velocity signals for use in signal generation
         if coinbase_velocity:
             self._coinbase_velocity_signals = coinbase_velocity
@@ -13691,7 +13677,7 @@ class LeanAgentGrid15m:
                                         # not the Kalshi prediction market prices (which are 0-1 range binary options)
                                         agent._indicator_stack_price_buffer[update_asset].append(update_spot_price)
 
-                                        
+
 
                                         # Check if 1 minute has elapsed since last update
 
@@ -13701,7 +13687,7 @@ class LeanAgentGrid15m:
 
                                         time_since_update = current_time - last_update
 
-                                        
+
 
                                         # CRITICAL FIX: Allow immediate updates during warmup (first update)
 
@@ -13711,7 +13697,7 @@ class LeanAgentGrid15m:
 
                                         is_warmup = (last_update == 0.0)
 
-                                        
+
 
                                         if is_warmup or time_since_update >= 15.0:
 
@@ -13741,13 +13727,13 @@ class LeanAgentGrid15m:
 
             logger.error("[AGENT-GRID-INDICATOR-UPDATE] CRITICAL ERROR in indicator stack update: %s", e, exc_info=True)
 
-        
+
 
         # Sync from REST at the beginning of each cycle
 
         await self.sync_from_rest(tick)
 
-        
+
 
         # Phase 1: Collect all candidates from all agents (without execution)
 
@@ -13757,7 +13743,7 @@ class LeanAgentGrid15m:
 
         candidates = []
 
-        
+
 
         # Create tasks for all agents to run in parallel
 
@@ -13769,13 +13755,13 @@ class LeanAgentGrid15m:
 
             agent_tasks.append(agent.collect_order_candidate(tick))
 
-        
+
 
         # Execute all agent tasks in parallel
 
         results = await asyncio.gather(*agent_tasks, return_exceptions=True)
 
-        
+
 
         # Process results
 
@@ -13851,7 +13837,7 @@ class LeanAgentGrid15m:
 
         logger.info("[CYCLE-COMPLETE] tick=%d candidates=%d", tick, len(candidates))
 
-        
+
 
         # CRITICAL FIX (2026-07-16): Pre-filter candidates to select cheapest with best edge per asset
         # This ensures we execute only 1 contract per asset per window, selecting the optimal combination
@@ -13861,7 +13847,7 @@ class LeanAgentGrid15m:
         candidates = self._select_best_edge_per_asset(candidates)
         logger.info("[BEST-EDGE-FILTER] tick=%d filtered_candidates=%d", tick, len(candidates))
 
-        
+
 
         # Phase 2: Apply global allocator to select best edges under venue cap
 
@@ -13869,11 +13855,11 @@ class LeanAgentGrid15m:
 
             try:
 
-                from merid.risk.profiles.global_allocator import GlobalAllocator, OrderCandidate, create_global_allocator_from_envelope
+                from merid.risk.profiles.global_allocator import GlobalAllocator, OrderCandidate, CanonicalLivePosition, create_global_allocator_from_envelope
 
                 from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
 
-                
+
 
                 # Get risk envelope for allocator configuration
 
@@ -13890,7 +13876,7 @@ class LeanAgentGrid15m:
                 else:
                     logger.info("[GLOBAL-ALLOCATOR] Reusing existing allocator instance (preserves pending order tracking)")
 
-                
+
 
                 # Convert candidates to OrderCandidate objects
 
@@ -13901,7 +13887,7 @@ class LeanAgentGrid15m:
                     # Extract asset from agent_id (e.g., "BTC_15M" -> "BTC")
                     # 2026-07-13: Use robust asset extraction to handle various agent_id formats
                     agent_id = candidate.get('agent_id', '')
-                    
+
                     # Try to extract from agent_id first
                     if agent_id:
                         # Handle common formats: "BTC_15M", "ETH_15m", "SOL_15M", etc.
@@ -13912,7 +13898,7 @@ class LeanAgentGrid15m:
                     else:
                         asset = candidate.get('asset', 'UNKNOWN')
 
-                    
+
 
                     # CRITICAL FIX: Check if there's already a resting order for this ticker/price/side
 
@@ -13926,7 +13912,7 @@ class LeanAgentGrid15m:
 
                     action = candidate.get('action', 'buy')
 
-                    
+
 
                     # CRITICAL FIX (2026-07-13): Check for existing resting orders using resting_order_monitor
                     # This prevents duplicate order submissions when a resting order already exists
@@ -13958,7 +13944,7 @@ class LeanAgentGrid15m:
 
                                 has_resting_order = True
 
-                                logger.info("[GLOBAL-ALLOCATOR] Skipping candidate with existing resting order: ticker=%s side=%s action=%s order_id=%s", 
+                                logger.info("[GLOBAL-ALLOCATOR] Skipping candidate with existing resting order: ticker=%s side=%s action=%s order_id=%s",
 
                                            ticker, side, action, open_order_id)
 
@@ -13966,13 +13952,13 @@ class LeanAgentGrid15m:
 
                         logger.warning("[GLOBAL-ALLOCATOR] Failed to check for resting orders: %s", e)
 
-                    
+
 
                     if has_resting_order:
 
                         continue  # Skip this candidate - there's already a resting order
 
-                    
+
 
                     # Get current position notional for this asset
 
@@ -13983,7 +13969,7 @@ class LeanAgentGrid15m:
                         try:
 
                             positions = self.position_cache.get_all_positions(validate_freshness=False)
-                            
+
                             # CRITICAL FIX: Filter positions by current window to prevent counting stale positions
                             # Get current window ticker for this asset
                             from merid.event_venues.kalshi.market_catalog import get_market_catalog
@@ -14004,7 +13990,7 @@ class LeanAgentGrid15m:
                                     # Skip stale positions from previous windows
                                     if current_window_ticker and pos_ticker != current_window_ticker:
                                         continue
-                                    
+
                                     # Check if position belongs to this asset
 
                                     if asset.lower() in pos_ticker.lower():
@@ -14017,7 +14003,7 @@ class LeanAgentGrid15m:
 
                             logger.warning("[GLOBAL-ALLOCATOR] Failed to get current positions: %s", e)
 
-                    
+
 
                     order_candidate = OrderCandidate(
 
@@ -14045,9 +14031,27 @@ class LeanAgentGrid15m:
 
                     order_candidates.append(order_candidate)
 
-                
 
-                # Get current positions for all assets
+
+                # Build canonical live positions: exchange-confirmed per-ticker exposure
+                # that prevents a stale asset-level position in a different window from
+                # blocking the current candidate.
+
+                canonical_live_positions: List[CanonicalLivePosition] = []
+
+                if self.position_cache:
+
+                    try:
+
+                        canonical_live_positions = self._build_canonical_live_positions(
+                            ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']
+                        )
+
+                    except Exception as e:
+
+                        logger.warning("[GLOBAL-ALLOCATOR] Failed to build canonical live positions: %s", e)
+
+                # Legacy current_positions fallback (ignored when canonical provided)
 
                 current_positions = {}
 
@@ -14065,8 +14069,6 @@ class LeanAgentGrid15m:
 
                                 pos_notional = (pos_obj.contracts * pos_price) / 100.0
 
-                                # Determine asset from ticker
-
                                 for asset in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']:
 
                                     if asset.lower() in pos_ticker.lower():
@@ -14077,15 +14079,17 @@ class LeanAgentGrid15m:
 
                     except Exception as e:
 
-                        logger.warning("[GLOBAL-ALLOCATOR] Failed to build current positions dict: %s", e)
+                        logger.warning("[GLOBAL-ALLOCATOR] Failed to build legacy current positions: %s", e)
 
-                
+                # Run global allocator with authoritative per-ticker exposure
 
-                # Run global allocator
+                chosen_orders = allocator.allocate(
+                    order_candidates,
+                    current_positions=current_positions,
+                    canonical_live_positions=canonical_live_positions
+                )
 
-                chosen_orders = allocator.allocate(order_candidates, current_positions)
 
-                
 
                 # Get allocation summary
 
@@ -14099,13 +14103,13 @@ class LeanAgentGrid15m:
 
                 )
 
-                
+
 
                 # CRITICAL FIX (2026-07-21): Return chosen orders as candidates instead of executing directly
                 # The agent grid should return candidates to loop_15m.py for proper validation and execution
                 # loop_15m.py has critical checks: duplicate prevention, edge re-validation, count=0 check, parity checks
                 # Executing directly bypasses these checks and causes the 0% fill rate issue
-                
+
                 # Convert chosen orders back to candidate format for loop_15m.py processing
                 # Preserve original candidates list for lookup
                 original_candidates = candidates
@@ -14117,7 +14121,7 @@ class LeanAgentGrid15m:
                         if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
                             original_candidate = candidate
                             break
-                    
+
                     if original_candidate:
                         # 2026-08-05: Do NOT inject TP/SL metadata here. Exit policy resolution in
                         # loop_15m._execute_candidate (via resolve_exit_policy) is the single source
@@ -14139,7 +14143,7 @@ class LeanAgentGrid15m:
                     "[GLOBAL-ALLOCATOR] CRITICAL ERROR in global allocator phase: %s",
                     str(e), exc_info=True
                 )
-        
+
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
         return candidates
