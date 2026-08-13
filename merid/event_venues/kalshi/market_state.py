@@ -439,7 +439,7 @@ class LiquidityStatus(str, Enum):
 
 class StalenessRegime(str, Enum):
     """Staleness regime based on time-to-expiry and market conditions.
-    
+
     RELAXED: Far from expiry (>2-3 min), allow longer book age (60-120s)
     NORMAL: Normal trading conditions, moderate thresholds (30-60s)
     STRICT: Near expiry (<1 min) or high volatility, tight thresholds (5-10s)
@@ -451,7 +451,7 @@ class StalenessRegime(str, Enum):
 
 class LagClassifier(str, Enum):
     """Classification of lag type for diagnostic purposes.
-    
+
     WS_CONNECTION_ISSUE: WebSocket connection problem (pings late, connection dropped)
     NETWORK_LATENCY: General network latency (elevated RTT, packet loss)
     EXCHANGE_API_DELAY: Kalshi REST API lagging behind exchange events
@@ -468,10 +468,10 @@ class LagClassifier(str, Enum):
 @dataclass
 class MarketQuote:
     """Canonical quote model for data integrity layer.
-    
+
     Every signal agent receives this object (or None) and can inspect
     health, source, and diagnostics to make trading decisions.
-    
+
     Production-grade metadata:
     - age_ms: time since exchange timestamp in milliseconds
     - confidence: 0.0-1.0 score based on freshness and consistency
@@ -511,13 +511,13 @@ def log_rest_config() -> None:
     _rest_high_confidence = float(os.getenv("MERID_KALSHI_REST_HIGH_CONFIDENCE", "0.8"))
     _rest_mid_confidence = float(os.getenv("MERID_KALSHI_REST_MID_CONFIDENCE", "0.6"))
     _rest_low_confidence = float(os.getenv("MERID_KALSHI_REST_LOW_CONFIDENCE", "0.5"))
-    
+
     # Apply same validation as runtime
     if _rest_healthy_threshold_ms < 0:
         _rest_healthy_threshold_ms = 0
     if _rest_degraded_threshold_ms <= _rest_healthy_threshold_ms:
         _rest_degraded_threshold_ms = _rest_healthy_threshold_ms + 30000
-    
+
     for name, val in [("high", _rest_high_confidence), ("mid", _rest_mid_confidence), ("low", _rest_low_confidence)]:
         if not (0.0 <= val <= 1.0):
             if val < 0:
@@ -530,7 +530,7 @@ def log_rest_config() -> None:
                 _rest_mid_confidence = val
             else:
                 _rest_low_confidence = val
-    
+
     logger.info(
         "[market-state] REST fallback config: healthy_threshold=%.1fms, degraded_threshold=%.1fms, "
         "high_conf=%.2f, mid_conf=%.2f, low_conf=%.2f",
@@ -587,7 +587,7 @@ class KalshiMarketStateStore:
         # Some code (market_catalog.py) expects store._lock to exist
         self._lock = self._global_lock
         logger.debug("[BOOT-TRACE] KalshiMarketStateStore.__init__: per-ticker locks initialized")
-        
+
         # CRITICAL FIX: Store reference to main event loop for use by batch worker thread
         # This allows run_coroutine_threadsafe to work from the batch worker thread
         try:
@@ -597,7 +597,7 @@ class KalshiMarketStateStore:
         except Exception as e:
             logger.warning("[MD-STORE-INIT] Failed to capture main event loop: %s", e)
             self._main_event_loop = None
-        
+
         # LOCK CONTENTION FIX: Per-ticker queues for batched delta application
         # This eliminates LOCK BUSY drops by buffering deltas and applying them in batches
         self._delta_queues: Dict[str, deque] = {}  # Per-ticker queues for orderbook deltas
@@ -607,13 +607,13 @@ class KalshiMarketStateStore:
         # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume
         # Process 500 deltas per batch every 0.5ms = 1M deltas/sec per ticker max throughput
         self._batch_interval_ms = 10.0  # Process batches every 10ms (increased to reduce CPU contention and improve queue processing)
-        
+
         # DIAGNOSTIC: Update counter for tracking MD updates
         self._update_count = 0
-        
+
         # H3: per-ticker queue of delta messages received before snapshot (legacy, kept for compatibility)
         self._pending_deltas: Dict[str, List[Dict[str, Any]]] = {}
-        
+
         # DATA INTEGRITY LAYER: Per-market health state and tracking
         self._health_state: Dict[str, QuoteHealth] = {}
         self._rest_last_fetch: Dict[str, float] = {}  # Last REST fetch time per ticker
@@ -621,47 +621,47 @@ class KalshiMarketStateStore:
         self._circuit_breaker_until: Dict[str, float] = {}  # Circuit breaker expiration time per ticker
         self._metrics: Dict[str, Dict[str, float]] = {}  # Metrics per ticker: quote_age, fallback_count, breaker_opens, rejected_quotes
         self._quote_retry_count: Dict[str, int] = {}  # Total retry attempts per ticker (capped at 3 to prevent thrashing)
-        
+
         # QUARANTINE: Per-ticker invariant violation tracking and quarantine
         self._invariant_violations: Dict[str, int] = {}  # Invariant violation count per ticker
         self._quarantine_until: Dict[str, float] = {}  # Quarantine expiration time per ticker
         self._last_violation_ts: Dict[str, float] = {}  # Last violation timestamp per ticker
         self._QUARANTINE_THRESHOLD = 5  # Violations before quarantine
         self._QUARANTINE_DURATION_SECONDS = 300  # 5 minutes quarantine
-        
+
         # QUEUE OVERFLOW RECOVERY: Per-ticker resync tracking
         self._needs_resync: Dict[str, bool] = {}  # Tickers that need snapshot resync after overflow
         self._overflow_count: Dict[str, int] = {}  # Overflow count per ticker for metrics
-        
+
         # P3 Gap 16: Per-asset lock contention monitoring
         self._lock_contention_count: Dict[str, int] = {}  # Lock contention count per ticker
         self._lock_wait_time_ms: Dict[str, float] = {}  # Total lock wait time per ticker (ms)
-        
+
         # DIAGNOSTIC: Track last log time per ticker for rate-limited update logging
         self._last_log_ts: Dict[str, float] = {}
-        
+
         # AUDIT: Per-ticker snapshot counters for data path verification
         self._snapshots_applied_total: Dict[str, int] = {}  # Total snapshots applied per ticker
         self._last_snapshot_ts: Dict[str, float] = {}  # Last snapshot timestamp per ticker
-        
+
         # Liquidity metrics tracking
         self._liquidity_samples: Dict[str, int] = {}  # Total liquidity samples per asset
         self._liquidity_ok_samples: Dict[str, int] = {}  # OK liquidity samples per asset
-        
+
         # SUBSCRIPTION MECHANISM: Callbacks for state updates
         self._subscribers: Dict[str, List[callable]] = {}  # ticker -> list of callbacks
-        
+
         # ── Connection Health Watchdog Tracking ───────────────────────────────
         # Separate from data staleness - tracks WS connection health
         self._ws_last_msg_monotonic: Dict[str, float] = {}  # Last time ANY WS message received per ticker
         self._ws_connection_healthy: Dict[str, bool] = {}  # WS connection health state per ticker
         self._ws_connection_suspect_since: Dict[str, float] = {}  # When connection became suspect per ticker
-        
+
         # ── REST updated_time Cross-Check Tracking ─────────────────────────────
         # Track REST updated_time to detect true WS lag
         self._rest_updated_time: Dict[str, float] = {}  # Last REST updated_time per ticker (exchange timestamp)
         self._rest_updated_time_fetched: Dict[str, float] = {}  # When we fetched the REST updated_time per ticker
-        
+
         # ── Lag Classification Tracking ───────────────────────────────────────
         # Track various signals for lag classification
         self._ws_last_ping_monotonic: float = 0.0  # Last time Kalshi ping received
@@ -673,19 +673,19 @@ class KalshiMarketStateStore:
         self._net_ping_ms: float = 0.0  # Last network ping to Kalshi/VPS in ms
         self._processing_lag_ms: float = 0.0  # Internal processing delay in ms
         self._current_lag_class: LagClassifier = LagClassifier.NORMAL  # Current lag classification
-        
+
         # ── Processing Lag Tracking (recv vs proc timestamps) ───────────────
         # Track message arrival vs processing time to measure internal lag
         self._msg_recv_monotonic: Dict[str, float] = {}  # When WS message was received per ticker
         self._msg_proc_monotonic: Dict[str, float] = {}  # When WS message was processed per ticker
-        
+
         # ── WS Message Cadence Tracking ─────────────────────────────────────
         # Track update frequency per market to detect staleness anomalies
         self._book_update_timestamps: Dict[str, List[float]] = {}  # Rolling window of update timestamps per ticker
         self._cadence_window_seconds: float = 60.0  # Window size for cadence calculation
         self._baseline_update_intervals: Dict[str, float] = {}  # Median update interval per ticker (baseline)
         self._updates_per_minute: Dict[str, float] = {}  # Current updates per minute per ticker
-        
+
         # ── RTT Volatility Tracking ─────────────────────────────────────────
         # Track rolling mean and std of RTT to detect network issues
         self._ws_rtt_samples: List[float] = []  # Rolling window of WS ping/pong RTT samples
@@ -696,7 +696,7 @@ class KalshiMarketStateStore:
         self._ws_rtt_std: float = 0.0  # Rolling std of WS RTT
         self._rest_rtt_mean: float = 0.0  # Rolling mean of REST RTT
         self._rest_rtt_std: float = 0.0  # Rolling std of REST RTT
-        
+
         # ── Rate Limiting & Adaptive Polling ───────────────────────────────
         # Track rate limit status and adapt polling intervals
         self._rest_calls_per_minute: float = 0.0  # Current REST call rate
@@ -708,15 +708,15 @@ class KalshiMarketStateStore:
         self._rate_limit_hits: int = 0  # Count of 429 responses
         self._last_429_timestamp: float = 0.0  # Last time we got a 429
         self._backoff_until: float = 0.0  # Backoff until this timestamp
-        
+
         logger.debug("[BOOT-TRACE] KalshiMarketStateStore.__init__: initialization complete")
 
     def _get_ticker_lock(self, ticker: str) -> threading.Lock:
         """Get or create a lock for a specific ticker.
-        
+
         HARDENING-FIX: Per-ticker locks reduce contention by allowing concurrent
         updates to different tickers.
-        
+
         P3 Gap 16: Track lock contention for monitoring.
         """
         with self._ticker_locks_lock:
@@ -726,7 +726,7 @@ class KalshiMarketStateStore:
 
     def _start_batch_worker(self) -> None:
         """Start the batch worker thread for processing queued deltas.
-        
+
         LOCK CONTENTION FIX: This worker processes deltas in batches to eliminate
         LOCK BUSY drops. It cycles through all tickers and applies queued deltas
         while holding the per-ticker lock for the minimum time.
@@ -735,10 +735,10 @@ class KalshiMarketStateStore:
         if self._batch_worker_running:
             logger.info("[BATCH-WORKER] Batch worker already running, skipping start")
             return
-        
+
         self._batch_worker_running = True
         logger.info("[BATCH-WORKER] Setting _batch_worker_running=True and starting thread")
-        
+
         def _batch_worker_loop():
             """Batch worker loop that processes queued deltas."""
             logger.info("[BATCH-WORKER] Starting batch worker thread")
@@ -747,26 +747,26 @@ class KalshiMarketStateStore:
                     # Process all ticker queues
                     with self._ticker_locks_lock:
                         tickers_to_process = list(self._delta_queues.keys())
-                    
+
                     if tickers_to_process:
                         logger.debug(f"[BATCH-WORKER] Processing {len(tickers_to_process)} tickers: {tickers_to_process}")
-                    
+
                     for ticker in tickers_to_process:
                         if not self._batch_worker_running:
                             break
-                        
+
                         # Get queue for this ticker
                         with self._ticker_locks_lock:
                             queue = self._delta_queues.get(ticker)
                             if not queue:
                                 continue
-                        
+
                         # Check for overflow
                         if len(queue) > self._MAX_PER_TICKER_QUEUE:
                             # Track overflow count for metrics
                             with self._ticker_locks_lock:
                                 self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
-                            
+
                             logger.error(
                                 f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
                                 f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count.get(ticker, 0)} "
@@ -787,7 +787,7 @@ class KalshiMarketStateStore:
                             with self._ticker_locks_lock:
                                 self._delta_queues[ticker].clear()
                             continue
-                        
+
                         # Batch process deltas for this ticker
                         ticker_lock = self._get_ticker_lock(ticker)
                         lock_start = time.monotonic()
@@ -805,14 +805,14 @@ class KalshiMarketStateStore:
                                         batch = [queue.popleft() for _ in range(batch_size)]
                                     else:
                                         batch = []
-                                
+
                                 for msg in batch:
                                     try:
                                         self._apply_delta_internal(ticker, msg)
                                         batch_count += 1
                                     except Exception as e:
                                         logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
-                                
+
                                 if batch_count > 0:
                                     batch_duration_ms = (time.monotonic() - batch_start) * 1000
                                     logger.debug(
@@ -834,16 +834,16 @@ class KalshiMarketStateStore:
                             # P3 Gap 16: Track lock contention (lock was busy)
                             with self._ticker_locks_lock:
                                 self._lock_contention_count[ticker] = self._lock_contention_count.get(ticker, 0) + 1
-                    
+
                     # Sleep before next batch
                     time.sleep(self._batch_interval_ms / 1000.0)
-                
+
                 except Exception as e:
                     logger.error("[BATCH-WORKER] Batch worker error: %s", e, exc_info=True)
                     time.sleep(0.1)
-            
+
             logger.info("[BATCH-WORKER] Batch worker thread stopped")
-        
+
         self._batch_worker_thread = threading.Thread(target=_batch_worker_loop, name="kalshi_batch_worker", daemon=False)
         self._batch_worker_thread.start()
         logger.info("[BATCH-WORKER] Batch worker thread started, _batch_worker_running=%s", self._batch_worker_running)
@@ -857,15 +857,15 @@ class KalshiMarketStateStore:
 
     def _enqueue_delta(self, ticker: str, msg: Dict[str, Any]) -> bool:
         """Enqueue a delta message for batch processing.
-        
+
         Returns True if enqueued successfully, False if queue overflow.
-        
+
         On overflow, triggers immediate snapshot recovery to prevent selective staleness.
         """
         with self._ticker_locks_lock:
             if ticker not in self._delta_queues:
                 self._delta_queues[ticker] = deque()
-            
+
             queue = self._delta_queues[ticker]
             if len(queue) >= self._MAX_PER_TICKER_QUEUE:
                 # Extract asset from ticker for selective staleness detection
@@ -880,10 +880,10 @@ class KalshiMarketStateStore:
                     asset = "XRP"
                 elif ticker.startswith("KXDOGE"):
                     asset = "DOGE"
-                
+
                 # Increment overflow counter for metrics
                 self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
-                
+
                 # P1 FIX: Trigger immediate snapshot recovery instead of just marking for resync
                 # This prevents selective staleness by requesting fresh data immediately
                 logger.error(
@@ -891,7 +891,7 @@ class KalshiMarketStateStore:
                     f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count[ticker]} "
                     f"triggering_immediate_snapshot_recovery"
                 )
-                
+
                 # Trigger immediate snapshot recovery via WebSocket
                 try:
                     import asyncio
@@ -904,15 +904,15 @@ class KalshiMarketStateStore:
                         )
                 except Exception as e:
                     logger.error(f"[BOOK-OVERFLOW] Failed to trigger snapshot recovery for {ticker}: {e}")
-                
+
                 return False
-            
+
             queue.append(msg)
             return True
 
     def _apply_delta_internal(self, ticker: str, msg: Dict[str, Any]) -> None:
         """Internal method to apply a delta message (called by batch worker).
-        
+
         This method assumes the ticker lock is already held.
         """
         ob = self._ob.get_book(ticker)
@@ -927,23 +927,24 @@ class KalshiMarketStateStore:
                 )
                 return
             self._pending_deltas.setdefault(ticker, []).append(msg)
-            
+
             # FIX: Update last_book_update_ts even when queuing to indicate we're receiving WS data
             # This prevents perpetual staleness flags when waiting for snapshot bootstrap
             state = self._get_or_create(ticker)
             state.last_book_update_ts = time.monotonic()
+            state.last_book_update_wall_ts = time.time()
             state.last_update_ts = time.monotonic()
             state.data_source = "WS_ORDERBOOK_DELTA_PENDING"  # More specific: delta waiting for snapshot
-            
+
             # CONNECTION HEALTH: Update WS connection health tracking
             self._update_ws_connection_health(ticker)
-            
+
             # CRITICAL FIX (2026-08-02): Update book freshness tracker from pending delta
             # This ensures even queued deltas refresh the state machine
             try:
                 from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
                 freshness_tracker = get_book_freshness_tracker()
-                
+
                 # Extract timestamp from delta message
                 timestamp_str = msg.get("timestamp")
                 received_ts = None
@@ -954,17 +955,17 @@ class KalshiMarketStateStore:
                             received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
                     except Exception as ts_error:
                         logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
-                
+
                 freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
                 logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from pending delta")
             except ImportError:
                 logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
             except Exception as e:
                 logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from pending delta: {e}")
-            
+
             # PROCESSING LAG: Record processing timestamp
             self._record_msg_proc_timestamp(ticker)
-            
+
             # Rate-limit logging to avoid spam
             now = time.monotonic()
             if now - self._last_log_ts.get(ticker, 0) > 30:
@@ -974,7 +975,7 @@ class KalshiMarketStateStore:
                     ticker, pending_count
                 )
                 self._last_log_ts[ticker] = now
-            
+
             # CRITICAL FIX: Trigger REST snapshot if we have many pending deltas but no initialized book
             # This handles the case where WS deltas arrive but no snapshot is ever received
             pending_count = len(self._pending_deltas.get(ticker, []))
@@ -993,7 +994,7 @@ class KalshiMarketStateStore:
                             loop
                         )
                         logger.info("[WS-DELTA-BOOTSTRAP] Successfully scheduled REST bootstrap for %s (future=%s)", ticker, future)
-                        
+
                         # Add callback to log completion or error
                         def log_future_result(fut):
                             try:
@@ -1001,18 +1002,18 @@ class KalshiMarketStateStore:
                                 logger.info("[WS-DELTA-BOOTSTRAP] REST bootstrap completed for %s: result=%s", ticker, result)
                             except Exception as e:
                                 logger.error("[WS-DELTA-BOOTSTRAP] REST bootstrap failed for %s: %s", ticker, e, exc_info=True)
-                        
+
                         future.add_done_callback(log_future_result)
                     else:
                         logger.warning("[WS-DELTA-BOOTSTRAP] Event loop not available or not running for %s (loop=%s)", ticker, loop)
                 except Exception as e:
                     logger.error("[WS-DELTA-BOOTSTRAP] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
-            
+
             return
-        
+
         # Apply delta
         self._ob.apply_delta(ticker, msg)
-        
+
         # Sync state
         state = self._get_or_create(ticker)
         self._sync_book_fields(state, self._ob.get_book(ticker), ticker, via="bridge_queue")
@@ -1024,7 +1025,7 @@ class KalshiMarketStateStore:
         # duality invariant check in _sync_book_fields - corrupt books must stay flagged.
         if state.data_quality != "SUSPECT":
             state.data_quality = "GOOD"
-        
+
         # Log raw book after delta (rate-limited to avoid spam)
         book = self._ob.get_book(ticker)
         if book and book.initialized:
@@ -1040,7 +1041,7 @@ class KalshiMarketStateStore:
                 "[KALSHI-RAW-BOOK] ticker=%s yes_raw=%s no_raw=%s side=orderbook_delta source=WS",
                 ticker, yes_raw, no_raw
             )
-            
+
             # DIAGNOSTIC: Log book summary after delta application
             try:
                 # Handle both tuple format (price, size) and index format (just integers)
@@ -1072,14 +1073,14 @@ class KalshiMarketStateStore:
                 )
             except Exception as e:
                 logger.warning("[OB-SUMMARY] Failed to compute summary for %s: %s", ticker, e)
-        
+
         # Log parsed book after computing top prices
         if state.best_bid_cents is not None or state.best_ask_cents is not None:
             logger.info(
                 "[KALSHI-PARSED-BOOK] ticker=%s yes_best=%s no_best=%s source=WS",
                 ticker, state.best_bid_cents, state.best_ask_cents
             )
-        
+
         # Log state after write (rate-limited)
         logger.info(
             "[STATE-AFTER-WRITE] ticker=%s bid=%s ask=%s initialized=%s executable=%s",
@@ -1089,13 +1090,13 @@ class KalshiMarketStateStore:
             state.book_initialized,
             state.executable
         )
-        
+
         # CRITICAL FIX (2026-08-02): Update book freshness tracker from delta data
         # This ensures WebSocket delta updates also refresh the state machine
         try:
             from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
             freshness_tracker = get_book_freshness_tracker()
-            
+
             # Extract timestamp from delta message
             timestamp_str = msg.get("timestamp")
             received_ts = None
@@ -1106,7 +1107,7 @@ class KalshiMarketStateStore:
                         received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
                 except Exception as ts_error:
                     logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
-            
+
             freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
             logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from delta data")
         except ImportError:
@@ -1125,11 +1126,11 @@ class KalshiMarketStateStore:
 
     def _record_invariant_violation(self, ticker: str, violation_type: str) -> bool:
         """Record an invariant violation and check if ticker should be quarantined.
-        
+
         Args:
             ticker: Market ticker
             violation_type: Type of violation (e.g., 'duality', 'invariant')
-            
+
         Returns:
             True if ticker is quarantined, False otherwise
         """
@@ -1140,16 +1141,16 @@ class KalshiMarketStateStore:
             # Reset violation count if last violation was > 5 minutes ago
             if ticker in self._last_violation_ts and now - self._last_violation_ts[ticker] > 300:
                 self._invariant_violations[ticker] = 0
-            
+
             # Increment violation count
             self._invariant_violations[ticker] = self._invariant_violations.get(ticker, 0) + 1
             self._last_violation_ts[ticker] = now
-            
+
             logger.warning(
                 f"[QUARANTINE] Invariant violation for {ticker}: type={violation_type} "
                 f"count={self._invariant_violations[ticker]} threshold={self._QUARANTINE_THRESHOLD}"
             )
-            
+
             # Check if quarantine threshold is reached
             if self._invariant_violations[ticker] >= self._QUARANTINE_THRESHOLD:
                 self._quarantine_until[ticker] = now + self._QUARANTINE_DURATION_SECONDS
@@ -1158,7 +1159,7 @@ class KalshiMarketStateStore:
                     f"due to {self._invariant_violations[ticker]} invariant violations"
                 )
                 return True
-            
+
             return False
 
     def _is_quarantined(self, ticker: str) -> bool:
@@ -1196,24 +1197,24 @@ class KalshiMarketStateStore:
 
     async def _trigger_snapshot_recovery(self, ticker: str) -> None:
         """P1 FIX: Trigger immediate snapshot recovery via WebSocket.
-        
+
         This method requests a fresh snapshot via the WebSocket client's
         request_orderbook_snapshot method, maintaining single ingestion path.
         """
         try:
             logger.info("[SNAPSHOT-RECOVERY] Triggering WebSocket snapshot recovery for %s", ticker)
-            
+
             # Get the WebSocket client
             from merid.event_venues.kalshi.ws import get_kalshi_websocket
             ws_client = get_kalshi_websocket()
-            
+
             if ws_client and ws_client._ws:
                 # Request snapshot via WebSocket API
                 await ws_client.request_orderbook_snapshot(ticker)
                 logger.info("[SNAPSHOT-RECOVERY] Snapshot request sent for %s", ticker)
             else:
                 logger.warning("[SNAPSHOT-RECOVERY] WebSocket client not available for %s - skipping", ticker)
-                
+
         except Exception as e:
             logger.error("[SNAPSHOT-RECOVERY] Failed to trigger snapshot recovery for %s: %s", ticker, e)
 
@@ -1260,34 +1261,34 @@ class KalshiMarketStateStore:
 
                     # P1 FIX: Use new check_health method to separate transport from liquidity health
                     health = state.check_health()
-                    
+
                     # P3 Gap 15: Track overflow count for alerting
                     overflow_count = self._overflow_count.get(ticker, 0)
                     total_overflows += overflow_count
-                    
+
                     # Alert if overflow count exceeds threshold
                     if overflow_count >= 3:
                         logger.warning(
                             f"[OVERFLOW-ALERT] ticker={ticker} overflow_count={overflow_count} "
                             f"exceeds threshold (3) - may indicate WS volume surge or processing bottleneck"
                         )
-                    
+
                     # P3 Gap 16: Track lock contention for alerting
                     lock_contention = self._lock_contention_count.get(ticker, 0)
                     lock_wait_time = self._lock_wait_time_ms.get(ticker, 0.0)
-                    
+
                     # Alert if lock contention is high
                     if lock_contention >= 10:
                         logger.warning(
                             f"[LOCK-CONTENTION-ALERT] ticker={ticker} lock_contention={lock_contention} "
                             f"total_wait_time_ms={lock_wait_time:.1f} - may indicate hot ticker or processing bottleneck"
                         )
-                    
+
                     # Phase 3: Use proper timestamp hierarchy for staleness calculation
                     # Prefer exchange timestamp for accurate data age, fallback to local timestamps
                     last_update = state.last_book_update_ts  # Already uses proper hierarchy
                     age_ms = (now - last_update) * 1000 if last_update > 0 else float('inf')
-                    
+
                     # Log timestamp source for debugging
                     timestamp_source = "exchange" if state.last_book_update_ts > 0 else "local"
                     if timestamp_source == "exchange":
@@ -1299,7 +1300,7 @@ class KalshiMarketStateStore:
                     # Markets with status=closed/paused are not tradable even if books are fresh
                     market_status = getattr(state, 'status', 'unknown').lower()
                     is_tradable_status = market_status == 'open'  # Kalshi API uses "open" for active markets
-                    
+
                     # P1 FIX: Log separated health metrics
                     # Handle None values for spread_cents to avoid logging TypeError
                     spread_cents = health.get("spread_cents")
@@ -1333,7 +1334,7 @@ class KalshiMarketStateStore:
                     # Calculate timing-aware staleness threshold based on minutes_to_expiry
                     minutes_to_expiry = state.seconds_to_expiry / 60.0 if hasattr(state, 'seconds_to_expiry') and state.seconds_to_expiry else None
                     staleness_threshold_ms = get_md_max_age_seconds(minutes_to_expiry) * 1000 if minutes_to_expiry is not None else MAX_BOOK_STALENESS_MS
-                    
+
                     # Track health status - only count as healthy if:
                     # 1. Book is fresh (within timing-aware staleness threshold)
                     # 2. Book is initialized
@@ -1373,7 +1374,7 @@ class KalshiMarketStateStore:
                             # Update staleness metric (convert ms to seconds)
                             staleness_sec = age_ms / 1000.0 if age_ms != float('inf') else 999.0
                             market_data_staleness_seconds.labels(asset=asset, ticker=ticker).set(staleness_sec)
-                            
+
                             # Update health status metric
                             if market_health_status:
                                 # Map health to numeric: 4=healthy, 3=suspended, 2=stale, 1=degraded, 0=unhealthy
@@ -1454,7 +1455,7 @@ class KalshiMarketStateStore:
                 # Prefer exchange timestamp for accurate data age, fallback to local timestamps
                 last_update = state.last_book_update_ts  # Already uses proper hierarchy
                 age_ms = (now - last_update) * 1000 if last_update > 0 else float('inf')
-                
+
                 # Calculate timing-aware staleness threshold based on minutes_to_expiry
                 seconds_to_expiry = getattr(state, 'seconds_to_expiry', None)
                 minutes_to_expiry = seconds_to_expiry / 60.0 if seconds_to_expiry is not None else None
@@ -1562,28 +1563,28 @@ class KalshiMarketStateStore:
 
     # ── WS path ────────────────────────────────────────────────────────
 
-    def _validate_yes_no_invariants(self, ticker: str, yes_bid: Optional[int], yes_ask: Optional[int], 
+    def _validate_yes_no_invariants(self, ticker: str, yes_bid: Optional[int], yes_ask: Optional[int],
                                   no_bid: Optional[int], no_ask: Optional[int]) -> bool:
         """PRODUCTION: Validate YES/NO price consistency invariants.
-        
+
         Checks:
         1. YES bid + NO ask ≈ 100¢ (within ±2¢ tolerance)
-        2. YES ask + NO bid ≈ 100¢ (within ±2¢ tolerance)  
+        2. YES ask + NO bid ≈ 100¢ (within ±2¢ tolerance)
         3. bid ≤ ask for both YES and NO
         4. Spread sanity (≥0, <50¢ for liquid markets)
-        
+
         Returns True if all invariants pass, False if any fail.
         """
         # PRODUCTION: Tolerance for YES/NO sum invariant (±2¢)
         SUM_TOLERANCE = 2
-        
+
         # Check if we have complete price data
         # Allow one-sided orderbooks (only bids or only asks) during bootstrap
         # Only validate full invariants when we have complete bid/ask data
         if not all(x is not None for x in [yes_bid, yes_ask, no_bid, no_ask]):
             logger.debug(f"[MARKET-STATE-SIDE-AWARE] Incomplete price data for {ticker}: yes_bid={yes_bid}, yes_ask={yes_ask}, no_bid={no_bid}, no_ask={no_ask} - allowing one-sided book")
             return True  # Allow one-sided books to build gradually
-            
+
         # Invariant 1: YES bid + NO ask ≈ 100¢
         yes_bid_plus_no_ask = yes_bid + no_ask
         if abs(yes_bid_plus_no_ask - 100) > SUM_TOLERANCE:
@@ -1593,7 +1594,7 @@ class KalshiMarketStateStore:
                 f"sum={yes_bid_plus_no_ask}, expected≈100±{SUM_TOLERANCE}"
             )
             return False
-            
+
         # Invariant 2: YES ask + NO bid ≈ 100¢
         yes_ask_plus_no_bid = yes_ask + no_bid
         if abs(yes_ask_plus_no_bid - 100) > SUM_TOLERANCE:
@@ -1603,7 +1604,7 @@ class KalshiMarketStateStore:
                 f"sum={yes_ask_plus_no_bid}, expected≈100±{SUM_TOLERANCE}"
             )
             return False
-            
+
         # Invariant 3: Bid ≤ Ask ordering
         if yes_bid > yes_ask:
             logger.critical(
@@ -1611,18 +1612,18 @@ class KalshiMarketStateStore:
                 f"ticker={ticker}, yes_bid={yes_bid}, yes_ask={yes_ask}"
             )
             return False
-            
+
         if no_bid > no_ask:
             logger.critical(
                 f"[PRODUCTION-INVARIANT] NO bid/ask ordering violation: "
                 f"ticker={ticker}, no_bid={no_bid}, no_ask={no_ask}"
             )
             return False
-            
+
         # Invariant 4: Spread sanity
         yes_spread = yes_ask - yes_bid
         no_spread = no_ask - no_bid
-        
+
         # Check spread is non-negative
         if yes_spread < 0 or no_spread < 0:
             logger.critical(
@@ -1630,7 +1631,7 @@ class KalshiMarketStateStore:
                 f"ticker={ticker}, yes_spread={yes_spread}, no_spread={no_spread}"
             )
             return False
-            
+
         # Check spread is not absurdly large (>85¢ for realistic 15m markets)
         MAX_SPREAD_CENTS = 85  # Reduced from 95 to 85 for production safety and illiquidity detection
         if yes_spread > MAX_SPREAD_CENTS or no_spread > MAX_SPREAD_CENTS:
@@ -1639,12 +1640,12 @@ class KalshiMarketStateStore:
                 f"ticker={ticker}, yes_spread={yes_spread}, no_spread={no_spread}, max_allowed={MAX_SPREAD_CENTS}"
             )
             # Don't reject for large spread, just warn - could be genuine illiquidity
-        
+
         # Invariant 5: Mid-price computation consistency
         # Calculate mids using standard formula: (bid + ask) / 2
         yes_mid = (yes_bid + yes_ask) // 2  # Integer division for cents
         no_mid = (no_bid + no_ask) // 2
-        
+
         # Check YES mid + NO mid ≈ 100¢ (within ±2¢ tolerance)
         mid_sum = yes_mid + no_mid
         if abs(mid_sum - 100) > SUM_TOLERANCE:
@@ -1654,7 +1655,7 @@ class KalshiMarketStateStore:
                 f"sum={mid_sum}, expected≈100±{SUM_TOLERANCE}"
             )
             return False
-        
+
         # Validate mid is within bid-ask range (should be exactly midpoint)
         if not (yes_bid <= yes_mid <= yes_ask):
             logger.critical(
@@ -1662,71 +1663,50 @@ class KalshiMarketStateStore:
                 f"ticker={ticker}, yes_bid={yes_bid}, yes_mid={yes_mid}, yes_ask={yes_ask}"
             )
             return False
-            
+
         if not (no_bid <= no_mid <= no_ask):
             logger.critical(
                 f"[PRODUCTION-INVARIANT] NO mid outside bid-ask range: "
                 f"ticker={ticker}, no_bid={no_bid}, no_mid={no_mid}, no_ask={no_ask}"
             )
             return False
-            
+
         logger.debug(
             f"[PRODUCTION-INVARIANT] All invariants passed for {ticker}: "
             f"yes_bid={yes_bid}, yes_ask={yes_ask}, no_bid={no_bid}, no_ask={no_ask}, "
             f"yes_spread={yes_spread}, no_spread={no_spread}, yes_mid={yes_mid}, no_mid={no_mid}"
         )
-        
+
         return True
 
     async def _sync_invariant_violation_with_rest(self, ticker: str) -> None:
         """PRODUCTION: Sync invariant violations with REST snapshot recovery.
-        
+
         When YES/NO invariants are violated, fetch a fresh REST snapshot to restore
         data consistency and mark the ticker as rebuilding until sync completes.
         """
         try:
             logger.info("[PRODUCTION-SYNC-SIDE-AWARE] ENTRY: Starting REST sync for invariant violation: %s", ticker)
-            
+
             # Mark ticker as rebuilding to prevent trading during sync
             with self._lock:
                 state = self._get_or_create(ticker)
                 state.executable = False
                 state.book_initialized = False
-            
-            # Fetch fresh REST snapshot
-            from merid.event_venues.kalshi.client import get_kalshi_client
-            client = get_kalshi_client()
-            
-            result = await asyncio.wait_for(
-                client._request_with_resilience(
-                    "GET", f"/markets/{ticker}/orderbook",
-                    operation_name=f"invariant_sync({ticker})"
-                ),
+
+            # Fetch fresh REST snapshot through the normalized execution port.
+            from merid.event_venues.kalshi.port import get_kalshi_execution_port
+            port = get_kalshi_execution_port()
+
+            ob_result = await asyncio.wait_for(
+                port.get_orderbook(ticker),
                 timeout=5.0
             )
-            
-            if result.success and result.data:
-                # Parse REST response
-                data = result.data
-                no_levels = []
-                yes_levels = []
-                orderbook_fp = data.get("orderbook_fp", {})
-                
-                # CRITICAL FIX (2026-08-01): Use actual NO bid data from no_dollars
-                # Kalshi API documentation confirms that no_dollars contains valid NO bid data
-                # Previous assumption that no_dollars was corrupted was incorrect
-                # Reference: https://docs.kalshi.com/api-reference/market/get-market-orderbook
-                if "yes_dollars" in orderbook_fp:
-                    yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
-                else:
-                    # Fallback: empty YES levels if yes_dollars not available
-                    yes_levels = []
-                
-                if "no_dollars" in orderbook_fp:
-                    no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
-                else:
-                    # Fallback: empty NO levels if no_dollars not available
-                    no_levels = []
+
+            if ob_result.success:
+                # Port returns price in cents; convert to dollars for the snapshot.
+                yes_levels = [[level.price_cents / 100.0, float(level.size)] for level in ob_result.yes_levels]
+                no_levels = [[level.price_cents / 100.0, float(level.size)] for level in ob_result.no_levels]
 
                 # Create snapshot message
                 snapshot_msg = {
@@ -1736,26 +1716,26 @@ class KalshiMarketStateStore:
                     "yes": yes_levels,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
-                
+
                 # Apply snapshot directly (bypass invariant validation to avoid loop)
                 logger.info(f"[PRODUCTION-SYNC-SIDE-AWARE] Applying REST snapshot for {ticker}")
-                
+
                 # Apply snapshot to orderbook
                 with self._lock:
                     self._ob.apply_snapshot(ticker, snapshot_msg)
-                    
+
                     # Update state from fresh book
                     book = self._ob.get_book(ticker)
                     if book and book.initialized:
                         self._sync_book_fields(self._get_or_create(ticker), book, ticker, via="rest_bootstrap")
                         self._sync_unified_book(ticker, self._get_or_create(ticker))
-                        
+
                         # Validate the REST snapshot itself
                         yes_bid_ask = book.get_best_bid()
                         yes_ask = book.get_best_ask()
                         yes_bid_cents = yes_bid_ask[0] if yes_bid_ask else None
                         yes_ask_cents = yes_ask[0] if yes_ask else None
-                        
+
                         # CRITICAL FIX (2026-08-01): Extract actual NO bid/ask from book instead of deriving from YES
                         # The book now has actual NO bid data from no_dollars, so we should use it directly
                         # For validation, we need NO-space prices (not YES-space derived prices)
@@ -1765,7 +1745,7 @@ class KalshiMarketStateStore:
                         # TODO: Add book.get_best_no_bid() and book.get_best_no_ask() methods to LocalOrderbook
                         no_ask_cents = 100 - yes_bid_cents if yes_bid_cents is not None else None
                         no_bid_cents = 100 - yes_ask_cents if yes_ask_cents is not None else None
-                        
+
                         if self._validate_yes_no_invariants(ticker, yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents):
                             # Restore executable status
                             state = self._get_or_create(ticker)
@@ -1777,10 +1757,10 @@ class KalshiMarketStateStore:
                             # Keep non-executable - will retry on next update
                     else:
                         logger.error(f"[PRODUCTION-SYNC] REST snapshot failed to initialize book for {ticker}")
-                        
+
             else:
-                logger.error(f"[PRODUCTION-SYNC] REST sync failed for {ticker}: {result}")
-                
+                logger.error(f"[PRODUCTION-SYNC] REST sync failed for {ticker}: {ob_result.error}")
+
         except Exception as e:
             logger.error(f"[PRODUCTION-SYNC] Exception during invariant sync for {ticker}: {type(e).__name__}: {e}")
 
@@ -1833,7 +1813,7 @@ class KalshiMarketStateStore:
         #     "[market-state] apply_orderbook_message: RAW msg keys=%s, channel=%s, ticker=%s",
         #     msg_keys, channel, ticker
         # )
-        
+
         # Try multiple possible channel/type field names
         channel = msg.get("type") or msg.get("channel") or msg.get("msg_type") or ""
 
@@ -1850,7 +1830,7 @@ class KalshiMarketStateStore:
         #     "[market-state] apply_orderbook_message RECEIVED ticker=%s channel=%s",
         #     ticker, channel
         # )
-        
+
         # DISABLED: Excessive diagnostic logging for snapshot/delta messages - causing slow WS callbacks
         # if "snapshot" in channel.lower() or "delta" in channel.lower():
         #     import json
@@ -1874,7 +1854,7 @@ class KalshiMarketStateStore:
         #             "[WS-RAW-PAYLOAD] channel=%s ticker=%s has_bids=%s has_asks=%s has_delta_fp=%s",
         #             channel, ticker, has_bids, has_asks, has_delta_fp
         #         )
-        
+
         # ORDERBOOK-SHAPE-ASSERTION: Validate message shape against canonical schema
         # This catches malformed messages before they reach LocalOrderbook
         # P0 FIX: Skip validation for nested payload format - let LocalOrderbook handle it
@@ -1886,7 +1866,7 @@ class KalshiMarketStateStore:
                 validate_orderbook_delta,
                 KalshiOrderbookShapeError
             )
-            
+
             # Only validate if message is flat (no nested msg)
             if "msg" not in msg:
                 if "snapshot" in channel.lower() or (channel == "" and "yes" in msg and "no" in msg):
@@ -1910,7 +1890,7 @@ class KalshiMarketStateStore:
                 f"ticker={ticker}, channel={channel}"
             )
             return None
-        
+
         # PERFORMANCE FIX: Removed delta throttling to eliminate sequence gaps
         # Research shows any throttling causes sequence gaps in high-frequency trading
         # Even 5ms throttling was causing 200,000+ sequence gaps
@@ -1939,7 +1919,7 @@ class KalshiMarketStateStore:
                     asset = "XRP"
                 elif ticker.startswith("KXDOGE"):
                     asset = "DOGE"
-                
+
                 # Check if asset is allowed
                 if asset and not validate_asset_for_trading(asset):
                     self._scope_validation_cache[ticker] = (False, "asset_not_whitelisted")
@@ -1947,7 +1927,7 @@ class KalshiMarketStateStore:
                         f"[SCOPE_FILTER] WS orderbook rejected: asset={asset} not in production whitelist | ticker={ticker}"
                     )
                     return None
-                
+
                 # Check if ticker is 15m series
                 if not validate_series_ticker_for_trading(ticker):
                     self._scope_validation_cache[ticker] = (False, "not_15m_series")
@@ -1955,7 +1935,7 @@ class KalshiMarketStateStore:
                         f"[SCOPE_FILTER] WS orderbook rejected: ticker={ticker} not 15m timeframe"
                     )
                     return None
-                
+
                 # Cache valid result
                 self._scope_validation_cache[ticker] = (True, None)
 
@@ -1971,14 +1951,14 @@ class KalshiMarketStateStore:
             has_no = "no" in msg or isinstance(msg.get("no"), list)
             # Kalshi delta_fp messages are valid orderbook deltas (have delta_fp + side + price_dollars)
             has_delta_fp = "delta_fp" in msg and "side" in msg
-            
+
             # CRITICAL DIAGNOSTIC: Log message structure to understand why batch worker isn't starting
             logger.info(
                 "[market-state] apply_orderbook_message: channel=%s ticker=%s keys=%s has_bids=%s has_asks=%s has_yes=%s has_no=%s has_delta_fp=%s",
                 channel, ticker, list(msg.keys()) if isinstance(msg, dict) else "N/A",
                 has_bids, has_asks, has_yes, has_no, has_delta_fp
             )
-            
+
             if has_bids or has_asks or has_yes or has_no or has_delta_fp:
                 # Treat as orderbook_delta if it has book data or delta_fp
                 channel = "orderbook_delta"
@@ -2005,14 +1985,14 @@ class KalshiMarketStateStore:
         has_no = "no" in payload or isinstance(payload.get("no"), list)
         has_yes = "yes" in payload or isinstance(payload.get("yes"), list)
         has_delta_fields = "delta_fp" in payload and "price_dollars" in payload and "side" in payload
-        
+
         if channel == "orderbook_snapshot" and not ((has_bids or has_asks) or (has_no or has_yes)):
             logger.warning(
                 "[market-state] apply_orderbook_message REJECTED: snapshot missing bids/asks/no/yes, ticker=%s, msg keys=%s",
                 ticker, list(msg.keys()) if isinstance(msg, dict) else "N/A"
             )
             return None
-        
+
         if channel == "orderbook_delta" and not (has_bids or has_asks or has_no or has_yes or has_delta_fields):
             logger.warning(
                 "[market-state] apply_orderbook_message REJECTED: delta missing bids/asks/no/yes/delta_fields, ticker=%s, msg keys=%s",
@@ -2046,11 +2026,11 @@ class KalshiMarketStateStore:
                 "[OB-APPLY] ticker=%s channel=%s enqueuing_delta=True batch_worker_running=%s",
                 ticker, channel, self._batch_worker_running
             )
-            
+
             # Start batch worker if not running
             if not self._batch_worker_running:
                 self._start_batch_worker()
-            
+
             # Enqueue delta for batch processing
             enqueued = self._enqueue_delta(ticker, payload)
             if not enqueued:
@@ -2078,25 +2058,25 @@ class KalshiMarketStateStore:
                     ticker, queue_size
                 )
             return None
-        
+
         # For snapshots, apply directly (they're less frequent and need immediate effect)
         # Start batch worker if not running (for any subsequent deltas)
         if not self._batch_worker_running:
             self._start_batch_worker()
-        
+
         # Apply snapshots directly under lock (they're infrequent)
         if channel == "orderbook_snapshot":
             ticker_lock = self._get_ticker_lock(ticker)
             with ticker_lock:
                 payload = msg.get("msg", msg)
-                
+
                 # CRITICAL FIX (2026-08-01): Validate snapshot BEFORE applying to prevent state corruption
                 # Check if snapshot has any orderbook data
                 yes_levels = payload.get("yes", [])
                 no_levels = payload.get("no", [])
                 yes_count = len(yes_levels) if yes_levels else 0
                 no_count = len(no_levels) if no_levels else 0
-                
+
                 # Reject completely empty orderbooks before applying
                 if yes_count == 0 and no_count == 0:
                     logger.warning("[EMPTY-BOOK-REJECTION] Rejecting snapshot for %s: completely empty orderbook (validation before apply)", ticker)
@@ -2104,17 +2084,17 @@ class KalshiMarketStateStore:
                     with self._ticker_locks_lock:
                         self._pending_deltas.pop(ticker, None)
                     return None
-                
+
                 # Apply snapshot
                 self._ob.apply_snapshot(ticker, payload)
-                
+
                 # Log book state after snapshot for validation
                 book = self._ob.get_book(ticker)
                 if book:
                     # Simplified validation - just check if book has data
                     yes_count = len(book.yes_levels) if book.yes_levels else 0
                     no_count = len(book.no_levels) if book.no_levels else 0
-                    
+
                     # Double-check after apply (defensive)
                     if yes_count == 0 and no_count == 0:
                         logger.warning("[EMPTY-BOOK-REJECTION-POST-APPLY] Rejecting snapshot for %s: completely empty orderbook after apply", ticker)
@@ -2127,7 +2107,7 @@ class KalshiMarketStateStore:
                         with self._ticker_locks_lock:
                             self._pending_deltas.pop(ticker, None)
                         return None
-                
+
                 # CRITICAL FIX (2026-08-01): Clear pending deltas after snapshot application
                 # The snapshot is the source of truth - replaying pending deltas can apply stale data
                 # to fresh state, causing orderbook corruption. Deltas received after the snapshot
@@ -2152,7 +2132,7 @@ class KalshiMarketStateStore:
                             ticker, pending_count
                         )
                         self._pending_deltas.pop(ticker, None)
-                
+
                 # Sync state and mark as recovered
                 state = self._get_or_create(ticker)
                 self._sync_book_fields(state, self._ob.get_book(ticker), ticker, via)
@@ -2161,20 +2141,20 @@ class KalshiMarketStateStore:
                 state.data_quality = "GOOD"
                 state.book_initialized = True  # CRITICAL FIX: Mark as initialized after snapshot
                 state.executable = True  # CRITICAL FIX: Mark as executable when book is initialized via WS snapshot
-                
+
                 # CRITICAL FIX: Ensure transport_mode is set to WS for WS snapshots
                 # This aligns with the data_source being WS-based
                 if via == "bridge_queue":
                     state.transport_mode = "ws"
                 elif via.startswith("rest"):
                     state.transport_mode = "rest"
-                
+
                 # CRITICAL FIX (2026-08-02): Update book freshness tracker from orderbook data
                 # This prevents the DEAD state from blocking all trading when valid data exists
                 try:
                     from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
                     freshness_tracker = get_book_freshness_tracker()
-                    
+
                     # Extract timestamp from message
                     timestamp_str = payload.get("timestamp") or msg.get("timestamp")
                     received_ts = None
@@ -2186,7 +2166,7 @@ class KalshiMarketStateStore:
                                 received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
                         except Exception as ts_error:
                             logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
-                    
+
                     # Update freshness state based on data source
                     if via == "bridge_queue":
                         # WebSocket data
@@ -2195,18 +2175,18 @@ class KalshiMarketStateStore:
                         # REST data (bootstrap, fallback, polling)
                         is_fallback = via in ("ws_fallback", "rest_polling")
                         freshness_tracker.update_from_rest(ticker, received_ts=received_ts, is_fallback=is_fallback)
-                    
+
                     logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} via={via} state={freshness_tracker.get_state(ticker).state.value}")
                 except ImportError:
                     logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
                 except Exception as e:
                     logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker}: {e}")
-                
+
                 # SUSPECT→GOOD recovery after REST snapshot
                 if state.book_consistency == "SUSPECT":
                     state.book_consistency = "GOOD"
                     logger.info(f"[BOOK-RECOVERED] ticker={ticker} consistency=GOOD after REST snapshot")
-                
+
                 # Log raw book after snapshot
                 book = self._ob.get_book(ticker)
                 if book and book.initialized:
@@ -2222,14 +2202,14 @@ class KalshiMarketStateStore:
                         "[KALSHI-RAW-BOOK] ticker=%s yes_raw=%s no_raw=%s side=%s source=WS",
                         ticker, yes_raw, no_raw, channel
                     )
-                
+
                 # Log parsed book after computing top prices
                 if state.best_bid_cents is not None or state.best_ask_cents is not None:
                     logger.info(
                         "[KALSHI-PARSED-BOOK] ticker=%s yes_best=%s no_best=%s source=WS",
                         ticker, state.best_bid_cents, state.best_ask_cents
                     )
-                
+
                 # CRITICAL FIX: Return the updated state after snapshot application
                 return state
         else:
@@ -2259,10 +2239,10 @@ class KalshiMarketStateStore:
         ticker = data.get("ticker")
         if not ticker:
             return None
-        
-        logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s states_count=%d", 
+
+        logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s states_count=%d",
                    ticker, threading.current_thread().name, len(self._states))
-        
+
         # CRITICAL FIX: Call _get_or_create directly without outer lock
         # _get_or_create already handles thread safety with its own global_lock
         # This prevents deadlock when catalog refresh thread calls apply_rest_market
@@ -2293,7 +2273,7 @@ class KalshiMarketStateStore:
         underlying = data.get("underlying")
         if underlying:
             state.underlying = underlying
-        
+
         # PRODUCTION FIX (2026-05-18): Set market status for health check
         # Default to "open" if not provided - markets with orderbook data should be tradable
         status = data.get("status", "open").lower()
@@ -2327,27 +2307,27 @@ class KalshiMarketStateStore:
         spot = data.get("external_spot")
         if spot is not None:
             state.external_spot = float(spot)
-            
+
             # CRITICAL: 2026-07-01 - Update strike divergence tracking
             # Calculate how far spot has moved from window strike price
             if state.window_strike_price is not None and state.window_strike_price > 0:
                 current_spot = float(spot)
             strike = state.window_strike_price
             divergence_pct = abs((current_spot - strike) / strike) * 100
-            
+
             # Update current divergence
             state.current_divergence_pct = divergence_pct
             state.last_divergence_update_ts = time.time()
-            
+
             # Track maximum divergence
             if divergence_pct > state.max_divergence_pct:
                 state.max_divergence_pct = divergence_pct
-            
+
             # Add to history (keep last 180 points = 15 minutes at 5-second cadence)
             state.strike_divergence_history.append((time.time(), divergence_pct, current_spot))
             if len(state.strike_divergence_history) > 180:
                 state.strike_divergence_history = state.strike_divergence_history[-180:]
-            
+
             # Divergence alerts (2026 best practice from Buildix)
             if divergence_pct >= 10.0:
                 logger.warning(
@@ -2373,11 +2353,11 @@ class KalshiMarketStateStore:
                     dt = datetime.fromisoformat(updated_time)
                     self._rest_updated_time[ticker] = dt.timestamp()
                     self._rest_updated_time_fetched[ticker] = time.time()
-                    
+
                     # Calculate user timestamp lag for lag classification
                     now_wall = time.time()
                     self._rest_user_ts_lag_s = now_wall - dt.timestamp()
-                    
+
                     # Check for WS lag
                     lag = self._check_rest_updated_time_lag(ticker)
                     if lag is not None:
@@ -2392,22 +2372,34 @@ class KalshiMarketStateStore:
         logger.info("[APPLY-REST-MARKET] BEFORE _recompute_seconds_to_expiry ticker=%s", ticker)
         _recompute_seconds_to_expiry(state)
         logger.info("[APPLY-REST-MARKET] AFTER _recompute_seconds_to_expiry ticker=%s", ticker)
-        
+
         logger.info("[APPLY-REST-MARKET] BEFORE _sync_unified_rest ticker=%s", ticker)
         self._sync_unified_rest(ticker, state)
         logger.info("[APPLY-REST-MARKET] AFTER _sync_unified_rest ticker=%s", ticker)
 
         # Check REST staleness and mark untradeable if too old
-        now = time.monotonic()
-        rest_age = now - state.last_rest_update_ts
-        if rest_age > _MAX_REST_AGE_SECONDS:
+        # CRITICAL FIX (2026-08-03): Also check the EXCHANGE data age. Previously this
+        # only measured time-since-we-fetched (set to monotonic() a few lines above,
+        # so the check could never fire) - hours-old REST data counted as fresh as
+        # long as we re-fetched it recently.
+        rest_age = time.monotonic() - state.last_rest_update_ts
+        exchange_updated = self._rest_updated_time.get(ticker)
+        exchange_data_age = (time.time() - exchange_updated) if exchange_updated else None
+        if exchange_data_age is not None and exchange_data_age > _MAX_REST_AGE_SECONDS:
+            logger.warning(
+                "[MARKET-STATE] rest_exchange_data_stale market=%s exchange_age_sec=%.0f fetch_age_sec=%.1f threshold=%s - marking untradeable",
+                ticker, exchange_data_age, rest_age, _MAX_REST_AGE_SECONDS
+            )
+            state.can_trade = False
+            state.confidence = 0.0
+        elif rest_age > _MAX_REST_AGE_SECONDS:
             logger.warning(
                 "[MARKET-STATE] rest_price_stale market=%s age_sec=%.0f threshold=%s - marking untradeable",
                 ticker, rest_age, _MAX_REST_AGE_SECONDS
             )
             state.can_trade = False
             state.confidence = 0.0
-        
+
         # CRITICAL FIX (2026-08-02): Update book freshness tracker from REST market data
         # This ensures REST-based updates also refresh the state machine
         try:
@@ -2460,10 +2452,10 @@ class KalshiMarketStateStore:
                 if ask_cents is not None:
                     state.best_ask_cents = ask_cents
                 if bid_cents is not None and ask_cents is not None:
-                    state.mid_cents = (bid_cents + ask_cents) // 2
-                    state.spread_cents = ask_cents - bid_cents
+                    state.mid_cents = int(round((bid_cents + ask_cents) / 2))
+                    state.spread_cents = int(round(ask_cents - bid_cents))
                 elif last_cents is not None:
-                    state.mid_cents = last_cents
+                    state.mid_cents = int(round(last_cents))
 
             # DIAGNOSTIC: Rate-limited per-ticker update logging (every 30s)
             now = time.monotonic()
@@ -2477,13 +2469,14 @@ class KalshiMarketStateStore:
                 self._last_log_ts[ticker] = now
 
             state.last_book_update_ts = time.monotonic()
+            state.last_book_update_wall_ts = time.time()
             # FIX: Reset retry counter when we receive fresh WebSocket data
             if ticker in self._quote_retry_count:
                 del self._quote_retry_count[ticker]
-            
+
             # CONNECTION HEALTH: Update WS connection health tracking
             self._update_ws_connection_health(ticker)
-            
+
             # CRITICAL FIX (2026-08-02): Update book freshness tracker from quote data
             # This ensures quote-based updates also refresh the state machine
             try:
@@ -2495,12 +2488,12 @@ class KalshiMarketStateStore:
                 logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
             except Exception as e:
                 logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from quote: {e}")
-            
+
             # CRITICAL FIX: Capture callbacks while holding lock, then release before notifying
             callbacks = []
             if ticker in self._subscribers:
                 callbacks = list(self._subscribers[ticker])
-        
+
         # Lock is now released - notify subscribers without re-acquiring lock
         self._notify_subscribers(ticker, state, callbacks)
         return state
@@ -2509,13 +2502,15 @@ class KalshiMarketStateStore:
 
     def get(self, ticker: str) -> Optional[KalshiMarketState]:
         """Return the current state for *ticker*, or ``None`` if unknown.
-        
+
         BUG-FIX (2026-05-12): No lock - rely on Python GIL for atomic dict reads.
         Dict get is atomic in CPython.
         """
         result = self._states.get(ticker)
         if result is None:
-            logger.warning(
+            # 2026-08-11: A miss is normal during startup/rolloff before the state
+            # store has processed a ticker.  Log at INFO; callers must handle None.
+            logger.info(
                 "[MARKET-STATE-GET-MISS] ticker=%s total_states=%d registered_keys=%s",
                 ticker, len(self._states), list(self._states.keys())[:10]
             )
@@ -2528,7 +2523,7 @@ class KalshiMarketStateStore:
         (``implied_prob``, ``external_fair_value``, ``edge_basis``) that
         ``KalshiMarketState`` does not have.  Agents and risk systems should
         prefer this when they need those fields.
-        
+
         BUG-FIX (2026-05-12): No lock - rely on Python GIL for atomic dict reads.
         Dict get is atomic in CPython.
         """
@@ -2536,7 +2531,7 @@ class KalshiMarketStateStore:
 
     def get_all(self) -> Dict[str, KalshiMarketState]:
         """Return a shallow copy of the full state registry.
-        
+
         BUG-FIX (2026-05-12): No lock - rely on Python GIL for atomic dict reads.
         Shallow copy of dict is atomic in CPython.
         """
@@ -2544,14 +2539,14 @@ class KalshiMarketStateStore:
 
     def get_all_states(self) -> Dict[str, KalshiMarketState]:
         """Return a shallow copy of the full state registry.
-        
+
         Alias for get_all() to match API endpoint expectations.
         """
         return self.get_all()
 
     def tickers(self) -> List[str]:
         """Return a snapshot of all tracked tickers.
-        
+
         BUG-FIX (2026-05-12): No lock - rely on Python GIL for atomic dict reads.
         Dict keys() is atomic in CPython.
         """
@@ -2559,15 +2554,15 @@ class KalshiMarketStateStore:
 
     def get_all_tickers(self) -> List[str]:
         """Return a snapshot of all tracked tickers.
-        
+
         Compatibility method for universe consistency checks.
         Alias for tickers() to match expected API.
         """
         return self.tickers()
-    
+
     def getalltickers(self) -> List[str]:
         """Return a snapshot of all tracked tickers.
-        
+
         Compatibility method for universe consistency checks.
         Handles incorrect method name that's being called.
         """
@@ -2578,7 +2573,7 @@ class KalshiMarketStateStore:
 
     def subscribe_to_updates(self, ticker: str, callback: callable) -> None:
         """Subscribe to state updates for a specific ticker.
-        
+
         Args:
             ticker: Market ticker to subscribe to (e.g., "KXBTCD-25JUN-T100000")
             callback: Callable that takes (ticker, state) as arguments
@@ -2588,12 +2583,12 @@ class KalshiMarketStateStore:
                 self._subscribers[ticker] = []
             if callback not in self._subscribers[ticker]:
                 self._subscribers[ticker].append(callback)
-                logger.debug("[market-state] Subscribed callback for ticker=%s (subscribers=%d)", 
+                logger.debug("[market-state] Subscribed callback for ticker=%s (subscribers=%d)",
                            ticker, len(self._subscribers[ticker]))
 
     def unsubscribe_from_updates(self, ticker: str, callback: callable) -> None:
         """Unsubscribe a callback from state updates for a specific ticker.
-        
+
         Args:
             ticker: Market ticker to unsubscribe from
             callback: Callable to remove from subscribers
@@ -2601,14 +2596,14 @@ class KalshiMarketStateStore:
         with self._lock:
             if ticker in self._subscribers and callback in self._subscribers[ticker]:
                 self._subscribers[ticker].remove(callback)
-                logger.debug("[market-state] Unsubscribed callback for ticker=%s (subscribers=%d)", 
+                logger.debug("[market-state] Unsubscribed callback for ticker=%s (subscribers=%d)",
                            ticker, len(self._subscribers[ticker]))
 
     def cleanup_stale_states(self, active_tickers: List[str]) -> None:
         """Remove market states for tickers that are no longer active.
-        
+
         Called when catalog refreshes to new time windows to prevent ticker mismatch.
-        
+
         Args:
             active_tickers: List of currently active tickers from catalog
         """
@@ -2618,33 +2613,33 @@ class KalshiMarketStateStore:
             for ticker in self._states:
                 if ticker not in active_tickers:
                     stale_tickers.append(ticker)
-            
+
             # Remove stale states
             for ticker in stale_tickers:
                 del self._states[ticker]
                 if ticker in self._subscribers:
                     del self._subscribers[ticker]
                 logger.info(f"[MARKET-STATE-CLEANUP] Removed stale state for ticker={ticker}")
-            
+
             if stale_tickers:
                 logger.info(f"[MARKET-STATE-CLEANUP] Cleaned up {len(stale_tickers)} stale tickers: {stale_tickers}")
-    
+
     def prune_expired_markets(self, max_age_seconds: float = 86400.0) -> int:
         """Remove market states that haven't been updated in a long time.
-        
+
         This prevents state bloat by removing markets that expired long ago
         and are no longer receiving updates. This is a time-based pruning
         mechanism complementary to catalog-based pruning.
-        
+
         Args:
             max_age_seconds: Maximum age in seconds before a market is pruned (default 24h)
-        
+
         Returns:
             Number of markets pruned
         """
         now = time.monotonic()
         pruned_count = 0
-        
+
         with self._lock:
             expired_tickers = []
             for ticker, state in self._states.items():
@@ -2653,11 +2648,11 @@ class KalshiMarketStateStore:
                     # Never updated - check creation time if available
                     # For now, skip these as they might be newly registered
                     continue
-                
+
                 age = now - state.last_book_update_ts
                 if age > max_age_seconds:
                     expired_tickers.append((ticker, age))
-            
+
             # Remove expired states
             for ticker, age in expired_tickers:
                 del self._states[ticker]
@@ -2668,26 +2663,26 @@ class KalshiMarketStateStore:
                     f"[MARKET-STATE-PRUNE] Pruned expired ticker={ticker} age={age:.0f}s "
                     f"(threshold={max_age_seconds:.0f}s)"
                 )
-            
+
             if pruned_count > 0:
                 logger.info(
                     f"[MARKET-STATE-PRUNE] Pruned {pruned_count} expired markets "
                     f"(age > {max_age_seconds:.0f}s)"
                 )
-        
+
         return pruned_count
 
     def _notify_subscribers(self, ticker: str, state: KalshiMarketState, callbacks: Optional[List] = None) -> None:
         """Notify all subscribers of a state update.
-        
+
         Called after state is updated via apply_orderbook_message or apply_rest_market.
-        
+
         CRITICAL FIX: Callbacks are passed as a parameter to avoid re-acquiring the lock.
         If callbacks is None, they will be fetched from _subscribers (for backward compatibility).
         Callbacks are executed in a background thread to prevent blocking
         the catalog refresh or other state updates. If a callback hangs or deadlocks,
         it will not block the entire market state system.
-        
+
         Args:
             ticker: Market ticker that was updated
             state: New state after update
@@ -2700,21 +2695,21 @@ class KalshiMarketStateStore:
             with self._lock:
                 if ticker in self._subscribers:
                     callbacks = list(self._subscribers[ticker])
-        
+
         logger.info("[APPLY-REST-MARKET] _notify_subscribers ENTER ticker=%s thread=%s callbacks=%d", ticker, threading.current_thread().name, len(callbacks))
-        
+
         # Execute callbacks in background thread to prevent blocking
         # This prevents deadlocks where callbacks try to acquire locks held by the caller
         if callbacks:
             logger.info("[APPLY-REST-MARKET] _notify_subscribers Starting callback thread for ticker=%s", ticker)
-            
+
             def _run_callbacks():
                 for callback in callbacks:
                     try:
                         callback(ticker, state)
                     except Exception as exc:
                         logger.error("[market-state] Subscriber callback failed for ticker=%s: %s", ticker, exc, exc_info=True)
-            
+
             # Start background thread for callback execution
             callback_thread = threading.Thread(
                 target=_run_callbacks,
@@ -2725,15 +2720,15 @@ class KalshiMarketStateStore:
             logger.info("[APPLY-REST-MARKET] _notify_subscribers Callback thread started for ticker=%s", ticker)
         else:
             logger.info("[APPLY-REST-MARKET] _notify_subscribers No callbacks for ticker=%s", ticker)
-        
+
         logger.info("[APPLY-REST-MARKET] _notify_subscribers EXIT ticker=%s", ticker)
 
     def _determine_staleness_regime(self, ticker: str) -> StalenessRegime:
         """Determine staleness regime based on time-to-expiry and market conditions.
-        
+
         Args:
             ticker: Kalshi market ticker
-            
+
         Returns:
             StalenessRegime (RELAXED, NORMAL, or STRICT)
         """
@@ -2741,26 +2736,26 @@ class KalshiMarketStateStore:
         if not state or state.seconds_to_expiry is None:
             # Default to NORMAL if we don't have expiry info
             return StalenessRegime.NORMAL
-        
+
         seconds_to_expiry = state.seconds_to_expiry
-        
+
         # STRICT regime: near expiry (<60s)
         if seconds_to_expiry <= _EXPIRY_STRICT_THRESHOLD_SECONDS:
             return StalenessRegime.STRICT
-        
+
         # RELAXED regime: far from expiry (>180s)
         if seconds_to_expiry >= _EXPIRY_RELAXED_THRESHOLD_SECONDS:
             return StalenessRegime.RELAXED
-        
+
         # NORMAL regime: between thresholds
         return StalenessRegime.NORMAL
-    
+
     def _get_regime_threshold_seconds(self, regime: StalenessRegime) -> float:
         """Get staleness threshold for a given regime.
-        
+
         Args:
             regime: StalenessRegime
-            
+
         Returns:
             Maximum allowed book age in seconds for this regime
         """
@@ -2770,26 +2765,26 @@ class KalshiMarketStateStore:
             return _STALENESS_REGIME_STRICT_SECONDS
         else:  # NORMAL
             return _STALENESS_REGIME_NORMAL_SECONDS
-    
+
     def _check_ws_connection_health(self, ticker: str) -> bool:
         """Check if WS connection is healthy based on message receipt.
-        
+
         This is separate from data staleness - it tracks whether we're receiving
         ANY WS messages (heartbeat, ping/pong, or orderbook delta).
-        
+
         Args:
             ticker: Kalshi market ticker
-            
+
         Returns:
             True if connection is healthy, False if suspect
         """
         now = time.monotonic()
         last_msg = self._ws_last_msg_monotonic.get(ticker, 0.0)
-        
+
         if last_msg == 0.0:
             # Never received a message - assume healthy until we get first message
             return True
-        
+
         # Check if we've received any WS message within watchdog window
         age = now - last_msg
         if age > _WS_HEALTH_WATCHDOG_SECONDS:
@@ -2799,18 +2794,18 @@ class KalshiMarketStateStore:
                 ticker, age, _WS_HEALTH_WATCHDOG_SECONDS
             )
             return False
-        
+
         return True
-    
+
     def _update_ws_connection_health(self, ticker: str) -> None:
         """Update WS connection health tracking when a message is received.
-        
+
         Args:
             ticker: Kalshi market ticker
         """
         now = time.monotonic()
         self._ws_last_msg_monotonic[ticker] = now
-        
+
         # If connection was suspect, mark it healthy again
         if not self._ws_connection_healthy.get(ticker, True):
             logger.info(
@@ -2820,40 +2815,43 @@ class KalshiMarketStateStore:
             self._ws_connection_healthy[ticker] = True
             if ticker in self._ws_connection_suspect_since:
                 del self._ws_connection_suspect_since[ticker]
-    
+
     def _check_rest_updated_time_lag(self, ticker: str) -> Optional[float]:
         """Check if REST updated_time indicates WS lag.
-        
+
         Compares REST updated_time (exchange timestamp) with our last WS update.
         If REST shows significantly newer data, WS may be lagging.
-        
+
         Args:
             ticker: Kalshi market ticker
-            
+
         Returns:
             Lag in seconds if detected, None if no lag or can't determine
         """
         rest_updated = self._rest_updated_time.get(ticker)
         if not rest_updated:
             return None
-        
+
         state = self._states.get(ticker)
         if not state or state.last_book_update_ts <= 0.0:
             return None
-        
-        # Convert last_book_update_ts (monotonic) to approximate wall clock
-        # This is approximate since monotonic doesn't map to wall clock directly
-        # We use the difference between current time and monotonic to estimate
-        now_wall = time.time()
-        now_monotonic = time.monotonic()
-        monotonic_offset = now_wall - now_monotonic
-        
-        # Estimate when last WS update occurred in wall clock time
-        last_ws_wall = state.last_book_update_ts + monotonic_offset
-        
+
+        # CRITICAL FIX (2026-08-03): Prefer the wall-clock sibling timestamp
+        # recorded at update time. The previous monotonic->wall conversion
+        # (last_book_update_ts + (now_wall - now_monotonic)) drifted whenever the
+        # system clock was adjusted (NTP/manual), producing false lag readings.
+        if getattr(state, "last_book_update_wall_ts", 0.0) > 0.0:
+            last_ws_wall = state.last_book_update_wall_ts
+        else:
+            # Legacy fallback: approximate conversion
+            now_wall = time.time()
+            now_monotonic = time.monotonic()
+            monotonic_offset = now_wall - now_monotonic
+            last_ws_wall = state.last_book_update_ts + monotonic_offset
+
         # Calculate lag
         lag = rest_updated - last_ws_wall
-        
+
         # If REST is significantly newer (>30s), WS may be lagging
         if lag > 30.0:
             logger.warning(
@@ -2861,29 +2859,29 @@ class KalshiMarketStateStore:
                 ticker, rest_updated, last_ws_wall, lag
             )
             return lag
-        
+
         return None
-    
+
     def _classify_lag(self) -> LagClassifier:
         """Classify the current lag type based on collected signals.
-        
+
         Rule-based classifier that distinguishes between:
         - WS_CONNECTION_ISSUE: WebSocket connection problem
         - NETWORK_LATENCY: General network latency
         - EXCHANGE_API_DELAY: Kalshi REST API lagging
         - LOCAL_PROCESSING_LAG: Internal processing delay
         - NORMAL: No significant lag
-        
+
         Returns:
             LagClassifier classification
         """
         now = time.monotonic()
-        
+
         # Check WS ping gap
         ws_ping_gap = 0.0
         if self._ws_last_ping_monotonic > 0.0:
             ws_ping_gap = now - self._ws_last_ping_monotonic
-        
+
         # Check if WS connection has issues
         if ws_ping_gap > _WS_PING_GAP_THRESHOLD_SECONDS:
             logger.warning(
@@ -2891,9 +2889,9 @@ class KalshiMarketStateStore:
                 ws_ping_gap, _WS_PING_GAP_THRESHOLD_SECONDS
             )
             return LagClassifier.WS_CONNECTION_ISSUE
-        
+
         # Check network latency (both network ping and REST latency elevated)
-        if (self._net_ping_ms > _NETWORK_LATENCY_THRESHOLD_MS and 
+        if (self._net_ping_ms > _NETWORK_LATENCY_THRESHOLD_MS and
             self._rest_latency_ms > _REST_LATENCY_THRESHOLD_MS):
             logger.warning(
                 "[LAG-CLASSIFIER] Network latency detected: net_ping_ms=%.1f rest_latency_ms=%.1f thresholds=%.1f/%.1f",
@@ -2901,7 +2899,7 @@ class KalshiMarketStateStore:
                 _NETWORK_LATENCY_THRESHOLD_MS, _REST_LATENCY_THRESHOLD_MS
             )
             return LagClassifier.NETWORK_LATENCY
-        
+
         # Check exchange API delay (WS fine, but REST user timestamp lagging)
         if self._rest_user_ts_lag_s > _REST_USER_TS_LAG_THRESHOLD_S:
             logger.warning(
@@ -2909,7 +2907,7 @@ class KalshiMarketStateStore:
                 self._rest_user_ts_lag_s, _REST_USER_TS_LAG_THRESHOLD_S
             )
             return LagClassifier.EXCHANGE_API_DELAY
-        
+
         # Check local processing lag
         if self._processing_lag_ms > _PROCESSING_LAG_THRESHOLD_MS:
             logger.warning(
@@ -2917,19 +2915,19 @@ class KalshiMarketStateStore:
                 self._processing_lag_ms, _PROCESSING_LAG_THRESHOLD_MS
             )
             return LagClassifier.LOCAL_PROCESSING_LAG
-        
+
         # No significant lag detected
         return LagClassifier.NORMAL
-    
+
     def _update_ws_ping_tracking(self, ping_received: bool = False, pong_sent: bool = False) -> None:
         """Update WS ping/pong tracking.
-        
+
         Args:
             ping_received: True if we just received a ping from Kalshi
             pong_sent: True if we just sent a pong to Kalshi
         """
         now = time.monotonic()
-        
+
         if ping_received:
             self._ws_last_ping_monotonic = now
             # Calculate RTT if we had sent a pong recently
@@ -2938,33 +2936,33 @@ class KalshiMarketStateStore:
                 self._ws_pong_rtt_ms = rtt_ms
                 # Track RTT for volatility analysis
                 self._record_rtt_sample("ws", rtt_ms, now)
-        
+
         if pong_sent:
             self._ws_last_pong_sent_monotonic = now
-    
+
     def _update_rest_latency_tracking(self, latency_ms: float) -> None:
         """Update REST latency tracking.
-        
+
         Args:
             latency_ms: Round-trip time for the REST call in milliseconds
         """
         self._rest_latency_ms = latency_ms
         # Track RTT for volatility analysis
         self._record_rtt_sample("rest", latency_ms, time.monotonic())
-    
+
     def _record_rtt_sample(self, source: str, rtt_ms: float, timestamp: float) -> None:
         """Record an RTT sample for volatility tracking.
-        
+
         Args:
             source: "ws" or "rest"
             rtt_ms: Round-trip time in milliseconds
             timestamp: Monotonic timestamp
         """
         now = time.monotonic()
-        
+
         # Prune old samples outside the window
         window_start = now - self._rtt_window_seconds
-        
+
         # Prune WS samples
         if source == "ws":
             self._ws_rtt_samples.append(rtt_ms)
@@ -2976,7 +2974,7 @@ class KalshiMarketStateStore:
                     self._ws_rtt_samples.pop(0)
             # Recalculate mean/std
             self._update_rtt_stats("ws")
-        
+
         # Prune REST samples
         elif source == "rest":
             self._rest_rtt_samples.append(rtt_ms)
@@ -2988,10 +2986,10 @@ class KalshiMarketStateStore:
                 self._rest_rtt_samples.pop(0)
             # Recalculate mean/std
             self._update_rtt_stats("rest")
-    
+
     def _update_rtt_stats(self, source: str) -> None:
         """Update rolling mean and std for RTT samples.
-        
+
         Args:
             source: "ws" or "rest"
         """
@@ -3001,17 +2999,17 @@ class KalshiMarketStateStore:
             samples = self._rest_rtt_samples
         else:
             return
-        
+
         if not samples:
             return
-        
+
         # Calculate mean
         mean = sum(samples) / len(samples)
-        
+
         # Calculate std
         variance = sum((x - mean) ** 2 for x in samples) / len(samples)
         std = variance ** 0.5
-        
+
         # Update stored values
         if source == "ws":
             self._ws_rtt_mean = mean
@@ -3019,13 +3017,13 @@ class KalshiMarketStateStore:
         else:
             self._rest_rtt_mean = mean
             self._rest_rtt_std = std
-    
+
     def _get_rtt_volatility_score(self, source: str) -> float:
         """Get RTT volatility score (coefficient of variation).
-        
+
         Args:
             source: "ws" or "rest"
-            
+
         Returns:
             Coefficient of variation (std/mean), or 0 if no data
         """
@@ -3035,185 +3033,185 @@ class KalshiMarketStateStore:
         else:
             mean = self._rest_rtt_mean
             std = self._rest_rtt_std
-        
+
         if mean == 0:
             return 0.0
-        
+
         return std / mean
-    
+
     def _record_rest_call(self) -> None:
         """Record a REST call for rate limit tracking."""
         now = time.monotonic()
         self._rest_call_timestamps.append(now)
-        
+
         # Prune old calls outside 1-minute window
         window_start = now - 60.0
         self._rest_call_timestamps = [ts for ts in self._rest_call_timestamps if ts >= window_start]
-        
+
         # Update calls per minute
         self._rest_calls_per_minute = len(self._rest_call_timestamps)
-    
+
     def _record_rate_limit_hit(self) -> None:
         """Record a 429 rate limit hit and trigger backoff."""
         now = time.monotonic()
         self._rate_limit_hits += 1
         self._last_429_timestamp = now
-        
+
         # Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, max 60s
         backoff_seconds = min(2 ** min(self._rate_limit_hits, 6), 60.0)
         self._backoff_until = now + backoff_seconds
-        
+
         logger.warning(
             "[RATE-LIMIT] 429 hit #%d, backoff for %.1fs until %.1f",
             self._rate_limit_hits, backoff_seconds, self._backoff_until
         )
-    
+
     def _check_backoff(self) -> bool:
         """Check if we're currently in backoff.
-        
+
         Returns:
             True if in backoff (should not make REST calls), False otherwise
         """
         now = time.monotonic()
         if now < self._backoff_until:
             return True
-        
+
         # Reset backoff if we're past the backoff period
         if self._backoff_until > 0 and now >= self._backoff_until:
             self._backoff_until = 0.0
             logger.info("[RATE-LIMIT] Backoff period ended, resuming normal operations")
-        
+
         return False
-    
+
     def _update_adaptive_poll_interval(self, ws_healthy: bool, market_activity: float) -> None:
         """Update adaptive polling interval based on conditions.
-        
+
         Args:
             ws_healthy: True if WebSocket is healthy
             market_activity: Current market activity metric (0-1)
         """
         # Base interval
         interval = self._base_poll_interval
-        
+
         # If WS is healthy and market is calm, increase interval (reduce REST load)
         if ws_healthy and market_activity < 0.3:
             interval = min(interval * 1.5, self._max_poll_interval)
         # If WS is unhealthy or market is active, decrease interval (more frequent checks)
         elif not ws_healthy or market_activity > 0.7:
             interval = max(interval * 0.8, self._min_poll_interval)
-        
+
         # If we've had recent 429s, use longer interval
         if self._rate_limit_hits > 0:
             time_since_429 = time.monotonic() - self._last_429_timestamp
             if time_since_429 < 300.0:  # Within 5 minutes of last 429
                 interval = max(interval * 2.0, self._max_poll_interval)
-        
+
         self._adaptive_poll_interval = interval
-        
+
         logger.debug(
             "[ADAPTIVE-POLL] interval=%.1fs ws_healthy=%s activity=%.2f rate_limit_hits=%d",
             interval, ws_healthy, market_activity, self._rate_limit_hits
         )
-    
+
     def _get_adaptive_poll_interval(self) -> float:
         """Get current adaptive polling interval.
-        
+
         Returns:
             Polling interval in seconds
         """
         return self._adaptive_poll_interval
-    
+
     def _update_network_ping_tracking(self, ping_ms: float) -> None:
         """Update network ping tracking.
-        
+
         Args:
             ping_ms: Round-trip time to Kalshi/VPS in milliseconds
         """
         self._net_ping_ms = ping_ms
-    
+
     def _update_processing_lag_tracking(self, lag_ms: float) -> None:
         """Update processing lag tracking.
-        
+
         Args:
             lag_ms: Internal processing delay in milliseconds
         """
         self._processing_lag_ms = lag_ms
-    
+
     def _record_msg_recv_timestamp(self, ticker: str) -> None:
         """Record when a WS message was received for a ticker.
-        
+
         Args:
             ticker: Market ticker
         """
         self._msg_recv_monotonic[ticker] = time.monotonic()
-    
+
     def _record_msg_proc_timestamp(self, ticker: str) -> None:
         """Record when a WS message was processed for a ticker and calculate lag.
-        
+
         Args:
             ticker: Market ticker
         """
         now = time.monotonic()
         self._msg_proc_monotonic[ticker] = now
-        
+
         # Calculate processing lag if we have a recv timestamp
         if ticker in self._msg_recv_monotonic:
             lag_ms = (now - self._msg_recv_monotonic[ticker]) * 1000.0
             self._processing_lag_ms = lag_ms
-        
+
         # Track cadence for orderbook updates
         self._record_book_update_timestamp(ticker, now)
-    
+
     def _record_book_update_timestamp(self, ticker: str, timestamp: float) -> None:
         """Record a book update timestamp for cadence tracking.
-        
+
         Args:
             ticker: Market ticker
             timestamp: Monotonic timestamp of the update
         """
         now = time.monotonic()
-        
+
         # Initialize list if needed
         if ticker not in self._book_update_timestamps:
             self._book_update_timestamps[ticker] = []
-        
+
         # Add timestamp
         self._book_update_timestamps[ticker].append(timestamp)
-        
+
         # Prune old timestamps outside the window
         window_start = now - self._cadence_window_seconds
         self._book_update_timestamps[ticker] = [
             ts for ts in self._book_update_timestamps[ticker] if ts >= window_start
         ]
-        
+
         # Calculate updates per minute
         if self._book_update_timestamps[ticker]:
             self._updates_per_minute[ticker] = len(self._book_update_timestamps[ticker]) / (self._cadence_window_seconds / 60.0)
-    
+
     def _get_updates_per_minute(self, ticker: str) -> float:
         """Get current updates per minute for a ticker.
-        
+
         Args:
             ticker: Market ticker
-            
+
         Returns:
             Updates per minute (0 if no data)
         """
         return self._updates_per_minute.get(ticker, 0.0)
-    
+
     def _update_baseline_interval(self, ticker: str) -> None:
         """Update the baseline update interval for a ticker based on recent history.
-        
+
         Args:
             ticker: Market ticker
         """
         if ticker not in self._book_update_timestamps or len(self._book_update_timestamps[ticker]) < 2:
             return
-        
+
         # Calculate intervals between consecutive updates
         timestamps = sorted(self._book_update_timestamps[ticker])
         intervals = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps)-1)]
-        
+
         if intervals:
             # Use median as baseline (robust to outliers)
             intervals.sort()
@@ -3222,21 +3220,21 @@ class KalshiMarketStateStore:
                 median_interval = (intervals[median_idx - 1] + intervals[median_idx]) / 2
             else:
                 median_interval = intervals[median_idx]
-            
+
             self._baseline_update_intervals[ticker] = median_interval
-    
+
     def _reconcile_with_rest(self, ticker: str, rest_data: Dict[str, Any]) -> Optional[str]:
         """Reconcile WS state with REST data to detect desync.
-        
+
         Compares WS book with REST book and timestamps to detect:
         - WS lag (REST leads WS)
         - Expected REST delay (WS leads REST)
         - Validation (WS and REST agree)
-        
+
         Args:
             ticker: Market ticker
             rest_data: REST market data dict
-            
+
         Returns:
             Reconciliation status: "validated", "ws_lag", "rest_lag", or None if insufficient data
         """
@@ -3244,34 +3242,34 @@ class KalshiMarketStateStore:
             state = self._states.get(ticker)
             if not state or not state.book_initialized:
                 return None
-            
+
             # Extract REST bid/ask
             rest_bid = rest_data.get("best_bid")
             rest_ask = rest_data.get("best_ask")
             rest_updated = rest_data.get("updated_time")
-            
+
             if rest_bid is None or rest_ask is None:
                 return None
-            
+
             # Get WS bid/ask
             ws_bid = state.best_bid_cents
             ws_ask = state.best_ask_cents
-            
+
             if ws_bid is None or ws_ask is None:
                 return None
-            
+
             # Convert to cents for comparison
             rest_bid_cents = int(rest_bid) if isinstance(rest_bid, (int, float)) else None
             rest_ask_cents = int(rest_ask) if isinstance(rest_ask, (int, float)) else None
-            
+
             if rest_bid_cents is None or rest_ask_cents is None:
                 return None
-            
+
             # Check if prices are within tolerance (1 tick = 1 cent)
             tick_tolerance = 1  # 1 cent tolerance
             bid_diff = abs(ws_bid - rest_bid_cents)
             ask_diff = abs(ws_ask - rest_ask_cents)
-            
+
             # Parse REST updated_time
             rest_updated_ts = None
             if rest_updated:
@@ -3282,20 +3280,27 @@ class KalshiMarketStateStore:
                             rest_updated = rest_updated[:-1] + '+00:00'
                         dt = datetime.fromisoformat(rest_updated)
                         rest_updated_ts = dt.timestamp()
-                except Exception:
-                    pass
-            
+                except Exception as e:
+                    logger.warning(
+                        "[REST-RECONCILIATION] Failed to parse rest updated_time=%r for %s: %s - "
+                        "timestamp comparison disabled for this check",
+                        rest_updated, ticker, e
+                    )
+
             # Compare timestamps
             ws_updated_ts = state.last_book_update_ts
             if ws_updated_ts > 0 and rest_updated_ts:
-                # Convert monotonic to wall time for comparison
-                # This is approximate but sufficient for lag detection
-                now_wall = time.time()
-                now_monotonic = time.monotonic()
-                ws_wall_ts = now_wall - (now_monotonic - ws_updated_ts)
-                
+                # CRITICAL FIX (2026-08-03): Prefer exact wall-clock sibling; the
+                # monotonic->wall approximation drifts on clock adjustments.
+                if getattr(state, "last_book_update_wall_ts", 0.0) > 0.0:
+                    ws_wall_ts = state.last_book_update_wall_ts
+                else:
+                    now_wall = time.time()
+                    now_monotonic = time.monotonic()
+                    ws_wall_ts = now_wall - (now_monotonic - ws_updated_ts)
+
                 timestamp_diff = rest_updated_ts - ws_wall_ts
-                
+
                 # Reconciliation logic
                 if bid_diff <= tick_tolerance and ask_diff <= tick_tolerance:
                     # Prices agree - check timestamps
@@ -3333,7 +3338,7 @@ class KalshiMarketStateStore:
                             ticker, bid_diff, ask_diff, timestamp_diff
                         )
                         return "price_divergence"
-            
+
             return None
 
     def is_stale(self, ticker: str, max_age_seconds: float = 30.0) -> bool:
@@ -3342,7 +3347,7 @@ class KalshiMarketStateStore:
         H3: Consumers (e.g. order router market-condition check) should call
         this to refuse to trade on a book that has gone silent after a WS
         reconnect.  A ticker that has never been seen is also considered stale.
-        
+
         BUG-FIX (2026-05-12): No lock - rely on Python GIL for atomic dict reads.
         Dict get is atomic in CPython.
         """
@@ -3362,64 +3367,64 @@ class KalshiMarketStateStore:
 
     async def get_trusted_quote(self, ticker: str) -> Optional[MarketQuote]:
         """Get a trusted quote for *ticker* with health state and cross-validation.
-        
+
         This is the main entry point for signal agents to fetch market data.
         It implements the data integrity layer logic:
         - Primary feed (WebSocket) is preferred
         - REST fallback is used when primary is stale or missing
         - Cross-validation between feeds detects discrepancies
         - Health state (healthy/degraded/suspended) guides trading decisions
-        
+
         Args:
             ticker: Kalshi market ticker (e.g., "KXBTC15M-26MAY112345-45")
-            
+
         Returns:
             MarketQuote with health state, or None if suspended
         """
         import asyncio
         from config.kalshi_crypto_config import kalshi_ticker_to_asset
         from merid.event_venues.kalshi.market_filter import get_series_timeframe_bucket
-        
+
         # Extract series ticker from market ticker
         asset = kalshi_ticker_to_asset(ticker) or "UNKNOWN"
         timeframe = get_series_timeframe_bucket(ticker) or "UNKNOWN"
         series_ticker = f"{asset.upper()}{timeframe.upper()}" if asset != "UNKNOWN" else "UNKNOWN"
-        
+
         with self._lock:
             state = self._states.get(ticker)
-            
+
             # Check if primary (WebSocket) data is fresh using regime-aware thresholds
             primary_fresh = False
             ws_connection_healthy = True
             regime = StalenessRegime.NORMAL
             regime_threshold = _PRIMARY_STALE_SECONDS  # Fallback to old threshold
-            
+
             if state and state.book_initialized and state.last_book_update_ts > 0.0:
                 age = time.monotonic() - state.last_book_update_ts
-                
+
                 # Determine staleness regime based on time-to-expiry
                 regime = self._determine_staleness_regime(ticker)
                 regime_threshold = self._get_regime_threshold_seconds(regime)
-                
+
                 # Check if data is fresh according to regime threshold
                 primary_fresh = age <= regime_threshold
-                
+
                 # Also check WS connection health separately
                 ws_connection_healthy = self._check_ws_connection_health(ticker)
-                
+
                 # Log regime decision for diagnostics
                 logger.debug(
                     "[STALENESS-REGIME] ticker=%s regime=%s threshold_s=%.1f age_s=%.1f fresh=%s ws_healthy=%s",
                     ticker, regime, regime_threshold, age, primary_fresh, ws_connection_healthy
                 )
-                
+
                 # Update baseline interval periodically
                 self._update_baseline_interval(ticker)
-                
+
                 # Get cadence metrics
                 updates_per_min = self._get_updates_per_minute(ticker)
                 baseline_interval = self._baseline_update_intervals.get(ticker, 0.0)
-                
+
                 # Classify lag type for diagnostics
                 lag_class = self._classify_lag()
                 self._current_lag_class = lag_class
@@ -3435,10 +3440,10 @@ class KalshiMarketStateStore:
                     updates_per_min,
                     baseline_interval
                 )
-            
+
             # Get current health state
             current_health = self._health_state.get(ticker, QuoteHealth.HEALTHY)
-            
+
             # If primary is fresh and not suspended, return it
             if primary_fresh and current_health != QuoteHealth.SUSPENDED:
                 # CRITICAL: Check for (0,100) anomaly before marking executable
@@ -3447,13 +3452,13 @@ class KalshiMarketStateStore:
                 has_valid_bid = state.best_bid_cents is not None and state.best_bid_cents > 0
                 has_valid_ask = state.best_ask_cents is not None and state.best_ask_cents < 100
                 has_anomaly = state.best_bid_cents == 0 and state.best_ask_cents == 100
-                
+
                 # Allow one-sided books if there's depth on the available side
                 # This aligns with agent_grid's one-sided book validation
                 # Use depth_10c or check yes_bids/no_bids lists for depth
                 has_depth = (state.depth_10c or 0) > 0 or len(state.yes_bids) > 0 or len(state.no_bids) > 0
                 has_valid_bid_ask = (has_valid_bid or has_valid_ask) and not has_anomaly and has_depth
-                
+
                 # Build quote from primary
                 quote = MarketQuote(
                     market_ticker=ticker,
@@ -3470,15 +3475,15 @@ class KalshiMarketStateStore:
                     executable=has_valid_bid_ask,  # Only executable if bid/ask are valid
                     diagnostics=[] if has_valid_bid_ask else ["(0,100) bid/ask pattern detected"]
                 )
-                
+
                 # Cross-validate with REST if needed (every 30s or on health transition)
                 last_rest = self._rest_last_fetch.get(ticker, 0.0)
                 if time.monotonic() - last_rest > 30.0:
                     # Schedule async REST validation (non-blocking)
                     asyncio.create_task(self._cross_validate_with_rest(ticker, quote))
-                
+
                 return quote
-            
+
             # Primary is stale or missing - try REST fallback
             last_rest = self._rest_last_fetch.get(ticker, 0.0)
             if time.monotonic() - last_rest >= _REST_THROTTLE_SECONDS:
@@ -3503,42 +3508,42 @@ class KalshiMarketStateStore:
                         diagnostics=["REST throttled, using cached data"]
                     )
                 return None
-        
+
         # Fetch REST data outside lock
         try:
             from merid.event_venues.kalshi.client import get_kalshi_client
             client = get_kalshi_client()
             market = await client.get_market(ticker)
-            
+
             if market:
                 # Update REST timestamp
                 with self._lock:
                     self._rest_last_fetch[ticker] = time.monotonic()
                     self._consecutive_failures[ticker] = 0
-                
+
                 # Build quote from REST
                 best_bid = None
                 best_ask = None
                 mid = None
-                
+
                 if hasattr(market, 'yes_bid'):
                     best_bid = int(market.yes_bid * 100) if market.yes_bid else None
                 if hasattr(market, 'yes_ask'):
                     best_ask = int(market.yes_ask * 100) if market.yes_ask else None
                 if hasattr(market, 'last_price'):
                     mid = int(market.last_price * 100) if market.last_price else None
-                
+
                 # Determine market status
                 status = "open"
                 if hasattr(market, 'status'):
                     status = str(market.status).lower()
-                
+
                 # If market is closed/paused, mark as suspended
                 if status in ("closed", "paused"):
                     with self._lock:
                         self._health_state[ticker] = QuoteHealth.SUSPENDED
                     return None
-                
+
                 # Check profile for fallback trade allowance (no-synthetic-pricing invariant)
                 allow_fallback = False
                 try:
@@ -3548,7 +3553,7 @@ class KalshiMarketStateStore:
                         allow_fallback = adapter.profile.allow_fallback_trades
                 except Exception:
                     pass  # Default to False (no fallback trades)
-                
+
                 # Build quote
                 quote = MarketQuote(
                     market_ticker=ticker,
@@ -3568,7 +3573,7 @@ class KalshiMarketStateStore:
                         f"fallback_trades_allowed={allow_fallback}"
                     ]
                 )
-                
+
                 # Cross-validate if primary exists
                 with self._lock:
                     state = self._states.get(ticker)
@@ -3576,7 +3581,7 @@ class KalshiMarketStateStore:
                         diff = abs(state.mid_cents - mid)
                         threshold_cents = _CROSS_VALIDATION_THRESHOLD_CENTS
                         threshold_pct = _CROSS_VALIDATION_THRESHOLD_PCT
-                        
+
                         # Check absolute difference
                         if diff > threshold_cents:
                             # Check relative difference
@@ -3591,14 +3596,14 @@ class KalshiMarketStateStore:
                                         f"({rel_diff:.1%} > {threshold_pct:.1%})"
                                     )
                                     return None
-                
+
                 # Update health to degraded if using REST
                 with self._lock:
                     if self._health_state.get(ticker) != QuoteHealth.SUSPENDED:
                         self._health_state[ticker] = QuoteHealth.DEGRADED
-                
+
                 return quote
-            
+
             else:
                 # REST fetch failed
                 with self._lock:
@@ -3607,7 +3612,7 @@ class KalshiMarketStateStore:
                     if self._consecutive_failures[ticker] >= 3:
                         self._health_state[ticker] = QuoteHealth.SUSPENDED
                 return None
-                
+
         except Exception as e:
             logger.error("[market-state] REST fetch failed for %s: %s", ticker, e)
             with self._lock:
@@ -3618,7 +3623,7 @@ class KalshiMarketStateStore:
 
     async def _cross_validate_with_rest(self, ticker: str, primary_quote: MarketQuote) -> None:
         """Cross-validate primary quote with REST data (background task).
-        
+
         This is called asynchronously to avoid blocking the main quote fetch.
         It updates health state based on cross-validation results.
         """
@@ -3626,23 +3631,23 @@ class KalshiMarketStateStore:
             from merid.event_venues.kalshi.client import get_kalshi_client
             client = get_kalshi_client()
             market = await client.get_market(ticker)
-            
+
             if not market:
                 return
-            
+
             with self._lock:
                 self._rest_last_fetch[ticker] = time.monotonic()
-            
+
             # Get REST price
             rest_mid = None
             if hasattr(market, 'last_price') and market.last_price:
                 rest_mid = int(market.last_price * 100)
-            
+
             if rest_mid and primary_quote.mid_cents:
                 diff = abs(primary_quote.mid_cents - rest_mid)
                 threshold_cents = _CROSS_VALIDATION_THRESHOLD_CENTS
                 threshold_pct = _CROSS_VALIDATION_THRESHOLD_PCT
-                
+
                 # Check absolute difference
                 if diff > threshold_cents:
                     # Check relative difference
@@ -3658,41 +3663,41 @@ class KalshiMarketStateStore:
                                 ticker, primary_quote.mid_cents, rest_mid, diff, rel_diff, threshold_pct
                             )
                             return
-            
+
             # Cross-validation passed - mark as healthy
             with self._lock:
                 if self._health_state.get(ticker) != QuoteHealth.SUSPENDED:
                     self._health_state[ticker] = QuoteHealth.HEALTHY
                     primary_quote.health = QuoteHealth.HEALTHY
                     primary_quote.source = QuoteSource.COMPOSITE
-                    
+
         except Exception as e:
             logger.debug("[market-state] Cross-validation failed for %s: %s", ticker, e)
 
     def get_trusted_quote_sync(self, ticker: str) -> Optional[MarketQuote]:
         """Synchronous version of get_trusted_quote with REST fallback.
-        
+
         This is for use in synchronous contexts where async/await is not available.
         It first checks cached data, then falls back to a synchronous REST fetch if needed.
-        
+
         Args:
             ticker: Kalshi market ticker (e.g., "KXBTC15M-26MAY112345-45")
-            
+
         Returns:
             MarketQuote with health state, or None if no data available
         """
         from config.kalshi_crypto_config import kalshi_ticker_to_asset
         from merid.event_venues.kalshi.market_filter import get_series_timeframe_bucket
-        
+
         # Extract series ticker from market ticker
         asset = kalshi_ticker_to_asset(ticker) or "UNKNOWN"
         timeframe = get_series_timeframe_bucket(ticker) or "UNKNOWN"
         series_ticker = f"{asset.upper()}{timeframe.upper()}" if asset != "UNKNOWN" else "UNKNOWN"
-        
+
         # First, try to get from cache
         with self._lock:
             state = self._states.get(ticker)
-            
+
             if state:
                 # Check circuit breaker
                 circuit_breaker_until = self._circuit_breaker_until.get(ticker, 0.0)
@@ -3705,22 +3710,22 @@ class KalshiMarketStateStore:
                     # Record rejected quote metric
                     self._record_metric(ticker, "rejected_quotes", 1.0)
                     return None
-                
+
                 # Check if primary (WebSocket) data is fresh
                 primary_fresh = False
                 age = 0.0
                 if state.book_initialized and state.last_book_update_ts > 0.0:
                     age = time.monotonic() - state.last_book_update_ts
                     primary_fresh = age <= _PRIMARY_STALE_SECONDS
-                
+
                 # Get current health state
                 current_health = self._health_state.get(ticker, QuoteHealth.HEALTHY)
-                
+
                 # If suspended, return None
                 if current_health == QuoteHealth.SUSPENDED:
                     logger.warning("[market-state] Market %s suspended - rejecting quote", ticker)
                     return None
-                
+
                 # Check if we have valid prices
                 has_valid_prices = (
                     (state.mid_cents and 0 < state.mid_cents < 100) or
@@ -3740,23 +3745,23 @@ class KalshiMarketStateStore:
                         state.book_initialized, state.last_book_update_ts, state.last_rest_update_ts,
                         self._health_state.get(ticker, "unknown")
                     )
-                
+
                 if has_valid_prices:
                     # Build quote from cached state
                     source = QuoteSource.WEBSOCKET if primary_fresh else QuoteSource.REST
                     health = QuoteHealth.HEALTHY if primary_fresh else QuoteHealth.DEGRADED
                     is_fallback = not primary_fresh
-                    
+
                     # Calculate age_ms and confidence
                     ts_exchange = state.last_book_update_ts if primary_fresh else state.last_rest_update_ts
                     age_ms = (time.monotonic() - ts_exchange) * 1000.0
-                    
+
                     # Record quote age metric
                     self._record_metric(ticker, "quote_age", age_ms)
-                    
+
                     # Confidence based on freshness: 1.0 if fresh, decays to 0.0 at TTL
                     confidence = max(0.0, 1.0 - (age_ms / 1000.0) / _MAX_QUOTE_TTL_SECONDS)
-                    
+
                     # TTL enforcement: reject if older than max TTL
                     if age_ms / 1000.0 > _MAX_QUOTE_TTL_SECONDS:
                         logger.warning(
@@ -3765,12 +3770,12 @@ class KalshiMarketStateStore:
                         )
                         self._record_metric(ticker, "rejected_quotes", 1.0)
                         return None
-                    
+
                     diagnostics = []
                     if not primary_fresh:
                         diagnostics.append(f"Primary feed stale (age={age:.1f}s), using cached data")
                         logger.info("[market-state] Using degraded quote for %s: age=%.1fms, confidence=%.2f", ticker, age_ms, confidence)
-                    
+
                     quote = MarketQuote(
                         market_ticker=ticker,
                         series_ticker=series_ticker,
@@ -3788,9 +3793,9 @@ class KalshiMarketStateStore:
                         executable=primary_fresh,  # Only executable if primary is fresh
                         diagnostics=diagnostics
                     )
-                    
+
                     return quote
-        
+
         # FIX: Cap retry loops to prevent thrashing (3 attempts max)
         with self._lock:
             retry_count = self._quote_retry_count.get(ticker, 0)
@@ -3808,7 +3813,7 @@ class KalshiMarketStateStore:
                 return None
             # Increment retry counter before attempting REST fallback
             self._quote_retry_count[ticker] = retry_count + 1
-        
+
         logger.warning("[market-state] No valid cached data for %s - attempting REST fallback (attempt %d/3)", ticker, retry_count + 1)
         # DIAGNOSTIC: Log cache status to debug why cache is empty (store-level only)
         with self._lock:
@@ -3827,17 +3832,17 @@ class KalshiMarketStateStore:
             import os
             from utils.http_client import get_shared_ssl_context
             from merid.event_venues.kalshi.client import get_kalshi_client
-            
+
             # Use existing Kalshi client for authentication (API Key + RSA signature)
             client = get_kalshi_client()
-            
+
             # Use synchronous httpx for REST fallback (works from any context)
             kalshi_base_url = os.getenv("KALSHI_API_URL", "https://external-api.kalshi.com/trade-api/v2")
             path = f"/markets/{ticker}"
-            
+
             # Generate RSA authentication headers using the client's method
             auth_headers = client._sign_headers("GET", path)
-            
+
             # BUG-FIX (2026-05-12): Added explicit timeout to prevent indefinite blocking
             # This is a sync function for sync contexts; if called from async, it will block.
             # Use get_trusted_quote (async version) instead from async contexts.
@@ -3882,13 +3887,13 @@ class KalshiMarketStateStore:
                         del self._circuit_breaker_until[ticker]
                         self._record_metric(ticker, "half_open_successes", 1.0)
                         logger.info("[market-state] Circuit breaker half-open success for %s - breaker cleared", ticker)
-                
+
                 # Parse market data from REST response
                 market = market_data["market"]
                 best_bid = None
                 best_ask = None
                 mid = None
-                
+
                 # Parse yes_bid/yes_ask from market data
                 price_source = "standard"
 
@@ -3951,26 +3956,26 @@ class KalshiMarketStateStore:
                         ticker, best_bid, best_ask
                     )
                     return None
-                
+
                 # Determine market status
                 status = "open"
                 if "status" in market:
                     status = str(market["status"]).lower()
-                
+
                 # If market is closed/paused, mark as suspended
                 if status in ("closed", "paused"):
                     with self._lock:
                         self._health_state[ticker] = QuoteHealth.SUSPENDED
                     logger.warning("[market-state] Market %s is %s - suspending and rejecting quote", ticker, status)
                     return None
-                
+
                 # Check if we have valid prices from REST
                 has_valid_prices = (
                     (mid and 0 < mid < 100) or
                     (best_bid and 0 < best_bid < 100) or
                     (best_ask and 0 < best_ask < 100)
                 )
-                
+
                 if not has_valid_prices:
                     # DIAGNOSTIC: Log actual values to understand why validation fails
                     logger.error(
@@ -4008,11 +4013,11 @@ class KalshiMarketStateStore:
                         ts_exchange = time.time()
                 elif not isinstance(ts_exchange, (int, float)):
                     ts_exchange = time.time()
-                
+
                 # Use time.time() for both to ensure consistent clock comparison
                 now = time.time()
                 age_ms = (now - ts_exchange) * 1000.0
-                
+
                 # Calculate confidence based on age (configurable thresholds)
                 # REST fallback gets lower confidence but can be HEALTHY if fresh
                 import os
@@ -4021,7 +4026,7 @@ class KalshiMarketStateStore:
                 _rest_high_confidence = float(os.getenv("MERID_KALSHI_REST_HIGH_CONFIDENCE", "0.8"))  # Default 0.8
                 _rest_mid_confidence = float(os.getenv("MERID_KALSHI_REST_MID_CONFIDENCE", "0.6"))  # Default 0.6
                 _rest_low_confidence = float(os.getenv("MERID_KALSHI_REST_LOW_CONFIDENCE", "0.5"))  # Default 0.5
-                
+
                 # Validate and clamp thresholds to sane ranges
                 if _rest_healthy_threshold_ms < 0:
                     logger.warning("[market-state] REST healthy threshold must be >= 0ms, clamping to 0ms")
@@ -4032,7 +4037,7 @@ class KalshiMarketStateStore:
                         _rest_degraded_threshold_ms, _rest_healthy_threshold_ms
                     )
                     _rest_degraded_threshold_ms = _rest_healthy_threshold_ms + 30000
-                
+
                 # Validate and clamp confidence values to [0, 1]
                 _rest_high_confidence_clamped = _rest_high_confidence
                 _rest_mid_confidence_clamped = _rest_mid_confidence
@@ -4053,12 +4058,12 @@ class KalshiMarketStateStore:
                             _rest_mid_confidence_clamped = val
                         else:
                             _rest_low_confidence_clamped = val
-                
+
                 # Use clamped values for actual assignment
                 _rest_high_confidence = _rest_high_confidence_clamped
                 _rest_mid_confidence = _rest_mid_confidence_clamped
                 _rest_low_confidence = _rest_low_confidence_clamped
-                
+
                 if age_ms < _rest_healthy_threshold_ms:
                     confidence = _rest_high_confidence
                     health = QuoteHealth.HEALTHY
@@ -4080,7 +4085,7 @@ class KalshiMarketStateStore:
                         "[market-state] REST fallback quote for %s is stale (age=%.1fms >= %.1fms): confidence=%.2f, health=DEGRADED",
                         ticker, age_ms, _rest_degraded_threshold_ms, confidence
                     )
-                
+
                 # Build quote
                 quote = MarketQuote(
                     market_ticker=ticker,
@@ -4098,20 +4103,20 @@ class KalshiMarketStateStore:
                     health=health,
                     diagnostics=[f"No cached data, using REST fallback (age={age_ms/1000:.1f}s)"]
                 )
-                
+
                 # Update health state based on calculated health (not hardcoded to DEGRADED)
                 with self._lock:
                     if self._health_state.get(ticker) != QuoteHealth.SUSPENDED:
                         self._health_state[ticker] = health
-                
+
                 logger.info(
                     "[market-state] REST fallback successful for %s: age=%.1fms, confidence=%.2f, health=%s, status=%s",
                     ticker, age_ms, confidence, health, status
                 )
                 return quote
-            
+
             return None
-                
+
         except Exception as e:
             logger.error("[market-state] REST fetch failed for %s: %s", ticker, e)
             with self._lock:
@@ -4287,7 +4292,7 @@ class KalshiMarketStateStore:
             logger.debug(f"[BOUNDARY-4-STATE→UNIFIED] ticker={ticker} Using current time as timestamp: state.last_book_update_ts={state_ts} -> book_ts={book_ts}")
         else:
             book_ts = state_ts
-        
+
         book = OrderbookSnapshot(
             ticker=ticker,
             yes_bids=_to_levels(yes_bids_raw),
@@ -4333,26 +4338,26 @@ class KalshiMarketStateStore:
             metrics.record_duality_violation(ticker, gap)
         except Exception as e:
             logger.debug("[METRICS] Failed to record duality violation telemetry: %s", e)
-        
+
         now = time.monotonic()
         if not hasattr(self, "_duality_violation_counts"):
             self._duality_violation_counts = {}
         if not hasattr(self, "_duality_violation_window_ts"):
             self._duality_violation_window_ts = {}
-        
+
         # Initialize tracking for ticker
         if ticker not in self._duality_violation_counts:
             self._duality_violation_counts[ticker] = 0
             self._duality_violation_window_ts[ticker] = now
-        
+
         # Reset count if window expired (30s window)
         if now - self._duality_violation_window_ts[ticker] > 30.0:
             self._duality_violation_counts[ticker] = 0
             self._duality_violation_window_ts[ticker] = now
-        
+
         # Increment violation count
         self._duality_violation_counts[ticker] += 1
-        
+
         # Only trigger resync if violations exceed threshold (3 in 30s)
         if self._duality_violation_counts[ticker] >= 3:
             logger.warning(
@@ -4400,17 +4405,17 @@ class KalshiMarketStateStore:
             self._last_duality_resync_ts = {}
         if not hasattr(self, "_duality_resync_backoff_s"):
             self._duality_resync_backoff_s = {}
-        
+
         last_ts = self._last_duality_resync_ts.get(ticker, 0.0)
         backoff_s = self._duality_resync_backoff_s.get(ticker, 10.0)
-        
+
         if now - last_ts < backoff_s:
             return
-        
+
         # Exponential backoff: 10s → 20s → 40s → 60s (max)
         self._duality_resync_backoff_s[ticker] = min(backoff_s * 2, 60.0)
         self._last_duality_resync_ts[ticker] = now
-        
+
         # CRITICAL FIX (2026-07-29): Record telemetry for triggered resyncs
         try:
             from merid.event_venues.kalshi.metrics import get_metrics_collector
@@ -4418,7 +4423,7 @@ class KalshiMarketStateStore:
             metrics.record_duality_resync_triggered(ticker, backoff_s)
         except Exception as e:
             logger.debug("[METRICS] Failed to record triggered resync telemetry: %s", e)
-        
+
         try:
             import asyncio
             loop = getattr(self, "_main_event_loop", None)
@@ -4439,14 +4444,14 @@ class KalshiMarketStateStore:
         self, state: KalshiMarketState, ob: LocalOrderbook, ticker: str, via: str = "unknown"
     ) -> None:
         """Copy the book-owned fields from a ``LocalOrderbook`` into *state*.
-        
+
         DEADLOCK-FIX (2026-05-12): This method is called from apply_orderbook_message
         which already holds self._lock. Therefore, this method must NOT acquire the lock.
         All state mutations happen here under the caller's lock.
-        
+
         Thread-safety: LocalOrderbook is shared across threads via MultiMarketOrderbook.
         This method assumes the caller already holds self._lock.
-        
+
         Args:
             state: KalshiMarketState to update
             ob: LocalOrderbook to copy from
@@ -4454,7 +4459,7 @@ class KalshiMarketStateStore:
             via: Provenance tag for transport health tracking
         """
         # All operations here are under the caller's lock (from apply_orderbook_message)
-        
+
         # CRITICAL FIX (2026-08-02): Preserve upstream timestamp instead of discarding it
         ob_ts = ob._snapshot_ts if hasattr(ob, '_snapshot_ts') else None
         if ob_ts is not None:
@@ -4463,10 +4468,11 @@ class KalshiMarketStateStore:
         else:
             state.last_book_update_ts = time.monotonic()
             logger.warning(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} NO upstream timestamp, using monotonic fallback: {state.last_book_update_ts}")
-        
+        state.last_book_update_wall_ts = time.time()
+
         state.book_initialized = ob.initialized
         state.last_update_ts = time.monotonic()  # FIX: Update last_update_ts for staleness checks
-        
+
         # P1 FIX: Set transport health fields based on via parameter
         if via == "bridge_queue":
             state.transport_mode = "ws"
@@ -4514,16 +4520,16 @@ class KalshiMarketStateStore:
         if best_bid is not None and best_ask is not None:
             best_yes_bid = best_bid[0]
             best_yes_ask = best_ask[0]
-            
+
             # Get actual NO bid from NO levels if available
             if ob.no_levels:
                 actual_best_no_bid = max(ob.no_levels.keys())
-                
+
                 # HARDENING-FIX: Read from threshold_config instead of hardcoded literal
                 duality_tolerance_cents = _threshold_config.get_duality_thresholds().duality_tolerance_cents
                 duality_gap = 100 - (best_yes_bid + actual_best_no_bid)
                 yes_no_sum = best_yes_bid + actual_best_no_bid
-                
+
                 # CRITICAL FIX (2026-07-26): Use absolute gap for symmetric tolerance
                 # A gap of -1c (YES+NO=101c) is as acceptable as +1c (YES+NO=99c)
                 # Both represent 1c deviation from perfect duality
@@ -4578,8 +4584,11 @@ class KalshiMarketStateStore:
         else:
             state.best_no_bid_cents = None
             state.best_no_ask_cents = None
-        state.mid_cents = mid
-        state.spread_cents = spread
+        # Store mid/spread as whole cents.  ob.get_midpoint() returns a float
+        # (e.g. 32.5c) which later poisons limit-price arithmetic and can produce
+        # fractional-cent prices such as 31.5c.
+        state.mid_cents = int(round(mid)) if mid is not None else None
+        state.spread_cents = int(round(spread)) if spread is not None else None
 
         # Update last good book tracking (for audit - tracks last known good state)
         from datetime import datetime, timezone
@@ -4587,20 +4596,20 @@ class KalshiMarketStateStore:
             # Only update last good book if we have valid bid/ask
             state.last_good_bid_cents = best_bid[0]
             state.last_good_ask_cents = best_ask[0]
-            state.last_good_mid_cents = mid
+            state.last_good_mid_cents = int(round(mid)) if mid is not None else None
             state.last_good_book_ts = datetime.now(timezone.utc)
             state.last_update = datetime.now(timezone.utc)
 
         # Set executable flag: True only when book has live bid/ask data
         state.executable = (best_bid is not None and best_ask is not None)
-        
+
         # CRITICAL FIX (2026-07-26): Books that violate YES/NO duality are corrupt
         # (stale window, missing snapshot, or one-sided ladder). Never mark them
         # executable - downstream pricing would produce non-marketable orders.
         if duality_violation:
             state.executable = False
             state.data_quality = "SUSPECT"
-        
+
         # CRITICAL: Detect (0,100) anomaly - indicates no real liquidity
         # This pattern occurs when orderbook has no executable resting orders
         # or parsing/rounding anomaly resulted in default values
@@ -4640,7 +4649,7 @@ class KalshiMarketStateStore:
         state.depth_10c = depth_10c
         state.depth_10c_yes = yes_depth
         state.depth_10c_no = no_depth
-        
+
         # AUDIT: Populate new liquidity audit fields
         state.last_update_ts = time.monotonic()
         state.has_bid = best_bid is not None
@@ -4648,16 +4657,19 @@ class KalshiMarketStateStore:
         # CRITICAL FIX (2026-08-01): Populate NO-side liquidity flags
         state.has_no_bid = state.best_no_bid_cents is not None
         state.has_no_ask = state.best_no_ask_cents is not None
+        # YES best bid and YES best ask are the two top levels of the unified order
+        # book.  In a binary market each YES level is also a NO level at (100 - p),
+        # so these sizes are reused for the opposite-side executable accessors.
         new_depth_yes = best_bid[1] if best_bid else 0
         new_depth_no = best_ask[1] if best_ask else 0
-        
+
         # Depth anomaly detection
         prev_depth_yes = state.min_depth_yes if hasattr(state, 'min_depth_yes') else None
         prev_depth_no = state.min_depth_no if hasattr(state, 'min_depth_no') else None
-        
+
         state.min_depth_yes = new_depth_yes
         state.min_depth_no = new_depth_no
-        
+
         # Log depth anomalies (order-of-magnitude changes)
         # Reduce log level to DEBUG - these are normal market microstructure events during active trading
         if prev_depth_yes is not None and prev_depth_yes > 0 and new_depth_yes < prev_depth_yes / 10:
@@ -4688,7 +4700,7 @@ class KalshiMarketStateStore:
                 prev_depth_no,
                 new_depth_no,
             )
-        
+
         # Classify liquidity status
         if not state.has_bid and not state.has_ask:
             state.liquidity_status = LiquidityStatus.MISSING
@@ -4702,25 +4714,25 @@ class KalshiMarketStateStore:
                 state.liquidity_status = LiquidityStatus.DEPTH_TOO_LOW
             else:
                 state.liquidity_status = LiquidityStatus.OK
-        
+
         # Track liquidity metrics per asset
         underlying, _ = _parse_market_ticker(ticker)
         if underlying:
             self._liquidity_samples[underlying] = self._liquidity_samples.get(underlying, 0) + 1
             if state.liquidity_status == LiquidityStatus.OK:
                 self._liquidity_ok_samples[underlying] = self._liquidity_ok_samples.get(underlying, 0) + 1
-            
+
             # Update Prometheus gauge
             if liquidity_ok_pct is not None:
                 total_samples = self._liquidity_samples[underlying]
                 ok_samples = self._liquidity_ok_samples.get(underlying, 0)
                 ok_pct = (ok_samples / total_samples * 100) if total_samples > 0 else 0.0
                 liquidity_ok_pct.labels(asset=underlying).set(ok_pct)
-        
+
         # AUDIT: Update per-ticker snapshot counters
         self._snapshots_applied_total[ticker] = self._snapshots_applied_total.get(ticker, 0) + 1
         self._last_snapshot_ts[ticker] = state.last_update_ts
-        
+
         # AUDIT: Log STATE-AFTER-WRITE with new liquidity audit fields
         logger.info(
             "[STATE-AFTER-WRITE] ticker=%s bid=%s ask=%s initialized=%s executable=%s "
@@ -4797,7 +4809,7 @@ class KalshiMarketStateStore:
             logger.debug(f"[BOUNDARY-4-STATE→UNIFIED] ticker={ticker} Using current time as timestamp: state.last_book_update_ts={state_ts} -> book_ts={book_ts}")
         else:
             book_ts = state_ts
-        
+
         book = OrderbookSnapshot(
             ticker=ticker,
             yes_bids=_to_levels(yes_bids_raw),
@@ -4831,7 +4843,7 @@ class KalshiMarketStateStore:
 
 def _recompute_seconds_to_expiry(state: KalshiMarketState) -> None:
     """Recompute ``state.seconds_to_expiry`` in-place from expiry ISO strings.
-    
+
     STAGE 1 FIX: Use authoritative normalization function for 15m crypto contracts.
     This enforces symmetric treatment across BTC/ETH/SOL/XRP/DOGE.
     For non-15m contracts, use original fail-fast logic (legacy path).
@@ -4841,7 +4853,7 @@ def _recompute_seconds_to_expiry(state: KalshiMarketState) -> None:
         state.ticker.startswith(prefix) and "15M" in state.ticker.upper()
         for prefix in ["KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"]
     )
-    
+
     if is_15m_crypto:
         # Use authoritative normalization function for 15m crypto contracts
         # This is the SINGLE SOURCE OF TRUTH for expiry metadata
@@ -4867,15 +4879,22 @@ def _recompute_seconds_to_expiry(state: KalshiMarketState) -> None:
                 state.ticker, exc
             )
             _recompute_seconds_to_expiry_fallback(state)
+
+        # Never report negative time-to-expiry; downstream logic treats this as a live value.
+        if state.seconds_to_expiry is not None and state.seconds_to_expiry < 0:
+            state.seconds_to_expiry = 0.0
     else:
         # Non-15m: use original fail-fast logic (legacy path)
         # TODO: Eventually migrate these to use normalization function as well
         _recompute_seconds_to_expiry_fallback(state)
+        # Ensure past expiry is floored at 0.0 for non-15m fallback too.
+        if state.seconds_to_expiry is not None and state.seconds_to_expiry < 0:
+            state.seconds_to_expiry = 0.0
 
 
 def _recompute_seconds_to_expiry_fallback(state: KalshiMarketState) -> None:
     """Fallback expiry computation for non-15m contracts.
-    
+
     P0 FIX: Fail-fast on missing or invalid expiry.
     If expiry cannot be computed, set seconds_to_expiry to 0 (already expired)
     and log a warning to prevent downstream processing of invalid markets.
@@ -4932,23 +4951,23 @@ def get_kalshi_market_state_store() -> KalshiMarketStateStore:
     CRITICAL FIX: Thread-safe singleton with double-checked locking.
     The module-level _store variable is shared across the entire process,
     so all calls from any thread/event loop will return the same instance.
-    
+
     CRITICAL FIX (2026-08-01): Eagerly initialize async lock during store creation
     to prevent race conditions where locks are created in the wrong event loop.
     """
     import threading
     global _store, _store_lock_async
-    logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: checking if _store is None thread=%s", 
+    logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: checking if _store is None thread=%s",
                threading.current_thread().name)
     if _store is None:
         with _store_lock:
             if _store is None:
-                logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: _store is None, creating new instance thread=%s", 
+                logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: _store is None, creating new instance thread=%s",
                           threading.current_thread().name)
                 logger.info("[MARKET-STATE] store init starting")
                 try:
                     _store = KalshiMarketStateStore()
-                    logger.info("[MARKET-STATE] store init completed id=%d thread=%s", 
+                    logger.info("[MARKET-STATE] store init completed id=%d thread=%s",
                               id(_store), threading.current_thread().name)
                     # CRITICAL FIX (2026-08-01): Eagerly initialize async lock in current event loop
                     # This prevents race conditions where locks are created in wrong event loop
@@ -4967,7 +4986,7 @@ def get_kalshi_market_state_store() -> KalshiMarketStateStore:
             else:
                 logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: another thread created store_id=%s", id(_store))
     else:
-        logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: returning existing store_id=%s thread=%s", 
+        logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: returning existing store_id=%s thread=%s",
                    id(_store), threading.current_thread().name)
     logger.debug("[BOOT-TRACE] get_kalshi_market_state_store: returning _store")
     return _store
