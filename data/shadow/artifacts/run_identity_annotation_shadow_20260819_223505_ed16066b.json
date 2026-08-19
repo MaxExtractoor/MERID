@@ -1,0 +1,11 @@
+{
+  "record_type": "run_identity_annotation",
+  "run_id": "shadow_20260819_223505_ed16066b",
+  "run_id_commit_suffix": "ed16066b",
+  "active_git_head": "ed16066b6a51b0975db25fc017537309598e54c9",
+  "manifest_sha256": "2A5D9A766B9C784A404AC840025C08C38F32761FFBCB166E1D924B997E10840D",
+  "reason": "Valid soak start with run_id propagated to agent grid and telemetry, git/config provenance embedded, and all startup gates passing.",
+  "valid_segment_start_utc": "2026-08-19T22:36:02Z",
+  "annotation_written_utc": "2026-08-19T22:42:55Z",
+  "initial_attempt_disposition": "discarded_before_valid_soak"
+}

@@ -1,0 +1,15 @@
+{
+  "record_type": "segment_termination",
+  "run_id": "shadow_20260819_223505_ed16066b",
+  "terminated_at_utc": "2026-08-19T23:34:40Z",
+  "terminated_by": "assistant_after_full_lifecycle_close",
+  "reason": "Soak stopped after multiple full 15-minute contract lifecycles (KX*15M-26AUG191900-00, 191915-15, and 191930-30) and the shadow_report completed with exit_code 0.",
+  "report_outputs": {
+    "json": "data/shadow/reports/shadow_report_shadow_20260819_223505_ed16066b_20260819_233434.json",
+    "text": "data/shadow/reports/shadow_report_shadow_20260819_223505_ed16066b_20260819_233434.txt"
+  },
+  "report_exit_code": 0,
+  "total_records": 1939,
+  "hard_failures_count": 0,
+  "open_positions_at_termination": 0
+}
