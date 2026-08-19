@@ -1,8 +1,13 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 
 
 from datetime import datetime as dt, timezone, timedelta, datetime
+from decimal import Decimal
+
+import json
+from pathlib import Path
 
 import math
 
@@ -20,7 +25,7 @@ import os
 
 from typing import Any, Optional, Dict, List
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 
 
@@ -43,13 +48,14 @@ except ImportError:
     compute_ev_net = None  # type: ignore
     compute_fee_cents = None  # type: ignore
 
-# CF-RTI settlement input: authoritative settlement reference with basis.
+# CF-RTI settlement input: authoritative settlement reference.
+# This is the only source permitted to set settlement_reference="cfb_rti_live".
 try:
-    from data.unified_spot_service import get_settlement_input_price
-    _SETTLEMENT_INPUT_AVAILABLE = True
+    from merid.data.cf_rti_adapter import get_live_rti
+    _CFB_RTI_AVAILABLE = True
 except ImportError:
-    _SETTLEMENT_INPUT_AVAILABLE = False
-    get_settlement_input_price = None  # type: ignore
+    _CFB_RTI_AVAILABLE = False
+    get_live_rti = None  # type: ignore
 
 # Import invariant checker for production logging
 from merid.validation.regime_gating_invariants import (
@@ -79,6 +85,206 @@ except ImportError:
 
 logger = get_logger("merid.prediction.agent_grid_15m")
 
+# Minimum minutes to expiry before an entry is permitted in normal mode.
+# This is a fail-closed gate; the trade-decision layer may apply a stricter limit.
+MIN_TIME_TO_EXPIRY_FOR_ENTRY_MIN: float = 5.0
+
+
+@dataclass(frozen=True)
+class MarketValidationResult:
+    """Fail-closed market-state validation result."""
+
+    ok: bool
+    reason: str
+
+
+def _write_shadow_telemetry(
+    *,
+    run_id: str,
+    decision_id: str,
+    ticker: str,
+    asset: str,
+    target_price: float,
+    seconds_to_expiry: float,
+    settlement_reference: str,
+    cfb_observation: Optional[Any],
+    decision: Any,
+    public_spot: float = 0.0,
+    spot_price: float = 0.0,
+    cf_rti_basis: float = 0.0,
+    yes_bid_cents: float = 0.0,
+    yes_ask_cents: float = 0.0,
+    no_bid_cents: float = 0.0,
+    no_ask_cents: float = 0.0,
+    fee_per_contract_cents: float = 0.0,
+    annualized_vol: float = 0.60,
+    data_quality: str = "unknown",
+    regime: str = "unknown",
+) -> None:
+    """Persist the raw CF-RTI and decision inputs for shadow-mode replay.
+
+    This runs even when ``MERID_ALLOW_LIVE_TRADES`` is false, so every
+    candidate can be replayed and reconciled against the live feed before
+    canary trading is enabled.
+    """
+    if os.environ.get("MERID_CFB_RTI_SHADOW_TELEMETRY", "1").strip().lower() in ("0", "false", "off"):
+        return
+    try:
+        now_ms = int(time.time() * 1000)
+        expiry_ts_ms = now_ms + int(seconds_to_expiry * 1000)
+
+        edge_breakdown = decision.edge_breakdown
+        if edge_breakdown is not None:
+            edge_breakdown = {
+                k: float(v) if isinstance(v, Decimal) and v is not None else v
+                for k, v in asdict(edge_breakdown).items()
+            }
+
+        timestamp_utc = decision.timestamp_utc
+        if isinstance(timestamp_utc, datetime):
+            timestamp_utc = timestamp_utc.isoformat().replace("+00:00", "Z")
+
+        payload = {
+            "schema_version": 1,
+            "record_type": "candidate",
+            "run_id": run_id,
+            "decision_id": decision_id,
+            "timestamp_utc": timestamp_utc,
+            "market_ticker": ticker,
+            "asset": asset,
+            "target_price": float(target_price) if target_price else 0.0,
+            "spot_price": float(spot_price) if spot_price else 0.0,
+            "public_spot": float(public_spot) if public_spot else 0.0,
+            "cf_rti_basis": float(cf_rti_basis),
+            "expiry_ts_ms": expiry_ts_ms,
+            "seconds_to_expiry": float(seconds_to_expiry),
+            "settlement_reference": settlement_reference,
+            "cfb_symbol": cfb_observation.cfb_symbol if cfb_observation is not None else None,
+            "cfb_value": float(cfb_observation.value) if cfb_observation is not None else None,
+            "cfb_source_ts_ms": cfb_observation.source_ts_ms if cfb_observation is not None else None,
+            "cfb_received_ts_ms": cfb_observation.received_ts_ms if cfb_observation is not None else None,
+            "cfb_age_ms": cfb_observation.age_ms if cfb_observation is not None else None,
+            "cfb_sequence": cfb_observation.sequence if cfb_observation is not None else None,
+            "cfb_60s_average": float(cfb_observation.cfb_60s_average) if cfb_observation is not None and cfb_observation.cfb_60s_average is not None else None,
+            "price_source_health": cfb_observation.price_source_health if cfb_observation is not None else None,
+            "p_yes": float(decision.p_yes_calibrated),
+            "p_no": float(decision.p_no_calibrated),
+            "p_selected": float(decision.p_selected) if decision.p_selected is not None else None,
+            "p_opposite": float(decision.p_opposite) if decision.p_opposite is not None else None,
+            "gross_edge": float(decision.gross_edge) if decision.gross_edge is not None else None,
+            "net_edge": float(decision.net_edge) if decision.net_edge is not None else None,
+            "confidence": float(decision.confidence) if decision.confidence is not None else None,
+            "confidence_valid": decision.confidence_valid,
+            "confidence_source": decision.confidence_source,
+            "confidence_reasons": list(decision.confidence_reasons or []),
+            "selected_outcome": decision.selected_outcome,
+            "selected_action": decision.selected_action,
+            "selected_outcome_price": int(round(float(decision.selected_outcome_price) * 100)) if decision.selected_outcome_price is not None else None,
+            "yes_bid_cents": float(yes_bid_cents),
+            "yes_ask_cents": float(yes_ask_cents),
+            "no_bid_cents": float(no_bid_cents),
+            "no_ask_cents": float(no_ask_cents),
+            "yes_depth_cc": float(decision.yes_depth_cc) if decision.yes_depth_cc is not None else 0.0,
+            "no_depth_cc": float(decision.no_depth_cc) if decision.no_depth_cc is not None else 0.0,
+            "fee_per_contract_cents": float(fee_per_contract_cents),
+            "annualized_vol": float(annualized_vol),
+            "min_required_edge": float(decision.min_required_edge) if decision.min_required_edge is not None else None,
+            "model_risk_reserve": float(decision.model_risk_reserve) if decision.model_risk_reserve is not None else None,
+            "data_quality": data_quality,
+            "regime": regime,
+            "rejection_reason": decision.no_trade_reason,
+            "policy_version": decision.policy_version,
+            "edge_breakdown": edge_breakdown,
+            "git_revision": os.environ.get("MERID_GIT_REVISION"),
+            "config_hash": os.environ.get("MERID_CONFIG_HASH"),
+        }
+        out_dir = Path("data/shadow/cfb_rti")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        out_path = out_dir / f"{run_id}_{ticker}_{ts}_{decision_id[:8]}.json"
+        out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("[SHADOW-TELEMETRY] Failed to write: %s", exc)
+
+
+def validate_market_state_for_entry(
+    asset: str,
+    market_id: str,
+    state: Any,
+    minutes_to_expiry: float,
+    min_depth_yes: int,
+    min_depth_no: int,
+    max_md_staleness_sec: float,
+) -> MarketValidationResult:
+    """Fail-closed gate: validate that market state is safe for a new entry.
+
+    This is the canonical pre-decision market gate. It checks state existence,
+    book initialization, liquidity, staleness, bid/ask anomalies, depth, and
+    expiry. It must never mutate state.
+    """
+    if state is None:
+        return MarketValidationResult(ok=False, reason="STATE-NONE")
+
+    if not getattr(state, "book_initialized", False):
+        return MarketValidationResult(ok=False, reason="BOOK-NOT-INITIALIZED")
+
+    if not getattr(state, "executable", False):
+        return MarketValidationResult(ok=False, reason="NOT-EXECUTABLE")
+
+    now = time.time()
+    last_update_ts = getattr(state, "last_update_ts", 0.0)
+    staleness_sec = now - last_update_ts if last_update_ts else 0.0
+    if staleness_sec <= 0 and getattr(state, "last_update", None) is not None:
+        try:
+            staleness_sec = (datetime.now(timezone.utc) - state.last_update).total_seconds()
+        except Exception:
+            staleness_sec = 0.0
+    if staleness_sec > max_md_staleness_sec:
+        return MarketValidationResult(ok=False, reason="MD-STALE")
+
+    best_bid = getattr(state, "best_bid_cents", 0) or 0
+    best_ask = getattr(state, "best_ask_cents", 0) or 0
+    if best_bid == 0 and best_ask == 100:
+        return MarketValidationResult(ok=False, reason="PATTERN-0100")
+    if best_bid == 0 or best_ask == 0:
+        return MarketValidationResult(ok=False, reason="NO-BIDASK")
+
+    if state.min_depth_yes < min_depth_yes:
+        return MarketValidationResult(
+            ok=False,
+            reason=f"DEPTH-LOW:yes_depth={state.min_depth_yes}<threshold={min_depth_yes}",
+        )
+    if state.min_depth_no < min_depth_no:
+        return MarketValidationResult(
+            ok=False,
+            reason=f"DEPTH-LOW:no_depth={state.min_depth_no}<threshold={min_depth_no}",
+        )
+
+    if minutes_to_expiry < MIN_TIME_TO_EXPIRY_FOR_ENTRY_MIN:
+        return MarketValidationResult(ok=False, reason="EXPIRY-TOO-CLOSE-NORMAL")
+
+    return MarketValidationResult(ok=True, reason="OK")
+
+
+def _get_settlement_input_price(asset: str, spot_price: float) -> tuple:
+    """Resolve the authoritative settlement reference price.
+
+    ``get_live_rti`` is the only source that can emit ``cfb_rti_live``.  If it
+    returns ``None`` the adapter has already logged the precise rejection reason
+    and we must not fabricate a public-spot fallback as if it were a settlement
+    reference.  The ``spot_price`` is retained only for basis telemetry.
+    """
+    if _CFB_RTI_AVAILABLE and get_live_rti is not None:
+        obs = get_live_rti(asset)
+        if obs is not None:
+            cf_rti_basis = spot_price - obs.value
+            return obs.value, cf_rti_basis, "cfb_rti_live", obs
+
+    # No authoritative RTI: honest public-spot fallback, which downstream gates
+    # will reject for entry because the reference is not ``cfb_rti_live``.
+    from merid.data.cf_rti_adapter import get_last_rejection_reason
+    reason = get_last_rejection_reason(asset) or "cf_rti_unavailable"
+    return spot_price, 0.0, f"public_spot_fallback:{reason}", None
 
 
 # Import unified signal terminology for consistent side selection
@@ -142,6 +348,18 @@ except ImportError:
     def get_bias_monitor() -> None:
         return None
 
+# Import directional anomaly circuit breaker and trace for YES/NO parity.
+# Disabled by default in unit tests; required for live 15m signal integrity.
+try:
+    from merid.validation.yes_no_parity_checker import (
+        get_directional_anomaly_breaker,
+        emit_directional_trace,
+    )
+    DIRECTIONAL_BREAKER_AVAILABLE = True
+except ImportError:
+    DIRECTIONAL_BREAKER_AVAILABLE = False
+    logger.debug("[DIRECTIONAL-BREAKER] Not available - parity guard disabled")
+
 # Import canonical price range from binary price space (single source of truth)
 try:
     from merid.event_venues.kalshi.binary_price_space import (
@@ -191,65 +409,9 @@ def format_price(asset: str, price: float) -> str:
 
 
 
-# Kalshi fee calculation (2026 industry standard)
-
-# Kalshi charges 7% × p × (1-p) on winning trades, capped at $0.0175
-
-# This function calculates the fee in cents for a given probability
-
-def calculate_kalshi_fee_cents(probability: float, price_cents: int) -> float:
-
-    """
-
-    Calculate Kalshi fee in cents for a winning trade.
-
-
-
-    Formula: fee = 7% × p × (1-p) × contract_price
-
-    Capped at $0.0175 (1.75 cents) per contract
-
-
-
-    Args:
-
-        probability: Market-implied probability (0.0 to 1.0)
-
-        price_cents: Contract price in cents (0 to 100)
-
-
-
-    Returns:
-
-        Fee in cents (capped at 1.75 cents)
-
-    """
-
-    # Clamp probability to valid range
-
-    probability = max(0.0, min(1.0, probability))
-
-
-
-    # Calculate fee percentage: 7% × p × (1-p)
-
-    fee_pct = 0.07 * probability * (1.0 - probability)
-
-
-
-    # Calculate fee in cents
-
-    fee_cents = fee_pct * price_cents
-
-
-
-    # Cap at $0.0175 (1.75 cents) per contract
-
-    fee_cents = min(fee_cents, 1.75)
-
-
-
-    return fee_cents
+# Kalshi fee calculation uses the canonical fees module (imported at module end
+# as canonical_calculate_kalshi_fee_cents).  The old local 7%-only formula with
+# a 1.75c cap was incorrect; it ignored tiered rates and the 2c floor.
 
 
 
@@ -283,6 +445,99 @@ def calculate_velocity_edge(velocity: float, velocity_threshold: float) -> float
         return 0.0
 
     return abs(velocity / velocity_threshold) * 2.0
+
+
+
+# 2026-08-17: asset-invariant MACD edge.  The indicator stack returns MACD
+# histogram in absolute price units.  Before contributing to percentage-point
+# edge, it is normalized by the contemporaneous spot price so a $1.50 MACD
+# move on BTC is treated the same as a $0.0015 move on an alt.
+MERID_MACD_EDGE_WEIGHT = float(os.environ.get("MERID_MACD_EDGE_WEIGHT", "10.0"))
+MERID_MAX_EDGE_PCT = float(os.environ.get("MERID_MAX_EDGE_PCT", "15.0"))
+
+
+def _fvg_edge_components(
+    score: int,
+    side_velocity_sign: float,
+    velocity: float,
+    velocity_threshold: float,
+    macd_hist: float,
+    spot_price: float,
+    rsi: float,
+    rsi_zone: str,
+    fvg_dir: Optional[str],
+    fvg_conf: float,
+    macd_edge_weight: Optional[float] = None,
+    max_edge_pct: Optional[float] = None,
+) -> Dict[str, float]:
+    """Compute the momentum-FVG edge for one side and return all components.
+
+    Returns a dict with:
+      - edge_pct: final capped edge in percentage points
+      - base_edge: velocity-derived base after alignment bonus (before MACD)
+      - macd_pct: MACD histogram as a percentage of spot price (signed)
+      - macd_edge: MACD contribution in percentage points (signed, side-aware)
+      - velocity_bonus: velocity alignment bonus in percentage points
+    """
+    # Score scaling: confluence discount/boost applied at the end.
+    # A score below the historical minimum (3) now receives a smooth
+    # multiplier rather than a hard 0.5 override, so a weak side still
+    # reflects its MACD/velocity components.  The multiplier is floored at
+    # 0.5 to retain some confluence gating while avoiding the unit-corrected
+    # edge being silently replaced by a constant.
+    score_mult = max(0.5, 1.0 + (score - 3) * 0.1)
+
+    if velocity_threshold == 0:
+        velocity_threshold = 1e-12
+
+    velocity_magnitude = abs(velocity)
+    base_edge = calculate_velocity_edge(velocity_magnitude, velocity_threshold)
+
+    velocity_alignment_bonus = 0.0
+    if side_velocity_sign > 0 and velocity > 0:
+        velocity_alignment_bonus = velocity * 1000.0
+    elif side_velocity_sign < 0 and velocity < 0:
+        velocity_alignment_bonus = abs(velocity) * 1000.0
+    elif side_velocity_sign > 0 and velocity < 0:
+        velocity_alignment_bonus = -abs(velocity) * 500.0
+    elif side_velocity_sign < 0 and velocity > 0:
+        velocity_alignment_bonus = -abs(velocity) * 500.0
+
+    base_edge = max(base_edge + velocity_alignment_bonus, 1.0)
+
+    if spot_price is None or not math.isfinite(spot_price) or spot_price <= 0:
+        macd_pct = 0.0
+    else:
+        safe_price = max(float(spot_price), 1e-12)
+        macd_pct = (float(macd_hist if macd_hist is not None else 0.0) / safe_price) * 100.0
+
+    weight = macd_edge_weight if macd_edge_weight is not None else MERID_MACD_EDGE_WEIGHT
+    macd_edge = macd_pct * weight * (1.0 if side_velocity_sign > 0 else -1.0)
+
+    edge = base_edge + macd_edge
+
+    if rsi_zone == "oversold" and side_velocity_sign > 0:
+        edge += 1.0
+    elif rsi_zone == "overbought" and side_velocity_sign < 0:
+        edge += 1.0
+
+    if fvg_conf > 0.5 and fvg_dir:
+        if (side_velocity_sign > 0 and fvg_dir == "bullish") or (
+            side_velocity_sign < 0 and fvg_dir == "bearish"
+        ):
+            edge += fvg_conf * 2.0
+
+    # Apply the confluence multiplier to the full normalized edge.
+    edge *= score_mult
+
+    cap = max_edge_pct if max_edge_pct is not None else MERID_MAX_EDGE_PCT
+    return {
+        "edge_pct": min(edge, cap),
+        "base_edge": base_edge,
+        "macd_pct": macd_pct,
+        "macd_edge": macd_edge,
+        "velocity_bonus": velocity_alignment_bonus,
+    }
 
 
 
@@ -340,6 +595,16 @@ MERID_EV_K_BASE = float(os.getenv("MERID_EV_K_BASE", "1.5"))
 MERID_EV_K_EXTREME = float(os.getenv("MERID_EV_K_EXTREME", "2.5"))
 MERID_EV_K_TERMINAL = float(os.getenv("MERID_EV_K_TERMINAL", "2.0"))
 
+# Momentum_FVG directional and EV invariants (2026-08-13).
+# Near-zero velocity must not be treated as a directional preference.
+MERID_MOMENTUM_FVG_MIN_CONFLUENCE_SCORE = int(os.getenv("MERID_MOMENTUM_FVG_MIN_CONFLUENCE_SCORE", "4"))
+MERID_MOMENTUM_FVG_MIN_VELOCITY_CONFLUENCE_SCORE = int(os.getenv("MERID_MOMENTUM_FVG_MIN_VELOCITY_CONFLUENCE_SCORE", "3"))
+# Use taker (cross spread) only when edge is very large or expiry is very close.
+MERID_MOMENTUM_FVG_TAKER_EDGE_PCT = float(os.getenv("MERID_MOMENTUM_FVG_TAKER_EDGE_PCT", "5.0"))
+MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS = float(os.getenv("MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS", "120.0"))
+# Calibrated execution-impact reserve added to the all-in expected cost (cents).
+MERID_EV_IMPACT_RESERVE_CENTS = float(os.getenv("MERID_EV_IMPACT_RESERVE_CENTS", "0.5"))
+
 
 def _lookup_displayed_depth(market_state: Any, signal_side: str, price_cents: int) -> Optional[int]:
     """Return displayed size at the executable quote for the selected side.
@@ -395,6 +660,10 @@ def _emit_ev_components_log(
     model_prob: float,
     decision: str = "no_trade",
     requested_contracts: int = 1,
+    fee_cents: Optional[float] = None,
+    impact_reserve_cents: float = 0.0,
+    slippage_cents: Optional[int] = None,
+    liquidity_role: str = "taker",
 ):
     """Emit a structured EV-gate decision payload.
 
@@ -407,10 +676,16 @@ def _emit_ev_components_log(
         exchange_fee_cents = 2.0
         max_slippage_guard_cents = 5
     else:
-        exchange_fee_cents = float(compute_fee_cents(price_cents))
-        max_slippage_guard_cents = int(_get_slippage_cents())
+        if fee_cents is None:
+            exchange_fee_cents = float(compute_fee_cents(price_cents))
+        else:
+            exchange_fee_cents = float(fee_cents)
+        if slippage_cents is None:
+            max_slippage_guard_cents = int(_get_slippage_cents())
+        else:
+            max_slippage_guard_cents = int(slippage_cents)
 
-    expected_entry_impact_cents = 0.0
+    expected_entry_impact_cents = float(impact_reserve_cents)
     expected_exit_fee_reserve_cents = 0.0
     expected_exit_impact_reserve_cents = 0.0
     uncertainty_buffer_cents = 0.0
@@ -427,6 +702,9 @@ def _emit_ev_components_log(
     ev_expected_cents = (model_prob * 100.0) - all_in_expected_cost_cents
     ev_robust_cents = (model_prob * 100.0) - robust_cost_cents
     raw_model_edge_cents = (model_prob - market_prob) * 100.0
+    # The actual break-even is the fee-only all-in cost; the 5c slippage guard
+    # is a worst-case limit bound, not a guaranteed realized cost.
+    break_even_edge_cents = all_in_expected_cost_cents - (market_prob * 100.0)
 
     if "yes" in price_source:
         quote_source = "yes_ask"
@@ -440,18 +718,116 @@ def _emit_ev_components_log(
     logger.info(
         "[SIGNAL-EV-GATE] asset=%s side=%s action=%s quote_price_cents=%d quote_source=%s "
         "displayed_depth=%s requested_contracts=%d market_probability=%.4f model_probability=%.4f "
-        "raw_model_edge_cents=%.4f exchange_fee_cents=%.2f expected_entry_impact_cents=%.2f "
-        "expected_exit_fee_reserve_cents=%.2f expected_exit_impact_reserve_cents=%.2f "
-        "uncertainty_buffer_cents=%.2f max_slippage_guard_cents=%d all_in_expected_cost_cents=%.2f "
-        "robust_cost_cents=%.2f ev_expected_cents=%.4f ev_robust_cents=%.4f decision=%s",
+        "raw_model_edge_cents=%.4f break_even_edge_cents=%.4f exchange_fee_cents=%.2f "
+        "expected_entry_impact_cents=%.2f expected_exit_fee_reserve_cents=%.2f "
+        "expected_exit_impact_reserve_cents=%.2f uncertainty_buffer_cents=%.2f "
+        "max_slippage_guard_cents=%d all_in_expected_cost_cents=%.2f robust_cost_cents=%.2f "
+        "ev_expected_cents=%.4f ev_robust_cents=%.4f impact_reserve_cents=%.2f "
+        "liquidity_role=%s decision=%s",
         asset, signal_side, signal_action, price_cents, quote_source,
         displayed_depth if displayed_depth is not None else "unknown",
         requested_contracts, market_prob, model_prob, raw_model_edge_cents,
-        exchange_fee_cents, expected_entry_impact_cents, expected_exit_fee_reserve_cents,
-        expected_exit_impact_reserve_cents, uncertainty_buffer_cents,
-        max_slippage_guard_cents, all_in_expected_cost_cents, robust_cost_cents,
-        ev_expected_cents, ev_robust_cents, decision
+        break_even_edge_cents, exchange_fee_cents, expected_entry_impact_cents,
+        expected_exit_fee_reserve_cents, expected_exit_impact_reserve_cents,
+        uncertainty_buffer_cents, max_slippage_guard_cents, all_in_expected_cost_cents,
+        robust_cost_cents, ev_expected_cents, ev_robust_cents, impact_reserve_cents,
+        liquidity_role, decision
     )
+
+
+
+def _build_directional_trace_payload(
+    agent,
+    *,
+    asset: str,
+    ticker: Optional[str],
+    market_state: Any,
+    buy_threshold: float,
+    sell_threshold: float,
+    yes_model_prob: float,
+    no_model_prob: float,
+    yes_edge: float,
+    no_edge: float,
+    best_bid: int,
+    best_ask: int,
+    selected_side: Optional[str],
+    selected_action: Optional[str],
+    selected_price_cents: Optional[int],
+    selected_model_prob: Optional[float],
+    selected_edge: Optional[float],
+    decision: str,
+    reason: str,
+    client_order_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a one-line structured directional trace payload.
+
+    This is the single source of truth for per-cycle YES/NO diagnostics.
+    The schema is stable and machine-parseable; keep field names unchanged.
+    """
+    import uuid
+    run_id = getattr(agent, "run_id", None)
+    if not run_id:
+        run_id = f"{getattr(agent.config, 'name', 'agent')}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
+
+    hybrid_enabled = getattr(agent.config, "signal_mode", "") == "hybrid"
+
+    yes_bid_cents = int(best_bid)
+    yes_ask_cents = int(best_ask)
+    no_bid_cents = 100 - int(best_ask)
+    no_ask_cents = 100 - int(best_bid)
+
+    quote_age_ms = getattr(market_state, "age_ms", None)
+    book_sequence = getattr(market_state, "book_sequence", None)
+
+    # Net-of-fee edges using the taker fee (conservative diagnostic)
+    if _UNIFIED_SIZING_AVAILABLE and compute_ev_net is not None:
+        yes_edge_net = compute_ev_net(yes_model_prob, yes_ask_cents)
+        no_edge_net = compute_ev_net(no_model_prob, no_ask_cents)
+    else:
+        fallback_fee = 2
+        yes_edge_net = (yes_model_prob * 100.0) - (yes_ask_cents + fallback_fee)
+        no_edge_net = (no_model_prob * 100.0) - (no_ask_cents + fallback_fee)
+
+    yes_candidate = yes_edge > 0
+    no_candidate = no_edge > 0
+
+    canonical_outcome_side = selected_side
+    canonical_book_side = "bid" if selected_side == "yes" else "ask"
+    submitted_outcome_side = selected_side
+    submitted_book_side = canonical_book_side
+
+    return {
+        "run_id": run_id,
+        "ticker": ticker,
+        "asset": asset,
+        "hybrid_enabled": hybrid_enabled,
+        "raw_signal_yes": float(buy_threshold),
+        "raw_signal_no": float(sell_threshold),
+        "model_probability_yes": float(yes_model_prob),
+        "model_probability_no": float(no_model_prob),
+        "yes_bid": yes_bid_cents / 100.0 if yes_bid_cents > 0 else None,
+        "yes_ask": yes_ask_cents / 100.0 if yes_ask_cents > 0 else None,
+        "no_bid": no_bid_cents / 100.0 if no_bid_cents > 0 else None,
+        "no_ask": no_ask_cents / 100.0 if no_ask_cents > 0 else None,
+        "quote_age_ms": quote_age_ms,
+        "book_sequence": book_sequence,
+        "yes_edge_net": round(float(yes_edge_net), 4),
+        "no_edge_net": round(float(no_edge_net), 4),
+        "yes_candidate": yes_candidate,
+        "no_candidate": no_candidate,
+        "selected_outcome": selected_side,
+        "selected_action": selected_action,
+        "selection_reason": reason,
+        "canonical_outcome_side": canonical_outcome_side,
+        "canonical_book_side": canonical_book_side,
+        "submitted_outcome_side": submitted_outcome_side,
+        "submitted_book_side": submitted_book_side,
+        "client_order_id": client_order_id,
+        "selected_price_cents": selected_price_cents,
+        "selected_model_prob": selected_model_prob,
+        "selected_edge": selected_edge,
+        "decision": decision,
+    }
 
 
 
@@ -780,6 +1156,44 @@ def reset_strip_order_counts() -> None:
         logger.warning("[STRIP-RESET-EXTERNAL] No agent grid instance available for reset")
 
 
+# Module-level strip-order counters and helpers for external callers and tests.
+_strip_order_counts: Dict[str, int] = {}
+
+_STRIP_PATTERN = re.compile(r"(\d{2}[A-Z]{3}\d{4})")
+
+
+def _extract_strip(ticker: str) -> str:
+    """Return the 15-minute strip key for a market ticker."""
+    m = _STRIP_PATTERN.search(ticker)
+    return m.group(1) if m else ticker
+
+
+def can_fire_order(
+    asset: str,
+    now: float,
+    ticker: str,
+    *,
+    per_strip_order_limit: int = 1,
+) -> tuple:
+    """Return (allowed, reason) for a proposed order in the strip limit."""
+    strip = _extract_strip(ticker)
+    count = _strip_order_counts.get(strip, 0)
+    if count >= per_strip_order_limit:
+        return (False, f"STRIP-LIMIT:{strip}:count={count}:limit={per_strip_order_limit}")
+    return (True, "OK")
+
+
+def register_order_fire(asset: str, now: float, ticker: str) -> None:
+    """Record an order placement against the strip limit."""
+    strip = _extract_strip(ticker)
+    _strip_order_counts[strip] = _strip_order_counts.get(strip, 0) + 1
+
+
+def reset_branch_counters() -> None:
+    """Clear module-level strip order counts (branch/legacy cooldown reset)."""
+    _strip_order_counts.clear()
+
+
 
 def log_agent_grid_version() -> None:
 
@@ -1071,14 +1485,14 @@ class LeanAgentConfig:
     calibration_min_samples: int = 100  # Minimum samples required to fit calibration
 
     # Phase 5.3: Price-based strategy (Turbine research winner)
-    # CRITICAL FIX (2026-07-22): Fixed inverted thresholds causing YES-side bias
-    # Previous: buy_threshold=0.70, sell_threshold=0.95 created 25c dead zone and bought YES at expensive prices
-    # Correct: buy_threshold=0.30 (buy YES when cheap), sell_threshold=0.70 (buy NO when expensive)
-    # Economic rationale: Buy YES when probability is LOW (cheap YES), buy NO when probability is HIGH (cheap NO)
-    # This creates symmetric trading around 0.50 with no dead zone
-    price_based_buy_threshold: float = 0.30  # Buy YES when price <= 30c (cheap YES contracts)
+    # CRITICAL FIX (2026-08-19): Align price-based fair value with the 0.50
+    # complement-symmetric model used by the 15m profile.  Both YES and NO fair
+    # probabilities are 0.50, so the strategy trades when either side is cheap
+    # relative to a neutral 50c fair.  This removes the 20c-40c dead zone and
+    # the structural YES bias of the previous 0.30/0.70 split.
+    price_based_buy_threshold: float = 0.50  # Buy YES when price <= 50c (cheap YES contracts)
 
-    price_based_sell_threshold: float = 0.70  # Buy NO when price >= 70c (cheap NO contracts)
+    price_based_sell_threshold: float = 0.50  # Buy NO when YES price >= 50c (i.e. NO <= 50c)
 
     calibration_max_samples: int = 1000  # Maximum samples to keep for calibration
 
@@ -1268,6 +1682,15 @@ class LeanAgent15m:
         self._coinbase_velocity_signals: Dict[str, Dict] = {}  # asset -> {velocity, timestamp, signal_type}
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             self._coinbase_velocity_signals[asset] = {"velocity": 0.0, "timestamp": 0.0, "signal_type": "none"}
+
+        # Per-cycle rejection waterfall for diagnostics.  Tracks which gate eliminated
+        # the asset each cycle so we can measure before tuning thresholds.
+        self._rejection_waterfall: Dict[str, Dict[str, Any]] = {
+            "asset": "",
+            "stages": {},
+            "selected": False,
+            "final_reason": "",
+        }
 
         if self._regime_detector_enabled:
 
@@ -1619,6 +2042,15 @@ class LeanAgent15m:
 
 
 
+        # CRITICAL FIX: 2026-08-17 - Maintain one in-progress 1m candle per asset
+        # and only append a completed bar to price/indicator history once per minute.
+        # This stops duplicate static public-OHLC bars from corrupting ADX/ATR/FVG.
+        self._current_candle: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._candle_interval_ms = 60000  # 1-minute candles
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._current_candle[asset] = None
+
+
         # CRITICAL FIX: 2026-07-01 - Initialize multi-timeframe price history for alignment
 
         # Industry standard: 1m + 5m confirmation for +10-20 pp win rate
@@ -1655,25 +2087,14 @@ class LeanAgent15m:
 
 
 
-        # Cooldown tracking: last trade timestamp per asset
+        # Cooldown tracking: last trade timestamp per asset (monotonic clock only).
 
-        # CRITICAL FIX 2026-07-10: Use time.monotonic() instead of time.time()
-
-        # time.time() returns Unix timestamp (absolute time), while time.monotonic() returns
-
-        # relative time suitable for calculating time differences. Using time.time() causes
-
-        # incorrect cooldown calculations when initialized to 0.0 (results in ~56 years).
+        # CRITICAL: Do not pre-populate. A missing entry means there is no prior
+        # trade for that asset, so cooldown is not applied and the first signal
+        # is eligible. update_cooldown_on_fill() writes monotonic timestamps here
+        # only after an actual fill. Wall-clock / epoch values must not be stored.
 
         self._last_trade_time: Dict[str, float] = {}
-
-        # Initialize to current monotonic time to allow immediate signal generation on startup
-
-        # Cooldown only applies after actual trades are placed
-
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-
-            self._last_trade_time[asset] = time.monotonic()
 
 
 
@@ -1951,252 +2372,162 @@ class LeanAgent15m:
         return spot_price, spot_data
 
 
+
+    def _close_minute_bar(self, asset: str, candle: Dict[str, Any]) -> None:
+        # Close a completed 1-minute candle and append it to price/indicator history.
+        close_price = candle['close']
+        open_price = candle['open']
+        high_price = candle['high']
+        low_price = candle['low']
+        candle_time = candle['start']
+
+        # Compute volume proxy from the completed bar
+        if high_price < low_price:
+            logger.error(
+                f'[DATA-QUALITY] asset={asset} CORRUPTED OHLC data: high={high_price:.2f} < low={low_price:.2f}. '
+                f'This violates the fundamental OHLC invariant (high >= low). '
+                f'Using default volume=1.0 and flagging for data quality audit.'
+            )
+            self._track_data_quality_issue(asset, 'ohlcv_corruption', 'high_less_than_low')
+            volume = 1.0
+        elif high_price == low_price:
+            logger.debug(
+                f'[DATA-QUALITY] asset={asset} STALE OHLC data: high={high_price:.2f} == low={low_price:.2f}. '
+                f'No price movement detected in this period. Using default volume=1.0.'
+            )
+            volume = 1.0
+        else:
+            volume_proxy = (high_price - low_price) * close_price
+            volume = max(1.0, min(100.0, volume_proxy * 100))
+            logger.info(
+                f'[VOLUME-EXTRACTION] asset={asset} volume not available, using OHLC proxy={volume:.2f} '
+                f'(high={high_price:.2f} low={low_price:.2f} spot={close_price:.2f})'
+            )
+
+        logger.info(
+            '[MINUTE-BAR-CLOSE] asset=%s candle_time=%s O=%s H=%s L=%s C=%s volume=%.2f',
+            asset, candle_time,
+            format_price(asset, open_price), format_price(asset, high_price),
+            format_price(asset, low_price), format_price(asset, close_price),
+            volume
+        )
+
+        # Update volatility for the completed bar before appending current close
+        self._update_volatility_history(asset, close_price)
+
+        # Append completed OHLC bar to price history once per minute
+        self._spot_price_history[asset].append((candle_time, close_price, open_price, high_price, low_price))
+        self._sma_history[asset].append((candle_time, close_price))
+        self._price_1m_history[asset].append((candle_time, close_price))
+        self._price_5m_history[asset].append((candle_time, close_price))
+        self._volume_history[asset].append((candle_time, volume))
+
+        # Update ADX once for the completed bar
+        self._update_adx_history(asset, close_price, open_price, high_price, low_price)
+
+        # Update FVG forecaster once for the completed bar
+        try:
+            from merid.prediction.forecasters.fvg import get_fvg_forecaster
+            fvg_forecaster = get_fvg_forecaster()
+            fvg_forecaster.update_price(
+                asset=asset,
+                timeframe='15m',
+                open_p=open_price * 100,
+                high=high_price * 100,
+                low=low_price * 100,
+                close=close_price * 100,
+                timestamp=candle_time / 1000.0,
+            )
+            logger.info('[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%s H=%s L=%s C=%s',
+                        asset, format_price(asset, open_price), format_price(asset, high_price),
+                        format_price(asset, low_price), format_price(asset, close_price))
+        except Exception as e:
+            logger.warning('[FVG-UPDATE] asset=%s failed to update FVG forecaster: %s', asset, e)
+
+
     def _update_price_history(self, asset: str, spot_price: Optional[float], spot_data: Any = None) -> None:
 
         # Update price history for velocity calculation.
 
         # CRITICAL FIX: Use milliseconds to match UnifiedSpotService timestamp format
 
-        # UnifiedSpotService stores timestamps as int(time.time() * 1000) in milliseconds
-
-        # Agent grid must use the same unit for velocity calculation to work correctly
-
-        # CRITICAL FIX: Store OHLC data for proper ADX/ATR calculation
+        # CRITICAL FIX: Maintain one in-progress 1m candle per asset; only close once per minute.
 
         if spot_price is None:
-            logger.warning("[UPDATE-PRICE-HISTORY] asset=%s spot_price is None - skipping", asset)
+            logger.warning('[UPDATE-PRICE-HISTORY] asset=%s spot_price is None - skipping', asset)
             return
 
-        logger.info("[UPDATE-PRICE-HISTORY-ENTRY] asset=%s spot_price=%s spot_data=%s",
-
+        logger.info('[UPDATE-PRICE-HISTORY-ENTRY] asset=%s spot_price=%s spot_data=%s',
                     asset, format_price(asset, spot_price), type(spot_data).__name__ if spot_data else None)
 
-        current_time = int(time.time() * 1000)
+        current_time_ms = int(time.time() * 1000)
+        candle_start = (current_time_ms // self._candle_interval_ms) * self._candle_interval_ms
 
+        # Extract public OHLC and volume.  Gate on hasattr to confirm the source
+        # actually provides these fields, then use getattr for safe access.
+        spot_data_has_ohlc = (
+            spot_data is not None
+            and hasattr(spot_data, 'open')
+            and hasattr(spot_data, 'high')
+            and hasattr(spot_data, 'low')
+        )
+        public_open = getattr(spot_data, 'open', None) if spot_data_has_ohlc else None
+        public_high = getattr(spot_data, 'high', None) if spot_data_has_ohlc else None
+        public_low = getattr(spot_data, 'low', None) if spot_data_has_ohlc else None
+        public_volume = getattr(spot_data, 'volume', None) if spot_data_has_ohlc else None
 
+        candle = self._current_candle[asset]
+        if candle is None or candle['start'] != candle_start:
+            # Minute boundary changed: close the previous candle if it exists
+            if candle is not None:
+                self._close_minute_bar(asset, candle)
 
-        # Extract OHLC data if available
-
-        if spot_data and hasattr(spot_data, 'open') and hasattr(spot_data, 'high') and hasattr(spot_data, 'low'):
-
-            open_price = spot_data.open if spot_data.open else spot_price
-
-            high_price = spot_data.high if spot_data.high else spot_price
-
-            low_price = spot_data.low if spot_data.low else spot_price
-
-        else:
-
-            # CRITICAL FIX: Use price history to construct valid OHLC when spot_data is None
-            # This prevents high=low which breaks ATR calculation (TR=0 -> ATR=0)
-            # Similar to UnifiedSpotService fallback logic (lines 313-338 in unified_spot_service.py)
-
-            history = list(self._spot_price_history[asset])
-
-            if len(history) > 0:
-                # Use recent price history to construct OHLC
-                recent_prices = [entry[1] for entry in history[-10:]]  # Last 10 prices
-                recent_prices.append(spot_price)
-
-                open_price = recent_prices[0]  # Oldest price as open
-                high_price = max(recent_prices)  # Highest as high
-                low_price = min(recent_prices)   # Lowest as low
-
-                logger.debug("[OHLC-FALLBACK] asset=%s using price history: O=%s H=%s L=%s C=%s",
-                           asset, format_price(asset, open_price), format_price(asset, high_price),
-                           format_price(asset, low_price), format_price(asset, spot_price))
+            # Start a new minute candle
+            prev_close = candle['close'] if candle is not None else None
+            if prev_close is not None:
+                new_open = prev_close
             else:
-                # No price history available - add small spread to avoid high=low
-                # This prevents TR=0 which would break ATR calculation
-                spread = spot_price * 0.0001  # 0.01% spread
-                open_price = spot_price
-                high_price = spot_price + spread
-                low_price = spot_price - spread
+                new_open = public_open if public_open is not None else spot_price
 
-                logger.debug("[OHLC-FALLBACK] asset=%s using spread proxy: O=%s H=%s L=%s C=%s",
-                           asset, format_price(asset, open_price), format_price(asset, high_price),
-                           format_price(asset, low_price), format_price(asset, spot_price))
+            new_high = public_high if public_high is not None else new_open
+            new_low = public_low if public_low is not None else new_open
+            new_high = max(new_high, spot_price)
+            new_low = min(new_low, spot_price)
 
-
-
-        # Extract volume data if available
-
-        volume = 1.0  # Default volume if not available
-
-        if spot_data and hasattr(spot_data, 'volume') and spot_data.volume is not None:
-
-            volume = float(spot_data.volume)
-
-            logger.debug(f"[VOLUME-EXTRACTION] asset={asset} volume={volume} from spot_data")
-
+            self._current_candle[asset] = {
+                'start': candle_start,
+                'open': new_open,
+                'high': new_high,
+                'low': new_low,
+                'close': spot_price,
+                'tick_count': 1,
+            }
+            if public_volume is not None:
+                self._current_candle[asset]['volume_public'] = float(public_volume)
         else:
-
-            # Fallback: Calculate OHLC proxy volume from price movement
-
-            # This captures trading activity as a proxy for volume
-
-            # DATA QUALITY FIX: Validate OHLC invariants before using data
-
-            # Industry best practice: high >= low is a fundamental invariant
-
-            if high_price < low_price:
-
-                # CORRUPTED DATA: high < low is mathematically impossible
-
-                # This indicates data provider error or transmission corruption
-
-                logger.error(
-
-                    f"[DATA-QUALITY] asset={asset} CORRUPTED OHLC data: high={high_price:.2f} < low={low_price:.2f}. "
-
-                    f"This violates the fundamental OHLC invariant (high >= low). "
-
-                    f"Using default volume=1.0 and flagging for data quality audit."
-
-                )
-
-                # Track data quality issue for metrics
-
-                self._track_data_quality_issue(asset, "ohlcv_corruption", "high_less_than_low")
-
-                volume = 1.0
-
-            elif high_price == low_price:
-
-                # STALE DATA: high == low indicates no price movement
-
-                # This is valid but indicates illiquid market or stale data
-
-                logger.debug(
-
-                    f"[DATA-QUALITY] asset={asset} STALE OHLC data: high={high_price:.2f} == low={low_price:.2f}. "
-
-                    f"No price movement detected in this period. Using default volume=1.0."
-
-                )
-
-                volume = 1.0
-
-            elif high_price > low_price:
-
-                # VALID DATA: Calculate volume proxy from price movement
-
-                volume_proxy = (high_price - low_price) * spot_price
-
-                # Normalize to reasonable range (1-100) to avoid extreme values
-
-                volume = max(1.0, min(100.0, volume_proxy * 100))
-
-                logger.info(f"[VOLUME-EXTRACTION] asset={asset} volume not available, using OHLC proxy={volume:.2f} (high={high_price:.2f} low={low_price:.2f} spot={spot_price:.2f})")
-
-
-
-        # Phase 4.1: Update volatility history for ATR calculation BEFORE appending current price
-
-        # This ensures we compare current price with previous price, not with itself
-
-        self._update_volatility_history(asset, spot_price)
-
-
-
-        # Store OHLC data in price history
-
-        self._spot_price_history[asset].append((current_time, spot_price, open_price, high_price, low_price))
-
-
-
-        # Phase 4.3: Update SMA history for mean reversion
-
-        self._sma_history[asset].append((current_time, spot_price))
-
-
-
-        # Phase 6: Update ADX history for trend filtering
-
-        self._update_adx_history(asset, spot_price, open_price, high_price, low_price)
-
-
-
-        # CRITICAL FIX: 2026-07-01 - Update volume history for volume confirmation filter
-
-        self._volume_history[asset].append((current_time, volume))
-
-
-
-        # CRITICAL FIX: 2026-07-10 - REMOVED old indicator stack update logic from _update_price_history
-
-        # This logic has been moved to collect_order_candidate where each agent fetches spot prices
-
-        # for ALL 5 assets and updates all indicator stacks with redundant updates
-
-        # This prevents the bars_available=1 bug by ensuring each stack gets 5 updates per cycle
-
-
-
-        # CRITICAL FIX: 2026-07-07 - Update FVG forecaster with OHLC data
-
-        # FVG forecaster needs candle data to detect Fair Value Gaps
-
-        # Without this, fvg_confidence will always be 0.00 because no FVGs are detected
-
-        logger.info("[FVG-UPDATE-DEBUG] asset=%s spot_data=%s has_open=%s has_high=%s has_low=%s",
-
-                    asset, type(spot_data).__name__,
-
-                    hasattr(spot_data, 'open') if spot_data else False,
-
-                    hasattr(spot_data, 'high') if spot_data else False,
-
-                    hasattr(spot_data, 'low') if spot_data else False)
-
-        try:
-
-            from merid.prediction.forecasters.fvg import get_fvg_forecaster
-
-            fvg_forecaster = get_fvg_forecaster()
-
-            # Convert spot price to cents for Kalshi markets (0-100 range)
-
-            # FVG forecaster expects price in cents for Kalshi prediction markets
-
-            price_cents = spot_price * 100
-
-            fvg_forecaster.update_price(
-
-                asset=asset,
-
-                timeframe="15m",
-
-                open_p=open_price * 100,  # Convert to cents
-
-                high=high_price * 100,    # Convert to cents
-
-                low=low_price * 100,      # Convert to cents
-
-                close=price_cents,        # Already in cents
-
-                timestamp=current_time / 1000.0  # Convert ms to seconds
-
-            )
-
-            logger.info("[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%s H=%s L=%s C=%s",
-
-                        asset, format_price(asset, open_price), format_price(asset, high_price),
-
-                        format_price(asset, low_price), format_price(asset, spot_price))
-
-        except Exception as e:
-
-            logger.warning("[FVG-UPDATE] asset=%s failed to update FVG forecaster: %s", asset, e)
-
-
-
-        # CRITICAL FIX: 2026-07-01 - Update multi-timeframe price history for alignment
-
-        self._price_1m_history[asset].append((current_time, spot_price))
-
-        self._price_5m_history[asset].append((current_time, spot_price))
-
+            # Same minute: update the in-progress candle with this tick
+            candle['high'] = max(candle['high'], public_high if public_high is not None else candle['high'], spot_price)
+            candle['low'] = min(candle['low'], public_low if public_low is not None else candle['low'], spot_price)
+            candle['close'] = spot_price
+            candle['tick_count'] += 1
+            if public_volume is not None:
+                self._current_candle[asset]['volume_public'] = float(public_volume)
+
+        candle = self._current_candle[asset]
+        # Enforce high >= close >= low
+        if candle['high'] < candle['close']:
+            candle['high'] = candle['close']
+        if candle['low'] > candle['close']:
+            candle['low'] = candle['close']
+
+        logger.info('[CANDLE-UPDATE] asset=%s in_progress O=%s H=%s L=%s C=%s ticks=%d',
+                    asset, format_price(asset, candle['open']), format_price(asset, candle['high']),
+                    format_price(asset, candle['low']), format_price(asset, candle['close']), candle['tick_count'])
+
+        # Keep SMA and multi-timeframe price histories responsive on every tick
+        self._sma_history[asset].append((current_time_ms, spot_price))
+        self._price_1m_history[asset].append((current_time_ms, spot_price))
+        self._price_5m_history[asset].append((current_time_ms, spot_price))
 
 
     def _track_data_quality_issue(self, asset: str, issue_type: str, detail: str) -> None:
@@ -4041,6 +4372,14 @@ class LeanAgent15m:
 
             logger.warning("[MOMENTUM-FVG] Failed to load profile config: %s", e)
 
+            self._record_signal_rejection(
+                "profile_load_failed",
+                market_id=getattr(market, 'market_id', None) if hasattr(market, 'market_id') else getattr(getattr(market, 'market', None), 'market_id', None),
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} error={e}",
+            )
+
             return None
 
 
@@ -4051,7 +4390,20 @@ class LeanAgent15m:
 
         velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
 
+        velocity_passed = abs(velocity) >= velocity_threshold
 
+        self._record_waterfall(
+            "velocity",
+            velocity_passed,
+            f"velocity={velocity:.6f} threshold={velocity_threshold:.6f}"
+        )
+
+        if not velocity_passed:
+
+            logger.info(
+                "[VELOCITY-FILTER] asset=%s velocity=%.6f below threshold=%.6f; continuing to evaluate confluence",
+                asset, velocity, velocity_threshold
+            )
 
         # CRITICAL FIX: 2026-07-08 - Check for sufficient warmup data before calculating indicators
 
@@ -4084,6 +4436,13 @@ class LeanAgent15m:
                 # Previous fallback only checked price history length but didn't calculate indicators
                 # If indicator stack fails, fail fast - don't attempt signal generation without proper indicators
                 logger.warning("[MOMENTUM-FVG] asset=%s indicator stack unavailable - skipping signal generation", asset)
+                self._record_signal_rejection(
+                    "indicator_stack_exception",
+                    market_id=getattr(market, 'market_id', None) if hasattr(market, 'market_id') else getattr(getattr(market, 'market', None), 'market_id', None),
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} error={e}",
+                )
                 return None
 
 
@@ -4128,6 +4487,14 @@ class LeanAgent15m:
                     # CRITICAL FIX (2026-07-13): Return None to prevent order execution during warmup
                     # Previous cold start logic bypassed the 30-bar requirement, allowing orders within 1-2 minutes
                     # This bypass defeats the purpose of the warmup period and exposes the system to unreliable signals
+                    self._record_signal_rejection(
+                        "momentum_fvg_warmup",
+                        market_id=getattr(market, 'market_id', None) if hasattr(market, 'market_id') else getattr(getattr(market, 'market', None), 'market_id', None),
+                        market_time_remaining_s=minutes_to_expiry * 60.0,
+                        reference_price=spot_price,
+                        candles_available=indicator_snap.bars_available,
+                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} min_bars_required={min_bars_required} bars_needed={bars_needed}",
+                    )
                     return None
 
                 else:
@@ -4615,6 +4982,16 @@ class LeanAgent15m:
 
             )
 
+            self._record_signal_rejection(
+                "macd_dead_zone",
+                market_id=getattr(market, 'market_id', None) if hasattr(market, 'market_id') else getattr(getattr(market, 'market', None), 'market_id', None),
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                velocity=velocity,
+                threshold=velocity_threshold,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} macd_histogram={macd_histogram} macd_dead_zone={macd_dead_zone}",
+            )
+
             return None
 
 
@@ -4701,12 +5078,54 @@ class LeanAgent15m:
 
 
 
-        # CRITICAL FIX: 2026-07-24 - Determine thesis_side BEFORE evaluating cheapness
-        # Cheapness must only be evaluated on the thesis_side leg, not both sides
-        # This prevents "cheap but wrong side" candidates from being generated
-
-        # Determine thesis_side from velocity (directional signal)
-        thesis_side = "yes" if velocity > 0 else "no"
+        # CRITICAL FIX 2026-08-13: Determine thesis_side BEFORE evaluating cheapness.
+        # Cheapness is evaluated on the thesis_side leg only. Near-zero velocity
+        # must not be treated as a directional preference; confluence is used only
+        # when it clearly favors one side.
+        velocity_passed = abs(velocity) >= velocity_threshold
+        if velocity_passed:
+            thesis_side = "yes" if velocity > 0 else "no"
+            thesis_source = "velocity"
+            min_score = MERID_MOMENTUM_FVG_MIN_VELOCITY_CONFLUENCE_SCORE
+            confluence_score = long_score if thesis_side == "yes" else short_score
+            if confluence_score < min_score:
+                logger.info(
+                    "[MOMENTUM-FVG-THESIS] asset=%s velocity=%.6f passed but confluence_score=%d below min=%d -> NO TRADE",
+                    asset, velocity, confluence_score, min_score
+                )
+                self._record_signal_rejection(
+                    "momentum_fvg_weak_confluence",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    velocity=velocity,
+                    threshold=velocity_threshold,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} long_score={long_score} short_score={short_score} min_score={min_score}",
+                )
+                return None
+        else:
+            min_score = MERID_MOMENTUM_FVG_MIN_CONFLUENCE_SCORE
+            if long_score >= min_score and long_score > short_score:
+                thesis_side = "yes"
+                thesis_source = "confluence"
+            elif short_score >= min_score and short_score > long_score:
+                thesis_side = "no"
+                thesis_source = "confluence"
+            else:
+                logger.info(
+                    "[MOMENTUM-FVG-NEUTRAL] asset=%s velocity=%.6f below threshold (%.6f); confluence unclear (long=%d short=%d) -> NO TRADE",
+                    asset, velocity, velocity_threshold, long_score, short_score
+                )
+                self._record_signal_rejection(
+                    "momentum_fvg_neutral",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    velocity=velocity,
+                    threshold=velocity_threshold,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} long_score={long_score} short_score={short_score} min_score={min_score}",
+                )
+                return None
 
         # STRICT MODE: Check for suspicious cheapness (feature flag)
         # In strict mode, reject candidates when thesis_side price is suspiciously cheap
@@ -4765,13 +5184,25 @@ class LeanAgent15m:
                 logger.warning("[STRIKE-TARGET-FALLBACK] asset=%s catalog lookup failed: %s", asset, e)
 
         if strike_target is None:
-            logger.error(
-                "[STRIKE-TARGET-FAILURE] asset=%s window_strike_price, floor_strike, and catalog floor_strike all unavailable - CRITICAL DATA FAILURE",
-                asset
-            )
-            # CRITICAL: Never use 0.0 as strike target - this invalidates all pricing logic
-            # Raise exception to prevent trading with invalid strike target
-            raise ValueError(f"Cannot determine strike target for {asset} - all data sources unavailable")
+            # Final fallback: use current spot price as a degraded strike target.
+            # Some 15m contracts (especially threshold markets and new windows)
+            # do not expose floor/cap/strike fields; using spot keeps the agent
+            # alive rather than failing every cycle.  If even spot is invalid,
+            # raise as before so we never trade with an unusable strike.
+            if _is_valid_strike_target(spot_price, asset):
+                strike_target = float(spot_price)
+                logger.warning(
+                    "[STRIKE-TARGET-SPOT-FALLBACK] asset=%s using spot_price=%s as degraded strike target",
+                    asset, format_price(asset, strike_target),
+                )
+            else:
+                logger.error(
+                    "[STRIKE-TARGET-FAILURE] asset=%s window_strike_price, floor_strike, and catalog floor_strike all unavailable - CRITICAL DATA FAILURE",
+                    asset
+                )
+                # CRITICAL: Never use 0.0 as strike target - this invalidates all pricing logic
+                # Raise exception to prevent trading with invalid strike target
+                raise ValueError(f"Cannot determine strike target for {asset} - all data sources unavailable")
 
         # Sanity-validate the strike target (rejects corrupt metadata / unit errors)
         if strike_target is not None and not _is_valid_strike_target(strike_target, asset):
@@ -4783,8 +5214,8 @@ class LeanAgent15m:
 
         # Check price band ONLY for thesis_side using side-aware ranges
         # CRITICAL FIX 2026-08-07: Single source of truth from binary_price_space.
-        # YES: 1c-85c (expanded low end for late-expiry markets)
-        # NO: 15c-99c (expanded high end for late-expiry markets)
+        # YES: 10c-75c (canonical entry range)
+        # NO: 10c-75c (canonical entry range)
         # This fixes the inconsistency where agent-grid rejected NO theses at 78-86c that allocator would accept
 
         # CRITICAL FIX 2026-08-03: Add diagnostic logging to verify thesis_side detection
@@ -4792,8 +5223,8 @@ class LeanAgent15m:
             "[THESIS-SIDE-DEBUG] asset=%s thesis_side=%s yes_price=%dc no_price=%dc "
             "thesis_in_range_check=%s range_str=%s",
             asset, thesis_side, yes_price_cents, no_price_cents,
-            "YES:1-85c" if thesis_side == "yes" else "NO:15-99c",
-            "1c-85c" if thesis_side == "yes" else "15c-99c"
+            "YES:10-75c" if thesis_side == "yes" else "NO:10-75c",
+            "10c-75c"
         )
 
         # Verify thesis_side is correctly normalized
@@ -4804,46 +5235,73 @@ class LeanAgent15m:
             )
             return None
 
+        # Evaluate canonical entry ranges for BOTH sides up front.  The thesis
+        # side is still preferred, but if it is out of range while the opposite
+        # side is executable we now allow the dual-side edge calc to select it.
+        if PRICE_SPACE_AVAILABLE:
+            yes_in_range = is_price_in_canonical_range(yes_price_cents, "yes")
+            no_in_range = is_price_in_canonical_range(no_price_cents, "no")
+        else:
+            yes_in_range = (10 <= yes_price_cents <= 75)
+            no_in_range = (10 <= no_price_cents <= 75)
+
         if thesis_side == "yes":
             thesis_price_cents = yes_price_cents
-            if PRICE_SPACE_AVAILABLE:
-                thesis_in_range = is_price_in_canonical_range(yes_price_cents, "yes")
-            else:
-                thesis_in_range = (1 <= yes_price_cents <= 85)
-            range_str = "1c-85c"
+            thesis_in_range = yes_in_range
+            range_str = "10c-75c"
             logger.info(
                 "[PRICE-SIDE-CHECK] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
                 "yes_price=%dc no_price=%dc selected_side=%s selected_price=%dc price_range_ok=%s strict_mode=%s "
-                "(cheapness evaluated only on thesis_side, YES range=%s)",
+                "yes_in_range=%s no_in_range=%s (cheapness evaluated on thesis_side, YES range=%s)",
                 dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A",
                 thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_side, thesis_price_cents,
-                thesis_in_range, strict_mode_enabled, range_str
+                thesis_in_range, strict_mode_enabled, yes_in_range, no_in_range, range_str
             )
         else:  # thesis_side == "no"
             thesis_price_cents = no_price_cents
-            if PRICE_SPACE_AVAILABLE:
-                thesis_in_range = is_price_in_canonical_range(no_price_cents, "no")
-            else:
-                thesis_in_range = (15 <= no_price_cents <= 99)
-            range_str = "15c-99c"
+            thesis_in_range = no_in_range
+            range_str = "10c-75c"
             logger.info(
                 "[PRICE-SIDE-CHECK] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
                 "yes_price=%dc no_price=%dc selected_side=%s selected_price=%dc price_range_ok=%s strict_mode=%s "
-                "(cheapness evaluated only on thesis_side, NO range=%s)",
+                "yes_in_range=%s no_in_range=%s (cheapness evaluated on thesis_side, NO range=%s)",
                 dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A",
                 thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_side, thesis_price_cents,
-                thesis_in_range, strict_mode_enabled, range_str
+                thesis_in_range, strict_mode_enabled, yes_in_range, no_in_range, range_str
             )
 
-        # CRITICAL INVARIANT: Reject if thesis_side price is not in range
-        # Cheapness on the wrong side is irrelevant - we only trade the thesis_side
+        # Reject only when neither side is within the canonical entry range.
+        # Side-lock: the model is only allowed to trade its thesis side.
+        # No counter-trend or opposite-side fallback.
+        if not (yes_in_range or no_in_range):
+            logger.info(
+                "[PRICE-SIDE-CHECK-REJECT] timestamp=%s asset=%s market_id=%s thesis_side=%s "
+                "yes_price=%dc no_price=%dc reject_type=BOTH_SIDES_OUT_OF_RANGE both prices outside %s range -> NO TRADE",
+                dt.utcnow().isoformat(), asset, market_id or "unknown", thesis_side,
+                yes_price_cents, no_price_cents, range_str
+            )
+            self._record_signal_rejection(
+                "both_sides_out_of_range",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} yes_price={yes_price_cents} no_price={no_price_cents} range={range_str}",
+            )
+            return None
+
         if not thesis_in_range:
             logger.info(
-                "[PRICE-SIDE-CHECK-REJECT] timestamp=%s asset=%s market_id=%s strike_target=%s signal_side=%s thesis_side=%s "
-                "yes_price=%dc no_price=%dc reject_type=THESIS_OUT_OF_RANGE_REJECT thesis_price=%dc outside %s range -> NO TRADE "
-                "(cheapness filter only applies to thesis_side, wrong-side cheapness ignored)",
-                dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A",
-                thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_price_cents, range_str
+                "[PRICE-SIDE-CHECK-REJECT] timestamp=%s asset=%s market_id=%s thesis_side=%s "
+                "thesis_price=%dc out of %s range -> NO TRADE (side lock, no counter-trend fallback)",
+                dt.utcnow().isoformat(), asset, market_id or "unknown", thesis_side,
+                thesis_price_cents, range_str
+            )
+            self._record_signal_rejection(
+                "thesis_side_out_of_range",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} thesis_price={thesis_price_cents} range={range_str}",
             )
             return None
 
@@ -4859,19 +5317,16 @@ class LeanAgent15m:
                     dt.utcnow().isoformat(), asset, market_id or "unknown", strike_target or "N/A",
                     thesis_side, thesis_side, yes_price_cents, no_price_cents, thesis_price_cents, suspicious_cheap_threshold
                 )
+                self._record_signal_rejection(
+                    "strict_mode_suspiciously_cheap",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} thesis_price={thesis_price_cents} strict_mode={strict_mode_enabled}",
+                )
                 return None
 
-        # Log both sides for diagnostic purposes (but only thesis_side matters for gating)
-        # CRITICAL FIX 2026-08-07: Use side-aware ranges to match thesis_side check
-        # YES: 1c-85c (expanded low end for late-expiry markets)
-        # NO: 15c-99c (expanded high end for late-expiry markets)
-        if PRICE_SPACE_AVAILABLE:
-            yes_in_range = is_price_in_canonical_range(yes_price_cents, "yes")
-            no_in_range = is_price_in_canonical_range(no_price_cents, "no")
-        else:
-            yes_in_range = (1 <= yes_price_cents <= 85)
-            no_in_range = (15 <= no_price_cents <= 99)
-
+        # Log both sides for diagnostic purposes (ranges already computed above).
         logger.info(
             "[MOMENTUM-FVG-PRICE-RANGE] asset=%s yes_price=%dc yes_in_range=%s no_price=%dc no_in_range=%s thesis_side=%s",
             asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, thesis_side
@@ -4879,95 +5334,41 @@ class LeanAgent15m:
 
 
 
-        # Build edges for both YES and NO using scores as inputs
+        # Build edges for both YES and NO using the unit-corrected helper.
+        # MACD is normalized by spot_price so BTC's $1.50 histogram is not
+        # treated as 15 percentage points while an alt's $0.0015 histogram is 0.
 
-        def fvg_edge(score, velocity_sign, macd_hist, rsi, fvg_dir, fvg_conf):
+        _macd_pct = (macd_histogram / max(spot_price, 1e-12)) * 100.0 if spot_price and macd_histogram is not None else 0.0
 
-            """Calculate edge from score and indicators."""
+        yes_components = _fvg_edge_components(
+            score=long_score,
+            side_velocity_sign=1.0,
+            velocity=velocity,
+            velocity_threshold=velocity_threshold,
+            macd_hist=macd_histogram,
+            spot_price=spot_price,
+            rsi=rsi,
+            rsi_zone=rsi_zone,
+            fvg_dir=fvg_direction,
+            fvg_conf=fvg_confidence,
+        )
+        no_components = _fvg_edge_components(
+            score=short_score,
+            side_velocity_sign=-1.0,
+            velocity=velocity,
+            velocity_threshold=velocity_threshold,
+            macd_hist=macd_histogram,
+            spot_price=spot_price,
+            rsi=rsi,
+            rsi_zone=rsi_zone,
+            fvg_dir=fvg_direction,
+            fvg_conf=fvg_confidence,
+        )
 
-            # CRITICAL FIX: 2026-07-10 - Always return an edge value, even if score < 3
-
-            # This prevents edge=None which was causing no_edge to be None
-
-            # Instead, use a lower base edge for scores below threshold
-
-
-
-            if score < 3:
-
-                # Return minimal edge for low scores instead of None
-
-                # This allows both sides to have edge values for comparison
-
-                return 0.5  # Minimal edge for insufficient conditions
-
-
-
-            # CRITICAL FIX: Velocity influences edge as a feature, not a direction gate
-            # Use absolute velocity magnitude for edge strength, not velocity * velocity_sign
-            # This allows velocity to boost edge on both sides based on conviction strength
-            velocity_magnitude = abs(velocity)
-            base_edge = calculate_velocity_edge(velocity_magnitude, velocity_threshold)
-
-            # Apply velocity alignment bonus: if velocity aligns with side, boost edge
-            # If velocity opposes side, reduce edge (but don't zero it out)
-            velocity_alignment_bonus = 0.0
-            if velocity_sign > 0 and velocity > 0:
-                velocity_alignment_bonus = velocity * 1000  # Boost for aligned velocity
-            elif velocity_sign < 0 and velocity < 0:
-                velocity_alignment_bonus = abs(velocity) * 1000  # Boost for aligned velocity
-            elif velocity_sign > 0 and velocity < 0:
-                velocity_alignment_bonus = -abs(velocity) * 500  # Penalty for counter-trend
-            elif velocity_sign < 0 and velocity > 0:
-                velocity_alignment_bonus = -abs(velocity) * 500  # Penalty for counter-trend
-
-            base_edge = max(base_edge + velocity_alignment_bonus, 1.0)  # Minimum 1% edge after adjustment
-
-
-
-            # MACD contribution
-
-            edge = base_edge + abs(macd_hist) * 10.0
-
-
-
-            # Score-based scaling: more aligned conditions → larger edge
-
-            edge *= 1.0 + (score - 3) * 0.1  # Scale by score above minimum
-
-
-
-            # RSI strength (fade at extremes)
-
-            if rsi_zone == "oversold" and velocity_sign > 0:
-
-                edge += 1.0  # Bonus for oversold bounce
-
-            elif rsi_zone == "overbought" and velocity_sign < 0:
-
-                edge += 1.0  # Bonus for overbought fade
-
-
-
-            # FVG confluence bonus
-
-            if fvg_conf > 0.5:
-
-                if (velocity_sign > 0 and fvg_dir == "bullish") or (velocity_sign < 0 and fvg_dir == "bearish"):
-
-                    edge += fvg_conf * 2.0
-
-
-
-            # Cap edge at reasonable maximum
-
-            return min(edge, 15.0)
-
-
+        edge_yes_pct = yes_components["edge_pct"]
+        edge_no_pct = no_components["edge_pct"]
 
         # Calculate edges for both sides with validation
-        edge_yes_pct = None
-        edge_no_pct = None
 
         # CRITICAL FIX: Validate both sides have valid prices before edge calculation
         # If one side is N/A, reconstruct from the other side using duality (NO = 100 - YES)
@@ -4983,6 +5384,13 @@ class LeanAgent15m:
                     "[PRICE-VALIDATION-FAILURE] asset=%s both YES and NO prices are N/A - CANNOT CALCULATE EDGES",
                     asset
                 )
+                self._record_signal_rejection(
+                    "both_prices_unavailable",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} yes_price={yes_price_cents} no_price={no_price_cents}",
+                )
                 return None
 
         if no_price_cents is None or no_price_cents <= 0:
@@ -4997,24 +5405,27 @@ class LeanAgent15m:
                     "[PRICE-VALIDATION-FAILURE] asset=%s both YES and NO prices are N/A - CANNOT CALCULATE EDGES",
                     asset
                 )
+                self._record_signal_rejection(
+                    "both_prices_unavailable",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} yes_price={yes_price_cents} no_price={no_price_cents}",
+                )
                 return None
 
         # Recalculate side-aware range checks after reconstruction
         # CRITICAL FIX 2026-08-07: Use side-aware ranges to match thesis_side check
-        # YES: 1c-85c (expanded low end for late-expiry markets)
-        # NO: 15c-99c (expanded high end for late-expiry markets)
+        # YES: 10c-75c (canonical entry range)
+        # NO: 10c-75c (canonical entry range)
         if PRICE_SPACE_AVAILABLE:
             yes_in_range = is_price_in_canonical_range(yes_price_cents, "yes")
             no_in_range = is_price_in_canonical_range(no_price_cents, "no")
         else:
-            yes_in_range = (1 <= yes_price_cents <= 85)
-            no_in_range = (15 <= no_price_cents <= 99)
+            yes_in_range = (10 <= yes_price_cents <= 75)
+            no_in_range = (10 <= no_price_cents <= 75)
 
-        # CRITICAL FIX: 2026-07-24 - Always calculate edges, never return N/A
-        # Edge calculation should happen regardless of range - range gating happens later
-        # This prevents yes_edge=N/A or no_edge=N/A in logs
-        edge_yes_pct = fvg_edge(long_score, 1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
-        edge_no_pct = fvg_edge(short_score, -1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
+        # edge_yes_pct / edge_no_pct already computed with unit-corrected MACD above.
 
 
 
@@ -5028,11 +5439,16 @@ class LeanAgent15m:
 
         logger.info(
             "[DUAL-SIDE-EDGE-CALC] asset=%s long_score=%d short_score=%d yes_edge=%s no_edge=%s "
-            "macd=%.6f rsi=%.2f fvg_dir=%s fvg_conf=%.2f obi=%.3f obi_strong=%s",
+            "macd_hist=%.6f macd_hist_pct=%.6f macd_edge_weight=%.2f "
+            "yes_base_edge=%.4f yes_macd_edge=%.4f no_base_edge=%.4f no_macd_edge=%.4f "
+            "rsi=%.2f fvg_dir=%s fvg_conf=%.2f obi=%.3f obi_strong=%s",
             asset, long_score, short_score,
             f"{edge_yes_pct:.4f}" if edge_yes_pct is not None else "N/A",
             f"{edge_no_pct:.4f}" if edge_no_pct is not None else "N/A",
-            macd_histogram, rsi, fvg_direction, fvg_confidence, obi, obi_strong
+            macd_histogram, _macd_pct, MERID_MACD_EDGE_WEIGHT,
+            yes_components["base_edge"], yes_components["macd_edge"],
+            no_components["base_edge"], no_components["macd_edge"],
+            rsi, fvg_direction, fvg_confidence, obi, obi_strong
         )
 
 
@@ -5061,6 +5477,14 @@ class LeanAgent15m:
 
             )
 
+            self._record_signal_rejection(
+                "no_valid_edges",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} long_score={long_score} short_score={short_score}",
+            )
+
             return None
 
 
@@ -5081,90 +5505,69 @@ class LeanAgent15m:
 
 
 
-        # CRITICAL FIX: 2026-07-24 - Replace thesis_side invariant with hybrid edge-based selection
-        # Select side with higher positive edge, but apply velocity alignment threshold
-        # This preserves directional bias without killing opportunity when opposite side has much better edge
+        # CRITICAL FIX 2026-08-13: Side-lock. The model is only allowed to trade
+        # its thesis side. No counter-trend or opposite-side fallback.
 
         yes_edge = side_edges.get("yes")
         no_edge = side_edges.get("no")
 
-        # Side-aware candidate filter: only consider sides whose current market price is
-        # in the executable range. This prevents the edge model from selecting an
-        # out-of-range side (e.g. YES at 99c or NO at 1c) that would later be rejected.
-        candidates = []
-        if yes_edge and yes_edge > 0 and yes_in_range:
-            candidates.append(("yes", yes_edge))
-        if no_edge and no_edge > 0 and no_in_range:
-            candidates.append(("no", no_edge))
+        signal_side = thesis_side
+        selected_edge = side_edges.get(signal_side)
 
-        if not candidates:
+        if not selected_edge or selected_edge <= 0:
             logger.info(
-                "[DUAL-SIDE-REJECT] asset=%s yes_edge=%.4f no_edge=%.4f "
-                "yes_in_range=%s no_in_range=%s -> NO TRADE (no executable side)",
-                asset, yes_edge or 0.0, no_edge or 0.0, yes_in_range, no_in_range
+                "[MOMENTUM-FVG-THESIS-NO-EDGE] asset=%s thesis_side=%s thesis_source=%s has no positive edge (edge=%s) -> NO TRADE",
+                asset, signal_side, thesis_source, selected_edge
+            )
+            self._record_signal_rejection(
+                "thesis_side_no_positive_edge",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={signal_side} thesis_source={thesis_source} edge={selected_edge}",
             )
             return None
 
-        candidate_edges = dict(candidates)
-
-        # Hybrid selection: prefer velocity-aligned side unless opposite side has
-        # significantly better edge. Restrict to executable (in-range) candidates.
-        EDGE_RATIO_THRESHOLD = 1.5
-
-        velocity_aligned_side = thesis_side  # thesis_side is derived from velocity sign
-        opposite_side = "no" if velocity_aligned_side == "yes" else "yes"
-        velocity_aligned_edge = candidate_edges.get(velocity_aligned_side)
-        opposite_edge = candidate_edges.get(opposite_side)
-
-        if velocity_aligned_edge and opposite_edge:
-            edge_ratio = opposite_edge / velocity_aligned_edge if velocity_aligned_edge > 0 else float('inf')
-
-            if edge_ratio >= EDGE_RATIO_THRESHOLD:
-                # Opposite side has significantly better edge - select it despite velocity misalignment
-                signal_side = opposite_side
-                selected_edge = opposite_edge
-                logger.info(
-                    "[HYBRID-SELECTION-COUNTER-TREND] asset=%s velocity_aligned=%s velocity_edge=%.4f "
-                    "opposite=%s opposite_edge=%.4f edge_ratio=%.2f threshold=%.2f -> SELECTED OPPOSITE (edge advantage)",
-                    asset, velocity_aligned_side, velocity_aligned_edge,
-                    opposite_side, opposite_edge, edge_ratio, EDGE_RATIO_THRESHOLD
-                )
-            else:
-                # Velocity-aligned side has comparable or better edge - select it
-                signal_side = velocity_aligned_side
-                selected_edge = velocity_aligned_edge
-                logger.info(
-                    "[HYBRID-SELECTION-ALIGNED] asset=%s velocity_aligned=%s velocity_edge=%.4f "
-                    "opposite=%s opposite_edge=%.4f edge_ratio=%.2f threshold=%.2f -> SELECTED ALIGNED (velocity preferred)",
-                    asset, velocity_aligned_side, velocity_aligned_edge,
-                    opposite_side, opposite_edge, edge_ratio, EDGE_RATIO_THRESHOLD
-                )
-        else:
-            # Only one executable side - select it
-            signal_side, selected_edge = max(candidates, key=lambda x: x[1])
+        if (signal_side == "yes" and not yes_in_range) or (signal_side == "no" and not no_in_range):
+            thesis_price = yes_price_cents if signal_side == "yes" else no_price_cents
             logger.info(
-                "[HYBRID-SELECTION-FALLBACK] asset=%s one executable side - selected=%s edge=%.4f",
-                asset, signal_side, selected_edge
+                "[MOMENTUM-FVG-THESIS-OUT-OF-RANGE] asset=%s thesis_side=%s thesis_price=%dc not in canonical range -> NO TRADE",
+                asset, signal_side, thesis_price
             )
+            self._record_signal_rejection(
+                "thesis_side_out_of_range",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={signal_side} price_cents={thesis_price}",
+            )
+            return None
 
         # Apply midpoint bonus to selected side
         if signal_side == "yes" and yes_in_range:
-            selected_edge_with_bonus = selected_edge + midpoint_bonus(yes_price_cents)
+            selected_edge = selected_edge + midpoint_bonus(yes_price_cents)
         elif signal_side == "no" and no_in_range:
-            selected_edge_with_bonus = selected_edge + midpoint_bonus(no_price_cents)
-        else:
-            selected_edge_with_bonus = selected_edge
+            selected_edge = selected_edge + midpoint_bonus(no_price_cents)
 
-        # Log dual-side selection with diagnostic detail
+        # Log thesis-locked selection with diagnostic detail
         edge_ratio = (yes_edge / no_edge) if yes_edge and no_edge and no_edge > 0 else float('inf')
-        velocity_aligned = (signal_side == thesis_side)
+
+        velocity_status = "passed" if velocity_passed else "neutral"
+        velocity_expected_side_simple = "yes" if velocity > 0 else "no"
+        if not velocity_passed:
+            alignment = "NEUTRAL"
+        elif signal_side == velocity_expected_side_simple:
+            alignment = "ALIGNED"
+        else:
+            alignment = "COUNTER_TREND"
 
         logger.info(
-            "[DUAL-SIDE-SELECTION] asset=%s velocity=%.6f thesis_side=%s "
+            "[DUAL-SIDE-SELECTION] asset=%s velocity=%.6f velocity_status=%s thesis_side=%s thesis_source=%s "
             "yes_edge=%.4f no_edge=%.4f selected_side=%s selected_edge=%.4f "
-            "edge_ratio=%.2f velocity_aligned=%s selection_method=MAX_EDGE",
-            asset, velocity, thesis_side, yes_edge or 0.0, no_edge or 0.0,
-            signal_side, selected_edge, edge_ratio, velocity_aligned
+            "edge_ratio=%.2f alignment=%s selection_method=SIDE_LOCK",
+            asset, velocity, velocity_status, thesis_side, thesis_source,
+            yes_edge or 0.0, no_edge or 0.0,
+            signal_side, selected_edge, edge_ratio, alignment
         )
 
         # PHASE 1: Dual-side evaluation logging (no longer shadow - this is actual selection)
@@ -5202,14 +5605,20 @@ class LeanAgent15m:
             hypothetical_best_edge = expected_side_edge
 
         # Log velocity alignment diagnostic
+        if not velocity_passed:
+            alignment = "NEUTRAL"
+        elif signal_side == velocity_expected_side:
+            alignment = "ALIGNED"
+        else:
+            alignment = "COUNTER_TREND"
+
         logger.info(
-            "[VELOCITY-ALIGNMENT-DIAGNOSTIC] asset=%s velocity=%.6f velocity_expected_side=%s velocity_expected_edge=%.4f "
+            "[VELOCITY-ALIGNMENT-DIAGNOSTIC] asset=%s velocity=%.6f velocity_passed=%s velocity_expected_side=%s velocity_expected_edge=%.4f "
             "opposite_side=%s opposite_edge=%.4f actual_selected_side=%s actual_selected_edge=%.4f "
             "alignment=%s yes_in_range=%s no_in_range=%s",
-            asset, velocity, velocity_expected_side, velocity_expected_edge,
+            asset, velocity, velocity_passed, velocity_expected_side, velocity_expected_edge,
             opposite_side, opposite_side_edge, signal_side, selected_edge,
-            "ALIGNED" if signal_side == velocity_expected_side else "COUNTER_TREND",
-            yes_in_range, no_in_range
+            alignment, yes_in_range, no_in_range
         )
 
         # Log to shadow dual-side metrics monitor
@@ -5258,6 +5667,15 @@ class LeanAgent15m:
                 "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.6f - %s -> NO TRADE",
                 asset, selected_edge, reason
             )
+            self._record_signal_rejection(
+                f"edge_threshold:{reason}",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                velocity=velocity,
+                threshold=velocity_threshold,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} selected_edge={selected_edge} signal_side={signal_side}",
+            )
             return None
 
 
@@ -5267,17 +5685,38 @@ class LeanAgent15m:
             asset, signal_side, selected_edge, confidence, side_edges
         )
 
-        # CRITICAL FIX: 2026-07-24 - Removed thesis_side invariant check
-        # Hybrid selection now allows counter-trend trades when opposite side has better edge
-        # signal_side may differ from thesis_side (velocity-derived) when edge_ratio >= threshold
-        # This is intentional behavior, not a violation
+        # CRITICAL FIX 2026-08-13: Side-lock enforced. signal_side always equals
+        # thesis_side; counter-trend / opposite-side fallback has been removed.
 
         # CRITICAL INSTRUMENTATION (2026-07-23): Log raw directional indicators for bias analysis
         logger.info(
             "[SIGNAL-RAW-INDICATORS] asset=%s velocity=%.6f velocity_threshold=%.6f macd_histogram=%.6f "
-            "rsi=%.2f rsi_zone=%s long_score=%d short_score=%d fvg_direction=%s fvg_confidence=%.2f obi=%.2f obi_strong=%s",
-            asset, velocity, velocity_threshold, macd_histogram, rsi, rsi_zone,
+            "macd_hist_pct=%.6f rsi=%.2f rsi_zone=%s long_score=%d short_score=%d fvg_direction=%s fvg_confidence=%.2f obi=%.2f obi_strong=%s",
+            asset, velocity, velocity_threshold, macd_histogram, _macd_pct, rsi, rsi_zone,
             long_score, short_score, fvg_direction, fvg_confidence, obi, obi_strong
+        )
+
+        self._telemetry_update(
+            ticker=market_id,
+            minutes_to_expiry=minutes_to_expiry,
+            selected_side=signal_side,
+            velocity=velocity,
+            velocity_threshold=velocity_threshold,
+            spot_price=spot_price,
+            macd_histogram=macd_histogram,
+            macd_hist_pct=_macd_pct,
+            base_edge_yes=yes_components["base_edge"],
+            macd_edge_component_yes=yes_components["macd_edge"],
+            edge_yes_pct=edge_yes_pct,
+            base_edge_no=no_components["base_edge"],
+            macd_edge_component_no=no_components["macd_edge"],
+            edge_no_pct=edge_no_pct,
+            rsi=rsi,
+            fvg_direction=fvg_direction,
+            fvg_confidence=fvg_confidence,
+            order_book_imbalance=obi,
+            yes_ask_cents=yes_price_cents,
+            no_ask_cents=no_price_cents,
         )
 
         # Use selected_edge from dual-side evaluation (already computed)
@@ -5355,11 +5794,58 @@ class LeanAgent15m:
         eps = MERID_MODEL_PROBABILITY_EPSILON
         model_prob = max(eps, min(1.0 - eps, model_prob))
 
-        # Compute all-in cost and EV using the same helper as the sizing calculator.
-        all_in_cost_cents = compute_all_in_cost_cents(price_cents) if _UNIFIED_SIZING_AVAILABLE else float(price_cents)
+        # Determine execution role and fee. Prefer maker (resting, 0 fee) unless
+        # expiry is very close or the edge is large enough to justify crossing the
+        # spread as a taker. This makes the EV gate economically coherent.
+        seconds_to_expiry = minutes_to_expiry * 60.0
+        is_late = seconds_to_expiry < MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS
+        is_high_edge = selected_edge >= MERID_MOMENTUM_FVG_TAKER_EDGE_PCT
+
+        if getattr(self.config, 'prefer_maker_orders', True) and not is_late and not is_high_edge:
+            liquidity_role = "maker"
+            aggressiveness = 0.0
+            execution_mode = "maker"
+            time_in_force = "gtc"
+            post_only = True
+            fee_cents = 0.0
+        else:
+            liquidity_role = "taker"
+            aggressiveness = 1.0
+            execution_mode = "taker"
+            time_in_force = "ioc"
+            post_only = False
+            fee_cents = float(compute_fee_cents(price_cents)) if _UNIFIED_SIZING_AVAILABLE else 2.0
+
+        impact_reserve_cents = MERID_EV_IMPACT_RESERVE_CENTS
+
+        # Compute all-in cost and EV using role-aware fee and calibrated impact reserve.
+        all_in_cost_cents = float(price_cents) + fee_cents + impact_reserve_cents
         ev_net_cents = (model_prob * 100.0) - all_in_cost_cents
 
-        # Base EV gate: must be positive expected value.
+        try:
+            _tel_slippage_cents = int(_get_slippage_cents()) if _UNIFIED_SIZING_AVAILABLE else 5
+            _tel_robust_cost = float(price_cents) + fee_cents + float(_tel_slippage_cents)
+            self._telemetry_update(
+                model_prob=model_prob,
+                market_prob=market_prob,
+                edge_pct=edge_pct,
+                capped_edge_pct=edge_pct,
+                raw_edge_cents=(model_prob - market_prob) * 100.0,
+                entry_fee_cents=fee_cents,
+                impact_reserve_cents=impact_reserve_cents,
+                slippage_guard_cents=_tel_slippage_cents,
+                all_in_cost_cents=all_in_cost_cents,
+                ev_net_cents=ev_net_cents,
+                robust_ev_cents=(model_prob * 100.0) - _tel_robust_cost,
+                price_cents=price_cents,
+                price_source=price_source,
+                liquidity_role=liquidity_role,
+                displayed_depth=_lookup_displayed_depth(market_state, signal_side, price_cents),
+            )
+        except Exception:
+            pass
+
+        # Base EV gate: must be positive expected value net of role-aware cost and impact reserve.
         if ev_net_cents <= 0:
             _emit_ev_components_log(
                 market_state=market_state,
@@ -5371,13 +5857,24 @@ class LeanAgent15m:
                 market_prob=market_prob,
                 model_prob=model_prob,
                 decision="no_trade",
+                fee_cents=fee_cents,
+                impact_reserve_cents=impact_reserve_cents,
+                liquidity_role=liquidity_role,
+            )
+            self._record_signal_rejection(
+                "ev_gate_non_positive",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                velocity=velocity,
+                threshold=velocity_threshold,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={price_cents} ev_net_cents={ev_net_cents} liquidity_role={liquidity_role}",
             )
             return None
 
         # Extreme-price guardrail: 1-5c and 95-99c require a stronger LCB EV margin.
         is_extreme_price = price_cents <= 5 or price_cents >= 95
         if is_extreme_price:
-            fee_cents = float(compute_fee_cents(price_cents)) if _UNIFIED_SIZING_AVAILABLE else 2.0
             min_ev_cents = MERID_EV_K_EXTREME * fee_cents
             if ev_net_cents < min_ev_cents:
                 _emit_ev_components_log(
@@ -5390,11 +5887,23 @@ class LeanAgent15m:
                     market_prob=market_prob,
                     model_prob=model_prob,
                     decision="no_trade_extreme",
+                    fee_cents=fee_cents,
+                    impact_reserve_cents=impact_reserve_cents,
+                    liquidity_role=liquidity_role,
                 )
                 logger.info(
                     "[SIGNAL-EV-EXTREME] asset=%s side=%s price=%dc model_prob=%.4f ev_net=%.4fc < %.4fc (k=%.2f * fee=%.2fc) -> NO TRADE",
                     asset, signal_side, price_cents, model_prob, ev_net_cents, min_ev_cents,
                     MERID_EV_K_EXTREME, fee_cents
+                )
+                self._record_signal_rejection(
+                    "ev_extreme_price",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    velocity=velocity,
+                    threshold=velocity_threshold,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={price_cents} ev_net_cents={ev_net_cents} min_ev_cents={min_ev_cents}",
                 )
                 return None
 
@@ -5408,6 +5917,9 @@ class LeanAgent15m:
             market_prob=market_prob,
             model_prob=model_prob,
             decision="pass",
+            fee_cents=fee_cents,
+            impact_reserve_cents=impact_reserve_cents,
+            liquidity_role=liquidity_role,
         )
 
         logger.info(
@@ -5428,9 +5940,9 @@ class LeanAgent15m:
 
 
 
-        # Check if price is within range (YES: 1c-85c, NO: 15c-99c)
+        # Check if price is within canonical 10c-75c range
 
-        if (signal_side == "yes" and 1 <= raw_price_cents <= 85) or (signal_side == "no" and 15 <= raw_price_cents <= 99):
+        if 10 <= raw_price_cents <= 75:
 
             # Price is already in the side-appropriate range - use it directly
 
@@ -5482,7 +5994,7 @@ class LeanAgent15m:
                     else:
                         # Cheapest NO ask = 100 - YES bid; search yes_bids.
                         levels = getattr(market_state, 'yes_bids', [])
-                        range_min, range_max = 25, 99
+                        range_min, range_max = 10, 75
 
                     if levels:
 
@@ -5513,6 +6025,16 @@ class LeanAgent15m:
 
                             )
 
+                            self._record_signal_rejection(
+                                "no_executable_price_in_range",
+                                market_id=market_id,
+                                market_time_remaining_s=minutes_to_expiry * 60.0,
+                                reference_price=spot_price,
+                                velocity=velocity,
+                                threshold=velocity_threshold,
+                                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} range={range_min}-{range_max}",
+                            )
+
                             return None  # Drop candidate - no valid price in side-aware range
 
                     else:
@@ -5523,6 +6045,16 @@ class LeanAgent15m:
 
                             asset, signal_side
 
+                        )
+
+                        self._record_signal_rejection(
+                            "orderbook_not_available",
+                            market_id=market_id,
+                            market_time_remaining_s=minutes_to_expiry * 60.0,
+                            reference_price=spot_price,
+                            velocity=velocity,
+                            threshold=velocity_threshold,
+                            feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
                         )
 
                         return None
@@ -5537,6 +6069,16 @@ class LeanAgent15m:
 
                     )
 
+                    self._record_signal_rejection(
+                        "market_state_not_available",
+                        market_id=market_id,
+                        market_time_remaining_s=minutes_to_expiry * 60.0,
+                        reference_price=spot_price,
+                        velocity=velocity,
+                        threshold=velocity_threshold,
+                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                    )
+
                     return None
 
             except Exception as e:
@@ -5547,6 +6089,16 @@ class LeanAgent15m:
 
                     asset, e
 
+                )
+
+                self._record_signal_rejection(
+                    "price_selection_exception",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    velocity=velocity,
+                    threshold=velocity_threshold,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} error={e}",
                 )
 
                 return None
@@ -5561,13 +6113,12 @@ class LeanAgent15m:
         # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
         # single 10c-75c range rejected all NO candidates above 75c even though NO contracts
         # naturally trade at high prices (implied probability of event NOT happening).
-        side_lower = signal_side.lower() if isinstance(signal_side, str) else 'yes'
-        if side_lower == 'no':
-            price_min, price_max = 15, 99
-            range_str = "15c-99c"
-        else:
-            price_min, price_max = 1, 85
-            range_str = "1c-85c"
+        # Single canonical entry range 10c-75c for both YES and NO.  Duality
+        # means an 80c NO is equivalent to a 20c YES; there is no need to allow
+        # either side to trade outside 10-75, and order_intent_contract rejects
+        # such prices with `invalid_price`.
+        price_min, price_max = 10, 75
+        range_str = "10c-75c"
 
         if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
@@ -5577,6 +6128,16 @@ class LeanAgent15m:
 
                 asset, signal_side, clamped_price_cents, range_str
 
+            )
+
+            self._record_signal_rejection(
+                "final_price_out_of_range",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                velocity=velocity,
+                threshold=velocity_threshold,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
             )
 
             return None
@@ -5596,6 +6157,15 @@ class LeanAgent15m:
         # Kalshi contracts trade in whole cents.  Guard against any float or numpy
         # scalar leaking through from market-state arithmetic.
         price_cents = int(round(clamped_price_cents))
+
+        # Recompute all-in cost and EV at the final rounded price so the signal
+        # contract matches the price sent to the router. Fee is role-aware.
+        if liquidity_role == "taker":
+            fee_cents = float(compute_fee_cents(price_cents)) if _UNIFIED_SIZING_AVAILABLE else 2.0
+        else:
+            fee_cents = 0.0
+        all_in_cost_cents = float(price_cents) + fee_cents + impact_reserve_cents
+        ev_net_cents = (model_prob * 100.0) - all_in_cost_cents
 
 
 
@@ -5691,12 +6261,10 @@ class LeanAgent15m:
         # CRITICAL FIX 2026-08-02: Add candidate tracing for end-to-end validation
         candidate_id = str(uuid.uuid4()) if CANDIDATE_TRACE_AVAILABLE else None
 
-        is_counter_trend = (signal_side != thesis_side)
+        # Side-lock: counter-trend trades are no longer allowed.
+        is_counter_trend = False
 
-        if _SETTLEMENT_INPUT_AVAILABLE and get_settlement_input_price is not None:
-            settlement_input_price, cf_rti_basis = get_settlement_input_price(asset, spot_price=spot_price)
-        else:
-            settlement_input_price, cf_rti_basis = spot_price, 0.0
+        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(asset, spot_price)
 
         signal_dict = {
 
@@ -5759,14 +6327,26 @@ class LeanAgent15m:
 
             # Economic / telemetry fields (single source of truth for EV)
             "thesis_side": thesis_side,
+            "thesis_source": thesis_source,
             "is_counter_trend": is_counter_trend,
             "all_in_cost_cents": all_in_cost_cents,
             "ev_net_cents": ev_net_cents,
-            "fee_cents": float(compute_fee_cents(price_cents)) if _UNIFIED_SIZING_AVAILABLE else 2.0,
+            "fee_cents": fee_cents,
+            "impact_reserve_cents": impact_reserve_cents,
             "slippage_cents": _get_slippage_cents() if _UNIFIED_SIZING_AVAILABLE else 5,
             "time_to_expiry_seconds": minutes_to_expiry * 60.0,
+
+            # CRITICAL FIX 2026-08-13: Execution parameters are resolved at signal
+            # generation so the loop and router use the same maker/taker economics.
+            "aggressiveness": aggressiveness,
+            "execution_mode": execution_mode,
+            "liquidity_role": liquidity_role,
+            "time_in_force": time_in_force,
+            "post_only": post_only,
+            "order_type": "limit",
             "settlement_input_price": settlement_input_price,
             "cf_rti_basis": cf_rti_basis,
+            "settlement_reference": settlement_reference,
 
             # CRITICAL FIX 2026-08-13: Bind executable liquidity explicitly to the
             # ask side for both YES and NO.  These are the canonical sizes used by
@@ -5810,6 +6390,7 @@ class LeanAgent15m:
                         "time_to_expiry_seconds": minutes_to_expiry * 60.0,
                         "settlement_input_price": settlement_input_price,
                         "cf_rti_basis": cf_rti_basis,
+                        "settlement_reference": settlement_reference,
                         "yes_ask_size": getattr(market_state, "yes_ask_size", None) if market_state else None,
                         "no_ask_size": getattr(market_state, "no_ask_size", None) if market_state else None,
                         "quote_price_cents": price_cents,
@@ -5909,6 +6490,240 @@ class LeanAgent15m:
             return True
 
 
+
+    def _generate_trade_decision_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
+        """Unified hybrid decision engine for 15-minute crypto binaries.
+
+        Builds a single immutable TradeDecision from external spot, the Kalshi
+        strike, the live YES/NO order book, and execution costs.  A candidate
+        is emitted only when the calibrated net edge exceeds the minimum
+        required edge; otherwise the decision is ``no_trade``.
+        """
+        if not spot_price or spot_price <= 0:
+            logger.warning("[TRADE-DECISION] asset=%s invalid spot_price=%s", asset, spot_price)
+            return None
+
+        ticker = market.market.market_id if hasattr(market, 'market') else (getattr(market, 'market_id', None) or getattr(market, 'ticker', asset))
+        market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+        if market_state is None:
+            market_state = market
+
+        strike = getattr(market_state, "floor_strike", None) or getattr(market_state, "window_strike_price", None)
+        if not strike or strike <= 0:
+            logger.warning("[TRADE-DECISION] asset=%s missing/invalid strike (floor=%s window=%s)",
+                           asset, getattr(market, "floor_strike", None), getattr(market, "window_strike_price", None))
+            return None
+
+        seconds_to_expiry = float(getattr(market_state, "seconds_to_expiry", 0.0) or (minutes_to_expiry * 60.0))
+        if seconds_to_expiry <= 0:
+            logger.warning("[TRADE-DECISION] asset=%s invalid seconds_to_expiry=%.1f", asset, seconds_to_expiry)
+            return None
+
+        yes_bid = getattr(market_state, "best_bid_cents", None) or 0.0
+        yes_ask = getattr(market_state, "best_ask_cents", None) or 0.0
+        no_bid = getattr(market_state, "best_no_bid_cents", None) or 0.0
+        no_ask = getattr(market_state, "best_no_ask_cents", None) or 0.0
+
+        # Duality fallback when explicit asks are missing.
+        if yes_ask <= 0 and no_bid > 0:
+            yes_ask = 100.0 - no_bid
+        if no_ask <= 0 and yes_bid > 0:
+            no_ask = 100.0 - yes_bid
+
+        yes_depth_cc = float(getattr(market_state, "min_depth_yes", 0) or 0) * 100.0
+        no_depth_cc = float(getattr(market_state, "min_depth_no", 0) or 0) * 100.0
+
+        # Approximate annualized volatility by asset.  A realized-vol estimator
+        # can replace these constants when external spot history is available.
+        annualized_vol = {
+            "BTC": 0.60,
+            "ETH": 0.80,
+            "SOL": 1.00,
+            "XRP": 1.00,
+            "DOGE": 1.20,
+        }.get(asset.upper(), 0.80)
+
+        # Fee per contract for the winning side; approximate entry fee as the
+        # larger of the two side fees to stay conservative.
+        try:
+            fee_yes_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(yes_ask))))
+            fee_no_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(no_ask))))
+            fee_cents = max(fee_yes_cents, fee_no_cents)
+        except Exception:
+            fee_cents = 0.0
+
+        data_quality = getattr(market_state, "data_quality", "unknown") or "unknown"
+        if not getattr(market_state, "book_initialized", False):
+            data_quality = "stale"
+
+        regime = getattr(market_state, "regime", "unknown") or "unknown"
+
+        # Settlement reference and CF-RTI basis.  The model and confidence are
+        # only valid when the price is the official CF Benchmarks RTI, not a
+        # public spot fallback.  get_live_rti returns None and logs the precise
+        # rejection reason if the feed is unhealthy.
+        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(asset, spot_price)
+
+        run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
+        decision = compute_trade_decision(
+            run_id=run_id,
+            decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
+            ticker=getattr(market, "ticker", asset),
+            asset=asset,
+            spot_price=settlement_input_price,
+            strike_price=float(strike),
+            seconds_to_expiry=seconds_to_expiry,
+            yes_bid_cents=float(yes_bid),
+            yes_ask_cents=float(yes_ask),
+            no_bid_cents=float(no_bid),
+            no_ask_cents=float(no_ask),
+            yes_depth_cc=yes_depth_cc,
+            no_depth_cc=no_depth_cc,
+            fee_per_contract_cents=fee_cents,
+            annualized_vol=annualized_vol,
+            model_uncertainty=0.05,
+            data_quality=data_quality,
+            regime=regime,
+            indicators={},
+            min_required_edge=float(getattr(self.config, "min_net_edge", 0.03)),
+            settlement_reference=settlement_reference,
+            policy_version="trade_decision_v2",
+        )
+
+        _write_shadow_telemetry(
+            run_id=run_id,
+            decision_id=decision.decision_id,
+            ticker=getattr(market, "ticker", asset),
+            asset=asset,
+            target_price=float(strike),
+            seconds_to_expiry=seconds_to_expiry,
+            settlement_reference=settlement_reference,
+            cfb_observation=cfb_observation,
+            decision=decision,
+            public_spot=float(spot_price),
+            spot_price=float(settlement_input_price),
+            cf_rti_basis=float(cf_rti_basis),
+            yes_bid_cents=float(yes_bid),
+            yes_ask_cents=float(yes_ask),
+            no_bid_cents=float(no_bid),
+            no_ask_cents=float(no_ask),
+            fee_per_contract_cents=float(fee_cents),
+            annualized_vol=float(annualized_vol),
+            data_quality=data_quality,
+            regime=regime,
+        )
+
+        if decision.selected_outcome is None:
+            bd = decision.edge_breakdown
+            logger.info(
+                "[TRADE-DECISION] asset=%s no_trade reason=%s p_yes=%.3f p_no=%.3f "
+                "yes_edge=%.3f no_edge=%.3f confidence_valid=%s confidence_reasons=%s",
+                asset, decision.no_trade_reason, float(decision.p_yes_calibrated),
+                float(decision.p_no_calibrated), float(decision.yes_net_edge),
+                float(decision.no_net_edge), decision.confidence_valid,
+                ",".join(decision.confidence_reasons),
+            )
+            return None
+
+        side = decision.selected_outcome
+        action = "buy"
+        price_cents = int(round(float(decision.selected_outcome_price) * 100.0))
+        model_prob = float(decision.p_selected) if decision.p_selected is not None else 0.0
+        edge_pct = float(decision.net_edge) if decision.net_edge is not None else 0.0
+        thesis_side = side
+
+        # Depth guard: reject if the executable depth cannot absorb one contract.
+        depth_ok = (float(decision.yes_depth_cc) >= 100.0) if side == "yes" else (float(decision.no_depth_cc) >= 100.0)
+        if not depth_ok:
+            logger.info(
+                "[TRADE-DECISION] asset=%s no_trade reason=insufficient_depth side=%s depth_cc=%s",
+                asset, side, decision.yes_depth_cc if side == "yes" else decision.no_depth_cc,
+            )
+            return None
+
+        # Runtime trap for the historical 0.95 default-confidence sentinel.
+        # The new uncertainty engine should never emit exactly 0.95.
+        if decision.confidence is not None and float(decision.confidence) == 0.95:
+            logger.critical(
+                "[TRADE-DECISION] asset=%s side=%s reserved default confidence=0.95 detected; "
+                "blocking as release-gate violation", asset, side
+            )
+            return None
+
+        # Explicit edge breakdown in the log.  No hidden deductions.
+        bd = decision.edge_breakdown
+        logger.info(
+            "[TRADE-DECISION] asset=%s side=%s action=%s price=%dc "
+            "p_yes=%.3f p_no=%.3f p_selected=%.3f "
+            "entry_price=%.3f entry_fee=%.3f exit_reserve=%.3f risk_reserve=%.3f "
+            "gross_edge=%.3f net_edge=%.3f confidence=%s confidence_valid=%s confidence_source=%s",
+            asset, side, action, price_cents,
+            float(decision.p_yes_calibrated), float(decision.p_no_calibrated), model_prob,
+            float(bd.executable_entry_price) if bd else 0.0,
+            float(bd.entry_fee) if bd else 0.0,
+            float(bd.exit_cost_reserve) if bd else 0.0,
+            float(bd.model_risk_reserve) if bd else 0.0,
+            float(decision.gross_edge) if decision.gross_edge is not None else 0.0,
+            edge_pct,
+            str(decision.confidence),
+            decision.confidence_valid,
+            decision.confidence_source,
+        )
+
+        return {
+            "ticker": getattr(market, "ticker", asset),
+            "side": side,
+            "action": action,
+            "price_cents": price_cents,
+            "model_prob": model_prob,
+            "p_yes": float(decision.p_yes_calibrated),
+            "p_no": float(decision.p_no_calibrated),
+            "p_selected": model_prob,
+            "edge_pct": edge_pct * 100.0,
+            "edge_yes": float(decision.yes_net_edge) * 100.0,
+            "edge_no": float(decision.no_net_edge) * 100.0,
+            "gross_edge_cents": float(decision.gross_edge) * 100.0 if decision.gross_edge is not None else 0.0,
+            "net_edge_cents": edge_pct * 100.0,
+            "entry_fee_cents": float(bd.entry_fee) * 100.0 if bd else fee_cents,
+            "exit_cost_reserve_cents": float(bd.exit_cost_reserve) * 100.0 if bd else fee_cents,
+            "model_risk_reserve_cents": float(bd.model_risk_reserve) * 100.0 if bd else 0.0,
+            "confidence": float(decision.confidence) if decision.confidence is not None else 0.0,
+            "confidence_valid": decision.confidence_valid,
+            "confidence_source": decision.confidence_source,
+            "confidence_reasons": decision.confidence_reasons,
+            "count": int(decision.approved_size_cc) // 100,
+            "trade_decision": decision,
+            "rationale": f"trade_decision: {decision.decision_id} p_yes={float(decision.p_yes_calibrated):.3f} p_no={float(decision.p_no_calibrated):.3f} p_selected={model_prob:.3f} edge={edge_pct:.3f}",
+            "thesis_side": thesis_side,
+            "is_counter_trend": False,
+            "yes_bid_cents": yes_bid,
+            "yes_ask_cents": yes_ask,
+            "no_bid_cents": no_bid,
+            "no_ask_cents": no_ask,
+            "yes_depth": getattr(market_state, "min_depth_yes", 0) or 0,
+            "no_depth": getattr(market_state, "min_depth_no", 0) or 0,
+            "vol_regime": regime,
+            "seconds_to_expiry": seconds_to_expiry,
+            "velocity": 0.0,
+            "regime": regime,
+            "hmm_regime": None,
+            "hmm_regime_confidence": 0.0,
+            "aggressiveness": 1.0,
+            "post_only": False,
+            "order_type": "limit",
+            "time_of_day_multiplier": 1.0,
+            "take_profit_r_multiple": 0.8,
+            "stop_loss_r_multiple": 0.4,
+            "all_in_cost_cents": fee_cents,
+            "ev_net_cents": edge_pct * 100.0,
+            "fee_cents": fee_cents,
+            "slippage_cents": 0.0,
+            "time_to_expiry_seconds": seconds_to_expiry,
+            "settlement_input_price": float(settlement_input_price) if settlement_input_price is not None else float(strike),
+            "cf_rti_basis": float(cf_rti_basis) if cf_rti_basis is not None else 0.0,
+            "settlement_reference": settlement_reference,
+            "flb_position_multiplier": 1.0,
+        }
 
     def _generate_price_based_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
 
@@ -6025,17 +6840,25 @@ class LeanAgent15m:
         # 2. Compute edge as model_prob - market_price (canonical formula)
         # 3. This ensures consistency across allocator, parity block, and microstructure gate
 
-        # Derive model probabilities from thresholds (our fair price estimates)
-        # If price is at buy_threshold, we think fair probability = buy_threshold
-        # If price is below buy_threshold, we think it's undervalued (positive edge)
-        yes_model_prob = buy_threshold  # Our fair probability estimate for YES
-        no_model_prob = 1.0 - sell_threshold  # Our fair probability estimate for NO
+        # Complement-symmetric fair values: p_yes + p_no must equal 1.
+        # buy_threshold is the fair value used for YES; the NO fair is its
+        # complement.  sell_threshold is only the activation boundary for NO
+        # (NO price <= 1 - sell_threshold, equivalently YES price >= sell_threshold).
+        # This fixes the structural YES bias from using 1 - sell_threshold as the
+        # NO fair while buy_threshold was the YES fair (p_yes + p_no != 1).
+        yes_model_prob = buy_threshold
+        no_model_prob = 1.0 - buy_threshold
+
+        # Only evaluate a side when the market price is inside its configured
+        # entry zone; otherwise force the edge negative so it cannot be selected.
+        yes_active = yes_market_price <= buy_threshold
+        no_active = no_market_price <= (1.0 - sell_threshold)
 
         # Calculate canonical edges using side-appropriate market prices.
         # YES edge = fair YES prob - cost to buy YES.
         # NO edge = fair NO prob - cost to buy NO.
-        yes_edge_pct = yes_model_prob - yes_market_price
-        no_edge_pct = no_model_prob - no_market_price
+        yes_edge_pct = yes_model_prob - yes_market_price if yes_active else -1.0
+        no_edge_pct = no_model_prob - no_market_price if no_active else -1.0
 
         # Apply minimum edge threshold (2% = 0.02 fraction)
         # This is a quality gate, not a transformation of the edge formula
@@ -6056,6 +6879,29 @@ class LeanAgent15m:
                 "[PRICE-BASED-SIGNAL] asset=%s price=%.2f no positive edges (yes_edge=%.4f no_edge=%.4f) -> NO TRADE",
                 asset, market_price, yes_edge_pct, no_edge_pct
             )
+            if DIRECTIONAL_BREAKER_AVAILABLE:
+                trace_payload = _build_directional_trace_payload(
+                    self,
+                    asset=asset,
+                    ticker=ticker,
+                    market_state=market_state,
+                    buy_threshold=buy_threshold,
+                    sell_threshold=sell_threshold,
+                    yes_model_prob=yes_model_prob,
+                    no_model_prob=no_model_prob,
+                    yes_edge=yes_edge_pct,
+                    no_edge=no_edge_pct,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                    selected_side=None,
+                    selected_action=None,
+                    selected_price_cents=None,
+                    selected_model_prob=None,
+                    selected_edge=None,
+                    decision="no_trade",
+                    reason="both_edges_non_positive",
+                )
+                emit_directional_trace(logger, trace_payload)
             return None
 
         # Select side with maximum positive edge
@@ -6089,6 +6935,54 @@ class LeanAgent15m:
                 asset, market_price, yes_edge_pct, no_edge_pct
             )
 
+        # DIRECTIONAL ANOMALY CIRCUIT BREAKER (2026-08-19): verify complement
+        # parity, edge-winner parity, and rolling frequency/price fairness.
+        # If the raw model probabilities and market prices cannot explain the
+        # selection, block the signal and emit a structured trace.
+        if DIRECTIONAL_BREAKER_AVAILABLE:
+            breaker = get_directional_anomaly_breaker()
+            allowed, breaker_reason = breaker.record_and_check(
+                asset=asset,
+                ticker=ticker or "unknown",
+                buy_threshold=buy_threshold,
+                sell_threshold=sell_threshold,
+                yes_model_prob=yes_model_prob,
+                no_model_prob=no_model_prob,
+                yes_edge=yes_edge_pct,
+                no_edge=no_edge_pct,
+                selected_side=signal_side,
+                selected_action=signal_action,
+                market_price=market_price,
+            )
+            if not allowed:
+                trace_payload = _build_directional_trace_payload(
+                    self,
+                    asset=asset,
+                    ticker=ticker,
+                    market_state=market_state,
+                    buy_threshold=buy_threshold,
+                    sell_threshold=sell_threshold,
+                    yes_model_prob=yes_model_prob,
+                    no_model_prob=no_model_prob,
+                    yes_edge=yes_edge_pct,
+                    no_edge=no_edge_pct,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                    selected_side=None,
+                    selected_action=None,
+                    selected_price_cents=None,
+                    selected_model_prob=None,
+                    selected_edge=None,
+                    decision="blocked",
+                    reason=breaker_reason,
+                )
+                emit_directional_trace(logger, trace_payload)
+                logger.error(
+                    "[DIRECTIONAL-ANOMALY-BREAKER] asset=%s ticker=%s %s",
+                    asset, ticker, breaker_reason,
+                )
+                return None
+
         # CRITICAL FIX 2026-08-04: Use side-appropriate market price for confidence,
         # model probability, and the actual order price.  YES uses the YES ask;
         # NO uses the YES bid (because buying NO means selling YES at the bid).
@@ -6101,12 +6995,12 @@ class LeanAgent15m:
 
         # Fee-aware executable edges separate raw edge from spread and fee drag
         # for maker-first routing decisions.
-        # CRITICAL FIX (2026-08-09): Maker fee is 25% of taker fee on Kalshi.
+        # Maker fee on Kalshi is 0% for resting orders (maker coefficient = 0.0).
         spread_pct = spread_width_cents / 100.0
         taker_fee_cents = canonical_calculate_kalshi_fee_cents(1, int(entry_price_cents))
-        maker_fee_cents = round(taker_fee_cents * 0.25, 2)
+        maker_fee_cents = 0
         taker_fee_pct = taker_fee_cents / entry_price_cents if entry_price_cents > 0 else 0.0
-        maker_fee_pct = (maker_fee_cents / entry_price_cents) if entry_price_cents > 0 else 0.0
+        maker_fee_pct = 0.0
         executable_edge_maker_pct = edge_pct - maker_fee_pct
         executable_edge_taker_pct = edge_pct - spread_pct - taker_fee_pct
 
@@ -6293,9 +7187,9 @@ class LeanAgent15m:
 
 
 
-        # Check if price is within range (YES: 1c-85c, NO: 15c-99c)
+        # Check if price is within canonical 10c-75c range
 
-        if (signal_side == "yes" and 1 <= raw_price_cents <= 85) or (signal_side == "no" and 15 <= raw_price_cents <= 99):
+        if 10 <= raw_price_cents <= 75:
 
             # Price is already in the side-appropriate range - use it directly
 
@@ -6347,7 +7241,7 @@ class LeanAgent15m:
                     else:
                         # Cheapest NO ask = 100 - YES bid; search yes_bids.
                         levels = getattr(market_state, 'yes_bids', [])
-                        range_min, range_max = 25, 99
+                        range_min, range_max = 10, 75
 
                     if levels:
 
@@ -6378,6 +7272,16 @@ class LeanAgent15m:
 
                             )
 
+                            self._record_signal_rejection(
+                                "no_executable_price_in_range",
+                                market_id=market_id,
+                                market_time_remaining_s=minutes_to_expiry * 60.0,
+                                reference_price=spot_price,
+                                velocity=velocity,
+                                threshold=velocity_threshold,
+                                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} range={range_min}-{range_max}",
+                            )
+
                             return None  # Drop candidate - no valid price in side-aware range
 
                     else:
@@ -6388,6 +7292,16 @@ class LeanAgent15m:
 
                             asset, signal_side
 
+                        )
+
+                        self._record_signal_rejection(
+                            "orderbook_not_available",
+                            market_id=market_id,
+                            market_time_remaining_s=minutes_to_expiry * 60.0,
+                            reference_price=spot_price,
+                            velocity=velocity,
+                            threshold=velocity_threshold,
+                            feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
                         )
 
                         return None
@@ -6402,6 +7316,16 @@ class LeanAgent15m:
 
                     )
 
+                    self._record_signal_rejection(
+                        "market_state_not_available",
+                        market_id=market_id,
+                        market_time_remaining_s=minutes_to_expiry * 60.0,
+                        reference_price=spot_price,
+                        velocity=velocity,
+                        threshold=velocity_threshold,
+                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                    )
+
                     return None
 
             except Exception as e:
@@ -6412,6 +7336,16 @@ class LeanAgent15m:
 
                     asset, e
 
+                )
+
+                self._record_signal_rejection(
+                    "price_selection_exception",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    velocity=velocity,
+                    threshold=velocity_threshold,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} error={e}",
                 )
 
                 return None
@@ -6426,13 +7360,12 @@ class LeanAgent15m:
         # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
         # single 10c-75c range rejected all NO candidates above 75c even though NO contracts
         # naturally trade at high prices (implied probability of event NOT happening).
-        side_lower = signal_side.lower() if isinstance(signal_side, str) else 'yes'
-        if side_lower == 'no':
-            price_min, price_max = 15, 99
-            range_str = "15c-99c"
-        else:
-            price_min, price_max = 1, 85
-            range_str = "1c-85c"
+        # Single canonical entry range 10c-75c for both YES and NO.  Duality
+        # means an 80c NO is equivalent to a 20c YES; there is no need to allow
+        # either side to trade outside 10-75, and order_intent_contract rejects
+        # such prices with `invalid_price`.
+        price_min, price_max = 10, 75
+        range_str = "10c-75c"
 
         if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
@@ -6442,6 +7375,16 @@ class LeanAgent15m:
 
                 asset, signal_side, clamped_price_cents, range_str
 
+            )
+
+            self._record_signal_rejection(
+                "final_price_out_of_range",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                velocity=velocity,
+                threshold=velocity_threshold,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
             )
 
             return None
@@ -6461,10 +7404,7 @@ class LeanAgent15m:
         # CRITICAL FIX (2026-07-19): Include strategy_intent in signal for exposure validation
         selected_price_cents = int(round(clamped_price_cents))
 
-        if _SETTLEMENT_INPUT_AVAILABLE and get_settlement_input_price is not None:
-            settlement_input_price, cf_rti_basis = get_settlement_input_price(asset, spot_price=spot_price)
-        else:
-            settlement_input_price, cf_rti_basis = spot_price, 0.0
+        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(asset, spot_price)
         signal_dict = {
             "side": signal_side,
             "action": signal_action,
@@ -6488,14 +7428,132 @@ class LeanAgent15m:
             "time_to_expiry_seconds": minutes_to_expiry * 60.0,
             "settlement_input_price": settlement_input_price,
             "cf_rti_basis": cf_rti_basis,
+            "settlement_reference": settlement_reference,
         }
 
         if UNIFIED_TERMINOLOGY_AVAILABLE:
             signal_dict["strategy_intent"] = strategy_intent.value
 
+        if DIRECTIONAL_BREAKER_AVAILABLE:
+            trace_payload = _build_directional_trace_payload(
+                self,
+                asset=asset,
+                ticker=ticker,
+                market_state=market_state,
+                buy_threshold=buy_threshold,
+                sell_threshold=sell_threshold,
+                yes_model_prob=yes_model_prob,
+                no_model_prob=no_model_prob,
+                yes_edge=edge_yes,
+                no_edge=edge_no,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                selected_side=signal_side,
+                selected_action=signal_action,
+                selected_price_cents=selected_price_cents,
+                selected_model_prob=model_prob,
+                selected_edge=edge_pct,
+                decision="trade",
+                reason="max_positive_edge",
+            )
+            emit_directional_trace(logger, trace_payload)
+
         return signal_dict
 
 
+
+    def set_velocity_snapshot(self, snapshot: Dict[str, Dict]) -> None:
+        """Inject an immutable per-cycle Coinbase velocity snapshot into this agent.
+
+        The grid owns the authoritative snapshot; each agent receives a shallow copy
+        keyed by asset.  This avoids the previous propagation defect where the grid
+        held the live signals but agents inspected an unset agent-local attribute.
+        """
+        self._coinbase_velocity_signals = {
+            asset: {
+                "velocity": float(info.get("velocity", 0.0)),
+                "timestamp": float(info.get("timestamp", 0.0)),
+                "signal_type": str(info.get("signal_type", "none")),
+            }
+            for asset, info in (snapshot or {}).items()
+        }
+        logger.debug(
+            "[VELOCITY-SNAPSHOT] agent=%s received snapshot for %d assets",
+            self.config.name, len(self._coinbase_velocity_signals)
+        )
+
+    def _reset_rejection_waterfall(self, asset: str) -> None:
+        """Reset the per-cycle rejection waterfall for a new collection cycle."""
+        self._rejection_waterfall = {
+            "asset": asset,
+            "stages": {},
+            "selected": False,
+            "final_reason": "",
+        }
+        self._last_signal_rejection = {
+            "reason": "",
+            "context": {},
+        }
+        self._cycle_decision = {}
+        self._last_velocity_value = 0.0
+        self._last_velocity_source = "internal_fallback"
+        self._last_velocity_age_ms = -1.0
+        self._last_velocity_signal_type = "none"
+
+    def _record_signal_rejection(self, reason: str, **context) -> None:
+        """Record the specific reason signal generation returned None.
+
+        This is surfaced in the rejection waterfall and as a structured
+        SIGNAL-GENERATION-REJECT log in collect_order_candidate.
+        """
+        # Backfill velocity/freshness metadata if available and not explicitly provided
+        if "velocity" not in context and hasattr(self, '_last_velocity_value'):
+            context["velocity"] = self._last_velocity_value
+        if "velocity_source" not in context and hasattr(self, '_last_velocity_source'):
+            context["velocity_source"] = self._last_velocity_source
+        if "velocity_age_ms" not in context and hasattr(self, '_last_velocity_age_ms'):
+            context["velocity_age_ms"] = self._last_velocity_age_ms
+        if "signal_type" not in context and hasattr(self, '_last_velocity_signal_type'):
+            context["signal_type"] = self._last_velocity_signal_type
+
+        self._last_signal_rejection = {
+            "reason": reason,
+            "context": context,
+        }
+        self._telemetry_update(rejection_reason=reason, **context)
+
+    def _telemetry_update(self, **fields) -> None:
+        """Merge fields into the per-cycle decision telemetry snapshot.
+
+        Read-only instrumentation for decision_telemetry; never raises and
+        never affects signal, gating, or allocator behavior.
+        """
+        try:
+            if not hasattr(self, "_cycle_decision") or self._cycle_decision is None:
+                self._cycle_decision = {}
+            self._cycle_decision.update(fields)
+        except Exception:
+            pass
+
+    def _record_waterfall(self, stage: str, status: bool, reason: str = "") -> None:
+        """Record a stage outcome in the rejection waterfall.
+
+        status=True means the stage passed; status=False means it failed this check.
+        The final_reason is set separately when a failure actually causes a return.
+        """
+        self._rejection_waterfall["stages"][stage] = {
+            "status": status,
+            "reason": reason,
+        }
+
+    def _set_final_reason(self, reason: str) -> None:
+        """Set the final gate that caused this candidate to be rejected."""
+        if not self._rejection_waterfall["final_reason"]:
+            self._rejection_waterfall["final_reason"] = reason
+
+    def get_rejection_waterfall(self) -> Dict[str, Any]:
+        """Return the current rejection waterfall for this agent."""
+        return self._rejection_waterfall.copy()
 
     def _calculate_multi_window_velocity(self, asset: str, current_price: float) -> float:
 
@@ -6513,129 +7571,118 @@ class LeanAgent15m:
 
         # PRIORITY: Use external Coinbase velocity when available (Turbine research #1 winner)
         # Coinbase 1-minute velocity was the top-performing strategy (+$19,451 P&L)
+        velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
+
+        # Determine the authoritative velocity source for this cycle.
+        # Coinbase velocity is preferred when fresh; otherwise fall back to the
+        # internal multi-window velocity computed from the agent's price history.
+        cb_velocity = 0.0
+        cb_age_ms = -1.0
+        cb_signal_type = "none"
+        cb_timestamp = 0.0
+        source = "internal_fallback"
+        self._last_velocity_source = source
+        self._last_velocity_age_ms = cb_age_ms
+        self._last_velocity_signal_type = cb_signal_type
+
         if hasattr(self, '_coinbase_velocity_signals') and asset in self._coinbase_velocity_signals:
             cb_signal = self._coinbase_velocity_signals[asset]
-            # Check if signal is fresh (within last 2 minutes)
-            current_time = time.time()
-            signal_age = current_time - cb_signal.get('timestamp', 0)
-            if signal_age < 120.0 and cb_signal.get('signal_type') != 'none':
-                # Use Coinbase velocity directly (already normalized per second)
-                logger.info(
-                    "[COINBASE-VELOCITY-USE] asset=%s using external Coinbase velocity=%.6f signal_type=%s age=%.1fs",
-                    asset, cb_signal['velocity'], cb_signal['signal_type'], signal_age
-                )
-                return cb_signal['velocity']
+            cb_timestamp = float(cb_signal.get('timestamp', 0.0))
+            cb_signal_type = str(cb_signal.get('signal_type', 'none'))
+            cb_velocity = float(cb_signal.get('velocity', 0.0))
 
-        # Fallback to internal multi-window velocity calculation
+            if cb_timestamp > 1000000000.0:  # Sane timestamp, not 0/unset
+                current_time = time.time()
+                signal_age = current_time - cb_timestamp
+                cb_age_ms = signal_age * 1000.0
+
+                if signal_age < 120.0 and cb_signal_type != 'none':
+                    # Coinbase snapshot is fresh - use it as the authoritative source.
+                    source = "coinbase"
+                    final_velocity = cb_velocity
+                else:
+                    # Coinbase snapshot is stale or unavailable - fall back to internal.
+                    source = "internal_fallback"
+            else:
+                # No Coinbase snapshot received for this agent.
+                source = "internal_fallback"
+        else:
+            # No Coinbase snapshot received for this agent.
+            source = "internal_fallback"
+
+        if source == "internal_fallback":
+            final_velocity = self._calculate_internal_multi_window_velocity(asset, current_price)
+        else:
+            final_velocity = cb_velocity
+
+        velocity_passed = abs(final_velocity) >= velocity_threshold
+
+        self._last_velocity_value = final_velocity
+        self._last_velocity_source = source
+        self._last_velocity_age_ms = cb_age_ms
+        self._last_velocity_signal_type = cb_signal_type
+
+        logger.info(
+            "[VELOCITY-SOURCE] asset=%s source=%s signal_type=%s age_ms=%.0f value=%.6f threshold=%.6f passed=%s",
+            asset, source, cb_signal_type, cb_age_ms, final_velocity, velocity_threshold, velocity_passed
+        )
+
+        return final_velocity
+
+    def _calculate_internal_multi_window_velocity(self, asset: str, current_price: float) -> float:
+        """Internal multi-window velocity fallback from the agent's price history."""
+
         history = list(self._spot_price_history[asset])
 
         if len(history) < 2:
-
             return 0.0
-
-
 
         current_time = int(time.time() * 1000)  # Milliseconds to match spot service
 
         weighted_velocity = 0.0
 
-
-
         for window_sec, weight in zip(self._velocity_windows, self._momentum_weights):
 
-            target_time = current_time - int(window_sec * 1000)  # Convert seconds to milliseconds
-
-
+            target_time = current_time - int(window_sec * 1000)
 
             prev_price = None
 
             # Handle OHLC format: (timestamp, close, open, high, low)
-
             for entry in reversed(history):
-
                 if len(entry) >= 2:
-
                     ts = entry[0]
-
                     price = entry[1]  # Use close price for velocity
-
                     if ts <= target_time:
-
                         prev_price = price
-
                         break
 
-
-
             if prev_price is None or prev_price <= 0:
-
                 # If no data for this window, skip it
-
                 continue
 
-
-
             window_velocity = (current_price - prev_price) / prev_price
-
             weighted_velocity += weight * window_velocity
 
-
-
         # Apply EMA smoothing to reduce noise
-
         ema_velocity = self._apply_ema_smoothing(asset, weighted_velocity)
 
-
-
         # Apply ATR-based volatility normalization
-
         atr_normalized_velocity = self._apply_atr_normalization(asset, ema_velocity)
 
-
-
         # Update Z-score history with the normalized velocity
-
         self._velocity_zscore_history[asset].append((current_time, atr_normalized_velocity))
 
-
-
         # Apply Z-score filter for extreme detection (monitoring only)
-
         final_velocity = self._apply_zscore_filter(asset, atr_normalized_velocity)
 
-
-
         # CRITICAL FIX: 2026-07-06 - Fix bias bug: use history[-1][1] instead of history[-2][1]
-
-        # Previous code used history[-2][1] (second-to-last price) which created incorrect trend comparison
-
-        # history[-1][1] is the most recent price in history, history[-2][1] is the price before that
-
-        # This caused systematic bias in epsilon direction, leading to only BUY_NO signals
-
-        # Crypto prices move continuously - even in "quiet" periods, minimum movement is ~0.001% per minute
-
-        # Previous epsilon (1e-9 = 0.0000001%) was 100,000x too small, causing velocity to appear zero
-
-        # New epsilon (1e-5 = 0.001%) represents realistic minimum price movement for major cryptos
-
-        # This prevents the vicious cycle: velocity=0 -> no trade -> no price update -> velocity=0
-
-        # Add realistic minimum movement in direction of recent price trend if available
-
+        # This prevents systematic bias in epsilon direction.
         if len(history) >= 1:
-
             recent_trend = (current_price - history[-1][1]) / history[-1][1]
-
             final_velocity = final_velocity + (1e-5 if recent_trend >= 0 else -1e-5)
-
         else:
-
-            # No trend data available - add small positive epsilon (realistic minimum movement)
-
+            # No trend data available - add small positive epsilon
             final_velocity = final_velocity + 1e-5
-
-
 
         return final_velocity
 
@@ -8216,6 +9263,13 @@ class LeanAgent15m:
 
                 )
 
+            self._record_signal_rejection(
+                "trading_session_not_active",
+                market_id=getattr(market, 'market_id', None) or getattr(market, 'market', None),
+                market_time_remaining_s=minutes_to_expiry * 60.0 if minutes_to_expiry else None,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+            )
+
             return None
 
 
@@ -8259,6 +9313,13 @@ class LeanAgent15m:
         if not asset:
 
             logger.warning("[SIGNAL-ERROR] Could not determine asset from market")
+
+            self._record_signal_rejection(
+                "asset_extraction_failed",
+                market_id=getattr(market, 'market_id', None) or getattr(market, 'market', None),
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+            )
 
             return None
 
@@ -8354,6 +9415,12 @@ class LeanAgent15m:
                     reason=f"hard_tte_cutoff: <{MERID_HARD_MIN_ENTRY_TTE_SECONDS}s to expiry",
                     market_id=getattr(market, 'market_id', None),
                 )
+            self._record_signal_rejection(
+                f"hard_tte_cutoff:<{MERID_HARD_MIN_ENTRY_TTE_SECONDS}s",
+                market_id=getattr(market, 'market_id', None),
+                market_time_remaining_s=seconds_to_expiry,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+            )
             return None
 
 
@@ -8384,6 +9451,13 @@ class LeanAgent15m:
 
                 )
 
+            self._record_signal_rejection(
+                f"too_early:>{max_entry_mins}min",
+                market_id=getattr(market, 'market_id', None),
+                market_time_remaining_s=seconds_to_expiry,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+            )
+
             return None
 
         elif minutes_to_expiry < cutoff_mins:
@@ -8410,6 +9484,13 @@ class LeanAgent15m:
 
                 )
 
+            self._record_signal_rejection(
+                f"terminal_phase:<{cutoff_mins}min",
+                market_id=getattr(market, 'market_id', None),
+                market_time_remaining_s=seconds_to_expiry,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+            )
+
             return None
 
         elif minutes_to_expiry < min_entry_mins:
@@ -8435,6 +9516,13 @@ class LeanAgent15m:
                     market_id=getattr(market, 'market_id', None),
 
                 )
+
+            self._record_signal_rejection(
+                f"too_early:<{min_entry_mins}min",
+                market_id=getattr(market, 'market_id', None),
+                market_time_remaining_s=seconds_to_expiry,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+            )
 
             return None
 
@@ -8538,15 +9626,15 @@ class LeanAgent15m:
 
         # Check which sides are within their side-aware ranges.
         # Single source of truth is merid.event_venues.kalshi.binary_price_space.
-        # YES: 1c-85c (expanded low end for late-expiry markets)
-        # NO: 15c-99c (expanded high end for late-expiry markets)
+        # YES: 10c-75c (canonical entry range)
+        # NO: 10c-75c (canonical entry range)
 
         if PRICE_SPACE_AVAILABLE:
             yes_in_range = is_price_in_canonical_range(yes_price_cents, "yes")
             no_in_range = is_price_in_canonical_range(no_price_cents, "no")
         else:
-            yes_in_range = (1 <= yes_price_cents <= 85)
-            no_in_range = (15 <= no_price_cents <= 99)
+            yes_in_range = (10 <= yes_price_cents <= 75)
+            no_in_range = (10 <= no_price_cents <= 75)
 
         # Determine expiry bucket for observability
         expiry_bucket = "unknown"
@@ -8558,7 +9646,7 @@ class LeanAgent15m:
             expiry_bucket = "10-15min"
 
         logger.info(
-            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc yes_in_1_85=%s no_price=%dc no_in_15_99=%s expiry_bucket=%s",
+            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc yes_in_canonical=%s no_price=%dc no_in_canonical=%s range=10c-75c expiry_bucket=%s",
             asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, expiry_bucket
         )
 
@@ -8570,7 +9658,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-FILTER-REJECT] asset=%s both sides outside side-aware ranges (yes=%dc not in 1c-85c, no=%dc not in 15c-99c) -> SKIP",
+                "[PRICE-FILTER-REJECT] asset=%s both sides outside canonical 10c-75c range (yes=%dc, no=%dc) -> SKIP",
 
                 asset, yes_price_cents, no_price_cents
 
@@ -8586,11 +9674,19 @@ class LeanAgent15m:
 
                     no_price_cents=no_price_cents,
 
-                    reason="both sides outside side-aware ranges (YES 1c-85c, NO 15c-99c)",
+                    reason="both sides outside canonical 10c-75c range",
 
                     market_id=getattr(market, 'market_id', None),
 
                 )
+
+            self._record_signal_rejection(
+                "both_sides_out_of_canonical_range",
+                market_id=getattr(market, 'market_id', None),
+                market_time_remaining_s=seconds_to_expiry,
+                reference_price=spot_price,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} yes_price={yes_price_cents} no_price={no_price_cents}",
+            )
 
             return None
 
@@ -8673,36 +9769,33 @@ class LeanAgent15m:
 
 
 
-        # PRICE-BASED STRATEGY (Turbine research winner: +56.6% ROI)
+        # 2026-08-13: price_based and volatility_reversion are removed as
+        # authoritative signal sources.  They may remain as market-structure
+        # features, but a price alone is not an edge and cannot emit an order.
+        _allow_price_signal = os.environ.get("MERID_ALLOW_PRICE_BASED", "0") == "1"
 
-        # Buy YES when price <= 0.50, sell when price >= 0.70
-
+        # PRICE-BASED STRATEGY is now a no-op unless explicitly enabled.
         if self.config.signal_mode == "price_based":
+            logger.warning("[PRICE-BASED-DISABLED] asset=%s signal_mode=price_based is not an authoritative source", asset)
+            return None
 
-            return self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
-
-
-
-        # VOLATILITY_REVERSION STRATEGY (Turbine research winner: 93/96 profitable, +4.90% mean ROI)
-        # 2026-07-17: Fade extreme panic moves - same as price_based (panic_fade)
-        # This is the current winning archetype on KXBTC15M
+        # VOLATILITY_REVERSION is also price-based; disabled.
         if self.config.signal_mode == "volatility_reversion":
+            logger.warning("[PRICE-BASED-DISABLED] asset=%s signal_mode=volatility_reversion is not an authoritative source", asset)
+            return None
 
-            return self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
-
-
-
-        # HYBRID STRATEGY: Combine momentum_fvg with price_based (panic fade)
-        # 2026-07-15: Enable both strategies - prefer price_based when panic conditions met
+        # HYBRID STRATEGY (2026-08-13): the hybrid ensemble is the unified
+        # TradeDecision engine.  It consumes external spot, the Kalshi strike,
+        # the live YES/NO order book, and execution costs to emit a single
+        # calibrated, cost-aware decision.  No price-based panic-fade override.
         if self.config.signal_mode == "hybrid":
-            # Try price_based first (panic fade)
-            price_signal = self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
-            if price_signal is not None:
-                logger.info("[HYBRID-SIGNAL] asset=%s using price_based (panic fade) signal", asset)
-                return price_signal
-            # Fallback to momentum_fvg if no price signal
-            logger.info("[HYBRID-SIGNAL] asset=%s falling back to momentum_fvg", asset)
-            return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
+            if _allow_price_signal:
+                logger.warning("[HYBRID-SIGNAL] asset=%s MERID_ALLOW_PRICE_BASED=1 - price_based path is deprecated", asset)
+                price_signal = self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
+                if price_signal is not None:
+                    logger.warning("[HYBRID-SIGNAL] asset=%s using deprecated price_based signal", asset)
+                    return price_signal
+            return self._generate_trade_decision_signal(asset, spot_price, market, minutes_to_expiry)
 
 
 
@@ -10822,9 +11915,9 @@ class LeanAgent15m:
 
         if price_cents > 0:
 
-            # Calculate fee in cents for the winning side
+            # Calculate fee in cents for the winning side using canonical Kalshi fee function.
 
-            fee_cents = calculate_kalshi_fee_cents(p_mkt, int(price_cents))
+            fee_cents = canonical_calculate_kalshi_fee_cents(1, int(price_cents))
 
 
 
@@ -11193,9 +12286,9 @@ class LeanAgent15m:
 
 
 
-        # Check if price is within range (YES: 1c-85c, NO: 15c-99c)
+        # Check if price is within canonical 10c-75c range
 
-        if (signal_side == "yes" and 1 <= raw_price_cents <= 85) or (signal_side == "no" and 15 <= raw_price_cents <= 99):
+        if 10 <= raw_price_cents <= 75:
 
             # Price is already in the side-appropriate range - use it directly
 
@@ -11247,7 +12340,7 @@ class LeanAgent15m:
                     else:
                         # Cheapest NO ask = 100 - YES bid; search yes_bids.
                         levels = getattr(market_state, 'yes_bids', [])
-                        range_min, range_max = 25, 99
+                        range_min, range_max = 10, 75
 
                     if levels:
 
@@ -11278,6 +12371,16 @@ class LeanAgent15m:
 
                             )
 
+                            self._record_signal_rejection(
+                                "no_executable_price_in_range",
+                                market_id=market_id,
+                                market_time_remaining_s=minutes_to_expiry * 60.0,
+                                reference_price=spot_price,
+                                velocity=velocity,
+                                threshold=velocity_threshold,
+                                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} range={range_min}-{range_max}",
+                            )
+
                             return None  # Drop candidate - no valid price in side-aware range
 
                     else:
@@ -11288,6 +12391,16 @@ class LeanAgent15m:
 
                             asset, signal_side
 
+                        )
+
+                        self._record_signal_rejection(
+                            "orderbook_not_available",
+                            market_id=market_id,
+                            market_time_remaining_s=minutes_to_expiry * 60.0,
+                            reference_price=spot_price,
+                            velocity=velocity,
+                            threshold=velocity_threshold,
+                            feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
                         )
 
                         return None
@@ -11302,6 +12415,16 @@ class LeanAgent15m:
 
                     )
 
+                    self._record_signal_rejection(
+                        "market_state_not_available",
+                        market_id=market_id,
+                        market_time_remaining_s=minutes_to_expiry * 60.0,
+                        reference_price=spot_price,
+                        velocity=velocity,
+                        threshold=velocity_threshold,
+                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                    )
+
                     return None
 
             except Exception as e:
@@ -11312,6 +12435,16 @@ class LeanAgent15m:
 
                     asset, e
 
+                )
+
+                self._record_signal_rejection(
+                    "price_selection_exception",
+                    market_id=market_id,
+                    market_time_remaining_s=minutes_to_expiry * 60.0,
+                    reference_price=spot_price,
+                    velocity=velocity,
+                    threshold=velocity_threshold,
+                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} error={e}",
                 )
 
                 return None
@@ -11326,13 +12459,12 @@ class LeanAgent15m:
         # CRITICAL FIX (2026-08-05): YES and NO trade in different price regions. The previous
         # single 10c-75c range rejected all NO candidates above 75c even though NO contracts
         # naturally trade at high prices (implied probability of event NOT happening).
-        side_lower = signal_side.lower() if isinstance(signal_side, str) else 'yes'
-        if side_lower == 'no':
-            price_min, price_max = 15, 99
-            range_str = "15c-99c"
-        else:
-            price_min, price_max = 1, 85
-            range_str = "1c-85c"
+        # Single canonical entry range 10c-75c for both YES and NO.  Duality
+        # means an 80c NO is equivalent to a 20c YES; there is no need to allow
+        # either side to trade outside 10-75, and order_intent_contract rejects
+        # such prices with `invalid_price`.
+        price_min, price_max = 10, 75
+        range_str = "10c-75c"
 
         if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
@@ -11342,6 +12474,16 @@ class LeanAgent15m:
 
                 asset, signal_side, clamped_price_cents, range_str
 
+            )
+
+            self._record_signal_rejection(
+                "final_price_out_of_range",
+                market_id=market_id,
+                market_time_remaining_s=minutes_to_expiry * 60.0,
+                reference_price=spot_price,
+                velocity=velocity,
+                threshold=velocity_threshold,
+                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
             )
 
             return None
@@ -11770,6 +12912,35 @@ class LeanAgent15m:
 
 
 
+    def _cooldown_elapsed(self, asset: str, now: float, last_trade_time: Optional[float]) -> float:
+        """Return elapsed seconds since last trade; fail-open on clock-domain corruption.
+
+        A missing entry means there is no prior trade, so the asset is eligible.
+        A stored timestamp that is ahead of ``now`` indicates a different clock
+        domain was mixed in (e.g. a persisted Unix epoch wall-time timestamp
+        stored in a monotonic cooldown). In that case we reset the stored
+        timestamp and fail open so the asset is not blocked forever.
+        """
+        if last_trade_time is None:
+            logger.info(
+                "[COOLDOWN-NO-PRIOR-TRADE] asset=%s; eligible for immediate evaluation",
+                asset
+            )
+            return float("inf")
+
+        elapsed = now - last_trade_time
+        if elapsed < 0:
+            logger.warning(
+                "[COOLDOWN-CLOCK-DOMAIN] asset=%s last=%s now=%s elapsed=%.1fs; resetting",
+                asset, last_trade_time, now, elapsed
+            )
+            self._last_trade_time.pop(asset, None)
+            return float("inf")
+
+        return elapsed
+
+
+
     async def collect_order_candidate(self, tick: int) -> Optional[Dict[str, Any]]:
 
         # Collect order candidate for this agent.
@@ -11781,6 +12952,9 @@ class LeanAgent15m:
             # Get spot price from unified spot service
 
             asset = self.config.name.split('_')[0]
+
+            self._reset_rejection_waterfall(asset)
+            self._record_waterfall("asset_identified", True)
 
             logger.info("[COLLECT-ASSET] agent=%s asset=%s", self.config.name, asset)
 
@@ -11794,9 +12968,9 @@ class LeanAgent15m:
 
             cooldown_seconds = self._calculate_dynamic_cooldown(asset)
 
-            last_trade_time = self._last_trade_time.get(asset, time.monotonic())
+            last_trade_time = self._last_trade_time.get(asset)
 
-            time_since_last_trade = time.monotonic() - last_trade_time
+            time_since_last_trade = self._cooldown_elapsed(asset, time.monotonic(), last_trade_time)
 
 
 
@@ -11816,7 +12990,12 @@ class LeanAgent15m:
 
                 )
 
+                self._record_waterfall("cooldown", False, f"time_since_last={time_since_last_trade:.1f}s < cooldown={cooldown_seconds:.1f}s")
+                self._set_final_reason(f"cooldown: time_since_last={time_since_last_trade:.1f}s < cooldown={cooldown_seconds:.1f}s")
+
                 return None
+
+            self._record_waterfall("cooldown", True)
 
 
 
@@ -12040,7 +13219,12 @@ class LeanAgent15m:
 
                 logger.warning("[SPOT-ERROR] asset=%s no spot price available", self.config.name)
 
+                self._record_waterfall("spot_price", False, "no spot price available")
+                self._set_final_reason("spot_price: no spot price available")
+
                 return None
+
+            self._record_waterfall("spot_price", True)
 
 
 
@@ -12260,6 +13444,9 @@ class LeanAgent15m:
 
                                     )
 
+                                    self._record_waterfall("market_open", False, "market already settled")
+                                    self._set_final_reason("market_open: market already settled")
+
                                     return None
 
 
@@ -12308,6 +13495,8 @@ class LeanAgent15m:
 
                             )
 
+                            self._record_waterfall("market_discovered", True, f"ticker={ticker}")
+
                         else:
 
                             # No contract in entry window - skip this cycle
@@ -12319,6 +13508,9 @@ class LeanAgent15m:
                                 self.config.name
 
                             )
+
+                            self._record_waterfall("market_discovered", False, "no contract in entry window")
+                            self._set_final_reason("market_discovered: no contract in entry window")
 
                             return None
 
@@ -12451,6 +13643,8 @@ class LeanAgent15m:
                                     self.config.name, time_to_expiry, max_trading_window
 
                                 )
+                                self._record_waterfall("market_open", False, f"time_to_expiry={time_to_expiry:.1f}s > max={max_trading_window}s")
+                                self._set_final_reason(f"market_open: time_to_expiry={time_to_expiry:.1f}s > max={max_trading_window}s")
 
                                 return None
 
@@ -12463,6 +13657,8 @@ class LeanAgent15m:
                                     self.config.name, time_to_expiry, min_time_to_expiry, min_decision_minute
 
                                 )
+                                self._record_waterfall("market_open", False, f"time_to_expiry={time_to_expiry:.1f}s < min={min_time_to_expiry}s")
+                                self._set_final_reason(f"market_open: time_to_expiry={time_to_expiry:.1f}s < min={min_time_to_expiry}s")
 
                                 return None
 
@@ -12521,6 +13717,8 @@ class LeanAgent15m:
             if not market:
 
                 logger.warning("[MARKET-ERROR] asset=%s no market available from market state store", self.config.name)
+                self._record_waterfall("market_discovered", False, "no market available from market state store")
+                self._set_final_reason("market_discovered: no market available from market state store")
 
                 return None
 
@@ -12538,11 +13736,15 @@ class LeanAgent15m:
                     "[MARKET-VALIDATION-SKIP] asset=%s price_history=%d < 1, BLOCKING TRADE during warmup (insufficient data)",
                     self.config.name, price_history_len
                 )
+                self._record_waterfall("market_open", False, f"price_history={price_history_len} < 1 (warmup)")
+                self._set_final_reason(f"market_open: price_history={price_history_len} < 1 (warmup)")
                 return None  # Block trading during warmup
 
             # Validate market state (single call after warmup check)
             if not self._validate_market_state(market):
                 logger.info("[MARKET-VALIDATION-FAILED] asset=%s market validation failed", self.config.name)
+                self._record_waterfall("market_open", False, "market validation failed (stale/missing/illiquid)")
+                self._set_final_reason("market_open: market validation failed (stale/missing/illiquid)")
                 return None
 
 
@@ -12718,19 +13920,49 @@ class LeanAgent15m:
 
                              self.config.name, market.market.market_id if hasattr(market, 'market') else 'N/A', minutes_to_expiry)
 
+                self._record_waterfall("market_open", False, f"expired minutes_to_expiry={minutes_to_expiry:.1f}")
+                self._set_final_reason(f"market_open: expired minutes_to_expiry={minutes_to_expiry:.1f}")
+
                 return None
 
 
 
             # Generate signal
 
+            self._record_waterfall("market_open", True)
+
             signal = self._generate_signal(spot_price, market, minutes_to_expiry)
 
             if not signal:
 
-                logger.info("[NO-SIGNAL] asset=%s no signal generated", self.config.name)
+                reason = self._last_signal_rejection.get("reason") or "_generate_signal returned None"
+                context = self._last_signal_rejection.get("context") or {}
+
+                logger.info(
+                    "[SIGNAL-GENERATION-REJECT] asset=%s market=%s reason=%s spot_price=%s reference_price=%s "
+                    "velocity=%s velocity_source=%s velocity_age_ms=%s signal_type=%s threshold=%s "
+                    "market_time_remaining_s=%s candles_available=%s feature_flags=%s",
+                    self.config.name,
+                    getattr(market, 'market_id', None) or getattr(market, 'market', None),
+                    reason,
+                    spot_price,
+                    context.get("reference_price", "N/A"),
+                    context.get("velocity", "N/A"),
+                    context.get("velocity_source", "N/A"),
+                    context.get("velocity_age_ms", "N/A"),
+                    context.get("signal_type", "N/A"),
+                    context.get("threshold", "N/A"),
+                    context.get("market_time_remaining_s", f"{minutes_to_expiry * 60:.0f}"),
+                    context.get("candles_available", "N/A"),
+                    context.get("feature_flags", f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}"),
+                )
+
+                self._record_waterfall("signal_generated", False, reason)
+                self._set_final_reason(f"signal_generated: {reason}")
 
                 return None
+
+            self._record_waterfall("signal_generated", True)
 
 
 
@@ -12974,6 +14206,9 @@ class LeanAgent15m:
 
             # Return candidate without execution (grid level will execute)
 
+            self._record_waterfall("candidate_generated", True, f"side={signal.get('side')}")
+            self._rejection_waterfall["selected"] = True
+
             return candidate
 
 
@@ -12981,6 +14216,9 @@ class LeanAgent15m:
         except Exception as e:
 
             logger.error("[CANDIDATE-ERROR] asset=%s error=%s", self.config.name, str(e), exc_info=True)
+
+            self._record_waterfall("candidate_generated", False, f"exception: {str(e)[:80]}")
+            self._set_final_reason(f"candidate_generated: exception {str(e)[:80]}")
 
             return None
 
@@ -13753,6 +14991,11 @@ class LeanAgentGrid15m:
 
             logger.info("[AGENT-GRID-RUN-CYCLE-AGENT] agent=%s", agent.config.name)
 
+            # CRITICAL FIX: Inject the authoritative per-cycle Coinbase velocity snapshot
+            # into each agent before collection.  The grid owns the live signal; the agent
+            # must not rely on a stale or unset agent-local copy.
+            agent.set_velocity_snapshot(self._coinbase_velocity_signals.copy())
+
             agent_tasks.append(agent.collect_order_candidate(tick))
 
 
@@ -13805,6 +15048,90 @@ class LeanAgentGrid15m:
         # Log per-asset candidate counts (every tick to detect hidden filters)
         for asset, count in per_asset_candidates.items():
             logger.info("[SIGNAL-METRICS] asset=%s candidates=%d", asset, count)
+
+        # Log per-cycle rejection waterfall by asset
+        waterfall_rows = []
+        for agent in self._agents:
+            asset = agent.config.name.split('_')[0]
+            wf = agent.get_rejection_waterfall()
+            stages = wf.get("stages", {})
+            selected = wf.get("selected", False)
+            row = {
+                "asset": asset,
+                "market_discovered": "PASS" if stages.get("market_discovered", {}).get("status") else (stages.get("market_discovered", {}).get("reason") or "N/A"),
+                "spot_price": "PASS" if stages.get("spot_price", {}).get("status") else (stages.get("spot_price", {}).get("reason") or "N/A"),
+                "market_open": "PASS" if stages.get("market_open", {}).get("status") else (stages.get("market_open", {}).get("reason") or "N/A"),
+                "signal_generated": "PASS" if stages.get("signal_generated", {}).get("status") else (stages.get("signal_generated", {}).get("reason") or "N/A"),
+                "candidate_generated": "PASS" if stages.get("candidate_generated", {}).get("status") else (stages.get("candidate_generated", {}).get("reason") or "N/A"),
+                "selected": "YES" if selected else "NO",
+                "final_reason": wf.get("final_reason", ""),
+            }
+            waterfall_rows.append(row)
+
+        if waterfall_rows:
+            import json
+            logger.info(
+                "[REJECTION-WATERFALL] tick=%d table=%s",
+                tick, json.dumps(waterfall_rows, default=str)
+            )
+
+        # Read-only decision telemetry: one record per asset per cycle plus a
+        # DECISION-SCORECARD. Never affects candidates, allocator, or execution.
+        telemetry_candidates_by_asset: Dict[str, Dict[str, Any]] = {}
+        for _cand in candidates:
+            _cid = str(_cand.get('agent_id', '') or '')
+            _casset = (_cid.split('_')[0].upper() if '_' in _cid else _cid.upper()) or str(_cand.get('asset', '')).upper()
+            if _casset:
+                telemetry_candidates_by_asset[_casset] = _cand
+        telemetry_state = {"emitted": False}
+
+        def _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note: str = "") -> None:
+            if telemetry_state["emitted"]:
+                return
+            telemetry_state["emitted"] = True
+            try:
+                from merid.prediction import decision_telemetry as _dt
+                if not _dt.telemetry_enabled():
+                    return
+                ranked = sorted(
+                    telemetry_candidates_by_asset.values(),
+                    key=lambda c: float(c.get('edge_pct') or 0.0),
+                    reverse=True,
+                )
+                candidate_ranks = {id(c): i + 1 for i, c in enumerate(ranked)}
+                chosen_map = {}
+                for _idx, _o in enumerate(chosen_orders or []):
+                    chosen_map[(_o.ticker, _o.side)] = _idx + 1
+                allocation_ran = chosen_orders is not None and not allocator_note
+                records = []
+                for _agent in self._agents:
+                    _asset = _agent.config.name.split('_')[0]
+                    _cand = telemetry_candidates_by_asset.get(_asset.upper())
+                    _a_rank = None
+                    _selected = False
+                    if _cand is not None:
+                        _key = (_cand.get('ticker'), _cand.get('side'))
+                        _a_rank = chosen_map.get(_key)
+                        _selected = _key in chosen_map
+                    _rec = _dt.build_asset_record(
+                        cycle_id=tick,
+                        asset=_asset,
+                        decision=getattr(_agent, '_cycle_decision', {}) or {},
+                        waterfall=_agent.get_rejection_waterfall(),
+                        candidate=_cand,
+                        candidate_rank=candidate_ranks.get(id(_cand)) if _cand is not None else None,
+                        allocator_rank=_a_rank,
+                        allocator_selected=_selected,
+                        allocator_note=allocator_note,
+                    )
+                    if _cand is not None and not _selected and allocation_ran:
+                        _rec["rejection_stage"] = "allocator_loss"
+                        if not _rec.get("rejection_reason"):
+                            _rec["rejection_reason"] = "allocator_loss"
+                    records.append(_rec)
+                _dt.emit_cycle(tick, records, extra={"allocator_note": allocator_note or None})
+            except Exception as _tel_exc:
+                logger.warning("[DECISION-TELEMETRY] non-fatal emit error: %s", _tel_exc)
 
         # Log signal quality histogram every 60 ticks (5 minutes at 5s cadence)
         if tick % 60 == 0 and signal_quality_metrics:
@@ -14082,12 +15409,23 @@ class LeanAgentGrid15m:
                         logger.warning("[GLOBAL-ALLOCATOR] Failed to build legacy current positions: %s", e)
 
                 # Run global allocator with authoritative per-ticker exposure
-
-                chosen_orders = allocator.allocate(
-                    order_candidates,
-                    current_positions=current_positions,
-                    canonical_live_positions=canonical_live_positions
-                )
+                # CRITICAL FIX (2026-08-14): Fail-close on allocator exception.
+                # An allocator crash must never return unfiltered candidates to the
+                # execution path; it is equivalent to disabling all risk/edge filters.
+                try:
+                    chosen_orders = allocator.allocate(
+                        order_candidates,
+                        current_positions=current_positions,
+                        canonical_live_positions=canonical_live_positions
+                    )
+                except Exception as alloc_err:
+                    logger.error(
+                        "[GLOBAL-ALLOCATOR] Allocation failed; returning empty candidate list: %s",
+                        alloc_err,
+                        exc_info=True,
+                    )
+                    _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="allocator_error")
+                    return []
 
 
 
@@ -14102,6 +15440,8 @@ class LeanAgentGrid15m:
                     summary['total_orders'], summary['total_notional'], summary['utilization_pct'], summary['avg_edge']
 
                 )
+
+                _emit_cycle_decision_telemetry(chosen_orders=chosen_orders)
 
 
 
@@ -14143,6 +15483,17 @@ class LeanAgentGrid15m:
                     "[GLOBAL-ALLOCATOR] CRITICAL ERROR in global allocator phase: %s",
                     str(e), exc_info=True
                 )
+                # FAIL-CLOSED: an unfiltered candidate list reaching loop_15m can
+                # execute extreme prices the allocator would have rejected.  Do not
+                # return raw candidates.
+                _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="allocator_phase_error")
+                return []
+
+        if not telemetry_state["emitted"]:
+            if not candidates:
+                _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="no_candidates")
+            elif not allow_new_entries:
+                _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="entries_disabled")
 
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
@@ -14173,3 +15524,123 @@ AgentGrid15M = LeanAgent15m
 
 # Tests expect a fee function with signature (contracts, price_cents) returning an int.
 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as canonical_calculate_kalshi_fee_cents
+from merid.prediction.trade_decision import compute_trade_decision
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Config-driven asset profile and regime knobs
+# ═════════════════════════════════════════════════════════════════════════════
+# These constants satisfy tests/config/test_kalshi_15m_invariants.py and
+# provide the canonical per-asset base parameters and regime multipliers.
+
+from enum import Enum
+
+
+class RiskRegime(Enum):
+    """Trading regime used by _get_effective_knobs."""
+
+    CONSERVATIVE = "conservative"
+    NORMAL = "normal"
+    AGGRESSIVE = "aggressive"
+
+
+@dataclass(frozen=True)
+class _AssetProfile:
+    """Per-asset base parameters."""
+
+    base_edge_threshold: float
+    base_max_contracts_per_strip: int
+    base_max_concurrent_strips: int
+    min_depth_yes_base: int
+    min_depth_no_base: int
+
+
+@dataclass(frozen=True)
+class _RegimeKnobs:
+    """Regime-specific absolute values."""
+
+    edge_threshold: float
+    size_factor: float
+    max_trades_per_cycle_asset: int
+    depth_mult: float
+
+
+ASSET_PROFILE: Dict[str, _AssetProfile] = {
+    "BTC": _AssetProfile(
+        base_edge_threshold=0.06,
+        base_max_contracts_per_strip=2,
+        base_max_concurrent_strips=3,
+        min_depth_yes_base=15,
+        min_depth_no_base=15,
+    ),
+    "ETH": _AssetProfile(
+        base_edge_threshold=0.06,
+        base_max_contracts_per_strip=2,
+        base_max_concurrent_strips=3,
+        min_depth_yes_base=15,
+        min_depth_no_base=15,
+    ),
+    "SOL": _AssetProfile(
+        base_edge_threshold=0.07,
+        base_max_contracts_per_strip=2,
+        base_max_concurrent_strips=3,
+        min_depth_yes_base=10,
+        min_depth_no_base=10,
+    ),
+    "XRP": _AssetProfile(
+        base_edge_threshold=0.07,
+        base_max_contracts_per_strip=2,
+        base_max_concurrent_strips=3,
+        min_depth_yes_base=10,
+        min_depth_no_base=10,
+    ),
+    "DOGE": _AssetProfile(
+        base_edge_threshold=0.08,
+        base_max_contracts_per_strip=1,
+        base_max_concurrent_strips=2,
+        min_depth_yes_base=10,
+        min_depth_no_base=10,
+    ),
+}
+
+
+REGIME_KNOBS: Dict[RiskRegime, _RegimeKnobs] = {
+    RiskRegime.CONSERVATIVE: _RegimeKnobs(
+        edge_threshold=0.04,
+        size_factor=0.5,
+        max_trades_per_cycle_asset=2,
+        depth_mult=1.0,
+    ),
+    RiskRegime.NORMAL: _RegimeKnobs(
+        edge_threshold=0.06,
+        size_factor=1.0,
+        max_trades_per_cycle_asset=3,
+        depth_mult=1.5,
+    ),
+    RiskRegime.AGGRESSIVE: _RegimeKnobs(
+        edge_threshold=0.08,
+        size_factor=1.5,
+        max_trades_per_cycle_asset=5,
+        depth_mult=2.0,
+    ),
+}
+
+
+def _get_effective_knobs(asset: str) -> _RegimeKnobs:
+    """Return the current regime knobs for an asset.
+
+    For now the canonical regime is ``NORMAL``. Future iterations can map
+    asset volatility/PNL state to a regime.
+    """
+    _ = ASSET_PROFILE.get(asset, ASSET_PROFILE["BTC"])
+    return REGIME_KNOBS[RiskRegime.NORMAL]
+
+
+def _get_effective_depth_thresholds(asset: str, regime: RiskRegime) -> tuple[int, int]:
+    """Compute effective YES/NO depth thresholds for an asset and regime."""
+    profile = ASSET_PROFILE.get(asset, ASSET_PROFILE["BTC"])
+    knobs = REGIME_KNOBS[regime]
+    return (
+        int(profile.min_depth_yes_base * knobs.depth_mult),
+        int(profile.min_depth_no_base * knobs.depth_mult),
+    )
