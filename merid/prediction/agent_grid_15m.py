@@ -1127,6 +1127,40 @@ async def build_15m_agent_grid(
     agent_grid = LeanAgentGrid15m(agents=agents)
     logger.info("[AGENT-GRID-BUILD] Built LeanAgentGrid15m with %d agents", len(agents))
 
+    # Tie the agent grid (and each agent) to the segment run_id so telemetry,
+    # decisions, and orders all share the same identity.
+    segment_run_id = os.environ.get("MERID_RUN_ID")
+    if segment_run_id:
+        agent_grid.run_id = segment_run_id
+        for agent in agents:
+            agent.run_id = segment_run_id
+        logger.info("[AGENT-GRID-BUILD] Set run_id=%s on all agents", segment_run_id)
+
+    # Record code/config provenance in the process environment so every shadow
+    # record and order can be traced back to the exact segment.
+    if not os.environ.get("MERID_GIT_REVISION"):
+        try:
+            import subprocess
+            git_rev = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+            if git_rev:
+                os.environ["MERID_GIT_REVISION"] = git_rev
+                logger.info("[AGENT-GRID-BUILD] Set MERID_GIT_REVISION=%s", git_rev)
+        except Exception:
+            pass
+    if not os.environ.get("MERID_CONFIG_HASH"):
+        try:
+            from pathlib import Path
+            import hashlib
+            config_path = Path("config/profiles/kalshi_crypto_15m_v2.yaml")
+            if config_path.exists():
+                config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest().upper()
+                os.environ["MERID_CONFIG_HASH"] = config_hash
+                logger.info("[AGENT-GRID-BUILD] Set MERID_CONFIG_HASH=%s", config_hash)
+        except Exception:
+            pass
+
     return agent_grid
 
 
