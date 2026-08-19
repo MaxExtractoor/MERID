@@ -62,6 +62,11 @@ _DB_RETRY_DELAY_INITIAL: float = float(os.getenv("MERID_EVENT_LOG_DB_RETRY_DELAY
 _DB_RETRY_DELAY_MAX: float = float(os.getenv("MERID_EVENT_LOG_DB_RETRY_DELAY_MAX", "0.5"))
 
 
+def _postgres_required() -> bool:
+    """Return True when PostgreSQL persistence is mandatory (soak/audit mode)."""
+    return os.getenv("MERID_POSTGRES_REQUIRED", "").strip().lower() in ("1", "true")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Event Log Implementation
 # ═══════════════════════════════════════════════════════════════════════════
@@ -91,6 +96,11 @@ class PortfolioEventLog:
         self._db_path = _EVENT_LOG_DB_PATH
         self._local_lock = threading.Lock()
         self._use_postgres = POSTGRES_AVAILABLE and os.getenv("POSTGRES_PASSWORD")
+        if _postgres_required() and not self._use_postgres:
+            raise RuntimeError(
+                "MERID_POSTGRES_REQUIRED is set but PostgreSQL is not configured "
+                "(asyncpg unavailable or POSTGRES_PASSWORD missing)"
+            )
         self._postgres_pool = None
         self._initialized = True
         self._init_db()
@@ -102,7 +112,11 @@ class PortfolioEventLog:
         )
     
     async def _ensure_postgres_pool(self) -> asyncpg.Pool:
-        """Ensure PostgreSQL connection pool is initialized."""
+        """Ensure PostgreSQL connection pool is initialized.
+
+        If MERID_POSTGRES_REQUIRED is set, a connection failure is fatal and
+        raises instead of silently falling back to SQLite.
+        """
         if self._postgres_pool is None and self._use_postgres:
             try:
                 from merid.settings import get_settings
@@ -121,6 +135,8 @@ class PortfolioEventLog:
                 logger.info("PortfolioEventLog PostgreSQL connection pool established")
             except Exception as e:
                 logger.error(f"Failed to create PostgreSQL pool: {e}")
+                if _postgres_required():
+                    raise RuntimeError(f"PostgreSQL required for soak but unavailable: {e}") from e
                 self._use_postgres = False
                 logger.warning("PortfolioEventLog falling back to SQLite")
         

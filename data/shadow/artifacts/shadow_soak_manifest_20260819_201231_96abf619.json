@@ -1,0 +1,99 @@
+{
+  "manifest_schema_version": 1,
+  "run_id": "shadow_20260819_201231_96abf619",
+  "created_at_utc": "2026-08-19T20:12:31Z",
+  "git_head": "1b0b90b8db1b44ad5361324b54135cf67c8abff2",
+  "patch_base_git_head": "96abf61924ebd0e1625237d10df14bef630aa285",
+  "rti_postgres_patch_sha256": "87742B5321D50C60C469376F5A664ADCDB1CE2476988B62542A38CCEEDCE67E9  data/shadow/artifacts/rti_postgres_preflight.patch",
+  "private_env_sha256": "EB532755676BAE683EB7AB386312AE7F312EE34D141E93B6501F9171A83E0A97",
+  "config_sha256": "84D3BA537F191E654DD86554736A0276C8B2D2256235945CCEADDE7136DBCB40",
+  "runtime_file_sha256": {
+    "merid/data/kalshi_cf_rti_ws.py": "4166AE9B0B5CD34CAC9AC6E3467A000A5451EC29E742A1A142DE1234DCFCFF8D",
+    "merid/data/cf_rti_adapter.py": "7AF1A434978E3A07435436094E02FD976951D6421EC4263128A834125F59A0C9",
+    "merid/startup_validations.py": "6DCA1A142B520BA02B7DDBDB219A3C8F8DEA9C3C061E2DCF4D7F0DAF1D47621C",
+    "web/main_15m_lean.py": "45D13CBE0A836D44C4F314CA4FBAA873AE1A0571D7A1F610F96B1C36F2C81EE5",
+    "merid/prediction/agent_grid_15m.py": "6B923E63F58591494F205A5AB1683DD390528C3996976B9217A7CF06F604AFA1",
+    "merid/prediction/trade_decision.py": "AACFD31CA40EDF8CFE5399C3E13D0A23BB1188868DDB85BF03E6986D5A07814B",
+    "merid/event_venues/kalshi/order_router.py": "F1577C7E75A71D415ED9908C587D72537B8420985B846776A9A85F23011B2FB4",
+    "merid/loop_15m.py": "8BA66935A95B0228007A5BD28869D1D2E1E1A96726C6FC2486C18F310A27EEC8",
+    "merid/data/shadow_telemetry.py": "D6115CF198A04B8CF0361F04812D6337541725FDBA1AF9E82B73AFBEC06806E0",
+    "scripts/shadow_report.py": "28017B1DDF1EE6DE3EFCAA79FE5D5E41D83041A1A03EA60B6DBD9604C8572FC3",
+    "merid/event_venues/kalshi/fills_ledger.py": "7DFEEEDB11A9915CAFE3353789E76C56E5F965D1DDA3630ABF3827D223FF756C",
+    "merid/event_venues/kalshi/portfolio_event_log.py": "9F39F205A47B05090912B482E5AC362547D0E0B840D8AE9D44ABC9AC68831EA0"
+  },
+  "effective_runtime": {
+    "MERID_CFB_RTI_SOURCE": "kalshi_ws",
+    "MERID_CFB_RTI_ADAPTER": true,
+    "MERID_ALLOW_LIVE_TRADES": false,
+    "MERID_PM_TRADING_MODE": "paper",
+    "MERID_CFB_RTI_SHADOW_TELEMETRY": true,
+    "MERID_ENABLE_LEGACY_095_SENTINEL_TRAP": true,
+    "MERID_POSTGRES_REQUIRED": true
+  },
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "merid",
+    "schema_initialized": true,
+    "failure_behavior": "required_halt",
+    "failure_halt_trigger": "MERID_POSTGRES_REQUIRED=true makes PostgreSQL pool initialization or an unhandled persistence error raise RuntimeError instead of silently falling back to SQLite"
+  },
+  "rti_indexlist": [
+    "BCHUSD_RTI",
+    "BNBUSD_RTI",
+    "BRTI",
+    "DOGEUSD_RTI",
+    "DOTUSD_RTI",
+    "ETHUSD_RTI",
+    "HBARUSD_RTI",
+    "HYPEUSD_RTI",
+    "LINKUSD_RTI",
+    "LTCUSD_RTI",
+    "NEARUSD_RTI",
+    "SHIBUSD_RTI",
+    "SOLUSD_RTI",
+    "SUIUSD_RTI",
+    "XLMUSD_RTI",
+    "XRPUSD_RTI",
+    "ZECUSD_RTI"
+  ],
+  "rti_indexlist_count": 17,
+  "rti_indexlist_sha256": "599156DAFCA82BABC5D3C71A5CE077CC6A444D41294EC4FDD9C42E272E30E17F",
+  "rti_index_mapping": {
+    "BTC": "BRTI",
+    "ETH": "ETHUSD_RTI",
+    "SOL": "SOLUSD_RTI",
+    "XRP": "XRPUSD_RTI",
+    "DOGE": "DOGEUSD_RTI"
+  },
+  "rti_source_url": "wss://external-api-ws.kalshi.com/trade-api/ws/v2",
+  "rti_subscription_mode": "index_ids_all_with_client_side_filter",
+  "rti_subscription_note": "Kalshi's update_subscription subscribe_indices/unsubscribe_indices actions do not narrow an existing 'all' subscription. The stream remains subscribed to index_ids=['all'] and the adapter drops unmapped index IDs at the on_frame boundary.",
+  "rti_reconnect": {
+    "rediscovers_indexlist": true,
+    "resubscribes_cfbenchmarks_value": true,
+    "clears_stale_cache": true,
+    "callback": "reset_state"
+  },
+  "rti_fail_closed": {
+    "max_age_ms_env": "MERID_MAX_CFB_RTI_AGE_MS",
+    "max_age_ms_default": 5000,
+    "stale_returns_none": true,
+    "disconnect_clears_cache": true,
+    "timestamp_uses_utc_epoch_ms": true
+  },
+  "preflight_status": {
+    "startup_safety_validation": true,
+    "live_trading_safety_validation": true,
+    "kalshi_auth": true,
+    "kalshi_indexlist_received": true,
+    "kalshi_frames_received_for_all_enabled_assets": true,
+    "postgresql_connected": true,
+    "postgresql_tables_present": true,
+    "postgresql_paper_event_writable": true,
+    "candidate_telemetry_dir_writable": true,
+    "order_telemetry_dir_writable": true,
+    "paper_mode_confirmed": true,
+    "live_trading_confirmed_disabled": true
+  }
+}

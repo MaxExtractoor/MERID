@@ -1,0 +1,574 @@
+"""CF Benchmarks Real-Time Index (RTI) adapter — authoritative, fail-closed.
+
+This module is the single source of truth for the settlement reference price
+used by the Kalshi 15m crypto stack.  It returns a typed, immutable
+``CfbRtiObservation`` only when every health gate passes.  Public spot or stale
+values are never returned as a fallback.
+
+Design notes:
+- The adapter is synchronous so it can be called from the synchronous signal
+  generation path in ``agent_grid_15m``.
+- Health failures are logged with a precise rejection reason that becomes the
+  candidate's ``no_trade_reason``.
+- ``MERID_CFB_RTI_ADAPTER`` must be set to ``live`` before the adapter will
+  attempt to call the live CF Benchmarks API.  In paper/shadow mode the trading
+  stack still sets this to ``live`` but uses ``MERID_ALLOW_LIVE_TRADES=false``
+  to keep entries disabled while it validates the feed.
+"""
+from __future__ import annotations
+
+import math
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Dict, Optional
+
+import httpx
+
+from utils.logger import get_logger
+
+logger = get_logger("merid.data.cf_rti_adapter")
+
+# Kalshi index ID -> asset map (used to validate WebSocket frames whose
+# authoritative symbol is the server-returned ID, e.g. ETHUSD_RTI).
+from merid.data.kalshi_cf_rti_ws import index_id_to_asset
+
+
+# CF Benchmarks API configuration
+_CFB_BASE_URL = "https://api.cfbenchmarks.com"
+_CFB_RTI_ENDPOINT = "/api/v1/rti"
+
+# Asset → official CF Benchmarks index symbol
+_ASSET_TO_CFB_SYMBOL = {
+    "BTC": "BRTI",
+    "ETH": "ETH_RTI",
+    "SOL": "SOL_RTI",
+    "XRP": "XRP_RTI",
+    "DOGE": "DOGE_RTI",
+}
+
+# Kalshi crypto contracts settle on a one-minute average of CF RTI per-second
+# observations.  The 60-second average field is required when trading inside the
+# final minute window.
+_MAX_CFB_RTI_AGE_MS = int(os.environ.get("MERID_MAX_CFB_RTI_AGE_MS", "5000"))
+_FINAL_MINUTE_CUTOFF_S = float(os.environ.get("MERID_FINAL_MINUTE_CUTOFF_S", "60"))
+_REQUEST_TIMEOUT = float(os.environ.get("MERID_CFB_RTI_TIMEOUT_S", "5"))
+
+
+@dataclass(frozen=True)
+class CfbRtiObservation:
+    """Immutable CF Benchmarks Real-Time Index observation.
+
+    This is the canonical settlement input.  No public-spot fallback is allowed.
+    """
+    asset: str
+    cfb_symbol: str
+    value: float
+    source_ts_ms: int
+    received_ts_ms: int
+    sequence: Optional[int] = None
+    source: str = "cf_benchmarks"
+    settlement_reference: str = "cfb_rti_live"
+    cfb_60s_average: Optional[float] = None
+    price_source_health: str = "healthy"
+
+    @property
+    def age_ms(self) -> int:
+        return max(0, self.received_ts_ms - self.source_ts_ms)
+
+
+# Adapter state for ordering, stream liveness, and last-success tracking.
+@dataclass
+class _AdapterState:
+    last_observation_by_asset: Dict[str, CfbRtiObservation] = field(default_factory=dict)
+    last_source_ts_ms_by_asset: Dict[str, int] = field(default_factory=dict)
+    last_failure_ts_ms: int = 0
+    last_failure_reason_by_asset: Dict[str, str] = field(default_factory=dict)
+    consecutive_failures_by_asset: Dict[str, int] = field(default_factory=dict)
+
+
+_state = _AdapterState()
+
+# Kalshi authenticated ``cfbenchmarks_value`` WebSocket stream.
+_kalshi_stream: Optional[Any] = None
+_kalshi_stream_lock = threading.Lock()
+
+
+def _ensure_kalshi_stream() -> Optional[Any]:
+    """Lazily start the Kalshi CF-RTI WebSocket stream when enabled."""
+    global _kalshi_stream
+    with _kalshi_stream_lock:
+        if _kalshi_stream is not None:
+            return _kalshi_stream
+
+        if not _env_bool("MERID_CFB_RTI_ADAPTER"):
+            return None
+
+        if _rti_source() not in ("kalshi_ws", "both"):
+            return None
+
+        # Never start a real WebSocket during pytest unless the source is
+        # explicitly set.  This protects test suites that set MERID_ENV=prod
+        # from accidentally connecting to a live Kalshi socket.
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            source = os.environ.get("MERID_CFB_RTI_SOURCE", "").strip().lower()
+            if source not in ("kalshi_ws", "both"):
+                logger.debug("[CF-RTI-ADAPTER] skipping stream under pytest")
+                return None
+
+        try:
+            from merid.data.kalshi_cf_rti_ws import KalshiCfRtiStream, index_id_to_asset
+        except Exception as exc:
+            logger.error("[CF-RTI-ADAPTER] Kalshi stream import failed: %s", exc)
+            return None
+
+        def _on_frame(frame):
+            asset = index_id_to_asset(frame.index_id)
+            if not asset:
+                logger.debug(
+                    "[CF-RTI-ADAPTER] dropping unknown index_id=%s", frame.index_id
+                )
+                return
+
+            # For the WebSocket path the authoritative symbol is the Kalshi
+            # index ID returned by the server (e.g. ETHUSD_RTI).  The legacy
+            # _ASSET_TO_CFB_SYMBOL map is kept for the optional direct REST path.
+            cfb_symbol = frame.index_id
+            obs = _parse_response_payload(asset, cfb_symbol, frame.data)
+            if obs is None:
+                logger.debug(
+                    "[CF-RTI-ADAPTER] stream frame parse failed asset=%s index_id=%s",
+                    asset,
+                    frame.index_id,
+                )
+                return
+
+            _state.last_observation_by_asset[asset] = obs
+            _state.last_source_ts_ms_by_asset[asset] = obs.source_ts_ms
+            _state.consecutive_failures_by_asset[asset] = 0
+            _state.last_failure_reason_by_asset[asset] = ""
+            logger.info(
+                "[CF-RTI-ADAPTER] stream_observation_accepted asset=%s cfb_symbol=%s value=%.4f source_ts_ms=%s",
+                asset,
+                cfb_symbol,
+                obs.value,
+                obs.source_ts_ms,
+            )
+
+        _kalshi_stream = KalshiCfRtiStream(
+            on_frame=_on_frame,
+            on_reconnect=reset_state,
+            on_disconnect=reset_state,
+        )
+        try:
+            _kalshi_stream.start()
+            logger.info("[CF-RTI-ADAPTER] Kalshi cfbenchmarks_value stream started")
+        except Exception as exc:
+            logger.error("[CF-RTI-ADAPTER] Kalshi stream start failed: %s", exc)
+            _kalshi_stream = None
+            return None
+
+        return _kalshi_stream
+
+
+def start_kalshi_rti_stream() -> Optional[Any]:
+    """Explicitly start the Kalshi CF-RTI WebSocket stream.
+
+    Called from ``web.main_15m_lean`` lifespan; also triggered lazily by
+    ``get_live_rti`` when the adapter is enabled.
+    """
+    return _ensure_kalshi_stream()
+
+
+def stop_kalshi_rti_stream() -> None:
+    """Stop the Kalshi CF-RTI WebSocket stream."""
+    global _kalshi_stream
+    with _kalshi_stream_lock:
+        stream = _kalshi_stream
+        _kalshi_stream = None
+    if stream is not None:
+        stream.stop()
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _asset_symbol_valid(asset: str) -> Optional[str]:
+    """Return the canonical CF Benchmarks symbol for ``asset`` or ``None``."""
+    normalized = (asset or "").upper().strip()
+    if not normalized:
+        return None
+    return _ASSET_TO_CFB_SYMBOL.get(normalized)
+
+
+def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -> Optional[CfbRtiObservation]:
+    """Parse a CF Benchmarks API response into a typed observation.
+
+    Accepts several documented and legacy field shapes without being lossy.
+    """
+    value = None
+    for field in ("value", "price", "last", "index_value", "rti"):
+        if field in data and data[field] is not None:
+            try:
+                value = float(data[field])
+                break
+            except (TypeError, ValueError):
+                pass
+
+    if value is None or not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_invalid_value asset=%s cfb_symbol=%s value=%s",
+            asset, cfb_symbol, value
+        )
+        return None
+
+    source_ts_ms = None
+    for field in ("ts", "timestamp", "time", "source_ts_ms", "published_at"):
+        if field in data and data[field] is not None:
+            candidate = data[field]
+            parsed = _parse_timestamp(candidate)
+            if parsed is not None:
+                source_ts_ms = parsed
+                break
+    if source_ts_ms is None:
+        source_ts_ms = _now_ms()
+
+    sequence = None
+    for field in ("sequence", "seq", "id"):
+        if field in data and data[field] is not None:
+            try:
+                sequence = int(data[field])
+                break
+            except (TypeError, ValueError):
+                pass
+
+    cfb_60s_average = None
+    for field in ("average_60s", "60s_average", "minute_average", "trailing_60s"):
+        if field in data and data[field] is not None:
+            try:
+                cfb_60s_average = float(data[field])
+                if math.isfinite(cfb_60s_average) and cfb_60s_average > 0:
+                    break
+            except (TypeError, ValueError):
+                pass
+
+    return CfbRtiObservation(
+        asset=asset,
+        cfb_symbol=cfb_symbol,
+        value=value,
+        source_ts_ms=source_ts_ms,
+        received_ts_ms=_now_ms(),
+        sequence=sequence,
+        source="cf_benchmarks",
+        settlement_reference="cfb_rti_live",
+        cfb_60s_average=cfb_60s_average,
+        price_source_health="healthy",
+    )
+
+
+def _parse_timestamp(candidate: Any) -> Optional[int]:
+    """Best-effort parse of a timestamp field into source epoch milliseconds."""
+    if isinstance(candidate, (int, float)):
+        if not math.isfinite(candidate):
+            return None
+        if candidate > 1e12:  # already milliseconds
+            return int(candidate)
+        return int(candidate * 1000)
+
+    if isinstance(candidate, str):
+        candidate = candidate.strip()
+        # ISO 8601
+        if "T" in candidate or "Z" in candidate:
+            try:
+                dt = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return int(dt.timestamp() * 1000)
+            except ValueError:
+                pass
+        # Numeric milliseconds / seconds
+        try:
+            value = float(candidate)
+            if value > 1e12:
+                return int(value)
+            return int(value * 1000)
+        except ValueError:
+            pass
+
+    if isinstance(candidate, datetime):
+        if candidate.tzinfo is None:
+            candidate = candidate.replace(tzinfo=timezone.utc)
+        return int(candidate.timestamp() * 1000)
+
+    return None
+
+
+def _rti_source() -> str:
+    """Return the active RTI source strategy.
+
+    - ``kalshi_ws``: use the authenticated Kalshi ``cfbenchmarks_value`` WebSocket.
+    - ``direct``: use a direct CF Benchmarks REST API key.
+    - ``both``: prefer Kalshi WebSocket, fall back to direct REST.
+    """
+    source = os.environ.get("MERID_CFB_RTI_SOURCE", "").strip().lower()
+    if source in ("kalshi_ws", "direct", "both"):
+        return source
+    # When the adapter is enabled and no explicit source is set, prefer the
+    # authenticated Kalshi WebSocket (``.env.shadow`` sets this explicitly).
+    # In test/dev with no source, fall back to direct REST so unit tests that
+    # mock httpx can run without connecting to a live Kalshi WebSocket.
+    if _env_bool("MERID_CFB_RTI_ADAPTER", False):
+        if os.environ.get("MERID_ENV", "").lower() in ("testing", "test", "dev", "development"):
+            return "direct"
+        return "kalshi_ws"
+    return "direct"
+
+
+def _fetch_raw(asset: str, cfb_symbol: str) -> Optional[Dict[str, Any]]:
+    """Synchronous HTTP fetch from CF Benchmarks RTI endpoint."""
+    if not _env_bool("MERID_CFB_RTI_ADAPTER", False):
+        logger.debug(
+            "[CF-RTI-ADAPTER] cfb_rti_adapter_not_live asset=%s (MERID_CFB_RTI_ADAPTER not live)",
+            asset,
+        )
+        return None
+
+    base_url = os.environ.get("MERID_CFB_RTI_BASE_URL", _CFB_BASE_URL)
+    api_key = os.environ.get("CFB_API_KEY") or os.environ.get("MERID_CFB_RTI_API_KEY")
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    url = f"{base_url}{_CFB_RTI_ENDPOINT}/{cfb_symbol}"
+    try:
+        with httpx.Client(timeout=_REQUEST_TIMEOUT, headers=headers) as client:
+            resp = client.get(url)
+    except httpx.TimeoutException:
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=timeout", asset, cfb_symbol
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=%s", asset, cfb_symbol, exc
+        )
+        return None
+
+    if resp.status_code == 401:
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=auth_required", asset, cfb_symbol
+        )
+        return None
+    if resp.status_code == 404:
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=index_not_found", asset, cfb_symbol
+        )
+        return None
+    if resp.status_code != 200:
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s status=%s", asset, cfb_symbol, resp.status_code
+        )
+        return None
+
+    try:
+        data = resp.json()
+    except Exception as exc:
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=invalid_json exc=%s", asset, cfb_symbol, exc
+        )
+        return None
+
+    if data.get("source") and data.get("source") != "cf_benchmarks":
+        _state.last_failure_reason_by_asset[asset] = "source_not_cf_benchmarks"
+        _state.consecutive_failures_by_asset[asset] = _state.consecutive_failures_by_asset.get(asset, 0) + 1
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s "
+            "reason=source_not_cf_benchmarks source=%s",
+            asset, cfb_symbol, data.get("source")
+        )
+        return None
+
+    return data
+
+
+def _validate_observation(
+    asset: str, cfb_symbol: str, obs: CfbRtiObservation
+) -> Optional[CfbRtiObservation]:
+    """Apply all fail-closed health gates.  Returns ``None`` and logs the reason on failure."""
+    now_ms = _now_ms()
+
+    # Source identity
+    if obs.source != "cf_benchmarks":
+        _state.last_failure_reason_by_asset[asset] = "source_not_cf_benchmarks"
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s reason=source_not_cf_benchmarks source=%s",
+            asset, obs.source
+        )
+        return None
+
+    # Asset / symbol mapping.  The authoritative symbol may be a canonical CF
+    # Benchmarks ID (e.g. ETH_RTI) or the Kalshi-specific ID (e.g. ETHUSD_RTI).
+    # Either is valid as long as it maps back to the requested asset.
+    if _asset_symbol_valid(asset) is None:
+        _state.last_failure_reason_by_asset[asset] = "cfb_rti_symbol_mismatch"
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s reason=cfb_rti_symbol_mismatch unknown_asset",
+            asset
+        )
+        return None
+    if obs.asset != asset or index_id_to_asset(obs.cfb_symbol) != asset:
+        _state.last_failure_reason_by_asset[asset] = "cfb_rti_symbol_mismatch"
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s reason=cfb_rti_symbol_mismatch "
+            "observed_asset=%s observed_cfb_symbol=%s", asset, obs.asset, obs.cfb_symbol
+        )
+        return None
+
+    # Value sanity
+    if not math.isfinite(obs.value) or obs.value <= 0:
+        _state.last_failure_reason_by_asset[asset] = "cfb_rti_invalid_value"
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_invalid_value value=%s",
+            asset, cfb_symbol, obs.value
+        )
+        return None
+
+    # Freshness
+    age_ms = now_ms - obs.source_ts_ms
+    if age_ms > _MAX_CFB_RTI_AGE_MS:
+        _state.last_failure_reason_by_asset[asset] = "cfb_rti_stale"
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_stale "
+            "age_ms=%s max_age_ms=%s", asset, cfb_symbol, age_ms, _MAX_CFB_RTI_AGE_MS
+        )
+        return None
+
+    # Stream liveness: if the previous observation for this asset was more recent
+    # than the current one, the stream is going backwards or has stalled.
+    last_source_ts_ms = _state.last_source_ts_ms_by_asset.get(asset, 0)
+    if obs.source_ts_ms < last_source_ts_ms:
+        _state.last_failure_reason_by_asset[asset] = "cfb_rti_nonmonotonic"
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_nonmonotonic "
+            "source_ts_ms=%s last=%s", asset, cfb_symbol, obs.source_ts_ms, last_source_ts_ms
+        )
+        return None
+
+    # Subscription integrity: the adapter must have seen a successful observation
+    # within the heartbeat window.  A long run of failures triggers this gate.
+    failures = _state.consecutive_failures_by_asset.get(asset, 0)
+    heartbeat_window_ms = max(_MAX_CFB_RTI_AGE_MS * 3, 30000)
+    last_success = _state.last_observation_by_asset.get(asset)
+    if last_success is not None:
+        since_last_success = now_ms - last_success.source_ts_ms
+        if since_last_success > heartbeat_window_ms:
+            _state.last_failure_reason_by_asset[asset] = "cfb_rti_subscription_unconfirmed"
+            logger.error(
+                "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_subscription_unconfirmed "
+                "since_last_success_ms=%s", asset, cfb_symbol, since_last_success
+            )
+            return None
+
+    # Ordering: sequence numbers must not go backward.
+    if obs.sequence is not None and last_success is not None and last_success.sequence is not None:
+        if obs.sequence < last_success.sequence:
+            _state.last_failure_reason_by_asset[asset] = "cfb_rti_nonmonotonic"
+            logger.error(
+                "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_nonmonotonic "
+                "sequence=%s last=%s", asset, cfb_symbol, obs.sequence, last_success.sequence
+            )
+            return None
+
+    return obs
+
+
+def get_live_rti(asset: str) -> Optional[CfbRtiObservation]:
+    """Return the latest valid CF Benchmarks RTI observation for ``asset``.
+
+    Returns ``None`` and logs a precise rejection reason if any health gate
+    fails.  Never returns a public-spot fallback.
+    """
+    cfb_symbol = _asset_symbol_valid(asset)
+    if cfb_symbol is None:
+        _state.consecutive_failures_by_asset[asset] = _state.consecutive_failures_by_asset.get(asset, 0) + 1
+        _state.last_failure_reason_by_asset[asset] = "cfb_rti_symbol_mismatch"
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s reason=cfb_rti_symbol_mismatch", asset
+        )
+        return None
+
+    source = _rti_source()
+
+    cached = _state.last_observation_by_asset.get(asset)
+
+    # Primary: authenticated Kalshi cfbenchmarks_value WebSocket stream.
+    if source in ("kalshi_ws", "both"):
+        _ensure_kalshi_stream()
+        if cached is not None:
+            obs = _validate_observation(asset, cfb_symbol, cached)
+            if obs is not None:
+                _state.last_observation_by_asset[asset] = obs
+                _state.last_source_ts_ms_by_asset[asset] = obs.source_ts_ms
+                _state.consecutive_failures_by_asset[asset] = 0
+                _state.last_failure_reason_by_asset[asset] = ""
+                logger.info(
+                    "[CF-RTI-ADAPTER] cfb_rti_live asset=%s cfb_symbol=%s value=%.4f source_ts_ms=%s age_ms=%s source=kalshi_ws",
+                    asset, obs.cfb_symbol, obs.value, obs.source_ts_ms, obs.age_ms
+                )
+                return obs
+
+    # Fallback: direct CF Benchmarks REST key.
+    if source in ("direct", "both"):
+        data = _fetch_raw(asset, cfb_symbol)
+        if data is not None:
+            obs = _parse_response_payload(asset, cfb_symbol, data)
+            if obs is not None:
+                obs = _validate_observation(asset, cfb_symbol, obs)
+                if obs is not None:
+                    _state.last_observation_by_asset[asset] = obs
+                    _state.last_source_ts_ms_by_asset[asset] = obs.source_ts_ms
+                    _state.consecutive_failures_by_asset[asset] = 0
+                    _state.last_failure_reason_by_asset[asset] = ""
+                    logger.info(
+                        "[CF-RTI-ADAPTER] cfb_rti_live asset=%s cfb_symbol=%s value=%.4f source_ts_ms=%s age_ms=%s source=direct_cfb",
+                        asset, obs.cfb_symbol, obs.value, obs.source_ts_ms, obs.age_ms
+                    )
+                    return obs
+
+    _state.consecutive_failures_by_asset[asset] = _state.consecutive_failures_by_asset.get(asset, 0) + 1
+    if not _state.last_failure_reason_by_asset.get(asset):
+        _state.last_failure_reason_by_asset[asset] = "cfb_rti_unavailable"
+    return None
+
+
+def get_last_rejection_reason(asset: str) -> str:
+    return _state.last_failure_reason_by_asset.get(asset, "")
+
+
+def get_last_observation(asset: str) -> Optional[CfbRtiObservation]:
+    return _state.last_observation_by_asset.get(asset)
+
+
+def reset_state() -> None:
+    """Reset adapter state.  Intended for tests only."""
+    _state.last_observation_by_asset.clear()
+    _state.last_source_ts_ms_by_asset.clear()
+    _state.last_failure_ts_ms = 0
+    _state.last_failure_reason_by_asset.clear()
+    _state.consecutive_failures_by_asset.clear()
+
+
+def final_minute_cutoff_seconds() -> float:
+    return _FINAL_MINUTE_CUTOFF_S
