@@ -6590,7 +6590,14 @@ class LeanAgent15m:
         if not getattr(market_state, "book_initialized", False):
             data_quality = "stale"
 
-        regime = getattr(market_state, "regime", "unknown") or "unknown"
+        # Regime is a critical confidence/edge input.  The market state store does
+        # not set a regime attribute, so derive it from available depth using the
+        # same classifier the rest of the agent uses.
+        state_regime = getattr(market_state, "regime", None)
+        if state_regime in (None, "unknown", "insufficient_data"):
+            regime = self._classify_regime(ticker)
+        else:
+            regime = state_regime
 
         # Settlement reference and CF-RTI basis.  The model and confidence are
         # only valid when the price is the official CF Benchmarks RTI, not a

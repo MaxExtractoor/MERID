@@ -219,6 +219,192 @@ def _is_paper_eligible(record: Dict[str, Any]) -> bool:
     return True
 
 
+# Ordered trust chain for the 15m decision funnel.  A record is assigned the
+# first gate whose predicate fails; later gates are recorded for secondary
+# diagnosis but do not change the first-failure label.
+_REJECTION_GATES = [
+    ("market_state_valid", lambda r: _coerce_str(r.get("data_quality")) not in ("stale", "bad", "unknown")),
+    ("rti_valid", lambda r: _coerce_str(r.get("settlement_reference")) == "cfb_rti_live"),
+    ("book_valid", lambda r: _coerce_float(r.get("yes_bid_cents")) is not None and _coerce_float(r.get("yes_ask_cents")) is not None and _coerce_float(r.get("no_bid_cents")) is not None and _coerce_float(r.get("no_ask_cents")) is not None),
+    ("feature_vector_complete", lambda r: _coerce_float(r.get("p_yes")) is not None and _coerce_float(r.get("p_no")) is not None and _coerce_float(r.get("spot_price")) is not None and _coerce_float(r.get("target_price")) is not None and _coerce_float(r.get("seconds_to_expiry")) is not None),
+    ("confidence_valid", lambda r: bool(r.get("confidence_valid")) is True and _coerce_str(r.get("confidence_source")) == "uncertainty_engine"),
+    ("selected_probability_gt_50", lambda r: _coerce_float(r.get("p_selected")) is not None and _coerce_float(r.get("p_selected")) > 0.5),
+    ("executable_price_in_canonical_range", lambda r: _price_in_canonical_range(r)),
+    ("gross_edge_positive", lambda r: _coerce_float(r.get("gross_edge")) is not None and _coerce_float(r.get("gross_edge")) > 0.0),
+    ("net_edge_ge_min", lambda r: _coerce_float(r.get("net_edge")) is not None and _coerce_float(r.get("net_edge")) >= _coerce_float(r.get("min_required_edge"), DEFAULT_MIN_EDGE)),
+]
+
+
+def _price_in_canonical_range(record: Dict[str, Any]) -> bool:
+    """Check whether either side has executable prices inside the 10c-75c canonical band.
+
+    The agent's pre-decision filter rejects both sides when they are both outside
+    10c-75c (deep ITM/OTM).  This gate flags when the candidate's price would have
+    been ineligible for that reason.
+    """
+    yes_bid = _coerce_float(record.get("yes_bid_cents"))
+    yes_ask = _coerce_float(record.get("yes_ask_cents"))
+    no_bid = _coerce_float(record.get("no_bid_cents"))
+    no_ask = _coerce_float(record.get("no_ask_cents"))
+    # Duality fallback: yes/no are 100 - reciprocal.
+    yes_lo = yes_bid if yes_bid is not None else (100.0 - no_ask) if no_ask is not None else None
+    yes_hi = yes_ask if yes_ask is not None else (100.0 - no_bid) if no_bid is not None else None
+    no_lo = no_bid if no_bid is not None else (100.0 - yes_ask) if yes_ask is not None else None
+    no_hi = no_ask if no_ask is not None else (100.0 - yes_bid) if yes_bid is not None else None
+    yes_in = yes_lo is not None and yes_hi is not None and (yes_lo >= 10.0 or yes_hi <= 75.0)
+    no_in = no_lo is not None and no_hi is not None and (no_lo >= 10.0 or no_hi <= 75.0)
+    # At least one side must have an executable price in the canonical band.
+    return bool(yes_in or no_in)
+
+
+def _first_failure(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the first failed gate, reason, and input snapshot for a candidate.
+
+    The returned dict is suitable for both `rejection_funnel` aggregation and
+    `candidate_rejection` record emission.
+    """
+    if _coerce_str(record.get("record_type"), "candidate") != "candidate":
+        return {
+            "first_failed_gate": "not_candidate_record",
+            "reason": "record_type is not candidate",
+            "input_snapshot": {},
+        }
+
+    # Pre-defined reasons that already encode a first-failure source are mapped
+    # directly, then the numeric predicates are checked in gate order.
+    rejection_reason = _coerce_str(record.get("rejection_reason"))
+    direct_gates = {
+        "no_net_edge_above_threshold": ("net_edge_ge_min", "both sides below min net edge"),
+        "yes_edge_below_threshold": ("net_edge_ge_min", "yes side net edge below min"),
+        "no_edge_below_threshold": ("net_edge_ge_min", "no side net edge below min"),
+        "cost_basis_override_yes": ("selected_probability_gt_50", "best edge is yes but p_yes <= 0.5"),
+        "cost_basis_override_no": ("selected_probability_gt_50", "best edge is no but p_no <= 0.5"),
+        "invalid_confidence": ("confidence_valid", "model side qualifies but confidence invalid"),
+        "expired_or_no_time": ("final_minute_cutoff", "expired or no time"),
+        "final_minute_entry_disabled": ("final_minute_cutoff", "final minute entry disabled"),
+    }
+
+    if rejection_reason and not record.get("selected_outcome"):
+        gate, base_reason = direct_gates.get(rejection_reason, (None, None))
+        if gate:
+            # For confidence-override records, the real first failure is confidence
+            # if confidence is invalid; otherwise fall through to the edge/p gate.
+            if gate == "confidence_valid" and not _REJECTION_GATES[4][1](record):
+                pass  # will be caught below
+            else:
+                return {
+                    "first_failed_gate": gate,
+                    "reason": f"{base_reason}; rejection_reason={rejection_reason}",
+                    "input_snapshot": _rejection_inputs(record),
+                }
+
+    # Evaluate the full gate chain to discover the first failure.  This is used
+    # both for records that have a less specific rejection reason and as a
+    # cross-check on the direct mapping above.
+    for gate, predicate in _REJECTION_GATES:
+        try:
+            if not predicate(record):
+                return {
+                    "first_failed_gate": gate,
+                    "reason": _gate_reason(record, gate),
+                    "input_snapshot": _rejection_inputs(record),
+                }
+        except Exception as exc:
+            return {
+                "first_failed_gate": f"{gate}_predicate_error",
+                "reason": f"predicate raised {exc}",
+                "input_snapshot": _rejection_inputs(record),
+            }
+
+    return {
+        "first_failed_gate": "paper_intent_created",
+        "reason": "all gates passed; paper intent created",
+        "input_snapshot": _rejection_inputs(record),
+    }
+
+
+def _gate_reason(record: Dict[str, Any], gate: str) -> str:
+    """Human-readable reason for a specific failed gate."""
+    if gate == "market_state_valid":
+        return f"data_quality={record.get('data_quality')}"
+    if gate == "rti_valid":
+        return f"settlement_reference={record.get('settlement_reference')}"
+    if gate == "book_valid":
+        return "missing yes/no bid or ask cents"
+    if gate == "feature_vector_complete":
+        return "missing p_yes/p_no/spot/strike/expiry"
+    if gate == "confidence_valid":
+        reasons = record.get("confidence_reasons") or []
+        return "confidence invalid: " + ", ".join(str(r) for r in reasons)
+    if gate == "selected_probability_gt_50":
+        p = _coerce_float(record.get("p_selected"))
+        return f"p_selected={p} not > 0.5"
+    if gate == "executable_price_in_canonical_range":
+        return f"yes_bid={record.get('yes_bid_cents')} yes_ask={record.get('yes_ask_cents')} no_bid={record.get('no_bid_cents')} no_ask={record.get('no_ask_cents')}"
+    if gate == "gross_edge_positive":
+        return f"gross_edge={record.get('gross_edge')} not positive"
+    if gate == "net_edge_ge_min":
+        return f"net_edge={record.get('net_edge')} < min_required_edge={record.get('min_required_edge')}"
+    return "unknown gate reason"
+
+
+def _rejection_inputs(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Numeric inputs that explain why the gate failed.
+
+    When no side is selected, the top-level ``p_selected``/``gross_edge``/``net_edge``
+    fields are null.  We fall back to the preferred-side breakdown so the report
+    can show how close the best candidate came to passing.
+    """
+    eb = record.get("edge_breakdown") or {}
+    p_yes = _coerce_float(record.get("p_yes"))
+    p_no = _coerce_float(record.get("p_no"))
+    side = _coerce_str(eb.get("selected_side")) if isinstance(eb, dict) else None
+    breakdown_p_selected = _coerce_float(eb.get("p_selected")) if isinstance(eb, dict) else None
+    breakdown_gross = _coerce_float(eb.get("gross_edge")) if isinstance(eb, dict) else None
+    breakdown_net = _coerce_float(eb.get("net_edge")) if isinstance(eb, dict) else None
+
+    p_selected = _coerce_float(record.get("p_selected"))
+    gross_edge = _coerce_float(record.get("gross_edge"))
+    net_edge = _coerce_float(record.get("net_edge"))
+
+    # If the record did not select a side but has a breakdown, surface the
+    # preferred-side edge and probability so the funnel is meaningful.
+    if side and p_yes is not None and p_no is not None and p_selected is None:
+        p_selected = breakdown_p_selected
+    if gross_edge is None:
+        gross_edge = breakdown_gross
+    if net_edge is None:
+        net_edge = breakdown_net
+
+    return {
+        "run_id": record.get("run_id"),
+        "decision_id": record.get("decision_id"),
+        "ticker": record.get("market_ticker"),
+        "asset": record.get("asset"),
+        "p_yes": p_yes,
+        "p_no": p_no,
+        "p_selected": p_selected,
+        "preferred_side": side,
+        "yes_bid_cents": _coerce_float(record.get("yes_bid_cents")),
+        "yes_ask_cents": _coerce_float(record.get("yes_ask_cents")),
+        "no_bid_cents": _coerce_float(record.get("no_bid_cents")),
+        "no_ask_cents": _coerce_float(record.get("no_ask_cents")),
+        "spread_cents": _coerce_float(record.get("yes_ask_cents")) - _coerce_float(record.get("yes_bid_cents")) if _coerce_float(record.get("yes_ask_cents")) is not None and _coerce_float(record.get("yes_bid_cents")) is not None else None,
+        "entry_fee_cents": _coerce_float(record.get("fee_per_contract_cents")),
+        "model_risk_reserve": _coerce_float(record.get("model_risk_reserve")),
+        "gross_edge": gross_edge,
+        "net_edge": net_edge,
+        "min_required_edge": _coerce_float(record.get("min_required_edge"), DEFAULT_MIN_EDGE),
+        "confidence": _coerce_float(record.get("confidence")),
+        "confidence_valid": record.get("confidence_valid"),
+        "confidence_reasons": record.get("confidence_reasons"),
+        "seconds_to_expiry": _coerce_float(record.get("seconds_to_expiry")),
+        "settlement_reference": record.get("settlement_reference"),
+        "data_quality": record.get("data_quality"),
+        "regime": record.get("regime"),
+    }
+
+
 def _read_input_files(input_path: Path, strict: bool) -> Tuple[List[Path], List[str]]:
     files: List[Path] = []
     if input_path.is_file():
@@ -471,6 +657,14 @@ def _terminal_table(report: Dict[str, Any]) -> str:
         ["terminal", str(funnel["terminal"])],
     ])
 
+    # First-failure funnel table
+    funnel = report.get("rejection_funnel")
+    if funnel and funnel.get("asset_gate_table"):
+        table = [["First rejection gate", *funnel["assets"], "Total", "%"]]
+        for gate, row in sorted(funnel["asset_gate_table"].items(), key=lambda kv: -kv[1]["total"]):
+            table.append([gate] + [str(row.get(asset, 0)) for asset in funnel["assets"]] + [str(row["total"]), str(row["pct"])])
+        sections.append(table)
+
     hard = report["hard_fails"]
     sections.append([
         ["Hard failures", "count"],
@@ -517,6 +711,7 @@ def _empty_report() -> Dict[str, Any]:
         "rti_health": {},
         "rti_basis": {},
         "candidate_funnel": {},
+        "rejection_funnel": {},
         "decision_quality": {},
         "side_integrity": {},
         "cost_basis_protection": {},
@@ -701,6 +896,70 @@ def _build_report(
         "paper_intent": paper_intents,
         "filled": filled,
         "terminal": terminal,
+    }
+
+    # Rejection funnel: first-failure gate per candidate, with mutually
+    # exclusive counts and per-asset/per-gate numeric distributions.
+    first_failures: List[Dict[str, Any]] = []
+    gate_asset_counts: Counter = Counter()
+    gate_counts: Counter = Counter()
+    gate_inputs: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+    for r in candidates:
+        ff = _first_failure(r)
+        first_failures.append(ff)
+        gate = ff["first_failed_gate"]
+        asset = _coerce_str(r.get("asset"), "unknown")
+        gate_counts[gate] += 1
+        gate_asset_counts[(gate, asset)] += 1
+        gate_inputs[gate].append(ff["input_snapshot"])
+
+    # Per-gate numeric distributions of the inputs just before the gate.
+    gate_distributions: Dict[str, Dict[str, Any]] = {}
+    for gate, inputs in gate_inputs.items():
+        gate_distributions[gate] = {
+            "p_yes": _distribution([i["p_yes"] for i in inputs if i["p_yes"] is not None]),
+            "p_selected": _distribution([i["p_selected"] for i in inputs if i["p_selected"] is not None]),
+            "yes_ask_cents": _distribution([i["yes_ask_cents"] for i in inputs if i["yes_ask_cents"] is not None]),
+            "no_ask_cents": _distribution([i["no_ask_cents"] for i in inputs if i["no_ask_cents"] is not None]),
+            "gross_edge": _distribution([i["gross_edge"] for i in inputs if i["gross_edge"] is not None]),
+            "net_edge": _distribution([i["net_edge"] for i in inputs if i["net_edge"] is not None]),
+            "model_risk_reserve": _distribution([i["model_risk_reserve"] for i in inputs if i["model_risk_reserve"] is not None]),
+            "seconds_to_expiry": _distribution([i["seconds_to_expiry"] for i in inputs if i["seconds_to_expiry"] is not None]),
+        }
+
+    # Asset-by-gate table: rows are gates, columns are assets.
+    assets = sorted({r.get("asset") for r in candidates if r.get("asset")})
+    gate_rows: Dict[str, Any] = {}
+    for gate, _ in _REJECTION_GATES + [("final_minute_cutoff", None), ("not_candidate_record", None), ("paper_intent_created", None)]:
+        row = {"total": 0}
+        for asset in assets:
+            c = gate_asset_counts.get((gate, asset), 0)
+            row[asset] = c
+            row["total"] += c
+        gate_rows[gate] = row
+
+    # Add any observed gates not in the canonical list.
+    for (gate, asset), c in gate_asset_counts.items():
+        if gate not in gate_rows:
+            if gate not in gate_rows:
+                gate_rows[gate] = {a: 0 for a in assets}
+                gate_rows[gate]["total"] = 0
+            gate_rows[gate][asset] += c
+            gate_rows[gate]["total"] += c
+
+    # Percentages relative to total candidates.
+    for gate in gate_rows:
+        total = gate_rows[gate]["total"]
+        gate_rows[gate]["pct"] = round(100.0 * total / len(candidates), 2) if candidates else 0.0
+
+    report["rejection_funnel"] = {
+        "first_failures": first_failures,
+        "gate_counts": dict(gate_counts),
+        "gate_distributions": gate_distributions,
+        "asset_gate_table": gate_rows,
+        "assets": assets,
+        "total_candidates": len(candidates),
     }
 
     # Decision quality distributions
@@ -1059,7 +1318,24 @@ def _write_outputs(report: Dict[str, Any], output_dir: Path, run_id: Optional[st
         text_path = output_dir / f"shadow_report_{run_part}{now}.txt"
         text_path.write_text(text, encoding="utf-8")
 
-    return json_path, text_path
+    # Emit candidate_rejection records for replay / dashboard use.
+    rejections = report.get("rejection_funnel", {}).get("first_failures")
+    if rejections:
+        rejections_path = output_dir / f"candidate_rejections_{run_part}{now}.jsonl"
+        with rejections_path.open("w", encoding="utf-8") as f:
+            for r in rejections:
+                rec = {
+                    "record_type": "candidate_rejection",
+                    "run_id": run_id,
+                    "first_failed_gate": r["first_failed_gate"],
+                    "reason": r["reason"],
+                    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    **r["input_snapshot"],
+                }
+                f.write(json.dumps(rec, default=str) + "\n")
+        return json_path, text_path, rejections_path
+
+    return json_path, text_path, None
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1105,10 +1381,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         if args.format in ("json", "both"):
-            json_path, text_path = _write_outputs(report, args.output, args.run_id)
+            json_path, text_path, rejections_path = _write_outputs(report, args.output, args.run_id)
             print(f"Wrote JSON: {json_path}")
             if text_path:
                 print(f"Wrote text: {text_path}")
+            if rejections_path:
+                print(f"Wrote candidate rejections: {rejections_path}")
 
         if args.format == "text":
             print(_terminal_table(report))
