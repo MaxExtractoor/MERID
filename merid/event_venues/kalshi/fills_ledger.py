@@ -33,6 +33,11 @@ except ImportError:
     POSTGRES_AVAILABLE = False
     asyncpg = None
 
+
+def _postgres_required() -> bool:
+    """Return True when PostgreSQL persistence is mandatory (soak/audit mode)."""
+    return os.getenv("MERID_POSTGRES_REQUIRED", "").strip().lower() in ("1", "true")
+
 from merid.event_venues.kalshi.risk_parameters import (
     DEFAULT_KALSHI_PRICE_CENTS,
     DEEP_OTM_THRESHOLD_CENTS,  # DEPRECATED: Use profile when available
@@ -73,7 +78,7 @@ except ImportError:
     SAFETY_METRICS_AVAILABLE = False
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from enum import Enum
 
@@ -85,6 +90,7 @@ try:
         from_signed_yes_exposure,
         fill_to_signed_yes_exposure,
         normalize_rest_position,
+        parse_kalshi_side,
     )
     BINARY_PRICE_SPACE_AVAILABLE = True
 except Exception:
@@ -260,6 +266,24 @@ class ReconciliationStatus(Enum):
 FEE_MISMATCH_THRESHOLD_PCT: float = float(os.getenv("MERID_FEE_MISMATCH_THRESHOLD_PCT", "5.0"))  # 5% default
 
 
+def fee_dollars_to_cents(fee_dollars: Optional[Decimal]) -> int:
+    """Convert a dollar-denominated fee (Kalshi V2 ``fee_cost``) to integer cents.
+
+    Rounding policy (2026-08-16): ROUND_HALF_UP to the nearest cent.  Fees
+    below half a cent (e.g. $0.004) therefore record as 0 cents in the
+    integer-cent fields; the exact dollar value is always preserved in
+    ``KalshiFill.fee_cost`` and the persisted ledger columns.  Never compute
+    cents via ``int(fee * 100)`` — that truncates fractional cents toward
+    zero and silently drops fee cost from PnL.
+    """
+    if not fee_dollars:
+        return 0
+    try:
+        return int((Decimal(fee_dollars) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except Exception:
+        return 0
+
+
 def validate_fee_vs_estimate(
     actual_fee_cents: Decimal,
     estimated_fee_cents: Optional[Decimal],
@@ -321,7 +345,7 @@ def validate_fee_vs_estimate(
 LEDGER_SCHEMA_VERSION: int = 3
 CANONICALIZATION_VERSION: int = 1
 TRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1"})
-UNTRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"UNTRUSTED_LEGACY", "UNTRUSTED_RAW"})
+UNTRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"UNTRUSTED_LEGACY", "UNTRUSTED_RAW", "UNTRUSTED_SIDE_CONFLICT"})
 
 
 def _safe_price_to_cents(p) -> Optional[int]:
@@ -536,6 +560,32 @@ class KalshiFill:
     is_live: bool = False  # True if this was a LIVE trade with real money
     # Note: is_live is determined at ingestion time based on process trade mode
     # In strict mode, live trades MUST have derived_id=False (real Kalshi fill ID)
+
+    def __post_init__(self) -> None:
+        """Fail-closed defaults for trust and canonical quantity.
+
+        - A fill constructed without an explicit ``canonicalization_state`` is
+          treated as ``UNTRUSTED_RAW`` and cannot mutate live positions.
+        - A fill without a ``canonicalization_version`` is promoted to the
+          current schema version, except for legacy DB rows explicitly marked
+          ``UNTRUSTED_LEGACY`` (version 0 is a migration marker there).
+        - ``quantity_cc`` is derived exactly from ``count_fp`` when the caller
+          did not provide it, preserving fractional centi-contracts.
+        """
+        # Canonical centi-contracts from fixed-point contract count.
+        if self.quantity_cc == 0 and self.count_fp and self.count_fp > 0:
+            try:
+                self.quantity_cc = int(self.count_fp * Decimal("100"))
+            except Exception:
+                pass
+
+        # Fail-closed: no trust state means untrusted.
+        if self.canonicalization_state is None:
+            self.canonicalization_state = "UNTRUSTED_RAW"
+
+        # Explicit version for newly generated fills; preserve 0 for legacy rows.
+        if self.canonicalization_version == 0 and self.canonicalization_state != "UNTRUSTED_LEGACY":
+            self.canonicalization_version = CANONICALIZATION_VERSION
 
     def resolved_asset(self) -> Optional[str]:
         """Crypto asset code (BTC, ETH, …) from market ticker via canonical prefix map."""
@@ -932,6 +982,11 @@ class KalshiFillsLedger:
         # PostgreSQL connection pool (replaces SQLite)
         self._postgres_pool: Optional[asyncpg.Pool] = None
         self._use_postgres = POSTGRES_AVAILABLE and os.getenv("POSTGRES_PASSWORD")
+        if _postgres_required() and not self._use_postgres:
+            raise RuntimeError(
+                "MERID_POSTGRES_REQUIRED is set but PostgreSQL is not configured "
+                "(asyncpg unavailable or POSTGRES_PASSWORD missing)"
+            )
 
         # Fallback to SQLite if PostgreSQL not available
         # TEST-ISOLATION FIX (2026-07-19): Path is env-overridable so tests can
@@ -1468,12 +1523,19 @@ class KalshiFillsLedger:
                 if _is_test_fixture_fill(fill.fill_id):
                     continue
 
+                # 2026-08-16: Quarantined fills (side conflict, unknown, untrusted) are
+                # stored for audit and reconciliation, but they must not be applied to
+                # positions.  Keep them out of the position-applicable validation below.
+                _quarantined = fill.unmatched or fill.canonicalization_state in UNTRUSTED_CANONICALIZATION_STATES
+
                 # CRITICAL FIX: Validate fill data before ingesting (same as on_fill)
                 # This prevents corrupted fill data from entering the ledger via HTTP
                 if fill.count_fp is None or fill.count_fp <= 0:
-                    # Zero-count records from /portfolio/fills are open orders that have
+                    # Zero-count fills from /portfolio/fills are open orders that have
                     # not yet filled; they are not invalid, just not true fills.
-                    logger.debug("[FILLS-LEDGER] Skipping zero-count HTTP record: count_fp=%s fill_id=%s", fill.count_fp, fill.fill_id)
+                    # _action = "settle" sentinel for non-buy/non-sell (zero-count) records.
+                    _action = "settle"
+                    logger.debug("[FILLS-LEDGER] Skipping zero-count HTTP record: count_fp=%s fill_id=%s action=%s", fill.count_fp, fill.fill_id, _action)
                     continue
 
                 if not fill.fill_id or not fill.fill_id.strip():
@@ -1481,14 +1543,16 @@ class KalshiFillsLedger:
                     continue
 
                 # 2026-08-12: Validate the CANONICAL position side/action, not the raw
-                # exchange action which may be the taker/counterparty view.
-                if fill.canonical_position_side not in ["yes", "no"]:
-                    logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: side=%s (must be 'yes' or 'no') fill_id=%s", fill.canonical_position_side, fill.fill_id)
-                    continue
+                # exchange action which may be the taker/counterparty view.  Quarantined
+                # fills intentionally have no canonical position effect.
+                if not _quarantined:
+                    if fill.canonical_position_side not in ["yes", "no"]:
+                        logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: side=%s (must be 'yes' or 'no') fill_id=%s", fill.canonical_position_side, fill.fill_id)
+                        continue
 
-                if fill.canonical_position_action not in ["buy", "sell"]:
-                    logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: action=%s (must be 'buy' or 'sell') fill_id=%s", fill.canonical_position_action, fill.fill_id)
-                    continue
+                    if fill.canonical_position_action not in ["buy", "sell"]:
+                        logger.error("[FILLS-LEDGER] Rejecting invalid HTTP fill: action=%s (must be 'buy' or 'sell') fill_id=%s", fill.canonical_position_action, fill.fill_id)
+                        continue
 
                 # CRITICAL FIX: Check global fill_id uniqueness across all sources
                 # This prevents false dedupe or missed dedupe across WS, REST, backfill, replay
@@ -1586,7 +1650,8 @@ class KalshiFillsLedger:
                     if hasattr(intent, 'raw_logit') and intent.raw_logit is not None:
                         fill.raw_logit = intent.raw_logit
                     # Resolve canonical/raw action from intent when missing.
-                    if intent.action in ("buy", "sell"):
+                    # Never use the intent to override a quarantined fill.
+                    if not _quarantined and intent.action in ("buy", "sell"):
                         if fill.canonical_position_action not in ("buy", "sell"):
                             fill.canonical_position_action = intent.action
                         if fill.action not in ("buy", "sell"):
@@ -1654,55 +1719,57 @@ class KalshiFillsLedger:
                 # Without this, _open_positions is not updated when fills come via HTTP polling
                 self.on_fill(fill)
 
-                # Track deep OTM/ITM fills for deployment safety monitoring
-                deep_otm_threshold = _get_deep_otm_threshold()
-                deep_itm_threshold = _get_deep_itm_threshold()
-                # Defensive: Ensure thresholds are ints (profile may return dict in some cases)
-                if isinstance(deep_otm_threshold, dict) and 'value' in deep_otm_threshold:
-                    deep_otm_threshold = deep_otm_threshold['value']
-                if not isinstance(deep_otm_threshold, int):
-                    logger.warning(
-                        "[DEPLOYMENT-SAFETY] Invalid deep_otm_threshold type: type=%s value=%s",
-                        type(deep_otm_threshold).__name__, str(deep_otm_threshold)[:100]
-                    )
-                    deep_otm_threshold = 0  # Safe fallback
-                if isinstance(deep_itm_threshold, dict) and 'value' in deep_itm_threshold:
-                    deep_itm_threshold = deep_itm_threshold['value']
-                if not isinstance(deep_itm_threshold, int):
-                    logger.warning(
-                        "[DEPLOYMENT-SAFETY] Invalid deep_itm_threshold type: type=%s value=%s",
-                        type(deep_itm_threshold).__name__, str(deep_itm_threshold)[:100]
-                    )
-                    deep_itm_threshold = 100  # Safe fallback
-                # Defensive: Ensure price_cents is an int before comparison (API may return dict in some cases)
-                price_cents = fill.price_cents
-                if not isinstance(price_cents, int):
-                    logger.warning(
-                        "[DEPLOYMENT-SAFETY] Invalid price_cents type for deep OTM/ITM check: ticker=%s price_cents=%s type=%s fill_id=%s",
-                        fill.market_ticker, price_cents, type(price_cents).__name__, fill.fill_id
-                    )
-                elif price_cents < deep_otm_threshold:
-                    logger.warning(
-                        "[DEPLOYMENT-SAFETY] Deep OTM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
-                        fill.market_ticker, price_cents, deep_otm_threshold, fill.fill_id
-                    )
-                    if SAFETY_METRICS_AVAILABLE:
-                        inc_deep_otm_fill(
-                            ticker=fill.market_ticker,
-                            source="http_poller",
-                            price_cents=price_cents,
+                # Track deep OTM/ITM fills for deployment safety monitoring.
+                # Quarantined fills have no usable price; skip these checks.
+                if not _quarantined:
+                    deep_otm_threshold = _get_deep_otm_threshold()
+                    deep_itm_threshold = _get_deep_itm_threshold()
+                    # Defensive: Ensure thresholds are ints (profile may return dict in some cases)
+                    if isinstance(deep_otm_threshold, dict) and 'value' in deep_otm_threshold:
+                        deep_otm_threshold = deep_otm_threshold['value']
+                    if not isinstance(deep_otm_threshold, int):
+                        logger.warning(
+                            "[DEPLOYMENT-SAFETY] Invalid deep_otm_threshold type: type=%s value=%s",
+                            type(deep_otm_threshold).__name__, str(deep_otm_threshold)[:100]
                         )
-                elif price_cents > deep_itm_threshold:
-                    logger.warning(
-                        "[DEPLOYMENT-SAFETY] Deep ITM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
-                        fill.market_ticker, price_cents, deep_itm_threshold, fill.fill_id
-                    )
-                    if SAFETY_METRICS_AVAILABLE:
-                        inc_deep_itm_fill(
-                            ticker=fill.market_ticker,
-                            source="http_poller",
-                            price_cents=price_cents,
+                        deep_otm_threshold = 0  # Safe fallback
+                    if isinstance(deep_itm_threshold, dict) and 'value' in deep_itm_threshold:
+                        deep_itm_threshold = deep_itm_threshold['value']
+                    if not isinstance(deep_itm_threshold, int):
+                        logger.warning(
+                            "[DEPLOYMENT-SAFETY] Invalid deep_itm_threshold type: type=%s value=%s",
+                            type(deep_itm_threshold).__name__, str(deep_itm_threshold)[:100]
                         )
+                        deep_itm_threshold = 100  # Safe fallback
+                    # Defensive: Ensure price_cents is an int before comparison (API may return dict in some cases)
+                    price_cents = fill.price_cents
+                    if not isinstance(price_cents, int):
+                        logger.warning(
+                            "[DEPLOYMENT-SAFETY] Invalid price_cents type for deep OTM/ITM check: ticker=%s price_cents=%s type=%s fill_id=%s",
+                            fill.market_ticker, price_cents, type(price_cents).__name__, fill.fill_id
+                        )
+                    elif price_cents < deep_otm_threshold:
+                        logger.warning(
+                            "[DEPLOYMENT-SAFETY] Deep OTM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
+                            fill.market_ticker, price_cents, deep_otm_threshold, fill.fill_id
+                        )
+                        if SAFETY_METRICS_AVAILABLE:
+                            inc_deep_otm_fill(
+                                ticker=fill.market_ticker,
+                                source="http_poller",
+                                price_cents=price_cents,
+                            )
+                    elif price_cents > deep_itm_threshold:
+                        logger.warning(
+                            "[DEPLOYMENT-SAFETY] Deep ITM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
+                            fill.market_ticker, price_cents, deep_itm_threshold, fill.fill_id
+                        )
+                        if SAFETY_METRICS_AVAILABLE:
+                            inc_deep_itm_fill(
+                                ticker=fill.market_ticker,
+                                source="http_poller",
+                                price_cents=price_cents,
+                            )
 
                 logger.info(
                     "fills_ledger http_ingest fill_id=%s order_id=%s ticker=%s raw_side=%s raw_action=%s canonical_side=%s canonical_action=%s size=%s src=http_poller",
@@ -1758,7 +1825,7 @@ class KalshiFillsLedger:
                             contracts=fill.count_fp,
                             quantity_cc=fill.quantity_cc,
                             price_cents=fill.price_cents,
-                            fee_cents=int(fill.fee_cost * 100) if fill.fee_cost else 0,
+                            fee_cents=fee_dollars_to_cents(fill.fee_cost),
                             side=fill.canonical_position_side,
                             client_order_id=fill.client_order_id,
                             fill_id=fill.fill_id,
@@ -1806,6 +1873,11 @@ class KalshiFillsLedger:
 
             fill = self._parse_fill(raw, "websocket")
 
+            # 2026-08-16: Quarantined fills (side conflict, unknown, untrusted) are
+            # stored for audit and reconciliation, but they must not be applied to
+            # positions.  Keep them out of the position-applicable validation below.
+            _quarantined = fill.unmatched or fill.canonicalization_state in UNTRUSTED_CANONICALIZATION_STATES
+
             # CRITICAL FIX: Validate fill data before ingesting (same as on_fill)
             # This prevents corrupted fill data from entering the ledger via WebSocket
             if fill.count_fp is None or fill.count_fp <= 0:
@@ -1816,19 +1888,36 @@ class KalshiFillsLedger:
                 logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: fill_id=%s (must be non-empty)", fill.fill_id)
                 return False
 
-            # 2026-08-12: Validate the canonical position side/action.  The raw
-            # exchange action may be the taker/counterparty view and is not used
-            # to decide whether this fill is position-applicable.
-            if fill.canonical_position_side not in ["yes", "no"]:
-                logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: side=%s (must be 'yes' or 'no') fill_id=%s", fill.canonical_position_side, fill.fill_id)
-                return False
-
-            if fill.canonical_position_action not in ["buy", "sell"]:
-                logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: action=%s (must be 'buy' or 'sell') fill_id=%s", fill.canonical_position_action, fill.fill_id)
-                return False
-
             if fill.fill_id in self._fills:
                 self._duplicates_dropped += 1
+                return False
+
+            # 2026-08-12: Validate the canonical position side/action.  The raw
+            # exchange action may be the taker/counterparty view and is not used
+            # to decide whether this fill is position-applicable.  Quarantined
+            # fills intentionally have no canonical position effect.
+            if not _quarantined:
+                if fill.canonical_position_side not in ["yes", "no"]:
+                    logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: side=%s (must be 'yes' or 'no') fill_id=%s", fill.canonical_position_side, fill.fill_id)
+                    return False
+
+                if fill.canonical_position_action not in ["buy", "sell"]:
+                    logger.error("[FILLS-LEDGER] Rejecting invalid WS fill: action=%s (must be 'buy' or 'sell') fill_id=%s", fill.canonical_position_action, fill.fill_id)
+                    return False
+
+            # Reject incomplete WebSocket fills (size or price missing/zero).
+            # Even quarantined fills carry no usable position effect when price
+            # is absent; do not store them.
+            if fill.is_incomplete():
+                logger.debug(
+                    "fills_ledger ws_fill_incomplete fill_id=%s order_id=%s ticker=%s "
+                    "size=%s price_cents=%s (HTTP may complete via upsert)",
+                    fill.fill_id,
+                    fill.order_id,
+                    fill.market_ticker,
+                    fill.count_fp,
+                    fill.price_cents,
+                )
                 return False
 
             # WebSocket may not have all fields - try to enrich
@@ -1860,8 +1949,9 @@ class KalshiFillsLedger:
                 fill.agent_id = intent.agent_id
                 # Resolve canonical action from intent when the ledger could not
                 # derive one from the exchange payload (e.g. WebSocket without
-                # price or action).  Keep the raw `action` separate.
-                if intent.action in ("buy", "sell"):
+                # price or action).  Keep the raw `action` separate.  Never use
+                # the intent to override a quarantined fill.
+                if not _quarantined and intent.action in ("buy", "sell"):
                     if fill.canonical_position_action not in ("buy", "sell"):
                         fill.canonical_position_action = intent.action
                     if fill.action not in ("buy", "sell"):
@@ -1901,20 +1991,6 @@ class KalshiFillsLedger:
             # Leave action blank when the wire omits it — HTTP ``/portfolio/fills``
             # upserts canonical buy/sell (see ingest_http_fills duplicate branch).
 
-            if fill.is_incomplete():
-                # P2: Incomplete WebSocket fills are expected - WS may not have full data
-                # HTTP poller will upsert complete data later. This is normal dual-ingestion behavior.
-                logger.debug(
-                    "fills_ledger ws_fill_incomplete fill_id=%s order_id=%s ticker=%s "
-                    "size=%s price_cents=%s (HTTP will complete via upsert)",
-                    fill.fill_id,
-                    fill.order_id,
-                    fill.market_ticker,
-                    fill.count_fp,
-                    fill.price_cents,
-                )
-                return False
-
             self._fills[fill.fill_id] = fill
             self._index_fill(fill)
             self._ws_ingested += 1
@@ -1934,55 +2010,57 @@ class KalshiFillsLedger:
                 fill.fill_source
             )
 
-            # Track deep OTM/ITM fills for deployment safety monitoring
-            deep_otm_threshold = _get_deep_otm_threshold()
-            deep_itm_threshold = _get_deep_itm_threshold()
-            # Defensive: Ensure thresholds are ints (profile may return dict in some cases)
-            if isinstance(deep_otm_threshold, dict) and 'value' in deep_otm_threshold:
-                deep_otm_threshold = deep_otm_threshold['value']
-            if not isinstance(deep_otm_threshold, int):
-                logger.warning(
-                    "[DEPLOYMENT-SAFETY] Invalid deep_otm_threshold type: type=%s value=%s",
-                    type(deep_otm_threshold).__name__, str(deep_otm_threshold)[:100]
-                )
-                deep_otm_threshold = 0  # Safe fallback
-            if isinstance(deep_itm_threshold, dict) and 'value' in deep_itm_threshold:
-                deep_itm_threshold = deep_itm_threshold['value']
-            if not isinstance(deep_itm_threshold, int):
-                logger.warning(
-                    "[DEPLOYMENT-SAFETY] Invalid deep_itm_threshold type: type=%s value=%s",
-                    type(deep_itm_threshold).__name__, str(deep_itm_threshold)[:100]
-                )
-                deep_itm_threshold = 100  # Safe fallback
-            # Defensive: Ensure price_cents is an int before comparison (API may return dict in some cases)
-            price_cents = fill.price_cents
-            if not isinstance(price_cents, int):
-                logger.warning(
-                    "[DEPLOYMENT-SAFETY] Invalid price_cents type for deep OTM/ITM check: ticker=%s price_cents=%s type=%s fill_id=%s",
-                    fill.market_ticker, price_cents, type(price_cents).__name__, fill.fill_id
-                )
-            elif price_cents < deep_otm_threshold:
-                logger.warning(
-                    "[DEPLOYMENT-SAFETY] Deep OTM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
-                    fill.market_ticker, price_cents, deep_otm_threshold, fill.fill_id
-                )
-                if SAFETY_METRICS_AVAILABLE:
-                    inc_deep_otm_fill(
-                        ticker=fill.market_ticker,
-                        source="websocket",
-                        price_cents=price_cents,
+            # Track deep OTM/ITM fills for deployment safety monitoring.
+            # Quarantined fills have no usable price; skip these checks.
+            if not _quarantined:
+                deep_otm_threshold = _get_deep_otm_threshold()
+                deep_itm_threshold = _get_deep_itm_threshold()
+                # Defensive: Ensure thresholds are ints (profile may return dict in some cases)
+                if isinstance(deep_otm_threshold, dict) and 'value' in deep_otm_threshold:
+                    deep_otm_threshold = deep_otm_threshold['value']
+                if not isinstance(deep_otm_threshold, int):
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Invalid deep_otm_threshold type: type=%s value=%s",
+                        type(deep_otm_threshold).__name__, str(deep_otm_threshold)[:100]
                     )
-            elif price_cents > deep_itm_threshold:
-                logger.warning(
-                    "[DEPLOYMENT-SAFETY] Deep ITM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
-                    fill.market_ticker, price_cents, deep_itm_threshold, fill.fill_id
-                )
-                if SAFETY_METRICS_AVAILABLE:
-                    inc_deep_itm_fill(
-                        ticker=fill.market_ticker,
-                        source="websocket",
-                        price_cents=price_cents,
+                    deep_otm_threshold = 0  # Safe fallback
+                if isinstance(deep_itm_threshold, dict) and 'value' in deep_itm_threshold:
+                    deep_itm_threshold = deep_itm_threshold['value']
+                if not isinstance(deep_itm_threshold, int):
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Invalid deep_itm_threshold type: type=%s value=%s",
+                        type(deep_itm_threshold).__name__, str(deep_itm_threshold)[:100]
                     )
+                    deep_itm_threshold = 100  # Safe fallback
+                # Defensive: Ensure price_cents is an int before comparison (API may return dict in some cases)
+                price_cents = fill.price_cents
+                if not isinstance(price_cents, int):
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Invalid price_cents type for deep OTM/ITM check: ticker=%s price_cents=%s type=%s fill_id=%s",
+                        fill.market_ticker, price_cents, type(price_cents).__name__, fill.fill_id
+                    )
+                elif price_cents < deep_otm_threshold:
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Deep OTM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
+                        fill.market_ticker, price_cents, deep_otm_threshold, fill.fill_id
+                    )
+                    if SAFETY_METRICS_AVAILABLE:
+                        inc_deep_otm_fill(
+                            ticker=fill.market_ticker,
+                            source="websocket",
+                            price_cents=price_cents,
+                        )
+                elif price_cents > deep_itm_threshold:
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Deep ITM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
+                        fill.market_ticker, price_cents, deep_itm_threshold, fill.fill_id
+                    )
+                    if SAFETY_METRICS_AVAILABLE:
+                        inc_deep_itm_fill(
+                            ticker=fill.market_ticker,
+                            source="websocket",
+                            price_cents=price_cents,
+                        )
 
             # Session-based PnL tracking: call on_fill() for new fills
             self.on_fill(fill)
@@ -3675,7 +3753,7 @@ class KalshiFillsLedger:
             "total_contracts": fill.count_fp,
             "avg_price_cents": fill.price_cents,
             "total_cost_cents": fill.count_fp * fill.price_cents,
-            "fees_cents": int(fill.fee_cost * 100) if fill.fee_cost else 0,
+            "fees_cents": fee_dollars_to_cents(fill.fee_cost),
             "fills": [fill.fill_id],
             "created_at": fill.created_time.isoformat(),
         }
@@ -3720,7 +3798,7 @@ class KalshiFillsLedger:
             )
 
         # Add fees
-        position["fees_cents"] += int(fill.fee_cost * 100) if fill.fee_cost else 0
+        position["fees_cents"] += fee_dollars_to_cents(fill.fee_cost)
 
     def _position_is_closed(self, position: Dict[str, Any]) -> bool:
         """Check if position is closed (net contracts = 0).
@@ -4101,11 +4179,12 @@ class KalshiFillsLedger:
 
                 side_enum = PositionSide.YES if position.get("side") == "yes" else PositionSide.NO
 
-                # Only claim original SL if we found it in the registered tp_targets.
-                risk_params_state = (
-                    "original_persisted" if (client_order_id and tp_targets and tp_targets.get("sl_price") is not None)
-                    else "unknown"
-                )
+                # CRITICAL FIX (2026-08-13): A trusted entry fill has an immutable
+                # client_order_id -> fill_id linkage.  Provenance is original even if
+                # the entry intent did not carry a stop-loss; take-profit exits are
+                # still valid for TP-only trusted positions.
+                is_trusted_entry = bool(client_order_id and fill.fill_id and fill.is_exit is not True)
+                risk_params_state = "original_persisted" if is_trusted_entry else "unknown"
 
                 fill_created_at = getattr(fill, "created_time", None)
                 order_id = getattr(fill, "order_id", None)
@@ -5200,6 +5279,7 @@ class KalshiFillsLedger:
         _intent_target_side: Optional[str] = None
         _intent_action: Optional[str] = None
         _intent_yes_delta_cc: Optional[int] = None
+        _execution_yes_delta_cc: Optional[int] = None
         intent: Optional[Any] = None
         if resolved_intent_id:
             intent = _intent_or_durable(self, resolved_intent_id)
@@ -5210,27 +5290,30 @@ class KalshiFillsLedger:
                 # alerting.  The intent is *never* used to override the exchange's
                 # execution-side; it only tells us what side the agent expected to
                 # trade so we can detect order-routing or reporting inversions.
-                intent_side_str = str(getattr(intent, "side", "") or "").upper()
-                _order_form_map = {
-                    "BUY_YES": ("buy", "yes"), "SELL_YES": ("sell", "yes"),
-                    "BUY_NO":  ("buy", "no"),  "SELL_NO":  ("sell", "no"),
-                    "YES":     ("buy", "yes"), "NO":       ("buy", "no"),
-                }
-                _mapped = _order_form_map.get(intent_side_str)
-                if _mapped:
-                    _intent_action, _intent_target_side = _mapped
+                # Derive the user-side action/outcome from the immutable wire
+                # form whenever it was captured; fall back to the (action, side)
+                # fields.  We do NOT trust `side` alone for SELL_NO/SELL_YES.
+                _original_side = (getattr(intent, "original_side", None) or "").strip()
+                if _original_side:
+                    try:
+                        _intent_target_side, _intent_action = parse_kalshi_side(_original_side)
+                    except Exception:
+                        _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
+                        _intent_action = (getattr(intent, "action", "") or "").lower()
                 else:
-                    _intent_action = (getattr(intent, "action", "") or "").lower()
                     _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
-                    if _intent_target_side not in ("yes", "no"):
-                        _intent_target_side = "yes"
+                    _intent_action = (getattr(intent, "original_action", None) or getattr(intent, "action", "") or "").lower()
+
+                if _intent_target_side not in ("yes", "no"):
+                    _intent_target_side = "yes" if "yes" in _intent_target_side else "no" if "no" in _intent_target_side else None
                 if _intent_action not in ("buy", "sell"):
                     _intent_action = None
+
                 logger.debug(
                     "[FILL-INTENT-DERIVATION] fill_id=%s client_order_id=%s order_id=%s | "
-                    "intent_action=%s intent_target_side=%s from intent.side=%s",
+                    "intent_action=%s intent_target_side=%s from original_side=%s",
                     fill_id, client_order_id, order_id,
-                    _intent_action, _intent_target_side, getattr(intent, "side", None)
+                    _intent_action, _intent_target_side, _original_side
                 )
 
         # 2a. Authoritative entry/exit classification from the originating intent.
@@ -5267,18 +5350,13 @@ class KalshiFillsLedger:
             )
 
         # 4. Detect side-inversion between intent and exchange execution.
+        #    The actual conflict check is performed after we have parsed the
+        #    execution action and quantity, because V2 may report the economic
+        #    counterparty form (e.g. SELL_YES for a BUY_NO) with a different
+        #    outcome_side but the same signed-YES exposure.
         _side_conflict = False
         _side_conflict_reason: Optional[str] = None
-        if _execution_outcome_side and _intent_target_side and _execution_outcome_side != _intent_target_side:
-            _side_conflict = True
-            _side_conflict_reason = (
-                f"execution_outcome_side={_execution_outcome_side} != intent_target_side={_intent_target_side}"
-            )
-            logger.critical(
-                "[FILL-SIDE-CONFLICT] fill_id=%s client_order_id=%s order_id=%s | %s - "
-                "Using exchange execution side as canonical. This may indicate an order-routing or counterparty-side reporting mismatch.",
-                fill_id, client_order_id, order_id, _side_conflict_reason
-            )
+        _ticker_for_identity = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
 
         # 5. Capture the exchange's raw action.  The raw `action` may reflect the
         #    taker/counterparty or the opposite leg, so it is only a fallback.
@@ -5289,6 +5367,13 @@ class KalshiFillsLedger:
         _raw_act = _raw_act.lower() if isinstance(_raw_act, str) else ""
         _execution_action = _raw_act if _raw_act in ("buy", "sell") else None
 
+        # Resolve the execution action from the correlated intent when the
+        # exchange payload omits it (common for HTTP/WS records).  The intent
+        # is only used to fill a missing value, never to override an explicit
+        # exchange report.
+        if _execution_action is None and _intent_action in ("buy", "sell"):
+            _execution_action = _intent_action
+
         # If we only have generic price, assign it to the execution side.
         if price and not yes_price_dollars and not no_price_dollars:
             if _execution_outcome_side == "yes":
@@ -5296,14 +5381,22 @@ class KalshiFillsLedger:
             elif _execution_outcome_side == "no":
                 no_price_dollars = normalize_price(price)
 
-        # Parse fee
-        fee = raw.get("fee") or raw.get("fee_cost") or raw.get("fee_paid") or 0
-        try:
-            fee_decimal = Decimal(str(fee))
-            if fee_decimal > 1:  # Assume cents
-                fee_decimal = fee_decimal / 100
-        except Exception:
-            fee_decimal = Decimal("0")
+        # Parse fee.  Kalshi V2 ``fee_cost`` / ``fee_paid`` are dollars and are
+        # used exactly as Decimal; only the legacy ``fee`` key may be
+        # cent-denominated and gets the >1 heuristic conversion.
+        if raw.get("fee") is not None:
+            try:
+                fee_decimal = Decimal(str(raw.get("fee")))
+                if fee_decimal > 1:  # Legacy cent-denominated payloads
+                    fee_decimal = fee_decimal / 100
+            except Exception:
+                fee_decimal = Decimal("0")
+        else:
+            fee_raw = raw.get("fee_cost") if raw.get("fee_cost") is not None else raw.get("fee_paid")
+            try:
+                fee_decimal = Decimal(str(fee_raw)) if fee_raw is not None else Decimal("0")
+            except Exception:
+                fee_decimal = Decimal("0")
 
         # 6. Parse count first so we can compute signed-YES deltas before
         #    choosing the canonical action.
@@ -5331,6 +5424,21 @@ class KalshiFillsLedger:
             _count_fp = Decimal("0")
             _quantity_cc = 0
 
+        # CRITICAL FIX (2026-08-18): WebSocket fills sometimes omit the action
+        # field.  When we have no correlated intent and no existing position for
+        # the ticker, a positive-count fill on a valid side can only be an
+        # opening buy (it cannot be a reduce-only close with no prior position).
+        # Infer ``buy`` so the fill is not quarantined; record the metric.
+        if _execution_action is None and _execution_outcome_side in ("yes", "no") and _quantity_cc > 0:
+            existing_fills = self._fills_by_market.get(_ticker_for_identity, [])
+            if not existing_fills and not resolved_intent_id:
+                _execution_action = "buy"
+                try:
+                    from merid.event_venues.kalshi.kalshi_ledger_metrics import inc_fills_missing_action
+                    inc_fills_missing_action()
+                except Exception:
+                    pass
+
         # 7. Compute signed-YES deltas for intent and execution.
         _intent_resulting_side: Optional[str] = None
         if _intent_action and _intent_target_side and _quantity_cc:
@@ -5344,6 +5452,38 @@ class KalshiFillsLedger:
                 _execution_yes_delta_cc = yes_delta(_execution_action, _execution_outcome_side, _quantity_cc)
             except Exception:
                 _execution_yes_delta_cc = None
+
+        # 7a. Side-conflict detection.
+        #     A side *label* conflict is when the exchange's outcome_side does
+        #     not match the user's recorded intent target side.  The economic
+        #     counterparty form (e.g. SELL_YES for a BUY_NO) has a different
+        #     label but the same signed-YES exposure; that is a warning, not a
+        #     quarantine.  We quarantine only when the exposure direction also
+        #     diverges, which means the fill cannot safely be applied to a
+        #     position by ticker alone.
+        if _execution_outcome_side and _intent_target_side and _execution_outcome_side != _intent_target_side:
+            _side_conflict = True
+            _side_conflict_reason = (
+                f"execution_outcome_side={_execution_outcome_side} != intent_target_side={_intent_target_side}"
+            )
+
+            _immutable_identity = (
+                f"ticker={_ticker_for_identity}:action={_execution_action}:outcome_side={_execution_outcome_side}:"
+                f"client_order_id={client_order_id}:exchange_order_id={order_id}:fill_id={fill_id}"
+            )
+            logger.critical(
+                "[FILL-SIDE-CONFLICT] %s | %s - "
+                "Exchange outcome side differs from intent target side.",
+                _immutable_identity, _side_conflict_reason
+            )
+
+        _exposure_mismatch = False
+        if _side_conflict:
+            if _execution_yes_delta_cc is not None and _intent_yes_delta_cc is not None:
+                _exposure_mismatch = _execution_yes_delta_cc != _intent_yes_delta_cc
+            else:
+                # Cannot compare exposure; assume the worst.
+                _exposure_mismatch = True
 
         # 8/9. Derive the canonical position effect from execution facts only.
         #      The canonical side and action are the exchange's reported
@@ -5383,7 +5523,26 @@ class KalshiFillsLedger:
         _canonical_yes_delta_cc = _effect["canonical_yes_delta_cc"]
         _canonicalization_state = _effect["canonicalization_state"]
 
-        if _canonicalization_state not in TRUSTED_CANONICALIZATION_STATES and not _side_conflict:
+        # An exposure mismatch means the exchange-reported position direction
+        # does not match the user's recorded intent.  We must not use the raw
+        # report to mutate local positions; quarantine until a human or a REST
+        # order/fill reconciliation resolves which side was actually traded.
+        if _exposure_mismatch:
+            is_unmatched = True
+            if not unmatched_reason:
+                unmatched_reason = f"fill_side_conflict:{_side_conflict_reason}"
+            _canonicalization_state = "UNTRUSTED_SIDE_CONFLICT"
+            _action = None
+            _canonical_side = None
+            _canonical_leg_price_cents = None
+            _canonical_yes_delta_cc = None
+            logger.critical(
+                "[FILL-SIDE-CONFLICT-QUARANTINE] fill_id=%s client_order_id=%s order_id=%s - "
+                "Exposure mismatch with resolved intent; canonical fields cleared.",
+                fill_id, client_order_id, order_id
+            )
+
+        if _canonicalization_state not in TRUSTED_CANONICALIZATION_STATES and not _exposure_mismatch:
             is_unmatched = True
             if not unmatched_reason:
                 unmatched_reason = "untrusted_position_effect"
@@ -5870,7 +6029,11 @@ class KalshiFillsLedger:
         logger.info("SQLite DB initialized with WAL mode and schema migrations complete")
 
     async def _ensure_postgres_pool(self) -> asyncpg.Pool:
-        """Ensure PostgreSQL connection pool is initialized."""
+        """Ensure PostgreSQL connection pool is initialized.
+
+        If MERID_POSTGRES_REQUIRED is set, a connection failure is fatal and
+        raises instead of silently falling back to SQLite.
+        """
         if self._postgres_pool is None and self._use_postgres:
             try:
                 from merid.settings import get_settings
@@ -5889,6 +6052,8 @@ class KalshiFillsLedger:
                 logger.info("PostgreSQL connection pool established")
             except Exception as e:
                 logger.error(f"Failed to create PostgreSQL pool: {e}")
+                if _postgres_required():
+                    raise RuntimeError(f"PostgreSQL required for soak but unavailable: {e}") from e
                 self._use_postgres = False
                 logger.warning("Falling back to SQLite")
 

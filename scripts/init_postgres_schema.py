@@ -157,7 +157,7 @@ async def init_postgres_schema():
             $$ LANGUAGE plpgsql
         """)
         
-        print("\n✅ PostgreSQL schema initialized successfully!")
+        print("\nOK: PostgreSQL schema initialized successfully!")
         print("\nTables created:")
         print("  - kalshi_fills (with indexes)")
         print("  - kalshi_fills_dlq (dead-letter queue)")

@@ -14,6 +14,7 @@ Usage:
     See docs/kalshi_15m_stack.md Section 4.3 for details.
 """
 
+import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
@@ -51,25 +52,44 @@ def is_kalshi_15m_profile() -> bool:
 def validate_live_trading_safety() -> None:
     """
     CRITICAL SAFETY CHECK: Environment-based live trading controls.
-    
+
     This validation ensures proper separation between dev/staging/prod environments:
-    
+
     1. Non-prod environments (dev/staging) must use paper mode or demo Kalshi only
     2. Production environment requires explicit confirmation and production Kalshi
     3. Execution mode (paper/live) and venue environment (demo/prod) are validated separately
     4. Real-money trades only allowed with prod env + prod Kalshi + explicit confirmation
-    
+
     Raises:
         StartupValidationError if safety checks fail.
     """
     log_startup_phase("validate_live_trading_safety", "merid.startup_validations")
-    
+
     # Environment configuration
     env = os.getenv("MERID_ENV", "development")  # dev/staging/prod
     trade_mode = os.getenv("MERID_TRADE_MODE", "paper").lower()  # paper/live
     pm_trade_mode = os.getenv("MERID_PM_TRADING_MODE", "paper").lower()
     allow_live_trades = os.getenv("MERID_ALLOW_LIVE_TRADES", "false").lower() == "true"
     live_confirmation = os.getenv("MERID_LIVE_CONFIRMATION", "").lower()
+
+    # SHADOW-SOAK FAIL-CLOSED: when shadow telemetry is enabled, live trading
+    # must be physically disabled and the portfolio manager must be in paper mode.
+    shadow_telemetry = os.getenv("MERID_CFB_RTI_SHADOW_TELEMETRY", "0").strip().lower()
+    if shadow_telemetry in ("1", "true", "yes"):
+        if allow_live_trades:
+            error_msg = (
+                "CRITICAL SHADOW-SOAK SAFETY VIOLATION: MERID_ALLOW_LIVE_TRADES=true "
+                "while MERID_CFB_RTI_SHADOW_TELEMETRY is enabled. Shadow soak requires paper mode only."
+            )
+            logger.error(error_msg)
+            raise StartupValidationError(error_msg)
+        if pm_trade_mode != "paper":
+            error_msg = (
+                f"CRITICAL SHADOW-SOAK SAFETY VIOLATION: MERID_PM_TRADING_MODE={pm_trade_mode} "
+                "while MERID_CFB_RTI_SHADOW_TELEMETRY is enabled. Shadow soak requires paper mode only."
+            )
+            logger.error(error_msg)
+            raise StartupValidationError(error_msg)
     
     # Venue configuration
     kalshi_env = os.getenv("KALSHI_ENV", "demo").lower()  # demo/live
@@ -157,6 +177,142 @@ def validate_live_trading_safety() -> None:
         logger.debug(
             f"[LIVE-TRADING-VALIDATION] Profile check: env={env} trade_mode={trade_mode} profile={profile}"
         )
+
+
+def validate_production_startup() -> None:
+    """Fail closed if production startup sees test/debug/bypass flags.
+
+    Production must never honor test-runner artifacts or manual/debug bypasses.
+    This check is intentionally strict: if a bypass is needed for canary or
+    diagnostics, it must be enabled through an explicit, documented temporary
+    profile, not a silent env flag.
+    """
+    log_startup_phase("validate_production_startup", "merid.startup_validations")
+
+    # Confirm the configured PostgreSQL is reachable when soak audit requires it,
+    # regardless of environment name.
+    validate_postgres_liveness()
+
+    env = os.getenv("MERID_ENV", "").strip().lower()
+    if env not in ("prod", "production"):
+        return
+
+    forbidden: List[str] = []
+
+    # Test-runner artifact must never be honored in production.
+    if os.getenv("PYTEST_CURRENT_TEST") is not None:
+        forbidden.append("PYTEST_CURRENT_TEST")
+
+    # Direct/manual execution bypasses.
+    if os.getenv("DEBUG_ALLOW_MANUAL_ORDERS", "").strip().lower() in ("1", "true", "yes"):
+        forbidden.append("DEBUG_ALLOW_MANUAL_ORDERS=true")
+    if os.getenv("ALLOW_DIRECT_EXECUTION", "").strip().lower() in ("1", "true", "yes"):
+        forbidden.append("ALLOW_DIRECT_EXECUTION=true")
+    if os.getenv("MERID_ALLOW_CT_SCRIPT_BYPASS", "").strip().lower() in ("1", "true", "yes"):
+        forbidden.append("MERID_ALLOW_CT_SCRIPT_BYPASS=true")
+
+    # Firewall enforcement and exit parentage are required unless an explicit
+    # canary profile is documented. These must not be silent defaults.
+    if os.getenv("MERID_EXIT_FIREWALL_OBSERVE_ONLY", "").strip().lower() in ("1", "true", "yes"):
+        forbidden.append("MERID_EXIT_FIREWALL_OBSERVE_ONLY=true")
+    if os.getenv("MERID_REQUIRE_EXIT_PARENTAGE", "").strip() not in ("1", "true", "yes"):
+        forbidden.append("MERID_REQUIRE_EXIT_PARENTAGE not set to 1")
+    if os.getenv("MERID_CIRCUIT_BREAKER_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+        forbidden.append("MERID_CIRCUIT_BREAKER_DISABLED=true")
+
+    # Canonical Kalshi environment resolver and conflict detection.
+    # MERID_KALSHI_ENV is canonical; KALSHI_ENV is a legacy operational alias.
+    merid_kalshi_env = os.getenv("MERID_KALSHI_ENV", "").strip().lower()
+    if merid_kalshi_env:
+        expected_kalshi_env = "live" if merid_kalshi_env in ("prod", "live") else merid_kalshi_env
+        kalshi_env = os.getenv("KALSHI_ENV", "").strip().lower()
+        if kalshi_env and kalshi_env != expected_kalshi_env:
+            forbidden.append(
+                f"KALSHI_ENV={kalshi_env} conflicts with MERID_KALSHI_ENV={merid_kalshi_env} "
+                f"(expected KALSHI_ENV={expected_kalshi_env})"
+            )
+    else:
+        kalshi_env = os.getenv("KALSHI_ENV", "").strip().lower()
+        if kalshi_env:
+            forbidden.append("KALSHI_ENV is set but MERID_KALSHI_ENV is missing; use MERID_KALSHI_ENV")
+
+    # 15m Kalshi live mode must not carry legacy exchange credentials or
+    # research-agent configuration.  Fail closed rather than warn.
+    if is_kalshi_15m_profile():
+        try:
+            from merid.settings import get_settings
+            settings = get_settings()
+            legacy_issues = settings.validate_15m_production()
+            if legacy_issues:
+                forbidden.extend(legacy_issues)
+        except Exception as exc:
+            forbidden.append(f"could not validate 15m production settings: {exc}")
+
+    if forbidden:
+        error_msg = (
+            "CRITICAL SAFETY VIOLATION: production startup refuses to operate "
+            "with forbidden test/debug/bypass flags: " + ", ".join(forbidden) + ". "
+            "Use an explicit canary profile or fix the environment."
+        )
+        logger.critical(error_msg)
+        raise StartupValidationError(error_msg)
+
+
+def validate_postgres_liveness() -> None:
+    """Confirm PostgreSQL is reachable before starting a soak/audit segment.
+
+    This check is intentionally synchronous so it can be called from the
+    synchronous startup path.  It only runs when MERID_POSTGRES_REQUIRED is set.
+    """
+    if os.getenv("MERID_POSTGRES_REQUIRED", "").strip().lower() not in ("1", "true"):
+        return
+
+    log_startup_phase("validate_postgres_liveness", "merid.startup_validations")
+
+    try:
+        import asyncpg
+    except Exception as exc:
+        raise StartupValidationError(f"PostgreSQL required but asyncpg unavailable: {exc}")
+
+    try:
+        from merid.settings import get_settings
+        settings = get_settings()
+    except Exception as exc:
+        raise StartupValidationError(f"PostgreSQL required but settings cannot be loaded: {exc}")
+
+    async def _probe() -> None:
+        conn = await asyncpg.connect(
+            host=settings.POSTGRES_HOST,
+            port=settings.POSTGRES_PORT,
+            user=settings.POSTGRES_USER,
+            password=settings.POSTGRES_PASSWORD,
+            database=settings.POSTGRES_DB,
+            timeout=10,
+        )
+        try:
+            row = await conn.fetchrow(
+                "SELECT 1 AS ok, current_database() AS db, version() AS v"
+            )
+            if not row:
+                raise RuntimeError("PostgreSQL liveness query returned no row")
+            logger.info(
+                "[POSTGRES-LIVENESS] OK host=%s:%s db=%s version=%s",
+                settings.POSTGRES_HOST,
+                settings.POSTGRES_PORT,
+                row["db"],
+                row["v"].split()[0] if row["v"] else "unknown",
+            )
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.run(_probe())
+    except StartupValidationError:
+        raise
+    except Exception as exc:
+        raise StartupValidationError(
+            f"PostgreSQL required for soak but unreachable: {exc}"
+        ) from exc
 
 
 def validate_kalshi_15m_strip_limits_consistency() -> None:
