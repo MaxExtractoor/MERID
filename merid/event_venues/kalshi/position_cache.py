@@ -13,7 +13,7 @@ import time as _time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from utils.logger import get_logger
@@ -110,8 +110,8 @@ def _is_expired_ticker(ticker: str) -> bool:
 
     # Fallback: catalog status/close_time when available
     try:
-        from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
-        catalog = get_kalshi_market_catalog()
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        catalog = get_market_catalog()
         if not catalog:
             return False
 
@@ -267,7 +267,7 @@ class CachedPosition:
     # CRITICAL FIX (2026-08-07): Entry edge percentage for dynamic TP adjustment
     entry_edge_pct: float = 0.03
     # CRITICAL 2026-08-09: Canonical position size in centi-contracts (100 = 1 contract).
-    quantity_cc: int = 0  # Edge percentage at entry (default 3% for dynamic TP adjustment)
+    quantity_cc: int = 0  # Initialized from contracts*100 if not explicitly provided
 
     # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution.
     entry_signal_id: Optional[str] = None
@@ -291,6 +291,11 @@ class CachedPosition:
     entry_book_timestamp: Optional[datetime] = None
     entry_book_sequence: Optional[int] = None
     entry_book_source: Optional[str] = None
+
+    def __post_init__(self):
+        """Initialize canonical quantity_cc from contracts if not already set."""
+        if self.quantity_cc == 0 and self.contracts:
+            self.quantity_cc = self.contracts * 100
 
     @property
     def notional_usd(self) -> Decimal:
@@ -517,7 +522,8 @@ class CachedPosition:
                 total_cost_old = Decimal(self.quantity_cc * avg_price_old) / Decimal("100")
                 total_cost_new = Decimal(quantity_cc * adjusted_price_cents) / Decimal("100")
                 new_total_cc = self.quantity_cc + quantity_cc
-                self.avg_price_cents = int((total_cost_old + total_cost_new) * Decimal("100") / Decimal(new_total_cc)) if new_total_cc > 0 else adjusted_price_cents
+                new_avg = (total_cost_old + total_cost_new) * Decimal("100") / Decimal(new_total_cc)
+                self.avg_price_cents = int(new_avg.to_integral_value(rounding=ROUND_HALF_UP)) if new_total_cc > 0 else adjusted_price_cents
                 if new_side != self.side:
                     logger.critical(
                         "[POSITION-SIDE-FLIP-ON-ADD] market=%s raw_side=%s action=%s - "
@@ -1200,7 +1206,7 @@ class KalshiPositionCache:
             # deployment, stale persisted data, or a caller that failed to propagate
             # the field.  Such fills are retained for audit only and require a fresh
             # exchange REST snapshot before the ticker can be traded again.
-            if canonicalization_state is None or canonicalization_state in ("UNTRUSTED_LEGACY", "UNTRUSTED_RAW"):
+            if canonicalization_state is None or canonicalization_state in ("UNTRUSTED_LEGACY", "UNTRUSTED_RAW", "UNTRUSTED_SIDE_CONFLICT"):
                 if canonicalization_state is None:
                     canonicalization_state = "UNTRUSTED_RAW"
                 self.require_rest_reconciliation(
@@ -1931,11 +1937,21 @@ class KalshiPositionCache:
                         market_id, side, entry_price, tp_price, tp_r,
                     )
 
-                # CRITICAL FIX (2026-08-11): Mark risk parameter provenance.
-                # original_persisted only when the SL was carried by the entry intent.
+                # CRITICAL FIX (2026-08-13): Mark risk parameter provenance.
+                # A trusted live entry has a client_order_id, fill_id, and a captured
+                # entry book.  The presence of a stop-loss is optional; take-profit
+                # and time-exit policies are still active for TP-only trusted entries.
+                # REST-synthetic or unmatched fills remain unknown.
+                has_entry_linkage = bool(client_order_id or fill_id)
+                is_trusted_live_entry = (
+                    has_entry_linkage
+                    and (not is_exit)
+                    and fill_id
+                    and fill_source in ("ws", "http_poller", "alpha")
+                )
                 risk_params_state = (
                     "original_persisted"
-                    if (sl_enabled and sl_original is not None)
+                    if is_trusted_live_entry
                     else "unknown"
                 )
 
@@ -2198,12 +2214,19 @@ class KalshiPositionCache:
                         # If TP is set, scale out at 75% of TP (between 1.5-2R)
                         scale_out_price = price_cents + int((tp_targets.get("tp_price") - price_cents) * 0.75)
 
-                    # CRITICAL FIX (2026-08-11): SL is only valid when it came from
-                    # the original entry intent.  No fallback, no synthetic stop.
+                    # CRITICAL FIX (2026-08-13): Trusted live entries carry ORIGINAL_PERSISTED
+                    # provenance independent of whether a stop-loss is attached.  SL is optional;
+                    # a TP-only trusted position is still eligible for take-profit exits.
                     final_sl_price = tp_targets.get("sl_price") if (sl_enabled and tp_targets.get("sl_price") is not None) else None
-
+                    has_entry_linkage = bool(client_order_id or fill_id)
+                    is_trusted_live_entry = (
+                        has_entry_linkage
+                        and (not is_exit)
+                        and fill_id
+                        and fill_source in ("ws", "http_poller", "alpha")
+                    )
                     monitor_risk_params_state = (
-                        "original_persisted" if (sl_enabled and tp_targets.get("sl_price") is not None) else "unknown"
+                        "original_persisted" if is_trusted_live_entry else "unknown"
                     )
 
                     # Extract series_ticker from market_id (e.g., KXBTC15M-26JUL162015-15 -> KXBTC15M)
@@ -3201,8 +3224,8 @@ class KalshiPositionCache:
                 avg_price_cents = fill_price_cents
             else:
                 pre_contracts = abs(yes_exposure)
-                total_cost = pre_contracts * avg_price_cents + fill_contracts * fill_price_cents
-                avg_price_cents = total_cost // (pre_contracts + fill_contracts)
+                total_cost = pre_contracts * avg_price_cents + fill_quantity_cc * fill_price_cents
+                avg_price_cents = total_cost // (pre_contracts + fill_quantity_cc)
 
             yes_exposure += fill_yes
 
@@ -4647,7 +4670,7 @@ class KalshiPositionCache:
                             if not contracts:
                                 continue
                             try:
-                                from decimal import Decimal
+                                from decimal import Decimal, ROUND_HALF_UP
                                 qty_cc = int(Decimal(str(contracts)) * Decimal("100"))
                             except Exception:
                                 qty_cc = int(contracts) * 100
@@ -5139,7 +5162,7 @@ class KalshiPositionCache:
         position.tp_bracket_client_tag = tp_tag
         try:
             res = await route_order_async(tp_intent)
-            ok = bool(getattr(res, "success", False))
+            ok = res is not None and (res.has_execution or (res.request_completed and not res.is_terminal))
             self._record_bracket_metric("tp", ok)
             logger.info(
                 "[BRACKET] TP submitted market=%s side=%s qty=%d @ %d¢ tag=%s ok=%s",
@@ -5195,7 +5218,7 @@ class KalshiPositionCache:
             position.sl_bracket_client_tag = sl_tag
             try:
                 res = await route_order_async(sl_intent)
-                ok = bool(getattr(res, "success", False))
+                ok = res is not None and (res.has_execution or (res.request_completed and not res.is_terminal))
                 self._record_bracket_metric("sl", ok)
                 logger.info(
                     "[BRACKET] SL submitted market=%s side=%s qty=%d @ %d¢ tag=%s ok=%s",

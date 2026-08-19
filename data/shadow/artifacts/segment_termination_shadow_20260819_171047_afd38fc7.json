@@ -1,0 +1,16 @@
+{
+  "record_type": "segment_termination",
+  "run_id": "shadow_20260819_171047_afd38fc7",
+  "active_git_head": "b80b2a8a16609889107a4a0d21bad55cc18c0e5a",
+  "manifest_sha256": "496A91F95E3D2537A6776F167F4A76C384C1EBC770EB6AEAA4D8496988F9EEE3",
+  "terminated_at_utc": "2026-08-19T21:33:08Z",
+  "reason": "Pre-conditions not met: settings.TRADING_ENABLED=false, unified-health endpoint references non-existent get_kalshi_market_catalog, and no trading loop/position-monitor started. No paper candidates or positions can be produced. Segment preserved; restart required with corrected configuration and health endpoint.",
+  "conditions_observed": {
+    "trading_enabled": false,
+    "trading_loop_status": "not_initialized",
+    "position_monitor_status": "stopped",
+    "health_endpoint_catalog_import_error": "cannot import name 'get_kalshi_market_catalog' from 'merid.event_venues.kalshi.market_catalog'",
+    "overall_health_status": "degraded"
+  },
+  "disposition": "discarded_before_valid_soak"
+}

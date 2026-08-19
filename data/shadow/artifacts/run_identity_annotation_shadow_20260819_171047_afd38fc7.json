@@ -1,0 +1,11 @@
+{
+  "record_type": "run_identity_annotation",
+  "run_id": "shadow_20260819_171047_afd38fc7",
+  "run_id_commit_suffix": "afd38fc7",
+  "active_git_head": "b80b2a8a16609889107a4a0d21bad55cc18c0e5a",
+  "manifest_sha256": "496A91F95E3D2537A6776F167F4A76C384C1EBC770EB6AEAA4D8496988F9EEE3",
+  "reason": "PostgreSQL liveness probe event-loop fix applied before valid soak continuation",
+  "valid_segment_start_utc": "2026-08-19T21:17:54Z",
+  "annotation_written_utc": "2026-08-19T21:29:15Z",
+  "initial_attempt_disposition": "discarded_before_valid_soak"
+}

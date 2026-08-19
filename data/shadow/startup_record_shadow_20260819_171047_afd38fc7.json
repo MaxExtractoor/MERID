@@ -1,0 +1,21 @@
+﻿{
+    "record_type":  "shadow_soak_start",
+    "run_id":  "shadow_20260819_171047_afd38fc7",
+    "started_at_utc":  "2026-08-19 17:10:51Z",
+    "git_revision":  "afd38fc7ee107c81f8bfc06157b9e44d06664a0e",
+    "env_hash":  "EB532755676BAE683EB7AB386312AE7F312EE34D141E93B6501F9171A83E0A97",
+    "config_hash":  "84D3BA537F191E654DD86554736A0276C8B2D2256235945CCEADDE7136DBCB40",
+    "cf_rti_adapter_enabled":  true,
+    "live_trades_enabled":  false,
+    "trading_mode":  "paper",
+    "shadow_telemetry_enabled":  true,
+    "legacy_095_sentinel_trap_enabled":  true,
+    "enabled_assets":  [
+                           "BTC",
+                           "ETH",
+                           "SOL",
+                           "XRP",
+                           "DOGE"
+                       ],
+    "postgres_required":  true
+}
