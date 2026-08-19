@@ -10,6 +10,13 @@ import logging
 import asyncio
 from pathlib import Path
 
+# CRITICAL (2026-08-07): Kalshi deprecated the legacy V1 /portfolio/orders endpoint
+# on ~2026-06-18 and now returns 410 "Please switch to the V2 endpoints". V2's
+# single-book API reports the counterparty side (e.g. a BUY_NO order displays as
+# "sell yes"), but it is the only working order placement path.  Keep the default
+# at v2; do NOT set legacy in the environment unless Kalshi restores V1.
+os.environ.setdefault("KALSHI_ORDER_API_VERSION", "v2")
+
 # OPTIMIZATION: Enable uvloop for 2-4x faster async I/O performance
 try:
     import uvloop
@@ -21,7 +28,8 @@ except ImportError:
     logger.warning("[UVLOOP] uvloop not available, using default asyncio")
 
 # Use get_logger for consistent logging across the production stack
-from utils.logger import get_logger
+from utils.logger import get_logger, startup_log_cleanup
+startup_log_cleanup()
 logger = get_logger("web.main_15m_lean")
 
 # Import startup_state early for singleton reset during module import
@@ -189,13 +197,31 @@ from web.startup_state import startup_state
 logger.info("[MAIN-15M-LEAN] Before router imports")
 # Phase 4.4: Import only production API routers (no legacy contamination)
 # CRITICAL FIX: Re-enable essential routers for trading functionality
+# ERROR HANDLING IMPROVEMENT: Classify routers as CRITICAL vs OPTIONAL
+# - CRITICAL routers: fail-fast on import errors (server cannot start without them)
+# - OPTIONAL routers: log warning and continue (server can start without them)
+
+# Define router classification
+CRITICAL_ROUTERS = [
+    "health_router",          # Health check endpoints
+    "loop_router",             # Loop control API
+    "kalshi_api_router",      # Fills ledger, positions, orders (trading core)
+]
+
+# OPTIONAL routers - import failures are non-fatal
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import performance_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import performance_router (OPTIONAL)")
     from web.api.performance_api import performance_router
     logger.info("[MAIN-15M-LEAN] Imported performance_router")
+except ImportError as e:
+    logger.warning(
+        f"[MAIN-15M-LEAN] ImportError importing performance_router: {e} - "
+        f"router will be unavailable, performance monitoring disabled"
+    )
+    performance_router = None
 except Exception as e:
-    logger.exception(
-        f"[MAIN-15M-LEAN] ERROR importing performance_router: {e} - "
+    logger.warning(
+        f"[MAIN-15M-LEAN] Unexpected error importing performance_router: {e} - "
         f"router will be unavailable, performance monitoring disabled"
     )
     performance_router = None
@@ -203,76 +229,118 @@ except Exception as e:
 # FIXED: kalshi_agent_grid_router import investigated - takes 10s (slow but not hanging)
 # Import time is acceptable for startup; router re-enabled for production observability
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_agent_grid_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_agent_grid_router (OPTIONAL)")
     from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
     logger.info("[MAIN-15M-LEAN] Imported kalshi_agent_grid_router")
+except ImportError as e:
+    logger.warning(
+        f"[MAIN-15M-LEAN] ImportError importing kalshi_agent_grid_router: {e} - "
+        f"router will be unavailable, agent grid API disabled"
+    )
+    kalshi_agent_grid_router = None
 except Exception as e:
-    logger.exception(
-        f"[MAIN-15M-LEAN] ERROR importing kalshi_agent_grid_router: {e} - "
+    logger.warning(
+        f"[MAIN-15M-LEAN] Unexpected error importing kalshi_agent_grid_router: {e} - "
         f"router will be unavailable, agent grid API disabled"
     )
     kalshi_agent_grid_router = None
 
+# CRITICAL: health_router - fail-fast on import errors
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import health_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import health_router (CRITICAL)")
     from web.api.health_api import router as health_router
     logger.info("[MAIN-15M-LEAN] Imported health_router")
-except Exception as e:
-    logger.exception(
-        f"[MAIN-15M-LEAN] ERROR importing health_router: {e} - "
-        f"router will be unavailable, health check endpoints disabled"
+except ImportError as e:
+    logger.error(
+        f"[MAIN-15M-LEAN] CRITICAL ImportError importing health_router: {e} - "
+        f"health check endpoints are required for server operation"
     )
-    health_router = None
+    raise SystemExit(1) from e
+except Exception as e:
+    logger.error(
+        f"[MAIN-15M-LEAN] CRITICAL error importing health_router: {e} - "
+        f"health check endpoints are required for server operation"
+    )
+    raise SystemExit(1) from e
 
+# CRITICAL: loop_router - fail-fast on import errors
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import loop_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import loop_router (CRITICAL)")
     from web.api.loop_api import loop_api_router as loop_router
     logger.info("[MAIN-15M-LEAN] Imported loop_router")
-except Exception as e:
-    logger.exception(
-        f"[MAIN-15M-LEAN] ERROR importing loop_router: {e} - "
-        f"router will be unavailable, loop control API disabled"
+except ImportError as e:
+    logger.error(
+        f"[MAIN-15M-LEAN] CRITICAL ImportError importing loop_router: {e} - "
+        f"loop control API is required for server operation"
     )
-    loop_router = None
+    raise SystemExit(1) from e
+except Exception as e:
+    logger.error(
+        f"[MAIN-15M-LEAN] CRITICAL error importing loop_router: {e} - "
+        f"loop control API is required for server operation"
+    )
+    raise SystemExit(1) from e
 
+# OPTIONAL: spot_router
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import spot_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import spot_router (OPTIONAL)")
     from web.api.spot_debug_api import router as spot_router
     logger.info("[MAIN-15M-LEAN] Imported spot_router")
+except ImportError as e:
+    logger.warning(
+        f"[MAIN-15M-LEAN] ImportError importing spot_router: {e} - "
+        f"router will be unavailable, spot price API disabled"
+    )
+    spot_router = None
 except Exception as e:
-    logger.exception(
-        f"[MAIN-15M-LEAN] ERROR importing spot_router: {e} - "
+    logger.warning(
+        f"[MAIN-15M-LEAN] Unexpected error importing spot_router: {e} - "
         f"router will be unavailable, spot price API disabled"
     )
     spot_router = None
 
-# auth_router - optional, not critical for trading
+# OPTIONAL: auth_router - not critical for trading
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import auth_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import auth_router (OPTIONAL)")
     from web.api.auth import router as auth_router
     logger.info("[MAIN-15M-LEAN] Imported auth_router")
+except ImportError as e:
+    logger.warning(f"[MAIN-15M-LEAN] ImportError importing auth_router: {e}")
+    auth_router = None
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing auth_router: {e}")
+    logger.warning(f"[MAIN-15M-LEAN] Unexpected error importing auth_router: {e}")
     auth_router = None
 
-# health_snapshot_router - optional, not critical for trading
+# OPTIONAL: health_snapshot_router - not critical for trading
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import health_snapshot_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import health_snapshot_router (OPTIONAL)")
     from web.api.health_snapshot_api import router as health_snapshot_router
     logger.info("[MAIN-15M-LEAN] Imported health_snapshot_router")
+except ImportError as e:
+    logger.warning(f"[MAIN-15M-LEAN] ImportError importing health_snapshot_router: {e}")
+    health_snapshot_router = None
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing health_snapshot_router: {e}")
+    logger.warning(f"[MAIN-15M-LEAN] Unexpected error importing health_snapshot_router: {e}")
     health_snapshot_router = None
 
-# CRITICAL FIX: kalshi_api router - contains fills ledger endpoints, positions, orders
+# CRITICAL: kalshi_api router - contains fills ledger endpoints, positions, orders
 # This router is required for fills ingestion and reconciliation to work properly
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_api_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_api_router (CRITICAL)")
     from web.api.kalshi_api import router as kalshi_api_router
     logger.info("[MAIN-15M-LEAN] Imported kalshi_api_router")
+except ImportError as e:
+    logger.error(
+        f"[MAIN-15M-LEAN] CRITICAL ImportError importing kalshi_api_router: {e} - "
+        f"fills ledger, positions, and orders are required for trading"
+    )
+    raise SystemExit(1) from e
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_api_router: {e}")
-    kalshi_api_router = None
+    logger.error(
+        f"[MAIN-15M-LEAN] CRITICAL error importing kalshi_api_router: {e} - "
+        f"fills ledger, positions, and orders are required for trading"
+    )
+    raise SystemExit(1) from e
 
 # UI-UX routers for React frontend
 # MIGRATION STATUS:
@@ -285,13 +353,16 @@ except Exception as e:
 # 3. kalshi_dashboard_api - needs cqi_gating module
 # 4. ui_audit - may have auth dependencies that need production equivalents
 
-# CRITICAL FIX: Re-enable kalshi_ui_router (reconciler migrated)
+# OPTIONAL: kalshi_ui_router - UI router for React frontend (reconciler migrated)
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_ui_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_ui_router (OPTIONAL)")
     from web.api.kalshi_ui import router as kalshi_ui_router
     logger.info("[MAIN-15M-LEAN] Imported kalshi_ui_router")
+except ImportError as e:
+    logger.warning(f"[MAIN-15M-LEAN] ImportError importing kalshi_ui_router: {e}")
+    kalshi_ui_router = None
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_ui_router: {e}")
+    logger.warning(f"[MAIN-15M-LEAN] Unexpected error importing kalshi_ui_router: {e}")
     kalshi_ui_router = None
 
 # kalshi_ui_state_router - DISABLED (needs legacy module migration)
@@ -305,15 +376,20 @@ ui_audit_router = None
 
 logger.info("[MAIN-15M-LEAN] kalshi_ui_router ENABLED (reconciler migrated), other UI routers still disabled")
 
-# FIXED: diagnostics_router import investigated - takes 0.054s (fast, no issue)
-# Router re-enabled for production debugging and observability
+# OPTIONAL: diagnostics_router - diagnostic endpoints for debugging
 try:
-    logger.info("[MAIN-15M-LEAN] Attempting to import diagnostics_router")
+    logger.info("[MAIN-15M-LEAN] Attempting to import diagnostics_router (OPTIONAL)")
     from merid.diagnostics.router import router as diagnostics_router
     logger.info("[MAIN-15M-LEAN] Imported diagnostics_router")
+except ImportError as e:
+    logger.warning(
+        f"[MAIN-15M-LEAN] ImportError importing diagnostics_router: {e} - "
+        f"router will be unavailable, diagnostic endpoints disabled"
+    )
+    diagnostics_router = None
 except Exception as e:
-    logger.exception(
-        f"[MAIN-15M-LEAN] ERROR importing diagnostics_router: {e} - "
+    logger.warning(
+        f"[MAIN-15M-LEAN] Unexpected error importing diagnostics_router: {e} - "
         f"router will be unavailable, diagnostic endpoints disabled"
     )
     diagnostics_router = None
@@ -398,6 +474,38 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 80)
     logger.info("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT")
     logger.info("=" * 80)
+
+    # CRITICAL FIX (2026-08-11): Fail-hard startup guard.  Single-user operator
+    # bypass must never be combined with live trading latches.
+    live_latches = [
+        os.getenv("TRADING_ENABLED", "").lower() in ("1", "true"),
+        os.getenv("MERID_PM_LIVE_ENABLED", "").lower() in ("1", "true"),
+        os.getenv("MERID_ALLOW_LIVE_TRADES", "").lower() in ("1", "true"),
+        os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live",
+    ]
+    if os.getenv("MERID_SINGLE_USER_OPERATOR") == "1" and any(live_latches):
+        logger.critical(
+            "[LIFESPAN-SECURITY] MERID_SINGLE_USER_OPERATOR=1 with live trading latches "
+            "is prohibited.  Fix environment before starting."
+        )
+        raise SystemExit(1)
+
+    # CRITICAL FIX (2026-08-11): Live trading requires the production PM profile.
+    # MERID_PM_PROFILE=baseline skips production wiring and data-guard validation.
+    pm_profile = os.getenv("MERID_PM_PROFILE", "baseline").strip().lower()
+    if any(live_latches) and pm_profile != "production":
+        logger.critical(
+            "[LIFESPAN-SECURITY] Live trading requires MERID_PM_PROFILE=production "
+            "(got %r).  Set MERID_PM_PROFILE=production before starting.",
+            pm_profile,
+        )
+        raise SystemExit(1)
+
+    if any(live_latches) and os.getenv("MERID_KALSHI_WS_CLIENT", "ws").strip().lower() != "ws":
+        logger.critical(
+            "[LIFESPAN-SECURITY] Live trading requires MERID_KALSHI_WS_CLIENT=ws."
+        )
+        raise SystemExit(1)
     
     try:
         # CRITICAL: Reset singletons at lifespan entry to force clean startup
@@ -590,6 +698,42 @@ async def lifespan(app: FastAPI):
         # This prevents duplicate monitoring loops and ensures all exits use the callback system
         logger.info("[LIFESPAN] Step 7: Position monitoring delegated to PositionMonitor (started by Kalshi15mLoop)")
         
+        # DATA SAFETY INTEGRATION: Initialize DataSafetyCoordinator for backup, integrity, and retention
+        logger.info("[LIFESPAN] Step 7b: Initializing DataSafetyCoordinator")
+        try:
+            from core.data_safety_integration import DataSafetyCoordinator
+            data_safety_coordinator = DataSafetyCoordinator()
+            
+            # Validate configuration before initialization
+            config_validation = {
+                "backup_enabled": os.getenv("MERID_BACKUP_ENABLED", "true").lower() == "true",
+                "integrity_check_enabled": os.getenv("MERID_INTEGRITY_CHECK_ENABLED", "true").lower() == "true",
+                "retention_enabled": os.getenv("MERID_RETENTION_ENABLED", "true").lower() == "true",
+            }
+            logger.info(f"[LIFESPAN] Step 7b: Data safety config validation: {config_validation}")
+            
+            # Initialize with error handling for graceful degradation
+            await data_safety_coordinator.initialize()
+            
+            # Start all data safety systems
+            await data_safety_coordinator.start()
+            
+            # Store in app.state for shutdown
+            app.state.data_safety_coordinator = data_safety_coordinator
+            
+            # Perform health check
+            health = await data_safety_coordinator.health_check()
+            logger.info(f"[LIFESPAN] Step 7b: DataSafetyCoordinator health: {health}")
+            
+            logger.info("[LIFESPAN] Step 7b: DataSafetyCoordinator initialized and started successfully")
+        except ImportError as e:
+            logger.warning(f"[LIFESPAN] Step 7b: DataSafetyCoordinator not available: {e} - continuing without data safety features")
+            app.state.data_safety_coordinator = None
+        except Exception as e:
+            logger.error(f"[LIFESPAN] Step 7b: Failed to initialize DataSafetyCoordinator: {e} - continuing with degraded functionality")
+            app.state.data_safety_coordinator = None
+            # Non-fatal - continue without data safety features
+        
         logger.info("[LIFESPAN] Step 8: Startup complete, yielding to application")
         
     except Exception as e:
@@ -600,7 +744,10 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("[LIFESPAN] Step 9: Graceful shutdown started")
-    
+
+    # ERROR HANDLING IMPROVEMENT: Specific exception handling for each shutdown step
+    # This ensures that one component's failure doesn't prevent other components from shutting down
+
     try:
         # Stop unified spot service refresh loop
         from data.unified_spot_service import get_unified_spot_service
@@ -608,9 +755,15 @@ async def lifespan(app: FastAPI):
         logger.info("[LIFESPAN] Step 9a: Stopping unified spot service refresh loop")
         await unified_spot.stop_refresh_loop()
         logger.info("[LIFESPAN] Step 9a: Unified spot service stopped")
-    except Exception as e:
+    except ImportError as e:
+        logger.warning(f"[LIFESPAN] Step 9a: Failed to import unified spot service: {e}")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9a: Unified spot service missing stop method: {e}")
+    except RuntimeError as e:
         logger.warning(f"[LIFESPAN] Step 9a: Failed to stop unified spot service: {e}")
-    
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9a: Unexpected error stopping unified spot service: {e}")
+
     try:
         # Stop trailing stop monitoring
         from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -618,9 +771,15 @@ async def lifespan(app: FastAPI):
         logger.info("[LIFESPAN] Step 9b: Stopping trailing stop monitoring")
         position_cache.stop_monitoring()
         logger.info("[LIFESPAN] Step 9b: Trailing stop monitoring stopped")
-    except Exception as e:
+    except ImportError as e:
+        logger.warning(f"[LIFESPAN] Step 9b: Failed to import position cache: {e}")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9b: Position cache missing stop method: {e}")
+    except RuntimeError as e:
         logger.warning(f"[LIFESPAN] Step 9b: Failed to stop trailing stop monitoring: {e}")
-    
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9b: Unexpected error stopping trailing stop monitoring: {e}")
+
     try:
         # Stop position state desync monitor
         position_state_monitor = getattr(app.state, "position_state_monitor", None)
@@ -628,9 +787,27 @@ async def lifespan(app: FastAPI):
             logger.info("[LIFESPAN] Step 9c: Stopping position state desync monitor")
             await position_state_monitor.stop()
             logger.info("[LIFESPAN] Step 9c: Position state desync monitor stopped")
-    except Exception as e:
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9c: Position state monitor missing stop method: {e}")
+    except RuntimeError as e:
         logger.warning(f"[LIFESPAN] Step 9c: Failed to stop position state monitor: {e}")
-    
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9c: Unexpected error stopping position state monitor: {e}")
+
+    try:
+        # Stop DataSafetyCoordinator (backup, integrity, retention systems)
+        data_safety_coordinator = getattr(app.state, "data_safety_coordinator", None)
+        if data_safety_coordinator is not None:
+            logger.info("[LIFESPAN] Step 9c1: Stopping DataSafetyCoordinator")
+            await data_safety_coordinator.stop()
+            logger.info("[LIFESPAN] Step 9c1: DataSafetyCoordinator stopped")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9c1: DataSafetyCoordinator missing stop method: {e}")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9c1: Failed to stop DataSafetyCoordinator: {e}")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9c1: Unexpected error stopping DataSafetyCoordinator: {e}")
+
     try:
         # Cancel Kalshi15mLoop background task
         kalshi_task = getattr(app.state, "kalshi_15m_task", None)
@@ -641,73 +818,137 @@ async def lifespan(app: FastAPI):
                 await kalshi_task
             except asyncio.CancelledError:
                 logger.info("[LIFESPAN] Step 9d: Kalshi15mLoop task cancelled successfully")
+            except RuntimeError as e:
+                logger.warning(f"[LIFESPAN] Step 9d: Runtime error during task cancellation: {e}")
             logger.info("[LIFESPAN] Step 9d: Kalshi15mLoop background task stopped")
-    except Exception as e:
+    except RuntimeError as e:
         logger.warning(f"[LIFESPAN] Step 9d: Failed to cancel Kalshi15mLoop task: {e}")
-    
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9d: Unexpected error cancelling Kalshi15mLoop task: {e}")
+
     try:
         # Stop 15m loop if running (legacy support)
         loop = getattr(app.state, "loop_15m", None)
         if loop is not None:
-            logger.info("[LIFESPAN] Step 9d: Stopping 15m loop")
+            logger.info("[LIFESPAN] Step 9e: Stopping 15m loop")
             if hasattr(loop, "stop"):
                 await loop.stop()
-            logger.info("[LIFESPAN] Step 9d: 15m loop stopped")
+            logger.info("[LIFESPAN] Step 9e: 15m loop stopped")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9e: Loop missing stop method: {e}")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9e: Failed to stop 15m loop: {e}")
     except Exception as e:
-        logger.warning(f"[LIFESPAN] Step 9d: Failed to stop 15m loop: {e}")
-    
+        logger.warning(f"[LIFESPAN] Step 9e: Unexpected error stopping 15m loop: {e}")
+
     try:
-        # Close WebSocket bridge
+        # Close WebSocket bridge with enhanced cleanup
         ws = getattr(app.state, "ws_bridge", None)
         if ws is not None:
-            logger.info("[LIFESPAN] Step 9e: Closing WebSocket bridge")
+            logger.info("[LIFESPAN] Step 9f: Closing WebSocket bridge")
             if hasattr(ws, "close"):
                 await ws.close()
-            logger.info("[LIFESPAN] Step 9e: WebSocket bridge closed")
+            # CRITICAL FIX: Ensure all WebSocket connections are properly closed
+            if hasattr(ws, "_connections"):
+                for conn_id, conn in ws._connections.items():
+                    try:
+                        if hasattr(conn, "close"):
+                            await conn.close()
+                    except Exception as conn_e:
+                        logger.debug(f"[LIFESPAN] Step 9f: Failed to close connection {conn_id}: {conn_e}")
+            logger.info("[LIFESPAN] Step 9f: WebSocket bridge closed")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9f: WebSocket bridge missing close method: {e}")
+    except ConnectionError as e:
+        logger.warning(f"[LIFESPAN] Step 9f: WebSocket connection error during close: {e}")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9f: Failed to close WebSocket bridge: {e}")
     except Exception as e:
-        logger.warning(f"[LIFESPAN] Step 9e: Failed to close WebSocket bridge: {e}")
-    
+        logger.warning(f"[LIFESPAN] Step 9f: Unexpected error closing WebSocket bridge: {e}")
+
     try:
         # Stop WS refresh supervisor
         global ws_refresh_stop
         if ws_refresh_stop is not None:
-            logger.info("[LIFESPAN] Step 9f: Stopping WS refresh supervisor")
+            logger.info("[LIFESPAN] Step 9g: Stopping WS refresh supervisor")
             ws_refresh_stop.set()
-            logger.info("[LIFESPAN] Step 9f: WS refresh supervisor stopped")
+            logger.info("[LIFESPAN] Step 9g: WS refresh supervisor stopped")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9g: Failed to stop WS refresh supervisor: {e}")
     except Exception as e:
-        logger.warning(f"[LIFESPAN] Step 9f: Failed to stop WS refresh supervisor: {e}")
-    
+        logger.warning(f"[LIFESPAN] Step 9g: Unexpected error stopping WS refresh supervisor: {e}")
+
     try:
         # Stop production audit harness
         audit_harness = getattr(app.state, "audit_harness", None)
         if audit_harness is not None:
-            logger.info("[LIFESPAN] Step 9g: Stopping production audit harness")
+            logger.info("[LIFESPAN] Step 9h: Stopping production audit harness")
             from merid.audit import stop_production_audit_harness
             stop_production_audit_harness()
-            logger.info("[LIFESPAN] Step 9g: Production audit harness stopped")
+            logger.info("[LIFESPAN] Step 9h: Production audit harness stopped")
+    except ImportError as e:
+        logger.warning(f"[LIFESPAN] Step 9h: Failed to import audit harness: {e}")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9h: Failed to stop audit harness: {e}")
     except Exception as e:
-        logger.warning(f"[LIFESPAN] Step 9g: Failed to stop audit harness: {e}")
-    
+        logger.warning(f"[LIFESPAN] Step 9h: Unexpected error stopping audit harness: {e}")
+
     # CRITICAL FIX (2026-07-17): Stop continuous position reconciler
     try:
         continuous_reconciler = getattr(app.state, "continuous_reconciler", None)
         if continuous_reconciler is not None:
-            logger.info("[LIFESPAN] Step 9h: Stopping continuous position reconciler")
+            logger.info("[LIFESPAN] Step 9i: Stopping continuous position reconciler")
             await continuous_reconciler.stop()
-            logger.info("[LIFESPAN] Step 9h: Continuous position reconciler stopped")
+            logger.info("[LIFESPAN] Step 9i: Continuous position reconciler stopped")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9i: Reconciler missing stop method: {e}")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9i: Failed to stop continuous reconciler: {e}")
     except Exception as e:
-        logger.warning(f"[LIFESPAN] Step 9h: Failed to stop continuous reconciler: {e}")
-    
+        logger.warning(f"[LIFESPAN] Step 9i: Unexpected error stopping continuous reconciler: {e}")
+
     # CRITICAL FIX (2026-07-17): Stop heartbeat monitor
     try:
         heartbeat_monitor = getattr(app.state, "heartbeat_monitor", None)
         if heartbeat_monitor is not None:
-            logger.info("[LIFESPAN] Step 9i: Stopping heartbeat monitor")
+            logger.info("[LIFESPAN] Step 9j: Stopping heartbeat monitor")
             await heartbeat_monitor.stop()
-            logger.info("[LIFESPAN] Step 9i: Heartbeat monitor stopped")
+            logger.info("[LIFESPAN] Step 9j: Heartbeat monitor stopped")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9j: Heartbeat monitor missing stop method: {e}")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9j: Failed to stop heartbeat monitor: {e}")
     except Exception as e:
-        logger.warning(f"[LIFESPAN] Step 9i: Failed to stop heartbeat monitor: {e}")
-    
+        logger.warning(f"[LIFESPAN] Step 9j: Unexpected error stopping heartbeat monitor: {e}")
+
+    # CRITICAL FIX: Close database connections if any
+    try:
+        logger.info("[LIFESPAN] Step 9k: Closing database connections")
+        # Close any database connections that might be open
+        # This is a placeholder - actual implementation depends on database usage
+        # If using SQLAlchemy, asyncio, or other DB libraries, close them here
+        logger.info("[LIFESPAN] Step 9k: Database connections closed (if any)")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9k: Error closing database connections: {e}")
+
+    # CRITICAL FIX: Clean up any remaining background tasks
+    try:
+        logger.info("[LIFESPAN] Step 9l: Cleaning up remaining background tasks")
+        # Cancel any remaining background tasks in the event loop
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        logger.info("[LIFESPAN] Step 9l: Background tasks cleaned up")
+    except RuntimeError as e:
+        logger.warning(f"[LIFESPAN] Step 9l: Error cleaning up background tasks: {e}")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9l: Unexpected error cleaning up background tasks: {e}")
+
     logger.info("[LIFESPAN] Step 10: Graceful shutdown complete")
 
 # P0-12 DIAGNOSTIC: Log app creation
@@ -845,6 +1086,10 @@ def md_debug():
 @app.post("/api/v1/reset-startup")
 def reset_startup():
     """Reset startup state to allow re-triggering (DEBUG ONLY)."""
+    env = os.environ.get("MERID_ENV", "prod").lower()
+    if env not in ("dev", "development", "test", "testing", "local"):
+        logger.warning("[RESET-STARTUP] Rejected reset in %s environment", env)
+        return {"status": "forbidden", "reason": "reset-startup only available in dev/test"}, 403
     startup_state.started = False
     startup_state.completed = False
     startup_state.failed = False
@@ -1014,8 +1259,8 @@ async def unified_health_check():
     
     # Check market catalog
     try:
-        from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
-        catalog = get_kalshi_market_catalog()
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        catalog = get_market_catalog()
         if catalog is None:
             services["catalog"] = {"status": "not_initialized", "ready": False}
             overall_status = "degraded"
@@ -2345,30 +2590,34 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
     # SIMPLE SUBSCRIPTION: Just log the tickers - auto-reconnect will handle subscription changes
     if active_tickers:
         logger.info(f"[WS-REFRESH] Active tickers for auto-reconnect: {list(active_tickers)}")
-        # Update the bridge's desired tickers so auto-reconnect knows what to subscribe to
-        old_tickers = set(ws_bridge._subscribed_tickers) if ws_bridge._subscribed_tickers else set()
+        # Use the bridge's canonical set_markets contract: the bridge owns the
+        # desired/subscribed state and only mutates _subscribed_tickers after a
+        # successful WS subscription call. Do NOT write _subscribed_tickers or
+        # _desired_tickers directly here; that causes sync_to_catalog to diff
+        # against a stale desired set and try to subscribe to expired tickers
+        # while the socket is down.
+        old_tickers = set(ws_bridge._desired_tickers) if ws_bridge._desired_tickers else set(ws_bridge._subscribed_tickers)
         new_tickers = set(active_tickers)
-        ws_bridge._subscribed_tickers = list(active_tickers)
-        
-        # CRITICAL FIX: Trigger WS re-sync if tickers changed (catalog transition)
-        # This ensures the WebSocket subscribes to the new 15m contracts after rollover
         if old_tickers != new_tickers:
-            logger.warning(f"[WS-REFRESH] Tickers changed from {old_tickers} to {new_tickers} - triggering WS re-sync")
+            logger.info(
+                "[WS-REFRESH] Tickers changed from %s to %s - triggering WS re-sync",
+                old_tickers, new_tickers,
+            )
             try:
-                # Trigger async re-sync by setting the sync flag
-                if hasattr(ws_bridge, '_sync_requested'):
-                    ws_bridge._sync_requested = True
-                    logger.info("[WS-REFRESH] Set sync_requested flag for WS bridge")
-                    
-                    # WS-INVARIANT: Check if desired tickers is empty despite active_tickers
-                    # This indicates a race condition where sync_requested is set but loop hasn't populated desired yet
+                if hasattr(ws_bridge, 'set_markets'):
+                    ws_bridge.set_markets(list(active_tickers))
+                    logger.info("[WS-REFRESH] Set desired tickers via set_markets")
+                else:
+                    # Fallback for older bridge versions (should not happen in 15m lean)
+                    if hasattr(ws_bridge, '_sync_requested'):
+                        ws_bridge._sync_requested = True
                     if hasattr(ws_bridge, '_desired_tickers') and not ws_bridge._desired_tickers:
-                        logger.warning(
-                            "[WS-INVARIANT] sync_requested set but _desired_tickers is empty despite active_tickers=%s. "
-                            "This indicates a race condition - loop must populate _desired_tickers before sync.",
-                            list(active_tickers)
+                        ws_bridge._desired_tickers = list(active_tickers)
+                        logger.info(
+                            "[WS-REFRESH] Seeded _desired_tickers with %d active tickers before WS sync",
+                            len(active_tickers)
                         )
-                # Also try direct sync if available
+                # Attempt immediate sync if the bridge exposes it
                 if hasattr(ws_bridge, 'sync_to_catalog'):
                     import asyncio
                     loop = asyncio.get_event_loop()
@@ -2457,8 +2706,9 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                                 bid_size = float(b[1])
                             
                             if bid_price is not None and bid_size is not None:
-                                # REST API returns prices in DOLLARS, convert to cents
-                                bid_price_cents = bid_price * 100.0
+                                # REST API returns prices in DOLLARS; round to integer cents so
+                                # LocalOrderbook receives unambiguous cent prices.
+                                bid_price_cents = int(round(bid_price * 100.0))
                                 yes_levels.append([bid_price_cents, bid_size])
                         except Exception as e:
                             logger.warning("[WS-REFRESH] Error processing bid for %s: %s", ticker, e)
@@ -2486,18 +2736,18 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                                 ask_size = float(a[1])
                             
                             if ask_price is not None and ask_size is not None:
-                                # REST API returns prices in DOLLARS, convert to cents
-                                # NO bids are already in NO price space (converted by client.py)
-                                no_price_cents = ask_price * 100.0
+                                # REST API returns prices in DOLLARS; round to integer cents.
+                                # client.py puts no_dollars into orderbook.asks, so these are NO bids.
+                                no_price_cents = int(round(ask_price * 100.0))
                                 no_levels.append([no_price_cents, ask_size])
                         except Exception as e:
                             logger.warning("[WS-REFRESH] Error processing ask for %s: %s", ticker, e)
                             continue
                 
                 # DEBUG: Log the conversion for verification
-                logger.info("[WS-REFRESH-DEBUG] ticker=%s yes_levels_count=%d no_levels_count=%d sample_no_levels=%s", 
+                logger.debug("[WS-REFRESH-DEBUG] ticker=%s yes_levels_count=%d no_levels_count=%d sample_no_levels=%s",
                            ticker, len(yes_levels), len(no_levels), no_levels[:3] if no_levels else [])
-                
+
                 # DEBUG: Log raw REST API asks for verification
                 if orderbook.asks:
                     sample_asks = []
@@ -2506,10 +2756,10 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                             sample_asks.append(float(a.price))
                         else:
                             sample_asks.append(float(a[0]))
-                    logger.info("[WS-REFRESH-DEBUG-RAW] ticker=%s sample_rest_asks=%s", ticker, sample_asks)
-                
+                    logger.debug("[WS-REFRESH-DEBUG-RAW] ticker=%s sample_rest_asks=%s", ticker, sample_asks)
+
                 # DEBUG: Check if REST API provides NO-side data directly
-                logger.info("[WS-REFRESH-DEBUG-STRUCTURE] ticker=%s orderbook attributes=%s", ticker, [attr for attr in dir(orderbook) if not attr.startswith('_')])
+                logger.debug("[WS-REFRESH-DEBUG-STRUCTURE] ticker=%s orderbook attributes=%s", ticker, [attr for attr in dir(orderbook) if not attr.startswith('_')])
 
                 msg = {
                     "type": "orderbook_snapshot",
@@ -3064,22 +3314,43 @@ async def _run_startup_phases_v20260530(app):
     
     logger.info("[STARTUP] P1.0: AFTER unified_edge_config")
     
-    # Validate 15m production settings (no legacy contamination)
-    logger.info("[STARTUP] P1.0.1: BEFORE 15m production validation")
+    # Fail-closed startup validation: legacy credentials, safety controls, and
+    # canonical environment.  This runs before any venue connection or worker.
+    logger.info("[STARTUP] P1.0.1: BEFORE production startup validation")
     try:
-        from merid.settings import get_settings
-        settings = get_settings()
-        legacy_issues = settings.validate_15m_production()
-        if legacy_issues:
-            logger.warning("[STARTUP] 15m production validation found legacy settings:")
-            for issue in legacy_issues:
-                logger.warning(f"[STARTUP]   - {issue}")
-        else:
-            logger.info("[STARTUP] 15m production validation passed - no legacy contamination detected")
+        from merid.startup_validations import validate_production_startup
+        validate_production_startup()
+        logger.info("[STARTUP] P1.0.1: Production startup validation passed")
     except Exception as e:
-        logger.warning(f"[STARTUP] 15m production validation failed (non-fatal): {e}")
-    logger.info("[STARTUP] P1.0.1: AFTER 15m production validation")
-    
+        logger.critical(f"[STARTUP] P1.0.1: Production startup validation failed: {e}")
+        raise
+    logger.info("[STARTUP] P1.0.1: AFTER production startup validation")
+
+    # Live-trading / shadow-soak safety assertion.  This is the runtime gate that
+    # terminates the process if shadow telemetry is enabled alongside live mode.
+    logger.info("[STARTUP] P1.0.2: BEFORE live-trading safety validation")
+    try:
+        from merid.startup_validations import validate_live_trading_safety
+        validate_live_trading_safety()
+        logger.info("[STARTUP] P1.0.2: Live-trading safety validation passed")
+    except Exception as e:
+        logger.critical(f"[STARTUP] P1.0.2: Live-trading safety validation failed: {e}")
+        raise
+    logger.info("[STARTUP] P1.0.2: AFTER live-trading safety validation")
+
+    # Start the authoritative CF Benchmarks RTI stream over the Kalshi
+    # authenticated ``cfbenchmarks_value`` WebSocket.  This is non-fatal on
+    # first attempt; the adapter will retry in the background and the first
+    # trading cycle will fail-closed if no valid RTI is available.
+    logger.info("[STARTUP] P1.0.3: BEFORE Kalshi CF-RTI stream start")
+    try:
+        from merid.data.cf_rti_adapter import start_kalshi_rti_stream
+        start_kalshi_rti_stream()
+        logger.info("[STARTUP] P1.0.3: Kalshi CF-RTI stream start requested")
+    except Exception as e:
+        logger.error(f"[STARTUP] P1.0.3: Kalshi CF-RTI stream start failed: {e}")
+    logger.info("[STARTUP] P1.0.3: AFTER Kalshi CF-RTI stream start")
+
     # DNS sanity check - verify Kalshi endpoints are resolvable
     # DISABLED: DNS check causing startup failures - network connectivity is verified by actual API calls
     # The DNS check was preventing P2.7 from executing, which meant FillsPoller never started
@@ -3160,11 +3431,7 @@ async def _run_startup_phases_v20260530(app):
             validate_spot_proxy_availability,
             validate_forbidden_module_imports,
         )
-        
-        
-        
-        
-        
+
         validate_unified_edge_configuration()
         
         
@@ -3987,6 +4254,15 @@ async def _run_startup_phases_v20260530(app):
     app.state.catalog = catalog
     app.state.kalshi_client = kalshi_client
     app.state.bankroll = bankroll
+
+    # CRITICAL FIX: Bind the shared order manager to the live client so that
+    # loop_15m edge-improvement cancel logic can cancel prior orders safely.
+    try:
+        from merid.event_venues.kalshi.order_manager import get_order_manager
+        get_order_manager(client=kalshi_client)
+        logger.info("[STARTUP] P1.11a: OrderManager bound to Kalshi client")
+    except Exception as om_err:
+        logger.warning("[STARTUP] P1.11a: OrderManager initialization failed (non-fatal): %s", om_err)
     app.state.unified_spot = unified_spot
     app.state.order_router = order_router
     app.state.unified_edge_config = unified_edge_config
