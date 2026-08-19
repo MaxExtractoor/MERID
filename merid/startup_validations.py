@@ -305,14 +305,31 @@ def validate_postgres_liveness() -> None:
         finally:
             await conn.close()
 
-    try:
-        asyncio.run(_probe())
-    except StartupValidationError:
-        raise
-    except Exception as exc:
+    # The probe is async but this validation is synchronous.  Run it in a
+    # background thread with its own event loop so it can be invoked from
+    # either a sync test context or Uvicorn's running event loop.
+    import threading
+    result: list = [None]
+    exception: list = [None]
+
+    def _run_in_thread() -> None:
+        try:
+            asyncio.run(_probe())
+            result[0] = True
+        except Exception as exc:
+            exception[0] = exc
+
+    thread = threading.Thread(target=_run_in_thread, name="postgres_liveness_probe")
+    thread.start()
+    thread.join(timeout=15.0)
+
+    if thread.is_alive():
+        raise StartupValidationError("PostgreSQL liveness probe timed out")
+
+    if exception[0] is not None:
         raise StartupValidationError(
-            f"PostgreSQL required for soak but unreachable: {exc}"
-        ) from exc
+            f"PostgreSQL required for soak but unreachable: {exception[0]}"
+        ) from exception[0]
 
 
 def validate_kalshi_15m_strip_limits_consistency() -> None:
