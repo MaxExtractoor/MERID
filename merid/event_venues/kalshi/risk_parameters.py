@@ -290,11 +290,10 @@ def validate_edge(edge_pct: float, asset: str, confidence: float = 0.5) -> tuple
         (is_valid, reason): Tuple where is_valid is True if edge meets threshold,
                             and reason explains the decision
     """
-    # CRITICAL FIX: Lowered edge threshold from 2.5% to 0.5% to enable trading
-    # The 2.5% threshold was blocking all trades in the 15-minute system
-    # 15-minute markets have lower liquidity and smaller edges - 0.5% is more realistic
-    # 2026-07-29: Emergency fix to restore trading functionality
-    EDGE_BANDS_MINIMUM = 0.005  # 0.5% minimum edge (lowered from 2.5% to enable trading)
+    # 2026-08-21: Restore the profile edge_bands minimum (2.5%) as the single
+    # source of truth.  The 0.5% emergency bypass was allowing marginal,
+    # fee-negative trades through the validation layer.
+    EDGE_BANDS_MINIMUM = 0.025  # 2.5% minimum edge, aligned with profile edge_bands
     
     # Check if edge meets threshold (use absolute value for contrarian signals)
     if abs(edge_pct) >= EDGE_BANDS_MINIMUM:

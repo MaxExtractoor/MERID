@@ -486,7 +486,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    order_side: str,  # CRITICAL FIX (2026-07-24): Side-aware validation - only check spread for order's side
+    order_side: str = "yes",  # CRITICAL FIX (2026-07-24): Side-aware validation - only check spread for order's side
     max_spread_cents: float = 20.0,  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
@@ -624,7 +624,8 @@ def check_market_microstructure_edge_aware(
     min_total_depth: int = 25,
     ticker: Optional[str] = None,  # CRITICAL FIX 2026-07-28: Add ticker for dynamic threshold asset extraction
     aggressiveness: float = 0.0,  # CRITICAL FIX 2026-07-28: Add aggressiveness for maker/taker economics selection
-    intent: Optional[Any] = None  # CRITICAL FIX 2026-08-02: Add intent for maker/taker policy decision access
+    intent: Optional[Any] = None,  # CRITICAL FIX 2026-08-02: Add intent for maker/taker policy decision access
+    max_threshold_cents: Optional[float] = None  # 2026-08-21: Price-scaled cap on dynamic threshold
 ) -> tuple[bool, str]:
     """
     Edge-aware microstructure gate using spread/edge ratio instead of fixed spread threshold.
@@ -847,7 +848,8 @@ def check_market_microstructure_edge_aware(
             min_executable_edge_frac=min_executable_edge_frac,
             max_spread_to_edge_ratio=1.0,  # RELAXED: makers capture spread, so ratio doesn't matter
             max_spread_cents=None,  # DISABLED: makers want wide spreads
-            dynamic_threshold=dynamic_threshold
+            dynamic_threshold=dynamic_threshold,
+            max_threshold_cents=max_threshold_cents
         )
     else:
         # Taker gate: strict spread/edge ratio (existing logic)
@@ -865,7 +867,8 @@ def check_market_microstructure_edge_aware(
             min_executable_edge_frac=min_executable_edge_frac,
             max_spread_to_edge_ratio=max_spread_to_edge_ratio,  # STRICT: spread shouldn't eat edge
             max_spread_cents=max_spread_cents,  # STRICT: cap to avoid overpaying
-            dynamic_threshold=dynamic_threshold
+            dynamic_threshold=dynamic_threshold,
+            max_threshold_cents=max_threshold_cents
         )
     
     # CRITICAL FIX 2026-08-02: Update candidate trace with microstructure stage data
@@ -5338,6 +5341,17 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                                 passes = False
                                 reason = f"gate_coordination_fallback_failed: spread={spread_cents:.1f}c > cap={max_spread_cents:.1f}c"
 
+                        # 2026-08-21: The decision engine approved this trade based on a
+                        # minimum net edge (strategy_policy_min_edge). The microstructure
+                        # threshold must not exceed that price-scaled edge, otherwise the
+                        # router rejects trades that the agent already validated.
+                        strategy_min_edge = getattr(profile, 'strategy_policy_min_edge', 0.05)
+                        max_threshold_cents = (
+                            float(intent.price_cents) * strategy_min_edge
+                            if intent.price_cents is not None and intent.price_cents > 0
+                            else None
+                        )
+
                         passes, reason = check_market_microstructure_edge_aware(
                             yes_bid_cents=intent.yes_bid_cents or 0,
                             no_bid_cents=no_bid_cents or 0,
@@ -5354,7 +5368,8 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                             min_total_depth=profile.momentum_fvg_liquidity_min_threshold,
                             ticker=intent.ticker,  # CRITICAL FIX 2026-07-28: Pass ticker for dynamic threshold asset extraction
                             aggressiveness=intent.aggressiveness,  # CRITICAL FIX 2026-07-28: Pass aggressiveness for maker/taker economics
-                            intent=intent  # CRITICAL FIX 2026-08-02: Pass intent for maker/taker policy decision access
+                            intent=intent,  # CRITICAL FIX 2026-08-02: Pass intent for maker/taker policy decision access
+                            max_threshold_cents=max_threshold_cents
                         )
                         logger.info(
                             "[EDGE-AWARE-GATE] ticker=%s side=%s p_hat_side=%.1fc p_hat_yes=%.1fc passes=%s reason=%s",
@@ -13343,6 +13358,11 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
         )
 
     t0 = _time.monotonic()
+
+    # Resolve the canonical trading mode once for the entire route.
+    # This field is required on every OrderResult; referencing it before
+    # assignment produced UnboundLocalError in the firewall / exit path.
+    mode = _resolve_mode(intent.mode)
 
     # ── CIRCUIT BREAKER + ORDER-IDENTITY CONTRACT (2026-08-11) ─────────────
     identity_rejection = _validate_order_identity(intent, t0)

@@ -262,10 +262,17 @@ def compute_per_side_edges(
         yes_executable_edge = yes_raw_edge - yes_spread_cost - yes_taker_fee
         logger.info("[EDGE-CALC] YES side using TAKER economics: raw_edge=%.2fc, spread_cost=%.2fc, taker_fee=%.2fc, executable_edge=%.2fc", yes_raw_edge, yes_spread_cost, yes_taker_fee, yes_executable_edge)
     
-    # CRITICAL FIX 2026-08-02: Use spread_cost (0 for makers) instead of spread_cents for ratio calculation
-    # Previous bug: Always used full spread, causing maker orders to be rejected based on taker-style costs
-    # Now: Ratio reflects actual execution cost (0 for makers, full spread for takers)
-    yes_spread_ratio = (yes_spread_cost / yes_raw_edge) if yes_raw_edge > 0 else float('inf')
+    # CRITICAL FIX 2026-08-04: Spread/edge ratio reflects actual spread cost for
+    # specific orders (order_price_cents provided), but falls back to quoted market
+    # spread for generic side-selection calls (order_price_cents=None). This keeps
+    # side-by-side comparison meaningful while making per-order maker/taker gating
+    # reflect the real economics (0 cost for makers, full spread for takers).
+    if use_maker_economics and order_price_cents is None:
+        # No specific order price: use quoted market spread for side comparison
+        yes_spread_ratio = (spread_metrics.yes_spread_cents / yes_raw_edge) if yes_raw_edge > 0 else float('inf')
+    else:
+        # Specific order or taker economics: use actual spread cost
+        yes_spread_ratio = (yes_spread_cost / yes_raw_edge) if yes_raw_edge > 0 else float('inf')
     
     yes_edge = PerSideEdgeMetrics(
         side="yes",
@@ -300,10 +307,13 @@ def compute_per_side_edges(
         no_executable_edge = no_raw_edge - no_spread_cost - no_taker_fee
         logger.info("[EDGE-CALC] NO side using TAKER economics: raw_edge=%.2fc, spread_cost=%.2fc, taker_fee=%.2fc, executable_edge=%.2fc", no_raw_edge, no_spread_cost, no_taker_fee, no_executable_edge)
     
-    # CRITICAL FIX 2026-08-02: Use spread_cost (0 for makers) instead of spread_cents for ratio calculation
-    # Previous bug: Always used full spread, causing maker orders to be rejected based on taker-style costs
-    # Now: Ratio reflects actual execution cost (0 for makers, full spread for takers)
-    no_spread_ratio = (no_spread_cost / no_raw_edge) if no_raw_edge > 0 else float('inf')
+    # CRITICAL FIX 2026-08-04: See YES-side comment above for spread/edge ratio logic.
+    if use_maker_economics and order_price_cents is None:
+        # No specific order price: use quoted market spread for side comparison
+        no_spread_ratio = (spread_metrics.no_spread_cents / no_raw_edge) if no_raw_edge > 0 else float('inf')
+    else:
+        # Specific order or taker economics: use actual spread cost
+        no_spread_ratio = (no_spread_cost / no_raw_edge) if no_raw_edge > 0 else float('inf')
     
     no_edge = PerSideEdgeMetrics(
         side="no",
@@ -909,7 +919,9 @@ def edge_aware_microstructure_gate(
     min_executable_edge_frac: float = 0.03,  # 2026-07-25: Changed to fraction (3% = 0.03) for canonical alignment
     max_spread_to_edge_ratio: float = 0.4,
     max_spread_cents: Optional[int] = None,
-    dynamic_threshold: Optional[DynamicThresholdResult] = None
+    dynamic_threshold: Optional[DynamicThresholdResult] = None,
+    use_maker_economics: bool = False,  # CRITICAL FIX 2026-08-04: Split maker/taker gate logic
+    max_threshold_cents: Optional[float] = None  # 2026-08-21: Cap dynamic threshold to price-scaled max
 ) -> Tuple[bool, str]:
     """Edge-aware microstructure gate.
     
@@ -921,17 +933,23 @@ def edge_aware_microstructure_gate(
     If dynamic_threshold is provided, it overrides min_executable_edge_frac for the edge threshold.
     Dynamic threshold adapts to market conditions: T = α·spread + β·σ_15m + γ·fee + δ·slippage + ε
     
+    CRITICAL FIX 2026-08-04: Split maker/taker gate logic.
+    - Takers pay the spread, so spread/edge ratio and absolute spread cap are enforced strictly.
+    - Makers capture the spread, so spread/edge ratio and absolute spread cap are NOT costs and are
+      only checked when explicitly requested (max_spread_cents is provided by the caller).
+    
     Replaces fixed spread threshold (e.g., 20c) with edge-aware logic:
     - Require executable edge > min_executable_edge_frac (converted to cents internally) OR dynamic threshold
-    - Require spread/edge_raw <= max_spread_to_edge_ratio (default 40%)
-    - Optionally require spread <= max_spread_cents (secondary guard)
+    - For taker economics: require spread/edge_raw <= max_spread_to_edge_ratio (default 40%)
+    - For taker economics: optionally require spread <= max_spread_cents (secondary guard)
     
     Args:
         edge_metrics: Per-side edge metrics
         min_executable_edge_frac: Minimum executable edge as fraction (default 0.03 = 3%)
-        max_spread_to_edge_ratio: Max spread/edge ratio (default 0.4)
-        max_spread_cents: Optional absolute spread cap (secondary guard)
+        max_spread_to_edge_ratio: Max spread/edge ratio for taker economics (default 0.4)
+        max_spread_cents: Optional absolute spread cap for taker economics (secondary guard)
         dynamic_threshold: Optional dynamic threshold result (overrides min_executable_edge_frac)
+        use_maker_economics: If True, skip spread/edge ratio and absolute spread cap checks
     
     Returns:
         (passes_gate, reason)
@@ -951,7 +969,19 @@ def edge_aware_microstructure_gate(
     else:
         # Convert fraction threshold to cents for comparison with edge_metrics (which are in cents)
         min_executable_edge_cents = min_executable_edge_frac * 100.0
-    
+
+    # 2026-08-21: The dynamic threshold is an execution-cost overlay; it must never
+    # exceed the strategy's own minimum edge requirement (as a fraction of the
+    # order price). If it did, the router would reject trades that the decision
+    # engine already approved as having adequate edge.
+    if max_threshold_cents is not None and min_executable_edge_cents > max_threshold_cents:
+        logger.info(
+            "[EDGE-AWARE-GATE] Threshold capped: %.2fc -> %.2fc (price-scaled max)",
+            min_executable_edge_cents,
+            max_threshold_cents
+        )
+        min_executable_edge_cents = max_threshold_cents
+
     # Check executable edge first (primary gate)
     if not edge_metrics.is_positive_executable_edge():
         # CRITICAL FIX 2026-07-29: Emit structured rejection reason with exact fields
@@ -975,6 +1005,19 @@ def edge_aware_microstructure_gate(
         )
         logger.warning("[EDGE-AWARE-GATE-REJECT] %s", rejection_details)
         return False, rejection_details
+    
+    # CRITICAL FIX 2026-08-04: Split maker/taker spread controls.
+    # Takers pay the spread; makers capture it. The spread/edge ratio and absolute spread cap
+    # are only meaningful costs for taker economics. For maker economics, the only gating
+    # factor is positive executable edge above the dynamic/minimum threshold.
+    if use_maker_economics:
+        logger.info(
+            "[MAKER-GATE-PASS] side=%s raw_edge=%.2fc executable_edge=%.2fc spread=%dc "
+            "(spread/edge ratio and absolute cap skipped for maker economics)",
+            edge_metrics.side, edge_metrics.raw_edge_cents, edge_metrics.executable_edge_cents,
+            edge_metrics.spread_cents
+        )
+        return True, "ok"
     
     # Check spread cost ratio (secondary gate - only if raw edge is positive)
     if edge_metrics.raw_edge_cents > 0:
