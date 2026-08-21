@@ -85,6 +85,20 @@ except ImportError:
 
 logger = get_logger("merid.prediction.agent_grid_15m")
 
+
+def _is_legacy_signal_enabled() -> bool:
+    """Return True only when the legacy _generate_signal path is explicitly allowed.
+
+    In paper and live modes the v2 ``_generate_trade_decision_signal`` path must
+    be used.  The legacy path remains available in testing/development and only
+    when ``MERID_ENABLE_LEGACY_15M_SIGNAL`` is set.
+    """
+    pm_mode = os.environ.get("MERID_PM_TRADING_MODE", "")
+    if pm_mode in ("paper", "live"):
+        return os.environ.get("MERID_ENABLE_LEGACY_15M_SIGNAL", "").strip().lower() == "1"
+    return True
+
+
 # Minimum minutes to expiry before an entry is permitted in normal mode.
 # This is a fail-closed gate; the trade-decision layer may apply a stricter limit.
 MIN_TIME_TO_EXPIRY_FOR_ENTRY_MIN: float = 5.0
@@ -133,12 +147,17 @@ def _write_shadow_telemetry(
         now_ms = int(time.time() * 1000)
         expiry_ts_ms = now_ms + int(seconds_to_expiry * 1000)
 
-        edge_breakdown = decision.edge_breakdown
-        if edge_breakdown is not None:
-            edge_breakdown = {
+        def _json_breakdown(bd):
+            if bd is None:
+                return None
+            return {
                 k: float(v) if isinstance(v, Decimal) and v is not None else v
-                for k, v in asdict(edge_breakdown).items()
+                for k, v in asdict(bd).items()
             }
+
+        edge_breakdown = _json_breakdown(decision.edge_breakdown)
+        yes_edge_breakdown = _json_breakdown(decision.yes_edge_breakdown)
+        no_edge_breakdown = _json_breakdown(decision.no_edge_breakdown)
 
         timestamp_utc = decision.timestamp_utc
         if isinstance(timestamp_utc, datetime):
@@ -173,10 +192,33 @@ def _write_shadow_telemetry(
             "p_opposite": float(decision.p_opposite) if decision.p_opposite is not None else None,
             "gross_edge": float(decision.gross_edge) if decision.gross_edge is not None else None,
             "net_edge": float(decision.net_edge) if decision.net_edge is not None else None,
+            "gross_edge_yes": float(decision.gross_edge_yes) if decision.gross_edge_yes is not None else None,
+            "gross_edge_no": float(decision.gross_edge_no) if decision.gross_edge_no is not None else None,
+            "net_edge_yes": float(decision.net_edge_yes) if decision.net_edge_yes is not None else None,
+            "net_edge_no": float(decision.net_edge_no) if decision.net_edge_no is not None else None,
+            "entry_fee_yes": float(decision.entry_fee_yes) if decision.entry_fee_yes is not None else None,
+            "entry_fee_no": float(decision.entry_fee_no) if decision.entry_fee_no is not None else None,
+            "exit_cost_reserve_yes": float(decision.exit_cost_reserve_yes) if decision.exit_cost_reserve_yes is not None else None,
+            "exit_cost_reserve_no": float(decision.exit_cost_reserve_no) if decision.exit_cost_reserve_no is not None else None,
+            "model_risk_reserve_yes": float(decision.model_risk_reserve_yes) if decision.model_risk_reserve_yes is not None else None,
+            "model_risk_reserve_no": float(decision.model_risk_reserve_no) if decision.model_risk_reserve_no is not None else None,
+            "best_side": decision.best_side,
+            "best_net_edge": float(decision.best_net_edge) if decision.best_net_edge is not None else None,
+            "edge_threshold": float(decision.edge_threshold) if decision.edge_threshold is not None else None,
+            "yes_score": float(decision.yes_score) if decision.yes_score is not None else None,
+            "no_score": float(decision.no_score) if decision.no_score is not None else None,
+            "yes_vote_count": decision.yes_vote_count,
+            "no_vote_count": decision.no_vote_count,
+            "selected_side_pre_edge": decision.selected_side_pre_edge,
+            "selection_reason": decision.selection_reason,
             "confidence": float(decision.confidence) if decision.confidence is not None else None,
             "confidence_valid": decision.confidence_valid,
             "confidence_source": decision.confidence_source,
             "confidence_reasons": list(decision.confidence_reasons or []),
+            "confidence_data_penalty": float(decision.confidence_data_penalty) if decision.confidence_data_penalty is not None else None,
+            "confidence_book_penalty": float(decision.confidence_book_penalty) if decision.confidence_book_penalty is not None else None,
+            "confidence_model_penalty": float(decision.confidence_model_penalty) if decision.confidence_model_penalty is not None else None,
+            "confidence_regime_penalty": float(decision.confidence_regime_penalty) if decision.confidence_regime_penalty is not None else None,
             "selected_outcome": decision.selected_outcome,
             "selected_action": decision.selected_action,
             "selected_outcome_price": int(round(float(decision.selected_outcome_price) * 100)) if decision.selected_outcome_price is not None else None,
@@ -191,10 +233,16 @@ def _write_shadow_telemetry(
             "min_required_edge": float(decision.min_required_edge) if decision.min_required_edge is not None else None,
             "model_risk_reserve": float(decision.model_risk_reserve) if decision.model_risk_reserve is not None else None,
             "data_quality": data_quality,
+            "data_state": decision.data_state,
             "regime": regime,
+            "regime_label": decision.regime_label,
+            "regime_probability": float(decision.regime_probability) if decision.regime_probability is not None else None,
+            "regime_warmup_samples": decision.regime_warmup_samples,
             "rejection_reason": decision.no_trade_reason,
             "policy_version": decision.policy_version,
             "edge_breakdown": edge_breakdown,
+            "yes_edge_breakdown": yes_edge_breakdown,
+            "no_edge_breakdown": no_edge_breakdown,
             "git_revision": os.environ.get("MERID_GIT_REVISION"),
             "config_hash": os.environ.get("MERID_CONFIG_HASH"),
         }
@@ -364,6 +412,8 @@ except ImportError:
 try:
     from merid.event_venues.kalshi.binary_price_space import (
         is_price_in_canonical_range,
+        require_outcome_side,
+        SideValidationError,
     )
     PRICE_SPACE_AVAILABLE = True
 except ImportError:
@@ -4372,6 +4422,14 @@ class LeanAgent15m:
 
     def _generate_momentum_fvg_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
 
+        # Legacy path is disabled in paper/live unless explicitly enabled.
+        if not _is_legacy_signal_enabled():
+            logger.warning(
+                "[LEGACY-SIGNAL-DISABLED] _generate_momentum_fvg_signal blocked in %s mode",
+                os.environ.get("MERID_PM_TRADING_MODE", "unknown"),
+            )
+            return None
+
         """MOMENTUM_FVG STRATEGY: Combines velocity, MACD, RSI, OBI, and FVG for enhanced signals.
 
 
@@ -6535,6 +6593,16 @@ class LeanAgent15m:
         """
         if not spot_price or spot_price <= 0:
             logger.warning("[TRADE-DECISION] asset=%s invalid spot_price=%s", asset, spot_price)
+            self._record_signal_rejection(
+                "invalid_spot",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    None,
+                    None,
+                    (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
+                )
+            )
             return None
 
         ticker = market.market.market_id if hasattr(market, 'market') else (getattr(market, 'market_id', None) or getattr(market, 'ticker', asset))
@@ -6546,11 +6614,35 @@ class LeanAgent15m:
         if not strike or strike <= 0:
             logger.warning("[TRADE-DECISION] asset=%s missing/invalid strike (floor=%s window=%s)",
                            asset, getattr(market, "floor_strike", None), getattr(market, "window_strike_price", None))
+            self._record_signal_rejection(
+                "missing_strike",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    None,
+                    None,
+                    (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
+                    extra={
+                        "floor_strike": getattr(market, "floor_strike", None),
+                        "window_strike_price": getattr(market, "window_strike_price", None),
+                    },
+                )
+            )
             return None
 
         seconds_to_expiry = float(getattr(market_state, "seconds_to_expiry", 0.0) or (minutes_to_expiry * 60.0))
         if seconds_to_expiry <= 0:
             logger.warning("[TRADE-DECISION] asset=%s invalid seconds_to_expiry=%.1f", asset, seconds_to_expiry)
+            self._record_signal_rejection(
+                "invalid_expiry",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    None,
+                    None,
+                    seconds_to_expiry,
+                )
+            )
             return None
 
         yes_bid = getattr(market_state, "best_bid_cents", None) or 0.0
@@ -6569,13 +6661,18 @@ class LeanAgent15m:
 
         # Approximate annualized volatility by asset.  A realized-vol estimator
         # can replace these constants when external spot history is available.
-        annualized_vol = {
+        # Env overrides allow quick per-asset calibration without a code change.
+        _vol_defaults = {
             "BTC": 0.60,
             "ETH": 0.80,
             "SOL": 1.00,
             "XRP": 1.00,
             "DOGE": 1.20,
-        }.get(asset.upper(), 0.80)
+        }
+        annualized_vol = float(
+            os.environ.get(f"MERID_ANNUALIZED_VOL_{asset.upper()}")
+            or _vol_defaults.get(asset.upper(), 0.80)
+        )
 
         # Fee per contract for the winning side; approximate entry fee as the
         # larger of the two side fees to stay conservative.
@@ -6590,6 +6687,18 @@ class LeanAgent15m:
         if not getattr(market_state, "book_initialized", False):
             data_quality = "stale"
 
+        # data_state is a first-class data-quality gate; it is not an economic
+        # regime and must never imply direction.
+        data_state = {
+            "good": "healthy",
+            "live": "healthy",
+            "healthy": "healthy",
+            "stale": "stale",
+            "degraded": "degraded",
+            "bad": "degraded",
+            "unknown": "invalid",
+        }.get(data_quality.lower(), "invalid")
+
         # Regime is a critical confidence/edge input.  The market state store does
         # not set a regime attribute, so derive it from available depth using the
         # same classifier the rest of the agent uses.
@@ -6598,6 +6707,11 @@ class LeanAgent15m:
             regime = self._classify_regime(ticker)
         else:
             regime = state_regime
+
+        # Classifier does not yet produce a posterior; treat the label as certain
+        # once known and zero otherwise.
+        regime_label = regime
+        regime_probability = 1.0 if regime not in ("unknown", "insufficient_data") else 0.0
 
         # Settlement reference and CF-RTI basis.  The model and confidence are
         # only valid when the price is the official CF Benchmarks RTI, not a
@@ -6622,11 +6736,23 @@ class LeanAgent15m:
             no_depth_cc=no_depth_cc,
             fee_per_contract_cents=fee_cents,
             annualized_vol=annualized_vol,
-            model_uncertainty=0.05,
+            model_uncertainty=float(
+                os.environ.get(f"MERID_MODEL_UNCERTAINTY_{asset.upper()}")
+                or os.environ.get("MERID_MODEL_UNCERTAINTY")
+                or "0.05"
+            ),
             data_quality=data_quality,
+            data_state=data_state,
             regime=regime,
+            regime_label=regime_label,
+            regime_probability=regime_probability,
             indicators={},
-            min_required_edge=float(getattr(self.config, "min_net_edge", 0.03)),
+            min_required_edge=float(
+                os.environ.get(f"MERID_MIN_NET_EDGE_{asset.upper()}")
+                or os.environ.get("MERID_MIN_NET_EDGE")
+                or os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE")
+                or getattr(self.config, "min_net_edge", 0.03)
+            ),
             settlement_reference=settlement_reference,
             policy_version="trade_decision_v2",
         )
@@ -6664,6 +6790,17 @@ class LeanAgent15m:
                 float(decision.no_net_edge), decision.confidence_valid,
                 ",".join(decision.confidence_reasons),
             )
+            self._record_signal_rejection(
+                decision.no_trade_reason or "no_trade",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    settlement_input_price,
+                    settlement_reference,
+                    seconds_to_expiry,
+                    decision=decision,
+                )
+            )
             return None
 
         side = decision.selected_outcome
@@ -6672,13 +6809,30 @@ class LeanAgent15m:
         model_prob = float(decision.p_selected) if decision.p_selected is not None else 0.0
         edge_pct = float(decision.net_edge) if decision.net_edge is not None else 0.0
         thesis_side = side
+        strategy_intent = "bullish_event" if side == "yes" else "bearish_event"
 
         # Depth guard: reject if the executable depth cannot absorb one contract.
         depth_ok = (float(decision.yes_depth_cc) >= 100.0) if side == "yes" else (float(decision.no_depth_cc) >= 100.0)
         if not depth_ok:
+            depth_cc = decision.yes_depth_cc if side == "yes" else decision.no_depth_cc
             logger.info(
                 "[TRADE-DECISION] asset=%s no_trade reason=insufficient_depth side=%s depth_cc=%s",
-                asset, side, decision.yes_depth_cc if side == "yes" else decision.no_depth_cc,
+                asset, side, depth_cc,
+            )
+            self._record_signal_rejection(
+                "insufficient_depth",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    settlement_input_price,
+                    settlement_reference,
+                    seconds_to_expiry,
+                    decision=decision,
+                    extra={
+                        "depth_side": side,
+                        "depth_cc": depth_cc,
+                    },
+                )
             )
             return None
 
@@ -6688,6 +6842,18 @@ class LeanAgent15m:
             logger.critical(
                 "[TRADE-DECISION] asset=%s side=%s reserved default confidence=0.95 detected; "
                 "blocking as release-gate violation", asset, side
+            )
+            self._record_signal_rejection(
+                "reserved_default_confidence",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    settlement_input_price,
+                    settlement_reference,
+                    seconds_to_expiry,
+                    decision=decision,
+                    extra={"side": side, "confidence": 0.95},
+                )
             )
             return None
 
@@ -6713,6 +6879,9 @@ class LeanAgent15m:
 
         return {
             "ticker": getattr(market, "ticker", asset),
+            "run_id": run_id,
+            "decision_id": decision.decision_id,
+            "asset": asset,
             "side": side,
             "action": action,
             "price_cents": price_cents,
@@ -6725,9 +6894,14 @@ class LeanAgent15m:
             "edge_no": float(decision.no_net_edge) * 100.0,
             "gross_edge_cents": float(decision.gross_edge) * 100.0 if decision.gross_edge is not None else 0.0,
             "net_edge_cents": edge_pct * 100.0,
+            "gross_edge": float(decision.gross_edge) if decision.gross_edge is not None else 0.0,
+            "net_edge": float(decision.net_edge) if decision.net_edge is not None else 0.0,
             "entry_fee_cents": float(bd.entry_fee) * 100.0 if bd else fee_cents,
             "exit_cost_reserve_cents": float(bd.exit_cost_reserve) * 100.0 if bd else fee_cents,
             "model_risk_reserve_cents": float(bd.model_risk_reserve) * 100.0 if bd else 0.0,
+            "data_state": decision.data_state,
+            "regime_label": decision.regime_label,
+            "regime_probability": float(decision.regime_probability) if decision.regime_probability is not None else 0.0,
             "confidence": float(decision.confidence) if decision.confidence is not None else 0.0,
             "confidence_valid": decision.confidence_valid,
             "confidence_source": decision.confidence_source,
@@ -6736,6 +6910,7 @@ class LeanAgent15m:
             "trade_decision": decision,
             "rationale": f"trade_decision: {decision.decision_id} p_yes={float(decision.p_yes_calibrated):.3f} p_no={float(decision.p_no_calibrated):.3f} p_selected={model_prob:.3f} edge={edge_pct:.3f}",
             "thesis_side": thesis_side,
+            "strategy_intent": strategy_intent,
             "is_counter_trend": False,
             "yes_bid_cents": yes_bid,
             "yes_ask_cents": yes_ask,
@@ -6755,18 +6930,38 @@ class LeanAgent15m:
             "time_of_day_multiplier": 1.0,
             "take_profit_r_multiple": 0.8,
             "stop_loss_r_multiple": 0.4,
-            "all_in_cost_cents": fee_cents,
-            "ev_net_cents": edge_pct * 100.0,
+            "all_in_cost_cents": (
+                float(bd.executable_entry_price) * 100.0
+                + float(bd.entry_fee) * 100.0
+                + float(bd.exit_cost_reserve) * 100.0
+                + float(bd.model_risk_reserve) * 100.0
+            ) if bd else float(price_cents) + fee_cents,
+            "ev_net_cents": (
+                (model_prob * 100.0)
+                - (float(bd.executable_entry_price) * 100.0
+                   + float(bd.entry_fee) * 100.0
+                   + float(bd.exit_cost_reserve) * 100.0
+                   + float(bd.model_risk_reserve) * 100.0)
+            ) if bd else (model_prob * 100.0) - float(price_cents) - fee_cents,
             "fee_cents": fee_cents,
             "slippage_cents": 0.0,
             "time_to_expiry_seconds": seconds_to_expiry,
+            "selected_outcome_price": int(round(float(decision.selected_outcome_price) * 100.0)) if decision.selected_outcome_price is not None else price_cents,
             "settlement_input_price": float(settlement_input_price) if settlement_input_price is not None else float(strike),
             "cf_rti_basis": float(cf_rti_basis) if cf_rti_basis is not None else 0.0,
             "settlement_reference": settlement_reference,
             "flb_position_multiplier": 1.0,
+            # CRITICAL FIX 2026-08-20: carry the per-decision edge threshold so the
+            # router's fill-adjusted edge gate and repricer use the same minimum.
+            "min_required_edge": float(decision.min_required_edge) if decision.min_required_edge is not None else 0.03,
         }
 
     def _generate_price_based_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
+
+        # Legacy path is disabled in paper/live unless explicitly enabled.
+        if not _is_legacy_signal_enabled():
+            logger.warning("[LEGACY-SIGNAL-DISABLED] _generate_price_based_signal blocked in %s mode", os.environ.get("MERID_PM_TRADING_MODE", "unknown"))
+            return None
 
         # PRICE-BASED STRATEGY (Turbine research winner: +56.6% ROI)
 
@@ -7562,6 +7757,60 @@ class LeanAgent15m:
             "context": context,
         }
         self._telemetry_update(rejection_reason=reason, **context)
+
+    def _get_candles_available(self, asset: str) -> Optional[int]:
+        """Return the number of available 1m bars for an asset, if known."""
+        try:
+            stack = getattr(self, "_indicator_stacks", {}).get(asset)
+            if stack is not None and hasattr(stack, "snapshot"):
+                return stack.snapshot().bars_available
+        except Exception:
+            pass
+        return None
+
+    def _build_trade_decision_rejection_context(
+        self,
+        asset: str,
+        spot_price: float,
+        settlement_input_price: Optional[float],
+        settlement_reference: Optional[str],
+        seconds_to_expiry: float,
+        decision: Any = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build the context attached to a trade-decision (no-trade) rejection.
+
+        Mirrors the fields emitted by [SIGNAL-GENERATION-REJECT] so telemetry
+        and logs stop showing N/A when a candidate fails on edge, depth, or
+        data quality.
+        """
+        context: Dict[str, Any] = {
+            "reference_price": settlement_input_price if settlement_input_price is not None else spot_price,
+            "market_time_remaining_s": seconds_to_expiry,
+            "candles_available": self._get_candles_available(asset),
+            "signal_type": "hybrid",
+            "feature_flags": f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} trade_decision_v2",
+            "settlement_reference": settlement_reference,
+            "velocity": None,
+            "velocity_source": "trade_decision_v2",
+            "velocity_age_ms": None,
+        }
+        if decision is not None:
+            context.update({
+                "p_yes": float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
+                "p_no": float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
+                "yes_edge": float(decision.yes_net_edge) if decision.yes_net_edge is not None else None,
+                "no_edge": float(decision.no_net_edge) if decision.no_net_edge is not None else None,
+                "gross_edge": float(decision.gross_edge) if decision.gross_edge is not None else None,
+                "net_edge": float(decision.net_edge) if decision.net_edge is not None else None,
+                "data_state": getattr(decision, "data_state", None),
+                "regime": getattr(decision, "regime", None),
+                "confidence_valid": getattr(decision, "confidence_valid", None),
+                "confidence_reasons": getattr(decision, "confidence_reasons", []),
+            })
+        if extra:
+            context.update(extra)
+        return context
 
     def _telemetry_update(self, **fields) -> None:
         """Merge fields into the per-cycle decision telemetry snapshot.
@@ -8793,7 +9042,7 @@ class LeanAgent15m:
 
         # Regime classification matches the one used in _validate_market_state
 
-        regime = "normal"  # Default fallback
+        regime = "unknown"  # Default fallback: missing state is not a valid economic regime
 
         try:
 
@@ -8845,9 +9094,9 @@ class LeanAgent15m:
 
         except Exception as regime_err:
 
-            logger.warning("[REGIME-CLASSIFY] Failed to classify regime for %s: %s, using 'normal'", ticker, regime_err)
+            logger.warning("[REGIME-CLASSIFY] Failed to classify regime for %s: %s, using 'unknown'", ticker, regime_err)
 
-            regime = "normal"
+            regime = "unknown"
 
 
 
@@ -9869,6 +10118,15 @@ class LeanAgent15m:
             return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
 
 
+
+        # Non-hybrid legacy paths (trend alignment / velocity) are disabled in
+        # paper/live unless explicitly enabled.
+        if not _is_legacy_signal_enabled():
+            logger.warning(
+                "[LEGACY-SIGNAL-DISABLED] asset=%s signal_mode=%s blocked in %s mode",
+                asset, self.config.signal_mode, os.environ.get("MERID_PM_TRADING_MODE", "unknown"),
+            )
+            return None
 
         # CRITICAL FIX: 2026-07-06 - Integrate trend alignment as confirmation filter
 
@@ -14009,7 +14267,7 @@ class LeanAgent15m:
 
             # REMOVED (2026-07-23): FINAL-INVERSION layer was causing YES bias
             # Signal generation already produces correct side/intent mappings
-            # BULLISH_EVENT → NO leg (side=no), BEARISH_EVENT → YES leg (side=yes)
+            # BULLISH_EVENT → YES leg (side=yes), BEARISH_EVENT → NO leg (side=no)
             # No inversion needed - use signal as-is
 
             # Construct order candidate
@@ -14081,6 +14339,35 @@ class LeanAgent15m:
                 "yes_depth": None,
 
                 "no_depth": None,
+
+                # CRITICAL FIX 2026-08-20: order identity/provenance fields required by order_router
+                "run_id": f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}",
+                "decision_id": f"decision_{uuid.uuid4().hex[:16]}",
+                "data_state": "healthy" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "public_spot_fallback",
+                "regime_label": signal.get("regime") or "normal",
+                "regime_probability": signal.get("hmm_regime_confidence", 1.0) or 1.0,
+                "p_yes": (signal.get("model_prob", 0.5) if signal.get("side") == "yes" else 1.0 - signal.get("model_prob", 0.5)),
+                "p_no": (1.0 - signal.get("model_prob", 0.5) if signal.get("side") == "yes" else signal.get("model_prob", 0.5)),
+                "p_selected": signal.get("model_prob", 0.5),
+                "gross_edge": signal.get("edge_pct", 0.0),
+                "net_edge": (signal.get("ev_net_cents") / 100.0) if signal.get("ev_net_cents") is not None else signal.get("edge_pct", 0.0),
+                "selected_outcome_price": int(signal.get("price_cents", 0)),
+                "settlement_reference": signal.get("settlement_reference") or "public_spot_fallback:unknown",
+                "confidence_valid": "cfb_rti_live" in (signal.get("settlement_reference") or ""),
+                "confidence_source": "uncertainty_engine" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "public_spot",
+                "confidence_reasons": [],
+                "cf_rti_basis": signal.get("cf_rti_basis", 0.0),
+                "settlement_input_price": signal.get("settlement_input_price", 0.0),
+                "all_in_cost_cents": signal.get("all_in_cost_cents"),
+                "ev_net_cents": signal.get("ev_net_cents"),
+                "fee_cents": signal.get("fee_cents"),
+                "slippage_cents": signal.get("slippage_cents"),
+                "time_to_expiry_seconds": signal.get("time_to_expiry_seconds"),
+                "thesis_side": signal.get("thesis_side"),
+                "strategy_intent": signal.get("strategy_intent"),
+                "is_counter_trend": signal.get("is_counter_trend", False),
+                "edge_yes": signal.get("edge_yes"),
+                "edge_no": signal.get("edge_no"),
 
             }
 
@@ -14215,7 +14502,6 @@ class LeanAgent15m:
             # Now strip order count is incremented in GLOBAL-ALLOCATOR-EXECUTE-SUCCESS path
 
             # CRITICAL FIX: 2026-08-02 - Add unique candidate ID for lifecycle tracking
-            import uuid
             candidate_id = f"cid-{uuid.uuid4().hex[:12]}"
             candidate["candidate_id"] = candidate_id
             candidate["generation_tick"] = tick
@@ -15276,7 +15562,19 @@ class LeanAgentGrid15m:
 
                     price_cents = int(candidate.get('price_cents', 50))
 
-                    side = candidate.get('side', 'yes')
+                    # Fail-closed: a candidate without a valid side is not executable.
+                    try:
+                        side = require_outcome_side(
+                            candidate,
+                            context=f"agent_grid_15m candidate ticker={ticker}",
+                            fields=("side", "outcome_side", "kalshi_side", "thesis_side"),
+                        )
+                    except SideValidationError as side_err:
+                        logger.error(
+                            "[AGENT-GRID-CANDIDATE-SIDE-INVALID] %s: skipping candidate with missing/invalid side: %s",
+                            ticker, side_err,
+                        )
+                        continue
 
                     action = candidate.get('action', 'buy')
 
