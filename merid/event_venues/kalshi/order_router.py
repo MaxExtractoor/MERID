@@ -46,6 +46,10 @@ from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.trading_mode import TradingMode
 from utils.logger import get_logger
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
+from merid.event_venues.kalshi.order_identity import (
+    finalize_order_identity,
+    OrderIdentityError,
+)
 
 # Import candidate tracing for end-to-end validation
 try:
@@ -157,6 +161,7 @@ from merid.event_venues.kalshi.binary_price_space import (
     parse_kalshi_side,
     extract_outcome_side,
     extract_action,
+    is_price_in_canonical_range,
     yes_to_no_price,
     no_to_yes_price,
     derive_yes_ask_from_no_bid,
@@ -177,6 +182,19 @@ except ImportError:
 def _dedup_cache():
     """Helper to get the global order deduplication cache singleton."""
     return get_order_cache()
+
+
+def _mark_attempt_status(intent: "OrderIntent", status: str) -> None:
+    """Update the durable order-attempt status, if one exists."""
+    try:
+        from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+
+        store = OrderAttemptStore()
+        if getattr(intent, "order_attempt_id", None):
+            store.update_status(intent.order_attempt_id, status)
+    except Exception as status_err:
+        logger.warning("[ORDER-ATTEMPT-STATUS] Failed to mark %s: %s", status, status_err)
+
 
 # Trade trace integration for calibration (P1: Feed lag calibration)
 try:
@@ -1345,12 +1363,15 @@ class ExitPolicyResolution:
     tp_mode: TakeProfitMode
     tp_r_multiple: float  # R-multiple target (e.g., 1.0, 0.75, 0.5)
     tp_min_cents: int  # Minimum TP in cents
+    tp_price_cents: Optional[int] = None  # CRITICAL FIX (2026-08-12): absolute TP price, fee/fair-capped
+    take_profit_enabled: bool = True  # CRITICAL FIX (2026-08-12): false when TP would be invalid
     tp_time_based_r: Dict[str, float] = field(default_factory=dict)  # Time-based R-multiple mapping
     
     # Stop loss configuration
     sl_mode: StopLossMode = StopLossMode.R_MULTIPLE  # Default to R-multiple SL
     sl_cents: Optional[int] = None  # Fixed SL in cents
     sl_r_multiple: Optional[float] = None  # R-multiple SL
+    stop_loss_enabled: bool = True  # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch
     
     # Trailing stop configuration
     trailing_enabled: bool = False
@@ -1436,7 +1457,12 @@ def resolve_exit_policy(
     
     policy_id = f"exit_policy_{uuid.uuid4().hex[:12]}"
     strip_context = strip_context or {}
-    
+
+    # Defaults for every policy. The edge-based block below may disable TP
+    # when the model does not support a reachable target.
+    take_profit_enabled = True
+    tp_price_cents = None
+
     # Extract edge context (duck-typed: accepts an EdgeResult object, a dict, or None).
     # Recorded on the resolution for observability/audit so exit decisions are traceable
     # back to the entry edge. Does NOT alter TP/SL/trailing thresholds.
@@ -1456,10 +1482,18 @@ def resolve_exit_policy(
     
     # CRITICAL FIX: Load TP/SL from YAML exit_policy.risk_reward config (2026-07-15)
     # Previously hardcoded to 0.75/1.0/1.2 - now uses upstream configuration
+    # 2026-08-12: TP is now edge-based (75% of model edge, min 5c gross profit)
+    # rather than a fixed % of entry price, which produced unreachable 99c targets.
     tp_r_multiple = 1.0  # Default fallback
-    tp_min_cents = 3  # Default fallback
+    tp_min_cents = 5  # Minimum gross profit in cents to cover round-trip fees
     sl_cents_offset = 5  # Default fallback
+    stop_loss_enabled = True  # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch
     configured_max_hold_seconds = 900  # Default fallback (15 min from YAML)
+    
+    # Edge-based TP capture ratio (research: 65-80% of model edge)
+    TP_EDGE_CAPTURE = 0.75
+    TP_MIN_GROSS_PROFIT_CENTS = tp_min_cents
+    regime_tp_multiplier = 1.0  # Always defined for fee-aware TP block below
     
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -1469,17 +1503,19 @@ def resolve_exit_policy(
         if hasattr(profile, 'exit_policy_risk_reward'):
             rr_config = profile.exit_policy_risk_reward
             
-            # Get asset-specific TP distance percentage
-            tp_distance_pct = rr_config.get('tp_distance_pct', {}).get(asset, 0.15)
-            # Convert percentage to R-multiple for binary options
-            # For binary options: TP = entry + (entry * tp_distance_pct)
-            # This is equivalent to R-multiple = tp_distance_pct
+            # Get asset-specific TP distance percentage (fallback when edge is unavailable)
+            tp_distance_pct = rr_config.get('tp_distance_pct', {}).get(asset, 0.65)
+            # CRITICAL FIX (2026-08-12): tp_distance_pct is now a fraction of MAX GAIN,
+            # not of entry price. TP = entry + (tp_distance_pct * (100 - entry)).
+            # Edge-based override in resolve_exit_policy uses 75% of model edge when known.
             tp_r_multiple = tp_distance_pct
             
             # Get asset-specific SL distance percentage
             sl_distance_pct = rr_config.get('sl_distance_pct', {}).get(asset, 0.075)
             # Convert to fixed cents for binary options (using 42c as reference entry)
             sl_cents_offset = int(42 * sl_distance_pct)
+            # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch
+            stop_loss_enabled = rr_config.get('stop_loss_enabled', True)
         
         # Load max_hold_minutes from YAML exit_policy.time_exit section (2026-07-15)
         if hasattr(profile, 'exit_policy_time_exit'):
@@ -1488,15 +1524,17 @@ def resolve_exit_policy(
             configured_max_hold_seconds = max_hold_minutes * 60  # Convert to seconds
         
         # Regime adjustments from YAML if available
+        regime_tp_multiplier = 1.0
         if regime == "conservative":
-            tp_r_multiple *= 0.75  # More conservative TP
+            regime_tp_multiplier = 0.85  # Slightly tighter capture for conservative
             sl_cents_offset = int(sl_cents_offset * 0.8)
             configured_max_hold_seconds = int(configured_max_hold_seconds * 1.5)  # Longer hold for conservative
         elif regime == "aggressive":
-            tp_r_multiple *= 1.2  # More aggressive TP
+            regime_tp_multiplier = 1.15  # Slightly wider capture for aggressive
             sl_cents_offset = int(sl_cents_offset * 1.2)
             configured_max_hold_seconds = int(configured_max_hold_seconds * 0.67)  # Shorter hold for aggressive
-        # normal: use configured_max_hold_seconds as-is
+        # normal: multiplier stays 1.0
+        tp_r_multiple *= regime_tp_multiplier
         
         if not hasattr(profile, 'exit_policy_risk_reward'):
             # Fallback to hardcoded values if YAML config not available
@@ -1525,6 +1563,64 @@ def resolve_exit_policy(
             tp_r_multiple = 1.0
             tp_min_cents = 3
             configured_max_hold_seconds = 600
+    
+    # CRITICAL FIX (2026-08-12): Fee-aware, fair-value-capped take-profit.
+    # TP is derived from the model edge (75% capture) but is capped at:
+    #   fair_value_cents - estimated_exit_fee_cents - safety_buffer_cents
+    # This prevents unreachable targets beyond the model's own fair value and
+    # removes the unconditional 5c minimum that exceeded the edge.
+    entry_price_cents = strip_context.get("entry_price_cents")
+    entry_model_probability = strip_context.get("entry_model_probability")
+    edge_cents = None
+    if entry_price_cents is not None and 0 < entry_price_cents < 100:
+        if net_edge_cents_at_entry is not None:
+            edge_cents = float(net_edge_cents_at_entry)
+        elif entry_model_probability is not None:
+            edge_cents = (float(entry_model_probability) - entry_price_cents / 100.0) * 100.0
+    
+    fair_value_cents = None
+    estimated_exit_fee_cents = 0
+    if edge_cents is not None and edge_cents > 0 and entry_price_cents is not None and 0 < entry_price_cents < 100 and entry_model_probability is not None:
+        try:
+            fair_value_cents = max(1, min(99, round(float(entry_model_probability) * 100.0)))
+            from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+            estimated_exit_fee_cents = calculate_kalshi_fee_cents(1, fair_value_cents)
+            safety_buffer_cents = 1
+            max_executable_tp_cents = fair_value_cents - estimated_exit_fee_cents - safety_buffer_cents
+            
+            capture_distance = edge_cents * TP_EDGE_CAPTURE * regime_tp_multiplier
+            target_cents = entry_price_cents + capture_distance
+            tp_price_cents = int(min(99, max_executable_tp_cents, target_cents))
+            
+            if tp_price_cents > entry_price_cents and max_executable_tp_cents > entry_price_cents:
+                max_gain = 100 - entry_price_cents
+                tp_r_multiple = (tp_price_cents - entry_price_cents) / max_gain if max_gain > 0 else 0.0
+                tp_min_cents = 0
+                logger.info(
+                    "[ORDER-ROUTER] Fee-aware edge TP: entry=%dc fair=%dc fee=%dc edge=%.2fc target=%dc tp_r=%.4f",
+                    entry_price_cents, fair_value_cents, estimated_exit_fee_cents, edge_cents, tp_price_cents, tp_r_multiple,
+                )
+            else:
+                take_profit_enabled = False
+                tp_r_multiple = 0.0
+                tp_price_cents = None
+                tp_min_cents = 0
+                logger.warning(
+                    "[ORDER-ROUTER] No valid TP for entry=%dc fair=%dc fee=%dc edge=%.2fc - disabling fixed TP",
+                    entry_price_cents, fair_value_cents, estimated_exit_fee_cents, edge_cents,
+                )
+        except Exception as fee_err:
+            logger.warning("[ORDER-ROUTER] Fee-aware TP cap failed: %s", fee_err)
+            take_profit_enabled = False
+            tp_r_multiple = 0.0
+            tp_price_cents = None
+            tp_min_cents = 0
+    else:
+        # No trusted model edge: do not create a price TP.
+        take_profit_enabled = False
+        tp_r_multiple = 0.0
+        tp_price_cents = None
+        tp_min_cents = 0
     
     # Default TP configuration (time-based dynamic R-multiple)
     tp_time_based_r = {
@@ -1588,10 +1684,13 @@ def resolve_exit_policy(
         tp_mode=TakeProfitMode.TIME_BASED,
         tp_r_multiple=tp_r_multiple,
         tp_min_cents=tp_min_cents,
+        tp_price_cents=tp_price_cents,
+        take_profit_enabled=take_profit_enabled,
         tp_time_based_r=tp_time_based_r,
         sl_mode=StopLossMode.FIXED_CENTS,  # CRITICAL FIX: Use fixed cent SL for binary options
         sl_cents=sl_cents_offset,  # CRITICAL FIX: Load from profile config instead of hardcoded 5
         sl_r_multiple=0.5,  # Fallback R-multiple for legacy compatibility
+        stop_loss_enabled=stop_loss_enabled,  # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch
         trailing_enabled=True,
         trailing_activation_r=0.8,
         trailing_giveback_cents=trailing_giveback_cents,  # CRITICAL FIX: Load from profile config instead of hardcoded 5
@@ -2135,6 +2234,7 @@ class OrderIntent:
     ticker: str
     price_cents: int
     count: int
+    count_fp: Optional[Decimal] = None
     side: str = ""
     action: str = ""
     mode: Optional[TradingMode] = None
@@ -2154,16 +2254,50 @@ class OrderIntent:
     data_version: str = "v1"
     # CRITICAL FIX (2026-07-17): Idempotency and client order ID for duplicate prevention
     idempotency_key: str = field(default_factory=lambda: f"idemp_{__import__('uuid').uuid4().hex}")
-    client_order_id: str = field(default_factory=lambda: f"client_{__import__('uuid').uuid4().hex[:16]}")
+    # CRITICAL FIX (2026-08-12): client_order_id is allocated once, durably, by
+    # order_identity.finalize_order_identity(). It must be None before finalization
+    # so retries cannot accidentally reuse or randomize the venue idempotency key.
+    client_order_id: Optional[str] = None
+    order_attempt_id: Optional[str] = None
+    # CRITICAL FIX (2026-08-19): decision/run provenance is mandatory for every order.
+    # Defaults are None/False so an unpopulated intent is rejected by the router.
+    decision_id: Optional[str] = None
+    run_id: Optional[str] = field(default_factory=lambda: os.environ.get("MERID_RUN_ID", "unset"))
+    process_id: Optional[str] = field(default_factory=lambda: str(os.getpid()))
+    reason: Optional[str] = field(default_factory=lambda: f"unset_{_time.time()}")
+    parent_entry_fill_id: Optional[str] = None
+    is_manual_emergency_close: bool = False
+    approval_token: Optional[str] = None  # Required to bypass circuit breaker
     agent_id: Optional[str] = None
     session_id: Optional[str] = None
     confidence: Optional[float] = None
+    confidence_valid: bool = False
+    confidence_source: str = "unknown"
+    settlement_reference: Optional[str] = None
+    data_state: Optional[str] = None
+    regime_label: Optional[str] = None
+    regime_probability: Optional[float] = None
+    # CRITICAL FIX (2026-08-19): full economic provenance for fill-adjusted edge.
+    p_yes: Optional[float] = None
+    p_no: Optional[float] = None
+    p_selected: Optional[float] = None
+    gross_edge: Optional[float] = None
+    net_edge_pretrade: Optional[float] = None
+    selected_outcome_price_cents: Optional[int] = None
     rationale: Optional[str] = None
     parent_intent_id: Optional[str] = None
     leg_index: Optional[int] = None
     group_id: Optional[str] = None
     # P1: Trade trace integration for feed lag calibration
     trace_id: Optional[str] = None
+    # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution
+    entry_signal_id: Optional[str] = None  # client_order_id / intent_id used as signal id
+    entry_model: Optional[str] = None  # model name / strategy that produced the signal
+    entry_model_version: Optional[str] = None
+    entry_model_probability: Optional[float] = None
+    entry_market_probability: Optional[float] = None
+    entry_edge: Optional[float] = None
+    entry_book_snapshot_id: Optional[str] = None
     # Model probability (for signal validation guardrails)
     model_prob: Optional[float] = None
     # Phase 2: Strategy identification for multi-strategy support
@@ -2192,6 +2326,7 @@ class OrderIntent:
     take_profit_price_cents: Optional[int] = None  # TP price in cents (computed from R-multiple)
     take_profit_r_multiple: Optional[float] = None  # R-multiple target (e.g., 1.5R, 2.0R)
     stop_loss_price_cents: Optional[int] = None  # Protective stop in cents
+    stop_loss_enabled: bool = True  # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch
     # Sizing context for TRADE-TRACE (links fill back to edge/sizing decision)
     edgepct: float = 0.0
     # Order scaling configuration
@@ -2218,6 +2353,20 @@ class OrderIntent:
     regime: str = ""
     size_contracts: int = 0
     notional_usd: float = 0.0
+    # 2026-08-11: Single-source-of-truth economics and settlement telemetry.
+    # These fields are propagated from signal generation through sizing to the ledger.
+    all_in_cost_cents: Optional[float] = None
+    ev_net_cents: Optional[float] = None
+    fee_cents: Optional[float] = None
+    slippage_cents: Optional[int] = None
+    time_to_expiry_seconds: Optional[float] = None
+    settlement_input_price: Optional[float] = None
+    cf_rti_basis: Optional[float] = None
+    # 2026-08-19: Edge threshold from the decision, used to gate fill-adjusted edge.
+    min_required_edge: Optional[float] = None
+    is_counter_trend: bool = False
+    thesis_side: Optional[str] = None
+    strategy_intent: Optional[str] = None
     
     # COHERENT RISK CONTRACT: WindowResolution + ExitPolicyResolution linkage
     window_resolution_id: Optional[str] = None  # ID of WindowResolution backing this order
@@ -2259,6 +2408,11 @@ class OrderIntent:
     is_exit_order: bool = False  # Explicit exit flag for downstream routing
     reduce_only: bool = False  # CRITICAL FIX (2026-08-08): Exit orders must reduce exposure only
 
+    # CANONICAL ORDER-INTENT CONTRACT (2026-08-10)
+    allow_short: Optional[bool] = None  # Allow a sell to open/increase a negative YES position
+    expected_realized_pnl_cents: Optional[int] = None  # Predicted close PnL in cents
+    strategy_signal: Optional[str] = None  # "up" or "down" market signal
+
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
         if self.kalshi_side and (not self.side or not self.action):
@@ -2284,6 +2438,12 @@ class OrderIntent:
         # fractional or numpy-scalar values such as 31.5c.
         self.price_cents = int(round(self.price_cents))
         self.count = int(round(self.count))
+        if self.count_fp is None:
+            self.count_fp = Decimal(self.count)
+        else:
+            # Use str() to avoid binary-float Decimal artefacts.  Centi-contract
+            # alignment is validated by normalize_order / the canonical contract.
+            self.count_fp = Decimal(str(self.count_fp))
         self.size_contracts = int(round(self.size_contracts))
         if self.take_profit_price_cents is not None:
             self.take_profit_price_cents = int(round(self.take_profit_price_cents))
@@ -2313,9 +2473,251 @@ def _is_exit_order(intent: OrderIntent) -> bool:
     CRITICAL FIX (2026-07-15): Use shared exit_order_utils module to prevent
     divergence between order_router.py and position_cache.py.
     """
+    # CRITICAL FIX (2026-08-10): Classify ambiguous orders using canonical
+    # signed-YES exposure against the current position, not raw side/action.
+    pre_yes_cc: Optional[int] = None
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        position = get_position_cache().get_position(intent.ticker)
+        if position is not None:
+            pre_yes_cc = position._yes_exposure()
+    except Exception:
+        pre_yes_cc = None
+
     from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_intent
-    
-    return is_exit_order_from_intent(intent)
+    return is_exit_order_from_intent(intent, pre_position_yes_cc=pre_yes_cc)
+
+
+def _validate_order_identity(intent: OrderIntent, t0: float) -> Optional[OrderResult]:
+    """Fail-closed identity and circuit-breaker check for every order.
+
+    Every outbound order must carry a non-empty identity chain:
+    client_order_id, order_attempt_id, intent_id, run_id, process_id, reason.
+    Exit orders must also link to their parent entry fill.  Missing fields are
+    rejected before any API call and never retried automatically.
+    """
+    from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
+
+    breaker = get_trading_circuit_breaker()
+    if not breaker.is_order_allowed(intent):
+        latency_ms = (_time.monotonic() - t0) * 1000
+        logger.critical(
+            "[ORDER-ROUTER] REJECTED due to trading halt | intent_id=%s ticker=%s reason=%s",
+            getattr(intent, "intent_id", None),
+            intent.ticker,
+            breaker.reason,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=_resolve_mode(intent.mode),
+            reason=f"trading_halted:{breaker.reason}",
+            latency_ms=round(latency_ms, 2),
+        )
+
+    missing: List[str] = []
+    if not getattr(intent, "client_order_id", None):
+        missing.append("client_order_id")
+    if not getattr(intent, "order_attempt_id", None):
+        missing.append("order_attempt_id")
+    if not getattr(intent, "intent_id", None):
+        missing.append("intent_id")
+    if not getattr(intent, "run_id", None):
+        missing.append("run_id")
+    if not getattr(intent, "process_id", None):
+        missing.append("process_id")
+    if not getattr(intent, "reason", None):
+        missing.append("reason")
+
+    is_exit = _is_exit_order(intent)
+    if is_exit and not getattr(intent, "parent_entry_fill_id", None):
+        # Exit parentage is opt-in via env until every exit path has been wired.
+        if os.environ.get("MERID_REQUIRE_EXIT_PARENTAGE", "").strip() == "1" and not intent.is_manual_emergency_close:
+            missing.append("parent_entry_fill_id")
+
+    if missing:
+        latency_ms = (_time.monotonic() - t0) * 1000
+        logger.critical(
+            "[ORDER-ROUTER] REJECTED missing required identity fields | ticker=%s missing=%s is_exit=%s",
+            intent.ticker,
+            ",".join(missing),
+            is_exit,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=_resolve_mode(intent.mode),
+            reason=f"missing_order_identity:{','.join(missing)}",
+            latency_ms=round(latency_ms, 2),
+        )
+
+    return None
+
+
+def _validate_decision_provenance(
+    intent: OrderIntent,
+    t0: float,
+    mode: TradingMode,
+) -> Optional[OrderResult]:
+    """Hard-reject 15m crypto entry intents with missing or untrusted provenance.
+
+    Decision confidence, settlement reference, and data-state are only meaningful
+    when the signal layer has already produced them.  For the 15m crypto lane
+    (agent_grid_15m) they are mandatory for every *entry*.  Exits are still
+    allowed to lack parentage while MERID_REQUIRE_EXIT_PARENTAGE is not yet
+    enabled, but the missing fields are logged loudly.
+    """
+    source = (getattr(intent, "source", None) or "").lower()
+    agent_id = (getattr(intent, "agent_id", None) or "").lower()
+    is_15m_crypto = (
+        "merid.prediction.agent_grid_15m" in source
+        or "agent_grid_15m" in agent_id
+    )
+    is_exit = _is_exit_order(intent)
+
+    if not is_15m_crypto:
+        return None
+
+    # CRITICAL FIX (2026-08-19): enforce provenance only when the CF-RTI adapter
+    # is enabled (canary / live / paper with adapter) so unit tests using bare
+    # OrderIntent objects without full provenance are not blocked.
+    cfb_rti_enabled = os.environ.get("MERID_CFB_RTI_ADAPTER", "").lower() in ("1", "true")
+    if not cfb_rti_enabled:
+        return None
+
+    # For exits, require provenance only once parentage is globally enforced.
+    if is_exit:
+        if os.environ.get("MERID_REQUIRE_EXIT_PARENTAGE", "").strip() != "1":
+            missing = []
+            if not getattr(intent, "decision_id", None):
+                missing.append("decision_id")
+            if not getattr(intent, "confidence_valid", None):
+                missing.append("confidence_valid")
+            if getattr(intent, "settlement_reference", None) != "cfb_rti_live":
+                missing.append("settlement_reference")
+            if missing:
+                logger.warning(
+                    "[PROVENANCE-WARNING] Exit intent lacks full provenance "
+                    "(allowed because MERID_REQUIRE_EXIT_PARENTAGE=0): ticker=%s missing=%s",
+                    intent.ticker,
+                    ",".join(missing),
+                )
+            return None
+
+    missing: List[str] = []
+    if not getattr(intent, "decision_id", None):
+        missing.append("decision_id")
+    if not getattr(intent, "run_id", None) or getattr(intent, "run_id", None) == "unset":
+        missing.append("run_id")
+    if not getattr(intent, "confidence", None):
+        missing.append("confidence")
+    if not getattr(intent, "confidence_valid", None):
+        missing.append("confidence_valid")
+    if getattr(intent, "confidence_source", None) != "uncertainty_engine":
+        missing.append("confidence_source")
+    if getattr(intent, "settlement_reference", None) != "cfb_rti_live":
+        missing.append("settlement_reference")
+    if getattr(intent, "data_state", None) != "healthy":
+        missing.append("data_state")
+    if getattr(intent, "regime_label", None) in (None, "", "unknown"):
+        missing.append("regime_label")
+
+    if missing:
+        latency_ms = (_time.monotonic() - t0) * 1000
+        logger.critical(
+            "[PROVENANCE-REJECT] 15m crypto entry intent rejected: ticker=%s missing=%s "
+            "decision_id=%s confidence_valid=%s settlement_reference=%s data_state=%s",
+            intent.ticker,
+            ",".join(missing),
+            getattr(intent, "decision_id", None),
+            getattr(intent, "confidence_valid", None),
+            getattr(intent, "settlement_reference", None),
+            getattr(intent, "data_state", None),
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"provenance_missing:{','.join(missing)}",
+            latency_ms=round(latency_ms, 2),
+        )
+
+    return None
+
+
+def _canonical_yes_book_from_state(state: Optional[Any]) -> Optional[Any]:
+    """Build a CanonicalBook from market state (YES bid/ask).
+
+    Returns None when the book is unavailable or invalid; callers should fail
+    closed for entry orders.
+    """
+    if state is None:
+        return None
+    try:
+        from merid.prediction.kalshi_maker_taker_contract import CanonicalBook
+        bid = getattr(state, 'best_bid_cents', None)
+        ask = getattr(state, 'best_ask_cents', None)
+        if bid is None or ask is None:
+            return None
+        return CanonicalBook(
+            yes_bid_cents=int(round(bid)),
+            yes_ask_cents=int(round(ask)),
+            observed_at=datetime.now(timezone.utc),
+            sequence=int(getattr(state, 'sequence', 0) or 0),
+        )
+    except Exception:
+        return None
+
+
+def _canonical_signed_yes_delta(intent: OrderIntent) -> Decimal:
+    """Return the canonical signed-YES delta for this intent (sign only)."""
+    try:
+        from merid.event_venues.kalshi.binary_price_space import yes_delta
+        raw_side = (intent.side or "").lower()
+        # Normalize Kalshi-format sides (BUY_YES/SELL_NO/etc.) to canonical yes/no.
+        if "no" in raw_side:
+            side = "no"
+        elif "yes" in raw_side:
+            side = "yes"
+        else:
+            side = raw_side
+        action = (intent.action or "").lower()
+        delta = yes_delta(action, side, 1)
+    except Exception:
+        delta = 1 if (intent.action or "").lower() == "buy" else -1
+    return Decimal(delta)
+
+
+def _validate_canonical_price_placement(
+    intent: OrderIntent,
+    role: str,
+    price_cents: int,
+    state: Optional[Any],
+) -> tuple[bool, Optional[str]]:
+    """Validate price placement against the canonical YES book.
+
+    Fails closed when the book is unavailable or invalid. NO-side prices are
+    translated to their YES equivalent before validation so spread/crossing is
+    always evaluated in a consistent YES-price representation.
+    """
+    try:
+        from merid.prediction.kalshi_maker_taker_contract import (
+            LiquidityRole,
+            validate_price_placement_invariant,
+        )
+        book = _canonical_yes_book_from_state(state)
+        if book is None:
+            return False, "book_unavailable_or_invalid"
+        side_lower = (intent.side or "").lower()
+        if "no" in side_lower:
+            yes_price_cents = 100 - int(price_cents)
+        else:
+            yes_price_cents = int(price_cents)
+        return validate_price_placement_invariant(
+            role=LiquidityRole(role),
+            signed_yes_delta=_canonical_signed_yes_delta(intent),
+            price_cents=yes_price_cents,
+            book=book,
+        )
+    except ImportError:
+        return True, None
 
 
 def _build_create_order_request(
@@ -2358,7 +2760,10 @@ def _build_create_order_request(
     elif action_lower in ("buy", "sell"):
         side = action_lower
     else:
-        side = "buy"
+        raise OrderIdentityError(
+            f"cannot resolve order side/action for intent_id={intent.intent_id}: "
+            f"side={intent.side!r} action={intent.action!r}"
+        )
 
     if "yes" in side_lower:
         outcome = "yes"
@@ -2367,7 +2772,10 @@ def _build_create_order_request(
     elif side_lower in ("yes", "no"):
         outcome = side_lower
     else:
-        outcome = "yes"
+        raise OrderIdentityError(
+            f"cannot resolve order outcome for intent_id={intent.intent_id}: "
+            f"side={intent.side!r}"
+        )
 
     # ── TIF / expiration invariants ──────────────────────────────────────
     tif = (effective_tif or "GTC").strip().upper()
@@ -2402,26 +2810,46 @@ def _build_create_order_request(
     # ── Correlation metadata ─────────────────────────────────────────────
     metadata: Dict[str, Any] = {
         "intent_id": intent.intent_id,
+        "client_order_id": getattr(intent, "client_order_id", None),
+        "order_attempt_id": getattr(intent, "order_attempt_id", None),
+        "decision_id": getattr(intent, "decision_id", None),
+        "run_id": getattr(intent, "run_id", None),
+        "process_id": getattr(intent, "process_id", None),
+        "reason": getattr(intent, "reason", None),
+        "parent_entry_fill_id": getattr(intent, "parent_entry_fill_id", None),
         "ticker": intent.ticker,
         "side": intent.side,
         "action": intent.action,
         "count": intent.count,
+        "count_fp": str(intent.count_fp) if intent.count_fp is not None else str(intent.count),
         "price_cents": int(final_price_cents),
         "snapshot_ts": intent.snapshot_ts,
         "data_version": getattr(intent, "data_version", None),
         "policy_version": getattr(intent, "policy_version", None) or getattr(intent, "policy_mode", None),
+        "entry_or_exit": getattr(intent, "entry_or_exit", None),
+        "firewall_decision_id": getattr(intent, "firewall_decision_id", None),
+        "firewall_client_order_id": getattr(intent, "firewall_client_order_id", None),
     }
+
+    # Fail-closed: no live request leaves the process without a canonical coid.
+    canonical_coid = getattr(intent, "client_order_id", None)
+    if not canonical_coid:
+        raise OrderIdentityError(
+            f"client_order_id not finalized for intent_id={intent.intent_id}"
+        )
+
+    canonical_count = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
 
     return CreateOrderRequest(
         ticker=normalized_ticker,
         side=side,
         outcome=outcome,
-        size=Decimal(intent.count),
+        size=canonical_count,
         price_cents=int(final_price_cents) if (effective_order_type or "limit") != "market" else None,
         order_type=effective_order_type or "limit",
         time_in_force=tif,
         expiration_ts=expiration_ts,
-        client_order_id=intent.client_order_id,
+        client_order_id=canonical_coid,
         idempotency_key=intent.idempotency_key,
         post_only=bool(post_only),
         reduce_only=bool(getattr(intent, "reduce_only", False)),
@@ -2550,8 +2978,10 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
             # Get current position for this market
             # CRITICAL FIX (2026-08-01): get_position() signature changed to only take market_id
             position = position_cache.get_position(intent.ticker)
-            # CRITICAL FIX (2026-08-01): CachedPosition uses 'contracts' not 'total_contracts'
-            pre_position_size = position.contracts if position else 0
+            # Canonical position size is in centi-contracts; ``contracts`` is display-only.
+            pre_position_size = position.quantity_cc if position else 0
+            exit_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+            count = int(exit_count_fp * Decimal("100"))
             
             # INVARIANT-1: Position must have positive size (cannot exit from zero)
             if pre_position_size <= 0:
@@ -2569,36 +2999,36 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
                 )
             
             # INVARIANT-2: Exit count must be positive
-            if intent.count <= 0:
+            if count <= 0:
                 logger.critical(
                     "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s count=%d - "
                     "EXIT orders require count>0. Zero or negative count is invalid. Rejecting as critical bug.",
-                    intent.ticker, intent.side, intent.count
+                    intent.ticker, intent.side, count
                 )
                 return OrderResult(
                     status="rejected",
                     mode=mode,
-                    reason=f"exit_invariant_violation:invalid_count:count={intent.count}",
+                    reason=f"exit_invariant_violation:invalid_count:count={count}",
                     latency_ms=0.0,
                 )
             
             # INVARIANT-3: Exit count cannot exceed position size (cannot over-close)
-            if intent.count > pre_position_size:
+            if count > pre_position_size:
                 logger.critical(
                     "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%d - "
                     "EXIT orders cannot close more contracts than exist in position. "
                     "This would over-close the position. Rejecting as critical bug.",
-                    intent.ticker, intent.side, pre_position_size, intent.count
+                    intent.ticker, intent.side, pre_position_size, count
                 )
                 return OrderResult(
                     status="rejected",
                     mode=mode,
-                    reason=f"exit_invariant_violation:over_close:pre_size={pre_position_size}:count={intent.count}",
+                    reason=f"exit_invariant_violation:over_close:pre_size={pre_position_size}:count={count}",
                     latency_ms=0.0,
                 )
             
             # Calculate expected post-size
-            expected_post_position_size = pre_position_size - intent.count
+            expected_post_position_size = pre_position_size - count
             
             # INVARIANT-4: Expected post-size must be non-negative (cannot flip to negative)
             if expected_post_position_size < 0:
@@ -2606,7 +3036,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
                     "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%d post_size=%d - "
                     "EXIT orders cannot result in negative position size. "
                     "This would flip position sign and create exposure on opposite leg. Rejecting as critical bug.",
-                    intent.ticker, intent.side, pre_position_size, intent.count, expected_post_position_size
+                    intent.ticker, intent.side, pre_position_size, count, expected_post_position_size
                 )
                 return OrderResult(
                     status="rejected",
@@ -2633,7 +3063,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
             logger.info(
                 "[EXIT-INVARIANT-PASS] ticker=%s side=%s pre_size=%d count=%d post_size=%d - "
                 "Exit order passes all position-delta invariants (close-only validation)",
-                intent.ticker, intent.side, pre_position_size, intent.count, expected_post_position_size
+                intent.ticker, intent.side, pre_position_size, count, expected_post_position_size
             )
             
     except Exception as check_err:
@@ -2717,6 +3147,266 @@ def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMo
     )
 
 
+async def _canonical_order_intent_validation(
+    intent: OrderIntent,
+    t0: float,
+) -> Optional[OrderResult]:
+    """Canonical order-intent contract validation (2026-08-10).
+
+    Normalizes every order to a signed-YES centi-contract contract, fetches a
+    fresh exchange position snapshot for exits, and hard-rejects invariants
+    violations before any API call or state mutation.
+
+    Returns an ``OrderResult`` with status ``rejected`` if the intent fails,
+    otherwise ``None`` and mutates ``intent`` with derived position/PnL fields.
+    """
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            OrderIntentValidationError,
+            fetch_fresh_signed_yes_exposure,
+            max_adverse_pnl_cents,
+            normalize_order,
+            persist_order_decision,
+            validate_canonical_intent,
+        )
+
+        is_exit = _is_exit_order(intent)
+
+        exchange_position_cc: Optional[int] = None
+        position_avg_price_cents: Optional[int] = None
+        position_side: Optional[str] = None
+
+        if is_exit:
+            # Require a fresh exchange snapshot before every exit.
+            exchange_position_cc, position_avg_price_cents, position_side = await fetch_fresh_signed_yes_exposure(
+                intent.ticker, timeout=1.0, fallback_to_cache=True
+            )
+
+        if exchange_position_cc is None:
+            # For entries (or if the fresh snapshot failed), use the in-memory cache.
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+
+                pos = get_position_cache().get_position(intent.ticker)
+                if pos is not None:
+                    exchange_position_cc = pos._yes_exposure()
+                    position_avg_price_cents = pos.avg_price_cents
+                    position_side = pos.side
+            except Exception as cache_err:
+                logger.debug("[CANONICAL-VALIDATION] cache lookup failed: %s", cache_err)
+
+        if exchange_position_cc is None:
+            exchange_position_cc = 0
+
+        canonical = normalize_order(
+            intent,
+            exchange_position_cc=exchange_position_cc,
+            position_avg_price_cents=position_avg_price_cents,
+            position_side=position_side,
+        )
+
+        validate_canonical_intent(
+            canonical,
+            exchange_position_cc=exchange_position_cc,
+            position_avg_price_cents=position_avg_price_cents,
+            max_adverse_pnl_cents=max_adverse_pnl_cents(),
+        )
+
+        # Back-fill derived fields on the mutable intent so downstream code
+        # (e.g. _check_exit_delta_invariant) sees consistent values.
+        if intent.pre_position_size is None:
+            intent.pre_position_size = abs(exchange_position_cc) // 100
+        if intent.expected_post_position_size is None:
+            intent.expected_post_position_size = abs(canonical.expected_position_after) // 100
+        intent.expected_realized_pnl_cents = canonical.expected_realized_pnl_cents
+        intent.strategy_signal = canonical.strategy_signal
+
+        # Track canonical key so downstream rejection/submit/fill paths can
+        # release or promote the contract-side entry idempotency record.
+        intent._canonical_entry_key = (canonical.market_ticker, canonical.contract)
+        intent._canonical_client_order_id = canonical.client_order_id
+        intent._canonical_order_intent = canonical
+
+        persist_order_decision(
+            {
+                "ticker": canonical.market_ticker,
+                "intent_id": canonical.intent_id,
+                "client_order_id": canonical.client_order_id,
+                "contract": canonical.contract,
+                "action": canonical.action,
+                "purpose": canonical.purpose,
+                "qty_cc": canonical.qty_cc,
+                "limit_cents": canonical.limit_cents,
+                "strategy_signal": canonical.strategy_signal,
+                "expected_position_before": canonical.expected_position_before,
+                "expected_position_after": canonical.expected_position_after,
+                "expected_realized_pnl_cents": canonical.expected_realized_pnl_cents,
+                "exchange_position_cc": exchange_position_cc,
+                "position_avg_price_cents": position_avg_price_cents,
+                "position_side": position_side,
+                "allowed": True,
+                "reason": canonical.reason,
+                "mode": get_venue_gate().mode.value if get_venue_gate().mode else None,
+            }
+        )
+
+        logger.info(
+            "[CANONICAL-ORDER-INTENT-PASS] ticker=%s intent_id=%s purpose=%s "
+            "contract=%s action=%s qty_cc=%d limit=%dc before=%d after=%d pnl_cents=%s",
+            canonical.market_ticker,
+            canonical.intent_id,
+            canonical.purpose,
+            canonical.contract,
+            canonical.action,
+            canonical.qty_cc,
+            canonical.limit_cents,
+            canonical.expected_position_before,
+            canonical.expected_position_after,
+            canonical.expected_realized_pnl_cents,
+        )
+
+        return None
+
+    except OrderIntentValidationError as exc:
+        reason = f"order_intent_contract:{exc}"
+        logger.warning(
+            "[CANONICAL-ORDER-INTENT-REJECT] ticker=%s intent_id=%s reason=%s",
+            intent.ticker,
+            getattr(intent, "intent_id", None),
+            reason,
+        )
+        persist_order_decision(
+            {
+                "ticker": intent.ticker,
+                "intent_id": getattr(intent, "intent_id", None),
+                "client_order_id": getattr(intent, "client_order_id", None) or getattr(intent, "client_tag", None),
+                "allowed": False,
+                "reason": reason,
+                "mode": get_venue_gate().mode.value if get_venue_gate().mode else None,
+            }
+        )
+        return OrderResult(
+            status="rejected",
+            mode=get_venue_gate().mode,
+            reason=reason,
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
+    except Exception as exc:
+        logger.error(
+            "[CANONICAL-ORDER-INTENT-ERROR] ticker=%s intent_id=%s error=%s",
+            intent.ticker,
+            getattr(intent, "intent_id", None),
+            exc,
+            exc_info=True,
+        )
+        # Fail-open on unexpected validation error so a bug in the new guard
+        # does not halt trading.  The error is logged loudly for remediation.
+        return None
+
+
+def _sync_canonical_order_intent_validation(
+    intent: OrderIntent,
+    t0: float,
+) -> Optional[OrderResult]:
+    """Sync version of canonical validation for ``route_order()`` (mock/paper)."""
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            OrderIntentValidationError,
+            max_adverse_pnl_cents,
+            normalize_order,
+            persist_order_decision,
+            validate_canonical_intent,
+        )
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        pos = get_position_cache().get_position(intent.ticker)
+        exchange_position_cc = pos._yes_exposure() if pos else 0
+        position_avg_price_cents = pos.avg_price_cents if pos else None
+        position_side = pos.side if pos else None
+
+        canonical = normalize_order(
+            intent,
+            exchange_position_cc=exchange_position_cc,
+            position_avg_price_cents=position_avg_price_cents,
+            position_side=position_side,
+        )
+
+        validate_canonical_intent(
+            canonical,
+            exchange_position_cc=exchange_position_cc,
+            position_avg_price_cents=position_avg_price_cents,
+            max_adverse_pnl_cents=max_adverse_pnl_cents(),
+        )
+
+        if intent.pre_position_size is None:
+            intent.pre_position_size = abs(exchange_position_cc) // 100
+        if intent.expected_post_position_size is None:
+            intent.expected_post_position_size = abs(canonical.expected_position_after) // 100
+        intent.expected_realized_pnl_cents = canonical.expected_realized_pnl_cents
+        intent.strategy_signal = canonical.strategy_signal
+
+        # Track canonical key for downstream release/mark idempotency hooks.
+        intent._canonical_entry_key = (canonical.market_ticker, canonical.contract)
+        intent._canonical_client_order_id = canonical.client_order_id
+        intent._canonical_order_intent = canonical
+
+        persist_order_decision(
+            {
+                "ticker": canonical.market_ticker,
+                "intent_id": canonical.intent_id,
+                "client_order_id": canonical.client_order_id,
+                "contract": canonical.contract,
+                "action": canonical.action,
+                "purpose": canonical.purpose,
+                "qty_cc": canonical.qty_cc,
+                "limit_cents": canonical.limit_cents,
+                "strategy_signal": canonical.strategy_signal,
+                "expected_position_before": canonical.expected_position_before,
+                "expected_position_after": canonical.expected_position_after,
+                "expected_realized_pnl_cents": canonical.expected_realized_pnl_cents,
+                "exchange_position_cc": exchange_position_cc,
+                "allowed": True,
+                "reason": canonical.reason,
+                "mode": _resolve_mode(intent.mode).value,
+            }
+        )
+        return None
+
+    except OrderIntentValidationError as exc:
+        reason = f"order_intent_contract:{exc}"
+        logger.warning(
+            "[CANONICAL-ORDER-INTENT-REJECT] ticker=%s intent_id=%s reason=%s",
+            intent.ticker,
+            getattr(intent, "intent_id", None),
+            reason,
+        )
+        persist_order_decision(
+            {
+                "ticker": intent.ticker,
+                "intent_id": getattr(intent, "intent_id", None),
+                "client_order_id": getattr(intent, "client_order_id", None) or getattr(intent, "client_tag", None),
+                "allowed": False,
+                "reason": reason,
+                "mode": _resolve_mode(intent.mode).value,
+            }
+        )
+        return OrderResult(
+            status="rejected",
+            mode=_resolve_mode(intent.mode),
+            reason=reason,
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
+    except Exception as exc:
+        logger.error(
+            "[CANONICAL-ORDER-INTENT-ERROR] ticker=%s intent_id=%s error=%s",
+            intent.ticker,
+            getattr(intent, "intent_id", None),
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
 @dataclass
 class ResolvedTIF:
     """Canonical time-in-force resolution with an absolute Kalshi API expiration.
@@ -2767,8 +3457,19 @@ def _resolve_gtc_expiration(intent: OrderIntent) -> int:
 
 
 def _resolve_max_slippage_cents() -> int:
-    """Resolve the maximum allowed slippage in cents from active profile."""
+    """Resolve the maximum allowed slippage in cents.
+
+    Env override MERID_MAX_SLIPPAGE_CENTS takes precedence, then the active
+    profile, then the default. This lets live 15m crypto runs chase fast-moving
+    orderbooks without changing committed profile defaults used by tests.
+    """
     default = 5
+    try:
+        env_val = os.environ.get("MERID_MAX_SLIPPAGE_CENTS")
+        if env_val:
+            return int(env_val)
+    except Exception:
+        pass
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
         adapter = get_active_profile()
@@ -2897,6 +3598,11 @@ class OrderResult:
         latency_ms: Routing latency
         order_id: Venue order id (when known)
         error: Machine-readable error tag
+        submission_attempted: Whether an outbound exchange request was sent.
+        exchange_request_sent: Whether the HTTP request left the process.
+        exchange_ack_received: Whether a parseable HTTP response was received.
+        submission_certainty: One of ``pre_submit``, ``in_flight``,
+            ``ack_received``, ``rejected``, ``unknown``.
     """
     status: str
     mode: TradingMode
@@ -2905,6 +3611,10 @@ class OrderResult:
     latency_ms: float = 0.0
     order_id: Optional[str] = None
     error: Optional[str] = None
+    submission_attempted: bool = False
+    exchange_request_sent: bool = False
+    exchange_ack_received: bool = False
+    submission_certainty: str = "pre_submit"
 
     # Successful *execution* / accepted request.  Does NOT include
     # ``unfilled_ioc`` because a zero-fill IOC is not an execution success.
@@ -2979,9 +3689,36 @@ class OrderResult:
         return 0
 
     @property
+    def executed_quantity_cc(self) -> int:
+        """Actual filled quantity in centi-contracts (0 when unknown)."""
+        if not self.fill:
+            return 0
+        for key in ("quantity_cc", "executed_quantity_cc"):
+            value = self.fill.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    pass
+        return self.executed_count * 100
+
+    @property
+    def remaining_quantity_cc(self) -> int:
+        """Remaining/unfilled quantity in centi-contracts (0 when unknown)."""
+        if not self.fill:
+            return 0
+        value = self.fill.get("remaining_quantity_cc")
+        if value is not None:
+            try:
+                return int(value)
+            except Exception:
+                pass
+        return self.remaining_count * 100
+
+    @property
     def has_execution(self) -> bool:
         """At least one contract was actually filled/executed."""
-        return self.executed_count > 0
+        return self.executed_quantity_cc > 0
 
     @property
     def is_terminal(self) -> bool:
@@ -2997,6 +3734,11 @@ class OrderResult:
             "canceled",
             "expired",
         }
+
+    @property
+    def is_resting(self) -> bool:
+        """Confirmed GTC order is live on the book with no execution yet."""
+        return self.status == "resting"
 
     @property
     def requires_recovery(self) -> bool:
@@ -3098,11 +3840,8 @@ def _is_live_mode(mode: TradingMode) -> bool:
     return _mode_value(mode) == "live"
 
 
-def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
+def _kalshi_fee_cents(price_cents: int, contracts: Any) -> int:
     """Canonical Kalshi fee calculation using unified fees module.
-    
-    DEPRECATED (2026-07-16): Use calculate_kalshi_fee_cents from fees module directly.
-    This internal wrapper is being removed to consolidate fee calculation.
     
     DELEGATED to unified fees module: merid.event_venues.kalshi.fees
     
@@ -3110,12 +3849,6 @@ def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     - C = number of contracts
     - P = price in dollars (price_cents / 100)
     """
-    import warnings
-    warnings.warn(
-        "_kalshi_fee_cents is deprecated. Use calculate_kalshi_fee_cents from fees module directly.",
-        DeprecationWarning,
-        stacklevel=2
-    )
     return calculate_kalshi_fee_cents(contracts, price_cents)
 
 
@@ -3138,7 +3871,14 @@ def simulate_paper_fill(
     import random as _random_module
     rng = _rng if _rng is not None else _random_module
 
-    requested_count = max(0, int(intent.count))
+    # Fixed-point contract quantity is the sole authority; ``count`` is display.
+    requested_count_fp = (
+        Decimal(str(intent.count_fp))
+        if intent.count_fp is not None
+        else Decimal(max(0, int(intent.count)))
+    )
+    requested_qty_cc = int(requested_count_fp * Decimal("100"))
+
     # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
     requested_price = max(10, min(75, int(intent.price_cents)))
 
@@ -3154,28 +3894,32 @@ def simulate_paper_fill(
 
     # Partial fill simulation when size > 1 contract.
     partial_fill = False
-    fill_count = requested_count
-    if requested_count > 1 and rng.random() < PAPER_PARTIAL_FILL_PROB:
+    fill_count_fp = requested_count_fp
+    if requested_count_fp > 1 and rng.random() < PAPER_PARTIAL_FILL_PROB:
         partial_fill = True
-        min_fill = max(1, int(round(requested_count * PAPER_MIN_FILL_RATIO)))
-        fill_count = rng.randint(min_fill, requested_count)
+        min_fill = max(1, int(round(float(requested_count_fp) * PAPER_MIN_FILL_RATIO)))
+        fill_count_int = rng.randint(min_fill, int(requested_count_fp))
+        fill_count_fp = Decimal(fill_count_int)
 
-    remaining_count = max(0, requested_count - fill_count)
+    remaining_count_fp = max(Decimal("0"), requested_count_fp - fill_count_fp)
+    fill_qty_cc = int(fill_count_fp * Decimal("100"))
+    remaining_qty_cc = int(remaining_count_fp * Decimal("100"))
+
     # Bug 8 fix: fee is computed on the decision price (requested_price), not
     # the slipped fill_price.  Using fill_price understates fees for buys
     # (slippage raises fill_price → reduces payout → reduces fee) and
     # overstates them for sells, diverging from the exchange's actual charge.
-    fee_cents = _kalshi_fee_cents(requested_price, fill_count)
+    fee_cents = _kalshi_fee_cents(requested_price, fill_count_fp)
 
     # Build v1 hash preimage for deterministic fill_id and forensic traceability
     import hashlib
-    hash_preimage = f"{intent.intent_id}:{intent.ticker}:{intent.side}:{intent.action}:{fill_count}:{fill_price}"
+    hash_preimage = f"{intent.intent_id}:{intent.ticker}:{intent.side}:{intent.action}:{fill_count_fp}:{fill_price}"
     # M1-FIX: Use SHA256 for deterministic fill_id (hash() is randomized per process)
     fill_id = f"paper_{hashlib.sha256(hash_preimage.encode()).hexdigest()[:16]}"
     logger.debug(f"[order-router] Paper fill hash_preimage: {hash_preimage} -> {fill_id}")
 
     # P1: Wire TradeTrace into paper fill events (update fill_time and fill_price)
-    if _TRACE_AVAILABLE and intent.trace_id and fill_count > 0:
+    if _TRACE_AVAILABLE and intent.trace_id and fill_qty_cc > 0:
         update_trace(
             intent.trace_id,
             fill_time=_time.time(),
@@ -3194,11 +3938,21 @@ def simulate_paper_fill(
         "action": intent.action,
         "price_cents": fill_price,
         "requested_price_cents": requested_price,
-        "count": fill_count,
-        "requested_count": requested_count,
-        "remaining_count": remaining_count,
+        # Canonical fixed-point fields
+        "count_fp": str(fill_count_fp),
+        "requested_count_fp": str(requested_count_fp),
+        "remaining_count_fp": str(remaining_count_fp),
+        # Centi-contract canonical quantity
+        "quantity_cc": fill_qty_cc,
+        "requested_quantity_cc": requested_qty_cc,
+        "remaining_quantity_cc": remaining_qty_cc,
+        # Display/legacy integer fields (floor of fixed-point values)
+        "count": int(fill_count_fp),
+        "requested_count": int(requested_count_fp),
+        "remaining_count": int(remaining_count_fp),
         "partial_fill": partial_fill,
         "fee_cents": fee_cents,
+        "net_edge_at_fill_cents": _compute_net_edge_at_fill(intent, fill_price),
         "ts": datetime.now(timezone.utc).isoformat(),
         "simulated": True,
         "decision_trace_id": intent.decision_trace_id,
@@ -3420,23 +4174,29 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                 thesis_side, kalshi_side, getattr(intent, 'price_cents', 0)
             )
     
-    if intent.count <= 0:
+    # Canonical quantity in centi-contracts.
+    if intent.count_fp is not None:
+        qty_cc = int(intent.count_fp * Decimal("100"))
+    else:
+        qty_cc = (intent.count or 0) * 100
+
+    if qty_cc <= 0:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "non_positive_size")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "non_positive_size")
         return "non_positive_size"
-    
-    # CRITICAL FIX (2026-07-31): Restore 1 contract per order limit for ENTRY orders
-    # Entry orders must be exactly 1 contract per $1 allocation rule
-    # Exit orders can have count > 1 for multi-contract closes (ratchet, scale-out, etc.)
-    if not _is_exit_order(intent) and intent.count != 1:
+
+    # CRITICAL FIX (2026-07-31): 1 contract ($1) cap for ENTRY orders.
+    # Fractional sizes <= 1 contract are allowed; exits can exceed 1 contract only
+    # when closing a larger prior position.
+    if not _is_exit_order(intent) and qty_cc > 100:
         logger.error(
-            "[ROUTER-VALIDATION] Entry orders must have count=1 per $1 allocation rule: "
-            "ticker=%s count=%d action=%s side=%s - REJECTING",
-            intent.ticker, intent.count, intent.action, intent.side
+            "[ROUTER-VALIDATION] Entry order exceeds 1 contract ($1) cap: "
+            "ticker=%s qty_cc=%d action=%s side=%s - REJECTING",
+            intent.ticker, qty_cc, intent.action, intent.side
         )
-        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "entry_count_not_one")
-        _increment_validation_gate_metric("ROUTER_VALIDATION", "entry_count_not_one")
-        return "entry_count_not_one"
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "entry_count_exceeds_one")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "entry_count_exceeds_one")
+        return "entry_count_exceeds_one"
     
     # CRITICAL: Check for duplicate orders (same ticker, side, action, price within time window)
     # This prevents agents from placing multiple identical resting limit orders
@@ -3669,52 +4429,54 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             # CRITICAL FIX (2026-07-14): Hard $1 exposure cap check using slot_allocator
             # This provides real-time exposure tracking from the authoritative source
             # Exit orders bypass this check to allow position closure
-            # CRITICAL FIX (2026-07-31): Now enforces both notional AND 1 contract per entry rule
+            # CRITICAL FIX (2026-08-18): Use canonical qty_cc so fractional sizes are
+            # included in the exposure math instead of being rounded to 0 contracts.
+            price_cents_int = int(intent.price_cents) if intent.price_cents is not None else 0
+            qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+
             if not _is_exit_order(intent):
                 current_exposure = slot_allocator.get_total_exposure()
-                order_notional = (intent.count * intent.price_cents) / 100.0
+                order_notional = (qty_cc * price_cents_int) / 10000.0
                 fixed_exposure_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-                
+
                 # CRITICAL FIX (2026-07-31): Log contract count enforcement for $1 rule
                 logger.info(
                     "[HARD-EXPOSURE-CAP] Checking $1 cap with count constraint: "
-                    "asset=%s count=%d price=%dc notional=$%.2f current_exposure=$%.2f cap=$%.2f",
-                    asset, intent.count, intent.price_cents, order_notional, current_exposure, fixed_exposure_cap
+                    "asset=%s qty_cc=%d price=%dc notional=$%.4f current_exposure=$%.2f cap=$%.2f",
+                    asset, qty_cc, price_cents_int, order_notional, current_exposure, fixed_exposure_cap
                 )
-                
+
                 if current_exposure + order_notional > fixed_exposure_cap:
                     logger.error(
-                        "[HARD-EXPOSURE-CAP] REJECTING: current_exposure=$%.2f + order_notional=$%.2f > $%.2f cap",
+                        "[HARD-EXPOSURE-CAP] REJECTING: current_exposure=$%.2f + order_notional=$%.4f > $%.2f cap",
                         current_exposure, order_notional, fixed_exposure_cap
                     )
                     _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "hard_exposure_cap_exceeded")
                     _increment_validation_gate_metric("ROUTER_VALIDATION", "hard_exposure_cap_exceeded")
-                    return f"hard_exposure_cap_exceeded:${current_exposure:.2f}+${order_notional:.2f}>${fixed_exposure_cap:.2f}"
-                
+                    return f"hard_exposure_cap_exceeded:${current_exposure:.2f}+${order_notional:.4f}>${fixed_exposure_cap:.2f}"
+
                 logger.info(
-                    "[HARD-EXPOSURE-CAP] Check passed: current_exposure=$%.2f + order_notional=$%.2f <= $%.2f cap",
+                    "[HARD-EXPOSURE-CAP] Check passed: current_exposure=$%.2f + order_notional=$%.4f <= $%.2f cap",
                     current_exposure, order_notional, fixed_exposure_cap
                 )
-            
+
             # Get current position for this ticker using actual position cache API
             current_position_obj = position_cache.get_position(ticker)
-            current_contracts = current_position_obj.contracts if current_position_obj else 0
-            current_notional = (current_contracts * intent.price_cents) / 100.0
-            
-            # Calculate new position notional after this order
-            # CRITICAL FIX (2026-07-20): Exit orders REDUCE exposure
-            # For exit orders, intent.count is positive (e.g., "sell 5 contracts"), so we subtract it
-            # For entry orders, intent.count is positive (e.g., "buy 5 contracts"), so we add it
+            current_quantity_cc = current_position_obj.quantity_cc if current_position_obj else 0
+            current_notional = (current_quantity_cc * price_cents_int) / 10000.0
+
+            # Calculate new position notional after this order using canonical quantity_cc.
+            # CRITICAL FIX (2026-07-20): Exit orders REDUCE exposure.
             if _is_exit_order(intent):
-                new_contracts = current_contracts - intent.count  # Reduce position for exit
-                new_notional = (new_contracts * intent.price_cents) / 100.0
+                new_quantity_cc = max(0, current_quantity_cc - qty_cc)
+                new_notional = (new_quantity_cc * price_cents_int) / 10000.0
             else:
-                new_contracts = current_contracts + intent.count  # Increase position for entry
-                new_notional = (new_contracts * intent.price_cents) / 100.0
-            
+                new_quantity_cc = current_quantity_cc + qty_cc
+                new_notional = (new_quantity_cc * price_cents_int) / 10000.0
+
             # Check total position limit across all assets using actual position cache API (fallback)
             all_positions = position_cache.get_all_positions(validate_freshness=False)
-            
+
             # CRITICAL FIX: Filter positions by current window to prevent counting stale positions
             # Get current window ticker for this asset
             from merid.event_venues.kalshi.market_catalog import get_market_catalog
@@ -3727,21 +4489,21 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                         current_window_ticker = current_market.market.market_id
                 except Exception as ticker_err:
                     logger.warning("[CHECK-INTENT-RISK] Failed to get current window ticker: %s", ticker_err)
-            
+
             total_position_notional = 0.0
             position_count = 0
             for pos_ticker, pos_obj in all_positions.items():
-                if pos_obj and pos_obj.contracts > 0:
+                if pos_obj and pos_obj.quantity_cc > 0:
                     # CRITICAL FIX (2026-07-31): Validate position data integrity
                     # Skip positions with corrupted price data
                     pos_price = getattr(pos_obj, 'avg_price_cents', None)
                     if pos_price is None or pos_price == 0:
                         logger.warning(
-                            "[CHECK-INTENT-RISK] Skipping corrupted position: %s (contracts=%d, price=%s)",
-                            pos_ticker, pos_obj.contracts, pos_price
+                            "[CHECK-INTENT-RISK] Skipping corrupted position: %s (quantity_cc=%d, price=%s)",
+                            pos_ticker, pos_obj.quantity_cc, pos_price
                         )
                         continue
-                    
+
                     # CRITICAL FIX: Only count positions from current window
                     # Skip stale positions from previous windows
                     if current_window_ticker and pos_ticker != current_window_ticker:
@@ -3758,18 +4520,18 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                             continue
                         elif asset_prefix == "DOGE" and not pos_ticker.startswith("KXDOGE"):
                             continue
-                    
+
                     # CRITICAL FIX (2026-07-30): This is a notional calculation, not a position check
                     # No side-aware check needed here - we're just summing exposure for risk limits
                     # The side-aware check is done earlier in the asset-window check (lines 2641-2691)
-                    
+
                     # Use current price from position object or estimate
                     pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else intent.price_cents
-                    total_position_notional += (pos_obj.contracts * pos_price) / 100.0
+                    total_position_notional += (pos_obj.quantity_cc * pos_price) / 10000.0
                     position_count += 1
-            
-            # Add this order's notional
-            order_notional = (intent.count * intent.price_cents) / 100.0
+
+            # Add this order's notional using canonical centi-contracts.
+            order_notional = (qty_cc * intent.price_cents) / 10000.0
             # CRITICAL FIX (2026-07-20): Exit orders REDUCE exposure, so subtract order_notional
             if _is_exit_order(intent):
                 total_with_order = total_position_notional - order_notional
@@ -4774,36 +5536,40 @@ def _validate_prob_price_consistency(intent: OrderIntent) -> Optional[str]:
     if _is_exit_order(intent):
         return None
     
-    # Map price to implied market probability
+    # Map price to implied market probability (same side as the trade)
     implied_prob = intent.price_cents / 100.0
     model_prob = intent.model_prob
-    
+
     # Check model_prob presence
     if model_prob is None:
         return ERR_MISSING_MODEL_PROB
-    
-    # For BUY YES: model_prob must be > implied_prob - tolerance (we think outcome is more likely than market)
-    # Tolerance allows for small pricing noise - reject only if model is clearly worse than market
-    # Handle both lowercase (before conversion) and uppercase (after conversion) formats
-    side_lower = intent.side.lower() if intent.side else ""
-    action_lower = intent.action.lower() if intent.action else ""
-    if side_lower in ("yes", "buy_yes") and action_lower == "buy":
+
+    # Clamp to valid probability space to avoid >1.0 or <0.0 leakage.
+    model_prob = max(0.0, min(1.0, model_prob))
+
+    # Canonicalize side and action so the comparison is side-consistent.
+    # For BUY: we want model_prob > market_implied - tol (we think the outcome we
+    #          bought is more likely than the market price implies).
+    # For SELL: we want model_prob < market_implied + tol (we think the outcome we
+    #           sold is less likely than the market price implies).
+    _side = intent.side
+    _action = intent.action
+    if _side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"):
+        _side, _action = parse_kalshi_side(_side)
+    _side = (_side or "").lower()
+    _action = (_action or "").lower()
+
+    if _action == "buy":
         threshold = implied_prob - PROB_PRICE_TOLERANCE_PCT
-        logger.info(f"[PROB-PRICE-DEBUG] BUY YES: model_prob={model_prob:.3f}, implied={implied_prob:.3f}, threshold={threshold:.3f}, model_prob > threshold = {model_prob > threshold}")
+        logger.info(f"[PROB-PRICE-DEBUG] BUY side={_side} model_prob={model_prob:.3f}, implied={implied_prob:.3f}, threshold={threshold:.3f}, model_prob > threshold = {model_prob > threshold}")
         if model_prob <= threshold:
             return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f},tolerance={PROB_PRICE_TOLERANCE_PCT:.3f}"
-    # For SELL YES (betting NO): model_prob must be < implied_prob + tolerance (we think outcome is less likely than market)
-    elif side_lower == "yes" and action_lower == "sell":
-        if model_prob >= implied_prob + PROB_PRICE_TOLERANCE_PCT:
+    else:  # sell
+        threshold = implied_prob + PROB_PRICE_TOLERANCE_PCT
+        logger.info(f"[PROB-PRICE-DEBUG] SELL side={_side} model_prob={model_prob:.3f}, implied={implied_prob:.3f}, threshold={threshold:.3f}, model_prob < threshold = {model_prob < threshold}")
+        if model_prob >= threshold:
             return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f},tolerance={PROB_PRICE_TOLERANCE_PCT:.3f}"
-    # For BUY NO: We're betting NO, so we want model YES prob < market YES prob (market overprices YES)
-    # This is equivalent to: model_prob < implied_prob + tolerance
-    # Example: model says YES=79% (NO=21%), market says YES=50% (NO=50%)
-    # Market overprices NO, so we buy NO. Edge = 29% in our favor.
-    else:  # buying NO
-        if model_prob >= implied_prob + PROB_PRICE_TOLERANCE_PCT:
-            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f},tolerance={PROB_PRICE_TOLERANCE_PCT:.3f}"
-    
+
     return None
 
 
@@ -4854,22 +5620,26 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
     if _is_exit_order(intent):
         return None
     
-    # Check if in deep OTM band
-    is_deep_cheap = intent.price_cents <= DEEP_OTM_CHEAP_CENTS
-    is_deep_expensive = intent.price_cents > DEEP_OTM_EXPENSIVE_CENTS
-    
+    # Canonicalize side for side-aware OTM check.
+    _canonical_side, _ = parse_kalshi_side(intent.side) if intent.side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO") else (intent.side, intent.action)
+
+    # Side-aware deep OTM check: reject only prices outside the executable
+    # canonical range (YES 1-85, NO 15-99). This matches agent_grid's range
+    # gate and prevents false rejection of late-expiry one-sided markets.
+    _in_range = is_price_in_canonical_range(intent.price_cents, _canonical_side)
+
     # DEEP_OTM_POLICY_STATE: Log detailed state for debugging price path
     logger.info(
-        "[DEEP_OTM_POLICY_STATE] trace_id=%s requested_price_cents=%d deep_cheap_threshold=%d deep_expensive_threshold=%d "
-        "is_deep_cheap=%s is_deep_expensive=%s ticker=%s action=%s edge_pct=%s",
-        getattr(intent, 'trace_id', 'N/A'), intent.price_cents, DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS,
-        is_deep_cheap, is_deep_expensive, intent.ticker, intent.action,
+        "[DEEP_OTM_POLICY_STATE] trace_id=%s requested_price_cents=%d side=%s in_side_aware_range=%s "
+        "ticker=%s action=%s edge_pct=%s",
+        getattr(intent, 'trace_id', 'N/A'), intent.price_cents, _canonical_side,
+        _in_range, intent.ticker, intent.action,
         getattr(intent, 'edge_pct', 'N/A')
     )
-    
-    if not (is_deep_cheap or is_deep_expensive):
+
+    if _in_range:
         return None
-    
+
     # Policy: disallow deep OTM entirely (configurable)
     # If you want to allow with strong edge, change this to check edge/confidence
     return ERR_DEEP_OTM_DISALLOWED
@@ -4878,6 +5648,52 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
     # if not (intent.edge_pct and intent.edge_pct > DEEP_OTM_MIN_EDGE_PCT):
     #     if not (intent.confidence and intent.confidence > 0.85):
     #         return ERR_DEEP_OTM_INSUFFICIENT_EDGE
+
+
+def _max_edge_preserving_buy_price(intent: OrderIntent) -> Optional[int]:
+    """Return the highest integer buy price that preserves per-contract net edge.
+
+    Uses the signal's pre-computed ``ev_net_cents`` and ``selected_outcome_price_cents``
+    plus the Kalshi fee schedule.  The search is exact: it finds the largest
+    whole-cent price such that the realized net edge at that fill price is at
+    least ``min_required_edge`` cents.  Returns ``None`` when the required
+    provenance is missing, allowing callers to fall back to less precise caps.
+    """
+    basis = getattr(intent, "selected_outcome_price_cents", None)
+    ev_net = getattr(intent, "ev_net_cents", None)
+    if basis is None or ev_net is None or int(basis) <= 0:
+        return None
+
+    min_required_edge = getattr(intent, "min_required_edge", None)
+    if min_required_edge is None or float(min_required_edge) <= 0:
+        from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
+        min_required_edge = TRADE_DECISION_MIN_REQUIRED_EDGE
+    threshold_cents = float(min_required_edge) * 100.0
+
+    fee_basis = getattr(intent, "fee_cents", None)
+    if fee_basis is None or float(fee_basis) <= 0:
+        fee_basis = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(basis)))
+    else:
+        fee_basis = float(fee_basis)
+
+    # Start from the linear (fee-ignored) cap and walk down until the fee-aware
+    # net-edge condition holds.  The walk is at most a few cents because the fee
+    # difference between adjacent prices is bounded by the Kalshi per-contract fee.
+    start_cap = int(math.floor(float(basis) + float(ev_net) - threshold_cents))
+    # Never price above the model's fair value minus 1c; buying at or above fair
+    # value has negative gross edge regardless of reserves.
+    p_selected = getattr(intent, "p_selected", None)
+    if p_selected is not None:
+        theoretical_max = max(1, int(round(float(p_selected) * 100.0)) - 1)
+        start_cap = min(start_cap, theoretical_max)
+    start_cap = max(1, min(99, start_cap))
+
+    for fill_price in range(start_cap, int(basis) - 1, -1):
+        fee_fill = float(calculate_kalshi_fee_cents(contracts=1, price_cents=fill_price))
+        new_net = float(ev_net) - (fill_price - float(basis)) - (fee_fill - fee_basis)
+        if new_net >= threshold_cents - 1e-9:
+            return fill_price
+    return None
 
 
 def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any]) -> int:
@@ -4924,21 +5740,39 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
 
     # Snapshot freshness / sequence validation before trusting any price level.
     # A stale or un-initialized book must never be used for repricing.
+    # Default 5s is intentionally strict; an order repricing must use a fresh book.
+    # The profile may relax this for specific venues, but the default stays tight.
     _max_snapshot_age_ms = 5000
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
         _profile_adapter = get_active_profile()
         if _profile_adapter and _profile_adapter.profile:
-            _max_snapshot_age_ms = int(getattr(_profile_adapter.profile, 'guardrails_max_snapshot_age_ms', 5000))
+            _max_snapshot_age_ms = int(
+                getattr(_profile_adapter.profile, 'guardrails_max_snapshot_age_ms', _max_snapshot_age_ms)
+            )
     except Exception:
         pass
 
     _book_initialized = bool(getattr(state, 'book_initialized', False))
     _snapshot_age_ms = getattr(intent, 'snapshot_age_ms', None)
-    if _snapshot_age_ms is None:
-        _last_update = getattr(state, 'last_book_update_wall_ts', None)
-        if _last_update:
-            _snapshot_age_ms = int((_time.time() - _last_update) * 1000)
+    # CRITICAL FIX (2026-08-13): A live order may carry a fresher at-intent
+    # snapshot than the in-store state (e.g., when REST/WS state is stale but
+    # the candidate was just built from the same feed).  Use the newest trusted
+    # wall timestamp available: explicit intent age, then intent.snapshot_ts,
+    # then the state book update timestamp, then the state age_ms.
+    if _snapshot_age_ms is None or _snapshot_age_ms <= 0:
+        _now = _time.time()
+        _state_age_ms = getattr(state, 'age_ms', None)
+        _state_wall_ts = getattr(state, 'last_book_update_wall_ts', None) or 0.0
+        _intent_snapshot_ts = getattr(intent, 'snapshot_ts', None) or 0.0
+        _intent_wall_ts = _intent_snapshot_ts if _intent_snapshot_ts else 0.0
+
+        # The book is fresh if either the state or the intent has a recent update.
+        _newest_wall_ts = max(_state_wall_ts, _intent_wall_ts)
+        if _newest_wall_ts and _newest_wall_ts > 0:
+            _snapshot_age_ms = int((_now - _newest_wall_ts) * 1000)
+        elif _state_age_ms is not None and _state_age_ms >= 0:
+            _snapshot_age_ms = int(_state_age_ms)
 
     if not _book_initialized:
         raise RepriceWouldCross(
@@ -4969,15 +5803,30 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     best_bid_cents = getattr(state, 'best_bid_cents', None)
     best_ask_cents = getattr(state, 'best_ask_cents', None)
 
-    # If no market data available, return original price
+    # Fail closed if the book does not carry a valid mid price.  A missing or
+    # None mid indicates an uninitialized/absent snapshot and must never be
+    # priced from the input alone.
     if mid_cents is None:
-        return int(round(intent.price_cents))
+        raise RepriceWouldCross(
+            ticker=intent.ticker,
+            side=("no" if "no" in (intent.side or "").lower() else "yes"),
+            action=intent.action or "buy",
+            role=(intent.liquidity_role if intent.liquidity_role in ("maker", "taker") else "taker"),
+            attempted_price=int(round(intent.price_cents)),
+            side_bid=best_bid_cents,
+            side_ask=best_ask_cents,
+            reason="book_unavailable_or_invalid",
+        )
 
     # Kalshi contract prices are whole cents; derived mid-prices from the orderbook
     # may be floats (e.g. 32.5c). Round them to the nearest integer cent so all
     # downstream price arithmetic stays integral and we do not submit fractional
     # limit prices like 31.5c.
     mid_cents = int(round(mid_cents))
+    if best_bid_cents is not None:
+        best_bid_cents = int(round(best_bid_cents))
+    if best_ask_cents is not None:
+        best_ask_cents = int(round(best_ask_cents))
 
     # Slippage budget: never cross more than max_slippage cents away from the
     # fair value (market mid).  For NO-side orders this is the NO-side mid.
@@ -5003,7 +5852,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             "[PRICE-ADJUSTMENT] ticker=%s side=%s using NO mid=%dc (YES mid=%dc) for price adjustment",
             intent.ticker, intent.side, mid_cents, original_yes_mid
         )
-    
+
     # CRITICAL FIX 2026-08-08: Side-aware best bid/ask for the outcome side.
     # YES bid/ask are primary. NO-specific fields are preferred when available;
     # otherwise derive NO prices from YES duality:
@@ -5029,6 +5878,60 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     else:
         displayed_ask_size = int(getattr(state, 'best_ask_size', 0) or 0)
         displayed_bid_size = int(getattr(state, 'best_bid_size', 0) or 0)
+
+    # CRITICAL FIX 2026-08-20: Use executable quotes from the full WS ladder.
+    # The top-of-book best_bid/best_ask may reference an empty price level
+    # (size 0) because level deletion can be lazy.  Scan the first non-empty
+    # level on each side to get the real price to hit and the displayed size,
+    # and recompute the mid from those executable quotes.
+    yes_bids = getattr(state, 'yes_bids', None) or []
+    no_bids = getattr(state, 'no_bids', None) or []
+
+    def _first_non_empty(levels):
+        for price, size in levels:
+            if size and size > 0:
+                return int(round(price)), int(size)
+        return None, 0
+
+    _ladder_bid = None
+    _ladder_ask = None
+    _ladder_bid_size = 0
+    _ladder_ask_size = 0
+
+    if outcome_side == "yes":
+        _yes_bid_price, _yes_bid_size = _first_non_empty(yes_bids)
+        _no_bid_price, _no_bid_size = _first_non_empty(no_bids)
+        if _yes_bid_price is not None:
+            _ladder_bid = _yes_bid_price
+            _ladder_bid_size = _yes_bid_size
+        if _no_bid_price is not None:
+            _ladder_ask = 100 - _no_bid_price
+            _ladder_ask_size = _no_bid_size
+    else:
+        _no_bid_price, _no_bid_size = _first_non_empty(no_bids)
+        _yes_bid_price, _yes_bid_size = _first_non_empty(yes_bids)
+        if _no_bid_price is not None:
+            _ladder_bid = _no_bid_price
+            _ladder_bid_size = _no_bid_size
+        if _yes_bid_price is not None:
+            _ladder_ask = 100 - _yes_bid_price
+            _ladder_ask_size = _yes_bid_size
+
+    if _ladder_bid is not None and _ladder_ask is not None and _ladder_bid <= _ladder_ask:
+        side_bid = _ladder_bid
+        side_ask = _ladder_ask
+        displayed_bid_size = _ladder_bid_size
+        displayed_ask_size = _ladder_ask_size
+        mid_cents = int(round((side_bid + side_ask) / 2.0))
+        logger.debug(
+            "[PRICE-ADJUSTMENT] ticker=%s outcome=%s executable ladder bid=%d/%d ask=%d/%d mid=%d",
+            intent.ticker, outcome_side, side_bid, displayed_bid_size, side_ask, displayed_ask_size, mid_cents
+        )
+    else:
+        logger.debug(
+            "[PRICE-ADJUSTMENT] ticker=%s outcome=%s falling back to state best bid=%s ask=%s mid=%s",
+            intent.ticker, outcome_side, side_bid, side_ask, mid_cents
+        )
 
     # Reject a crossed book immediately (bid > ask). A locked book (bid == ask)
     # still admits a coherent maker/taker price, so we let the role clamps decide.
@@ -5069,6 +5972,11 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
         else:
             role = "maker"  # aggressiveness == 0 means resting/maker by default
 
+    # Edge-preserving cap: never reprice a buy above the level that still clears
+    # the signal's net edge threshold after fees.  This is the canonical budget
+    # that unifies the repricer, the fill-adjusted edge gate, and slippage policy.
+    edge_preserve_cap = _max_edge_preserving_buy_price(intent)
+
     # For maker orders, gently improve the limit price toward the mid (25% of the
     # distance) so it sits inside the spread and has a better chance of being hit.
     # Taker orders are priced from the current book and slippage budget instead; the
@@ -5081,6 +5989,11 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
         elif not is_buy and original_price > mid_cents:
             adjusted_price = int(original_price - (original_price - mid_cents) * adjustment_factor)
             adjusted_price = max(adjusted_price, mid_cents + 1)
+
+        # CRITICAL FIX 2026-08-20: Buy-side maker prices must stay inside the edge
+        # budget.  Resting above the budget would create a position at a loss if hit.
+        if is_buy and edge_preserve_cap is not None:
+            adjusted_price = min(adjusted_price, edge_preserve_cap)
 
     # Resolve the canonical execution-mode values once and freeze them on the
     # intent. This prevents _apply_execution_mode, _route_live, or any later
@@ -5098,9 +6011,9 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             compute_expected_fee,
             LiquidityRole,
         )
-        intent.estimated_fee_cents = compute_expected_fee(
+        intent.estimated_fee_cents = int(round(compute_expected_fee(
             LiquidityRole(role), intent.price_cents, getattr(intent, 'count', 1) or 1
-        )
+        )))
         intent.fee_type = role
     except Exception:
         pass
@@ -5123,14 +6036,20 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         reason=f"maker buy price {adjusted_price}c is at/above side ask {side_ask}c",
                     )
             elif role == "taker":
-                # Taker buy: price at or through the displayed ask.  If the displayed
-                # ask has zero/unknown size, cross one valid tick above it.  Never
-                # cross beyond the fair cap (mid + max slippage budget).
-                taker_target = side_ask
-                if not displayed_ask_size:
-                    taker_target = _next_valid_tick_at_or_above(side_ask + 1)
-
-                fair_cap = mid_cents + max_slippage_cents
+                # Taker buy: use the full slippage budget as the limit, but never
+                # pay more than the model value minus the taker fee and a 1c buffer.
+                fair_cap = min(99, mid_cents + max_slippage_cents)
+                if side_ask is None:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=original_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason="taker buy: displayed ask unavailable",
+                    )
                 if side_ask > fair_cap:
                     raise RepriceWouldCross(
                         ticker=intent.ticker,
@@ -5143,31 +6062,78 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         reason=f"taker buy: displayed ask {side_ask}c beyond fair cap {fair_cap}c (slippage > {max_slippage_cents}c)",
                     )
 
-                taker_target = min(taker_target, fair_cap)
-                # Use the more aggressive of the model fair value and the executable
-                # ask, then clamp to the slippage cap so a high input price never
-                # crosses the model's max taker budget.
-                adjusted_price = min(max(adjusted_price, taker_target), fair_cap)
+                taker_target = fair_cap
+
+                # CRITICAL FIX 2026-08-20: Use the exact edge-preserving cap when
+                # the signal carries provenance.  Fall back to the model-value cap
+                # only when provenance is missing.
+                if edge_preserve_cap is not None:
+                    if side_ask > edge_preserve_cap:
+                        raise RepriceWouldCross(
+                            ticker=intent.ticker,
+                            side=outcome_side,
+                            action=intent.action,
+                            role=role,
+                            attempted_price=side_ask,
+                            side_bid=side_bid,
+                            side_ask=side_ask,
+                            reason=f"taker buy: side_ask {side_ask}c exceeds edge budget {edge_preserve_cap}c",
+                        )
+                    taker_target = min(taker_target, edge_preserve_cap)
+                else:
+                    p_selected = getattr(intent, "p_selected", None)
+                    if p_selected is not None:
+                        fee = getattr(intent, "estimated_fee_cents", None)
+                        if fee is None:
+                            try:
+                                from merid.prediction.kalshi_maker_taker_contract import (
+                                    compute_expected_fee,
+                                    LiquidityRole,
+                                )
+                                fee = int(round(compute_expected_fee(
+                                    LiquidityRole.TAKER, side_ask, getattr(intent, 'count', 1) or 1
+                                )))
+                            except Exception:
+                                fee = 2
+                        edge_cap = int(round(float(p_selected) * 100.0)) - fee - 1
+                        if edge_cap < side_ask:
+                            raise RepriceWouldCross(
+                                ticker=intent.ticker,
+                                side=outcome_side,
+                                action=intent.action,
+                                role=role,
+                                attempted_price=edge_cap,
+                                side_bid=side_bid,
+                                side_ask=side_ask,
+                                reason=f"taker buy: model edge cap {edge_cap}c below displayed ask {side_ask}c",
+                            )
+                        taker_target = min(taker_target, edge_cap)
+
+                taker_target = _next_valid_tick_at_or_above(max(side_ask, taker_target))
+                adjusted_price = taker_target
 
                 try:
                     from merid.prediction.kalshi_maker_taker_contract import (
                         compute_expected_fee,
                         LiquidityRole,
                     )
-                    taker_fee_cents = compute_expected_fee(
+                    taker_fee_cents = int(round(compute_expected_fee(
                         LiquidityRole.TAKER, adjusted_price, getattr(intent, 'count', 1) or 1
-                    )
+                    )))
                     logger.info(
                         "[PRICE-ADJUSTMENT] ticker=%s taker BUY at %dc (side_ask=%dc target=%dc ask_size=%s) "
-                        "expected_fee_cents=%d slippage_to_ask=%dc fair_cap=%dc",
+                        "expected_fee_cents=%d slippage_to_ask=%dc fair_cap=%dc edge_budget=%s",
                         intent.ticker, adjusted_price, side_ask, taker_target, displayed_ask_size,
-                        taker_fee_cents, max(0, adjusted_price - side_ask), fair_cap
+                        taker_fee_cents, max(0, adjusted_price - side_ask), fair_cap,
+                        edge_preserve_cap
                     )
                 except Exception:
                     pass
             else:
                 # Default fill-rate improvement: do not cross the ask.
                 adjusted_price = min(adjusted_price, side_ask - 1)
+                if is_buy and edge_preserve_cap is not None:
+                    adjusted_price = min(adjusted_price, edge_preserve_cap)
             # Role-consistent invariant for buy paths.
             if side_ask is not None:
                 if role == "maker" and adjusted_price >= side_ask:
@@ -5209,14 +6175,20 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         reason=f"maker sell price {adjusted_price}c at/below side bid {side_bid}c",
                     )
             elif role == "taker":
-                # Taker sell: price at or through the displayed bid.  If the displayed
-                # bid has zero/unknown size, cross one valid tick below it.  Never
-                # cross below the fair floor (mid - max slippage budget).
-                taker_target = side_bid
-                if not displayed_bid_size:
-                    taker_target = _next_valid_tick_at_or_below(side_bid - 1)
-
-                fair_floor = mid_cents - max_slippage_cents
+                # Taker sell: use the full slippage budget as the limit, but never
+                # accept less than the model value plus the taker fee and a 1c buffer.
+                fair_floor = max(1, mid_cents - max_slippage_cents)
+                if side_bid is None:
+                    raise RepriceWouldCross(
+                        ticker=intent.ticker,
+                        side=outcome_side,
+                        action=intent.action,
+                        role=role,
+                        attempted_price=original_price,
+                        side_bid=side_bid,
+                        side_ask=side_ask,
+                        reason="taker sell: displayed bid unavailable",
+                    )
                 if side_bid < fair_floor:
                     raise RepriceWouldCross(
                         ticker=intent.ticker,
@@ -5229,20 +6201,46 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         reason=f"taker sell: displayed bid {side_bid}c below fair floor {fair_floor}c (slippage > {max_slippage_cents}c)",
                     )
 
-                taker_target = max(taker_target, fair_floor)
-                # Use the more aggressive of the model fair value and the executable
-                # bid, then clamp to the slippage floor so a low input price never
-                # crosses the model's max taker budget.
-                adjusted_price = max(min(adjusted_price, taker_target), fair_floor)
+                taker_target = fair_floor
+                p_selected = getattr(intent, "p_selected", None)
+                if p_selected is not None:
+                    fee = getattr(intent, "estimated_fee_cents", None)
+                    if fee is None:
+                        try:
+                            from merid.prediction.kalshi_maker_taker_contract import (
+                                compute_expected_fee,
+                                LiquidityRole,
+                            )
+                            fee = int(round(compute_expected_fee(
+                                LiquidityRole.TAKER, side_bid, getattr(intent, 'count', 1) or 1
+                            )))
+                        except Exception:
+                            fee = 2
+                    edge_floor = int(round(float(p_selected) * 100.0)) + fee + 1
+                    if edge_floor > side_bid:
+                        raise RepriceWouldCross(
+                            ticker=intent.ticker,
+                            side=outcome_side,
+                            action=intent.action,
+                            role=role,
+                            attempted_price=edge_floor,
+                            side_bid=side_bid,
+                            side_ask=side_ask,
+                            reason=f"taker sell: model edge floor {edge_floor}c above displayed bid {side_bid}c",
+                        )
+                    taker_target = max(taker_target, edge_floor)
+
+                taker_target = _next_valid_tick_at_or_below(min(side_bid, taker_target))
+                adjusted_price = taker_target
 
                 try:
                     from merid.prediction.kalshi_maker_taker_contract import (
                         compute_expected_fee,
                         LiquidityRole,
                     )
-                    taker_fee_cents = compute_expected_fee(
+                    taker_fee_cents = int(round(compute_expected_fee(
                         LiquidityRole.TAKER, adjusted_price, getattr(intent, 'count', 1) or 1
-                    )
+                    )))
                     logger.info(
                         "[PRICE-ADJUSTMENT] ticker=%s taker SELL at %dc (side_bid=%dc target=%dc bid_size=%s) "
                         "expected_fee_cents=%d slippage_to_bid=%dc fair_floor=%dc",
@@ -5286,25 +6284,28 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             intent.ticker, original_price, adjusted_price, mid_cents
         )
     
-    # CRITICAL FIX (2026-08-01): Clamp adjusted price to slot allocator bounds [10, 75]
-    # The slot allocator enforces [10, 75] as a hard safety boundary for entry orders
-    # Price adjustment must respect this constraint to prevent slot allocation failures
-    # This keeps the allocator as the final guardrail while preventing adjustment logic
-    # from producing prices that would be rejected downstream
-    ALLOCATOR_MIN_PRICE = 10
-    ALLOCATOR_MAX_PRICE = 75
-    
+    # CRITICAL FIX (2026-08-01): Clamp adjusted price to side-aware slot allocator bounds.
+    # The legacy hard [10, 75] boundary blocked NO-side taker orders from crossing
+    # legitimate asks above 75c (e.g. 80c NO) while the canonical NO range is 15c-99c.
+    # Use the same side-aware ranges as canonical price space.
     if not _is_exit_order(intent):  # Only clamp entry orders, not exits
+        if outcome_side == "no":
+            ALLOCATOR_MIN_PRICE = 25
+            ALLOCATOR_MAX_PRICE = 99
+        else:
+            ALLOCATOR_MIN_PRICE = 10
+            ALLOCATOR_MAX_PRICE = 75
+
         if adjusted_price < ALLOCATOR_MIN_PRICE:
             logger.warning(
-                "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc below allocator minimum %dc - clamping to minimum",
-                intent.ticker, adjusted_price, ALLOCATOR_MIN_PRICE
+                "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc below allocator minimum %dc (side=%s) - clamping to minimum",
+                intent.ticker, adjusted_price, ALLOCATOR_MIN_PRICE, outcome_side
             )
             adjusted_price = ALLOCATOR_MIN_PRICE
         elif adjusted_price > ALLOCATOR_MAX_PRICE:
             logger.warning(
-                "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc above allocator maximum %dc - clamping to maximum",
-                intent.ticker, adjusted_price, ALLOCATOR_MAX_PRICE
+                "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc above allocator maximum %dc (side=%s) - clamping to maximum",
+                intent.ticker, adjusted_price, ALLOCATOR_MAX_PRICE, outcome_side
             )
             adjusted_price = ALLOCATOR_MAX_PRICE
     
@@ -5330,35 +6331,163 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     # Final role-consistent validation after all clamping. Uses the same
     # invariant contract that downstream submission will use, so any repricing
     # that violates the intended role is rejected before sizing/reservation.
-    if side_bid is not None and side_ask is not None:
-        try:
-            from merid.prediction.kalshi_maker_taker_contract import (
-                LiquidityRole,
-                validate_price_placement_invariant,
-            )
-            is_valid, error = validate_price_placement_invariant(
-                role=LiquidityRole(role),
+    # CRITICAL FIX (2026-08-10): Validate in canonical YES-price space so the
+    # spread/crossing logic is evaluated consistently for both YES and NO orders.
+    if state is not None:
+        is_valid, error = _validate_canonical_price_placement(
+            intent, role, adjusted_price, state
+        )
+        if not is_valid:
+            raise RepriceWouldCross(
+                ticker=intent.ticker,
                 side=outcome_side,
                 action=intent.action,
-                price_cents=adjusted_price,
-                best_bid=side_bid,
-                best_ask=side_ask,
+                role=role,
+                attempted_price=adjusted_price,
+                side_bid=side_bid,
+                side_ask=side_ask,
+                reason=error or "final_validate_price_placement_invariant_failed",
             )
-            if not is_valid:
-                raise RepriceWouldCross(
-                    ticker=intent.ticker,
-                    side=outcome_side,
-                    action=intent.action,
-                    role=role,
-                    attempted_price=adjusted_price,
-                    side_bid=side_bid,
-                    side_ask=side_ask,
-                    reason=error or "final_validate_price_placement_invariant_failed",
-                )
-        except ImportError:
-            pass
 
     return int(round(adjusted_price))
+
+
+def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
+    """Reject an entry order unless its round-trip net edge is positive.
+
+    Passive/maker execution is the default.  We only allow aggressive/taker
+    execution when the taker's net-of-costs edge (after entry fee, assumed
+    taker exit fee, and spread cost) is still positive.  If only the maker
+    path is positive we switch the policy to NEUTRAL_MM and let it rest.  If
+    neither is positive we reject with a clear reason so no risk capital is
+    reserved.
+
+    Returns None when the order may proceed, or a rejection reason string.
+    """
+    # Exits have different economics (closing a position) and are gated elsewhere.
+    if _is_exit_order(intent):
+        return None
+
+    edge_pct = getattr(intent, "edge_pct", None) or 0.0
+    if edge_pct <= 0.0:
+        # No modeled edge; there is nothing to pay for fees or spread.
+        return "net_of_cost:zero_or_negative_edge"
+
+    price_cents = intent.price_cents
+    if not (1 <= price_cents <= 99):
+        return "net_of_cost:invalid_price"
+
+    count = getattr(intent, "count_fp", None) or getattr(intent, "count", None)
+    if count is None or count <= 0:
+        return "net_of_cost:invalid_quantity"
+
+    # Use the exact fixed-point count if available.
+    try:
+        count_value = float(count)
+    except Exception:
+        return "net_of_cost:invalid_quantity"
+
+    # Load current market state and require a fresh, valid book.
+    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+    market_store = get_kalshi_market_state_store()
+    state = market_store.get(intent.ticker) if market_store else None
+    if state is None:
+        return "net_of_cost:market_state_unavailable"
+
+    best_bid = getattr(state, "best_bid_cents", None)
+    best_ask = getattr(state, "best_ask_cents", None)
+    if best_bid is None or best_ask is None:
+        return "net_of_cost:book_unavailable"
+
+    book_initialized = getattr(state, "book_initialized", False)
+    if not book_initialized:
+        return "net_of_cost:book_not_initialized"
+
+    last_update = getattr(state, "last_book_update_wall_ts", None)
+    if last_update:
+        seconds_to_expiry = getattr(state, "seconds_to_expiry", None)
+        minutes_to_expiry = seconds_to_expiry / 60.0 if seconds_to_expiry is not None else None
+        from merid.event_venues.kalshi.sla_config import get_md_max_age_seconds
+        max_age = get_md_max_age_seconds(minutes_to_expiry)
+        if (_time.time() - last_update) > max_age:
+            return "net_of_cost:stale_book"
+
+    if best_bid >= best_ask:
+        return "net_of_cost:locked_or_crossed_book"
+
+    # Canonical gross edge in cents.
+    # Prefer the model's selected probability when available; it is the true
+    # gross edge (payoff - price).  Fall back to treating edge_pct as a gross
+    # percentage for legacy/test intents that do not carry p_selected.
+    notional_cents = price_cents * count_value
+    p_selected = getattr(intent, "p_selected", None)
+    if p_selected is not None:
+        gross_edge_cents = (float(p_selected) - price_cents / 100.0) * 100.0 * count_value
+    else:
+        gross_edge_cents = notional_cents * (edge_pct / 100.0)
+
+    # Round-trip fee estimates using the schedule-based parabolic formula.
+    try:
+        from merid.event_venues.kalshi.parabolic_fees import (
+            kalshi_maker_fee_cents,
+            kalshi_taker_fee_cents_parabolic,
+        )
+        price_dollars = price_cents / 100.0
+        maker_fee = kalshi_maker_fee_cents(price_dollars, count_value)
+        taker_fee = kalshi_taker_fee_cents_parabolic(price_dollars, count_value)
+    except Exception:
+        # Fee lookup failure is a production safety concern; fail closed.
+        return "net_of_cost:fee_computation_failed"
+
+    spread_cents = best_ask - best_bid
+
+    # Conservative round-trip cost assumptions:
+    # - Maker path: pay maker fee to enter, pay taker fee to exit worst-case.
+    # - Taker path: pay taker fee to enter, pay taker fee to exit, plus the spread.
+    maker_round_trip_cents = 2 * maker_fee
+    taker_round_trip_cents = 2 * taker_fee + spread_cents
+
+    maker_net = gross_edge_cents - maker_round_trip_cents
+    taker_net = gross_edge_cents - taker_round_trip_cents
+
+    # Determine the cheapest viable role.
+    if taker_net > 0 and (getattr(intent, "aggressiveness", 0.0) or 0.0) > 0.0:
+        # Upstream already requested taker and it pays.
+        intent.policy_mode = "AGGRESSIVE_CONVICTION"
+        return None
+
+    if maker_net > 0:
+        # Passive/maker is the default; the policy engine will be forced to
+        # maker-only NEUTRAL_MM below.
+        intent.policy_mode = "NEUTRAL_MM"
+        return None
+
+    if taker_net > 0:
+        # Taker is viable even if it was not requested, but we still prefer
+        # maker when maker is also viable. Since maker is not viable, allow
+        # taker only if the strategy explicitly wants aggressiveness; otherwise
+        # reject rather than change a passive order into a taker.
+        if (getattr(intent, "aggressiveness", 0.0) or 0.0) > 0.0:
+            intent.policy_mode = "AGGRESSIVE_CONVICTION"
+            return None
+
+    logger.info(
+        "[NET-OF-COST] REJECTED ticker=%s price=%dc count=%s edge_pct=%.2f "
+        "gross_edge=%.2fc taker_net=%.2fc maker_net=%.2fc",
+        intent.ticker,
+        price_cents,
+        count,
+        edge_pct,
+        gross_edge_cents,
+        taker_net,
+        maker_net,
+    )
+    return (
+        f"net_of_cost:edge={edge_pct:.2f}% "
+        f"gross={gross_edge_cents:.1f}c "
+        f"taker_cost={taker_round_trip_cents:.1f}c "
+        f"maker_cost={maker_round_trip_cents:.1f}c"
+    )
 
 
 def _check_market_liquidity(intent: OrderIntent, state: Optional[Any]) -> Optional[str]:
@@ -5609,7 +6738,7 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any],
     return None
 
 
-def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -> int:
+def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -> Decimal:
     """Adjust order size based on available liquidity at best price.
     
     Limits order size to available liquidity to improve fill rates:
@@ -5631,65 +6760,51 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
     Returns:
         Adjusted count (capped at available liquidity, never exceeds 1)
     """
-    # CRITICAL FIX (2026-07-20): Exit orders bypass depth-based sizing
-    # Exit orders need to close the full position regardless of available liquidity
+    requested_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+
+    # CRITICAL FIX (2026-07-20): Exit orders bypass depth-based sizing.
     if _is_exit_order(intent):
         logger.debug(
-            "[DEPTH-BASED-SIZING] Exit order bypasses depth sizing: ticker=%s count=%d (exits close full position)",
-            intent.ticker, intent.count
+            "[DEPTH-BASED-SIZING] Exit order bypasses depth sizing: ticker=%s count_fp=%s",
+            intent.ticker, requested_count_fp,
         )
-        return intent.count
-    
-    requested_count = intent.count
-    
-    # CRITICAL FIX: Slot-based model enforces 1 contract per order
-    # Never allow depth-based sizing to increase count beyond 1
-    if requested_count <= 1:
-        # Already at or below slot limit, return as-is
-        return requested_count
-    
-    # If requested_count > 1 (shouldn't happen in slot-based model), cap at 1
-    logger.warning(
-        "[DEPTH-BASED-SIZING] ticker=%s requested_count=%d exceeds slot limit of 1, capping to 1",
-        intent.ticker, requested_count
-    )
-    requested_count = 1
-    
-    # If no state available, return capped size
+        return requested_count_fp
+
+    # Slot-based model enforces 1 contract per order; cap large requests.
+    if requested_count_fp > 1:
+        logger.warning(
+            "[DEPTH-BASED-SIZING] ticker=%s requested_count=%s exceeds slot limit of 1, capping to 1",
+            intent.ticker, requested_count_fp,
+        )
+        requested_count_fp = Decimal(1)
+
     if state is None:
-        return requested_count
-    
-    # Get top of book size (liquidity at best price)
+        return requested_count_fp
+
     top_of_book_size = getattr(state, 'top_of_book_size', 0)
-    
-    # If no liquidity data available, return capped size
     if top_of_book_size <= 0:
-        return requested_count
-    
-    # Cap order size at available liquidity with a safety margin (80% of available)
-    # This leaves room for other orders and reduces risk of partial fills
-    max_size = int(top_of_book_size * 0.8)
-    
-    # CRITICAL FIX: Ensure minimum order size of 1 contract
-    # When liquidity is very thin (e.g., top_of_book_size=1), max_size could be 0
-    # Kalshi rejects count_fp="0.00", so we must return at least 1 if requested_count >= 1
-    if max_size == 0 and requested_count >= 1:
-        max_size = 1
-    
-    # Never allow max_size to exceed 1 (slot-based model)
-    max_size = min(max_size, 1)
-    
-    if requested_count > max_size:
+        return requested_count_fp
+
+    # Cap order size at available liquidity with a safety margin (80% of available).
+    max_size = Decimal(str(top_of_book_size * 0.8)).quantize(Decimal("0.01"))
+
+    # Never allow the allowed size to exceed the 1-contract slot cap.
+    max_size = min(max_size, Decimal(1))
+
+    if requested_count_fp > max_size:
         logger.info(
-            "[DEPTH-BASED-SIZING] ticker=%s capping order size from %d to %d based on available liquidity (top_of_book_size=%d)",
-            intent.ticker, requested_count, max_size, top_of_book_size
+            "[DEPTH-BASED-SIZING] ticker=%s capping order size from %s to %s based on available liquidity (top_of_book_size=%s)",
+            intent.ticker, requested_count_fp, max_size, top_of_book_size,
         )
         return max_size
-    
-    return requested_count
+
+    return requested_count_fp
 
 
-def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[Decimal] = None) -> int:
+def _apply_risk_based_order_sizing(
+    intent: OrderIntent,
+    bankroll_usd: Optional[Decimal] = None,
+) -> Decimal:
     """Enforce the fixed $1 exposure cap via unified_sizing (global slot allocator model).
     
     2026-07-16: Percentage-based (3%) per-trade sizing is PRUNED. unified_sizing
@@ -5707,14 +6822,18 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
     Returns:
         Adjusted count under the $1 fixed exposure cap (or 0 if no slot available)
     """
+    from decimal import Decimal
+
+    requested = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+
     # CRITICAL FIX (2026-07-20): Exit orders bypass risk-based sizing
     # Exit orders reduce exposure and should not be constrained by the $1 cap
     if _is_exit_order(intent):
         logger.debug(
-            "[RISK-BASED-SIZING] Exit order bypasses sizing: ticker=%s count=%d (exits reduce exposure)",
-            intent.ticker, intent.count
+            "[RISK-BASED-SIZING] Exit order bypasses sizing: ticker=%s count_fp=%s",
+            intent.ticker, requested,
         )
-        return intent.count
+        return requested
     
     try:
         from merid.prediction.unified_sizing import compute_order_size
@@ -5737,7 +6856,7 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
         
         if not asset:
             logger.warning("[RISK-BASED-SIZING] Could not extract asset from ticker=%s, returning original count", ticker)
-            return intent.count
+            return requested
         
         # Get bankroll - use provided value or fetch from service
         # CRITICAL FIX: Use cached bankroll to avoid blocking order submission
@@ -5750,7 +6869,7 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
                 logger.debug("[RISK-BASED-SIZING] Using cached bankroll: %s", bankroll_usd)
             else:
                 logger.warning("[RISK-BASED-SIZING] Bankroll cache unavailable, returning original count")
-                return intent.count
+                return requested
         
         price_cents = intent.price_cents
         
@@ -5785,28 +6904,33 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
             reason = metadata.get("reason", "unknown")
             if reason == "kelly_no_edge":
                 logger.warning(
-                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (Kelly filter: no edge, model_prob=%.2f)",
-                    ticker, asset, float(bankroll_usd), price_cents, metadata.get("model_prob", 0.0)
+                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (Kelly filter: no edge)",
+                    ticker, asset, float(bankroll_usd), price_cents,
                 )
             else:
                 logger.warning(
-                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds $1 fixed exposure cap, requested_count=%d)",
-                    ticker, asset, float(bankroll_usd), price_cents, intent.count
+                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds $1 fixed exposure cap, requested_count_fp=%s)",
+                    ticker, asset, float(bankroll_usd), price_cents, requested,
                 )
-            return 0
-        
-        # If unified_sizing returns a smaller count, log the reduction
-        if count < intent.count:
+            return Decimal(0)
+
+        # unified_sizing returns the maximum whole-contract count the $1 cap
+        # allows.  Keep the requested fractional size as long as it is under that
+        # cap; only cap when the requested size is larger.
+        max_count_fp = Decimal(count)
+        sized = min(requested, max_count_fp)
+
+        if sized < requested:
             logger.info(
-                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> CAPPED from %d to %d contracts ($1 fixed exposure cap, notional=%.2f)",
-                ticker, asset, float(bankroll_usd), price_cents, intent.count, count, float(notional_usd)
+                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> CAPPED from %s to %s contracts ($1 fixed exposure cap)",
+                ticker, asset, float(bankroll_usd), price_cents, requested, sized,
             )
-        
-        return count
-        
+
+        return sized
+
     except Exception as e:
         logger.error("[RISK-BASED-SIZING] Failed to apply risk-based sizing: %s - returning original count for safety", e, exc_info=True)
-        return intent.count
+        return requested
 
 
 def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> tuple[str, str]:
@@ -6177,46 +7301,43 @@ def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
     
     Returns error string if safety check fails, None if OK.
     """
-    # Skip for sell orders (closes)
-    # CRITICAL FIX (2026-07-22): Case-insensitive action check + exit-order exemption.
-    # Legacy exit path passes action="SELL" (uppercase) which failed the lowercase
-    # comparison, so 99c auto-exits were rejected as deep ITM and deep stop-loss
-    # exits as deep OTM (exits carry no edge_pct to qualify for the exception).
-    if (intent.action or "").lower() == "sell" or _is_exit_order(intent):
+    # Skip for exit orders (closes). CRITICAL FIX (2026-08-10): Use canonical
+    # signed-YES exit detection, not the raw action string. SELL_NO with a long
+    # NO position is an exit; SELL_NO with no position is an entry.
+    if _is_exit_order(intent):
         return None
-    
-    # Check 1: Deep OTM/ITM detection
-    if intent.price_cents < DEEP_OTM_THRESHOLD_CENTS:
-        # Allow deep OTM only if edge is exceptional (> threshold)
+
+    # Check 1: Deep OTM/ITM detection using side-aware executable range.
+    # This aligns with agent_grid (YES 1-75, NO 25-99).  In-range prices
+    # proceed; only out-of-range extreme prints require exceptional edge.
+    _side = intent.side
+    if _side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"):
+        _side, _ = parse_kalshi_side(_side)
+    _side = (_side or "").lower()
+
+    _in_range = is_price_in_canonical_range(intent.price_cents, _side)
+    if not _in_range:
+        # Allow deep OTM/ITM only if edge is exceptional (> threshold)
         if not (intent.edge_pct and intent.edge_pct > EXCEPTIONAL_EDGE_THRESHOLD_PCT):
             logger.warning(
-                "[DEPLOYMENT-SAFETY] %s — Deep OTM rejection: price=%dc < threshold=%dc, edge=%.1f%%",
-                intent.ticker, intent.price_cents, DEEP_OTM_THRESHOLD_CENTS, intent.edge_pct or 0
+                "[DEPLOYMENT-SAFETY] %s — Deep OTM/ITM rejection: price=%dc outside side-aware range for side=%s, edge=%.1f%%",
+                intent.ticker, intent.price_cents, _side, intent.edge_pct or 0
             )
             # Track metric
             if SAFETY_METRICS_AVAILABLE:
-                inc_deep_otm_order_rejected(
-                    ticker=intent.ticker,
-                    agent_id=intent.agent_id or "unknown",
-                    price_cents=intent.price_cents,
-                )
-            return f"deployment_safety:deep_otm:price_cents={intent.price_cents}<threshold={DEEP_OTM_THRESHOLD_CENTS}"
-    
-    if intent.price_cents > DEEP_ITM_THRESHOLD_CENTS:
-        # Allow deep ITM only if edge is exceptional (> threshold)
-        if not (intent.edge_pct and intent.edge_pct > EXCEPTIONAL_EDGE_THRESHOLD_PCT):
-            logger.warning(
-                "[DEPLOYMENT-SAFETY] %s — Deep ITM rejection: price=%dc > threshold=%dc, edge=%.1f%%",
-                intent.ticker, intent.price_cents, DEEP_ITM_THRESHOLD_CENTS, intent.edge_pct or 0
-            )
-            # Track metric
-            if SAFETY_METRICS_AVAILABLE:
-                inc_deep_itm_order_rejected(
-                    ticker=intent.ticker,
-                    agent_id=intent.agent_id or "unknown",
-                    price_cents=intent.price_cents,
-                )
-            return f"deployment_safety:deep_itm:price_cents={intent.price_cents}>threshold={DEEP_ITM_THRESHOLD_CENTS}"
+                if _side == "yes" and intent.price_cents < 5:
+                    inc_deep_otm_order_rejected(
+                        ticker=intent.ticker,
+                        agent_id=intent.agent_id or "unknown",
+                        price_cents=intent.price_cents,
+                    )
+                else:
+                    inc_deep_itm_order_rejected(
+                        ticker=intent.ticker,
+                        agent_id=intent.agent_id or "unknown",
+                        price_cents=intent.price_cents,
+                    )
+            return f"deployment_safety:deep_otm_itm:price_cents={intent.price_cents}:side={_side}"
     
     # Check 2: Model probability distance
     if intent.model_prob is not None:
@@ -6615,7 +7736,7 @@ def _check_sanity(intent: OrderIntent, t0: float, mode: TradingMode) -> Optional
 
 # ── Router ────────────────────────────────────────────────────────────────
 
-def _update_gate_on_fill(intent: OrderIntent, fill_count: int) -> None:
+def _update_gate_on_fill(intent: OrderIntent, fill_qty_cc: int) -> None:
     """Transition the gate record through submitted→filled for mock/paper fills.
 
     Without this, the PENDING record inserted by _run_pre_trade_gate is never
@@ -6628,11 +7749,225 @@ def _update_gate_on_fill(intent: OrderIntent, fill_count: int) -> None:
         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
         _ptg = get_pre_trade_gate()
         _ptg.mark_submitted(intent.client_tag)
-        _ptg.mark_filled(intent.client_tag, fill_count)
+        _ptg.mark_filled(intent.client_tag, fill_qty_cc, filled_qty_cc=fill_qty_cc)
         # CRITICAL: Record price execution to prevent repeat price execution
         _record_price_execution(intent)
+        # Promote canonical entry idempotency record to executed.
+        _mark_canonical_entry_executed(intent, fill_id=intent.client_tag)
     except Exception as e:
         logger.debug(f"Failed to update gate on fill: {e}")
+
+
+def _check_fill_adjusted_edge(
+    intent: OrderIntent,
+    fill_price_cents: Optional[int],
+    t0: float,
+    mode: TradingMode,
+) -> Optional[OrderResult]:
+    """Fail-closed gate on fill-adjusted net edge.
+
+    Uses the pre-trade ``ev_net_cents`` (computed at the decision's selected
+    executable price) and the actual/worst-case fill price.  When the fill
+    price is worse than the selected price, the realized edge is reduced by the
+    full difference.  A fill that falls below ``min_required_edge`` is not
+    allowed, because the position would be opened at an unprofitable price.
+    """
+    min_required_edge = getattr(intent, "min_required_edge", None)
+    # 2026-08-20: Backstop: if the signal did not carry a threshold, use the
+    # global trade-decision floor so this gate is never silently disabled.
+    if min_required_edge is None or float(min_required_edge) <= 0:
+        from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
+        min_required_edge = TRADE_DECISION_MIN_REQUIRED_EDGE
+    ev_net_cents = getattr(intent, "ev_net_cents", None)
+    if ev_net_cents is None:
+        return None
+
+    basis = getattr(intent, "selected_outcome_price_cents", None) or getattr(
+        intent, "price_cents", None
+    )
+    if basis is None or basis <= 0:
+        return None
+
+    threshold_cents = float(min_required_edge) * 100.0
+    fill_price = fill_price_cents or getattr(intent, "price_cents", None)
+    if fill_price is None:
+        return None
+
+    # CRITICAL FIX 2026-08-20: account for the change in Kalshi fee as the
+    # repricer moves the fill price away from the signal basis. The fee is
+    # parabolic (depends on P*(1-P)), so a price shift can slightly change the
+    # per-contract fee and therefore the realized net edge.
+    fee_basis = getattr(intent, "fee_cents", None)
+    if fee_basis is None or float(fee_basis) <= 0:
+        fee_basis = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(basis)))
+    else:
+        fee_basis = float(fee_basis)
+    fee_fill = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(fill_price)))
+
+    net_edge_at_fill = float(ev_net_cents) - (float(fill_price) - float(basis)) - (fee_fill - fee_basis)
+    if net_edge_at_fill < threshold_cents - 1e-9:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.critical(
+            "[FILL-EDGE-REJECT] ticker=%s fill_price=%dc basis=%dc "
+            "pretrade_edge=%.2fc fill_edge=%.2fc threshold=%.2fc - rejecting fill",
+            intent.ticker,
+            fill_price,
+            basis,
+            float(ev_net_cents),
+            net_edge_at_fill,
+            threshold_cents,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"fill_adjusted_edge_below_threshold:fill_edge={net_edge_at_fill:.2f}c,threshold={threshold_cents:.2f}c",
+            latency_ms=round(latency, 2),
+        )
+    return None
+
+
+def _compute_net_edge_at_fill(intent: OrderIntent, fill_price_cents: int) -> Optional[float]:
+    """Return net edge in cents using the actual fill price.
+
+    Pre-trade ``ev_net_cents`` is anchored at the decision's selected executable
+    price (``selected_outcome_price_cents``).  The fill edge is shifted by the
+    difference between fill and that basis, plus the change in Kalshi fee as the
+    fill price moves.
+    """
+    ev_net_cents = getattr(intent, "ev_net_cents", None)
+    basis = getattr(intent, "selected_outcome_price_cents", None) or getattr(
+        intent, "price_cents", None
+    )
+    if ev_net_cents is None or basis is None or basis <= 0:
+        return None
+    try:
+        fee_basis = getattr(intent, "fee_cents", None)
+        if fee_basis is None or float(fee_basis) <= 0:
+            fee_basis = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(basis)))
+        else:
+            fee_basis = float(fee_basis)
+        fee_fill = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(fill_price_cents)))
+        return float(ev_net_cents) - (float(fill_price_cents) - float(basis)) - (fee_fill - fee_basis)
+    except Exception:
+        return None
+
+
+async def _apply_order_result_to_canonical_state(
+    intent: OrderIntent, result: OrderResult
+) -> None:
+    """Apply a paper/mock/live fill to the canonical fills ledger and position cache.
+
+    Paper fills do not arrive via WebSocket, so the router must explicitly mutate
+    the canonical position state when ``has_execution`` is true.  This keeps the
+    position cache, fills ledger, and position monitor synchronized with paper
+    and mock execution.
+    """
+    if not result or not result.has_execution or not result.fill:
+        return
+
+    fill = result.fill
+    status = result.status or ""
+    # CRITICAL: only apply paper/mock fills here.  Live fills are ingested
+    # through the authoritative WebSocket / HTTP poller path with real Kalshi
+    # fill IDs; applying them from the router would double-count.
+    if status not in {"filled_mock", "filled_paper"}:
+        return
+
+    fill_price = fill.get("price_cents")
+    filled_count_fp = Decimal(str(fill.get("count_fp"))) if fill.get("count_fp") is not None else None
+    if filled_count_fp is None and "quantity_cc" in fill:
+        filled_count_fp = Decimal(str(fill["quantity_cc"])) / Decimal("100")
+    if not filled_count_fp or filled_count_fp <= 0 or not fill_price:
+        return
+
+    # Resolve canonical side/action from intent.
+    side_raw = intent.side
+    action_raw = intent.action
+    try:
+        from merid.event_venues.kalshi.binary_price_space import parse_kalshi_side
+
+        canonical_side, _ = parse_kalshi_side(side_raw)
+    except Exception:
+        canonical_side = side_raw
+
+    canonical_action = action_raw
+    if canonical_action not in ("buy", "sell"):
+        canonical_action = "buy" if "buy" in canonical_action.lower() else "sell"
+
+    # Signed YES centi-contract delta.
+    from merid.event_venues.kalshi.binary_price_space import yes_delta
+
+    quantity_cc = int(filled_count_fp * Decimal("100"))
+    yes_delta_cc = yes_delta(canonical_action, canonical_side, quantity_cc)
+
+    fill_id = fill.get("fill_id") or f"paper_{intent.intent_id}_{int(_time.time()*1000)}"
+    client_order_id = intent.client_order_id or intent.client_tag or intent.intent_id
+    is_exit = _is_exit_order(intent)
+
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger, KalshiFill
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        ledger = get_fills_ledger()
+        kalshi_fill = KalshiFill(
+            fill_id=str(fill_id),
+            order_id=result.order_id or fill.get("order_id") or client_order_id,
+            market_id=intent.ticker,
+            market_ticker=intent.ticker,
+            side=canonical_side,
+            action=canonical_action,
+            count_fp=filled_count_fp,
+            quantity_cc=quantity_cc,
+            price_cents=int(fill_price),
+            fee_cost=Decimal(str(fill.get("fee_cents", 0))) / Decimal("100"),
+            client_order_id=client_order_id,
+            created_time=datetime.now(timezone.utc),
+            agent_id=intent.agent_id,
+            intent_id=intent.intent_id,
+            is_exit=is_exit,
+            reduce_only=bool(getattr(intent, "reduce_only", False)),
+            entry_or_exit=getattr(intent, "entry_or_exit", "exit" if is_exit else "entry"),
+            canonical_position_side=canonical_side,
+            canonical_position_action=canonical_action,
+            canonical_leg_price_cents=int(fill_price),
+            canonical_yes_delta_cc=yes_delta_cc,
+            canonicalization_state="TRUSTED_PAPER_V1",
+            intent_target_side=canonical_side,
+            intent_action=canonical_action,
+            intent_yes_delta_cc=yes_delta_cc,
+            is_live=False,
+            all_in_cost_cents=getattr(intent, "all_in_cost_cents", None),
+            ev_net_cents=getattr(intent, "ev_net_cents", None),
+            fee_cents=getattr(intent, "fee_cents", None),
+            slippage_cents=fill.get("slippage_cents"),
+            time_to_expiry_seconds=getattr(intent, "time_to_expiry_seconds", None),
+            settlement_input_price=getattr(intent, "settlement_input_price", None),
+            cf_rti_basis=getattr(intent, "cf_rti_basis", None),
+            is_counter_trend=bool(getattr(intent, "is_counter_trend", False)),
+            thesis_side=getattr(intent, "thesis_side", None),
+            execution_outcome_side=canonical_side,
+            execution_action=canonical_action,
+            execution_price_cents=int(fill_price),
+        )
+        ledger.on_fill(kalshi_fill)
+
+        cache = get_position_cache()
+        if cache:
+            await cache.on_fill(
+                market_id=intent.ticker,
+                contracts=int(filled_count_fp),
+                price_cents=int(fill_price),
+                fee_cents=int(fill.get("fee_cents", 0) or 0),
+                side=canonical_side,
+                client_order_id=client_order_id,
+                fill_id=str(fill_id),
+                action=canonical_action,
+                is_exit=is_exit,
+                quantity_cc=quantity_cc,
+                canonicalization_state="TRUSTED_PAPER_V1",
+            )
+    except Exception as e:
+        logger.warning("[PAPER-FILL-CANONICAL-APPLY] Failed to apply fill to ledger/cache: %s", e)
 
 
 def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
@@ -6657,31 +7992,41 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
     
     # Enforce fixed $1 exposure cap sizing via unified_sizing (global slot allocator model)
     # This applies to MOCK/PAPER modes as well for consistency
-    original_count = intent.count
-    intent.count = _apply_risk_based_order_sizing(intent)
-    
+    original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    sized_fp = _apply_risk_based_order_sizing(intent)
+    if sized_fp is not None:
+        intent.count_fp = sized_fp
+        intent.count = int(sized_fp)
+
     # Reject order if slot-based sizing returned 0 (exceeds $1 fixed exposure cap)
-    if intent.count == 0:
+    if sized_fp is None or sized_fp <= 0:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
-            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count=%d price=%dc mode=%s",
-            intent.ticker, original_count, intent.price_cents, _mode_value(mode)
+            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc mode=%s",
+            intent.ticker, original_count_fp, intent.price_cents, _mode_value(mode)
         )
+        _release_canonical_entry_idempotency(intent)
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count},price={intent.price_cents}c",
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count_fp},price={intent.price_cents}c",
             latency_ms=round(latency, 2),
         )
     
     if _is_mock_mode(mode):
         fill = simulate_paper_fill(intent)
+        fill_rejection = _check_fill_adjusted_edge(
+            intent, fill.get("price_cents"), t0, mode
+        )
+        if fill_rejection:
+            _release_canonical_entry_idempotency(intent)
+            return fill_rejection
         latency = (_time.monotonic() - t0) * 1000
         logger.info(
             f"[order-router] MOCK fill {intent.ticker} {intent.action} "
-            f"{intent.count}x @ {intent.price_cents}c"
+            f"{intent.count_fp}x @ {intent.price_cents}c"
         )
-        _update_gate_on_fill(intent, fill.get("count", intent.count))
+        _update_gate_on_fill(intent, fill.get("quantity_cc", int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else intent.count))
         return OrderResult(
             status="filled_mock",
             mode=mode,
@@ -6691,12 +8036,18 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
 
     if _is_paper_mode(mode):
         fill = simulate_paper_fill(intent)
+        fill_rejection = _check_fill_adjusted_edge(
+            intent, fill.get("price_cents"), t0, mode
+        )
+        if fill_rejection:
+            _release_canonical_entry_idempotency(intent)
+            return fill_rejection
         latency = (_time.monotonic() - t0) * 1000
         logger.info(
             f"[order-router] PAPER fill {intent.ticker} {intent.action} "
-            f"{intent.count}x @ {intent.price_cents}c"
+            f"{intent.count_fp}x @ {intent.price_cents}c"
         )
-        _update_gate_on_fill(intent, fill.get("count", intent.count))
+        _update_gate_on_fill(intent, fill.get("quantity_cc", int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else intent.count))
         return OrderResult(
             status="filled_paper",
             mode=mode,
@@ -6809,6 +8160,172 @@ def _release_allocated_slot(intent: OrderIntent) -> None:
         logger.debug("[order-router] No slot_id to release for ticker=%s (slot may not have been allocated)", intent.ticker)
 
 
+def _release_canonical_entry_idempotency(intent: OrderIntent) -> None:
+    """Release the contract-side entry idempotency record for a rejected intent.
+
+    Safe to call from any rejection path.  Only pre-submit records are released;
+    a record that has already progressed to submitted/executed is left untouched
+    so a real in-flight order is not accidentally unlocked.
+    """
+    key = getattr(intent, "_canonical_entry_key", None)
+    if not key:
+        return
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            release_entry_idempotency,
+        )
+
+        release_entry_idempotency(
+            market_ticker=key[0],
+            contract=key[1],
+            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+        )
+    except Exception as exc:
+        logger.debug(
+            "[order-router] canonical entry idempotency release failed: %s", exc
+        )
+
+
+def _mark_canonical_entry_submitted(intent: OrderIntent, order_id: Optional[str] = None) -> None:
+    """Promote the canonical entry idempotency record to submitted."""
+    key = getattr(intent, "_canonical_entry_key", None)
+    if not key:
+        return
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            mark_entry_idempotency_submitted,
+        )
+
+        mark_entry_idempotency_submitted(
+            market_ticker=key[0],
+            contract=key[1],
+            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+            order_id=order_id,
+        )
+    except Exception as exc:
+        logger.debug(
+            "[order-router] canonical entry idempotency mark submitted failed: %s", exc
+        )
+
+
+def _mark_canonical_entry_reconciliation_required(
+    intent: OrderIntent, reason: Optional[str] = None
+) -> None:
+    """Mark the canonical entry idempotency record as reconciliation-required."""
+    key = getattr(intent, "_canonical_entry_key", None)
+    if not key:
+        return
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            mark_entry_idempotency_reconciliation_required,
+        )
+
+        mark_entry_idempotency_reconciliation_required(
+            market_ticker=key[0],
+            contract=key[1],
+            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+            reason=reason,
+        )
+    except Exception as exc:
+        logger.debug(
+            "[order-router] canonical entry idempotency mark reconciliation required failed: %s", exc
+        )
+
+
+def _mark_canonical_entry_executed(intent: OrderIntent, fill_id: Optional[str] = None) -> None:
+    """Promote the canonical entry idempotency record to executed."""
+    key = getattr(intent, "_canonical_entry_key", None)
+    if not key:
+        return
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            mark_entry_idempotency_executed,
+        )
+
+        mark_entry_idempotency_executed(
+            market_ticker=key[0],
+            contract=key[1],
+            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+            fill_id=fill_id,
+        )
+    except Exception as exc:
+        logger.debug(
+            "[order-router] canonical entry idempotency mark executed failed: %s", exc
+        )
+
+
+def _post_route_canonical_idempotency_cleanup(
+    intent: OrderIntent,
+    result: Optional[OrderResult],
+) -> None:
+    """Finalize canonical (and gate) idempotency after any route attempt.
+
+    Ensures pre-submit rejection paths do not leave a stale canonical record
+    blocking a retry.  Real fills are promoted to executed; resting/submitted
+    outcomes are promoted to submitted; terminal no-execution outcomes are
+    released only when we are certain no exchange order is in flight.
+    Ambiguous / submission-unknown outcomes are marked for reconciliation.
+    """
+    if result is None:
+        _release_canonical_entry_idempotency(intent)
+        return
+
+    if result.has_execution or result.status in {
+        "filled_mock",
+        "filled_paper",
+        "filled_live",
+        "partial_live",
+        "partial_fill",
+    }:
+        _mark_canonical_entry_executed(intent, fill_id=None)
+        return
+
+    if result.status in ("accepted_live", "submitted_live", "resting"):
+        _mark_canonical_entry_submitted(intent, order_id=result.order_id)
+        return
+
+    if result.status in ("submission_unknown", "duplicate_unknown") or result.requires_recovery:
+        _mark_canonical_entry_reconciliation_required(
+            intent, reason=result.reason or "post_route_recovery"
+        )
+        return
+
+    # rejected / unfilled_ioc / canceled / expired
+    if result.status in ("rejected", "unfilled_ioc", "canceled", "expired"):
+        # A rejection that left the process without an ack or durable order ID
+        # is indistinguishable from a lost submission: keep the record locked
+        # for reconciliation rather than risk a duplicate live order.
+        if (
+            result.submission_attempted
+            and not result.exchange_ack_received
+            and not result.order_id
+        ):
+            _mark_canonical_entry_reconciliation_required(
+                intent, reason=result.reason or "post_route_uncertain_reject"
+            )
+            return
+
+        # Safe to release only when we know no exchange request was sent,
+        # or when the venue confirmed the rejection terminal.
+        no_request = (
+            not result.submission_attempted
+            and not result.exchange_request_sent
+            and not result.order_id
+        )
+        acked_terminal = result.exchange_ack_received or result.request_completed
+        if no_request or acked_terminal:
+            _release_canonical_entry_idempotency(intent)
+            if getattr(intent, "client_tag", None):
+                _release_gate_record(intent, result.reason or "post_route_cleanup")
+        else:
+            _mark_canonical_entry_reconciliation_required(
+                intent, reason=result.reason or "post_route_uncertain_reject"
+            )
+        return
+
+    # Unknown status: treat conservatively as reconciliation-required.
+
+
 def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
     """Mark the pre-trade gate record as REJECTED so the slot is freed.
 
@@ -6819,6 +8336,9 @@ def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
     cleanup happens even if gate stamping failed.
     
     CRITICAL FIX (2026-07-12): Also releases the allocated slot to prevent leaks.
+    
+    CRITICAL FIX (2026-08-16): Also releases the canonical entry idempotency
+    record when the order never reached the exchange.
     """
     # CRITICAL FIX (2026-07-12): Release allocated slot if present
     _release_allocated_slot(intent)
@@ -6837,6 +8357,10 @@ def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
         logger.debug("[order-router] Released gate record for %s: %s", tag[:32], reason[:50])
     except Exception as e:
         logger.debug(f"[CRASH-013] Failed to release gate record for {tag[:32]}: {e}")
+
+    # Release the canonical entry idempotency record when a PENDING gate record
+    # is being released, i.e. the order never reached the exchange.
+    _release_canonical_entry_idempotency(intent)
 
 
 def _record_price_execution(intent: OrderIntent) -> None:
@@ -7041,7 +8565,7 @@ def _prepare_order_for_gate(
     # Execution planning
     original_order_type = intent.order_type
     original_tif = intent.time_in_force
-    original_count = intent.count
+    original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
     original_price = intent.price_cents
 
     intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
@@ -7061,51 +8585,46 @@ def _prepare_order_for_gate(
             latency_ms=round(latency, 2),
         ), None
 
-    # Sizing: risk before depth, then risk again to cap
-    intent.count = _apply_risk_based_order_sizing(intent)
-    if intent.count > 0:
-        intent.count = _apply_depth_based_order_sizing(intent, state)
-        intent.count = _apply_risk_based_order_sizing(intent)
+    # Sizing: risk before depth, then risk again to cap.
+    # Work in fixed-point contracts; ``count`` is kept as the display floor.
+    sized_fp = _apply_risk_based_order_sizing(intent)
+    if sized_fp and sized_fp > 0:
+        sized_fp = _apply_depth_based_order_sizing(intent, state)
+        sized_fp = _apply_risk_based_order_sizing(intent)
+    if sized_fp is not None:
+        intent.count_fp = sized_fp
+        intent.count = int(sized_fp)
 
-    # Recompute expected fee using the planned price and final size
+    if sized_fp is None or sized_fp <= 0:
+        latency = (_time.monotonic() - t0) * 1000
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={intent.count_fp},price={intent.price_cents}c",
+            latency_ms=round(latency, 2),
+        ), None
+
+    # Recompute expected fee using the planned price and final size.
     try:
         from merid.prediction.kalshi_maker_taker_contract import (
-            compute_expected_fee,
+            compute_fee_estimate,
             LiquidityRole,
         )
-        intent.estimated_fee_cents = compute_expected_fee(
+        _qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+        _fee = compute_fee_estimate(
             LiquidityRole(intent.liquidity_role),
             intent.price_cents,
-            intent.count or 1,
+            Decimal(_qty_cc),
         )
+        intent.estimated_fee_cents = int(round(_fee.fee_cents))
     except Exception:
         pass
 
     # Liquidity-role price placement invariant
     if intent.liquidity_role and state and not _is_exit:
         try:
-            from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
-            side_lower = intent.side.lower() if intent.side else ""
-            if "yes" in side_lower:
-                outcome_side = "yes"
-            elif "no" in side_lower:
-                outcome_side = "no"
-            else:
-                outcome_side = side_lower
-            if outcome_side == "yes":
-                best_bid = state.best_bid_cents
-                best_ask = state.best_ask_cents
-            else:
-                best_bid = state.best_no_bid_cents if state.best_no_bid_cents else (100 - state.best_ask_cents if state.best_ask_cents else None)
-                best_ask = state.best_no_ask_cents if state.best_no_ask_cents else (100 - state.best_bid_cents if state.best_bid_cents else None)
-
-            is_valid, error = validate_price_placement_invariant(
-                role=intent.liquidity_role,
-                side=intent.side,
-                action=intent.action,
-                price_cents=intent.price_cents,
-                best_bid=best_bid,
-                best_ask=best_ask,
+            is_valid, error = _validate_canonical_price_placement(
+                intent, intent.liquidity_role, intent.price_cents, state
             )
             if not is_valid:
                 latency = (_time.monotonic() - t0) * 1000
@@ -7127,59 +8646,118 @@ def _prepare_order_for_gate(
         except ImportError:
             logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
 
-    # Staleness SLO checks (snapshot_age_ms and computed_age_ms)
-    STALENESS_SLO_MS = 5000.0
-    if intent.snapshot_age_ms > STALENESS_SLO_MS and not _is_exit:
+    # Staleness SLO checks: use live orderbook age, not intent creation time.
+    STALENESS_SLO_MS = float(os.getenv("MERID_STALENESS_SLO_MS", "5000.0"))
+    if state and hasattr(state, "age_ms") and state.age_ms is not None:
+        book_age_ms = float(state.age_ms)
+    else:
+        book_age_ms = 0.0
+    if book_age_ms == 0.0 and intent.snapshot_ts:
+        book_age_ms = (_time.time() - intent.snapshot_ts) * 1000.0
+
+    if book_age_ms > STALENESS_SLO_MS and not _is_exit:
         latency = (_time.monotonic() - t0) * 1000
         logger.error(
             f"[STALENESS-SLO] Rejected order: book snapshot too old | ticker={intent.ticker} | "
-            f"snapshot_age_ms={intent.snapshot_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
+            f"book_age_ms={book_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
         )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"staleness_slo:book_snapshot_age_{intent.snapshot_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+            reason=f"staleness_slo:book_age_{book_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
             latency_ms=round(latency, 2),
         ), None
 
-    current_time = _time.time()
-    computed_age_ms = (current_time - intent.snapshot_ts) * 1000.0
-    intent.snapshot_age_ms = computed_age_ms
-    if computed_age_ms > STALENESS_SLO_MS and not _is_exit:
-        latency = (_time.monotonic() - t0) * 1000
-        logger.error(
-            f"[STALENESS-SLO] Rejected order: computed snapshot age too old | ticker={intent.ticker} | "
-            f"computed_age_ms={computed_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
-        )
-        return OrderResult(
-            status="rejected",
-            mode=mode,
-            reason=f"staleness_slo:computed_age_{computed_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
-            latency_ms=round(latency, 2),
-        ), None
+    intent.snapshot_age_ms = book_age_ms
 
     # Reject order if slot-based sizing returned 0
-    if intent.count == 0 and not _is_exit:
+    qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+    if qty_cc == 0 and not _is_exit:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
-            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count=%d price=%dc",
-            intent.ticker, original_count, original_price
+            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc",
+            intent.ticker, original_count_fp, original_price
         )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count},price={original_price}c",
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count_fp},price={original_price}c",
             latency_ms=round(latency, 2),
         ), None
+
+    # CRITICAL FIX (2026-08-10): Reject entry orders whose worst-case executable
+    # fill exposure would exceed the fixed cap after price adjustment and sizing.
+    # For IOC/taker orders the executable price is the adjusted limit price, so
+    # count * price_cents is the worst-case fill notional. This must be checked
+    # after _adjust_order_price_for_fill_rate and sizing, not just on the
+    # requested price/count.
+    if not _is_exit and qty_cc > 0:
+        try:
+            from merid.risk.global_slot_allocator import get_global_slot_allocator
+            from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
+
+            slot_allocator = get_global_slot_allocator()
+            asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else None
+            if asset:
+                can_allocate, alloc_reason = slot_allocator.can_allocate(intent.price_cents, asset)
+                if not can_allocate:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.warning(
+                        "[order-router] Order rejected — slot allocator rejects executable price: ticker=%s price=%dc reason=%s",
+                        intent.ticker, intent.price_cents, alloc_reason
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"risk_limit_exceeded:slot_allocator_executable:{alloc_reason}",
+                        latency_ms=round(latency, 2),
+                    ), None
+
+                current_exposure = slot_allocator.get_total_exposure()
+                max_total_notional = float(getattr(slot_allocator, "MAX_EXPOSURE_USD", 1.0))
+                order_notional = (qty_cc * intent.price_cents) / 10000.0
+                if current_exposure + order_notional > max_total_notional:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.warning(
+                        "[order-router] Order rejected — worst-case executable fill exposure exceeds cap: "
+                        "ticker=%s qty_cc=%d price=%dc notional=%.4f current=%.2f cap=%.2f",
+                        intent.ticker, qty_cc, intent.price_cents, order_notional, current_exposure, max_total_notional
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"risk_limit_exceeded:executable_worst_case:{order_notional:.2f}usd_would_exceed_{max_total_notional:.2f}usd",
+                        latency_ms=round(latency, 2),
+                    ), None
+        except Exception as e:
+            logger.error("[order-router] Executable exposure cap check failed: %s", e)
 
     if (intent.order_type != original_order_type or
         intent.time_in_force != original_tif or
-        intent.count != original_count or
+        intent.count_fp != original_count_fp or
         intent.price_cents != original_price):
         logger.info(
-            "[DYNAMIC-ORDER-TYPE] ticker=%s order_type changed from %s to %s, tif from %s to %s, count from %d to %d, price from %dc to %dc based on market conditions",
-            intent.ticker, original_order_type, intent.order_type, original_tif, intent.time_in_force, original_count, intent.count, original_price, intent.price_cents
+            "[DYNAMIC-ORDER-TYPE] ticker=%s order_type changed from %s to %s, tif from %s to %s, count_fp from %s to %s, price from %dc to %dc based on market conditions",
+            intent.ticker, original_order_type, intent.order_type, original_tif, intent.time_in_force, original_count_fp, intent.count_fp, original_price, intent.price_cents
         )
+
+    # PRE-TRADE FILL-ADJUSTED EDGE CHECK (2026-08-20): The repricer may have moved
+    # the limit price beyond the price where the pre-trade net edge is still above
+    # min_required_edge. Reject here before any wire request is attempted so the
+    # exchange is never asked to fill at an unprofitable price.
+    if not _is_exit:
+        _fill_edge_result = _check_fill_adjusted_edge(intent, intent.price_cents, t0, mode)
+        if _fill_edge_result is not None:
+            logger.critical(
+                "[PRE-TRADE-FILL-EDGE-REJECT] ticker=%s price=%dc selected_basis=%s "
+                "ev_net_cents=%s min_required_edge=%s - not routing",
+                intent.ticker,
+                intent.price_cents,
+                getattr(intent, "selected_outcome_price_cents", None),
+                getattr(intent, "ev_net_cents", None),
+                getattr(intent, "min_required_edge", None),
+            )
+            return _fill_edge_result, None
 
     return None, state
 
@@ -7192,6 +8770,25 @@ async def _route_live(
     plan_done: bool = False,
 ) -> OrderResult:
     """Route LIVE intents through the canonical KalshiVenueClient."""
+    # Durable identity finalization is idempotent. It is performed early in
+    # _route_order_async_impl / _route_order_impl, but _route_live may be called
+    # directly by tests or batch paths. Ensure the canonical coid exists before
+    # any wire request is built.
+    try:
+        finalize_order_identity(intent)
+    except OrderIdentityError as identity_err:
+        logger.critical(
+            "[ORDER-IDENTITY-REJECT] intent_id=%s error=%s",
+            getattr(intent, "intent_id", None),
+            identity_err,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"identity_error:{identity_err}",
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
+
     # CRITICAL FIX: Initialize _exp_tracker to None to prevent NameError
     # CategoryExposureTracker is deprecated and replaced by UnifiedRiskManager
     # The exposure tracking is now handled by UnifiedRiskManager.check_order()
@@ -7318,7 +8915,7 @@ async def _route_live(
         _is_exit_gate = _is_exit_order(intent)
         original_order_type = intent.order_type
         original_tif = intent.time_in_force
-        original_count = intent.count
+        original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
         original_price = intent.price_cents
 
         if not plan_done or prepared_state is None:
@@ -7342,36 +8939,10 @@ async def _route_live(
             # exits crossing the spread, stop-losses far from mid). Blocking them traps positions.
             if not _is_exit_order(intent):
                 try:
-                    from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
-                    # Get orderbook data from state if available
-                    # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
-                    side_lower = intent.side.lower() if intent.side else ""
-                    if "yes" in side_lower:
-                        outcome_side = "yes"
-                    elif "no" in side_lower:
-                        outcome_side = "no"
-                    else:
-                        outcome_side = side_lower
-                    # CRITICAL FIX (2026-08-01): Use correct field names from KalshiMarketState
-                    # KalshiMarketState has best_bid_cents and best_ask_cents, not yes_bid_cents/no_bid_cents
-                    # For NO-side, we need to use the NO-side specific fields if available
-                    if outcome_side == "yes":
-                        best_bid = state.best_bid_cents
-                        best_ask = state.best_ask_cents
-                    else:
-                        # NO-side: use NO-specific fields if available, otherwise derive from YES-space
-                        best_bid = state.best_no_bid_cents if state.best_no_bid_cents else (100 - state.best_ask_cents if state.best_ask_cents else None)
-                        best_ask = state.best_no_ask_cents if state.best_no_ask_cents else (100 - state.best_bid_cents if state.best_bid_cents else None)
-                    
-                    is_valid, error = validate_price_placement_invariant(
-                        role=intent.liquidity_role,
-                        side=intent.side,
-                        action=intent.action,
-                        price_cents=intent.price_cents,
-                        best_bid=best_bid,
-                        best_ask=best_ask,
+                    is_valid, error = _validate_canonical_price_placement(
+                        intent, intent.liquidity_role, intent.price_cents, state
                     )
-                    
+
                     if not is_valid:
                         latency = (_time.monotonic() - t0) * 1000
                         logger.error(
@@ -7393,47 +8964,34 @@ async def _route_live(
                     logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
         
         if not plan_done:
-            # CRITICAL FIX (2026-07-19): Staleness SLO check - reject orders with stale book snapshots
-            # This prevents AUTO from making maker/taker decisions based on outdated market data
-            # CRITICAL FIX (2026-07-22): Exit orders bypass staleness SLO - stale snapshots are
-            # often WHY exits fire (stale_data exit reason). Blocking them here is circular.
-            STALENESS_SLO_MS = 5000.0  # 5 second staleness SLO for 15m markets
-            if intent.snapshot_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
+            # CRITICAL FIX (2026-08-16): Staleness SLO now measures live orderbook age,
+            # not the time since the intent was created. The book can stay fresh while the
+            # async routing pipeline is delayed by other tasks, so rejecting on intent age
+            # produced spurious staleness rejections. The SLO is overridable via env.
+            STALENESS_SLO_MS = float(os.getenv("MERID_STALENESS_SLO_MS", "5000.0"))
+            if state and hasattr(state, "age_ms") and state.age_ms is not None:
+                book_age_ms = float(state.age_ms)
+            else:
+                book_age_ms = 0.0
+            # Backward-compatible fallback: if no fresh state, use the exchange timestamp on the intent.
+            if book_age_ms == 0.0 and intent.snapshot_ts:
+                book_age_ms = (_time.time() - intent.snapshot_ts) * 1000.0
+
+            if book_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
                 latency = (_time.monotonic() - t0) * 1000
                 logger.error(
                     f"[STALENESS-SLO] Rejected order: book snapshot too old | ticker={intent.ticker} | "
-                    f"snapshot_age_ms={intent.snapshot_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
+                    f"book_age_ms={book_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
                 )
                 return OrderResult(
                     status="rejected",
                     mode=mode,
-                    reason=f"staleness_slo:book_snapshot_age_{intent.snapshot_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+                    reason=f"staleness_slo:book_age_{book_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
                     latency_ms=round(latency, 2),
                 )
-            
-            # CRITICAL FIX (2026-07-19): Recompute snapshot age at submission time
-            # This catches race conditions where the book moved between snapshot and submission
-            current_time = _time.time()
-            computed_age_ms = (current_time - intent.snapshot_ts) * 1000.0
-            
-            # Update snapshot_age_ms with computed value for accurate staleness tracking
-            intent.snapshot_age_ms = computed_age_ms
-            
-            # Double-check staleness with computed age
-            # CRITICAL FIX (2026-07-22): Exit orders bypass recomputed staleness SLO.
-            # Stale snapshots are often WHY exits fire - blocking them here is circular.
-            if computed_age_ms > STALENESS_SLO_MS and not _is_exit_order(intent):
-                latency = (_time.monotonic() - t0) * 1000
-                logger.error(
-                    f"[STALENESS-SLO] Rejected order: computed snapshot age too old | ticker={intent.ticker} | "
-                    f"computed_age_ms={computed_age_ms:.0f}ms | SLO={STALENESS_SLO_MS}ms"
-                )
-                return OrderResult(
-                    status="rejected",
-                    mode=mode,
-                    reason=f"staleness_slo:computed_age_{computed_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
-                    latency_ms=round(latency, 2),
-                )
+
+            # Record the book age for audit and downstream freshness logging.
+            intent.snapshot_age_ms = book_age_ms
             
             # CRITICAL FIX (2026-07-19): Recompute maker/taker classification at submission time
             # This catches cases where AUTO resolved to maker/taker based on stale data
@@ -7454,21 +9012,23 @@ async def _route_live(
                     time_to_expiry_seconds = getattr(intent, 'max_hold_seconds', 600.0) or 600.0
                     is_exit = _is_exit_order(intent)
                     
-                    resolved_role = resolve_auto_liquidity_role(
+                    role_decision = resolve_auto_liquidity_role(
                         edge_pct=edge_pct,
                         time_to_expiry_seconds=time_to_expiry_seconds,
                         orderbook_depth=orderbook_depth,
                         is_exit=is_exit,
                     )
-                    
+                    resolved_role = role_decision.resolved_role
+
                     # Update intent with resolved role
                     original_role = intent.liquidity_role
                     intent.liquidity_role = resolved_role.value
-                    
+
                     logger.info(
                         f"[LIQUIDITY-ROLE-RECOMPUTE-SIDE-AWARE] Recomputed AUTO at submission | ticker={intent.ticker} | "
-                        f"outcome_side={outcome_side} | original=auto | resolved={resolved_role.value} | edge={edge_pct:.1f}% | "
-                        f"depth={orderbook_depth} | time_to_expiry={time_to_expiry_seconds:.0f}s | is_exit={is_exit}"
+                        f"outcome_side={outcome_side} | original=auto | resolved={resolved_role.value} | "
+                        f"edge={edge_pct:.1f}% | depth={orderbook_depth} | time_to_expiry={time_to_expiry_seconds:.0f}s | "
+                        f"is_exit={is_exit} | rationale={role_decision.rationale_code} | profile={role_decision.profile_id}/{role_decision.profile_version}"
                     )
                 except ImportError:
                     logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping AUTO recompute")
@@ -7480,37 +9040,15 @@ async def _route_live(
         # snapshot (e.g., marketable exits crossing the spread, stop-losses far from mid).
         if state and intent.liquidity_role and not _is_exit_order(intent):
             try:
-                from merid.prediction.kalshi_maker_taker_contract import validate_price_placement_invariant
-                # Get current orderbook data from state
-                # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
-                side_lower = intent.side.lower() if intent.side else ""
-                if "yes" in side_lower:
-                    outcome_side = "yes"
-                elif "no" in side_lower:
-                    outcome_side = "no"
-                else:
-                    outcome_side = side_lower
-                # CRITICAL FIX (2026-08-01): Use correct field names from KalshiMarketState
-                # KalshiMarketState has best_bid_cents and best_ask_cents, not yes_bid_cents/no_bid_cents
-                # For NO-side, we need to use the NO-side specific fields if available
-                if outcome_side == "yes":
-                    best_bid = state.best_bid_cents
-                    best_ask = state.best_ask_cents
-                else:
-                    # NO-side: use NO-specific fields if available, otherwise derive from YES-space
-                    best_bid = state.best_no_bid_cents if state.best_no_bid_cents else (100 - state.best_ask_cents if state.best_ask_cents else None)
-                    best_ask = state.best_no_ask_cents if state.best_no_ask_cents else (100 - state.best_bid_cents if state.best_bid_cents else None)
-                
+                book = _canonical_yes_book_from_state(state)
+                best_bid = book.yes_bid_cents if book else None
+                best_ask = book.yes_ask_cents if book else None
+
                 # Re-validate price placement with current book
-                is_valid, error = validate_price_placement_invariant(
-                    role=intent.liquidity_role,
-                    side=intent.side,
-                    action=intent.action,
-                    price_cents=intent.price_cents,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
+                is_valid, error = _validate_canonical_price_placement(
+                    intent, intent.liquidity_role, intent.price_cents, state
                 )
-                
+
                 if not is_valid:
                     latency = (_time.monotonic() - t0) * 1000
                     logger.error(
@@ -7536,24 +9074,26 @@ async def _route_live(
         # CRITICAL FIX (2026-07-22): Exit orders bypass the $1 fixed exposure cap.
         # Exits REDUCE exposure - blocking them for exceeding the cap traps positions
         # that can never be closed. The slot allocator already exempts exits (is_exit_order=True).
-        if intent.count == 0 and not _is_exit_order(intent):
+        # CRITICAL FIX (2026-08-18): Use canonical quantity_cc for fractional sizing.
+        qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+        if qty_cc == 0 and not _is_exit_order(intent):
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
-                "[order-router] Live order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count=%d price=%dc",
-                intent.ticker, original_count, original_price
+                "[order-router] Live order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc",
+                intent.ticker, original_count_fp, original_price
             )
             _release_gate_record(intent, f"risk_limit_exceeded:{intent.ticker}")
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count},price={original_price}c",
+                reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count_fp},price={original_price}c",
                 latency_ms=round(latency, 2),
             )
-        
-        if intent.order_type != original_order_type or intent.time_in_force != original_tif or intent.count != original_count or intent.price_cents != original_price:
+
+        if intent.order_type != original_order_type or intent.time_in_force != original_tif or intent.count_fp != original_count_fp or intent.price_cents != original_price:
             logger.info(
-                "[DYNAMIC-ORDER-TYPE] ticker=%s order_type changed from %s to %s, tif from %s to %s, count from %d to %d, price from %dc to %dc based on market conditions",
-                intent.ticker, original_order_type, intent.order_type, original_tif, intent.time_in_force, original_count, intent.count, original_price, intent.price_cents
+                "[DYNAMIC-ORDER-TYPE] ticker=%s order_type changed from %s to %s, tif from %s to %s, count_fp from %s to %s, price from %dc to %dc based on market conditions",
+                intent.ticker, original_order_type, intent.order_type, original_tif, intent.time_in_force, original_count_fp, intent.count_fp, original_price, intent.price_cents
             )
 
         # Market liquidity check
@@ -7868,20 +9408,10 @@ async def _route_live(
         # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
         # SELL actions are ONLY for exit trades
         # This is a downstream safety net to catch any bugs that bypass upstream checks
-        if intent.action == "sell":
-            # Check if this is an entry order (no existing position)
-            # Entry orders are identified by entry_or_exit field if available
-            # Fallback to legacy detection via exit_policy_id or exit_reason in rationale
-            is_exit_order = False
-            
-            # Check for formal entry_or_exit field (from IntentContract)
-            if hasattr(intent, 'entry_or_exit') and intent.entry_or_exit is not None:
-                is_exit_order = (intent.entry_or_exit == "exit")
-            else:
-                # Use shared exit order detection utility
-                is_exit_order = _is_exit_order(intent)
-            
-            if not is_exit_order:
+        # CRITICAL FIX (2026-08-10): Use canonical signed-YES exit detection. A
+        # SELL that reduces an existing same-side position is an exit; a SELL
+        # that opens new exposure (or is marked entry) is rejected.
+        if intent.action == "sell" and not _is_exit_order(intent):
                 latency = (_time.monotonic() - t0) * 1000
                 logger.critical(
                     "[ENTRY-ORDER-INVARIANT-VIOLATION] ticker=%s side=%s action=%s kalshi_side=%s - "
@@ -8054,7 +9584,10 @@ async def _route_live(
         unified_risk.calibrate_from_balance(balance_cents)
     
     # Infer category and underlying
-    from merid.event_venues.kalshi.category_exposure import infer_category as _infer_cat
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        from merid.event_venues.kalshi.category_exposure import infer_category as _infer_cat
     _rm_category = _infer_cat(_get_underlying(intent.ticker))
     _underlying = _get_underlying(intent.ticker)
     
@@ -8167,8 +9700,8 @@ async def _route_live(
                 
                 # CRITICAL FIX (2026-08-01): For exit orders (SELL), subtract from existing instead of add
                 # Exit orders reduce exposure, so they should not be rejected by per-side limits
-                action_lower = intent.action.lower() if intent.action else ""
-                is_exit_order = action_lower == "sell"
+                # CRITICAL FIX (2026-08-10): Use canonical signed-YES exit detection, not raw action.
+                is_exit_order = _is_exit_order(intent)
                 
                 if outcome_side == "yes":
                     if is_exit_order:
@@ -8388,12 +9921,90 @@ async def _route_live(
                 # Only run market condition checks for entry orders (not exits)
                 _market_check_passed = True
                 _mkt = _market_result.market
-                _bid = int(getattr(_mkt, "best_bid", 0) or 0)
-                _ask = int(getattr(_mkt, "best_ask", 0) or 0)
+                _cfg = DEFAULT_FILTER_CONFIG
+
+                # Side-aware best bid/ask for the market being traded.
+                # EventMarket does not expose top-level best_bid/best_ask; the intent
+                # carries the snapshot orderbook and the market state store has live
+                # YES/NO prices. Fall back through those sources before declaring a
+                # degenerate book.
+                _canonical_side, _action = intent.side, intent.action
+                if _canonical_side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"):
+                    _canonical_side, _action = parse_kalshi_side(_canonical_side)
+
+                _bid = None
+                _ask = None
+
+                # 1) Use orderbook snapshot embedded in the intent.
+                if _canonical_side == "yes":
+                    _bid = intent.yes_bid_cents
+                    _ask = intent.yes_ask_cents
+                elif _canonical_side == "no":
+                    _bid = intent.no_bid_cents
+                    _ask = intent.no_ask_cents
+
+                # 2) Fallback to the centralized market state store.
+                if _bid is None or _ask is None:
+                    try:
+                        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                        _store = get_kalshi_market_state_store()
+                        _st = _store.get(intent.ticker) if _store else None
+                        if _st:
+                            if _canonical_side == "yes":
+                                _bid = getattr(_st, "best_bid_cents", None)
+                                _ask = getattr(_st, "best_ask_cents", None)
+                            else:
+                                _bid = getattr(_st, "best_no_bid_cents", None)
+                                _ask = getattr(_st, "best_no_ask_cents", None)
+                                if _bid is None and _ask is None:
+                                    _yes_bid = getattr(_st, "best_bid_cents", None)
+                                    _yes_ask = getattr(_st, "best_ask_cents", None)
+                                    _bid = 100 - _yes_ask if _yes_ask is not None else None
+                                    _ask = 100 - _yes_bid if _yes_bid is not None else None
+                    except Exception:
+                        pass
+
+                # 3) Fallback to the market object attributes (e.g. SimpleNamespace from tests or port result).
+                if (_bid is None or _ask is None) and _mkt is not None:
+                    if _canonical_side == "yes":
+                        if _bid is None:
+                            _bid = getattr(_mkt, "best_bid_cents", None) or getattr(_mkt, "best_bid", None)
+                        if _ask is None:
+                            _ask = getattr(_mkt, "best_ask_cents", None) or getattr(_mkt, "best_ask", None)
+                    else:
+                        _bid = getattr(_mkt, "best_no_bid_cents", None)
+                        _ask = getattr(_mkt, "best_no_ask_cents", None)
+                        if _bid is None and _ask is None:
+                            _yes_bid = getattr(_mkt, "best_bid_cents", None) or getattr(_mkt, "best_bid", None)
+                            _yes_ask = getattr(_mkt, "best_ask_cents", None) or getattr(_mkt, "best_ask", None)
+                            _bid = 100 - _yes_ask if _yes_ask is not None else None
+                            _ask = 100 - _yes_bid if _yes_bid is not None else None
+
+                # 4) Last resort: use the raw market data returned by get_market.
+                if (_bid is None or _ask is None) and _mkt is not None:
+                    _raw = getattr(_mkt, "raw_data", None)
+                    if _raw:
+                        if _canonical_side == "yes":
+                            if _bid is None:
+                                _bid = _raw.get("yes_bid_dollars") and int(_raw["yes_bid_dollars"] * 100)
+                            if _ask is None:
+                                _ask = _raw.get("yes_ask_dollars") and int(_raw["yes_ask_dollars"] * 100)
+                        else:
+                            if _bid is None:
+                                _bid = _raw.get("no_bid_dollars") and int(_raw["no_bid_dollars"] * 100)
+                            if _ask is None:
+                                _ask = _raw.get("no_ask_dollars") and int(_raw["no_ask_dollars"] * 100)
+                            if _bid is None and _ask is None:
+                                _yes_bid = _raw.get("yes_bid_dollars")
+                                _yes_ask = _raw.get("yes_ask_dollars")
+                                _bid = 100 - int(_yes_ask * 100) if _yes_ask is not None else None
+                                _ask = 100 - int(_yes_bid * 100) if _yes_bid is not None else None
+
+                _bid = int(_bid or 0)
+                _ask = int(_ask or 0)
                 _spread = (_ask - _bid) if (_bid > 0 and _ask > 0) else 0
                 _vol = int(getattr(_mkt, "volume", 0) or 0)
                 _oi = int(getattr(_mkt, "open_interest", 0) or 0)
-                _cfg = DEFAULT_FILTER_CONFIG
 
                 # Degenerate book: no bid AND no ask → market has no real quotes.
                 # Fail-closed: mirrors CT's [SKIP-DEGENERATE] — phantom prices produce
@@ -8402,12 +10013,17 @@ async def _route_live(
                     logger.warning("[order-router] A5: market %s degenerate book (bid=0 ask=0) — no real quotes", intent.ticker)
                     return _a5_reject(f"market_condition:degenerate_book:{intent.ticker}")
 
-                if _bid > 0 and _bid < _cfg.min_price_cents:
-                    logger.warning("[order-router] A5: market %s below min_price (%d < %d)", intent.ticker, _bid, _cfg.min_price_cents)
-                    return _a5_reject(f"market_condition:price_too_low:{_bid}")
-                if _bid > 0 and _bid > _cfg.max_price_cents:
-                    logger.warning("[order-router] A5: market %s above max_price (%d > %d)", intent.ticker, _bid, _cfg.max_price_cents)
-                    return _a5_reject(f"market_condition:price_too_high:{_bid}")
+                # Use the price the order will actually hit for min/max gate.
+                _target_price = _ask if _action == "buy" else _bid
+
+                # Canonical executable range (matches agent_grid: YES 1-85, NO 15-99).
+                # Prevents false rejection of one-sided late-expiry markets.
+                if _target_price > 0 and not is_price_in_canonical_range(_target_price, _canonical_side):
+                    logger.warning(
+                        "[order-router] A5: market %s price %dc outside side-aware executable range for side=%s",
+                        intent.ticker, _target_price, _canonical_side,
+                    )
+                    return _a5_reject(f"market_condition:price_out_of_side_aware_range:{_target_price}:{_canonical_side}")
                 if _spread > 0 and _spread > _cfg.max_spread_cents:
                     logger.warning("[order-router] A5: market %s spread too wide (%d > %d)", intent.ticker, _spread, _cfg.max_spread_cents)
                     return _a5_reject(f"market_condition:spread_too_wide:{_spread}")
@@ -8659,8 +10275,11 @@ async def _route_live(
                                     best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
                                 )
                             
-                            # Clamp to valid Kalshi price range (1-99 cents)
-                            adjusted_price = max(1, min(99, adjusted_price))
+                            # Clamp to valid Kalshi price range (5-95 cents).
+                            # This matches the CRASH-007 hard range used downstream
+                            # and avoids degenerate 1-4 cent prices that the venue
+                            # rejects anyway.
+                            adjusted_price = max(5, min(95, adjusted_price))
                             
                             # Update intent price with marketable adjustment
                             intent.price_cents = adjusted_price
@@ -8783,57 +10402,43 @@ async def _route_live(
                     # Fallback: use original price as limit order
                     final_order_type = "limit"
             
-        # PHASE1-DUP-2: Dedup cache check before order submission
-        # This prevents duplicate orders from being submitted on retry by reusing
-        # the same client_order_id when a matching in-flight order is found.
+        # DURABLE DEDUP / IDENTITY CHECK (2026-08-12)
+        # The canonical client_order_id and order_attempt_id were allocated before
+        # risk/validation. We now check the durable attempt store to ensure we are
+        # not about to submit a second in-flight request for the same attempt.
         try:
-            cache = _dedup_cache()
-            dedup_coid, is_duplicate = cache.get_or_create(
-                ticker=intent.ticker,
-                side=intent.action,  # buy/sell
-                outcome=intent.side,  # yes/no
-                price_cents=final_price_cents,
-                count=intent.count,
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+
+            store = OrderAttemptStore()
+            record = store.get_by_order_attempt_id(
+                getattr(intent, "order_attempt_id", "")
             )
-            if is_duplicate:
-                logger.info(
-                    "[DEDUP-CACHE-HIT] ticker=%s side=%s action=%s price=%dc count=%d — reusing client_order_id %s",
-                    intent.ticker, intent.side, intent.action, final_price_cents, intent.count, dedup_coid
-                )
-                # CRITICAL FIX: Check if the duplicate order was actually submitted to the exchange
-                # If the original order was rejected before submission, we should submit it now
-                # If it was submitted but not filled, we should wait for the fill
-                cache = _dedup_cache()
-                try:
-                    from merid.event_venues.kalshi.order_deduplication import get_order_cache
-                    cache = get_order_cache()
-                    metrics = cache.get_metrics()
-                    logger.info(
-                        "[DEDUP-CACHE-METRICS] cached_orders=%d pending=%d confirmed=%d",
-                        metrics.get("cached_orders", 0), metrics.get("pending", 0), metrics.get("confirmed", 0)
+            if record and record.status in ("SUBMITTING", "SUBMITTED"):
+                age_s = _time.monotonic() - record.created_at
+                if age_s < 60.0:
+                    logger.warning(
+                        "[ORDER-ATTEMPT-DEDUP] order_attempt_id=%s client_order_id=%s already %s (age=%.1fs) - returning duplicate",
+                        record.order_attempt_id,
+                        record.client_order_id,
+                        record.status,
+                        age_s,
                     )
-                except Exception as metrics_err:
-                    logger.warning("[DEDUP-CACHE-ERROR] Failed to get cache metrics: %s", metrics_err)
-                
-                # CRITICAL FIX: Skip risk guard checks for duplicate orders
-                # Duplicate orders reuse the same client_order_id and won't be submitted to the exchange
-                # Risk guards should not consume capacity for orders that won't actually execute
-                logger.info(
-                    "[DEDUP-SKIP-RISK] Skipping risk guard checks for duplicate order - will reuse existing submission"
-                )
-                # Return early with the duplicate order info - no need to proceed with order construction
-                return OrderResult(
-                    status="duplicate",
-                    mode=intent.mode,
-                    fill=None,
-                    reason="Duplicate order detected - reusing existing client_order_id",
-                    latency_ms=0.0,
-                )
-            # Use the dedup client_order_id (either existing or new)
-            intent.client_tag = dedup_coid
+                    return OrderResult(
+                        status="duplicate",
+                        mode=mode,
+                        fill=None,
+                        reason="duplicate:attempt_already_in_flight",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
+                else:
+                    logger.warning(
+                        "[ORDER-ATTEMPT-DEDUP] Stale %s attempt order_attempt_id=%s age=%.1fs; allowing resubmit",
+                        record.status,
+                        record.order_attempt_id,
+                        age_s,
+                    )
         except Exception as dedup_err:
-            logger.warning("[DEDUP-CACHE-ERROR] Failed to check dedup cache (non-fatal): %s", dedup_err)
-            # Fall through to original client_tag if dedup fails
+            logger.warning("[ORDER-ATTEMPT-DEDUP-ERROR] Durable dedup check failed (non-fatal): %s", dedup_err)
         
         # Convert Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO) to simple outcome_id (yes/no)
         # VenueOrder expects outcome_id to be "yes" or "no" for price field mapping
@@ -8949,13 +10554,24 @@ async def _route_live(
                         confidence_str = "low"
                 
                 get_position_cache().register_tp_targets(
-                    client_order_id=intent.client_tag,
+                    client_order_id=intent.client_order_id or intent.client_tag,
                     take_profit_price_cents=intent.take_profit_price_cents,
                     take_profit_r_multiple=intent.take_profit_r_multiple,
                     stop_loss_price_cents=intent.stop_loss_price_cents,
+                    stop_loss_enabled=intent.stop_loss_enabled,
                     entry_price_cents=intent.price_cents,  # CRITICAL FIX (2026-07-23): Persist entry price
                     vol_regime=vol_regime_str,  # CRITICAL FIX (2026-08-01): Persist volatility regime
                     confidence=confidence_str,  # CRITICAL FIX (2026-08-01): Persist signal confidence
+                    # CRITICAL FIX (2026-08-10): Durable entry-model provenance
+                    entry_edge_pct=intent.edgepct or None,
+                    entry_signal_id=intent.entry_signal_id or intent.client_tag,
+                    entry_model=intent.entry_model or intent.source,
+                    entry_model_version=intent.entry_model_version or intent.data_version,
+                    entry_model_probability=intent.entry_model_probability or intent.model_prob,
+                    entry_market_probability=intent.entry_market_probability or (intent.price_cents / 100.0 if intent.price_cents else None),
+                    entry_edge=intent.entry_edge or (intent.edgepct if intent.edgepct else None),
+                    entry_book_snapshot_id=intent.entry_book_snapshot_id,
+                    entry_execution_mode=intent.entry_execution_mode or intent.execution_mode,
                 )
             except Exception as _tp_reg_err:
                 logger.debug("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
@@ -9066,13 +10682,25 @@ async def _route_live(
         # DRY-RUN-TRACE: Fee computation using canonical kalshi_fee_cents
         # CRASH-007: Validate inputs before fee calculation
         # CRITICAL: Add price range validation to prevent degenerate trades
-        # Minimum 5 cents prevents 1 cent data quality issues
-        # Maximum 95 cents matches profile price_range.max_price_cents for skewed markets
-        # 2026-07-10: Fixed max from 50c to 95c to match profile kalshi_crypto_15m_v2.yaml
-        if intent.price_cents < 5 or intent.price_cents > 95 or intent.count <= 0:
+        # Minimum 5 cents prevents 1 cent data quality issues for new entries.
+        # Maximum 95 cents matches profile price_range.max_price_cents for skewed markets.
+        # 2026-07-10: Fixed max from 50c to 95c to match profile kalshi_crypto_15m_v2.yaml.
+        # CRITICAL (2026-08-09): Exits / reduce-only orders must be allowed to close
+        # positions even when the market price is below 5c (e.g. deep stop-loss for
+        # NO-side contracts).  The downstream client.py OTM guard already bypasses
+        # sub-10c prices for reduce_only, and _build_create_order_request allows
+        # reduce-only exits below 10c.
+        _is_reduce = bool(getattr(intent, "reduce_only", False)) or _is_exit_order(intent)
+        _min_price = 1 if _is_reduce else 5
+        _max_price = 99 if _is_reduce else 95
+        if (
+            intent.count <= 0
+            or intent.price_cents < _min_price
+            or intent.price_cents > _max_price
+        ):
             logger.error(
-                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting (price must be 5-95 cents)",
-                intent.ticker, intent.price_cents, intent.count
+                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting (price must be %d-%d cents)",
+                intent.ticker, intent.price_cents, intent.count, _min_price, _max_price
             )
             return OrderResult(
                 status="rejected",
@@ -9306,14 +10934,96 @@ async def _route_live(
                     latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
 
+            # Release gate: the selected side must have a model probability > 0.5.
+            # A p_hat_side_cents <= 50 means the model does not believe the side
+            # being bought is more likely than not (cost-basis override).
+            if p_hat_side_cents <= 50.0:
+                logger.error(
+                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s p_hat_side_cents=%.2f <= 50 - "
+                    "REJECTING ORDER (model does not believe selected side)",
+                    intent.ticker, intent.side, p_hat_side_cents
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=get_venue_gate().mode,
+                    reason="router_invariant_fail:p_hat_below_50_cost_basis_override",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+
+            # Durable confidence provenance gate: confidence must be marked valid
+            # and produced by the uncertainty engine.  A missing or untrusted source
+            # is a hard rejection.
+            if not getattr(intent, 'confidence_valid', True):
+                logger.error(
+                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s confidence_valid=False - "
+                    "REJECTING ORDER",
+                    intent.ticker, intent.side
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=get_venue_gate().mode,
+                    reason="router_invariant_fail:invalid_confidence",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+
+            if getattr(intent, 'confidence_source', '') != "uncertainty_engine":
+                logger.error(
+                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s confidence_source=%s - "
+                    "REJECTING ORDER (confidence must come from uncertainty_engine)",
+                    intent.ticker, intent.side, getattr(intent, 'confidence_source', '')
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=get_venue_gate().mode,
+                    reason="router_invariant_fail:untrusted_confidence_source",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+
+            # Settlement reference gate: entries must use live CF Benchmarks RTI.
+            if getattr(intent, 'settlement_reference', '') != "cfb_rti_live":
+                logger.error(
+                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s settlement_reference=%s - "
+                    "REJECTING ORDER (only cfb_rti_live is permitted for entry)",
+                    intent.ticker, intent.side, getattr(intent, 'settlement_reference', '')
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=get_venue_gate().mode,
+                    reason="router_invariant_fail:invalid_settlement_reference",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+
+            # Legacy runtime trap for the historical constant 0.95 confidence sentinel.
+            # This is a short-term legacy detector and should be removed once the
+            # uncertainty engine and CF-RTI wiring are fully proven in production.
+            if os.environ.get("MERID_ENABLE_LEGACY_095_SENTINEL_TRAP", "1") == "1":
+                if getattr(intent, 'confidence', None) == 0.95:
+                    logger.error(
+                        "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s confidence=0.95 default sentinel - "
+                        "REJECTING ORDER (confidence must come from uncertainty engine)",
+                        intent.ticker, intent.side
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=get_venue_gate().mode,
+                        reason="router_invariant_fail:reserved_default_confidence_0_95",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
+
             # Validate canonical edge >= min_executable_edge_frac
             # CRITICAL FIX 2026-07-31: Handle Kalshi format sides (BUY_YES/BUY_NO) not just yes/no
             canonical_edge_side_frac = getattr(intent, 'edge_yes_frac', None) if is_yes_side else getattr(intent, 'edge_no_frac', None)
             min_executable_edge_frac = 0.03  # 3% minimum (from profile)
             if canonical_edge_side_frac is not None and canonical_edge_side_frac < min_executable_edge_frac:
-                logger.warning(
-                    "[ROUTER-INVARIANT-WARN] ticker=%s side=%s canonical_edge_side_frac=%.4f < min_executable_edge_frac=%.4f",
+                logger.error(
+                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s canonical_edge_side_frac=%.4f < min_executable_edge_frac=%.4f - REJECTING ORDER",
                     intent.ticker, intent.side, canonical_edge_side_frac, min_executable_edge_frac
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=get_venue_gate().mode,
+                    reason=f"router_invariant_fail:edge_below_threshold_{canonical_edge_side_frac}",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
 
             # Validate spread/edge ratio if edge-aware gate is enabled
@@ -9426,26 +11136,86 @@ async def _route_live(
                             bid_divergence_cents = abs(ws_bid_for_compare - rest_bid_for_compare)
                             ask_divergence_cents = abs(ws_ask_for_compare - rest_ask_for_compare)
                             max_divergence_cents = max(bid_divergence_cents, ask_divergence_cents)
-                            
-                            # Tolerance: 2 cents max divergence (accounts for normal latency)
-                            divergence_tolerance_cents = 2
-                            
+
+                            # Tolerance: 2 cents default (accounts for normal latency).
+                            # Env override MERID_WS_REST_DIVERGENCE_TOLERANCE_CENTS allows fast
+                            # 15m crypto markets where WS and REST snapshots routinely diverge.
+                            try:
+                                divergence_tolerance_cents = int(
+                                    os.environ.get("MERID_WS_REST_DIVERGENCE_TOLERANCE_CENTS", "2")
+                                )
+                            except Exception:
+                                divergence_tolerance_cents = 2
+
                             if max_divergence_cents > divergence_tolerance_cents:
-                                logger.error(
-                                    "[WS-REST-DIVERGENCE-REJECT] ticker=%s intent_id=%s side=%s space=%s "
-                                    "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
-                                    "max_divergence=%dc (tolerance=%dc) - REJECTING ORDER to prevent trading on stale data",
-                                    intent.ticker, intent.intent_id, intent.side, compare_space,
-                                    ws_bid_for_compare, ws_ask_for_compare,
-                                    rest_bid_for_compare, rest_ask_for_compare,
-                                    max_divergence_cents, divergence_tolerance_cents
+                                # Exit/reduce-only orders can still be safe to submit if they are
+                                # marketable against the fresh REST book.  The WS book used by the
+                                # position monitor may be stale, but a limit order that would fill
+                                # at the current REST bid/ask is preferable to leaving a position
+                                # unclosed.  Entry orders remain strictly rejected on divergence.
+                                is_exit_or_reduce = (
+                                    _is_exit_order(intent)
+                                    or getattr(intent, "entry_or_exit", "") == "exit"
+                                    or getattr(intent, "reduce_only", False)
+                                    or (getattr(intent, "source", "") or "").startswith("position_monitor")
                                 )
-                                return OrderResult(
-                                    status="rejected",
-                                    mode=mode,
-                                    reason=f"ws_rest_divergence:{max_divergence_cents}c",
-                                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-                                )
+                                if is_exit_or_reduce:
+                                    order_price = getattr(intent, "price_cents", None)
+                                    action = (getattr(intent, "action", "") or "").lower()
+                                    is_marketable = (
+                                        order_price is not None
+                                        and order_price > 0
+                                        and (
+                                            (action == "buy" and order_price >= rest_ask_for_compare)
+                                            or (action == "sell" and order_price <= rest_bid_for_compare)
+                                        )
+                                    )
+                                    if is_marketable:
+                                        logger.warning(
+                                            "[WS-REST-DIVERGENCE-EXIT-MARKETABLE] ticker=%s intent_id=%s side=%s space=%s "
+                                            "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
+                                            "max_divergence=%dc (tolerance=%dc) order_price=%dc action=%s - "
+                                            "allowing exit/reduce order because it is marketable against REST",
+                                            intent.ticker, intent.intent_id, intent.side, compare_space,
+                                            ws_bid_for_compare, ws_ask_for_compare,
+                                            rest_bid_for_compare, rest_ask_for_compare,
+                                            max_divergence_cents, divergence_tolerance_cents,
+                                            order_price, action,
+                                        )
+                                    else:
+                                        logger.error(
+                                            "[WS-REST-DIVERGENCE-REJECT-EXIT] ticker=%s intent_id=%s side=%s space=%s "
+                                            "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
+                                            "max_divergence=%dc (tolerance=%dc) order_price=%dc action=%s - "
+                                            "exit/reduce order is not marketable against REST; rejecting",
+                                            intent.ticker, intent.intent_id, intent.side, compare_space,
+                                            ws_bid_for_compare, ws_ask_for_compare,
+                                            rest_bid_for_compare, rest_ask_for_compare,
+                                            max_divergence_cents, divergence_tolerance_cents,
+                                            order_price, action,
+                                        )
+                                        return OrderResult(
+                                            status="rejected",
+                                            mode=mode,
+                                            reason=f"ws_rest_divergence:{max_divergence_cents}c",
+                                            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                                        )
+                                else:
+                                    logger.error(
+                                        "[WS-REST-DIVERGENCE-REJECT] ticker=%s intent_id=%s side=%s space=%s "
+                                        "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
+                                        "max_divergence=%dc (tolerance=%dc) - REJECTING ORDER to prevent trading on stale data",
+                                        intent.ticker, intent.intent_id, intent.side, compare_space,
+                                        ws_bid_for_compare, ws_ask_for_compare,
+                                        rest_bid_for_compare, rest_ask_for_compare,
+                                        max_divergence_cents, divergence_tolerance_cents
+                                    )
+                                    return OrderResult(
+                                        status="rejected",
+                                        mode=mode,
+                                        reason=f"ws_rest_divergence:{max_divergence_cents}c",
+                                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                                    )
                             else:
                                 logger.info(
                                     "[WS-REST-DIVERGENCE-PASS] ticker=%s intent_id=%s side=%s space=%s "
@@ -9477,8 +11247,59 @@ async def _route_live(
             intent.intent_id, intent.ticker, intent.side, intent.action, intent.price_cents, intent.count, intent.client_tag
         )
 
+        # 2026-08-11: Register as pending before submission so a fast WebSocket fill
+        # does not trip the circuit breaker while the request is in flight.
+        # Also record a minimal intent now: if an HTTP fill races the create-order
+        # response (Kalshi omits client_order_id on HTTP fills), the ledger can
+        # resolve via the pending-order registry and the position_cache order_id map.
+        _fills_intent: Optional[Any] = None
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            from merid.event_venues.kalshi.fills_ledger import OrderIntent as FillsLedgerOrderIntent
+            _pre_submit_ledger = get_fills_ledger()
+            canonical_coid = intent.client_order_id or intent.client_tag or intent.intent_id
+            _pre_submit_ledger.record_pending_order(
+                client_order_ids=[canonical_coid, canonical_coid],
+                order_id=None,
+                intent_id=intent.intent_id,
+            )
+            _wire_client_id = canonical_coid
+            _client_tag = intent.client_tag or _wire_client_id
+            _fills_intent = FillsLedgerOrderIntent(
+                intent_id=intent.intent_id,
+                client_order_id=_wire_client_id,
+                client_tag=_client_tag,
+                ticker=intent.ticker,
+                side=intent.side,
+                action=intent.action,
+                count=intent.count,
+                price_cents=intent.price_cents,
+                agent_id=intent.agent_id,
+                entry_or_exit=getattr(intent, "entry_or_exit", None) or ("exit" if getattr(intent, "is_exit_order", False) or getattr(intent, "reduce_only", False) else "entry"),
+                reduce_only=getattr(intent, "reduce_only", False),
+                original_side=intent.kalshi_side or f"{intent.action.upper()}_{intent.side.upper()}",
+                original_action=intent.action,
+            )
+            _pre_submit_ledger.record_intent(_fills_intent)
+        except Exception as _pend_err:
+            logger.debug("[order-router] pre-submit intent/pending registration failed (non-fatal): %s", _pend_err)
+
+        # CRITICAL FIX (2026-08-19): Worst-case fill-adjusted edge gate before
+        # the order can be live.  The submitted limit price is the worst fill a
+        # taker IOC should receive; if that edge is below threshold, do not send.
+        live_edge_rejection = _check_fill_adjusted_edge(
+            intent, intent.price_cents, t0, mode
+        )
+        if live_edge_rejection:
+            _release_gate_record(intent, live_edge_rejection.reason)
+            _release_allocated_slot(intent)
+            return live_edge_rejection
+
         # Submit through the normalized execution port.  A timeout here means
         # the ack was lost in flight: the order MAY be live on the exchange.
+        # Mark the durable attempt as SUBMITTING before the network call.
+        _mark_attempt_status(intent, "SUBMITTING")
+
         placed_res = None
         _submit_timed_out = False
         try:
@@ -9499,12 +11320,14 @@ async def _route_live(
         if placed_res is not None and not placed_res.success and placed_res.error:
             _timeout_err_str = str(placed_res.error).lower()
         if _submit_timed_out or "timeout" in _timeout_err_str or "timed out" in _timeout_err_str:
+            _mark_attempt_status(intent, "SUBMISSION_UNKNOWN")
             try:
                 from merid.event_venues.kalshi.order_gate import get_pre_trade_gate as _get_ptg_unknown
                 _ptg_unknown = _get_ptg_unknown()
                 # SUBMISSION_UNKNOWN is only reachable from SUBMITTED.
                 _ptg_unknown.mark_submitted(intent.client_tag or "", None)
                 _ptg_unknown.mark_submission_unknown(intent.client_tag or "")
+                _mark_canonical_entry_submitted(intent, order_id=None)
             except Exception as _su_err:
                 logger.debug("[order-router] mark_submission_unknown failed (non-fatal): %s", _su_err)
             try:
@@ -9521,15 +11344,60 @@ async def _route_live(
                 mode=mode,
                 reason=f"submission_unknown:timeout_after_submit:{intent.client_tag}",
                 latency_ms=round(latency, 2),
+                submission_attempted=True,
+                exchange_request_sent=True,
+                exchange_ack_received=False,
+                submission_certainty="unknown",
             )
 
-        # 2026-07-25: Log ORDER-ACK after submission
+        # CRITICAL 2026-08-11: Bind the exchange order_id to the intent and to
+        # the position_cache order_id -> client_tag map as soon as the response
+        # arrives.  Kalshi's HTTP /portfolio/fills does not echo client_order_id,
+        # so the fills_ledger uses this map to recover the client_tag and resolve
+        # the fill before the circuit breaker trips.  This must happen before any
+        # subsequent await or long synchronous work.
+        _venue_oid = placed_res.order_id or "unknown"
+        if placed_res and placed_res.success and placed_res.order_id:
+            try:
+                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                ledger = get_fills_ledger()
+                canonical_coid = intent.client_order_id or intent.client_tag or intent.intent_id
+                ledger.record_pending_order(
+                    client_order_ids=[canonical_coid, canonical_coid],
+                    order_id=placed_res.order_id,
+                    intent_id=intent.intent_id,
+                )
+                if _fills_intent is not None:
+                    ledger.update_intent_status(
+                        _fills_intent.intent_id,
+                        "submitted",
+                        order_id=placed_res.order_id,
+                        client_order_id=_fills_intent.client_order_id,
+                    )
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                cache = get_position_cache()
+                if cache:
+                    cache.register_order_id_mapping(
+                        placed_res.order_id,
+                        intent.client_order_id or intent.client_tag or intent.intent_id,
+                    )
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                _ptg = get_pre_trade_gate()
+                if _ptg:
+                    _ptg.mark_submitted(intent.client_tag or "", placed_res.order_id)
+                    _mark_canonical_entry_submitted(intent, order_id=placed_res.order_id)
+            except Exception as _bind_err:
+                logger.debug("[order-router] Immediate order_id binding failed (non-fatal): %s", _bind_err)
+
+        # 2026-07-25: Log ORDER-ACK after submission and update durable status.
         if placed_res and placed_res.success:
+            _mark_attempt_status(intent, "ACKNOWLEDGED")
             logger.info(
                 "[ORDER-ACK] intent_id=%s ticker=%s order_id=%s status=accepted latency_ms=%.2f",
                 intent.intent_id, intent.ticker, getattr(placed_res, 'order_id', 'N/A'), latency
             )
         else:
+            _mark_attempt_status(intent, "REJECTED")
             logger.warning(
                 "[ORDER-ACK] intent_id=%s ticker=%s status=rejected reason=%s latency_ms=%.2f",
                 intent.intent_id, intent.ticker, getattr(placed_res, 'error', 'unknown'), latency
@@ -9541,8 +11409,12 @@ async def _route_live(
             ledger = get_fills_ledger()
             # Convert order_router.OrderIntent to fills_ledger.OrderIntent
             from merid.event_venues.kalshi.fills_ledger import OrderIntent as FillsLedgerOrderIntent
+            _wire_client_id = intent.client_order_id or intent.client_tag or intent.intent_id
+            _client_tag = intent.client_tag or _wire_client_id
             fills_intent = FillsLedgerOrderIntent(
                 intent_id=intent.intent_id,
+                client_order_id=_wire_client_id,
+                client_tag=_client_tag,
                 ticker=intent.ticker,
                 side=intent.side,
                 action=intent.action,
@@ -9560,8 +11432,59 @@ async def _route_live(
                 notional_usd=getattr(intent, 'notional_usd', 0.0),
                 # Phase 5.4: Raw logit for probability calibration
                 raw_logit=getattr(intent, 'raw_logit', None),
+                # CRITICAL 2026-08-09: Direction contract for authoritative entry/exit classification
+                # on every fill path (WebSocket, HTTP poller, backfill, replay).
+                entry_or_exit=getattr(intent, 'entry_or_exit', None) or ('exit' if getattr(intent, 'is_exit_order', False) or getattr(intent, 'reduce_only', False) else 'entry'),
+                reduce_only=getattr(intent, 'reduce_only', False),
+                original_side=intent.kalshi_side or f"{intent.action.upper()}_{intent.side.upper()}",
+                original_action=intent.action,
+                # CRITICAL FIX (2026-08-10): Durable entry-model provenance
+                entry_signal_id=intent.entry_signal_id or intent.client_order_id,
+                entry_model=intent.entry_model or intent.source,
+                entry_model_version=intent.entry_model_version or intent.data_version,
+                entry_model_probability=intent.entry_model_probability or intent.model_prob,
+                entry_market_probability=intent.entry_market_probability,
+                entry_edge=intent.entry_edge or intent.edge_pct or intent.edgepct,
+                entry_book_snapshot_id=intent.entry_book_snapshot_id,
+                entry_execution_mode=intent.entry_execution_mode or intent.execution_mode,
+                # 2026-08-11: Signal economics and settlement telemetry for immutable ledger.
+                all_in_cost_cents=intent.all_in_cost_cents,
+                ev_net_cents=intent.ev_net_cents,
+                fee_cents=intent.fee_cents,
+                slippage_cents=intent.slippage_cents,
+                time_to_expiry_seconds=intent.time_to_expiry_seconds,
+                settlement_input_price=intent.settlement_input_price,
+                cf_rti_basis=intent.cf_rti_basis,
+                is_counter_trend=intent.is_counter_trend,
+                thesis_side=intent.thesis_side,
             )
             ledger.record_intent(fills_intent)
+            # Once the intent is durably recorded, bind the exchange order_id so
+            # fills arriving without a client_order_id can still resolve back.
+            if placed_res and placed_res.success and placed_res.order_id:
+                try:
+                    ledger.update_intent_status(
+                        fills_intent.intent_id,
+                        "submitted",
+                        order_id=placed_res.order_id,
+                        client_order_id=fills_intent.client_order_id,
+                    )
+                    logger.debug(
+                        "[INTENT-CORRELATION] Bound order_id=%s client_order_id=%s to intent_id=%s",
+                        placed_res.order_id, fills_intent.client_order_id, fills_intent.intent_id
+                    )
+                    # Update the pending-order registry with the confirmed order_id.
+                    try:
+                        canonical_coid = intent.client_order_id or intent.client_tag
+                        ledger.record_pending_order(
+                            client_order_ids=[canonical_coid, canonical_coid],
+                            order_id=placed_res.order_id,
+                            intent_id=intent.intent_id,
+                        )
+                    except Exception as _pend_update_err:
+                        logger.debug("[order-router] pending-order update failed (non-fatal): %s", _pend_update_err)
+                except Exception as bind_err:
+                    logger.debug("[order-router] Failed to bind order_id to ledger intent (non-fatal): %s", bind_err)
         except Exception as record_err:
             logger.debug("[order-router] Failed to record intent in fills_ledger (non-fatal): %s", record_err)
 
@@ -9638,9 +11561,11 @@ async def _route_live(
                         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
                         _ptg = get_pre_trade_gate()
                         _ptg.mark_submitted(intent.client_tag, order_data.order_id)
+                        _mark_canonical_entry_submitted(intent, order_id=order_data.order_id)
                         _filled = int(order_data.filled_size or 0)
                         if _filled:
-                            _ptg.mark_filled(intent.client_tag, _filled, fill_id=f"{order_data.order_id}-dup")
+                            _ptg.mark_filled(intent.client_tag, _filled, fill_id=f"{order_data.order_id}-dup", filled_qty_cc=_filled * 100)
+                            _mark_canonical_entry_executed(intent, fill_id=f"{order_data.order_id}-dup")
                             # CRITICAL: Record price execution to prevent repeat price execution
                             _record_price_execution(intent)
                     except Exception as _dup_gate_err:
@@ -9701,6 +11626,10 @@ async def _route_live(
                 mode=mode,
                 reason=f"duplicate_unknown:{reason[:50]}",
                 latency_ms=round(latency, 2),
+                submission_attempted=True,
+                exchange_request_sent=True,
+                exchange_ack_received=False,
+                submission_certainty="unknown",
             )
         
         if not placed_res.success:
@@ -9794,6 +11723,7 @@ async def _route_live(
                 get_pre_trade_gate().mark_rejected(intent.client_tag or "", reason or "")
             except Exception as e:
                 logger.debug(f"Gate mark rejected failed: {e}")
+            _release_canonical_entry_idempotency(intent)
             try:
                 from merid.prediction.ua_ct_metrics import record_order_reject
 
@@ -9805,6 +11735,10 @@ async def _route_live(
                 mode=mode,
                 reason=reason,
                 latency_ms=round(latency, 2),
+                submission_attempted=True,
+                exchange_request_sent=True,
+                exchange_ack_received=True,
+                submission_certainty="rejected",
             )
 
         # Order successfully submitted to exchange - record in rate limiter
@@ -9817,8 +11751,25 @@ async def _route_live(
         # The port response carries filled/remaining sizes; the intent count is
         # the authoritative requested size for fill reconciliation.
         requested_count = _resolve_requested_count(None, intent.count)
-        filled_count = int(placed_res.filled_size or 0)
-        remaining_count = int(placed_res.remaining_size) if placed_res.remaining_size is not None else max(0, requested_count - filled_count)
+        filled_count_fp = Decimal(str(placed_res.filled_size or 0))
+        remaining_count_fp = (
+            Decimal(str(placed_res.remaining_size))
+            if placed_res.remaining_size is not None
+            else max(Decimal("0"), Decimal(str(requested_count)) - filled_count_fp)
+        )
+        # Authoritative requested size from the V2 response, falling back to the
+        # fixed-point intent count.  Integer display counts are floors.
+        requested_count_fp = (
+            filled_count_fp + remaining_count_fp
+            if placed_res.remaining_size is not None
+            else Decimal(str(intent.count_fp or requested_count))
+        )
+        # Canonical centi-contract quantities for fractional fills.
+        _filled_quantity_cc = int(filled_count_fp * Decimal("100"))
+        _remaining_quantity_cc = int(remaining_count_fp * Decimal("100"))
+        # Display/legacy whole-contract counts are floors.
+        filled_count = int(filled_count_fp)
+        remaining_count = int(remaining_count_fp)
         fill_price_cents = (
             placed_res.price_cents
             if placed_res.price_cents is not None
@@ -9828,7 +11779,8 @@ async def _route_live(
                 else int(intent.price_cents)
             )
         )
-        fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
+        # Fee is computed on the exact fixed-point count.
+        fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count_fp)
         _venue_oid = placed_res.order_id or "unknown"
 
         # CRITICAL FIX (2026-07-13): Notify global_allocator of order submission for pending order tracking
@@ -10017,8 +11969,10 @@ async def _route_live(
             from merid.event_venues.kalshi.order_gate import get_pre_trade_gate as _get_ptg
             _ptg = _get_ptg()
             _ptg.mark_submitted(intent.client_tag or "", _venue_oid)
+            _mark_canonical_entry_submitted(intent, order_id=_venue_oid)
             if filled_count > 0:
-                _ptg.mark_filled(intent.client_tag or "", filled_count, fill_id=f"{_venue_oid}-0")
+                _ptg.mark_filled(intent.client_tag or "", filled_count, fill_id=f"{_venue_oid}-0", filled_qty_cc=filled_count * 100)
+                _mark_canonical_entry_executed(intent, fill_id=f"{_venue_oid}-0")
                 # CRITICAL: Record price execution to prevent repeat price execution
                 _record_price_execution(intent)
         except Exception as e:
@@ -10075,22 +12029,36 @@ async def _route_live(
         # Classify the router result from the normalized port outcome.
         _resp_status = (placed_res.status or "").lower()
         _tif_upper = (effective_tif or intent.time_in_force or "").upper()
-        if _resp_status == "filled" or (filled_count >= requested_count and requested_count > 0):
+
+        # CRITICAL FIX (2026-08-10): IOC/FOK orders with zero fills are terminally unfilled,
+        # regardless of whatever status string the venue returns (including ambiguous
+        # "filled" responses with filled_count=0).  Treating them as anything else leaks
+        # the pre-trade gate record and causes the loop to believe an order is in-flight
+        # when it is not, blocking all re-entry for that contract.
+        if _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL") and filled_count_fp == 0 and requested_count_fp > 0:
+            status = "unfilled_ioc"
+        elif _resp_status == "filled" or (filled_count_fp >= requested_count_fp and requested_count_fp > 0):
             status = "filled_live"
-        elif _resp_status == "partially_filled" or filled_count > 0:
+        elif _resp_status == "partially_filled" or filled_count_fp > 0:
             # Partial fill: exposure-affecting, report filled_live with the
             # partial detail carried in the fill dict (requested/remaining).
             status = "filled_live"
         elif _resp_status == "resting":
-            status = "resting"
+            # IOC/FOK orders are terminal and cannot rest on the book.  If the
+            # port reports a zero-fill "resting" status for one of those TIFs,
+            # treat it as an unfilled IOC so exposure reservations are released.
+            if _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL") and filled_count_fp == 0:
+                status = "unfilled_ioc"
+            else:
+                status = "resting"
         elif _resp_status == "unfilled" and _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
             status = "unfilled_ioc"
         elif _resp_status == "unfilled":
             status = "unfilled_ioc"
-        elif _resp_status == "accepted" and filled_count == 0 and _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
+        elif _resp_status == "accepted" and filled_count_fp == 0 and _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
             # IOC/FOK orders that the port acks without a fill have zero remaining risk.
             status = "unfilled_ioc"
-        elif _resp_status == "accepted" and filled_count == 0:
+        elif _resp_status == "accepted" and filled_count_fp == 0:
             # GTC/post-only orders that the port acks without a fill are resting on the book.
             status = "resting"
         
@@ -10181,6 +12149,10 @@ async def _route_live(
                 get_pre_trade_gate().mark_rejected(intent.client_tag or "", "UNFILLED_IOC")
             except Exception as e:
                 logger.debug("Gate mark rejected (UNFILLED_IOC) failed: %s", e)
+
+            # Release the canonical entry idempotency record; this was a
+            # completed (zero-fill) IOC and should not block a new entry.
+            _release_canonical_entry_idempotency(intent)
 
             logger.info(
                 "[UNFILLED-IOC] ticker=%s order_id=%s requested=%d remaining=%d — no exposure recorded, slot released",
@@ -10348,10 +12320,15 @@ async def _route_live(
                 "action": intent.action,
                 "price_cents": fill_price_cents,
                 "count": filled_count,
+                "count_fp": str(filled_count_fp),
                 "requested_count": requested_count,
                 "remaining_count": remaining_count,
+                "remaining_count_fp": str(remaining_count_fp),
+                "quantity_cc": _filled_quantity_cc,
+                "remaining_quantity_cc": _remaining_quantity_cc,
                 "partial": 0 < filled_count < requested_count,
                 "fee_cents": fee_cents,
+                "net_edge_at_fill_cents": _compute_net_edge_at_fill(intent, fill_price_cents),
                 "order_id": placed_res.order_id,
                 "client_tag": intent.client_tag,
                 "status": placed_res.status,
@@ -10359,6 +12336,10 @@ async def _route_live(
                 "simulated": False,
             },
             latency_ms=round(latency, 2),
+            submission_attempted=True,
+            exchange_request_sent=True,
+            exchange_ack_received=True,
+            submission_certainty="ack_received",
         )
     except Exception as exc:
         latency = (_time.monotonic() - t0) * 1000
@@ -10390,12 +12371,51 @@ async def _route_live(
         )
 
 
-def route_order(intent: OrderIntent) -> OrderResult:
-    """Sync order routing (MOCK/PAPER only).
+def _route_order_impl(intent: OrderIntent) -> OrderResult:
+    """Sync order routing implementation (MOCK/PAPER only).
 
     LIVE mode requires ``route_order_async`` so the real Kalshi client can be
     called without blocking hacks.
     """
+    # Normalize count to int to avoid Decimal/float TypeError downstream.
+    # price_cents must remain un-cast here so validation can reject non-integer prices.
+    intent.count = int(intent.count) if intent.count is not None else 0
+
+    # ── DURABLE ORDER-IDENTITY FINALIZATION (2026-08-12) ───────────────────
+    try:
+        finalize_order_identity(intent)
+    except OrderIdentityError as identity_err:
+        logger.critical(
+            "[ORDER-IDENTITY-REJECT] intent_id=%s error=%s",
+            getattr(intent, "intent_id", None),
+            identity_err,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=_resolve_mode(intent.mode),
+            reason=f"identity_error:{identity_err}",
+            latency_ms=0.0,
+        )
+
+    t0 = _time.monotonic()
+
+    # ── CIRCUIT BREAKER + ORDER-IDENTITY CONTRACT (2026-08-11) ─────────────
+    identity_rejection = _validate_order_identity(intent, t0)
+    if identity_rejection:
+        return identity_rejection
+
+    # ── DECISION PROVENANCE CONTRACT (2026-08-19) ──────────────────────────
+    provenance_rejection = _validate_decision_provenance(
+        intent, t0, _resolve_mode(intent.mode)
+    )
+    if provenance_rejection:
+        return provenance_rejection
+
+    # ── CANONICAL ORDER-INTENT CONTRACT (2026-08-10) ───────────────────────
+    canonical_rejection = _sync_canonical_order_intent_validation(intent, t0)
+    if canonical_rejection:
+        return canonical_rejection
+
     # MODE GUARD: Reject live mode calls to sync route_order
     from merid.mode_resolver import ModeResolver
     ModeResolver.assert_not_live("route_order()")
@@ -10731,6 +12751,17 @@ def route_order(intent: OrderIntent) -> OrderResult:
     return _route_sync_non_live(intent, mode, t0)
 
 
+def route_order(intent: OrderIntent) -> OrderResult:
+    """Sync order-routing wrapper; cleans up idempotency on every outcome."""
+    try:
+        result = _route_order_impl(intent)
+    except Exception:
+        _post_route_canonical_idempotency_cleanup(intent, None)
+        raise
+    _post_route_canonical_idempotency_cleanup(intent, result)
+    return result
+
+
 def _run_pre_trade_gate(
     intent: OrderIntent, mode: TradingMode, t0: float
 ) -> Optional[OrderResult]:
@@ -10775,6 +12806,7 @@ def _run_pre_trade_gate(
                     "another agent owns it",
                     _agent, intent.ticker, intent.side,
                 )
+                _release_canonical_entry_idempotency(intent)
                 return OrderResult(
                     status="rejected",
                     mode=mode,
@@ -10823,6 +12855,7 @@ def _run_pre_trade_gate(
                         "[order-router] PRICE_GUARD_BYPASS_BLOCKED coid=%s ticker=%s side=%s price=%dc < %dc threshold (deep OTM longshot rejected - upstream reservation path)",
                         _upstream_coid[:16], intent.ticker, intent.side, intent.price_cents, min_price_cents,
                     )
+                    _release_canonical_entry_idempotency(intent)
                     return OrderResult(
                         status="rejected",
                         mode=mode,
@@ -10840,6 +12873,12 @@ def _run_pre_trade_gate(
                 )
                 return None  # lease acquired above; upstream owns the gate record
 
+        # CRITICAL FIX (2026-08-18): canonical fractional quantity in centi-contracts
+        _target_qty_cc = (
+            int(intent.count_fp * Decimal("100"))
+            if intent.count_fp is not None
+            else (intent.count or 0) * 100
+        )
         verdict = gate.check(
             agent_id=_agent,
             strategy_group=_strategy,
@@ -10859,6 +12898,8 @@ def _run_pre_trade_gate(
             entry_or_exit=intent.entry_or_exit,
             # CRITICAL FIX: Pass reduce_only flag so the gate can distinguish entry vs exit (2026-08-09)
             reduce_only=intent.reduce_only,
+            # CRITICAL FIX (2026-08-18): fractional canonical quantity
+            target_qty_cc=_target_qty_cc,
         )
         if not verdict.allowed:
             latency = (_time.monotonic() - t0) * 1000
@@ -10934,6 +12975,7 @@ def _run_pre_trade_gate(
                 intent.intent_id, intent.entry_or_exit, intent.exit_policy_id, intent.window_resolution_id,
                 intent.risk_tier, intent.max_hold_seconds, latency,
             )
+            _release_canonical_entry_idempotency(intent)
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -10952,6 +12994,7 @@ def _run_pre_trade_gate(
         
         latency = (_time.monotonic() - t0) * 1000
         logger.error("[order-router] pre_trade_gate error (fail-closed): %s", exc)
+        _release_canonical_entry_idempotency(intent)
         return OrderResult(
             status="rejected",
             mode=mode,
@@ -11131,45 +13174,78 @@ def _run_shared_risk_guard_and_dedup(
         )
 
     # MICRO-SCALPING FIX: Step 3 — Net edge after fees check
-    # Ensure trade clears Kalshi fees plus slippage buffer before submission
+    # Ensure trade clears Kalshi fees plus slippage buffer before submission.
+    # CRITICAL 2026-08-14: Use the signal's pre-computed net EV when available,
+    # otherwise compute canonical edge_cents = (P_true - P_market) * 100 and
+    # require it to exceed fee + slippage.  This replaces the broken unit mix
+    # between percentage and fraction edge_pct values.
     # Configurable via MERID_KALSHI_NET_EDGE_FILTER_ENABLED (default: True)
     try:
         from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
 
         net_edge_filter_enabled = os.getenv("MERID_KALSHI_NET_EDGE_FILTER_ENABLED", "true").lower() == "true"
 
-        if net_edge_filter_enabled and intent.price_cents and intent.count and intent.edge_pct is not None:
+        if (
+            net_edge_filter_enabled
+            and not _is_exit_order(intent)
+            and not getattr(intent, "reduce_only", False)
+            and intent.price_cents
+        ):
             price = int(intent.price_cents)
-            contracts = int(intent.count)
 
-            # Calculate fee for this trade
-            fee_cents = calculate_kalshi_fee_cents(contracts, price)
-            notional = contracts * price
-
-            if notional > 0:
-                # Fee as percentage (in decimal, e.g., 0.04 for 4%)
-                fee_pct = fee_cents / notional
-                # Add 0.25% slippage buffer for 15m crypto (reduced from 0.5% micro-scalping buffer)
-                slippage_buffer = 0.0025
-                required_edge = fee_pct + slippage_buffer
-
-                # Check if gross edge clears fees + buffer
-                if intent.edge_pct < required_edge:
+            # Prefer the signal generator's pre-computed net EV.
+            ev_net_cents = getattr(intent, "ev_net_cents", None)
+            if ev_net_cents is not None:
+                if ev_net_cents <= 0:
                     latency = (_time.monotonic() - t0) * 1000
                     logger.info(
-                        "[NET-EDGE-FILTER] Rejecting %s: edge %.2f%% < required %.2f%% (fee %.2f%% + buffer %.2f%%)",
-                        intent.ticker,
-                        intent.edge_pct * 100,
-                        required_edge * 100,
-                        fee_pct * 100,
-                        slippage_buffer * 100,
+                        "[NET-EDGE-FILTER] Rejecting %s: ev_net_cents=%.4f <= 0",
+                        intent.ticker, ev_net_cents,
                     )
                     return OrderResult(
                         status="rejected",
                         mode=mode,
-                        reason=f"net_edge_insufficient:{intent.edge_pct:.4f}<{required_edge:.4f}",
+                        reason=f"net_edge_non_positive:{ev_net_cents:.4f}",
                         latency_ms=round(latency, 2),
                     )
+
+            # Fallback: compute edge from model_prob and price directly.
+            elif getattr(intent, "model_prob", None) is not None:
+                model_prob = float(intent.model_prob)
+                edge_cents = (model_prob - price / 100.0) * 100.0
+
+                fee_cents = getattr(intent, "fee_cents", None)
+                if fee_cents is None:
+                    contracts = int(intent.count) if intent.count else 1
+                    fee_cents = calculate_kalshi_fee_cents(contracts, price)
+
+                slippage_cents = getattr(intent, "slippage_cents", None)
+                if slippage_cents is None:
+                    slippage_cents = int(os.getenv("MERID_SIGNAL_SLIPPAGE_CENTS", "5"))
+
+                if edge_cents <= (fee_cents + slippage_cents):
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.info(
+                        "[NET-EDGE-FILTER] Rejecting %s: edge_cents=%.4f <= cost=%.4f (fee=%.4f + slippage=%d)",
+                        intent.ticker,
+                        edge_cents,
+                        fee_cents + slippage_cents,
+                        fee_cents,
+                        slippage_cents,
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"net_edge_insufficient:{edge_cents:.4f}<={fee_cents + slippage_cents:.4f}",
+                        latency_ms=round(latency, 2),
+                    )
+
+            else:
+                # No economics available; do not block (fail-open) but log loudly.
+                logger.info(
+                    "[NET-EDGE-FILTER] Skipping %s: entry order has no ev_net_cents or model_prob",
+                    intent.ticker,
+                )
     except Exception as _edge_exc:
         # Fail-open on edge calculation error - let other risk checks handle it
         logger.debug("[NET-EDGE-FILTER] Calculation error (fail-open): %s", _edge_exc)
@@ -11244,10 +13320,128 @@ def _validate_risk_contract_linkage(intent: OrderIntent) -> tuple[bool, Optional
     return True, None
 
 
-async def route_order_async(intent: OrderIntent) -> OrderResult:
-    """Async order routing that supports true LIVE execution."""
+async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
+    """Async order routing implementation that supports true LIVE execution."""
+    # Normalize count to int to avoid Decimal/float TypeError downstream.
+    # price_cents must remain un-cast here so validation can reject non-integer prices.
+    intent.count = int(intent.count) if intent.count is not None else 0
+
+    # ── DURABLE ORDER-IDENTITY FINALIZATION (2026-08-12) ───────────────────
+    try:
+        finalize_order_identity(intent)
+    except OrderIdentityError as identity_err:
+        logger.critical(
+            "[ORDER-IDENTITY-REJECT] intent_id=%s error=%s",
+            getattr(intent, "intent_id", None),
+            identity_err,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=get_venue_gate().mode,
+            reason=f"identity_error:{identity_err}",
+            latency_ms=0.0,
+        )
+
     t0 = _time.monotonic()
-    
+
+    # ── CIRCUIT BREAKER + ORDER-IDENTITY CONTRACT (2026-08-11) ─────────────
+    identity_rejection = _validate_order_identity(intent, t0)
+    if identity_rejection:
+        return identity_rejection
+
+    # ── DECISION PROVENANCE CONTRACT (2026-08-19) ──────────────────────────
+    # Enforce for the 15m crypto lane after identity is confirmed but before
+    # any stateful validation that might mutate position assumptions.
+    provenance_rejection = _validate_decision_provenance(
+        intent, t0, _resolve_mode(intent.mode)
+    )
+    if provenance_rejection:
+        return provenance_rejection
+
+    # ── CANONICAL ORDER-INTENT CONTRACT (2026-08-10) ───────────────────────
+    # Normalize, fetch fresh exchange position for exits, and hard-reject
+    # position flips / over-closes / sell-to-short before any side effects.
+    canonical_rejection = await _canonical_order_intent_validation(intent, t0)
+    if canonical_rejection:
+        return canonical_rejection
+
+    # EXECUTION RISK FIREWALL (2026-08-13): final stateful gate for exits.
+    # Re-fetches fresh position + book, recomputes P&L, and emits a durable
+    # approval token. In production unapproved exits are rejected.
+    if _is_exit_order(intent):
+        try:
+            from merid.event_venues.kalshi.execution_risk_firewall import (
+                ExecutionRiskFirewall,
+            )
+
+            firewall = ExecutionRiskFirewall.get_instance()
+            canonical = getattr(intent, "_canonical_order_intent", None)
+            if canonical is None:
+                logger.critical(
+                    "[FIREWALL] Missing canonical intent for exit intent_id=%s",
+                    intent.intent_id,
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason="firewall:missing_canonical_intent",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+
+            decision = await firewall.validate_exit(canonical, intent)
+            if decision.status == "rejected":
+                latency = (_time.monotonic() - t0) * 1000
+                logger.critical(
+                    "[FIREWALL-REJECT] intent_id=%s ticker=%s reason=%s",
+                    intent.intent_id,
+                    intent.ticker,
+                    decision.reason,
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"firewall:{decision.reason}",
+                    latency_ms=round(latency, 2),
+                )
+
+            intent.firewall_decision_id = decision.decision_id
+            intent.firewall_client_order_id = decision.client_order_id
+            if decision.status == "observe_only":
+                logger.warning(
+                    "[FIREWALL-OBSERVE-ONLY] intent_id=%s ticker=%s reason=%s "
+                    "would have rejected; proceeding in observe mode",
+                    intent.intent_id,
+                    intent.ticker,
+                    decision.reason,
+                )
+            else:
+                logger.info(
+                    "[FIREWALL-APPROVE] intent_id=%s ticker=%s decision_id=%s "
+                    "coid=%s limit=%dc qty_cc=%d vwap=%dc depth=%d",
+                    intent.intent_id,
+                    intent.ticker,
+                    decision.decision_id,
+                    decision.client_order_id,
+                    decision.approved_limit_cents,
+                    decision.qty_cc,
+                    decision.vwap_cents,
+                    decision.available_depth_cc,
+                )
+        except Exception as fw_err:
+            logger.critical(
+                "[FIREWALL-ERROR] intent_id=%s ticker=%s error=%s",
+                intent.intent_id,
+                intent.ticker,
+                fw_err,
+                exc_info=True,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"firewall:internal_error:{fw_err}",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
     # AUDIT: Exit order acceptance tracking with timing
     if intent.entry_or_exit == "exit":
         logger.info(
@@ -11277,7 +13471,30 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         intent.count,
         intent.source
     )
-    
+
+    # CRITICAL 2026-08-09: Fail-closed exposure reconciliation. If exchange/ledger/cache
+    # signed-YES exposure disagree, do not open new positions. Exits are still allowed
+    # so the agent can close its way to a known-zero state.
+    if not _is_exit_order(intent):
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            if cache and cache.is_reconciliation_halted(intent.ticker):
+                latency = (_time.monotonic() - t0) * 1000
+                logger.critical(
+                    "[ORDER-ROUTER-RECONCILIATION-HALT] ticker=%s intent_id=%s is blocked: "
+                    "exchange/ledger/cache exposure mismatch unresolved. Rejecting new entry.",
+                    intent.ticker, intent.intent_id
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason="reconciliation_halted",
+                    latency_ms=round(latency, 2),
+                )
+        except Exception as recon_check_err:
+            logger.debug("[ORDER-ROUTER] Reconciliation halt check failed (fail-open): %s", recon_check_err)
+
     # ── Profile-based source whitelist (kalshi_crypto_15m_v2) ─────────────
     # For kalshi_crypto_15m_v2 profile, only accept orders from agent_grid_15m
     # Reject orders from kalshi_tools to prevent duplicate order attempts
@@ -11786,6 +14003,26 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             intent.intent_id, intent.ticker, intent.entry_or_exit, intent.source
         )
 
+    # ── ROUND-TRIP NET-OF-COST GATE (2026-08-18) ───────────────────────────────
+    # Before the policy engine can select a role, this gate compares the expected
+    # gross edge against the full round-trip cost (entry + exit fees and spread).
+    # It defaults to passive/maker execution and only allows aggressive/taker when
+    # the taker net-of-costs edge is positive. If neither role is profitable, the
+    # intent is rejected here before any risk capital is reserved.
+    reject_reason = _round_trip_net_of_cost_gate(intent)
+    if reject_reason:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.info(
+            "[EXEC-PATH] REJECTED intent_id=%s ticker=%s stage=net_of_cost_gate reason=%s latency_ms=%.2f",
+            intent.intent_id, intent.ticker, reject_reason, latency
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=reject_reason,
+            latency_ms=round(latency, 2),
+        )
+
     # ── FEE/MAKER-TAKER AWARENESS: Apply policy engine for optimal role selection ─────
     from merid.event_venues.kalshi.maker_taker_integration import apply_maker_taker_policy
     apply_maker_taker_policy(intent)
@@ -12030,8 +14267,8 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             
             # CRITICAL FIX (2026-08-01): For exit orders (SELL), subtract from existing instead of add
             # Exit orders reduce exposure, so they should not be rejected by per-side limits
-            action_lower = intent.action.lower() if intent.action else ""
-            is_exit_order = action_lower == "sell"
+            # CRITICAL FIX (2026-08-10): Use canonical signed-YES exit detection, not raw action.
+            is_exit_order = _is_exit_order(intent)
             
             if outcome_side == "yes":
                 if is_exit_order:
@@ -12134,6 +14371,30 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         return await _route_live(intent, mode, t0, prepared_state=state, plan_done=True)
 
     return _route_sync_non_live(intent, mode, t0)
+
+
+async def route_order_async(intent: OrderIntent) -> OrderResult:
+    """Async order-routing wrapper; cleans up idempotency on every outcome."""
+    try:
+        result = await _route_order_async_impl(intent)
+    except Exception:
+        _post_route_canonical_idempotency_cleanup(intent, None)
+        raise
+    _post_route_canonical_idempotency_cleanup(intent, result)
+    # Shadow telemetry for replay and lifecycle analysis (off by default).
+    try:
+        from merid.data.shadow_telemetry import persist_order_telemetry
+        persist_order_telemetry(intent, result)
+    except Exception:
+        pass
+    # CRITICAL FIX (2026-08-19): Paper and mock fills must update the canonical
+    # position cache and fills ledger just like live fills.  Without this the loop
+    # sees ``has_position=False`` and repeats entry orders on every cycle.
+    try:
+        await _apply_order_result_to_canonical_state(intent, result)
+    except Exception:
+        pass
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
