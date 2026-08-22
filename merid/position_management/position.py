@@ -6,11 +6,19 @@ Tracks open positions with TP/SL, trailing stops, and exit policy references.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Optional
 import logging
+import os
 import time
 import uuid
+
+try:
+    from merid.event_venues.kalshi.binary_price_space import require_outcome_side, SideValidationError
+    BINARY_PRICE_SPACE_AVAILABLE = True
+except ImportError:
+    BINARY_PRICE_SPACE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +52,15 @@ class RiskParamsState(str, Enum):
     FALLBACK = "fallback"
 
 
-# CRITICAL FIX (2026-08-11): Minimum profit cents for a take-profit exit.
-# Must cover the round-trip spread + taker-fee buffer so a "TP" cannot become
-# a stale-book or side-conversion loss.  Used for fallback TP and profit-exit
-# validation.
-TAKE_PROFIT_MIN_PROFIT_CENTS = 2
+# CRITICAL FIX (2026-08-22): Minimum profit cents for a take-profit exit.
+# Raised to 5c to cover round-trip taker fees on 15m crypto contracts.
+# At ~50c, taker fee is ~1.75c/contract/side, so two contracts cost
+# ~8c round trip.  A 5c per-contract margin gives a small positive net
+# for typical multi-contract positions while still preserving fee coverage.
+# For single-contract positions the downstream guard enforces net >=
+# MERID_EXIT_MIN_PROFIT_CENTS, so the order is re-evaluated until it clears.
+# Override with MERID_TAKE_PROFIT_MIN_PROFIT_CENTS.
+TAKE_PROFIT_MIN_PROFIT_CENTS = int(os.getenv("MERID_TAKE_PROFIT_MIN_PROFIT_CENTS", "5"))
 
 
 @dataclass
@@ -66,7 +78,7 @@ class Position:
 
     # Position details
     side: PositionSide = PositionSide.YES
-    size: int = 0  # Number of contracts
+    size: Decimal = Decimal("0")  # Number of contracts (fixed-point; fractional OK)
     avg_entry_price_cents: int = 0
     opened_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -84,7 +96,7 @@ class Position:
     # 2026-08-01: "Pay Yourself" strategy - lock profits at 1.5R while letting runner capture larger moves
     scale_out_price_cents: Optional[int] = None  # Price at which to scale out 50%
     scale_out_triggered: bool = False
-    scale_out_remaining_size: int = 0  # Size after scale-out
+    scale_out_remaining_size: Decimal = Decimal("0")  # Size after scale-out
     scale_out_r_multiple: Optional[float] = None  # R-multiple trigger for scale-out (from profile)
 
     # Trailing stop configuration
@@ -209,12 +221,10 @@ class Position:
         # monitor and exit math treat as whole cents/contracts. This prevents
         # downstream TypeErrors when fills_ledger passes Decimal count_fp.
         for attr in [
-            "size",
             "avg_entry_price_cents",
             "take_profit_price_cents",
             "stop_loss_price_cents",
             "scale_out_price_cents",
-            "scale_out_remaining_size",
             "max_favorable_price_cents",
             "high_watermark_cents",
             "low_watermark_cents",
@@ -929,11 +939,23 @@ class Position:
         """
         from datetime import datetime
 
+        # Fail-closed: a persisted position without a valid side is corrupt data.
+        if BINARY_PRICE_SPACE_AVAILABLE:
+            validated_side = require_outcome_side(
+                data,
+                context="Position.from_dict",
+                fields=("side", "outcome_side", "kalshi_side", "thesis_side"),
+            )
+        else:
+            validated_side = data.get("side")
+            if validated_side not in ("yes", "no"):
+                raise ValueError(f"Position.from_dict: missing or invalid side={validated_side!r}")
+
         return cls(
             position_id=data.get("position_id"),
             market_id=data.get("market_id", ""),
             series_ticker=data.get("series_ticker", ""),
-            side=PositionSide(data.get("side", "yes")),
+            side=PositionSide(validated_side),
             size=data.get("size", 0),
             avg_entry_price_cents=data.get("avg_entry_price_cents", 0),
             opened_at=datetime.fromisoformat(data["opened_at"]) if data.get("opened_at") else datetime.utcnow(),
