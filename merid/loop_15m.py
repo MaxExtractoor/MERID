@@ -42,7 +42,7 @@ USE_LEGACY_DIRECTION_MAPPING = False
 MERID_EXIT_MAX_LOSS_CENTS = int(os.getenv("MERID_EXIT_MAX_LOSS_CENTS", "3"))
 MERID_EXIT_EMERGENCY_MAX_LOSS_CENTS = int(os.getenv("MERID_EXIT_EMERGENCY_MAX_LOSS_CENTS", "15"))
 MERID_EXIT_MAX_SLIPPAGE_CENTS = int(os.getenv("MERID_EXIT_MAX_SLIPPAGE_CENTS", "2"))
-MERID_EXIT_MIN_PROFIT_CENTS = int(os.getenv("MERID_EXIT_MIN_PROFIT_CENTS", "5"))
+MERID_EXIT_MIN_PROFIT_CENTS = int(os.getenv("MERID_EXIT_MIN_PROFIT_CENTS", "2"))
 # Quote-age limit is tiered by time-to-expiry to avoid rejecting executable near-settlement exits.
 MERID_EXIT_MAX_QUOTE_AGE_MS = int(os.getenv("MERID_EXIT_MAX_QUOTE_AGE_MS", "10000"))
 MERID_EXIT_MAX_QUOTE_AGE_NEAR_EXPIRY_MS = int(os.getenv("MERID_EXIT_MAX_QUOTE_AGE_NEAR_EXPIRY_MS", "15000"))
@@ -345,6 +345,10 @@ from enum import Enum
 from dataclasses import dataclass
 
 from utils.logger import get_logger
+
+# Canonical asset extraction from Kalshi tickers (single source of truth)
+from merid.utils.kalshi_identity import extract_asset
+from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 
 # Import candidate tracing for end-to-end validation
 try:
@@ -868,21 +872,37 @@ class Kalshi15mLoop:
         self._market_maker = None
         try:
             from merid.event_venues.kalshi.market_maker_15m import init_market_maker_15m, MarketMakingConfig
-            # Load market making config from profile
+            from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+
+            profile = get_crypto_15m_profile()
+            if profile is not None:
+                mm_raw = getattr(profile, 'market_making', {}) or {}
+            else:
+                mm_raw = {}
+
+            # Env override takes precedence; otherwise use the profile.
+            mm_env = os.environ.get("MERID_MARKET_MAKING_ENABLED", "").lower()
+            if mm_env in ("1", "true"):
+                enabled = True
+            elif mm_env in ("0", "false"):
+                enabled = False
+            else:
+                enabled = bool(mm_raw.get('enabled', False))
+
             mm_config = MarketMakingConfig(
-                enabled=self.risk_config.market_making_enabled if hasattr(self.risk_config, 'market_making_enabled') else False,
-                quoting_mode=getattr(self.risk_config, 'market_making_quoting_mode', 'two_phase'),
-                spread_cents=getattr(self.risk_config, 'market_making_spread_cents', 2),
-                inventory_limit_contracts=getattr(self.risk_config, 'market_making_inventory_limit', 50),
-                skew_adjustment=getattr(self.risk_config, 'market_making_skew_adjustment', True),
-                phase1_duration_seconds=getattr(self.risk_config, 'market_making_phase1_duration', 720),
-                phase1_price_center_cents=getattr(self.risk_config, 'market_making_phase1_center', 50),
-                phase1_spread_cents=getattr(self.risk_config, 'market_making_phase1_spread', 3),
-                phase1_refresh_interval_seconds=getattr(self.risk_config, 'market_making_phase1_refresh', 15),
-                phase1_contracts_per_side=getattr(self.risk_config, 'market_making_phase1_contracts', 15),
-                phase2_price_cents=getattr(self.risk_config, 'market_making_phase2_price', 52),
-                phase2_contracts=getattr(self.risk_config, 'market_making_phase2_contracts', 15),
-                phase2_min_move_pct=getattr(self.risk_config, 'market_making_phase2_min_move', 0.0012)
+                enabled=enabled,
+                quoting_mode=mm_raw.get('quoting_mode', 'two_phase'),
+                spread_cents=int(mm_raw.get('spread_cents', 2)),
+                inventory_limit_contracts=int(mm_raw.get('inventory_limit_contracts', 50)),
+                skew_adjustment=bool(mm_raw.get('skew_adjustment', True)),
+                phase1_duration_seconds=int(mm_raw.get('phase1_duration_seconds', 720)),
+                phase1_price_center_cents=int(mm_raw.get('phase1_price_center_cents', 50)),
+                phase1_spread_cents=int(mm_raw.get('phase1_spread_cents', 3)),
+                phase1_refresh_interval_seconds=int(mm_raw.get('phase1_refresh_interval_seconds', 15)),
+                phase1_contracts_per_side=int(mm_raw.get('phase1_contracts_per_side', 15)),
+                phase2_price_cents=int(mm_raw.get('phase2_price_cents', 52)),
+                phase2_contracts=int(mm_raw.get('phase2_contracts', 15)),
+                phase2_min_move_pct=float(mm_raw.get('phase2_min_move_pct', 0.0012))
             )
             self._market_maker = init_market_maker_15m(mm_config)
             logger.info("[15m-LOOP] Market maker initialized: enabled=%s quoting_mode=%s", mm_config.enabled, mm_config.quoting_mode)
@@ -1597,20 +1617,31 @@ class Kalshi15mLoop:
                     # - Exit order failure tracking
                     # - Position state validation before exit
                     # - Idempotency guard to prevent duplicate exits
-                    # CRITICAL FIX (2026-07-16): Set exit_triggered BEFORE async task to prevent race conditions
-                    # Without this, multiple callbacks could fire before the first async task completes,
-                    # causing duplicate exit orders. Setting exit_triggered=True immediately provides
-                    # the idempotency guard that the callback was checking for.
-                    # CRITICAL FIX (2026-07-17): Exit-aware cooldown integration
-                    # Set cooldowns in StripOrderState for problematic exits to prevent re-entries.
+                    # CRITICAL FIX (2026-08-22): Do not set exit_triggered before the
+                    # order is actually accepted/filled. The PositionMonitor in-flight
+                    # state is the source of truth for duplicate suppression.  Setting
+                    # exit_triggered in this callback reintroduces the original stuck-
+                    # exit bug: if _execute_exit_order returns early (guard/duplicate/
+                    # no-market/exception), the terminal flag is never cleared and no
+                    # exit order can ever be placed for this position.
                     try:
                         # CRITICAL: Check if position already exited (idempotency guard)
                         if position.exit_triggered:
+                            if position.exited_at is not None:
+                                logger.warning(
+                                    "[POSITION-MONITOR-CALLBACK] Exit intent ignored - position already exited: position=%s reason=%s exit_reason=%s",
+                                    position.position_id[:8], exit_reason, position.exit_reason
+                                )
+                                return
+                            # Stale terminal flags from a lost/uncleaned prior exit
+                            # attempt.  Clear and proceed so we can actually exit.
                             logger.warning(
-                                "[POSITION-MONITOR-CALLBACK] Exit intent ignored - position already exited: position=%s reason=%s exit_reason=%s",
-                                position.position_id[:8], exit_reason, position.exit_reason
+                                "[POSITION-MONITOR-CALLBACK] Exit intent had stale exit_triggered, clearing and proceeding: position=%s reason=%s",
+                                position.position_id[:8], exit_reason
                             )
-                            return
+                            position.exit_triggered = False
+                            position.exit_reason = None
+                            position.exit_price_cents = None
                         
                         logger.info(
                             "[POSITION-MONITOR-CALLBACK] Exit intent: position=%s reason=%s price=%dc contracts=%s",
@@ -1642,6 +1673,8 @@ class Kalshi15mLoop:
                                 "for %s - submission gated by MERID_ENABLE_STOP_CANDIDATE_SUBMISSION",
                                 position.market_id,
                             )
+                            if self._position_monitor:
+                                self._position_monitor._clear_exit_intent_in_flight(position.position_id)
                             return
 
                         # CRITICAL INVARIANT CHECK: Exit orders can only execute on positions with size > 0
@@ -1650,6 +1683,8 @@ class Kalshi15mLoop:
                                 "[POSITION-MONITOR-CALLBACK] Exit intent suppressed - no open position: position=%s market=%s size=%d reason=%s",
                                 position.position_id[:8], position.market_id, position.size, exit_reason
                             )
+                            if self._position_monitor:
+                                self._position_monitor._clear_exit_intent_in_flight(position.position_id)
                             return
 
                         # CRITICAL FIX (2026-08-08): Gate exits by contract liveness. Never place
@@ -1671,6 +1706,7 @@ class Kalshi15mLoop:
                                     position.exited_at = datetime.utcnow()
                                     if self._position_monitor:
                                         self._position_monitor.remove_position(position.position_id)
+                                        self._position_monitor._clear_exit_intent_in_flight(position.position_id)
                                     try:
                                         from merid.event_venues.kalshi.position_cache import get_position_cache
                                         get_position_cache().force_delete_phantom_position(position.market_id)
@@ -1710,19 +1746,12 @@ class Kalshi15mLoop:
                         except Exception as cooldown_err:
                             logger.warning("[STRIP-COOLDOWN] Failed to set cooldown: %s", cooldown_err)
                         
-                        # CRITICAL FIX (2026-07-16): Set exit_triggered BEFORE async task ONLY for full exits
-                        # For partial exits, we don't set exit_triggered because the position remains monitored
-                        # and can trigger additional exit conditions (e.g., SL after partial TP). Setting
-                        # exit_triggered=True for partial exits would block subsequent exit conditions.
-                        if contracts_to_close is None:
-                            # 2026-08-11 CRITICAL FIX: set exit intent metadata but DO NOT
-                            # set exited_at or remove the position. The position is still
-                            # open until the loop-side executor confirms a terminal fill
-                            # or REST position reconciliation shows a zero position.
-                            # Full exit - set exit_triggered to prevent duplicate callbacks
-                            position.exit_triggered = True
-                            position.exit_reason = exit_reason
-                            position.exit_price_cents = exit_price_cents
+                        # CRITICAL FIX (2026-08-22): The in-flight flag in PositionMonitor
+                        # (and the loop-side position_exit_lock) prevents duplicate callbacks;
+                        # do NOT set exit_triggered here.  Setting it before route_order_async
+                        # returns creates a stuck terminal state on any early return or
+                        # unrecovered exception.  The position is only marked terminal after
+                        # a confirmed fill via position.mark_exited().
                         
                         # CRITICAL: Enable swing mode after trailing exit in profit
                         # This allows YES/NO reversal to capture profits from price swings in both directions
@@ -1764,6 +1793,10 @@ class Kalshi15mLoop:
                             "[POSITION-MONITOR-CALLBACK] Exit intent failure count: %d",
                             self._exit_intent_failures
                         )
+                        # Clear in-flight so the next poll can retry; the position
+                        # terminal flags were not touched by a successful fill.
+                        if self._position_monitor and position and hasattr(position, 'position_id'):
+                            self._position_monitor._clear_exit_intent_in_flight(position.position_id)
 
                 # CRITICAL FIX: Register exit callback BEFORE starting monitor
                 # This prevents race condition where positions are added before callback is registered
@@ -2091,6 +2124,19 @@ def _run_exit_price_guard(
         if stop_price is not None:
             stop_distance = abs(stop_price - entry_price)
             max_loss = stop_distance + slippage + fees
+        elif canonical == "trailing_stop":
+            # Trailing-stop exits are bounded by the actual giveback from the high
+            # watermark to the current executable bid, plus slippage and fees.  The
+            # trailing stop decision has already been made by the monitor; the guard
+            # just verifies the executable quote is within the natural giveback.
+            high_watermark = int(getattr(position, "max_favorable_price_cents", 0) or 0)
+            if high_watermark > 0 and best_bid is not None and high_watermark >= best_bid:
+                max_loss = (high_watermark - best_bid + slippage) * count + fees
+            else:
+                trail_distance = int(getattr(position, "trailing_param", 0) or 0)
+                if trail_distance <= 0:
+                    trail_distance = MERID_EXIT_MAX_LOSS_CENTS
+                max_loss = trail_distance + slippage + fees
         else:
             max_loss = MERID_EXIT_MAX_LOSS_CENTS
     else:
@@ -2168,7 +2214,14 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
     #     exit_reason: Exit reason
     #     exit_price_cents: Exit price in cents
     #     contracts_to_close: Number of contracts to close (None = full exit)
-    
+
+    # Local helper: clear the monitor's in-flight flag when this coroutine bails
+    # before a successful order submission, so the monitor can retry on the next
+    # poll instead of waiting for the 15s timeout.
+    def _clear_in_flight() -> None:
+        if self._position_monitor:
+            self._position_monitor._clear_exit_intent_in_flight(position.position_id)
+
     # CRITICAL INVARIANT CHECKS: Exit orders can only execute on valid positions
     assert position.size > 0, f"EXIT-ORDER: No open position for {position.market_id} - size={position.size}"
     
@@ -2181,6 +2234,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
             "[EXIT-ORDER-LOCK] Position %s is locked for exit creation - skipping duplicate attempt",
             position.position_id[:8]
         )
+        _clear_in_flight()
         return
     
     try:
@@ -2198,6 +2252,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                 exit_price_cents,
                 contracts_to_close is not None
             )
+            _clear_in_flight()
             return
         
         # CRITICAL FIX (2026-07-23): Check for duplicate resting exit orders (one-position-one-exit invariant)
@@ -2228,6 +2283,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                     contracts_to_close is not None
                 )
                 # Skip placing new exit order - existing one will handle the exit
+                _clear_in_flight()
                 return
         except Exception as dup_check_err:
             logger.warning(
@@ -2280,6 +2336,11 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
             position.exit_price_cents = None
         return
 
+    # Record the chosen exit reason/price for telemetry.  The position is still
+    # open; exit_triggered is only set after a confirmed fill.
+    position.exit_reason = exit_reason.value if hasattr(exit_reason, 'value') else str(exit_reason)
+    position.exit_price_cents = int(exit_price_cents)
+
     # Derive side_str from position for logging.  Prefer the confirmed canonical
     # outcome_side (from fills/positions) over the immutable strategy thesis.
     if getattr(position, 'outcome_side', None):
@@ -2318,6 +2379,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                 asset,
                 position.market_id
             )
+            _clear_in_flight()
             return
     except Exception as venue_check_err:
         from merid.utils.kalshi_identity import extract_asset
@@ -2475,6 +2537,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                     "[EXIT-ORDER-CONFIRMED] Invalid confirmed outcome_side=%s: %s - CANNOT GENERATE EXIT ORDER",
                     confirmed_outcome, e
                 )
+                _clear_in_flight()
                 return
 
             temp_position = StrategyPosition(
@@ -2511,6 +2574,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                 logger.error(
                     "[EXIT-ORDER-CONFIRMED] Pure function failed - CANNOT GENERATE EXIT ORDER (fallback removed to prevent side inversion - Bug #6 fix)"
                 )
+                _clear_in_flight()
                 return  # Fail closed - cannot generate exit order without valid confirmed outcome
         else:
             # CRITICAL FIX: No legacy fallback - fail closed if confirmed outcome not available
@@ -2518,6 +2582,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                 "[EXIT-ORDER-CONFIRMED] Confirmed outcome not available - CANNOT GENERATE EXIT ORDER "
                 "(legacy fallback removed to prevent side inversion - Bug #6 fix)"
             )
+            _clear_in_flight()
             return  # Fail closed - require confirmed outcome for all exits
 
         # AUDIT: Venue-side semantics - log Kalshi order semantics for exit
@@ -2577,10 +2642,10 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         }
         enforce_profit_check = exit_reason_str not in bypass_profit_check_reasons
         
-        # ENHANCEMENT (2026-08-02): Minimum profit threshold to account for trading fees
-        # Based on backtest-kit research: minimum take-profit distance to ensure profit exceeds fees
-        # Kalshi fees are typically ~0.1% per side, so we need at least 1-2 cents margin
-        MIN_PROFIT_MARGIN_CENTS = 2  # Minimum 2 cents profit to cover fees and slippage
+        # ENHANCEMENT (2026-08-22): Minimum profit threshold now uses a 5c floor to
+        # align with TAKE_PROFIT_MIN_PROFIT_CENTS and cover round-trip taker fees at
+        # typical 15m crypto prices.  Risk-management exits in the bypass list skip this.
+        MIN_PROFIT_MARGIN_CENTS = 5  # Minimum 5 cents profit to cover fees and slippage
         
         # ENHANCEMENT (2026-08-02): Bid-ask spread validation
         # Based on CuteMarkets research: exits should be validated against current market conditions
@@ -2671,6 +2736,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                             profit_margin_cents,
                             current_spread_cents
                         )
+                        _clear_in_flight()
                         return  # Reject this exit order
                     else:
                         logger.warning(
@@ -2723,6 +2789,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                             profit_margin_cents,
                             current_spread_cents
                         )
+                        _clear_in_flight()
                         return  # Reject this exit order
                     else:
                         logger.warning(
@@ -3088,10 +3155,25 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     infra_ready = KALSHI_READY and live_bankroll_valid
     markets_expected = markets_expected_now()
 
+    # Ensure risk envelope is loaded so depth thresholds are correct.
+    risk_envelope = self._get_cached_envelope(cycle_bankroll) if cycle_bankroll else getattr(self, "_risk_envelope", None)
+
     markets_present = False
     ready_assets_count = 0
+    md_fresh_count = 0
+    spot_fresh_count = 0
+
     try:
         catalog = get_market_catalog()
+
+        # Spot service for freshness gate (best effort).
+        spot_service = None
+        try:
+            from data.unified_spot_service import get_unified_spot_service, SpotError
+            spot_service = get_unified_spot_service()
+        except Exception:
+            spot_service = None
+
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             current_market = catalog.get_current_15m_market(asset)
             if current_market is None:
@@ -3105,13 +3187,56 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             state = self.market_state_store.get(market_id) if self.market_state_store else None
             if state is None:
                 continue
-            # Require a non-empty book on both sides for this cycle
-            best_bid = getattr(state, "best_bid_cents", None)
-            best_ask = getattr(state, "best_ask_cents", None)
-            min_depth_yes = getattr(state, "min_depth_yes", 0)
-            min_depth_no = getattr(state, "min_depth_no", 0)
-            if best_bid and best_ask and min_depth_yes >= 25 and min_depth_no >= 25:
+
+            # CRITICAL FIX (2026-08-22): Use the authoritative execution-readiness gate
+            # for per-asset MD freshness.  This guarantees that the loop's allow-new-entry
+            # decision agrees with the order-router stale-data gate under one clock domain.
+            asset_md_fresh = False
+            if self.market_state_store is not None:
+                asset_md_fresh, md_reason = self.market_state_store.is_market_execution_ready(market_id)
+                if not asset_md_fresh:
+                    logger.info(
+                        "[15M-LOOP-MD-READY] asset=%s ticker=%s not ready: %s",
+                        asset, market_id, md_reason,
+                    )
+
+            if asset_md_fresh:
+                md_fresh_count += 1
+
+            # Spot freshness (best effort).
+            asset_spot_fresh = False
+            if spot_service:
+                try:
+                    spot_result = spot_service.get(asset)
+                    if not isinstance(spot_result, SpotError):
+                        spot_ts = getattr(spot_result, "timestamp", 0)
+                        if spot_ts:
+                            asset_spot_fresh = (time.time() - (spot_ts / 1000.0)) < 30.0
+                except Exception:
+                    pass
+            if asset_spot_fresh:
+                spot_fresh_count += 1
+
+            # Depth/liquidity sufficiency: use the same function as the main loop.
+            if risk_envelope is not None:
+                try:
+                    depth_thresholds = risk_envelope.get_depth_thresholds(asset)
+                    target_qty = int(depth_thresholds.get("min_depth_yes", 1))
+                    max_slippage_cents = getattr(risk_envelope, "guardrails_max_slippage_cents", 3)
+                except Exception:
+                    target_qty = 1
+                    max_slippage_cents = 3
+            else:
+                target_qty = 1
+                max_slippage_cents = 3
+
+            liquidity_result = can_fill_order_safely(state, target_qty, max_slippage_cents, side="yes")
+            if (
+                asset_md_fresh
+                and liquidity_result.decision in (LiquidityDecision.FULL, LiquidityDecision.REDUCED)
+            ):
                 ready_assets_count += 1
+
     except Exception as e:
         logger.warning("[15m-LOOP] Failed to compute allow_new_entries: %s", e)
 
@@ -3120,12 +3245,12 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         markets_expected=markets_expected,
         markets_present=markets_present,
         ready_assets_count=ready_assets_count,
-        md_fresh_count=ready_assets_count,
-        spot_fresh_count=ready_assets_count,
+        md_fresh_count=md_fresh_count,
+        spot_fresh_count=spot_fresh_count,
     )
     logger.info(
-        "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s ready_assets=%d",
-        allow_new_entries, infra_ready, markets_expected, markets_present, ready_assets_count
+        "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s ready_assets=%d md_fresh=%d spot_fresh=%d",
+        allow_new_entries, infra_ready, markets_expected, markets_present, ready_assets_count, md_fresh_count, spot_fresh_count
     )
     return allow_new_entries
 
@@ -3373,7 +3498,7 @@ async def _run_loop(self) -> None:
                 logger.info("[15m-LOOP] Generated %d candidates in tick %d", len(candidates), tick_id)
                 
                 # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m._select_best_edge_per_asset
-                # This ensures only 1 contract per asset per window (cheapest with best edge) is selected
+                # This ensures up to 2 contracts per asset per window (cheapest with best edge, capped by $1 exposure) is selected
                 # before candidates are passed to the global allocator. The loop_15m execution logic
                 # no longer needs to perform duplicate best-edge filtering.
                 # agent_grid_15m already filtered to at most 1 candidate per asset.
@@ -3922,8 +4047,8 @@ async def _run_loop(self) -> None:
                                     logger.error("[15m-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT CALCULATE KELLY - SKIPPING", ticker)
                                     continue
                                 
-                                # Extract asset from ticker
-                                asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
+                                # Extract canonical asset from ticker
+                                asset = extract_asset(ticker)
                                 
                                 # Compute dynamic size
                                 # 2026 Research-Based Risk Management: Apply time-of-day risk scaling
@@ -3952,9 +4077,10 @@ async def _run_loop(self) -> None:
                                 # CRITICAL FIX: Skip execution if sizing returned count=0
                                 # This prevents invalid orders from being submitted
                                 if count == 0:
+                                    sizing_reason = metadata.get("reason", metadata.get("rejection_reason", "unknown"))
                                     logger.warning(
                                         "[15m-LOOP] Sizing returned count=0 for ticker=%s (notional=%.2f, rejection_reason=%s) - skipping execution",
-                                        ticker, float(notional), metadata.get("rejection_reason", "unknown")
+                                        ticker, float(notional), sizing_reason
                                     )
                                     # CRITICAL FIX: Increment rejection counter for sizing failures
                                     # This prevents counter sanity mismatch warnings
@@ -3963,8 +4089,8 @@ async def _run_loop(self) -> None:
                                         candidate_id=candidate_id,
                                         from_state="RECEIVED",
                                         to_state="REJECTED",
-                                        reason=f"Sizing returned count=0: {metadata.get('rejection_reason', 'unknown')}",
-                                        context={"asset": asset, "ticker": ticker, "notional": float(notional)}
+                                        reason=f"Sizing returned count=0: {sizing_reason}",
+                                        context={"asset": asset, "ticker": ticker, "notional": float(notional), "sizing_reason": sizing_reason}
                                     )
                                     continue
                                 
@@ -3974,14 +4100,14 @@ async def _run_loop(self) -> None:
                                 )
                                 
                                 # CRITICAL FIX (2026-08-01): DISABLE LiquidityAwareSizer for 15m crypto agents
-                                # The $1 global rule enforces max 1 contract per trade, but LiquidityAwareSizer
+                                # The $1 global rule enforces a shared exposure cap, but LiquidityAwareSizer
                                 # can increase count based on market depth, violating the $1 cap.
                                 # For 15m crypto agents with fixed $1 exposure, liquidity-aware sizing is incompatible.
                                 # The slot allocator already enforces position limits based on available capital.
-                                # Skip liquidity-aware sizing to prevent multi-contract orders that violate $1 rule.
+                                # Skip liquidity-aware sizing; unified_sizing determines count (1 or 2) within the $1 cap.
                                 logger.debug(
-                                    "[15m-LOOP] Liquidity-aware sizing DISABLED for $1 global rule enforcement: ticker=%s count=%d (fixed 1 contract per trade)",
-                                    ticker, count
+                                    "[15m-LOOP] Liquidity-aware sizing DISABLED for $1 global rule enforcement: ticker=%s count=%d (up to %d contracts per trade)",
+                                    ticker, count, MAX_CONTRACTS_PER_ORDER
                                 )
                             except Exception as sizing_err:
                                 logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
@@ -6634,14 +6760,15 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # would recalculate count from risk envelope, overwriting the unified_sizing result
         count = int(candidate.get("count", 1))
         
-        # CRITICAL FIX (2026-08-01): Enforce hard cap of 1 contract for $1 global rule
-        # This is a defensive check to prevent any path from violating the $1 exposure cap
-        if count > 1:
+        # 2026-08-22: Count is computed by unified_sizing under the $1 cap. Allow up to
+        # MAX_CONTRACTS_PER_ORDER as a defensive ceiling; compute_order_size will still
+        # reduce the count when price/exposure doesn't allow 2 contracts.
+        if count > MAX_CONTRACTS_PER_ORDER:
             logger.warning(
-                "[15M-LOOP] CRITICAL: count=%d exceeds $1 global rule cap of 1 contract, forcing to 1. ticker=%s",
-                count, ticker
+                "[15M-LOOP] CRITICAL: count=%d exceeds max_contracts_per_order=%d, capping. ticker=%s",
+                count, MAX_CONTRACTS_PER_ORDER, ticker
             )
-            count = 1
+            count = MAX_CONTRACTS_PER_ORDER
         
         # Validate count is reasonable
         if count < 1:
@@ -7746,6 +7873,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             return False
 
         if result and result.status == "unfilled_ioc":
+            self._rejection_counters["other"] += 1
             logger.info(
                 "[15M-LOOP-SIDE-AWARE] IOC order did not fill: ticker=%s side=%s count=%d status=%s order_id=%s",
                 ticker, kalshi_side, count, result.status, result.order_id
@@ -7780,6 +7908,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         if result and (result.has_execution or (result.request_completed and not result.is_terminal)):
             logger.info("Order routed successfully: ticker=%s status=%s", ticker, result.status)
             return True
+        self._rejection_counters["other"] += 1
         return False
         
     except Exception as e:

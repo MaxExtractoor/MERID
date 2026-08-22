@@ -421,6 +421,16 @@ def _trail_condition(
             evidence=evidence,
         )
 
+    if position.trailing_state == TrailingState.EXIT:
+        # The monitor already decided to trail-exit; keep the condition eligible
+        # so the audit trail and choose_exit_condition agree with the emitted reason.
+        return ExitCondition(
+            reason=ExitReason.TRAIL,
+            eligible=True,
+            priority=get_priority_for_reason(ExitReason.TRAIL).value,
+            evidence={**evidence, "ineligible_reason": "exit_state_already_set"},
+        )
+
     return ExitCondition(
         reason=ExitReason.TRAIL,
         eligible=False,
@@ -495,8 +505,11 @@ def _edge_decay_condition(
         "current_price_cents": current_price_cents,
     }
 
-    # Replay / REST-sync / historical / unmatched fills cannot activate edge decay.
-    ineligible_source = position.fill_source in {"rest_sync", "replay", "historical", "manual", "unknown"}
+    # Replay / historical / manual fills cannot activate edge decay.
+    # REST-sync positions that still carry an entry signal id are eligible, so
+    # they can participate in profit-taking / edge-decay exits after a process
+    # restart.  Unknown provenance remains ineligible.
+    ineligible_source = position.fill_source in {"replay", "historical", "manual", "unknown"}
     if ineligible_source or not position.entry_signal_id:
         return ExitCondition(
             reason=ExitReason.EDGE_DECAY,
@@ -505,7 +518,7 @@ def _edge_decay_condition(
             evidence={
                 **evidence,
                 "ineligible_reason": "provenance_ineligible",
-                "provenance_detail": "replay_rest_historical_unmatched_or_missing_signal",
+                "provenance_detail": "replay_historical_manual_unknown_or_missing_signal",
             },
         )
 

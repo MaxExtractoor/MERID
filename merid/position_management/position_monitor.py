@@ -984,7 +984,11 @@ class PositionMonitor:
         return result
 
     def _mark_exit_intent_in_flight(
-        self, position_id: str, client_order_id: Optional[str] = None
+        self,
+        position_id: str,
+        client_order_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        task: Optional[asyncio.Task] = None,
     ) -> None:
         """
         Mark an exit intent as in-flight for a position.
@@ -999,20 +1003,25 @@ class PositionMonitor:
         Args:
             position_id: Position ID
             client_order_id: Optional client_order_id for order lookup on timeout
+            reason: Optional trigger reason for diagnostic logs
+            task: Optional asyncio Task so it can be cancelled on timeout/retry
         """
         with self._lock:
             self._exit_intent_in_flight[position_id] = {
                 "state": "SUBMITTED",
                 "timestamp": time.time(),
                 "client_order_id": client_order_id,
+                "reason": reason,
+                "task": task,
             }
             if client_order_id:
                 self._position_to_client_order[position_id] = client_order_id
                 self._recent_exit_submissions[client_order_id] = time.time()
             logger.info(
-                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent SUBMITTED: position_id=%s client_order_id=%s",
+                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent SUBMITTED: position_id=%s client_order_id=%s reason=%s",
                 position_id[:8],
                 client_order_id,
+                reason or "unknown",
             )
 
     def _mark_exit_intent_reconciled(self, position_id: str, reason: str) -> None:
@@ -1130,7 +1139,7 @@ class PositionMonitor:
             # CRITICAL FIX: Query exchange for order state to avoid permanent exit blocking.
             if client_order_id and position.market_id:
                 try:
-                    from merid.event_venues.kalshi.client_v2 import get_kalshi_client
+                    from merid.event_venues.kalshi.client import get_kalshi_client
                     client = get_kalshi_client()
                     lookup = await client.get_order_by_client_id_result(
                         client_order_id, market_id=position.market_id
@@ -1163,6 +1172,79 @@ class PositionMonitor:
                     logger.debug(
                         "[EXIT-INTENT-RECONCILE] Order lookup failed for position=%s: %s",
                         position_id[:8], order_exc
+                    )
+
+            # CRITICAL FIX (2026-08-21): client_order_id is often missing for positions
+            # that came from REST sync / replay.  Without a lookup key the monitor was
+            # leaving these in SUBMISSION_UNKNOWN forever, blocking protective exits
+            # and leaking risk.  Fall back to an exchange open-order/position snapshot.
+            if not client_order_id and position.market_id:
+                try:
+                    from merid.event_venues.kalshi.client import get_kalshi_client
+                    client = get_kalshi_client()
+
+                    # 1) If the market already expired, the contract is gone; remove.
+                    if self._is_expired_market(position.market_id):
+                        logger.warning(
+                            "[EXIT-INTENT-RECONCILE] position_id=%s market=%s expired and "
+                            "client_order_id missing; removing position",
+                            position_id[:8], position.market_id
+                        )
+                        self.remove_position(position_id)
+                        self._mark_exit_intent_reconciled(position_id, "expired_no_client_order_id")
+                        return
+
+                    # 2) If there is still an open order on this market, the prior
+                    #    unknown submission may be resting.  Leave it alone and re-check.
+                    open_orders = await client.get_open_orders(market_id=position.market_id)
+                    if open_orders:
+                        logger.info(
+                            "[EXIT-INTENT-RECONCILE] position_id=%s market=%s still has %d open order(s); "
+                            "leaving SUBMISSION_UNKNOWN",
+                            position_id[:8], position.market_id, len(open_orders)
+                        )
+                        return
+
+                    # 3) No open order and no client_order_id.  The submission was
+                    #    likely lost or already filled.  Check exchange positions.
+                    exchange_positions = await client.get_positions()
+                    matching = [p for p in exchange_positions if getattr(p, "market_id", None) == position.market_id]
+                    if not matching or all(getattr(p, "size", Decimal("0")) == 0 for p in matching):
+                        logger.warning(
+                            "[EXIT-INTENT-RECONCILE] position_id=%s market=%s not found on exchange "
+                            "and no open order; removing position",
+                            position_id[:8], position.market_id
+                        )
+                        self.remove_position(position_id)
+                        self._mark_exit_intent_reconciled(position_id, "exchange_position_missing")
+                        return
+
+                    # 4) Exchange position still exists and no open order.  The prior
+                    #    exit probably never reached the venue.  Release the in-flight
+                    #    lock so the monitor can retry on the next tick, and also
+                    #    clear any stale terminal flags on the Position so the retry
+                    #    is not immediately dropped by the loop-side idempotency guard.
+                    logger.warning(
+                        "[EXIT-INTENT-RECONCILE] position_id=%s market=%s still open on exchange "
+                        "but no open order and no client_order_id; releasing in-flight lock to retry",
+                        position_id[:8], position.market_id
+                    )
+                    with self._lock:
+                        stale_position = self._open_positions.get(position_id)
+                        if stale_position and stale_position.exited_at is None:
+                            stale_position.exit_triggered = False
+                            stale_position.exit_reason = None
+                            stale_position.exit_price_cents = None
+                            logger.info(
+                                "[EXIT-INTENT-RECONCILE] Cleared stale exit_triggered for position=%s",
+                                position_id[:8]
+                            )
+                    self._mark_exit_intent_reconciled(position_id, "retry_unknown_submission")
+                    return
+                except Exception as fallback_exc:
+                    logger.debug(
+                        "[EXIT-INTENT-RECONCILE] Fallback reconciliation failed for position=%s: %s",
+                        position_id[:8], fallback_exc
                     )
 
             # Fallback: leave in SUBMISSION_UNKNOWN and alert; a later fill callback should reconcile.
@@ -2979,7 +3061,7 @@ class PositionMonitor:
         try:
             from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
             exit_fee = calculate_kalshi_fee_cents(
-                max(1, int(position.size)),
+                position.size,
                 exit_price_cents,
             )
             net_executable_pnl_cents = position.unrealized_pnl_cents - exit_fee
@@ -3137,16 +3219,24 @@ class PositionMonitor:
             )
             return
 
-        # CRITICAL FIX (2026-08-11): Profit-exit invariants (TP, TRAIL, DYNAMIC_TP,
-        # EXTREME_PROFIT).  A profit exit must use the executable own-side bid and
-        # must be at least entry + round-trip fee buffer.  It can never become a
-        # stale-book or side-conversion loss merely because it is labeled "profit".
-        if exit_reason in {
+        # CRITICAL FIX (2026-08-20): Profit-exit invariants for any discretionary
+        # (non-stop / non-emergency) exit.  These exits must use the executable
+        # own-side bid and must be at least entry + round-trip fee buffer so they
+        # cannot become stale-book or side-conversion losses.  EDGE_DECAY is now
+        # included so it cannot approve negative-net exits.
+        _PROFIT_EXIT_REASONS = {
             ExitReason.TAKE_PROFIT,
-            ExitReason.TRAIL,
             ExitReason.DYNAMIC_TAKE_PROFIT,
             ExitReason.EXTREME_PROFIT,
-        }:
+            ExitReason.AUTO_EXIT_99C,
+            ExitReason.RATCHET_TRIM,
+            ExitReason.SCALE_OUT,
+            ExitReason.OPPORTUNITY_COST,
+            ExitReason.CANDLE_REVERSAL,
+            ExitReason.ADAPTIVE_TIMING,
+            ExitReason.EDGE_DECAY,
+        }
+        if exit_reason in _PROFIT_EXIT_REASONS:
             # The exit price must be the executable own-side bid from the snapshot.
             if snapshot is not None and snapshot.own_side_bid_cents != exit_price_cents:
                 _bump_stop_counter(
@@ -3185,19 +3275,38 @@ class PositionMonitor:
             # CRITICAL FIX (2026-07-23): Check if exit intent is already in-flight
             # This prevents multiple triggers (TP + SL) from firing before first exit is placed
             # CRITICAL FIX (2026-07-29): Bypass in-flight check for expired markets to prevent stuck positions
+            # CRITICAL FIX (2026-08-22): If a previous exit intent died without
+            # resetting the position terminal flags, clear them so the callback
+            # can actually place an order.  Only a position with a real exited_at
+            # timestamp is genuinely closed.
+            if position.exit_triggered and position.exited_at is None:
+                logger.warning(
+                    "[EXIT-INTENT-STALE-CLEAR] position=%s had exit_triggered=True with no exited_at; "
+                    "clearing stale terminal flags so exit can retry",
+                    position.position_id[:8]
+                )
+                position.exit_triggered = False
+                position.exit_reason = None
+                position.exit_price_cents = None
+
             if not bypass_in_flight_check and self._is_exit_intent_in_flight(position.position_id):
+                with self._lock:
+                    flight = self._exit_intent_in_flight.get(position.position_id)
+                    existing_reason = (
+                        flight.get("reason") if flight else None
+                    ) or "unknown"
                 logger.warning(
                     "[EXIT-INTENT-IN-FLIGHT] Exit intent already in-flight for position=%s, skipping duplicate trigger. "
                     "Existing trigger reason=%s, new reason=%s",
                     position.position_id[:8],
-                    "unknown",
+                    existing_reason,
                     exit_reason.value
                 )
                 # Skip this trigger - the in-flight intent will handle the exit
                 return
 
             # Mark intent as in-flight before calling callback
-            self._mark_exit_intent_in_flight(position.position_id)
+            self._mark_exit_intent_in_flight(position.position_id, reason=exit_reason.value)
 
             try:
                 logger.info(
@@ -3824,7 +3933,7 @@ class PositionMonitor:
                         entry_market_probability=cached_pos.entry_market_probability,
                         entry_edge=cached_pos.entry_edge,
                         entry_book_snapshot_id=cached_pos.entry_book_snapshot_id,
-                        entry_fill_id=cached_pos.entry_fill_id,
+                        entry_fill_id=cached_pos.entry_fill_id or cached_pos.client_order_id or cached_pos.entry_order_id or cached_pos.entry_intent_id,
                         entry_order_id=cached_pos.entry_order_id or cached_pos.client_order_id,
                         entry_execution_mode=cached_pos.entry_execution_mode,
                         client_order_id=cached_pos.client_order_id,
