@@ -5,10 +5,10 @@ Tracks open positions with TP/SL, trailing stops, and exit policy references.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
+from typing import Any, List, Optional
 import logging
 import os
 import time
@@ -52,6 +52,62 @@ class RiskParamsState(str, Enum):
     FALLBACK = "fallback"
 
 
+@dataclass(frozen=True)
+class PositionKey:
+    """Canonical, immutable position identity.
+
+    A position is identified by the exact exchange, subaccount, and market ticker.
+    Asset labels (BTC, XRP15M, KXXRP15M) may be aliases, but they are never the
+    primary identity. This key is the single join key used by the REST position
+    endpoint, the fills ledger, the position cache, the monitor, exit intents,
+    retry state, order deduplication, and continuous reconciliation.
+    """
+
+    exchange_index: str = "kalshi"
+    subaccount: Optional[str] = None
+    market_ticker: str = ""
+
+    def __str__(self) -> str:
+        parts = [self.exchange_index]
+        if self.subaccount:
+            parts.append(self.subaccount)
+        parts.append(self.market_ticker)
+        return "/".join(parts)
+
+
+def canonical_position_key(
+    market_ticker: str,
+    exchange_index: str = "kalshi",
+    subaccount: Optional[str] = None,
+) -> PositionKey:
+    """Build a canonical position key from a market ticker."""
+    return PositionKey(
+        exchange_index=exchange_index,
+        subaccount=subaccount,
+        market_ticker=market_ticker,
+    )
+
+
+def migrate_legacy_key(
+    legacy_key: str,
+    candidates: list,
+) -> Optional[PositionKey]:
+    """Map a legacy asset/alias key to a canonical position key.
+
+    Returns the canonical key if exactly one candidate matches. Returns None
+    (indicating an ambiguous legacy key) when the alias cannot be resolved.
+    """
+    matches = [
+        getattr(p, "position_key", None)
+        for p in candidates
+        if getattr(p, "known_aliases", None) and legacy_key in p.known_aliases
+    ]
+    matches = [m for m in matches if m is not None]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 # CRITICAL FIX (2026-08-22): Minimum profit cents for a take-profit exit.
 # Raised to 5c to cover round-trip taker fees on 15m crypto contracts.
 # At ~50c, taker fee is ~1.75c/contract/side, so two contracts cost
@@ -75,12 +131,21 @@ class Position:
     position_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     market_id: str = ""
     series_ticker: str = ""  # e.g., KXBTC15M
+    # CRITICAL FIX (2026-08-23): Canonical position key.  This is the single
+    # immutable identity used by cache, monitor, ledger, and reconciliation.
+    position_key: Optional[PositionKey] = None
+    known_aliases: Optional[List[Any]] = field(default_factory=list)
+    # CRITICAL FIX (2026-08-23): Durable provenance state for edge-decay decisions.
+    entry_provenance_snapshot_id: Optional[str] = None
+    provenance_state: str = "UNKNOWN_PROVENANCE"
+    # CRITICAL FIX (2026-08-23): Monotonic position version for deterministic dedupe and intent keys.
+    position_version: int = 1
 
     # Position details
     side: PositionSide = PositionSide.YES
     size: Decimal = Decimal("0")  # Number of contracts (fixed-point; fractional OK)
     avg_entry_price_cents: int = 0
-    opened_at: datetime = field(default_factory=datetime.utcnow)
+    opened_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Exit targets
     take_profit_price_cents: Optional[int] = None
@@ -165,6 +230,9 @@ class Position:
     exit_reason: Optional[str] = None
     exit_price_cents: Optional[int] = None
     exited_at: Optional[datetime] = None
+    state: str = "OPEN"
+    removed: bool = False
+    terminal: bool = False
 
     # Ratchet profit floor tracking (2026-07-05)
     ratchet_activated: bool = False
@@ -220,6 +288,15 @@ class Position:
         # 2026-08-12: Coerce Decimal/float inputs to int for fields that the
         # monitor and exit math treat as whole cents/contracts. This prevents
         # downstream TypeErrors when fills_ledger passes Decimal count_fp.
+        # 2026-08-23: Coerce fractional size fields to Decimal.
+        for attr in ("size", "scale_out_remaining_size"):
+            value = getattr(self, attr, None)
+            if value is not None and not isinstance(value, Decimal):
+                try:
+                    setattr(self, attr, Decimal(str(value)))
+                except Exception:
+                    setattr(self, attr, Decimal("0"))
+
         for attr in [
             "avg_entry_price_cents",
             "take_profit_price_cents",
@@ -274,7 +351,10 @@ class Position:
                 self.risk_params_state = RiskParamsState.UNKNOWN
 
         has_entry_linkage = bool(
-            self.entry_intent_id or self.client_order_id or self.entry_fill_id
+            self.entry_intent_id
+            or self.client_order_id
+            or self.entry_fill_id
+            or self.entry_provenance_snapshot_id
         )
 
         if self.risk_params_state == RiskParamsState.ORIGINAL_PERSISTED:
@@ -370,11 +450,14 @@ class Position:
             now: Current timestamp (defaults to utcnow)
         """
         if now is None:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
         now_ts = time.monotonic()
         self.current_price_cents = int(current_price_cents)
-        self.time_since_entry_seconds = (now - self.opened_at).total_seconds()
+        opened_at = self.opened_at
+        if opened_at is not None and opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+        self.time_since_entry_seconds = (now - opened_at).total_seconds() if opened_at else 0.0
 
         # Calculate unrealized PnL
         # CRITICAL FIX (2026-07-16): SIDE-SPACE convention. Entry price (from fills ledger)
@@ -831,12 +914,20 @@ class Position:
             now: Exit timestamp (defaults to utcnow)
         """
         if now is None:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
         self.exit_triggered = True
         self.exit_reason = reason
         self.exit_price_cents = exit_price_cents
         self.exited_at = now
+        self.state = "EXITED"
+        self.terminal = True
+
+    def mark_reconciling(self, reason: str) -> None:
+        """Mark the position as waiting for post-order reconciliation."""
+        self.state = "RECONCILING"
+        self.terminal = False
+        self.exit_triggered = False
 
     def is_open(self) -> bool:
         """Check if position is still open."""
@@ -903,6 +994,8 @@ class Position:
             "entry_fill_id": self.entry_fill_id,
             "entry_order_id": self.entry_order_id,
             "entry_execution_mode": self.entry_execution_mode,
+            "entry_provenance_snapshot_id": self.entry_provenance_snapshot_id,
+            "provenance_state": self.provenance_state,
             "fill_source": self.fill_source,
             # trailing_profit_threshold_reached_at is runtime-only, not persisted
             "window_resolution_id": self.window_resolution_id,
@@ -937,7 +1030,7 @@ class Position:
         CRITICAL FIX: 2026-07-07 - Added dynamic_tp_target_cents from persistence
         to restore dynamic TP targets after system restart.
         """
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         # Fail-closed: a persisted position without a valid side is corrupt data.
         if BINARY_PRICE_SPACE_AVAILABLE:
@@ -958,7 +1051,7 @@ class Position:
             side=PositionSide(validated_side),
             size=data.get("size", 0),
             avg_entry_price_cents=data.get("avg_entry_price_cents", 0),
-            opened_at=datetime.fromisoformat(data["opened_at"]) if data.get("opened_at") else datetime.utcnow(),
+            opened_at=datetime.fromisoformat(data["opened_at"]) if data.get("opened_at") else datetime.now(timezone.utc),
             take_profit_price_cents=data.get("take_profit_price_cents"),
             take_profit_r_multiple=data.get("take_profit_r_multiple"),
             stop_loss_price_cents=data.get("stop_loss_price_cents"),
@@ -1005,6 +1098,8 @@ class Position:
             entry_fill_id=data.get("entry_fill_id"),
             entry_order_id=data.get("entry_order_id"),
             entry_execution_mode=data.get("entry_execution_mode"),
+            entry_provenance_snapshot_id=data.get("entry_provenance_snapshot_id"),
+            provenance_state=data.get("provenance_state", "UNKNOWN_PROVENANCE"),
             fill_source=data.get("fill_source"),
             # trailing_profit_threshold_reached_at is runtime-only, not persisted
             window_resolution_id=data.get("window_resolution_id", ""),
