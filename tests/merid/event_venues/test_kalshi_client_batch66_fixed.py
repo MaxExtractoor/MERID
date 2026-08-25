@@ -33,6 +33,7 @@ class TestKalshiVenueClient:
     @pytest.mark.asyncio
     async def test_authenticate_no_credentials(self, client):
         """Test authentication with no credentials."""
+        client._http_client = MagicMock()
         await client._authenticate()
         assert client._auth_token is None
 
@@ -41,6 +42,7 @@ class TestKalshiVenueClient:
         """Test close."""
         mock_client = MagicMock()
         mock_client.aclose = AsyncMock()
+        mock_client.is_closed = False
         client._http_client = mock_client
         
         await client.close()

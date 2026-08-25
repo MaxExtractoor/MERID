@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Universe tests require complex setup with API changes - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P2-INTEGRATION: TRACKER-021: Universe / series discovery API")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

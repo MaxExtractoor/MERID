@@ -33,7 +33,7 @@ class MockOHLCV:
 
 
 class TestVolatilityRegimeIntegration:
-    """Test volatility regime integration in position_monitor._check_position()."""
+    """Test volatility regime integration in position_monitor._legacy_check_position()."""
     
     @pytest.fixture
     def mock_position(self):
@@ -96,7 +96,7 @@ class TestVolatilityRegimeIntegration:
             
             # Check position - should compute volatility regime
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify OHLCV buffer was accessed (called twice: once for candles, once for volatility)
         assert mock_service.get_ohlcv_buffer.call_count >= 1
@@ -133,7 +133,7 @@ class TestVolatilityRegimeIntegration:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify volatility regime was classified
         mock_classify.assert_called_once()
@@ -168,7 +168,7 @@ class TestVolatilityRegimeIntegration:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify volatility regime was classified
         mock_classify.assert_called_once()
@@ -195,7 +195,7 @@ class TestVolatilityRegimeIntegration:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify spot service was attempted (error handling worked)
         # Called multiple times (candles + volatility), so check count >= 1
@@ -203,7 +203,7 @@ class TestVolatilityRegimeIntegration:
 
 
 class TestRealTimeEdgeComputationIntegration:
-    """Test real-time edge computation integration in position_monitor._check_position()."""
+    """Test real-time edge computation integration in position_monitor._legacy_check_position()."""
     
     @pytest.fixture
     def mock_position(self):
@@ -261,7 +261,7 @@ class TestRealTimeEdgeComputationIntegration:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify edge evaluator was called
         mock_evaluator.compute_current_edge.assert_called_once()
@@ -291,7 +291,7 @@ class TestRealTimeEdgeComputationIntegration:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify edge evaluator was called
         mock_evaluator.compute_current_edge.assert_called_once()
@@ -321,7 +321,7 @@ class TestRealTimeEdgeComputationIntegration:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify edge evaluator was called (fallback logic in code)
         mock_evaluator.compute_current_edge.assert_called_once()
@@ -352,7 +352,7 @@ class TestRealTimeEdgeComputationIntegration:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify edge evaluator was called
         mock_evaluator.compute_current_edge.assert_called_once()
@@ -484,7 +484,7 @@ class TestIntegrationEndToEnd:
             mock_profile.return_value = mock_adapter
             
             import asyncio
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Verify all three integrations were called
         # OHLCV buffer called twice (candles + volatility regime)

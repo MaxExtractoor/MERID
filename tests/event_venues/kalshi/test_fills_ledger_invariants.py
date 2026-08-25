@@ -12,6 +12,8 @@ from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger, get_fills_
 
 @pytest.fixture
 async def ledger(monkeypatch):
+    from merid.event_venues.kalshi import fills_ledger as _fl
+    _fl._ledgers.clear()
     KalshiFillsLedger._instance = None
     KalshiFillsLedger._lock = threading.Lock()
     lg = get_fills_ledger()
@@ -19,9 +21,12 @@ async def ledger(monkeypatch):
     lg._fills_by_order.clear()
     lg._fills_by_market.clear()
     lg._intents.clear()
+    lg._processed_fill_ids.clear()
+    lg._loaded_count = 1  # skip DB reload so tests use a clean ledger
     yield lg
     # Clean up: shutdown writer task properly
     await lg.shutdown()
+    _fl._ledgers.clear()
     KalshiFillsLedger._instance = None
 
 

@@ -10,6 +10,13 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 
+# SKIPPED: Import chain issues with trading.trade_mode module - not critical for 15m production stack
+pytest.skip(
+    "Import chain issues with trading.trade_mode module - not critical for 15m production stack",
+    allow_module_level=True,
+)
+
+
 # Ensure monitoring.* modules are importable without pulling heavy prod deps.
 monitoring_pkg = sys.modules.setdefault("monitoring", ModuleType("monitoring"))
 news_feeds_mod = ModuleType("monitoring.news_feeds")
@@ -187,9 +194,6 @@ for _agent_module, _class_name in _AGENT_CLASS_MAP.items():
 
         module.market_id_for_block = market_id_for_block
     sys.modules[module_name] = module
-
-# SKIPPED: Import chain issues with trading.trade_mode module - not critical for 15m production stack
-pytest.skip("Import chain issues with trading.trade_mode module - not critical for 15m production stack", allow_module_level=True)
 
 from web.main_15m_lean import app
 

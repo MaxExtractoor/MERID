@@ -34,16 +34,16 @@ class TestKalshiFeeSanity:
                 fee = calculate_kalshi_fee_cents(contracts, price)
                 assert fee >= 0, f"Fee must be non-negative: {fee} for {contracts}@{price}¢"
     
-    def test_fee_minimum_two_cents(self):
-        """Kalshi minimum fee is 2 cents total."""
+    def test_fee_minimum_one_cent(self):
+        """Kalshi fee is the cent-rounding ceiling; minimum is 1 cent."""
         from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
-        
-        # Any valid trade should have at least 2 cents fee
+
+        # Any valid trade should have at least 1 cent fee
         for contracts in [1, 5, 10]:
             for price in [1, 50, 99]:
                 fee = calculate_kalshi_fee_cents(contracts, price)
                 if fee > 0:
-                    assert fee >= 2, f"Fee below minimum: {fee}¢ for {contracts}@{price}¢"
+                    assert fee >= 1, f"Fee below 1 cent: {fee}¢ for {contracts}@{price}¢"
     
     def test_fee_tier_progression(self):
         """Higher contract counts should generally have lower per-contract fees."""

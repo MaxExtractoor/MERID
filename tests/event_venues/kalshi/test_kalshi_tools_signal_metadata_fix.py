@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Tests deprecated merid.prediction.kalshi_tools methods")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-027: Tests deprecated `merid.prediction.kalshi_tools`")
 
 from unittest.mock import AsyncMock, MagicMock, patch
 

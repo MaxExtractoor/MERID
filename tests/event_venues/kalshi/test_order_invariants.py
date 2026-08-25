@@ -29,8 +29,6 @@ import threading
 import time
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Implementation changed - order state machine, fill awareness, and exit order logic evolved - tested via integration tests")
-
 from merid.event_venues.kalshi.contract_lease import (
     ContractLeaseRegistry,
     LeaseKey,
@@ -369,6 +367,7 @@ class TestIdempotentOrderStore:
                 price_cents=55,
             )
             store.insert_if_absent(rec)
+            store.mark_submitted(f"coid-{i}", f"venue-{i}")
             store.mark_filled(f"coid-{i}", 5)
         total = store.filled_count_for_contract("KXBTC", "yes", "btc_15m")
         assert total == 15
@@ -406,6 +405,7 @@ class TestIdempotentOrderStore:
             price_cents=55,
         )
         store.insert_if_absent(rec)
+        store.mark_submitted("coid-old", "venue-old")
         store.mark_filled("coid-old", 10)
         # Force the record to look old
         store._orders["coid-old"].updated_at = time.time() - 100000
@@ -479,6 +479,7 @@ class TestPreTradeGate:
             contract_id="KXBTC", side="yes", action="buy",
             target_count=10, price_cents=55, decision_ts=ts,
         )
+        gate.mark_submitted(v1.client_order_id, "venue-abc")
         gate.mark_filled(v1.client_order_id, 10)
 
         # New decision, same contract — but existing_filled >= target
@@ -627,6 +628,7 @@ class TestCapBreachMetrics:
             contract_id="KXBTC", side="yes", action="buy",
             target_count=5, price_cents=55, decision_ts=ts,
         )
+        gate.mark_submitted(v.client_order_id, "venue-abc")
         gate.mark_filled(v.client_order_id, 5)
 
         # Attempt a new order — target already met

@@ -1,4 +1,5 @@
 """Test fills-ledger BROKEN status blocks execution gate (CRIT-3 fix)."""
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 import os
 
@@ -32,8 +33,20 @@ def _run_gate(ledger_mock, *, live: bool):
                         "core.execution_gate._is_kalshi_demo_mode",
                         return_value=(not live),
                     ):
-                        from core.execution_gate import check_execution_gate
-                        return check_execution_gate()
+                        with patch(
+                            "core.dependency_health.check_all_dependencies",
+                            return_value={
+                                "dependencies": [],
+                                "any_critical_down": False,
+                                "degraded_count": 0,
+                                "down_count": 0,
+                                "total": 0,
+                                "healthy_count": 0,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            },
+                        ):
+                            from core.execution_gate import check_execution_gate
+                            return check_execution_gate()
 
 
 def test_fills_ledger_broken_blocks_in_live_mode():

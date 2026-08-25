@@ -513,6 +513,7 @@ class TestBrierMetricsAPI:
         assert "meets_events_criteria" in evaluation
         assert "recommendation" in evaluation
 
+@pytest.mark.skip(reason="legacy prediction_arbitrage_analyst module not present in 15m stack")
 class TestIntegrationWithMERID:
     """Test integration with existing MERID components."""
 

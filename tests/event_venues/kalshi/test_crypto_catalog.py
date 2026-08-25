@@ -205,7 +205,7 @@ def test_summarize_crypto_ws_coverage_counts() -> None:
     assert s["by_asset"]["ETH"] == 1
 
 
-@pytest.mark.skip(reason="KalshiMarketStateStore API changed - requires ticker registration before message processing")
+@pytest.mark.skip(reason="P2-INTEGRATION: TRACKER-020: Catalog/ticker registration changed")
 def test_market_state_store_separate_books_per_ticker() -> None:
     """Test that market state store maintains separate books per ticker.
     

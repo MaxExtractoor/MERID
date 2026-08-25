@@ -205,8 +205,10 @@ class PositionExitManager:
         position_state.updated_at = datetime.now(timezone.utc)
         
         logger.info(
-            "[EXIT-PLAN-ADDED] position=%s plan_type=%s trigger_price=%dc size_fraction=%.2f",
-            position_id, plan_type.value, trigger_price_cents, size_fraction
+            "[EXIT-PLAN-ADDED] position=%s plan_type=%s trigger_price=%s size_fraction=%.2f",
+            position_id, plan_type.value,
+            f"{trigger_price_cents}c" if trigger_price_cents is not None else "None",
+            size_fraction
         )
         
         return True, None

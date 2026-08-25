@@ -50,31 +50,37 @@ class TestExitIntentCallback:
 
 
 class TestExitIntentOrderingFix:
-    """Tests for CRITICAL FIX (2026-07-16): Exit intent ordering fix.
-    
-    This fix ensures the callback fires BEFORE mark_exited/remove_position
-    to prevent silent exit drops.
+    """Tests for CRITICAL FIX (2026-08-11): Exit intent ordering fix.
+
+    The callback fires immediately to create the async order-routing task,
+    but the position must not be marked exited or removed from the monitor
+    until the venue confirms an execution (or REST position reconciliation
+    shows a zero position). mark_exited/remove_position now live in the
+    loop-side executor after route_order_async returns.
     """
-    
+
     def test_callback_before_mark_exited_in_position_monitor(self):
-        """Test that callback is called before mark_exited in PositionMonitor.
-        
-        CRITICAL FIX (2026-07-16): The callback must fire before mark_exited
-        to prevent silent exit drops.
+        """Test that _emit_exit_intent no longer marks exited or removes.
+
+        2026-08-11: mark_exited/remove_position must happen only after a
+        confirmed fill, not inside the monitor's callback dispatch.
         """
         import inspect
         from merid.position_management.position_monitor import PositionMonitor
-        
+
         # Get the source code of _emit_exit_intent
         source = inspect.getsource(PositionMonitor._emit_exit_intent)
-        
-        # Verify callback is called before mark_exited
+
+        # The callback must still be dispatched
         callback_index = source.find("self._exit_intent_callback")
-        mark_exited_index = source.find("position.mark_exited")
-        
         assert callback_index > 0, "Callback call must exist"
-        assert mark_exited_index > 0, "mark_exited call must exist"
-        assert callback_index < mark_exited_index, "Callback must be called before mark_exited"
+
+        # _emit_exit_intent must not mark the position terminal; the loop-side
+        # executor is responsible for mark_exited/remove_position after a fill.
+        mark_exited_index = source.find("position.mark_exited")
+        remove_position_index = source.find("self.remove_position")
+        assert mark_exited_index == -1, "mark_exited must not be called in _emit_exit_intent"
+        assert remove_position_index == -1, "remove_position must not be called in _emit_exit_intent"
     
     def test_callback_failed_keeps_position_monitored(self):
         """Test that callback failure keeps position monitored.

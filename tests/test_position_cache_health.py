@@ -13,6 +13,20 @@ from datetime import datetime, timezone, timedelta
 from merid.event_venues.kalshi.position_cache import get_position_cache, KalshiPositionCache
 
 
+@pytest.fixture(autouse=True)
+def disable_expiry_filter_in_sync_tests(monkeypatch):
+    """Disable the live expiry filter for REST-sync unit tests.
+
+    The test fixtures use historical tickers (e.g. KXBTC15M-26JUL012015-30)
+    that would otherwise be filtered by the production expiry guard.  This
+    patch isolates the sync/filter logic under test from wall-clock expiry.
+    """
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.position_cache._is_expired_ticker",
+        lambda t: False,
+    )
+
+
 class TestPositionCacheHealth:
     """Test suite for position cache health monitoring."""
     

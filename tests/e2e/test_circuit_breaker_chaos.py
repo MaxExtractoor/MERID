@@ -22,6 +22,8 @@ from trading.guards.trading_guard import (
 from trading.adapters.base import TradeRequest
 from trading.config.runtime_config import TradingRuntimeConfig
 from merid.execution.executors.kalshi import KalshiExecutor
+from merid.event_venues.kalshi.order_router import OrderResult
+from merid.prediction.trading_mode import TradingMode
 from merid.execution.base import TradeResult
 
 
@@ -40,6 +42,7 @@ class TestCircuitBreakerChaosE2E:
         config = TradingGuardConfig(
             allow_live_trades=True,
             enable_trading_suite=True,
+            max_notional_usd=100000.0,
             max_daily_loss_usd=100000.0,
             circuit_breaker_threshold=3,  # Trip after 3 errors
             circuit_breaker_window_seconds=5.0,  # 5 second window
@@ -221,20 +224,27 @@ class TestCircuitBreakerChaosE2E:
         """
         executor = KalshiExecutor()
         
-        # Mock _request to always fail
-        with patch.object(
-            executor,
-            '_request',
-            side_effect=asyncio.TimeoutError("Connection timeout")
-        ) as mock_request:
+        # Mock the canonical order router to return a failure for every order.
+        # This simulates a venue timeout without requiring network access.
+        failed_result = OrderResult(
+            status="rejected",
+            mode=TradingMode.MOCK,
+            reason="Connection timeout",
+        )
+        with patch(
+            'merid.execution.executors.kalshi.route_order_async',
+            new=AsyncMock(return_value=failed_result),
+        ) as mock_route:
             
             # Execute trades that will fail
             results = []
             for i in range(5):
-                result = await executor.execute_trade(
-                    symbol="PRES-2024-DEM",
-                    side="buy",
-                    amount=10.0,
+                result = await executor.place_order(
+                    ticker="KXBTC15M-26AUG021345-45",
+                    side="yes",
+                    action="buy",
+                    price_cents=50,
+                    count=1,
                 )
                 results.append(result)
             
@@ -243,7 +253,7 @@ class TestCircuitBreakerChaosE2E:
             
             # Verify executor captured errors
             print(f"✅ Executor handled {len(results)} failures gracefully")
-            print(f"   Mock call count: {mock_request.call_count}")
+            print(f"   Mock call count: {mock_route.call_count}")
 
     async def test_circuit_breaker_event_logging(
         self,
@@ -303,6 +313,8 @@ class TestStressBurstScenario:
         This tests that error timestamp tracking doesn't OOM or slow down.
         """
         config = TradingGuardConfig(
+            max_notional_usd=100000.0,
+            max_daily_loss_usd=100000.0,
             circuit_breaker_threshold=5,
             circuit_breaker_window_seconds=60.0,
         )

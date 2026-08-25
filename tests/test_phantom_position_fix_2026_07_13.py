@@ -184,7 +184,7 @@ class TestGlobalSlotAllocatorPhantomSlotClear:
         # Verify slots are cleared
         assert len(allocator._slots) == 0
         assert allocator.get_total_exposure() == 0.0
-        assert allocator.get_available_exposure() == 1.0
+        assert allocator.get_available_exposure() == 2.0
     
     def test_clear_slots_on_empty_positions_logs_warning(self, allocator, caplog):
         """Test that clearing phantom slots logs a warning."""
@@ -279,7 +279,7 @@ class TestFullReconciliationFlow:
         assert len(ledger._open_positions) == 0
         assert len(allocator._slots) == 0
         assert allocator.get_total_exposure() == 0.0
-        assert allocator.get_available_exposure() == 1.0
+        assert allocator.get_available_exposure() == 2.0
 
 
 class TestStartupResetLogic:

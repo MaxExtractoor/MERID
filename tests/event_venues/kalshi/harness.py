@@ -128,10 +128,11 @@ class KalshiTestHarness:
             created_time = datetime.now(timezone.utc)
 
         # Calculate proceeds
+        fee = Decimal("0.001") * count
         if action == "buy":
-            proceeds_dollars = -(count * yes_price_dollars + (count * 0.001))  # Buy cost + fee
+            proceeds_dollars = -(count * yes_price_dollars + fee)  # Buy cost + fee
         else:
-            proceeds_dollars = (count * yes_price_dollars - (count * 0.001))  # Sell proceeds - fee
+            proceeds_dollars = (count * yes_price_dollars - fee)  # Sell proceeds - fee
 
         return KalshiFillFixture(
             fill_id=fill_id,
@@ -496,7 +497,7 @@ class KalshiTestHarness:
         
         return {
             "risk_status": risk_status,
-            "gate_state": gate_status.gate_state.value,
+            "gate_state": gate_status.gate_state,
             "allowed_operations": allowed_operations,
             "recon_severity": severity if recon_state else None,
             "recon_phantom": phantom is not None if recon_state else None,
@@ -815,7 +816,7 @@ class KalshiTestHarness:
                     "fill_id": fill.fill_id,
                     "timestamp": fill.created_time.isoformat(),
                     "constraint": "execution_gate",
-                    "gate_state": gate_status.gate_state.value,
+                    "gate_state": gate_status.gate_state,
                 })
 
             # Update positions
@@ -828,7 +829,7 @@ class KalshiTestHarness:
 
             # Track final states
             results["final_risk_status"] = risk_status
-            results["final_gate_state"] = gate_status.gate_state.value
+            results["final_gate_state"] = gate_status.gate_state
 
         return results
 

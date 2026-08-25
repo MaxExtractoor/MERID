@@ -417,14 +417,14 @@ class TestGlobalAllocator:
         """Test that default per-asset thresholds are used when not provided (2026-07-10 fix)."""
         # Create allocator without explicit per-asset thresholds
         allocator = GlobalAllocator(venue_cap_usd=1.00)
-        
-        # Should have default thresholds aligned with risk_parameters.py
+
+        # Should have default thresholds aligned with current profile (unified 2.5% as a fraction)
         assert "BTC" in allocator.per_asset_min_edge_pct
-        assert allocator.per_asset_min_edge_pct["BTC"] == 1.75
-        assert allocator.per_asset_min_edge_pct["ETH"] == 2.0
-        assert allocator.per_asset_min_edge_pct["SOL"] == 2.5
-        assert allocator.per_asset_min_edge_pct["XRP"] == 3.0
-        assert allocator.per_asset_min_edge_pct["DOGE"] == 3.5
+        assert allocator.per_asset_min_edge_pct["BTC"] == 0.025
+        assert allocator.per_asset_min_edge_pct["ETH"] == 0.025
+        assert allocator.per_asset_min_edge_pct["SOL"] == 0.025
+        assert allocator.per_asset_min_edge_pct["XRP"] == 0.025
+        assert allocator.per_asset_min_edge_pct["DOGE"] == 0.025
 
     def test_per_asset_edge_thresholds_with_custom(self):
         """Test that custom per-asset thresholds override defaults (2026-07-10 fix)."""

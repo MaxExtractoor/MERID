@@ -1,7 +1,7 @@
-"""Tests for $1 global exposure cap as single source of truth.
+"""Tests for $2 global exposure cap as single source of truth.
 
 Verifies that:
-- GlobalSlotAllocator enforces $1 cap as the only exposure limit
+- GlobalSlotAllocator enforces $2 cap as the only exposure limit
 - All contradictory order flow limits have been removed
 - Rate limits are behavioral throttles, not exposure limits
 - No code path uses removed limits (max_concurrent_trades, max_orders_per_15m_window, per_strip_order_limit)
@@ -15,15 +15,15 @@ from pathlib import Path
 os.environ["MERID_PROFILE"] = "kalshi_crypto_15m_v2"
 
 
-class Test1DollarCapSingleSourceOfTruth:
-    """Verify $1 cap is the single source of truth for exposure."""
+class Test2DollarCapSingleSourceOfTruth:
+    """Verify $2 cap is the single source of truth for exposure."""
 
-    def test_global_slot_allocator_enforces_1dollar_cap(self):
-        """Verify GlobalSlotAllocator enforces $1 exposure cap."""
+    def test_global_slot_allocator_enforces_2dollar_cap(self):
+        """Verify GlobalSlotAllocator enforces $2 exposure cap."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         
-        assert GlobalSlotAllocator.MAX_EXPOSURE_USD == 1.00, "MAX_EXPOSURE_USD must be $1.00"
-        assert GlobalSlotAllocator.MAX_CONTRACTS_PER_ORDER == 1, "MAX_CONTRACTS_PER_ORDER must be 1"
+        assert GlobalSlotAllocator.MAX_EXPOSURE_USD == 2.00, "MAX_EXPOSURE_USD must be $2.00"
+        assert GlobalSlotAllocator.MAX_CONTRACTS_PER_ORDER == 2, "MAX_CONTRACTS_PER_ORDER must be 2"
         assert GlobalSlotAllocator.MAX_POSITIONS_PER_ASSET == 1, "MAX_POSITIONS_PER_ASSET must be 1"
 
     def test_profile_yaml_has_no_contradictory_limits(self):
@@ -39,11 +39,11 @@ class Test1DollarCapSingleSourceOfTruth:
         assert "max_contracts_per_asset:" not in content, "max_contracts_per_asset should be removed from profile"
         assert "max_contracts_per_cluster:" not in content, "max_contracts_per_cluster should be removed from profile"
         
-        # These should exist (align with $1 cap)
-        assert "max_single_order_contracts: 1" in content, "max_single_order_contracts should be 1"
-        assert "max_yes_position: 1" in content, "max_yes_position should be 1"
-        assert "max_no_position: 1" in content, "max_no_position should be 1"
-        assert "fixed_exposure_cap_usd: 1.00" in content, "fixed_exposure_cap_usd should be 1.00"
+        # These should exist (align with $2 cap)
+        assert "max_single_order_contracts: 2" in content, "max_single_order_contracts should be 2"
+        assert "max_yes_position: 2" in content, "max_yes_position should be 2"
+        assert "max_no_position: 2" in content, "max_no_position should be 2"
+        assert "fixed_exposure_cap_usd: 2.00" in content, "fixed_exposure_cap_usd should be 2.00"
 
     def test_agent_grid_config_has_removed_limits(self):
         """Verify LeanAgentConfig has removed contradictory limits."""
@@ -116,33 +116,33 @@ class Test1DollarCapSingleSourceOfTruth:
             "Throttling section should document that it's behavioral, not exposure limit"
 
     def test_settings_aligned_with_profile(self):
-        """Verify settings.py has comment explaining $1 cap alignment."""
+        """Verify settings.py has comment explaining $2 cap alignment."""
         # Note: Settings may load from .env file, so we only check the comment
         # The actual value alignment is tested in test_risk_threshold_fixes.py
         
         import inspect
         from merid.settings import Settings
         source = inspect.getsource(Settings)
-        assert "$1 cap" in source or "exposure cap" in source, \
-            "Settings should document alignment with $1 cap"
+        assert "$2 cap" in source or "exposure cap" in source, \
+            "Settings should document alignment with $2 cap"
 
 
-class Test1DollarCapMathematicalConsistency:
-    """Verify mathematical consistency of $1 cap with other limits."""
+class Test2DollarCapMathematicalConsistency:
+    """Verify mathematical consistency of $2 cap with other limits."""
 
-    def test_1dollar_cap_max_positions(self):
-        """Verify $1 cap allows realistic number of positions."""
+    def test_2dollar_cap_max_positions(self):
+        """Verify $2 cap allows realistic number of positions."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         
-        # With $1 cap and 1 contract/order at max 75c
-        # Maximum positions = floor(1.00 / 0.10) = 10 (at min price)
-        # Realistic positions = 1-2 (at 50-75c)
+        # With $2 cap and 2 contracts/order at max 75c
+        # Maximum positions = floor(2.00 / 0.10) = 20 (at min price)
+        # Realistic positions = 1-4 (at 50-75c)
         max_positions_min_price = int(GlobalSlotAllocator.MAX_EXPOSURE_USD / 0.10)
         max_positions_max_price = int(GlobalSlotAllocator.MAX_EXPOSURE_USD / 0.75)
         
         assert max_positions_min_price >= 1, "Should allow at least 1 position at min price"
         assert max_positions_max_price >= 1, "Should allow at least 1 position at max price"
-        assert max_positions_max_price <= 2, "Should allow at most 2 positions at max price"
+        assert max_positions_max_price <= 4, "Should allow at most 4 positions at max price"
 
     def test_rate_limits_generous_ceiling(self):
         """Verify rate limits are generous ceiling relative to realistic usage."""

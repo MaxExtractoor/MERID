@@ -10,6 +10,7 @@ from merid.position_management.position import (
     Position,
     PositionSide,
     TrailingType,
+    RiskParamsState,
 )
 from merid.position_management.exit_policy import ExitReason
 
@@ -26,17 +27,16 @@ class TestPosition:
             size=10,
             avg_entry_price_cents=50,
         )
-        
+
         assert position.position_id != ""
         assert position.market_id == "KXBTC15M-1234"
         assert position.side == PositionSide.YES
         assert position.size == 10
         assert position.avg_entry_price_cents == 50
         assert position.exit_triggered is False
-        # CRITICAL FIX: 2026-07-31 - Position now sets default 5c risk if no SL set
-        # This ensures all positions have profit-taking capability
-        assert position.initial_risk_cents == 5  # Default 5c risk set in __post_init__
-        assert position.take_profit_price_cents == 55  # Default TP at entry + 5c
+        # No provenance and no stop-loss: initial risk and take-profit are unset.
+        assert position.initial_risk_cents == 0
+        assert position.take_profit_price_cents is None
     
     def test_position_with_tp_sl(self):
         """Test position with take profit and stop loss."""
@@ -48,8 +48,11 @@ class TestPosition:
             avg_entry_price_cents=50,
             take_profit_price_cents=60,  # +10c TP
             stop_loss_price_cents=40,     # -10c SL
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         assert position.take_profit_price_cents == 60
         assert position.stop_loss_price_cents == 40
         assert position.initial_risk_cents == 10  # 50c - 40c = 10c risk
@@ -83,8 +86,11 @@ class TestPositionPnL:
             size=10,
             avg_entry_price_cents=50,
             stop_loss_price_cents=40,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         # Price moves up to 60c
         position.update_runtime_state(60)
         
@@ -102,8 +108,11 @@ class TestPositionPnL:
             size=10,
             avg_entry_price_cents=50,
             stop_loss_price_cents=60,  # NO SL is higher
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         # Price moves down to 40c (bad for NO - position is long NO)
         position.update_runtime_state(40)
         
@@ -120,8 +129,11 @@ class TestPositionPnL:
             size=10,
             avg_entry_price_cents=50,
             stop_loss_price_cents=40,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         # Price moves down to 45c
         position.update_runtime_state(45)
         
@@ -186,8 +198,11 @@ class TestPositionTriggers:
             size=10,
             avg_entry_price_cents=50,
             stop_loss_price_cents=40,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         # Price at SL
         assert position.should_trigger_stop_loss(40) is True
         
@@ -205,17 +220,20 @@ class TestPositionTriggers:
             side=PositionSide.NO,
             size=10,
             avg_entry_price_cents=50,
-            stop_loss_price_cents=60,
+            stop_loss_price_cents=45,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         # Price at SL
-        assert position.should_trigger_stop_loss(60) is True
-        
-        # Price above SL (should NOT trigger - side-space convention)
-        assert position.should_trigger_stop_loss(65) is False
-        
-        # Price below SL (should trigger - side-space convention)
-        assert position.should_trigger_stop_loss(55) is True
+        assert position.should_trigger_stop_loss(45) is True
+
+        # Price below SL (should trigger - long NO loses when NO price falls)
+        assert position.should_trigger_stop_loss(40) is True
+
+        # Price above SL (should NOT trigger - long NO profits when NO price rises)
+        assert position.should_trigger_stop_loss(55) is False
     
     def test_should_trigger_take_profit_yes(self):
         """Test take profit trigger for YES position."""
@@ -245,17 +263,17 @@ class TestPositionTriggers:
             side=PositionSide.NO,
             size=10,
             avg_entry_price_cents=50,
-            take_profit_price_cents=40,
+            take_profit_price_cents=55,
         )
-        
+
         # Price at TP
-        assert position.should_trigger_take_profit(40) is True
-        
-        # Price below TP (should NOT trigger - side-space convention)
-        assert position.should_trigger_take_profit(35) is False
-        
-        # Price above TP (should trigger - side-space convention)
-        assert position.should_trigger_take_profit(45) is True
+        assert position.should_trigger_take_profit(55) is True
+
+        # Price above TP (should trigger - long NO profits when NO price rises)
+        assert position.should_trigger_take_profit(60) is True
+
+        # Price below TP (should NOT trigger)
+        assert position.should_trigger_take_profit(45) is False
 
 
 class TestPositionTrailing:
@@ -302,8 +320,11 @@ class TestPositionTrailing:
             stop_loss_price_cents=40,  # 10c risk
             trailing_type=TrailingType.R_MULTIPLE,
             trailing_param=0.5,  # Trail at 0.5R below max
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         # Price moves up to 70c (2R profit)
         position.update_runtime_state(70)
         
@@ -653,8 +674,11 @@ class TestProbabilityAdjustedTrailing:
             stop_loss_price_cents=40,
             trailing_type=TrailingType.R_MULTIPLE,
             trailing_param=1.0,  # 1R trail
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
         )
-        
+
         position.update_runtime_state(current_price_cents=92)
         position.max_favorable_price_cents = 92
         

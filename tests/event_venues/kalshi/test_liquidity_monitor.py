@@ -7,7 +7,7 @@ Liquidity monitoring is tested through integration tests in the production stack
 import time
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Liquidity monitor tests require complex setup with API changes - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P2-INTEGRATION: TRACKER-015: Liquidity monitoring depends on live book")
 
 try:
     from merid.event_venues.kalshi.liquidity_monitor import (

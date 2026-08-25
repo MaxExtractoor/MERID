@@ -23,7 +23,7 @@ import asyncio
 
 import os
 
-from typing import Any, Optional, Dict, List
+from typing import Any, Optional, Dict, List, Tuple
 
 from dataclasses import dataclass, field, asdict
 
@@ -181,8 +181,10 @@ def _write_shadow_telemetry(
             "cfb_symbol": cfb_observation.cfb_symbol if cfb_observation is not None else None,
             "cfb_value": float(cfb_observation.value) if cfb_observation is not None else None,
             "cfb_source_ts_ms": cfb_observation.source_ts_ms if cfb_observation is not None else None,
-            "cfb_received_ts_ms": cfb_observation.received_ts_ms if cfb_observation is not None else None,
+            "cfb_observed_ts_ms": cfb_observation.observed_ts_ms if cfb_observation is not None else None,
             "cfb_age_ms": cfb_observation.age_ms if cfb_observation is not None else None,
+            "cfb_timestamp_quality": cfb_observation.timestamp_quality if cfb_observation is not None else None,
+            "cfb_execution_eligible": cfb_observation.execution_eligible if cfb_observation is not None else None,
             "cfb_sequence": cfb_observation.sequence if cfb_observation is not None else None,
             "cfb_60s_average": float(cfb_observation.cfb_60s_average) if cfb_observation is not None and cfb_observation.cfb_60s_average is not None else None,
             "price_source_health": cfb_observation.price_source_health if cfb_observation is not None else None,
@@ -322,17 +324,28 @@ def _get_settlement_input_price(asset: str, spot_price: float) -> tuple:
     and we must not fabricate a public-spot fallback as if it were a settlement
     reference.  The ``spot_price`` is retained only for basis telemetry.
     """
+    obs = None
     if _CFB_RTI_AVAILABLE and get_live_rti is not None:
         obs = get_live_rti(asset)
-        if obs is not None:
-            cf_rti_basis = spot_price - obs.value
-            return obs.value, cf_rti_basis, "cfb_rti_live", obs
+        if obs is not None and obs.execution_eligible:
+            # Kalshi crypto 15m contracts settle on a 60-second average of CF RTI
+            # observations.  The Bachelier baseline must therefore compare the
+            # current 60-second average to the strike (itself a 60-second average),
+            # not a noisy per-second tick.  Fall back to the tick only when the
+            # average is missing or invalid.
+            settlement_price = obs.cfb_60s_average
+            if settlement_price is None or not math.isfinite(settlement_price) or settlement_price <= 0:
+                settlement_price = obs.value
+            cf_rti_basis = spot_price - settlement_price
+            return settlement_price, cf_rti_basis, "cfb_rti_live", obs
 
     # No authoritative RTI: honest public-spot fallback, which downstream gates
     # will reject for entry because the reference is not ``cfb_rti_live``.
     from merid.data.cf_rti_adapter import get_last_rejection_reason
     reason = get_last_rejection_reason(asset) or "cf_rti_unavailable"
-    return spot_price, 0.0, f"public_spot_fallback:{reason}", None
+    if obs is not None and not obs.execution_eligible:
+        reason = f"cf_rti_not_execution_eligible:{obs.timestamp_quality}"
+    return spot_price, 0.0, f"public_spot_fallback:{reason}", obs
 
 
 # Import unified signal terminology for consistent side selection
@@ -627,6 +640,52 @@ def _is_valid_strike_target(price, asset: str) -> bool:
     low, high = bounds
     return low <= price <= high
 
+
+def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, spot_price: float) -> Tuple[Optional[float], Optional[str], Dict[str, Any]]:
+    """Resolve the canonical strike for a 15m binary trade decision.
+
+    Tries market_state, the supplied market/catalog object, the live catalog,
+    and finally the current public spot as a degraded fallback.  Returns the
+    resolved strike, the source provenance, and a structured diagnostic payload
+    for logging and rejection telemetry.
+    """
+    diagnostic: Dict[str, Any] = {"asset": asset, "spot_price": spot_price}
+
+    # 1. Try market_state and the provided market object in priority order.
+    for source_name, obj in (("market_state", market_state), ("market", market)):
+        if obj is None:
+            continue
+        for field in ("window_strike_price", "floor_strike", "strike_price"):
+            candidate = getattr(obj, field, None)
+            diagnostic.setdefault(source_name, {})[field] = candidate
+            if _is_valid_strike_target(candidate, asset):
+                return float(candidate), f"{source_name}.{field}", diagnostic
+
+    # 2. Catalog fallback: the catalog is the authoritative source for 15m
+    #    window metadata and is especially important right after a rollover when
+    #    the state store has not yet received a REST feed.
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        catalog = get_market_catalog()
+        if catalog:
+            current_market = catalog.get_current_15m_market(asset)
+            if current_market:
+                for field in ("floor_strike", "strike_price", "cap_strike", "window_strike_price"):
+                    candidate = getattr(current_market, field, None)
+                    diagnostic.setdefault("catalog", {})[field] = candidate
+                    if _is_valid_strike_target(candidate, asset):
+                        return float(candidate), f"catalog.{field}", diagnostic
+    except Exception as exc:
+        logger.warning("[STRIKE-RESOLUTION] asset=%s catalog lookup failed: %s", asset, exc)
+
+    # 3. Final degraded fallback: the contemporaneous public spot.  This keeps
+    #    the engine alive for threshold/unknown markets but is explicitly flagged
+    #    so downstream confidence/edge logic can treat it as degraded.
+    if _is_valid_strike_target(spot_price, asset):
+        diagnostic["spot_fallback"] = True
+        return float(spot_price), "spot_fallback", diagnostic
+
+    return None, None, diagnostic
 
 
 # Hard production floor: new entries are not allowed inside 90 seconds to expiry.
@@ -1024,6 +1083,8 @@ class MinimalMarket:
     asset: str
 
     minutes_to_expiry: Optional[float] = None  # Normalized minutes to expiry from catalog
+
+    exchange_index: Optional[int] = None  # Kalshi exchange shard index
 
 
 
@@ -2872,7 +2933,10 @@ class LeanAgent15m:
 
 
 
-        # 2026 Research-Based Risk Management: Track consecutive losses
+        # 2026 Research-Based Risk Management: Track consecutive losses.
+        # DIRECT-EXECUTION-FAILED: Do NOT increment consecutive loss counter on failed submissions.
+        # Failed submissions are technical failures, not actual monetary losses.
+        # Consecutive loss tracking should only apply to executed trades with negative PnL.
 
         if pnl_usd < 0:
 
@@ -6583,6 +6647,146 @@ class LeanAgent15m:
 
 
 
+    def _compute_hybrid_p_yes(
+        self,
+        asset: str,
+        spot_price: float,
+        settlement_input_price: float,
+        strike: float,
+        yes_ask: float,
+        no_ask: float,
+        seconds_to_expiry: float,
+        market_state: Any = None,
+    ) -> float:
+        """Compute a hybrid YES probability by fusing Bachelier fair value with
+        the live indicator/velocity stack.
+
+        The Bachelier probability is shifted by a signed directional delta that
+        comes from multi-window velocity, MACD histogram, RSI, order-book
+        imbalance, and the macro regime. The shift is capped so the model can
+        never become degenerate (p <= 0 or p >= 1).
+        """
+        import math
+
+        # Bachelier baseline.
+        t_years = max(seconds_to_expiry, 1.0) / (365.0 * 24.0 * 60.0 * 60.0)
+        log_moneyness = math.log(settlement_input_price / strike) if strike > 0 else 0.0
+        # Same vol lookup the trade_decision path uses by default.
+        _vol_defaults = {"BTC": 0.60, "ETH": 0.80, "SOL": 1.00, "XRP": 1.00, "DOGE": 1.20}
+        annualized_vol = float(
+            os.environ.get(f"MERID_ANNUALIZED_VOL_{asset.upper()}")
+            or _vol_defaults.get(asset.upper(), 0.80)
+        )
+        sigma = max(annualized_vol, 1e-6)
+        z = log_moneyness / (sigma * math.sqrt(t_years))
+        p_yes_bachelier = max(0.0, min(1.0, 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))))
+
+        # Indicator-independent fallback: no shift when the stack is missing.
+        if not getattr(self, "_indicator_stacks", None):
+            return p_yes_bachelier
+
+        try:
+            velocity = self._calculate_multi_window_velocity(asset, spot_price)
+            velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
+        except Exception as exc:
+            logger.warning("[HYBRID-P-YES] asset=%s failed to compute velocity: %s", asset, exc)
+            velocity = 0.0
+            velocity_threshold = 1e-12
+
+        # Velocity-derived directional shift (capped to max edge).
+        velocity_edge = 0.0
+        if velocity_threshold and abs(velocity) >= velocity_threshold:
+            edge_pct = calculate_velocity_edge(abs(velocity), velocity_threshold)
+            max_edge_pct = MERID_MAX_EDGE_PCT
+            velocity_edge = math.copysign(min(edge_pct, max_edge_pct) / 100.0, velocity)
+
+        delta = velocity_edge
+
+        # Indicator stack confluence.
+        macd_histogram = 0.0
+        rsi = 50.0
+        rsi_zone = "neutral"
+        macro_regime = "neutral"
+        price_above_ema_200 = True
+
+        indicator = self._indicator_stacks.get(asset)
+        if indicator is not None:
+            try:
+                snap = indicator.snapshot()
+                if getattr(snap, "bars_available", 0) >= 26:
+                    macd_histogram = float(getattr(snap, "macd_histogram", 0.0) or 0.0)
+                    rsi = float(getattr(snap, "rsi", 50.0) or 50.0)
+                    rsi_zone = str(getattr(snap, "rsi_zone", "neutral"))
+                    macro_regime = str(getattr(snap, "macro_regime", "neutral"))
+                    price_above_ema_200 = bool(getattr(snap, "price_above_ema_200", True))
+            except Exception as exc:
+                logger.debug("[HYBRID-P-YES] asset=%s indicator snapshot failed: %s", asset, exc)
+
+        # MACD histogram shift, asset-invariant (normalized by spot).
+        if spot_price and math.isfinite(spot_price) and spot_price > 0 and math.isfinite(macd_histogram):
+            macd_delta = (macd_histogram / spot_price) * MERID_MACD_EDGE_WEIGHT
+            # Cap individual contribution at 5 percentage points.
+            macd_delta = math.copysign(min(abs(macd_delta), 0.05), macd_delta)
+            delta += macd_delta
+
+        # RSI shift: oversold lifts p_yes, overbought lowers p_yes.
+        if rsi < 35.0:
+            delta += 0.02
+        elif rsi > 65.0:
+            delta -= 0.02
+
+        # Order-book imbalance shift: positive OBI lifts p_yes.
+        obi = 0.0
+        if market_state is not None:
+            depth_yes = float(getattr(market_state, "depth_10c_yes", 0) or 0)
+            depth_no = float(getattr(market_state, "depth_10c_no", 0) or 0)
+            if depth_yes + depth_no > 0:
+                obi = (depth_yes - depth_no) / (depth_yes + depth_no)
+                delta += max(-0.03, min(0.03, obi * 0.05))
+
+        # Macro-regime alignment: penalize contradicting the macro trend.
+        if macro_regime == "bull" and not price_above_ema_200:
+            delta -= 0.01
+        elif macro_regime == "bear" and price_above_ema_200:
+            delta += 0.01
+
+        # Final cap to prevent degenerate probabilities.
+        # Warmup gate is based only on the number of bars in the indicator stack.
+        # ADX can legitimately read 0.0 in a ranging market, so it must not be used
+        # as a warmup proxy; doing so permanently caps the model shift and prevents
+        # all directional trading.
+        max_shift = float(os.environ.get("MERID_HYBRID_MAX_P_SHIFT", "0.15"))
+        min_bars_for_full_shift = int(os.environ.get("MERID_HYBRID_MIN_BARS_FOR_FULL_SHIFT", "26"))
+        adx = self._calculate_adx(asset)
+        try:
+            indicator = self._indicator_stacks.get(asset)
+            if indicator is not None:
+                snap = indicator.snapshot()
+                bars_available = int(getattr(snap, "bars_available", 0) or 0)
+            else:
+                bars_available = 0
+        except Exception:
+            bars_available = 0
+        if bars_available < min_bars_for_full_shift:
+            max_shift = min(
+                max_shift,
+                float(os.environ.get("MERID_HYBRID_WARMUP_MAX_P_SHIFT", "0.05")),
+            )
+            logger.info(
+                "[HYBRID-P-YES-WARMUP] asset=%s adx=%.2f bars=%d min_bars=%d - capping model shift to %.3f",
+                asset, adx, bars_available, min_bars_for_full_shift, max_shift,
+            )
+        else:
+            logger.debug(
+                "[HYBRID-P-YES] asset=%s adx=%.2f bars=%d - using full model shift %.3f",
+                asset, adx, bars_available, max_shift,
+            )
+        delta = math.copysign(min(abs(delta), max_shift), delta)
+
+        p_yes = p_yes_bachelier + delta
+        eps = MERID_MODEL_PROBABILITY_EPSILON
+        return max(eps, min(1.0 - eps, p_yes))
+
     def _generate_trade_decision_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
         """Unified hybrid decision engine for 15-minute crypto binaries.
 
@@ -6606,16 +6810,61 @@ class LeanAgent15m:
             return None
 
         ticker = market.market.market_id if hasattr(market, 'market') else (getattr(market, 'market_id', None) or getattr(market, 'ticker', asset))
+
+        # CRITICAL FIX (2026-08-22): Authoritative *entry* readiness gate before any
+        # new signal/edge computation.  If the market data is not ready (stale,
+        # resync, pending snapshot, invalid book, or unconfirmed bootstrap), stop here
+        # with SKIP_MARKET_NOT_READY.  Exits are handled by PositionMonitor with the
+        # execution-readiness gate.
+        if self.market_state_store is not None:
+            if hasattr(self.market_state_store, "is_market_entry_ready"):
+                exec_ready, exec_reason = self.market_state_store.is_market_entry_ready(ticker)
+            elif hasattr(self.market_state_store, "is_market_execution_ready"):
+                exec_ready, exec_reason = self.market_state_store.is_market_execution_ready(ticker)
+            else:
+                # Legacy / unit-test path: a plain dict of ticker -> state.
+                exec_ready = bool(self.market_state_store.get(ticker))
+                exec_reason = None
+            if not exec_ready:
+                logger.info(
+                    "[TRADE-DECISION-ENTRY-READY] asset=%s ticker=%s SKIP_MARKET_NOT_READY: %s",
+                    asset, ticker, exec_reason,
+                )
+                self._record_signal_rejection(
+                    "SKIP_MARKET_NOT_READY",
+                    **self._build_trade_decision_rejection_context(
+                        asset,
+                        spot_price,
+                        None,
+                        None,
+                        (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
+                        extra={"entry_ready_reason": exec_reason},
+                    )
+                )
+                return None
+
         market_state = self.market_state_store.get(ticker) if self.market_state_store else None
         if market_state is None:
             market_state = market
 
-        strike = getattr(market_state, "floor_strike", None) or getattr(market_state, "window_strike_price", None)
-        if not strike or strike <= 0:
-            logger.warning("[TRADE-DECISION] asset=%s missing/invalid strike (floor=%s window=%s)",
-                           asset, getattr(market, "floor_strike", None), getattr(market, "window_strike_price", None))
+        strike, strike_source, strike_diag = _resolve_trade_decision_strike(
+            asset, market_state, market, spot_price
+        )
+        logger.info(
+            "[TRADE-DECISION-STRIKE-DIAG] asset=%s strike=%s source=%s diagnostic=%s",
+            asset,
+            format_price(asset, strike) if strike is not None else None,
+            strike_source,
+            strike_diag,
+        )
+
+        if strike is None or not _is_valid_strike_target(strike, asset):
+            logger.warning(
+                "[TRADE-DECISION] asset=%s market_metadata_invalid no resolvable strike",
+                asset,
+            )
             self._record_signal_rejection(
-                "missing_strike",
+                "market_metadata_invalid",
                 **self._build_trade_decision_rejection_context(
                     asset,
                     spot_price,
@@ -6623,8 +6872,31 @@ class LeanAgent15m:
                     None,
                     (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
                     extra={
-                        "floor_strike": getattr(market, "floor_strike", None),
-                        "window_strike_price": getattr(market, "window_strike_price", None),
+                        "strike_resolution_diagnostic": strike_diag,
+                    },
+                )
+            )
+            return None
+
+        # Degraded spot fallback: 15m contracts are required to carry Kalshi
+        # floor/window metadata; falling back to public spot is a metadata
+        # failure, not an authoritative strike.
+        if strike_source == "spot_fallback":
+            logger.warning(
+                "[TRADE-DECISION] asset=%s market_metadata_invalid strike derived from public spot (degraded)",
+                asset,
+            )
+            self._record_signal_rejection(
+                "market_metadata_invalid",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    None,
+                    None,
+                    (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
+                    extra={
+                        "strike_source": strike_source,
+                        "strike_resolution_diagnostic": strike_diag,
                     },
                 )
             )
@@ -6720,6 +6992,54 @@ class LeanAgent15m:
         settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(asset, spot_price)
 
         run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
+
+        # Hybrid probability: fuse Bachelier fair value with the live
+        # indicator/velocity stack so the decision engine uses the research
+        # signals instead of discarding them.
+        try:
+            p_yes_model = self._compute_hybrid_p_yes(
+                asset=asset,
+                spot_price=spot_price,
+                settlement_input_price=settlement_input_price,
+                strike=float(strike),
+                yes_ask=float(yes_ask),
+                no_ask=float(no_ask),
+                seconds_to_expiry=seconds_to_expiry,
+                market_state=market_state,
+            )
+        except Exception as hybrid_exc:
+            logger.warning("[HYBRID-P-YES] asset=%s failed to compute hybrid probability: %s", asset, hybrid_exc)
+            p_yes_model = None
+
+        # Thresholds: profile is the single source of truth; env overrides
+        # allow emergency calibration without a code change.
+        def _numeric_pref(v):
+            if v is None or isinstance(v, bool):
+                return None
+            if isinstance(v, (int, float, Decimal)):
+                return float(v)
+            # Strings from the environment are handled below.
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+            return None
+
+        model_uncertainty = _numeric_pref(
+            os.environ.get(f"MERID_MODEL_UNCERTAINTY_{asset.upper()}")
+            or os.environ.get("MERID_MODEL_UNCERTAINTY")
+            or _numeric_pref(getattr(self.risk_config, "model_uncertainty", None))
+        ) or 0.05
+
+        min_required_edge = _numeric_pref(
+            os.environ.get(f"MERID_MIN_NET_EDGE_{asset.upper()}")
+            or os.environ.get("MERID_MIN_NET_EDGE")
+            or os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE")
+            or _numeric_pref(getattr(self.config, "min_net_edge", None))
+            or _numeric_pref(getattr(self.risk_config, "strategy_policy_min_edge", None))
+        ) or 0.03
+
         decision = compute_trade_decision(
             run_id=run_id,
             decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
@@ -6736,23 +7056,15 @@ class LeanAgent15m:
             no_depth_cc=no_depth_cc,
             fee_per_contract_cents=fee_cents,
             annualized_vol=annualized_vol,
-            model_uncertainty=float(
-                os.environ.get(f"MERID_MODEL_UNCERTAINTY_{asset.upper()}")
-                or os.environ.get("MERID_MODEL_UNCERTAINTY")
-                or "0.05"
-            ),
+            model_uncertainty=model_uncertainty,
             data_quality=data_quality,
             data_state=data_state,
             regime=regime,
             regime_label=regime_label,
             regime_probability=regime_probability,
-            indicators={},
-            min_required_edge=float(
-                os.environ.get(f"MERID_MIN_NET_EDGE_{asset.upper()}")
-                or os.environ.get("MERID_MIN_NET_EDGE")
-                or os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE")
-                or getattr(self.config, "min_net_edge", 0.03)
-            ),
+            indicators={"p_yes_model": p_yes_model} if p_yes_model is not None else {},
+            p_yes_model=p_yes_model,
+            min_required_edge=min_required_edge,
             settlement_reference=settlement_reference,
             policy_version="trade_decision_v2",
         )
@@ -6784,10 +7096,11 @@ class LeanAgent15m:
             bd = decision.edge_breakdown
             logger.info(
                 "[TRADE-DECISION] asset=%s no_trade reason=%s p_yes=%.3f p_no=%.3f "
-                "yes_edge=%.3f no_edge=%.3f confidence_valid=%s confidence_reasons=%s",
+                "yes_edge=%.3f no_edge=%.3f edge_threshold=%.4f confidence_valid=%s confidence_reasons=%s",
                 asset, decision.no_trade_reason, float(decision.p_yes_calibrated),
                 float(decision.p_no_calibrated), float(decision.yes_net_edge),
-                float(decision.no_net_edge), decision.confidence_valid,
+                float(decision.no_net_edge), float(decision.edge_threshold),
+                decision.confidence_valid,
                 ",".join(decision.confidence_reasons),
             )
             self._record_signal_rejection(
@@ -7660,6 +7973,8 @@ class LeanAgent15m:
             "all_in_cost_cents": all_in_cost_cents,
             "ev_net_cents": ev_net_cents,
             "fee_cents": float(compute_fee_cents(selected_price_cents)) if _UNIFIED_SIZING_AVAILABLE else 2.0,
+            "selected_outcome_price": selected_price_cents,
+            "min_required_edge": 0.02,
             "slippage_cents": _get_slippage_cents() if _UNIFIED_SIZING_AVAILABLE else 5,
             "time_to_expiry_seconds": minutes_to_expiry * 60.0,
             "settlement_input_price": settlement_input_price,
@@ -7742,15 +8057,18 @@ class LeanAgent15m:
         This is surfaced in the rejection waterfall and as a structured
         SIGNAL-GENERATION-REJECT log in collect_order_candidate.
         """
-        # Backfill velocity/freshness metadata if available and not explicitly provided
-        if "velocity" not in context and hasattr(self, '_last_velocity_value'):
+        # Backfill velocity/freshness metadata if available and not explicitly provided.
+        # If the caller passed an explicit None, we still backfill from the last cycle.
+        if (context.get("velocity") is None or "velocity" not in context) and hasattr(self, '_last_velocity_value'):
             context["velocity"] = self._last_velocity_value
-        if "velocity_source" not in context and hasattr(self, '_last_velocity_source'):
+        if (context.get("velocity_source") is None or "velocity_source" not in context) and hasattr(self, '_last_velocity_source'):
             context["velocity_source"] = self._last_velocity_source
-        if "velocity_age_ms" not in context and hasattr(self, '_last_velocity_age_ms'):
+        if (context.get("velocity_age_ms") is None or "velocity_age_ms" not in context) and hasattr(self, '_last_velocity_age_ms'):
             context["velocity_age_ms"] = self._last_velocity_age_ms
-        if "signal_type" not in context and hasattr(self, '_last_velocity_signal_type'):
+        if (context.get("signal_type") is None or "signal_type" not in context) and hasattr(self, '_last_velocity_signal_type'):
             context["signal_type"] = self._last_velocity_signal_type
+        if (context.get("threshold") is None or "threshold" not in context) and hasattr(self, '_last_velocity_threshold'):
+            context["threshold"] = self._last_velocity_threshold
 
         self._last_signal_rejection = {
             "reason": reason,
@@ -7791,11 +8109,15 @@ class LeanAgent15m:
             "signal_type": "hybrid",
             "feature_flags": f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} trade_decision_v2",
             "settlement_reference": settlement_reference,
-            "velocity": None,
-            "velocity_source": "trade_decision_v2",
-            "velocity_age_ms": None,
+            "velocity": getattr(self, '_last_velocity_value', None),
+            "velocity_source": getattr(self, '_last_velocity_source', "trade_decision_v2"),
+            "velocity_age_ms": getattr(self, '_last_velocity_age_ms', None),
+            "velocity_threshold": getattr(self, '_last_velocity_threshold', None),
+            "threshold": getattr(self, '_last_velocity_threshold', None),
+            "threshold_type": "velocity",
         }
         if decision is not None:
+            edge_threshold = float(decision.edge_threshold) if decision.edge_threshold is not None else None
             context.update({
                 "p_yes": float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
                 "p_no": float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
@@ -7803,11 +8125,15 @@ class LeanAgent15m:
                 "no_edge": float(decision.no_net_edge) if decision.no_net_edge is not None else None,
                 "gross_edge": float(decision.gross_edge) if decision.gross_edge is not None else None,
                 "net_edge": float(decision.net_edge) if decision.net_edge is not None else None,
+                "edge_threshold": edge_threshold,
                 "data_state": getattr(decision, "data_state", None),
                 "regime": getattr(decision, "regime", None),
                 "confidence_valid": getattr(decision, "confidence_valid", None),
                 "confidence_reasons": getattr(decision, "confidence_reasons", []),
             })
+            if edge_threshold is not None:
+                context["threshold"] = edge_threshold
+                context["threshold_type"] = "edge"
         if extra:
             context.update(extra)
         return context
@@ -7862,6 +8188,7 @@ class LeanAgent15m:
         # PRIORITY: Use external Coinbase velocity when available (Turbine research #1 winner)
         # Coinbase 1-minute velocity was the top-performing strategy (+$19,451 P&L)
         velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
+        self._last_velocity_threshold = velocity_threshold
 
         # Determine the authoritative velocity source for this cycle.
         # Coinbase velocity is preferred when fresh; otherwise fall back to the
@@ -13981,7 +14308,9 @@ class LeanAgent15m:
 
                                 asset=asset,
 
-                                minutes_to_expiry=time_to_expiry / 60.0  # Convert seconds to minutes
+                                minutes_to_expiry=time_to_expiry / 60.0,  # Convert seconds to minutes
+
+                                exchange_index=getattr(market_state, 'exchange_index', None),
 
                             )
 
@@ -14239,7 +14568,8 @@ class LeanAgent15m:
 
                 logger.info(
                     "[SIGNAL-GENERATION-REJECT] asset=%s market=%s reason=%s spot_price=%s reference_price=%s "
-                    "velocity=%s velocity_source=%s velocity_age_ms=%s signal_type=%s threshold=%s "
+                    "velocity=%s velocity_source=%s velocity_age_ms=%s signal_type=%s "
+                    "threshold=%s threshold_type=%s edge_threshold=%s velocity_threshold=%s "
                     "market_time_remaining_s=%s candles_available=%s feature_flags=%s",
                     self.config.name,
                     getattr(market, 'market_id', None) or getattr(market, 'market', None),
@@ -14251,6 +14581,9 @@ class LeanAgent15m:
                     context.get("velocity_age_ms", "N/A"),
                     context.get("signal_type", "N/A"),
                     context.get("threshold", "N/A"),
+                    context.get("threshold_type", "N/A"),
+                    context.get("edge_threshold", "N/A"),
+                    context.get("velocity_threshold", "N/A"),
                     context.get("market_time_remaining_s", f"{minutes_to_expiry * 60:.0f}"),
                     context.get("candles_available", "N/A"),
                     context.get("feature_flags", f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}"),
@@ -14277,6 +14610,12 @@ class LeanAgent15m:
                 "agent_id": self.config.name,
 
                 "ticker": market.market.market_id if hasattr(market, 'market') else self.config.series_tickers[0],
+
+                "exchange_index": getattr(market, 'exchange_index', None) or (
+                    getattr(market.market, 'raw_data', {}).get('exchange_index')
+                    if hasattr(market, 'market') and market.market
+                    else None
+                ),
 
                 "side": signal["side"],
 
@@ -14506,10 +14845,14 @@ class LeanAgent15m:
             candidate["candidate_id"] = candidate_id
             candidate["generation_tick"] = tick
             candidate["generation_timestamp_ms"] = int(time.time() * 1000)
-            candidate["lifecycle_state"] = "GENERATED"
+            candidate["lifecycle_state"] = "EVALUATED"
 
-            logger.info("[CANDIDATE-GENERATED] asset=%s side=%s strategy_intent=%s candidate_id=%s",
-                       self.config.name, signal["side"], signal.get("strategy_intent", "N/A"), candidate_id)
+            logger.info(
+                "[CANDIDATE-EVALUATED] asset=%s side=%s strategy_intent=%s candidate_id=%s edge_pct=%.6f price_cents=%s",
+                self.config.name, signal["side"], signal.get("strategy_intent", "N/A"), candidate_id,
+                float(candidate.get("edge_pct", 0.0) or 0.0),
+                candidate.get("price_cents", "N/A"),
+            )
 
 
 
@@ -14527,7 +14870,7 @@ class LeanAgent15m:
 
             candidate["price_cents"] = int(signal.get("price_cents", 50))
 
-            candidate["count"] = int(signal.get("count", 1))
+            candidate["count"] = int(signal.get("count", 2))
 
 
 
@@ -14750,7 +15093,7 @@ class LeanAgentGrid15m:
     def _select_best_edge_per_asset(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Select the best edge candidate per asset.
 
-        This ensures only 1 contract per asset per 15-minute window is executed,
+        This ensures up to 2 contracts per asset per 15-minute window are executed,
         selecting the optimal combination of edge quality and price efficiency.
 
         Based on prediction market execution research:
@@ -15412,6 +15755,10 @@ class LeanAgentGrid15m:
                 telemetry_candidates_by_asset[_casset] = _cand
         telemetry_state = {"emitted": False}
 
+        # Allocated below when entries are enabled; the nested telemetry function
+        # needs a stable binding even if allocation throws before it is assigned.
+        allocator = None
+
         def _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note: str = "") -> None:
             if telemetry_state["emitted"]:
                 return
@@ -15426,20 +15773,48 @@ class LeanAgentGrid15m:
                     reverse=True,
                 )
                 candidate_ranks = {id(c): i + 1 for i, c in enumerate(ranked)}
+
+                # Build a lookup for chosen orders by (ticker, side) and candidate_id.
                 chosen_map = {}
+                chosen_by_candidate_id = {}
                 for _idx, _o in enumerate(chosen_orders or []):
                     chosen_map[(_o.ticker, _o.side)] = _idx + 1
+                    _ocid = getattr(_o, 'candidate_id', None)
+                    if _ocid:
+                        chosen_by_candidate_id[_ocid] = _idx + 1
+
                 allocation_ran = chosen_orders is not None and not allocator_note
+                decisions = []
+                if allocation_ran and allocator is not None:
+                    decisions = allocator.get_allocation_decisions(tick)
+                # Index decisions by candidate_id for fast lookup.
+                decisions_by_cid = {d.candidate_id: d for d in decisions if d.candidate_id}
+
                 records = []
+                counters: Dict[str, Dict[str, Any]] = {}
+
                 for _agent in self._agents:
                     _asset = _agent.config.name.split('_')[0]
                     _cand = telemetry_candidates_by_asset.get(_asset.upper())
                     _a_rank = None
                     _selected = False
+
+                    # Find the allocator decision for this candidate (if any).
+                    _alloc_decision: Optional[Any] = None
+                    if _cand is not None and decisions_by_cid:
+                        _cid = str(_cand.get('candidate_id') or '')
+                        if _cid in decisions_by_cid:
+                            _alloc_decision = decisions_by_cid[_cid]
+
                     if _cand is not None:
                         _key = (_cand.get('ticker'), _cand.get('side'))
-                        _a_rank = chosen_map.get(_key)
-                        _selected = _key in chosen_map
+                        if _alloc_decision is not None and _alloc_decision.selected:
+                            _selected = True
+                            _a_rank = chosen_by_candidate_id.get(_alloc_decision.candidate_id) or chosen_map.get(_key)
+                        else:
+                            _a_rank = chosen_map.get(_key)
+                            _selected = _key in chosen_map
+
                     _rec = _dt.build_asset_record(
                         cycle_id=tick,
                         asset=_asset,
@@ -15451,12 +15826,100 @@ class LeanAgentGrid15m:
                         allocator_selected=_selected,
                         allocator_note=allocator_note,
                     )
-                    if _cand is not None and not _selected and allocation_ran:
-                        _rec["rejection_stage"] = "allocator_loss"
-                        if not _rec.get("rejection_reason"):
-                            _rec["rejection_reason"] = "allocator_loss"
+
+                    # Enrich the record with the concrete allocator decision.
+                    if _alloc_decision is not None:
+                        _rec["allocator_candidate_id"] = _alloc_decision.candidate_id
+                        _rec["allocator_decision"] = {
+                            "selected": _alloc_decision.selected,
+                            "terminal_reason": _alloc_decision.terminal_reason,
+                            "rejection_stage": _alloc_decision.rejection_stage,
+                            "constraint_reasons": _alloc_decision.constraint_reasons,
+                            "requested_quantity_fp": _alloc_decision.requested_quantity_fp,
+                            "approved_quantity_fp": _alloc_decision.approved_quantity_fp,
+                        }
+                        if _alloc_decision.constraint_reasons:
+                            _rec["allocator_constraint_reasons"] = _alloc_decision.constraint_reasons
+
+                    if _cand is not None and allocation_ran:
+                        if _selected:
+                            _rec["rejection_stage"] = "selected"
+                            _rec["rejection_reason"] = None
+                        else:
+                            _rec["rejection_stage"] = "allocator_loss"
+                            concrete = _alloc_decision.terminal_reason if _alloc_decision is not None else None
+                            if _alloc_decision is not None and _alloc_decision.constraint_reasons:
+                                concrete = _alloc_decision.constraint_reasons[0]
+                            _rec["rejection_reason"] = concrete or "allocator_loss"
                     records.append(_rec)
-                _dt.emit_cycle(tick, records, extra={"allocator_note": allocator_note or None})
+
+                    # Accumulate per-asset allocator counters.
+                    if _alloc_decision is not None:
+                        if _asset not in counters:
+                            counters[_asset] = {
+                                "asset": _asset,
+                                "candidates_generated": 0,
+                                "allocator_evaluated": 0,
+                                "selected": 0,
+                                "allocator_rejected": 0,
+                                "total_rejections": 0,
+                                "terminal": 0,
+                                "signal_rejected": 0,
+                                "router_rejected": 0,
+                                "execution_failed": 0,
+                                "constraint_reasons": {},
+                            }
+                        ctr = counters[_asset]
+                        ctr["candidates_generated"] += 1
+                        ctr["allocator_evaluated"] += 1
+                        if _alloc_decision.selected:
+                            ctr["selected"] += 1
+                        else:
+                            ctr["allocator_rejected"] += 1
+                            ctr["total_rejections"] += 1
+                            if _alloc_decision.terminal_reason:
+                                ctr["terminal"] += 1
+                            concrete = _alloc_decision.constraint_reasons[0] if _alloc_decision.constraint_reasons else _alloc_decision.terminal_reason
+                            if concrete:
+                                ctr["constraint_reasons"][concrete] = ctr["constraint_reasons"].get(concrete, 0) + 1
+                    elif _cand is None:
+                        # No candidate generated for this asset: count as signal-level
+                        # rejection if the agent recorded a final reason.
+                        _decision = getattr(_agent, '_cycle_decision', {}) or {}
+                        _wf = _agent.get_rejection_waterfall()
+                        _reason = _decision.get('rejection_reason') or _wf.get('final_reason')
+                        if _reason:
+                            if _asset not in counters:
+                                counters[_asset] = {
+                                    "asset": _asset,
+                                    "candidates_generated": 0,
+                                    "allocator_evaluated": 0,
+                                    "selected": 0,
+                                    "allocator_rejected": 0,
+                                    "total_rejections": 0,
+                                    "terminal": 0,
+                                    "signal_rejected": 0,
+                                    "router_rejected": 0,
+                                    "execution_failed": 0,
+                                    "constraint_reasons": {},
+                                }
+                            ctr = counters[_asset]
+                            ctr["signal_rejected"] += 1
+                            ctr["total_rejections"] += 1
+                            ctr["constraint_reasons"][_reason] = ctr["constraint_reasons"].get(_reason, 0) + 1
+
+                counter_list = list(counters.values())
+                if counter_list:
+                    logger.info("[ALLOCATION-COUNTERS] %s", json.dumps(counter_list, default=str))
+
+                _dt.emit_cycle(
+                    tick,
+                    records,
+                    extra={
+                        "allocator_note": allocator_note or None,
+                        "allocator_counters": counter_list,
+                    },
+                )
             except Exception as _tel_exc:
                 logger.warning("[DECISION-TELEMETRY] non-fatal emit error: %s", _tel_exc)
 
@@ -15494,7 +15957,7 @@ class LeanAgentGrid15m:
 
 
         # CRITICAL FIX (2026-07-16): Pre-filter candidates to select cheapest with best edge per asset
-        # This ensures we execute only 1 contract per asset per window, selecting the optimal combination
+        # This ensures we execute up to 2 contracts per asset per window (capped by $1 exposure), selecting the optimal combination
         # of edge quality and price efficiency. Based on research from prediction market execution
         # literature: edge is the primary signal, but among similar edges, cheaper contracts provide
         # better risk-adjusted returns due to lower capital exposure.
@@ -15691,7 +16154,9 @@ class LeanAgentGrid15m:
 
                         model_prob=float(candidate.get('model_prob', 0.5)),
 
-                        agent_name=candidate.get('agent_id', asset)
+                        agent_name=candidate.get('agent_id', asset),
+
+                        candidate_id=str(candidate.get('candidate_id', '') or ''),
 
                     )
 
@@ -15755,7 +16220,8 @@ class LeanAgentGrid15m:
                     chosen_orders = allocator.allocate(
                         order_candidates,
                         current_positions=current_positions,
-                        canonical_live_positions=canonical_live_positions
+                        canonical_live_positions=canonical_live_positions,
+                        cycle_id=tick,
                     )
                 except Exception as alloc_err:
                     logger.error(
@@ -15794,12 +16260,19 @@ class LeanAgentGrid15m:
                 original_candidates = candidates
                 candidates = []
                 for order in chosen_orders:
-                    # Find the original candidate for this order
+                    # Find the original candidate for this order, preferring candidate_id
+                    # (immutable end-to-end identity) and falling back to ticker/side.
                     original_candidate = None
-                    for candidate in original_candidates:
-                        if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
-                            original_candidate = candidate
-                            break
+                    if getattr(order, 'candidate_id', None):
+                        for candidate in original_candidates:
+                            if candidate.get('candidate_id') == order.candidate_id:
+                                original_candidate = candidate
+                                break
+                    if original_candidate is None:
+                        for candidate in original_candidates:
+                            if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
+                                original_candidate = candidate
+                                break
 
                     if original_candidate:
                         # 2026-08-05: Do NOT inject TP/SL metadata here. Exit policy resolution in
@@ -15817,6 +16290,26 @@ class LeanAgentGrid15m:
                             order.ticker, order.side
                         )
 
+                # LIFECYCLE: emit unambiguous ADMITTED/REJECTED telemetry for every evaluated candidate.
+                selected_ids = {c.get("candidate_id") for c in candidates}
+                _decisions_for_candidate = {
+                    d.candidate_id: d for d in allocator.get_allocation_decisions(tick) if d.candidate_id
+                }
+                for oc in original_candidates:
+                    cid = oc.get("candidate_id")
+                    _ad = _decisions_for_candidate.get(cid)
+                    if cid in selected_ids:
+                        logger.info(
+                            "[CANDIDATE-ADMITTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=allocator_selected",
+                            cid, oc.get("ticker"), oc.get("side"), float(oc.get("edge_pct", 0.0) or 0.0)
+                        )
+                    else:
+                        concrete = _ad.constraint_reasons[0] if (_ad and _ad.constraint_reasons) else "allocator_loss"
+                        logger.info(
+                            "[CANDIDATE-REJECTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=%s",
+                            cid, oc.get("ticker"), oc.get("side"), float(oc.get("edge_pct", 0.0) or 0.0), concrete
+                        )
+
             except Exception as e:
                 logger.error(
                     "[GLOBAL-ALLOCATOR] CRITICAL ERROR in global allocator phase: %s",
@@ -15825,6 +16318,12 @@ class LeanAgentGrid15m:
                 # FAIL-CLOSED: an unfiltered candidate list reaching loop_15m can
                 # execute extreme prices the allocator would have rejected.  Do not
                 # return raw candidates.
+                for oc in (original_candidates if 'original_candidates' in locals() else candidates):
+                    logger.info(
+                        "[CANDIDATE-REJECTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=allocator_phase_error",
+                        oc.get("candidate_id"), oc.get("ticker"), oc.get("side"),
+                        float(oc.get("edge_pct", 0.0) or 0.0)
+                    )
                 _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="allocator_phase_error")
                 return []
 
@@ -15833,6 +16332,19 @@ class LeanAgentGrid15m:
                 _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="no_candidates")
             elif not allow_new_entries:
                 _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="entries_disabled")
+
+        # CRITICAL FIX: When new entries are disabled, do not pass raw candidates
+        # back to loop_15m. The allocator has already been skipped, so the list
+        # would bypass the global risk budget and side/exposure checks.
+        if not allow_new_entries:
+            for c in candidates:
+                logger.info(
+                    "[CANDIDATE-REJECTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=entries_disabled",
+                    c.get("candidate_id"), c.get("ticker"), c.get("side"),
+                    float(c.get("edge_pct", 0.0) or 0.0)
+                )
+            logger.info("[AGENT-GRID] allow_new_entries=False; returning empty candidate list")
+            return []
 
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
@@ -15935,7 +16447,7 @@ ASSET_PROFILE: Dict[str, _AssetProfile] = {
     ),
     "DOGE": _AssetProfile(
         base_edge_threshold=0.08,
-        base_max_contracts_per_strip=1,
+        base_max_contracts_per_strip=2,
         base_max_concurrent_strips=2,
         min_depth_yes_base=10,
         min_depth_no_base=10,

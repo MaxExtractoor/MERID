@@ -326,9 +326,57 @@ class TestSignalGeneration:
         assert gen1 is gen2, "Singleton should return same instance"
 
 
+class TestWebSocketVelocityPublishing:
+    """Test CoinbaseWebSocketClient always publishes a VelocitySignal."""
+
+    def test_calculate_velocity_publishes_neutral_for_small_move(self):
+        """A small price change should still publish a neutral signal (never none)."""
+        from merid.event_venues.coinbase.ws_client import CoinbaseWebSocketClient, SpotPrice
+
+        client = CoinbaseWebSocketClient()
+        now = time.time()
+
+        # Tiny 0.01% move over 60s -> well below the 0.0005/s threshold
+        client._price_history["BTC-USD"] = [
+            SpotPrice(asset="BTC-USD", price=65000.0, timestamp=now - 60.0, sequence=1),
+            SpotPrice(asset="BTC-USD", price=65006.5, timestamp=now, sequence=2),
+        ]
+
+        published = []
+        client.on_velocity_signal = lambda s: published.append(s)
+
+        asyncio.run(client._calculate_velocity("BTC-USD"))
+
+        assert len(published) == 1, f"Expected one velocity signal, got {len(published)}"
+        assert published[0].signal_type == "neutral", f"Expected neutral, got {published[0].signal_type}"
+        assert published[0].asset == "BTC-USD"
+
+    def test_calculate_velocity_publishes_positive_for_large_move(self):
+        """A large upward price change should publish a positive signal."""
+        from merid.event_venues.coinbase.ws_client import CoinbaseWebSocketClient, SpotPrice
+
+        client = CoinbaseWebSocketClient()
+        now = time.time()
+
+        # 0.5% move in 1 second -> velocity ~0.005/s, well above 0.0005 threshold
+        client._price_history["BTC-USD"] = [
+            SpotPrice(asset="BTC-USD", price=65000.0, timestamp=now - 1.0, sequence=1),
+            SpotPrice(asset="BTC-USD", price=65325.0, timestamp=now, sequence=2),
+        ]
+
+        published = []
+        client.on_velocity_signal = lambda s: published.append(s)
+
+        asyncio.run(client._calculate_velocity("BTC-USD"))
+
+        assert len(published) == 1
+        assert published[0].signal_type == "positive"
+        assert published[0].velocity > 0
+
+
 class TestModuleStructure:
     """Test that Coinbase module structure is correct."""
-    
+
     def test_coinbase_module_exists(self):
         """Test that Coinbase module directory exists."""
         coinbase_dir = Path(__file__).parent.parent / "merid" / "event_venues" / "coinbase"

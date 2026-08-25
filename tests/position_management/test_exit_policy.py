@@ -13,7 +13,7 @@ Tests all policy-layer exit reasons with precedence validation:
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
-from merid.position_management.position import Position, PositionSide
+from merid.position_management.position import Position, PositionSide, RiskParamsState
 from merid.position_management.exit_policy import (
     ExitPolicy,
     ExitAction,
@@ -58,7 +58,11 @@ class TestExitPolicy:
         assert policy.reason == ExitReason.RISK
     
     def test_evaluate_time_stop_losing(self):
-        """Test time stop triggers on losing position (< 0.5R)."""
+        """Test time stop does NOT trigger on losing position (< 0.5R) at max hold.
+
+        CRITICAL FIX (2026-07-31): Time stop now only exits stalled winners (>= 0.5R),
+        preventing systematic loss exits. Losers are left for the stop-loss path.
+        """
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -67,7 +71,7 @@ class TestExitPolicy:
             avg_entry_price_cents=50,
             stop_loss_price_cents=40,
         )
-        
+
         policy = ExitPolicy(
             position=position,
             current_price_cents=45,
@@ -77,14 +81,15 @@ class TestExitPolicy:
             time_to_expiry_seconds=600.0,
             max_hold_seconds=900.0,
         )
-        
-        policy.evaluate()
-        
-        assert policy.action == ExitAction.EXIT_MARKET
-        assert policy.reason == ExitReason.TIME_STOP
+
+        exit_decision = policy.evaluate()
+
+        assert exit_decision is None
+        assert policy.action == ExitAction.HOLD
+        assert policy.reason is None
     
     def test_evaluate_time_stop_no_progress(self):
-        """Test time stop triggers on no progress (< 0.5R)."""
+        """Test time stop does NOT trigger on no progress (< 0.5R) at max hold."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -93,7 +98,7 @@ class TestExitPolicy:
             avg_entry_price_cents=50,
             stop_loss_price_cents=40,
         )
-        
+
         policy = ExitPolicy(
             position=position,
             current_price_cents=52,
@@ -103,14 +108,15 @@ class TestExitPolicy:
             time_to_expiry_seconds=600.0,
             max_hold_seconds=900.0,
         )
-        
-        policy.evaluate()
-        
-        assert policy.action == ExitAction.EXIT_MARKET
-        assert policy.reason == ExitReason.TIME_STOP
+
+        exit_decision = policy.evaluate()
+
+        assert exit_decision is None
+        assert policy.action == ExitAction.HOLD
+        assert policy.reason is None
     
     def test_evaluate_time_stop_profitable(self):
-        """Test time stop does NOT trigger on profitable position (>= 0.5R)."""
+        """Test time stop DOES trigger on profitable position (>= 0.5R) at max hold."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -119,7 +125,7 @@ class TestExitPolicy:
             avg_entry_price_cents=50,
             stop_loss_price_cents=40,
         )
-        
+
         policy = ExitPolicy(
             position=position,
             current_price_cents=60,
@@ -129,12 +135,13 @@ class TestExitPolicy:
             time_to_expiry_seconds=600.0,
             max_hold_seconds=900.0,
         )
-        
+
         exit_decision = policy.evaluate()
-        
-        assert exit_decision is None
-        assert policy.action == ExitAction.HOLD
-        assert policy.reason is None
+
+        assert exit_decision is not None
+        assert exit_decision.reason == ExitReason.TIME_STOP
+        assert policy.action == ExitAction.EXIT_MARKET
+        assert policy.reason == ExitReason.TIME_STOP
     
     def test_evaluate_time_stop_before_max_hold(self):
         """Test time stop does NOT trigger before max hold (even if losing)."""
@@ -164,7 +171,7 @@ class TestExitPolicy:
         assert policy.reason is None
 
     def test_evaluate_time_stop_at_threshold(self):
-        """Test time stop at exactly 0.5R threshold (should hold)."""
+        """Test time stop at exactly 0.5R threshold (should exit at max hold)."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -172,7 +179,7 @@ class TestExitPolicy:
             size=10,
             avg_entry_price_cents=50,
         )
-        
+
         policy = ExitPolicy(
             position=position,
             current_price_cents=55,
@@ -182,12 +189,13 @@ class TestExitPolicy:
             time_to_expiry_seconds=600.0,
             max_hold_seconds=900.0,
         )
-        
+
         exit_decision = policy.evaluate()
-        
-        assert exit_decision is None
-        assert policy.action == ExitAction.HOLD
-        assert policy.reason is None
+
+        assert exit_decision is not None
+        assert exit_decision.reason == ExitReason.TIME_STOP
+        assert policy.action == ExitAction.EXIT_MARKET
+        assert policy.reason == ExitReason.TIME_STOP
     
     def test_evaluate_edge_decay(self):
         """Test edge decay triggers exit."""
@@ -198,17 +206,17 @@ class TestExitPolicy:
             size=10,
             avg_entry_price_cents=50,
         )
-        
+
         policy = ExitPolicy(
             position=position,
-            current_price_cents=50,
-            unrealized_pnl_cents=0,
+            current_price_cents=60,
+            unrealized_pnl_cents=100,
             r_multiple=0.0,
             time_since_entry_seconds=100.0,
             time_to_expiry_seconds=800.0,
             min_edge_threshold=0.03,  # 3% minimum edge
         )
-        
+
         exit_decision = policy.evaluate(current_edge_pct=0.02)  # Below threshold
         
         assert exit_decision is not None
@@ -390,7 +398,7 @@ class TestExitPolicyStaleData:
     """Test STALE_DATA exit reason (market data staleness)."""
     
     def test_stale_no_data(self):
-        """Test md_age_ms < 0 treated as no data, must exit."""
+        """Test positive stale MD age treated as no data, must exit."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -398,7 +406,7 @@ class TestExitPolicyStaleData:
             size=10,
             avg_entry_price_cents=50,
         )
-        
+
         policy = ExitPolicy(
             position=position,
             current_price_cents=50,
@@ -408,9 +416,9 @@ class TestExitPolicyStaleData:
             time_to_expiry_seconds=800.0,
             risk_kill_switch=False,
         )
-        
-        exit_decision = policy.evaluate(md_age_ms=-1, max_age_ms=5000)
-        
+
+        exit_decision = policy.evaluate(md_age_ms=10000, max_age_ms=5000)
+
         assert exit_decision is not None
         assert exit_decision.reason == ExitReason.STALE_DATA
         assert exit_decision.source_layer == ExitSourceLayer.POLICY_LAYER
@@ -802,18 +810,18 @@ class TestExitPolicyEdgeDecay:
             size=10,
             avg_entry_price_cents=50,
         )
-        
+
         policy = ExitPolicy(
             position=position,
-            current_price_cents=50,
-            unrealized_pnl_cents=0,
+            current_price_cents=60,
+            unrealized_pnl_cents=100,
             r_multiple=0.0,
             time_since_entry_seconds=100.0,
             time_to_expiry_seconds=800.0,
             min_edge_threshold=0.03,
             risk_kill_switch=False,
         )
-        
+
         exit_decision = policy.evaluate(current_edge_pct=0.02)  # Below threshold
         
         assert exit_decision is not None
@@ -1060,18 +1068,18 @@ class TestExitPolicyPrecedence:
         
         policy = ExitPolicy(
             position=position,
-            current_price_cents=45,
-            unrealized_pnl_cents=-50,
-            r_multiple=-5.0,
+            current_price_cents=60,
+            unrealized_pnl_cents=100,
+            r_multiple=1.0,  # >= 0.5R so TIME_STOP can trigger at max hold
             time_since_entry_seconds=900.0,
             time_to_expiry_seconds=600.0,
             max_hold_seconds=900.0,
             min_edge_threshold=0.03,
             risk_kill_switch=False,
         )
-        
+
         policy.evaluate(current_edge_pct=0.01)  # Would trigger EDGE_DECAY
-        
+
         assert policy.action == ExitAction.EXIT_MARKET
         assert policy.reason == ExitReason.TIME_STOP
     
@@ -1084,18 +1092,18 @@ class TestExitPolicyPrecedence:
             size=10,
             avg_entry_price_cents=50,
         )
-        
+
         policy = ExitPolicy(
             position=position,
-            current_price_cents=50,
-            unrealized_pnl_cents=0,
+            current_price_cents=60,
+            unrealized_pnl_cents=100,
             r_multiple=0.0,
             time_since_entry_seconds=100.0,  # Before time stop
             time_to_expiry_seconds=800.0,
             min_edge_threshold=0.03,
             risk_kill_switch=False,
         )
-        
+
         policy.evaluate(current_edge_pct=0.01)
         
         assert policy.action == ExitAction.EXIT_MARKET
@@ -1175,3 +1183,78 @@ class TestExitPolicyResolver:
             time_to_expiry_seconds=800.0,
         )
         assert policy3.action == ExitAction.HOLD
+
+
+class TestExitPolicyModelInvalidationProvenance:
+    """Test the 2026-08-12 provenance gate for model-invalidation loss exits."""
+
+    def _trusted_position(self) -> Position:
+        return Position(
+            market_id="KXBTC15M-TRUSTED",
+            series_ticker="KXBTC15M",
+            side=PositionSide.NO,
+            size=1,
+            avg_entry_price_cents=53,
+            current_price_cents=45,
+            unrealized_pnl_cents=-8,
+            entry_signal_id="signal-1",
+            entry_model_probability=0.55,
+            entry_market_probability=0.50,
+            entry_edge=0.05,
+            entry_fill_id="fill-1",
+            entry_order_id="order-1",
+            client_order_id="client-1",
+            fill_source="ws",
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            entry_book_capture_quality="AT_FILL",
+            edge_decay_confirmations=2,
+        )
+
+    def test_model_invalidation_blocked_without_provenance(self):
+        """A position with no provenance must not realize a model-invalidation loss."""
+        position = Position(
+            market_id="KXBTC15M-UNTRUSTED",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            current_price_cents=50,
+            unrealized_pnl_cents=-20,
+            edge_decay_confirmations=2,
+        )
+
+        policy = ExitPolicy(
+            position=position,
+            current_price_cents=50,
+            unrealized_pnl_cents=-20,
+            r_multiple=-1.0,
+            time_since_entry_seconds=100.0,
+            time_to_expiry_seconds=800.0,
+            min_edge_threshold=0.03,
+            min_edge_decay_confirmations=2,
+            risk_kill_switch=False,
+        )
+
+        decision = policy.evaluate(current_edge_pct=0.01)
+        assert decision is None, f"Expected no exit for untrusted provenance, got {decision}"
+
+    def test_model_invalidation_allowed_with_trusted_provenance(self):
+        """A fully-provenanced position may realize a model-invalidation loss."""
+        position = self._trusted_position()
+
+        policy = ExitPolicy(
+            position=position,
+            current_price_cents=45,
+            unrealized_pnl_cents=-8,
+            r_multiple=-1.0,
+            time_since_entry_seconds=100.0,
+            time_to_expiry_seconds=800.0,
+            min_edge_threshold=0.03,
+            min_edge_decay_confirmations=2,
+            risk_kill_switch=False,
+        )
+
+        decision = policy.evaluate(current_edge_pct=0.01)
+        assert decision is not None, "Expected model-invalidation loss exit"
+        assert decision.reason == ExitReason.MODEL_INVALIDATION_LOSS_EXIT

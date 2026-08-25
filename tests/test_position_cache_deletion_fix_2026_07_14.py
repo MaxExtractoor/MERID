@@ -39,6 +39,8 @@ class TestPositionCacheDeletionOnClose:
         market_id = "KXBTC15M-14JUL220000-50"
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=10,
             side="yes",
             avg_price_cents=5000,
@@ -69,6 +71,8 @@ class TestPositionCacheDeletionOnClose:
         market_id = "KXETH15M-14JUL220000-50"
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=10,
             side="yes",
             avg_price_cents=6000,
@@ -96,6 +100,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market1] = CachedPosition(
             market_id=market1,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=10,
             side="yes",
             avg_price_cents=5000,
@@ -105,6 +111,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market2] = CachedPosition(
             market_id=market2,
+            agent_id="test_agent",
+            thesis_side="no",
             contracts=5,
             side="no",
             avg_price_cents=4000,
@@ -114,6 +122,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market3] = CachedPosition(
             market_id=market3,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=8,
             side="yes",
             avg_price_cents=5500,
@@ -145,6 +155,8 @@ class TestPositionCacheDeletionOnClose:
         market_id = "KXDOGE15M-14JUL220000-50"
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=5,
             side="yes",
             avg_price_cents=3000,
@@ -182,6 +194,8 @@ class TestPositionCacheDeletionOnClose:
         # Open position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=10,
             side="yes",
             avg_price_cents=4500,
@@ -198,6 +212,8 @@ class TestPositionCacheDeletionOnClose:
         # Reopen position (new entry)
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=8,
             side="yes",
             avg_price_cents=4600,
@@ -218,6 +234,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market1] = CachedPosition(
             market_id=market1,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=10,
             side="yes",
             avg_price_cents=5000,
@@ -227,6 +245,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market2] = CachedPosition(
             market_id=market2,
+            agent_id="test_agent",
+            thesis_side="no",
             contracts=5,
             side="no",
             avg_price_cents=4000,
@@ -260,6 +280,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market1] = CachedPosition(
             market_id=market1,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=10,
             side="yes",
             avg_price_cents=5000,
@@ -269,6 +291,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market2] = CachedPosition(
             market_id=market2,
+            agent_id="test_agent",
+            thesis_side="no",
             contracts=5,
             side="no",
             avg_price_cents=4000,
@@ -278,6 +302,8 @@ class TestPositionCacheDeletionOnClose:
         
         cache._positions[market3] = CachedPosition(
             market_id=market3,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=8,
             side="yes",
             avg_price_cents=5500,
@@ -350,6 +376,8 @@ class TestPositionCacheDeletionOnClose:
         market_no = "KXXRP15M-21JUL220000-50"
         cache._positions[market_no] = CachedPosition(
             market_id=market_no,
+            agent_id="test_agent",
+            thesis_side="no",
             contracts=10,
             side="no",
             avg_price_cents=4000,
@@ -374,6 +402,8 @@ class TestPositionCacheDeletionOnClose:
         market_yes = "KXBTC15M-21JUL220000-50"
         cache._positions[market_yes] = CachedPosition(
             market_id=market_yes,
+            agent_id="test_agent",
+            thesis_side="yes",
             contracts=10,
             side="yes",
             avg_price_cents=5000,

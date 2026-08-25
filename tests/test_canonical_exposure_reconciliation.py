@@ -20,6 +20,7 @@ from merid.event_venues.kalshi.binary_price_space import (
     from_signed_yes_exposure,
     fill_to_signed_yes_exposure,
     normalize_rest_position,
+    PositionDataError,
 )
 from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger, KalshiFill
 from merid.event_venues.kalshi.position_cache import CachedPosition
@@ -52,13 +53,17 @@ def test_yes_delta_opposite_legs_cancel_yes(n: int):
 
 
 def test_rest_position_normalization_handles_both_conventions():
-    """normalize_rest_position collapses both sign conventions to signed-YES."""
+    """normalize_rest_position enforces canonical side/sign agreement."""
+    # Positive size with explicit YES side -> long YES.
     assert normalize_rest_position(3, "yes", "KXBTC15M") == 3
+    # Positive size with explicit NO side -> long NO.
     assert normalize_rest_position(3, "no", "KXBTC15M") == -3
     # Kalshi sometimes reports a long-NO position as a negative size with no side.
     assert normalize_rest_position(-3, "", "KXBTC15M") == -3
-    # Negative size with explicit yes side (counterparty convention).
-    assert normalize_rest_position(-3, "yes", "KXBTC15M") == -3
+    # A negative signed quantity with an explicit YES side is a data contradiction:
+    # side is the source of truth, not the counterparty's raw sign convention.
+    with pytest.raises(PositionDataError):
+        normalize_rest_position(-3, "yes", "KXBTC15M")
 
 
 def test_fill_to_signed_yes_exposure_defensive_on_malformed():

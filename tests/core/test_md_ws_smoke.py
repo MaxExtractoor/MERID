@@ -125,11 +125,11 @@ class TestMDWSIntegrationSmoke:
         md_result = compute_md_age(market_state, now_mono=now)
         assert md_result.status == "fresh"
         
-        # Stalled WebSocket (no events for >30s)
+        # Degraded WebSocket (no events for >15s, <60s)
         ws_health_stalled = compute_ws_health(
             event_count_total=50,
             first_event_ts=now - 300.0,
-            last_event_ts=now - 45.0,  # 45 seconds ago (stalled)
+            last_event_ts=now - 45.0,  # 45 seconds ago (degraded)
             events_per_sec=0.0,
             queue_size=0,
             subscribed_assets={"BTC", "ETH", "SOL", "XRP", "DOGE"},
@@ -137,8 +137,8 @@ class TestMDWSIntegrationSmoke:
             now_mono=now
         )
         
-        assert ws_health_stalled.state == "stalled"
-        assert ws_health_stalled.stalled is True
+        assert ws_health_stalled.state == "degraded"
+        assert ws_health_stalled.stalled is False
         assert ws_health_stalled.is_healthy() is False
         
         # This scenario should be detected as problematic
@@ -246,7 +246,7 @@ class TestMDWSIntegrationSmoke:
         assert ready is False
         assert "MD_STALE" in reason
         
-        # Test 3: WS stalled
+        # Test 3: WS degraded (no events for >15s, <60s)
         ws_stalled = compute_ws_health(
             event_count_total=10, first_event_ts=now-60, last_event_ts=now-40,
             events_per_sec=0.0, queue_size=0,
@@ -255,7 +255,7 @@ class TestMDWSIntegrationSmoke:
         )
         ready, reason = is_execution_ready(md_fresh, ws_stalled)
         assert ready is False
-        assert "WS_STALLED" in reason
+        assert "WS_DEGRADED" in reason
         
         # Test 4: Coverage incomplete
         ws_partial = compute_ws_health(

@@ -33,6 +33,15 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Any
 from utils.logger import get_logger
 
+try:
+    from merid.event_venues.kalshi.binary_price_space import (
+        require_outcome_side,
+        SideValidationError,
+    )
+    BINARY_PRICE_SPACE_AVAILABLE = True
+except ImportError:
+    BINARY_PRICE_SPACE_AVAILABLE = False
+
 logger = get_logger("trade_contract")
 
 try:
@@ -346,8 +355,32 @@ class ContractBuilder:
         asset = config_data.get("asset", "UNKNOWN")
         market_id = config_data.get("market_id", "UNKNOWN")
         strategy_intent = signal_data.get("strategy_intent", StrategyIntent.NEUTRAL)
-        thesis_side = signal_data.get("thesis_side", "yes")
-        kalshi_side = signal_data.get("kalshi_side", "yes")
+
+        # Fail-closed: missing or invalid side in a trade signal is a data-quality
+        # failure, not an implicit YES position.
+        if BINARY_PRICE_SPACE_AVAILABLE:
+            thesis_side = require_outcome_side(
+                signal_data,
+                context=f"trade_contract thesis_side market_id={market_id}",
+                fields=("thesis_side", "outcome_side", "side", "kalshi_side"),
+            )
+            kalshi_side = require_outcome_side(
+                signal_data,
+                context=f"trade_contract kalshi_side market_id={market_id}",
+                fields=("kalshi_side", "side", "outcome_side", "thesis_side"),
+            )
+        else:
+            thesis_side = signal_data.get("thesis_side")
+            if thesis_side not in ("yes", "no"):
+                raise ValueError(
+                    f"trade_contract market_id={market_id}: missing or invalid thesis_side={thesis_side!r}"
+                )
+            kalshi_side = signal_data.get("kalshi_side")
+            if kalshi_side not in ("yes", "no"):
+                raise ValueError(
+                    f"trade_contract market_id={market_id}: missing or invalid kalshi_side={kalshi_side!r}"
+                )
+
         kalshi_action = signal_data.get("kalshi_action", "buy")
         price_cents = signal_data.get("price_cents", 50)
         contracts = signal_data.get("contracts", 1)

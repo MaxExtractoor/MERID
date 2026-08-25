@@ -33,6 +33,7 @@ class TestKalshiVenueClient:
     async def test_authenticate_no_credentials(self):
         """Test authentication with no credentials."""
         client = KalshiVenueClient()
+        client._http_client = MagicMock()
         await client._authenticate()
         assert client._auth_token is None
 
@@ -42,6 +43,7 @@ class TestKalshiVenueClient:
         client = KalshiVenueClient()
         mock_client = MagicMock()
         mock_client.aclose = AsyncMock()
+        mock_client.is_closed = False
         client._http_client = mock_client
         
         await client.close()

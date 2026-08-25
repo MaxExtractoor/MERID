@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from unittest.mock import patch
 
-pytestmark = pytest.mark.skip(reason="Venue model tests have config changes - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-022: Venue model config tests; superseded by other suites")
 
 from merid.event_venues.kalshi.models import (
     KalshiOutcome,

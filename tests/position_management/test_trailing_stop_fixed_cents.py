@@ -171,7 +171,7 @@ class TestTrailingStopFixedCents:
         monitor.add_position(position)
         
         # Check position at 54 cents (below trail level of 55)
-        await monitor._check_position(position, 54)
+        await monitor._legacy_check_position(position, 54)
         
         # Exit should be triggered
         assert len(exit_triggered) == 1
@@ -233,6 +233,8 @@ class TestTrailingStopFixedCents:
             side=PositionSide.YES,
             size=1,
             avg_entry_price_cents=50,
+            take_profit_price_cents=99,
+            stop_loss_price_cents=1,
             trailing_type=TrailingType.FIXED_CENTS,
             trailing_param=5,
         )
@@ -245,7 +247,7 @@ class TestTrailingStopFixedCents:
         
         # Price moves to 62 cents (12 cent profit - meets threshold)
         # This should record the timestamp but NOT activate trailing yet
-        await monitor._check_position(position, 62)
+        await monitor._legacy_check_position(position, 62)
         
         # Threshold timestamp should be recorded
         assert position.trailing_profit_threshold_reached_at is not None
@@ -254,7 +256,7 @@ class TestTrailingStopFixedCents:
         
         # Price drops back to 60 cents (still above threshold)
         # Trailing should still not be activated
-        await monitor._check_position(position, 60)
+        await monitor._legacy_check_position(position, 60)
         assert position.trailing_activated is False
         
         # Wait for delay to elapse (simulate by manually setting timestamp)
@@ -263,7 +265,7 @@ class TestTrailingStopFixedCents:
         
         # Now check position again at 62 cents (still above threshold)
         # Trailing should activate after delay elapses
-        await monitor._check_position(position, 62)
+        await monitor._legacy_check_position(position, 62)
         assert position.trailing_activated is True
 
 

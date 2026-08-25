@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from merid.event_venues.kalshi.ws import KalshiWebSocket
 
-pytestmark = pytest.mark.skip(reason="Tests internal implementation details that changed (CoalescingBuffer) - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-031: Internal `CoalescingBuffer` implementation changed")
 
 
 class TestWebSocketCallbackSafety:

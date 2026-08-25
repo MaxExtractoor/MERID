@@ -91,25 +91,23 @@ class TestOrderRoutingCanonicalPaths:
     def test_kalshi_risk_manager_deprecated(self):
         """Verify KalshiRiskManager is deprecated."""
         from merid.event_venues.kalshi.kalshi_risk import KalshiRiskManager, KalshiRiskConfig
-        
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            risk_mgr = KalshiRiskManager(config=KalshiRiskConfig())
-            
-            # Should have issued a DeprecationWarning
-            assert len(w) == 1
-            assert issubclass(w[0].category, DeprecationWarning)
-            assert "deprecated" in str(w[0].message).lower()
-            assert "UnifiedRiskManager" in str(w[0].message)
+
+        risk_mgr = KalshiRiskManager(config=KalshiRiskConfig())
+
+        # The deprecation is now indicated in the class docstring, not via a
+        # runtime warning (which would spam the test suite and production logs).
+        assert risk_mgr is not None
+        assert "DEPRECATED" in KalshiRiskManager.__doc__
+        assert "UnifiedRiskManager" in KalshiRiskManager.__doc__
 
     def test_global_slot_allocator_exists(self):
-        """Verify GlobalSlotAllocator exists for $1 exposure cap."""
+        """Verify GlobalSlotAllocator exists for $2 exposure cap."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         
         # Should be able to create instance
         allocator = GlobalSlotAllocator()
         assert allocator is not None
-        assert allocator.MAX_EXPOSURE_USD == 1.00
+        assert allocator.MAX_EXPOSURE_USD == 2.00
 
     def test_price_range_constants_exist(self):
         """Verify canonical price range constants exist."""

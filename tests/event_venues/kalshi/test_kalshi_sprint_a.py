@@ -24,7 +24,7 @@ from decimal import Decimal
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Tests deprecated merid.prediction.consensus module")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-026: Tests deprecated `merid.prediction.consensus`")
 from typing import List
 from unittest.mock import MagicMock, patch
 

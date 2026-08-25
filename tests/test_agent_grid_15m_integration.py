@@ -1633,27 +1633,22 @@ def test_regime_aware_velocity_threshold():
     assert adjusted_threshold == 0.004, "No regime should not adjust threshold"
 
 
-def test_cooldown_initialization_allows_immediate_startup():
-    """Verify cooldown is initialized to 0.0 to allow immediate signal generation on startup.
-    
-    2026-07-06 FIX: Updated test to reflect actual behavior.
-    Cooldown is intentionally initialized to 0.0 to allow immediate signal generation on startup.
-    Cooldown only applies after actual trades are placed (via _reset_cooldown_after_trade).
-    """
+@pytest.fixture(scope="module")
+def btc_cooldown_agent():
+    """Create a single LeanAgent15m instance for cooldown clock-domain tests."""
     from merid.prediction.agent_grid_15m import LeanAgentConfig, LeanAgent15m
-    import time
     
     config = LeanAgentConfig(
         name="BTC_15M",
         series_tickers=["KXBTC15M"],
-        per_asset_cooldown_s=30,
+        per_asset_cooldown_s=3,
         max_spread_cents=10,
         signal_mode="velocity",
         alpha_0=0.0,
-        alpha_1=200.0,  # Updated to 2026-07-04 industry standard
+        alpha_1=200.0,
     )
     
-    agent = LeanAgent15m(
+    return LeanAgent15m(
         config=config,
         catalog=Mock(),
         market_state_store=Mock(),
@@ -1661,19 +1656,98 @@ def test_cooldown_initialization_allows_immediate_startup():
         order_router=Mock(),
         risk_config=Mock(),
     )
+
+
+def test_cooldown_initialization_allows_immediate_startup(btc_cooldown_agent):
+    """A fresh agent has no cooldown state; the first signal is eligible."""
+    import time
     
-    # Verify all assets have cooldown initialized to current monotonic time (allows immediate startup)
-    # CRITICAL FIX (2026-07-10): Changed from 0.0 to time.monotonic() to prevent ~56 year cooldown calculations
-    current_time = time.monotonic()
+    assert not btc_cooldown_agent._last_trade_time
+    now = time.monotonic()
     for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-        assert asset in agent._last_trade_time
-        last_trade_time = agent._last_trade_time[asset]
-        # Should be current monotonic time to allow immediate signal generation on startup
-        assert last_trade_time > 0, \
-            f"Asset {asset} cooldown should be initialized to current monotonic time, got {last_trade_time}"
-        # Should be close to current time (within 1 second)
-        assert abs(last_trade_time - current_time) < 1.0, \
-            f"Asset {asset} cooldown should be close to current time, got {last_trade_time} vs {current_time}"
+        elapsed = btc_cooldown_agent._cooldown_elapsed(
+            asset, now, btc_cooldown_agent._last_trade_time.get(asset)
+        )
+        assert elapsed == float("inf"), (
+            f"Asset {asset} should have no cooldown at startup (no prior trade)"
+        )
+
+
+def test_cooldown_blocks_within_window(btc_cooldown_agent):
+    """A recent trade in the same clock domain blocks the asset for the cooldown window."""
+    import time
+    
+    btc_cooldown_agent._last_trade_time.clear()
+    asset = "BTC"
+    now = time.monotonic()
+    btc_cooldown_agent._last_trade_time[asset] = now
+    
+    elapsed = btc_cooldown_agent._cooldown_elapsed(
+        asset, now + 1.0, btc_cooldown_agent._last_trade_time.get(asset)
+    )
+    assert 0.9 < elapsed < 1.1
+    assert elapsed < btc_cooldown_agent.config.per_asset_cooldown_s
+
+
+def test_cooldown_allows_after_window(btc_cooldown_agent):
+    """Once the cooldown window has passed, the asset is eligible again."""
+    import time
+    
+    btc_cooldown_agent._last_trade_time.clear()
+    asset = "BTC"
+    now = time.monotonic()
+    btc_cooldown_agent._last_trade_time[asset] = now
+    
+    elapsed = btc_cooldown_agent._cooldown_elapsed(
+        asset, now + 5.0, btc_cooldown_agent._last_trade_time.get(asset)
+    )
+    assert elapsed >= btc_cooldown_agent.config.per_asset_cooldown_s
+
+
+def test_cooldown_negative_wall_time_resets(btc_cooldown_agent):
+    """A wall-clock/epoch timestamp stored in the monotonic cooldown is reset and fails open."""
+    import time
+    
+    btc_cooldown_agent._last_trade_time.clear()
+    asset = "BTC"
+    now = time.monotonic()
+    # Simulate the broken state: a persisted Unix-epoch wall time was stored
+    # as though it were a monotonic timestamp, producing a massive negative
+    # elapsed time and blocking the asset forever.
+    btc_cooldown_agent._last_trade_time[asset] = time.time()
+    
+    elapsed = btc_cooldown_agent._cooldown_elapsed(
+        asset, now, btc_cooldown_agent._last_trade_time.get(asset)
+    )
+    assert elapsed == float("inf")
+    assert asset not in btc_cooldown_agent._last_trade_time
+
+
+def test_cooldown_update_on_fill_uses_monotonic(btc_cooldown_agent):
+    """update_cooldown_on_fill writes a monotonic timestamp."""
+    import time
+    
+    btc_cooldown_agent._last_trade_time.clear()
+    asset = "BTC"
+    before = time.monotonic()
+    btc_cooldown_agent.update_cooldown_on_fill(asset, pnl_usd=0.0, trade_risk_usd=0.0)
+    after = time.monotonic()
+    
+    assert asset in btc_cooldown_agent._last_trade_time
+    assert before <= btc_cooldown_agent._last_trade_time[asset] <= after
+
+
+def _make_test_intent():
+    """Build a non-exit OrderIntent for rate-limit tests."""
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    return OrderIntent(
+        ticker="KXBTC15M-26JAN26-B100",
+        price_cents=50,
+        count=1,
+        side="yes",
+        action="buy",
+        source="test_global_rate_limit",
+    )
 
 
 def test_global_rate_limit_startup_grace_period():
@@ -1686,7 +1760,7 @@ def test_global_rate_limit_startup_grace_period():
     order_router_module._startup_time = time.time()
     
     # Try to submit order immediately after startup (should be rejected)
-    result = _check_global_rate_limit()
+    result = _check_global_rate_limit(_make_test_intent())
     assert result is not None, "Should reject during startup grace period"
     assert "startup_grace_period" in result, f"Expected startup grace period rejection, got {result}"
 
@@ -1708,7 +1782,7 @@ def test_global_rate_limit_orders_per_minute():
         order_router_module._global_order_timestamps.append(current_time - (60 - i * 10))
     
     # Try to submit one more (should be rejected due to orders per minute limit)
-    result = _check_global_rate_limit()
+    result = _check_global_rate_limit(_make_test_intent())
     assert result is not None, "Should reject when exceeding orders per minute limit"
     assert "global_rate_limit_exceeded" in result, f"Expected rate limit rejection, got {result}"
 
@@ -1724,8 +1798,16 @@ def test_global_rate_limit_min_seconds_between_orders():
     order_router_module._startup_time = time.time() - 120  # Past grace period
     
     # Submit first order
-    result = _check_global_rate_limit()
+    result = _check_global_rate_limit(_make_test_intent())
     assert result is None, "Should allow first order"
+
+
+def _set_dev_mode_for_tests():
+    """Force settings into a non-production test mode so _kalshi_place_order
+    can exercise routing gates instead of the production bypass."""
+    from merid.settings import settings as _settings
+    _settings.MERID_ENV = "development"
+    _settings.MERID_PM_PROFILE = "baseline"
 
 
 def test_kalshi_place_order_routes_through_order_router():
@@ -1735,6 +1817,8 @@ def test_kalshi_place_order_routes_through_order_router():
     import time
     import asyncio
     
+    _set_dev_mode_for_tests()
+
     # Reset startup time to simulate fresh startup (within grace period)
     import merid.event_venues.kalshi.order_router as order_router_module
     order_router_module._startup_time = time.time()
@@ -1768,6 +1852,8 @@ def test_kalshi_place_order_enforces_global_rate_limit():
     import time
     import asyncio
     
+    _set_dev_mode_for_tests()
+
     # Reset timestamps and set startup time past grace period
     import merid.event_venues.kalshi.order_router as order_router_module
     order_router_module._startup_time = time.time() - 120  # 2 minutes ago

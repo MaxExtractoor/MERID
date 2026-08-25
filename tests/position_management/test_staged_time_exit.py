@@ -86,14 +86,15 @@ class TestStagedTimeExit:
             mock_profile.return_value = mock_adapter
             
             # Check position at 5 minutes since entry
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Stage 0 should trigger: 25% of 10 = 2.5 -> 2 contracts
         callback.assert_called_once()
         call_args = callback.call_args
         assert call_args[0][1] == ExitReason.TIME_STOP
         assert call_args[0][3] == 2  # contracts_to_close (partial exit)
-        assert mock_position.size == 8  # 10 - 2 = 8 remaining
+        # CRITICAL FIX (2026-08-04): position.size is NOT mutated here; it updates via fill callback
+        assert mock_position.size == 10
         assert mock_position.staged_exit_stage_0_executed is True
     
     def test_stage_1_triggers_at_10_minutes(self, mock_position):
@@ -137,14 +138,15 @@ class TestStagedTimeExit:
             mock_profile.return_value = mock_adapter
             
             # Check position at 10 minutes since entry
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Stage 1 should trigger: 25% of 8 = 2 contracts
         callback.assert_called_once()
         call_args = callback.call_args
         assert call_args[0][1] == ExitReason.TIME_STOP
         assert call_args[0][3] == 2  # contracts_to_close (partial exit)
-        assert mock_position.size == 6  # 8 - 2 = 6 remaining
+        # CRITICAL FIX (2026-08-04): position.size is NOT mutated here; it updates via fill callback
+        assert mock_position.size == 8
         assert mock_position.staged_exit_stage_1_executed is True
     
     def test_stage_2_triggers_at_13_minutes(self, mock_position):
@@ -189,14 +191,15 @@ class TestStagedTimeExit:
             mock_profile.return_value = mock_adapter
             
             # Check position at 13 minutes since entry
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Stage 2 should trigger: 50% of 6 = 3 contracts
         callback.assert_called_once()
         call_args = callback.call_args
         assert call_args[0][1] == ExitReason.TIME_STOP
         assert call_args[0][3] == 3  # contracts_to_close (partial exit)
-        assert mock_position.size == 3  # 6 - 3 = 3 remaining
+        # CRITICAL FIX (2026-08-04): position.size is NOT mutated here; it updates via fill callback
+        assert mock_position.size == 6
         assert mock_position.staged_exit_stage_2_executed is True
     
     def test_stage_execution_prevents_duplicate_exits(self, mock_position):
@@ -235,7 +238,7 @@ class TestStagedTimeExit:
             mock_profile.return_value = mock_adapter
             
             # Check position at 5 minutes since entry
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Stage 0 should not execute again
         callback.assert_not_called()
@@ -300,7 +303,7 @@ class TestStagedTimeExit:
             mock_profile.return_value = mock_adapter
             
             # Check position at 5 minutes since entry
-            asyncio.run(monitor._check_position(mock_position, 52))
+            asyncio.run(monitor._legacy_check_position(mock_position, 52))
         
         # Callback should be called with proper parameters
         callback.assert_called_once()

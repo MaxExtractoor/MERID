@@ -52,8 +52,11 @@ class TestCalibrationOutcomeRecording:
         """Create a LeanAgent15m instance for testing."""
         agent = LeanAgent15m(
             config=mock_agent_config,
+            catalog=Mock(),
             spot_provider=mock_spot_provider,
             market_state_store=mock_market_state_store,
+            order_router=Mock(),
+            risk_config=Mock(),
         )
         return agent
     

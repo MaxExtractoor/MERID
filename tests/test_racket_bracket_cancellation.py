@@ -46,7 +46,9 @@ class TestRatchetBracketCancellation:
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
             side="yes",
+            agent_id="test_agent",
             contracts=10,
+            thesis_side="yes",
             avg_price_cents=50,
             ratchet_activated=True,
             ratchet_floor_price_cents=80,
@@ -71,7 +73,9 @@ class TestRatchetBracketCancellation:
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
             side="yes",
+            agent_id="test_agent",
             contracts=10,
+            thesis_side="yes",
             avg_price_cents=50,
             ratchet_activated=True,
             ratchet_floor_price_cents=80,
@@ -99,7 +103,9 @@ class TestRatchetBracketCancellation:
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
             side="yes",
+            agent_id="test_agent",
             contracts=10,
+            thesis_side="yes",
             avg_price_cents=50,
             ratchet_activated=True,
             ratchet_floor_price_cents=80,
@@ -128,7 +134,9 @@ class TestRatchetBracketCancellation:
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
             side="yes",
+            agent_id="test_agent",
             contracts=10,
+            thesis_side="yes",
             avg_price_cents=50,
             ratchet_activated=True,
             ratchet_floor_price_cents=80,
@@ -155,7 +163,9 @@ class TestRatchetBracketCancellation:
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
             side="yes",
+            agent_id="test_agent",
             contracts=10,
+            thesis_side="yes",
             avg_price_cents=50,
             ratchet_activated=True,
             ratchet_floor_price_cents=80,

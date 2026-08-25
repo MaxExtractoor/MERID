@@ -8,7 +8,7 @@ import pytest
 import respx
 from httpx import Response
 
-pytestmark = pytest.mark.skip(reason="Regression tests require complex setup - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P1-REGRESSION: TRACKER-013: Regression scenarios need deterministic simulator")
 
 from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.models import KalshiConfig

@@ -121,19 +121,16 @@ class TestNinetySecondHardBlockInvariant:
         """
         _get_seconds_to_expiry must calculate correctly with timezone handling.
         """
-        from merid.prediction.trading_agent import KalshiTradingAgent
-        
         # Set expiry 95 seconds in future
         future = datetime.now(timezone.utc) + timedelta(seconds=95)
         mock_market.end_date = future
-        
-        agent = MagicMock(spec=KalshiTradingAgent)
+
         now = datetime.now(timezone.utc)
-        
+
         # Calculate seconds to expiry
         delta = future - now
         seconds_to_expiry = max(0.0, delta.total_seconds())
-        
+
         # Should be approximately 95 seconds (allow 1s tolerance for test execution)
         assert 94 <= seconds_to_expiry <= 96, \
             f"Expected ~95s, got {seconds_to_expiry}s"

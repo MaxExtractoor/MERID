@@ -242,7 +242,9 @@ class TestKalshiWebSocketSubscriptions:
         assert message["cmd"] == "subscribe"
         assert "orderbook_delta" in message["params"]["channels"]
         assert "FED-25DEC-T3.00" in message["params"]["market_tickers"]
-        
+        # NO-leg pricing must be used so side=no price_dollars stays in NO-space
+        assert message["params"].get("use_yes_price") is False
+
         # Check subscription tracked with prefix
         assert "orderbook:FED-25DEC-T3.00" in ws_client._subscriptions
     
@@ -265,6 +267,9 @@ class TestKalshiWebSocketSubscriptions:
         assert parsed[0]["params"]["channels"] == ["orderbook_delta"]
         assert len(parsed[0]["params"]["market_tickers"]) == 50
         assert len(parsed[1]["params"]["market_tickers"]) == 5
+        # NO-leg pricing must be used for all batch subscribe chunks
+        assert parsed[0]["params"].get("use_yes_price") is False
+        assert parsed[1]["params"].get("use_yes_price") is False
         assert ws_client._orderbook_tickers == set(tickers)
 
 
@@ -520,7 +525,9 @@ class TestKalshiWebSocketPerformanceFixes:
     def test_thread_pool_executor_initialization(self, ws_client):
         """Test that dedicated thread pool executor is initialized."""
         assert ws_client._callback_executor is not None
-        assert ws_client._callback_executor._max_workers == 8
+        # Reduced from 24 to 6 because the bridge callback is now async and
+        # processed sequentially; only fallback sync callbacks use the executor.
+        assert ws_client._callback_executor._max_workers == 6
     
     def test_queue_size_increase(self, ws_client):
         """Test that message queue size is increased to 65536."""

@@ -28,7 +28,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any, List
 
-pytestmark = pytest.mark.skip(reason="Position reconciliation tests require complex state setup - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P0-RECONCILIATION: TRACKER-004: Reconciliation is live-critical")
 
 from merid.event_venues.kalshi.position_cache import KalshiPositionCache, CachedPosition
 from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger

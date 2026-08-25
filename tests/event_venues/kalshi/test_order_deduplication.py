@@ -9,8 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Order deduplication tests require complex setup - tested via integration tests")
-
 from merid.event_venues.kalshi.order_deduplication import (
     OrderDeduplicationCache,
     get_order_cache,
@@ -27,6 +25,7 @@ def test_first_order_creates_new_entry():
 def test_identical_order_returns_same_coid():
     cache = OrderDeduplicationCache()
     coid1, _ = cache.get_or_create("KXBTC-T3550", "buy", "yes", 55, 10)
+    cache.mark_submitted(coid1)
     coid2, is_dup = cache.get_or_create("KXBTC-T3550", "buy", "yes", 55, 10)
     assert coid1 == coid2
     assert is_dup is True

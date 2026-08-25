@@ -212,18 +212,24 @@ class TestExitIntentTimeoutReconciliation:
         position_id = "KXBTC15M-TEST-001"
         client_order_id = "exit-coid-001"
 
-        monitor._mark_exit_intent_in_flight(position_id)
+        monitor._mark_exit_intent_in_flight(position_id, client_order_id=client_order_id)
         monitor._register_exit_submission(client_order_id, position_id=position_id)
 
         # Simulate a 15s timeout by aging the in-flight timestamp.
-        monitor._exit_intent_in_flight[position_id] = time.time() - 20.0
+        monitor._exit_intent_in_flight[position_id]["timestamp"] = time.time() - 20.0
 
         # Even though the in-flight flag has timed out, the recent submission
         # should keep the intent in-flight so no duplicate is emitted.
         assert monitor._is_exit_intent_in_flight(position_id) is True
 
-        # After clearing the submission, the timeout should be allowed.
-        monitor._clear_exit_intent_in_flight(position_id)
-        monitor._mark_exit_intent_in_flight(position_id)
-        monitor._exit_intent_in_flight[position_id] = time.time() - 20.0
+        # After clearing the submission, the timeout transitions to SUBMISSION_UNKNOWN
+        # and still blocks a new exit until explicitly reconciled.
+        monitor._submission_cache_ttl = 0.0  # force recent-submission TTL to be expired
+        monitor._mark_exit_intent_in_flight(position_id, client_order_id=client_order_id)
+        monitor._exit_intent_in_flight[position_id]["timestamp"] = time.time() - 20.0
+        assert monitor._is_exit_intent_in_flight(position_id) is True
+        assert monitor._exit_intent_in_flight[position_id]["state"] == "SUBMISSION_UNKNOWN"
+
+        # Reconciliation terminalizes the intent and allows a new exit.
+        monitor._mark_exit_intent_reconciled(position_id, "exchange_reconciled")
         assert monitor._is_exit_intent_in_flight(position_id) is False

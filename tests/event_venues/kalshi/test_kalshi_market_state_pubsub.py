@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Market state pubsub tests have mock assertion errors - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P2-INTEGRATION: TRACKER-016: Pub/sub mock assertions need live event replay")
 
 from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
 from merid.event_venues.kalshi.models import KalshiMarketState

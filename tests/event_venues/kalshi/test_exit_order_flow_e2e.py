@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import time
 
 # Skip entire test file due to order_gate API changes (get_position_cache not found)
-pytestmark = pytest.mark.skip(reason="order_gate API changed - get_position_cache not found, test needs update")
+pytestmark = pytest.mark.skip(reason="P0-EXECUTION: TRACKER-011: Exit order flow is live-critical")
 
 
 class TestExitOrderFlowE2E:

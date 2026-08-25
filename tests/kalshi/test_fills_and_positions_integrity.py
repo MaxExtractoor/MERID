@@ -158,7 +158,7 @@ class TestKalshiOrderIDLineage:
             
             intent = OrderIntent(
                 intent_id="merid-intent-123",  # This is the client_order_id
-                market_ticker="KXBTC-TEST",
+                ticker="KXBTC-TEST",
                 side="yes",
                 action="buy",
                 count=5,

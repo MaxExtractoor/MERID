@@ -85,6 +85,9 @@ def _make_fill(fill_id, ticker, side, action, count, price_dollars) -> KalshiFil
         fee_cost=Decimal("0.01"),
         ingestion_source="test",
         created_time=datetime.now(timezone.utc),
+        canonicalization_state="TRUSTED_LIVE_V1",
+        ledger_schema_version=3,
+        canonicalization_version=1,
     )
 
 

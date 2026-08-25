@@ -20,6 +20,24 @@ from merid.position_management.position_monitor import (
 logger = get_logger("test_position_monitor")
 
 
+def _trusted_position(**kwargs) -> Position:
+    """Build a Position with version-2 provenance for test fixtures."""
+    entry_price = kwargs.get("avg_entry_price_cents", 50)
+    defaults = {
+        "risk_params_state": "original_persisted",
+        "risk_params_schema_version": 2,
+        "client_order_id": "test-client",
+        "entry_fill_id": "test-fill",
+        "fill_source": "test",
+        "entry_book_capture_quality": "AT_FILL",
+        "entry_executable_bid_cents": entry_price - 1,
+        "entry_executable_ask_cents": entry_price + 1,
+        "entry_fill_price_cents": entry_price,
+    }
+    defaults.update(kwargs)
+    return Position(**defaults)
+
+
 class TestPositionMonitor:
     """Test PositionMonitor basic operations."""
     
@@ -34,7 +52,7 @@ class TestPositionMonitor:
         """Test adding a position to monitor."""
         monitor = PositionMonitor()
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -53,7 +71,7 @@ class TestPositionMonitor:
         """Test adding duplicate position is ignored."""
         monitor = PositionMonitor()
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -75,7 +93,7 @@ class TestPositionMonitor:
         
         monitor = PositionMonitor()
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -133,7 +151,7 @@ class TestPositionMonitorExitCallback:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -144,7 +162,9 @@ class TestPositionMonitorExitCallback:
 
         monitor.add_position(position)
 
-        # Manually trigger stop loss check
+        # Manually trigger stop loss check twice; hard stops now require executable
+        # book + confirmation before recording a StopCandidate.
+        asyncio.run(monitor._legacy_check_position(position, 35))
         asyncio.run(monitor._legacy_check_position(position, 35))
 
         # Direct exit callback must NOT be called while replay tests are in progress.
@@ -169,7 +189,7 @@ class TestPositionMonitorExitCallback:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -198,7 +218,7 @@ class TestPositionMonitorExitCallback:
         
         from merid.position_management.position import TrailingType
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -255,7 +275,7 @@ class TestPositionMonitorExitCallback:
             mock_profile.return_value = mock_adapter
             
             # Test entry at 27c (should match 25-30 zone, target 55c)
-            position = Position(
+            position = _trusted_position(
                 market_id="KXBTC15M-1234",
                 series_ticker="KXBTC15M",
                 side=PositionSide.YES,
@@ -320,7 +340,7 @@ class TestPositionMonitorExitCallback:
             mock_get_resolver.return_value = mock_resolver
             
             # Test NO position entry at 65c (side-space: NO uses own-side prices directly)
-            position = Position(
+            position = _trusted_position(
                 market_id="KXBTC15M-1234",
                 series_ticker="KXBTC15M",
                 side=PositionSide.NO,
@@ -384,7 +404,7 @@ class TestPositionMonitorExitCallback:
             mock_profile.return_value = mock_adapter
             
             # Test high edge (6%)
-            position = Position(
+            position = _trusted_position(
                 market_id="KXBTC15M-1234",
                 series_ticker="KXBTC15M",
                 side=PositionSide.YES,
@@ -427,7 +447,7 @@ class TestPositionMonitorExitCallback:
             mock_adapter.profile.staged_time_exit = {'enabled': False, 'stages': []}
             mock_profile.return_value = mock_adapter
             
-            position = Position(
+            position = _trusted_position(
                 market_id="KXBTC15M-1234",
                 series_ticker="KXBTC15M",
                 side=PositionSide.YES,
@@ -459,7 +479,7 @@ class TestPositionMonitorExitCallback:
         callback_yes = Mock()
         monitor_yes.register_exit_intent_callback(callback_yes)
         
-        position_yes = Position(
+        position_yes = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -486,7 +506,7 @@ class TestPositionMonitorExitCallback:
         callback_no = Mock()
         monitor_no.register_exit_intent_callback(callback_no)
         
-        position_no = Position(
+        position_no = _trusted_position(
             market_id="KXBTC15M-5678",
             series_ticker="KXBTC15M",
             side=PositionSide.NO,
@@ -596,7 +616,7 @@ class TestPositionMonitorExitCallback:
         ]
         
         for market_id, expected_agent_id in test_cases:
-            position = Position(
+            position = _trusted_position(
                 market_id=market_id,
                 series_ticker=market_id.split("-")[0],
                 side=PositionSide.YES,
@@ -648,7 +668,7 @@ class TestPositionMonitorPolling:
         
         monitor = PositionMonitor(poll_interval=0.1)
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -686,7 +706,7 @@ class TestPositionMonitorPolling:
         
         monitor = PositionMonitor(poll_interval=0.1)
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -738,7 +758,7 @@ class TestPositionMonitorPolling:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXXRP15M-26JUL160230-30",  # Expired ticker
             series_ticker="KXXRP15M",
             side=PositionSide.YES,
@@ -891,6 +911,9 @@ class TestPositionMonitorStartupLoading:
                 entry_price_state="known",
                 take_profit_price_cents=60,
                 stop_loss_price_cents=40,
+                risk_params_state="original_persisted",
+                risk_params_schema_version=2,
+                client_order_id="test-btc-entry",
             ),
             "KXETH15M-5678": CachedPosition(
                 market_id="KXETH15M-5678",
@@ -902,6 +925,9 @@ class TestPositionMonitorStartupLoading:
                 entry_price_state="known",
                 take_profit_price_cents=45,
                 stop_loss_price_cents=65,
+                risk_params_state="original_persisted",
+                risk_params_schema_version=2,
+                client_order_id="test-eth-entry",
             ),
         }
         mock_cache.get_all_positions.return_value = cached_positions
@@ -1073,7 +1099,7 @@ class TestPositionMonitorThreadSafety:
         positions_added = []
         
         def add_position(i):
-            position = Position(
+            position = _trusted_position(
                 market_id=f"KXBTC15M-{i}",
                 series_ticker="KXBTC15M",
                 side=PositionSide.YES,
@@ -1100,7 +1126,7 @@ class TestPositionMonitorThreadSafety:
         
         # Add initial positions
         for i in range(5):
-            position = Position(
+            position = _trusted_position(
                 market_id=f"KXBTC15M-{i}",
                 series_ticker="KXBTC15M",
                 side=PositionSide.YES,
@@ -1110,7 +1136,7 @@ class TestPositionMonitorThreadSafety:
             monitor.add_position(position)
         
         def add_position(i):
-            position = Position(
+            position = _trusted_position(
                 market_id=f"KXBTC15M-{i+5}",
                 series_ticker="KXBTC15M",
                 side=PositionSide.YES,
@@ -1165,7 +1191,7 @@ class TestExitPolicyEdgeDecayFix:
         monitor.register_exit_intent_callback(callback)
         
         # Create position with entry_edge_pct set
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -1202,7 +1228,7 @@ class TestExitPolicyEdgeDecayFix:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -1239,7 +1265,7 @@ class TestExitPolicyEdgeDecayFix:
         
         monitor = PositionMonitor()
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -1419,6 +1445,7 @@ class TestPositionMonitorPositionCacheIntegration:
                 client_order_id="test-order-123",
                 fill_id="test-fill-456",
                 action="buy",
+                canonicalization_state="TRUSTED_LIVE_V1",
             )
         
         # Position should be in monitor
@@ -1473,7 +1500,7 @@ class TestPositionMonitorPositionCacheIntegration:
         )
         
         # Add a position to monitor directly
-        position = Position(
+        position = _trusted_position(
             position_id="KXBTC15M-TEST",
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
@@ -1501,6 +1528,7 @@ class TestPositionMonitorPositionCacheIntegration:
                 client_order_id="test-order-123",
                 fill_id="test-fill-456",
                 action="buy",
+                canonicalization_state="TRUSTED_LIVE_V1",
             )
             
             # Now simulate a fill that closes the position (sell 5 contracts)
@@ -1513,6 +1541,7 @@ class TestPositionMonitorPositionCacheIntegration:
                 client_order_id="test-order-123",
                 fill_id="test-fill-789",
                 action="sell",
+                canonicalization_state="TRUSTED_LIVE_V1",
             )
         
         # Position should be removed from monitor
@@ -1590,6 +1619,7 @@ class TestPositionMonitorPositionCacheIntegration:
                 client_order_id="test-order-123",
                 fill_id="test-fill-456",
                 action="buy",
+                canonicalization_state="TRUSTED_LIVE_V1",
             )
             
             # Clear applied fill IDs to avoid duplicate detection
@@ -1606,6 +1636,7 @@ class TestPositionMonitorPositionCacheIntegration:
                 client_order_id="test-order-456",  # Different client_order_id to avoid duplicate detection
                 fill_id="test-fill-999",  # Different fill_id to avoid duplicate detection
                 action="sell",
+                canonicalization_state="TRUSTED_LIVE_V1",
             )
         
         # asset_notional should be decremented (5.0 - (5 * 50 / 100) = 5.0 - 2.5 = 2.5)
@@ -1699,7 +1730,7 @@ class TestPositionMonitorPositionCacheIntegration:
         monitor.register_exit_intent_callback(exit_intent_callback)
         
         # Create a YES position
-        position_yes = Position(
+        position_yes = _trusted_position(
             market_id="KXBTC15M-TEST-YES",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -1730,7 +1761,7 @@ class TestPositionMonitorPositionCacheIntegration:
         monitor.remove_position(position_yes.position_id)
         
         # Test NO position at 99c (side-space: NO extreme profit at 99c own-side)
-        position_no = Position(
+        position_no = _trusted_position(
             market_id="KXBTC15M-TEST-NO",
             series_ticker="KXBTC15M",
             side=PositionSide.NO,
@@ -1833,6 +1864,7 @@ class TestPositionMonitorTrailingStopConfiguration:
                 client_order_id="test-order-123",
                 fill_id="test-fill-456",
                 action="buy",
+                canonicalization_state="TRUSTED_LIVE_V1",
             )
         
         # Position should be in monitor with trailing configuration
@@ -1853,7 +1885,7 @@ class TestPositionMonitorTrailingStopConfiguration:
         """Test that 0.5R trailing distance is correctly calculated."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -1889,7 +1921,7 @@ class TestPositionBreakEvenTrigger(unittest.IsolatedAsyncioTestCase):
         """Break-even should trigger when position reaches 1R profit."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -1916,7 +1948,7 @@ class TestPositionBreakEvenTrigger(unittest.IsolatedAsyncioTestCase):
         """Triggering break-even should move SL to entry price."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -1939,7 +1971,7 @@ class TestPositionBreakEvenTrigger(unittest.IsolatedAsyncioTestCase):
         """Break-even should only trigger once per position."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -1964,7 +1996,7 @@ class TestPositionScaleOut(unittest.IsolatedAsyncioTestCase):
         """Scale-out should trigger when position reaches scale-out price."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -1986,7 +2018,7 @@ class TestPositionScaleOut(unittest.IsolatedAsyncioTestCase):
         """Scale-out should close 50% of position."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -2010,7 +2042,7 @@ class TestPositionScaleOut(unittest.IsolatedAsyncioTestCase):
         """Scale-out should only trigger once per position."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -2036,7 +2068,7 @@ class TestDelayedTrailingActivation(unittest.IsolatedAsyncioTestCase):
         """Trailing should not be active initially (before 1R)."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -2054,7 +2086,7 @@ class TestDelayedTrailingActivation(unittest.IsolatedAsyncioTestCase):
         """Trailing can be manually activated (by PositionMonitor after break-even)."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -2083,7 +2115,7 @@ class TestTimeBasedTrailingTightening(unittest.IsolatedAsyncioTestCase):
         from merid.position_management.position import Position, PositionSide, TrailingType
         from datetime import datetime, timedelta
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -2111,7 +2143,7 @@ class TestTimeBasedTrailingTightening(unittest.IsolatedAsyncioTestCase):
         """Trailing distance should be normal early in window."""
         from merid.position_management.position import Position, PositionSide, TrailingType
         
-        position = Position(
+        position = _trusted_position(
             position_id="test_position",
             market_id="TEST-MARKET",
             side=PositionSide.YES,
@@ -2141,7 +2173,7 @@ class TestPositionMonitorFallbackPriceHandling(unittest.IsolatedAsyncioTestCase)
         
         monitor = PositionMonitor()
         
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,

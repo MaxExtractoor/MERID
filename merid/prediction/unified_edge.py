@@ -326,6 +326,12 @@ class UnifiedEdgeComputer:
         self.calibration = calibration or PerAssetCalibration()
         self.alignment_threshold_cents = 50  # Trigger degraded mode if gap > 50 cents
 
+        # CRITICAL FIX (2026-08-11): Load latency calibration once and cache it.
+        # Do not re-read the JSON file (and do not re-emit the missing-data warning)
+        # on every edge computation call.
+        self._calibration_config = self._load_calibration_config()
+        self._calibration_missing_info_logged: set = set()
+
         # DELETED: Edge thresholds - now handled by profile edge_bands (1.25% unified minimum)
         # This module focuses on edge computation, not edge validation
         # UPDATED 2026-07-10: Changed from 4.0 to 1.25 to match moltbook research (BTC base)
@@ -1038,13 +1044,13 @@ class UnifiedEdgeComputer:
         
         # Compute spot move relative to strike (in price units, not percentage)
         spot_move = spot_ref.price_usd - contract.strike_price
-        
+
         # Compute time decay factor (0 at expiry, 1 at start)
         time_decay_factor = min(1.0, contract.time_to_expiry_seconds / 900.0)  # 15 min = 900s
-        
+
         # Get volatility for settlement variance estimation
         vol = self.calibration.get_volatility(asset)
-        
+
         # Estimate settlement variance (60-RTI mean variance)
         # This accounts for the fact that settlement is an average, not a single tick
         try:
@@ -1059,31 +1065,49 @@ class UnifiedEdgeComputer:
         except Exception as e:
             logger.debug("[MODEL-WIN-PROB] Failed to estimate settlement variance for asset=%s: %s", asset, e)
             settlement_std = 0.0
-        
+
+        # CRITICAL FIX: The settlement_risk_model can return a variance that is
+        # dimensionless / fractional. When that standard deviation is treated as
+        # price units it collapses to ~0 and forces the model probability to 0 or 1.
+        # Fall back to a price-units std derived from spot, 15m vol and the time
+        # to expiry.  The 60-sample RTI mean has std = sigma * spot * sqrt(t/T) / sqrt(60).
+        horizon_seconds = max(contract.time_to_expiry_seconds, 0.0)
+        if spot_ref.price_usd is not None and spot_ref.price_usd > 0 and vol > 0:
+            price_unit_std = (
+                spot_ref.price_usd
+                * vol
+                * math.sqrt(max(horizon_seconds, 1.0) / 900.0)
+                / math.sqrt(60.0)
+            )
+        else:
+            price_unit_std = 0.0
+
+        if settlement_std is None or settlement_std <= 0 or settlement_std < price_unit_std:
+            settlement_std = price_unit_std
+
+        # Ensure we never end up with a zero std; a tiny floor gives sensible
+        # transition probabilities instead of deterministic 0 / 1 jumps.
+        if settlement_std <= 0:
+            settlement_std = max(spot_ref.price_usd * vol * 1e-4, 1e-6)
+
         # Compute probability using Gaussian approximation
         # P(settlement > strike) = P(spot + move > strike) = P(move > strike - spot)
         # For side="yes" (e.g., UP contract): win if settlement > strike
         # For side="no" (e.g., DOWN contract): win if settlement < strike
-        
-        # Z-score: (spot - strike) / std
-        # If std is 0 or None (no variance), use deterministic threshold
-        if settlement_std is not None and settlement_std > 0:
-            z_score = spot_move / settlement_std
-            # Gaussian CDF approximation (error function)
-            # For side="yes": P(Z > -z) = 0.5 * (1 + erf(z / sqrt(2)))
-            # For side="no": P(Z < z) = 0.5 * (1 + erf(-z / sqrt(2)))
-            if contract.side == "yes":
-                # YES wins if settlement > strike (spot_move > 0)
-                q = 0.5 * (1.0 + math.erf(z_score / math.sqrt(2)))
-            else:  # side == "no"
-                # NO wins if settlement < strike (spot_move < 0)
-                q = 0.5 * (1.0 + math.erf(-z_score / math.sqrt(2)))
-        else:
-            # No variance: deterministic based on spot vs strike
-            if contract.side == "yes":
-                q = 1.0 if spot_move > 0 else 0.0
-            else:
-                q = 1.0 if spot_move < 0 else 0.0
+
+        # Z-score: (spot - strike) / std.  Always use the smooth normal CDF; the
+        # previous deterministic fallback produced q=0.000 / q=1.000 for any
+        # non-zero spot-strike gap when the settlement std was missing.
+        z_score = spot_move / settlement_std
+        # Gaussian CDF approximation (error function)
+        # For side="yes": P(Z > -z) = 0.5 * (1 + erf(z / sqrt(2)))
+        # For side="no": P(Z < z) = 0.5 * (1 + erf(-z / sqrt(2)))
+        if contract.side == "yes":
+            # YES wins if settlement > strike (spot_move > 0)
+            q = 0.5 * (1.0 + math.erf(z_score / math.sqrt(2)))
+        else:  # side == "no"
+            # NO wins if settlement < strike (spot_move < 0)
+            q = 0.5 * (1.0 + math.erf(-z_score / math.sqrt(2)))
         
         # Apply time decay adjustment (uncertainty increases as expiry approaches)
         # This accounts for the fact that longer time horizons have more variance
@@ -1310,8 +1334,10 @@ class UnifiedEdgeComputer:
         Returns:
             Buffer in probability space (0.0 to 1.0)
         """
-        # P2 FIX: Load calibration config if available with improved logging
-        calibration_config = self._load_calibration_config()
+        # CRITICAL FIX (2026-08-11): Use the cached latency calibration loaded at
+        # init time.  Do not re-read JSON and do not emit a repetitive WARNING each
+        # cycle.  Missing calibration is an INFO-level operational note, not an alert.
+        calibration_config = self._calibration_config
         
         # Conservative defaults (will be overridden by calibration once data is available)
         # These are initial estimates based on typical Kalshi 15m crypto market behavior
@@ -1332,13 +1358,16 @@ class UnifiedEdgeComputer:
                 asset, calibrated_lag_buffer_seconds, lag_buffer_prob
             )
         else:
-            # Use default tick-based buffer with warning
+            # Use default tick-based buffer.  Missing calibration is logged once per asset
+            # at INFO level; it does not require operator action on every cycle.
             lag_buffer_prob = DEFAULT_LAG_BUFFER_TICKS * 0.01
-            logger.warning(
-                "[LATENCY-BUFFER] No calibration data for %s - using default buffer (%.3f prob). "
-                "Consider running latency calibration to improve execution accuracy.",
-                asset, lag_buffer_prob
-            )
+            if asset not in self._calibration_missing_info_logged:
+                self._calibration_missing_info_logged.add(asset)
+                logger.info(
+                    "[LATENCY-BUFFER] No calibration data for %s - using default buffer (%.3f prob). "
+                    "Run latency calibration (merid/prediction/buffer_calibration.py) to improve execution accuracy.",
+                    asset, lag_buffer_prob
+                )
         
         # Get spread from orderbook
         spread_cents = 0

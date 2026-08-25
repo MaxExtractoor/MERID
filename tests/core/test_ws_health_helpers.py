@@ -65,13 +65,13 @@ class TestWSHealthComputation:
         assert result.subscription_coverage["expected_count"] == 3
         assert result.subscription_coverage["coverage_complete"] is False
     
-    def test_stalled_state_events_stopped(self):
-        """Test stalled state when events have stopped."""
+    def test_degraded_state_events_stopped(self):
+        """Test degraded state when events have stopped."""
         now = time.monotonic()
         result = compute_ws_health(
             event_count_total=50,
             first_event_ts=now - 120.0,
-            last_event_ts=now - 45.0,  # 45 seconds ago (> STALL_THRESHOLD)
+            last_event_ts=now - 45.0,  # 45 seconds ago (> STALL_THRESHOLD, < UNHEALTHY_THRESHOLD)
             events_per_sec=0.0,  # No recent events
             queue_size=0,
             subscribed_assets={"BTC", "ETH", "SOL"},
@@ -79,8 +79,8 @@ class TestWSHealthComputation:
             now_mono=now
         )
         
-        assert result.state == "stalled"
-        assert result.stalled is True
+        assert result.state == "degraded"
+        assert result.stalled is False
         assert result.event_count_total == 50
         assert result.time_since_last_event == 45.0
         assert result.is_healthy() is False
@@ -120,9 +120,9 @@ class TestWSHealthComputation:
             now_mono=now
         )
         
-        # Just over threshold should be stalled
-        assert result.state == "stalled"
-        assert result.stalled is True
+        # Just over threshold should be degraded (not unhealthy until >60s)
+        assert result.state == "degraded"
+        assert result.stalled is False
     
     def test_subscription_coverage_calculation(self):
         """Test subscription coverage calculation."""
@@ -338,11 +338,12 @@ class TestWSHealthLogging:
             log_ws_health_diagnostics(result, url="wss://test.example.com")
         
         # Check that diagnostic info was logged
-        assert "WS-HEALTH-DIAGNOSTIC" in caplog.text
-        assert "state=healthy" in caplog.text
-        assert "event_count_total=10" in caplog.text
-        assert "time_since_last=5.0s" in caplog.text
-        assert "url=wss://test.example.com" in caplog.text
+        assert "[WS_HEALTH]" in caplog.text
+        assert "status=HEALTHY" in caplog.text
+        assert "stalled=False" in caplog.text
+        assert "stale_ms=5000" in caplog.text
+        assert "reason=ok" in caplog.text
+        assert "uri=wss://test.example.com" in caplog.text
     
     def test_log_diagnostics_idle(self, caplog):
         """Test diagnostic logging for idle state."""
@@ -367,16 +368,17 @@ class TestWSHealthLogging:
                 log_ws_health_diagnostics(result)
         
         # Check that idle state was logged
-        assert "WS-HEALTH-DIAGNOSTIC" in caplog.text
-        assert "state=idle" in caplog.text
-        assert "event_count_total=0" in caplog.text
-        assert "time_since_last=0.0s" in caplog.text  # None converted to 0 for logging
+        assert "[WS_HEALTH]" in caplog.text
+        assert "status=IDLE" in caplog.text
+        assert "stalled=False" in caplog.text
+        assert "stale_ms=0" in caplog.text
+        assert "reason=ok" in caplog.text
     
-    def test_log_diagnostics_stalled(self, caplog):
-        """Test diagnostic logging for stalled state."""
+    def test_log_diagnostics_degraded(self, caplog):
+        """Test diagnostic logging for degraded state."""
         result = WSHealthResult(
-            state="stalled",
-            stalled=True,
+            state="degraded",
+            stalled=False,
             event_count_total=10,
             events_per_sec=0.0,
             queue_size=0,
@@ -392,11 +394,13 @@ class TestWSHealthLogging:
         with caplog.at_level(logging.INFO):
             log_ws_health_diagnostics(result)
         
-        # Check that both diagnostic and critical logs were generated
-        assert "WS-HEALTH-DIAGNOSTIC" in caplog.text
-        assert "state=stalled" in caplog.text
-        assert "WS-HEALTH-CRITICAL" in caplog.text
-        assert "STALLED for 45.0s" in caplog.text
+        # Check that both the diagnostic summary and the degraded warning were logged
+        assert "[WS_HEALTH]" in caplog.text
+        assert "status=DEGRADED" in caplog.text
+        assert "stalled=False" in caplog.text
+        assert "stale_ms=45000" in caplog.text
+        assert "reason=stale_connection" in caplog.text
+        assert "DEGRADED for 45.0s" in caplog.text
 
 
 if __name__ == "__main__":

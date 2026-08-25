@@ -754,14 +754,17 @@ class KalshiStrategy:
                 pass
             
             # Call unified_sizing to compute order size with $1 cap enforcement
+            # 2026-08-11: Use the model's side-specific probability (edge.model_prob), not the
+            # market-implied price (edge.market_prob), and enable fee-aware Kelly.
             count, notional_usd, metadata = compute_order_size(
                 bankroll_usd=_bankroll_usd,
                 price_cents=price_cents,
                 asset=_asset,
                 edge_pct=Decimal(str(edge_pct)),
-                model_prob=market_prob,
+                model_prob=float(edge.model_prob),
                 confidence=Decimal(str(max(0.0, min(1.0, size_factor)))),
-                side="yes",  # 15m crypto defaults to YES side
+                consider_fee_impact=True,
+                side=best.side,
             )
             
             # unified_sizing already enforces $1 cap via slot allocator
@@ -1763,47 +1766,34 @@ class KalshiStrategy:
             model_prob: float,
             kalshi_price: float,
             contracts: int = 1,
-            slippage: Optional[float] = None  # Default from env var
+            slippage: Optional[float] = None  # Default uses unified_sizing profile/env slippage
         ) -> tuple[float, float]:
-            """Compute expected value net of Kalshi fees.
-            
-            Returns:
-                (ev_net, fee_per_contract) where:
-                - ev_net = model_prob - kalshi_price - fee_per_contract - slippage
-                - fee_per_contract = Kalshi tiered fee per contract
-                
-            This uses the canonical Kalshi fee schedule from fees.py.
+            """Compute expected value net of Kalshi fees and slippage.
+
+            2026-08-11: Delegates to unified_sizing so the signal, EV gate, and
+            Kelly calculator all share the same all-in cost estimate.
             """
-            from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
-            
-            # Dynamic slippage: read from profile (single source of truth)
-            if slippage is None:
-                try:
-                    from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
-                    profile_adapter = Crypto15mProfileAdapter()
-                    profile = profile_adapter.profile
-                    # Convert max_slippage_cents to bps (1 cent = 100 bps at 42.5c price - canonical range midpoint 10-75c)
-                    _slippage_cents = getattr(profile, 'guardrails_max_slippage_cents', 5)
-                    _slippage_bps = _slippage_cents * 100  # Convert cents to bps
-                    slippage = _slippage_bps / 10000.0  # Convert bps to decimal
-                except Exception as e:
-                    # Fallback to env var if profile not available
-                    logger.warning(
-                        "[strategy] Failed to load slippage from profile: %s (using env var fallback)",
-                        e
-                    )
-                    _slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
-                    slippage = _slippage_bps / 10000.0  # Convert bps to decimal
-            
-            price_cents = round(kalshi_price * 100)  # Use round() to preserve sub-cent precision (fixes int() truncation bug)
-            fee_cents = calculate_kalshi_fee_cents(contracts, price_cents)
-            fee_per_contract = fee_cents / 100.0 / contracts
-            
-            ev_gross = model_prob - kalshi_price
-            ev_net = ev_gross - fee_per_contract - slippage
-            
+            from merid.prediction.unified_sizing import (
+                compute_all_in_cost_cents,
+                compute_fee_cents,
+            )
+
+            price_cents = round(kalshi_price * 100)  # Use round() to preserve sub-cent precision
+            # If caller provided a dollar slippage, convert to cents; otherwise let
+            # unified_sizing pick the single-source-of-truth slippage estimate.
+            slippage_cents = round(slippage * 100) if slippage is not None else None
+
+            fee_cents = compute_fee_cents(price_cents)
+            all_in_cost_cents = compute_all_in_cost_cents(
+                price_cents,
+                fee_cents=fee_cents,
+                slippage_cents=slippage_cents,
+            )
+            ev_net_cents = (model_prob * 100.0) - all_in_cost_cents
+            ev_net = ev_net_cents / 100.0
+            fee_per_contract = fee_cents / 100.0
             return ev_net, fee_per_contract
-        
+
         # Extract kalshi_price from market_prob (EdgeEstimate has market_prob field)
         kalshi_price = float(best.market_prob) if best and hasattr(best, 'market_prob') else 0.5
         

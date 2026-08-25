@@ -6,7 +6,6 @@ Timestamp handling is tested through integration tests in the production stack.
 """
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Market state timestamp tests require complex setup - tested via integration tests")
 
 
 def test_recompute_seconds_to_expiry_handles_naive_datetime():
@@ -70,7 +69,9 @@ def test_recompute_seconds_to_expiry_handles_none():
 
     state = FakeState()
     _recompute_seconds_to_expiry(state)
-    assert state.seconds_to_expiry is None
+    # CRITICAL FIX (2026-08-22): Missing expiry is treated as expired (0.0)
+    # so the market cannot be traded with unknown time-to-expiry.
+    assert state.seconds_to_expiry is not None and state.seconds_to_expiry <= 0.0
 
 
 def test_recompute_seconds_to_expiry_expiration_time_fallback():

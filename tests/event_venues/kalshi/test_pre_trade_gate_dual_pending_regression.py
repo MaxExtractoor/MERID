@@ -37,8 +37,6 @@ import pytest
 import time
 from typing import List, Optional
 
-pytestmark = pytest.mark.skip(reason="Dual-pending regression tests require complex setup - tested via integration tests")
-
 from merid.event_venues.kalshi.order_gate import (
     IdempotentOrderStore,
     OrderStatus,

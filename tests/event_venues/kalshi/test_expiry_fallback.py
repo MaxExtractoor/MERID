@@ -74,3 +74,36 @@ def test_non_interval_ticker_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
         m, datetime(2026, 4, 7, 22, 0, tzinfo=timezone.utc)
     )
     assert out.end_date == stale
+
+
+def test_ticker_expiry_day_24_canonical_not_poisoned_by_legacy() -> None:
+    """Regression: 2026-08-24 incident.
+
+    On days with DD >= 24 the legacy day-first regex (DDMON + HHMMSS) parses
+    the same body with hh >= 24 and fails.  The early-return
+    ``legacy_match and legacy_dt is None`` used to fire even when the canonical
+    year-first parse succeeded, so every live 15m position was rejected by
+    PositionMonitor as expired and no exit policy ever ran (100% losses).
+    """
+    from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_ticker_expiry
+
+    expiry_dt, is_15m = parse_kalshi_15m_ticker_expiry("KXXRP15M-26AUG240045-45")
+    assert is_15m is True
+    assert expiry_dt is not None
+    # 2026-08-24 00:45 America/New_York = 04:45 UTC
+    assert expiry_dt == datetime(2026, 8, 24, 4, 45, tzinfo=timezone.utc)
+
+    expiry_dt2, _ = parse_kalshi_15m_ticker_expiry("KXBTC15M-26AUG241330-30")
+    assert expiry_dt2 == datetime(2026, 8, 24, 17, 30, tzinfo=timezone.utc)
+
+    # Day 23 (legacy parse succeeds with hh=23) still prefers canonical.
+    expiry_dt3, _ = parse_kalshi_15m_ticker_expiry("KXXRP15M-26AUG232330-30")
+    assert expiry_dt3 == datetime(2026, 8, 24, 3, 30, tzinfo=timezone.utc)
+
+
+def test_is_expired_ticker_live_on_day_24() -> None:
+    """A live 15m ticker on DD >= 24 must not be treated as expired."""
+    from merid.position_management.position_monitor import _is_expired_ticker
+
+    # Far-future ticker is never expired.
+    assert _is_expired_ticker("KXBTC15M-30DEC312359-00") is False

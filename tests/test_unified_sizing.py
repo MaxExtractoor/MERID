@@ -360,5 +360,46 @@ class TestIntegrationETH15MScenario(unittest.TestCase):
 # differently in the fixed $1 exposure model.
 
 
+class TestTwoContractSizing(unittest.TestCase):
+    """Test that compute_order_size can return 2 contracts when configured."""
+
+    @patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=2)
+    @patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=False)
+    def test_sizing_returns_2_contracts_when_cheap(self, mock_dynamic, mock_max_contracts):
+        """Test that a cheap contract with full $1 cap can size to 2 contracts."""
+        bankroll = Decimal("1000.0")
+        price_cents = 25
+        asset = "BTC"
+
+        count, notional_usd, metadata = compute_order_size(
+            bankroll_usd=bankroll,
+            price_cents=price_cents,
+            asset=asset,
+            model_prob=0.60
+        )
+
+        self.assertEqual(count, 2, f"Expected 2 contracts for {asset} at {price_cents}c, got {count}")
+        self.assertEqual(notional_usd, Decimal("0.50"))
+        self.assertEqual(metadata["contract_count"], 2)
+
+    @patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=2)
+    @patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=False)
+    def test_sizing_caps_2_contracts_by_exposure(self, mock_dynamic, mock_max_contracts):
+        """Test that an expensive contract still caps at 1 when $1 cap doesn't allow 2."""
+        bankroll = Decimal("1000.0")
+        price_cents = 60
+        asset = "BTC"
+
+        count, notional_usd, metadata = compute_order_size(
+            bankroll_usd=bankroll,
+            price_cents=price_cents,
+            asset=asset,
+            model_prob=0.80  # Clear edge at 60c price
+        )
+
+        self.assertEqual(count, 1, f"Expected 1 contract for {asset} at {price_cents}c, got {count}")
+        self.assertEqual(notional_usd, Decimal("0.60"))
+
+
 if __name__ == "__main__":
     unittest.main()

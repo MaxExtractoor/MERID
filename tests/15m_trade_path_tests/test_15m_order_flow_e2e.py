@@ -235,7 +235,7 @@ class Test15mConfigSingleSourceOfTruth:
             import yaml
             from pathlib import Path
             
-            profile_path = Path(__file__).parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m.yaml"
+            profile_path = Path(__file__).parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
             
             # Use UTF-8 encoding to avoid Windows charmap codec issues
             with open(profile_path, 'r', encoding='utf-8') as f:

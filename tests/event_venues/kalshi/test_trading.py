@@ -22,7 +22,7 @@ from merid.event_venues.base import (
 )
 
 
-pytestmark = pytest.mark.skip(reason="Legacy KalshiTrader not used in production kalshi_crypto_15m_v2 stack")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-029: Legacy `KalshiTrader` not used in 15m stack")
 
 
 @pytest.fixture

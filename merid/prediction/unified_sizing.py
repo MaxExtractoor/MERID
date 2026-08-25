@@ -6,7 +6,7 @@ under the fixed $1 total exposure model (global slot allocator).
 The sizing function:
 - Applies Kelly-criterion edge filtering (rejects no-edge trades)
 - Reads existing exposure from the global slot allocator ($1 cap authority)
-- Allows at most 1 contract per order when a slot is available
+- Allows up to the configured per-asset max (2 in production) while staying inside the $1 cap
 - Returns integer contract count and computed notional
 
 2026-07-16: All percentage-based sizing (bankroll_cap_pct, per-asset
@@ -20,6 +20,7 @@ All other code should use this function or validate against its output.
 
 from __future__ import annotations
 
+import math
 import os
 from decimal import Decimal
 from typing import Optional, Tuple
@@ -35,6 +36,15 @@ try:
 except ImportError:
     _PROFILE_AVAILABLE = False
     logger.warning("[UNIFIED-SIZING] Profile adapter not available, using hardcoded values")
+
+# Fee integration (all-in cost / EV)
+try:
+    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_per_contract_cents
+    _FEES_AVAILABLE = True
+except ImportError:
+    _FEES_AVAILABLE = False
+    calculate_kalshi_fee_per_contract_cents = None  # type: ignore
+    logger.warning("[UNIFIED-SIZING] Fee module not available, fee-aware Kelly disabled")
 
 # Regime detection integration
 try:
@@ -357,14 +367,13 @@ def _get_max_contracts_per_asset(asset: str) -> int:
     Returns:
         Max contracts for this asset
     
-    PRODUCTION: If profile is unavailable, this fails (no silent fallback).
+    Fallback: returns 2 if profile is unavailable; production must activate the profile.
     """
     if not _PROFILE_AVAILABLE:
-        logger.error(
-            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
-            "profile initialization failed, max contracts unavailable"
+        logger.warning(
+            "[UNIFIED-SIZING] Profile adapter not available - using default max_contracts=2"
         )
-        raise RuntimeError("Profile adapter required for production sizing")
+        return 2
     
     try:
         if is_profile_active():
@@ -381,14 +390,13 @@ def _get_max_contracts_per_asset(asset: str) -> int:
             if asset_config:
                 return asset_config.max_contracts
             # If asset not in profile, use a conservative default
-            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=1", asset, asset_normalized)
-            return 1  # Slot model: 1 contract per order ($1 global slot allocator)
+            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=2", asset, asset_normalized)
+            return 2  # Slot model: 2 contracts per order ($2 global slot allocator)
         else:
-            logger.error(
-                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
-                "profile not activated, max contracts unavailable"
+            logger.warning(
+                "[UNIFIED-SIZING] Profile not active - using default max_contracts=2"
             )
-            raise RuntimeError("Active profile required for production sizing")
+            return 2  # Slot model default; production must activate profile for real values
     except Exception as e:
         logger.error(
             "[UNIFIED-SIZING] Failed to read max_contracts from profile: %s - "
@@ -462,6 +470,71 @@ def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None, asset: Optional[st
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read Kelly multiplier from profile: %s, using default 0.5x", e)
         return 0.5  # Default to 0.5x Kelly on error from e
+
+
+def _get_slippage_cents() -> int:
+    """Return the configured slippage estimate in cents for all-in cost."""
+    if _PROFILE_AVAILABLE and is_profile_active():
+        try:
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return int(getattr(profile, "guardrails_max_slippage_cents", 5))
+        except Exception as e:
+            logger.debug("[UNIFIED-SIZING] Failed to read slippage from profile: %s", e)
+    raw = os.getenv("MERID_SIGNAL_SLIPPAGE_CENTS", "5")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 5
+
+
+def compute_fee_cents(price_cents: int) -> float:
+    """Average Kalshi fee per contract in cents for a single-contract fill."""
+    if _FEES_AVAILABLE and calculate_kalshi_fee_per_contract_cents is not None:
+        return float(calculate_kalshi_fee_per_contract_cents(1, price_cents))
+    # Fallback parabolic estimate (matches the official formula at extremes).
+    price = price_cents / 100.0
+    fee = 0.07 * 1.0 * price * (1.0 - price) * 100.0
+    return float(math.ceil(fee))
+
+
+def compute_all_in_cost_cents(
+    price_cents: int,
+    fee_cents: Optional[float] = None,
+    slippage_cents: Optional[int] = None,
+) -> float:
+    """Realized all-in cost in cents: price + fee (+ optional slippage).
+
+    The canonical cost basis for signal EV and Kelly is the executable quote
+    price plus the Kalshi taker fee.  Settlement is free, so hold-to-settle
+    trades pay only the entry fee.  ``slippage_cents`` is intentionally opt-in:
+    it should only be passed when modeling a worst-case fill, not as the
+    default realized cost of a marketable limit order.
+    """
+    if fee_cents is None:
+        fee_cents = compute_fee_cents(price_cents)
+    if slippage_cents is None:
+        # Default to zero: the 5c limit-price guard is a fill guarantee bound,
+        # not a cost you pay every trade.  Callers can still pass it explicitly
+        # for stress/robustness calculations.
+        slippage_cents = 0
+    return float(price_cents) + float(fee_cents) + float(slippage_cents)
+
+
+def compute_ev_net(
+    model_prob: float,
+    price_cents: int,
+    fee_cents: Optional[float] = None,
+    slippage_cents: Optional[int] = None,
+) -> float:
+    """Expected value in cents net of realized all-in cost.
+
+    EV = p_model*100 - (price + fee) by default.  The ``slippage_cents``
+    parameter is opt-in and is only included when a caller explicitly wants to
+    stress a worst-case fill; it is not part of the default economic EV gate.
+    """
+    all_in_cost_cents = compute_all_in_cost_cents(price_cents, fee_cents, slippage_cents)
+    return (model_prob * 100.0) - all_in_cost_cents
 
 
 # 2026-07-16: _get_per_trade_risk_pct REMOVED (percentage-based sizing PRUNED).
@@ -565,7 +638,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
         Max contracts as int.
     """
     if not _PROFILE_AVAILABLE:
-        return 1  # Slot model: 1 contract per order ($1 global slot allocator)
+        return 2  # Slot model: 2 contracts per order ($2 global slot allocator)
     
     try:
         if is_profile_active():
@@ -575,7 +648,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_max_contracts: %s", e)
     
-    return 1  # Slot model: 1 contract per order ($1 global slot allocator)
+    return 2  # Slot model: 2 contracts per order ($2 global slot allocator)
 
 
 def _get_dynamic_sizing_min_contracts() -> int:
@@ -609,80 +682,86 @@ def calculate_kelly_fraction(
     price_cents: int,
     confidence: float = 0.5,
     fractional_kelly: float = 0.25,
-    side: str = "yes"
+    side: str = "yes",
+    consider_fee_impact: bool = False,
+    fee_cents: Optional[float] = None,
+    slippage_cents: Optional[int] = None,
 ) -> float:
-    """Calculate Kelly fraction for binary option.
-    
-    Based on Kelly Criterion: f* = (bp - q) / b
-    where b = (1 - price) / price (net odds for binary options)
-    
-    CRITICAL FIX (2026-07-13): Handle NO-side correctly
-    For NO contracts, model_prob represents probability of NOT outcome (trade wins if event doesn't happen)
-    For YES contracts, model_prob represents probability of YES outcome (trade wins if event happens)
-    
+    """Calculate Kelly fraction for a binary option using a single all-in cost.
+
+    The all-in cost includes the contract price, the Kalshi fee, and an
+    explicit slippage estimate.  Both the signal-generation EV gate and the
+    sizing Kelly calculator now share this cost so they cannot disagree.
+
     Args:
         model_prob: True probability of winning (0.0-1.0)
-        price_cents: Contract price in cents (5-85)
+        price_cents: Contract price in cents (1-99)
         confidence: Model confidence (0.0-1.0) for weighting
         fractional_kelly: Kelly fraction multiplier (default 0.25 for quarter-Kelly)
-        side: "yes" or "no" - determines how model_prob is interpreted
-    
+        side: "yes" or "no" - informational only, model_prob is side-specific
+        consider_fee_impact: If True, include fee and slippage in the cost basis
+        fee_cents: Optional per-contract fee in cents (default: compute from Kalshi schedule)
+        slippage_cents: Optional slippage in cents (default: profile or env)
+
     Returns:
         Kelly fraction (0.0 to 1.0). Returns 0.0 if edge is negative.
     """
     # Validate inputs
+    if model_prob is None:
+        logger.warning("[KELLY] model_prob is None, rejecting")
+        return 0.0
+
     if not (0.0 <= model_prob <= 1.0):
-        logger.warning("[KELLY] Invalid model_prob=%.2f, clamping to [0,1]", model_prob)
+        logger.warning("[KELLY] Invalid model_prob=%.4f, clamping to [0,1]", model_prob)
         model_prob = max(0.0, min(1.0, model_prob))
-    
+
     if not (0.0 <= confidence <= 1.0):
         logger.warning("[KELLY] Invalid confidence=%.2f, clamping to [0,1]", confidence)
         confidence = max(0.0, min(1.0, confidence))
-    
-    # Calculate net odds for binary option
+
     price = price_cents / 100.0
     if price <= 0 or price >= 1.0:
         logger.warning("[KELLY] Invalid price=%.2f, cannot calculate Kelly", price)
         return 0.0
-    
-    # CRITICAL FIX (2026-07-15): model_prob is already correct for Kelly formula
-    # agent_grid_15m.py calculates model_prob anchored to market price:
-    # - For YES: model_prob = market_prob + edge_adjustment (probability of YES outcome)
-    # - For NO: model_prob = market_prob - edge_adjustment (probability of YES outcome)
-    # Kelly formula needs probability of winning, which is exactly what model_prob represents
-    # No side-based conversion needed - use model_prob directly
+
+    # Single all-in cost basis: price + fee + slippage
+    if consider_fee_impact:
+        cost = compute_all_in_cost_cents(price_cents, fee_cents, slippage_cents) / 100.0
+    else:
+        cost = price
+
+    if cost <= 0 or cost >= 1.0:
+        logger.warning("[KELLY] Invalid all-in cost=%.4f, cannot calculate Kelly", cost)
+        return 0.0
+
     p = model_prob
-    
-    b = (1.0 - price) / price  # Net odds
-    q = 1.0 - p
-    
-    # Calculate full Kelly
-    kelly = (b * p - q) / b
-    
+    # Kelly for a binary with cost c and payoff 1: f* = (p - c) / (1 - c)
+    kelly = (p - cost) / (1.0 - cost)
+
     # If Kelly is negative, no edge
     if kelly <= 0:
         logger.debug(
-            "[KELLY] Negative edge: model_prob=%.2f side=%s price=%.2f b=%.2f kelly=%.4f",
-            model_prob, side, price, b, kelly
+            "[KELLY] Negative edge: model_prob=%.4f side=%s price=%.2f cost=%.4f kelly=%.4f",
+            model_prob, side, price, cost, kelly
         )
         return 0.0
-    
+
     # Apply fractional Kelly (quarter-Kelly by default for production)
     fractional = kelly * fractional_kelly
-    
+
     # Apply confidence weighting (0.5 to 2.0 multiplier)
-    confidence_multiplier = 0.5 + (confidence * 1.5)  # Maps 0.0→0.5, 0.5→1.25, 1.0→2.0
+    confidence_multiplier = 0.5 + (confidence * 1.5)
     weighted_kelly = fractional * confidence_multiplier
-    
+
     # Cap at 1.0 (cannot bet more than 100% of available capital)
     final_kelly = min(1.0, weighted_kelly)
-    
+
     logger.debug(
-        "[KELLY] model_prob=%.2f side=%s price=%.2f b=%.2f kelly=%.4f "
-        "fractional=%.4f confidence=%.2f multiplier=%.2f final=%.4f",
-        model_prob, side, price, b, kelly, fractional, confidence, confidence_multiplier, final_kelly
+        "[KELLY] model_prob=%.4f side=%s price=%.2f cost=%.4f kelly=%.4f "
+        "fractional=%.4f confidence=%.2f final=%.4f",
+        model_prob, side, price, cost, kelly, fractional, confidence, final_kelly
     )
-    
+
     return final_kelly
 
 
@@ -708,10 +787,10 @@ def compute_order_size(
     metadata: Optional[dict] = None,  # 2026-07-31: Metadata for sweet spot price adjustment tracking
     flb_position_multiplier: float = 1.0,  # 2026-08-01: FLB-aware position sizing multiplier
 ) -> Tuple[int, Decimal, dict]:
-    """Compute order size using fixed $1 total exposure model with Kelly filtering (2026-07-12).
+    """Compute order size using fixed $2 total exposure model with Kelly filtering (2026-07-12).
     
     This is the SINGLE SOURCE OF TRUTH for order sizing in 15m agents.
-    All percentage-based sizing has been removed in favor of fixed $1 total exposure.
+    All percentage-based sizing has been removed in favor of fixed $2 total exposure.
     
     NEW (2026-07-12): Kelly Criterion integration
     - Uses Kelly fraction to filter trades with no edge
@@ -721,10 +800,10 @@ def compute_order_size(
     Formula:
         1. Calculate Kelly fraction from model_prob, price, confidence
         2. If Kelly fraction is 0, reject (no edge)
-        3. Use fixed $1 exposure cap from profile (fixed_exposure_cap_usd)
+        3. Use fixed $2 exposure cap from profile (fixed_exposure_cap_usd)
         4. Check existing total exposure from slot allocator
-        5. Available exposure = $1 - existing_exposure
-        6. If available_exposure >= contract_cost, allow 1 contract
+        5. Available exposure = $2 - existing_exposure
+        6. If available_exposure >= contract_cost, allow up to 2 contracts
         7. Otherwise, reject (no slots available)
     
     Example with existing_exposure=$0.65, price_cents=35:
@@ -755,23 +834,38 @@ def compute_order_size(
         raise ValueError(f"Invalid price_cents={price_cents} for asset={asset} - must be > 0")
     
     # 2026-07-12: Kelly Criterion filtering
-    # Calculate Kelly fraction to filter trades with no edge
-    # CRITICAL FIX: Skip Kelly filter if price was adjusted by sweet spot logic
-    # The model_prob was calculated at the original signal price, not the adjusted price
-    # Using the adjusted price would cause false Kelly rejections
-    price_adjusted = metadata.get("price_adjusted_by_sweet_spot", False) if metadata else False
-    original_signal_price = metadata.get("original_signal_price") if metadata else None
-    
-    if model_prob is not None and not price_adjusted:
+    # CRITICAL FIX 2026-08-08: Always re-run Kelly/sizing against the final repriced
+    # price. Previously SWEET-SPOT-EXECUTION set a flag that bypassed Kelly, letting
+    # mispriced orders through. Now that repricing is explicit and side-aware, the
+    # edge/sizing must be recalculated at the submitted price.
+    if model_prob is not None:
         confidence_float = float(confidence) if confidence is not None else 0.5
+
+        # All-in cost is always computed for telemetry, but only used for Kelly
+        # gating when consider_fee_impact is True (default False preserves legacy
+        # test expectations; production callers pass consider_fee_impact=True).
+        _fee_cents: Optional[float] = None
+        _slippage_cents: Optional[int] = None
+        _ev_net: Optional[float] = None
+        _all_in_cost_cents: Optional[float] = None
+
+        if consider_fee_impact or estimated_fee_cents is not None:
+            if estimated_fee_cents is not None:
+                _fee_cents = float(estimated_fee_cents)
+            _all_in_cost_cents = compute_all_in_cost_cents(price_cents, _fee_cents, _slippage_cents)
+            _ev_net = (model_prob * 100.0) - _all_in_cost_cents
+
         kelly_fraction = calculate_kelly_fraction(
             model_prob=model_prob,
             price_cents=price_cents,
             confidence=confidence_float,
             fractional_kelly=0.25,  # Quarter-Kelly for production
-            side=side  # 2026-07-13: Pass side for correct Kelly calculation
+            side=side,
+            consider_fee_impact=consider_fee_impact or estimated_fee_cents is not None,
+            fee_cents=_fee_cents,
+            slippage_cents=_slippage_cents,
         )
-        
+
         # If Kelly fraction is 0, reject (no edge)
         if kelly_fraction <= 0:
             logger.info(
@@ -785,26 +879,21 @@ def compute_order_size(
                 "reason": "kelly_no_edge",
                 "model_prob": model_prob,
                 "kelly_fraction": kelly_fraction,
+                "all_in_cost_cents": _all_in_cost_cents,
+                "ev_net_cents": _ev_net,
             }
-        
+
         logger.info(
             "[UNIFIED-SIZING] Kelly filter passed: asset=%s model_prob=%.2f price=%dc kelly=%.4f",
             asset, model_prob, price_cents, kelly_fraction
         )
-    elif model_prob is not None and price_adjusted:
-        # Price was adjusted by sweet spot logic - skip Kelly filter
-        # The edge calculation at the original signal price is still valid
-        logger.info(
-            "[UNIFIED-SIZING] Kelly filter SKIPPED: asset=%s model_prob=%.2f adjusted_price=%dc original_price=%dc (price adjusted by sweet spot logic)",
-            asset, model_prob, price_cents, original_signal_price
-        )
     
-    # 2026-07-08 UPDATE: Fixed $1 total exposure model - slot-based position management
+    # 2026-07-08 UPDATE: Fixed $2 total exposure model - slot-based position management
     # All percentage-based sizing has been removed
-    # New model: sum of all contract prices must be ≤ $1
+    # New model: sum of all contract prices must be ≤ $2
     
-    # Step 1: Get fixed $1 exposure cap from profile
-    fixed_exposure_cap_usd = Decimal("1.00")  # Default
+    # Step 1: Get fixed $2 exposure cap from profile
+    fixed_exposure_cap_usd = Decimal("2.00")  # Default
     if _PROFILE_AVAILABLE and is_profile_active():
         adapter = get_active_profile()
         profile = adapter.profile
@@ -835,7 +924,27 @@ def compute_order_size(
     
     # Step 4: Calculate contract cost
     contract_cost_usd = Decimal(price_cents) / Decimal("100")
-    
+
+    # Step 4a: Compute the maximum number of whole contracts that fit under any
+    # explicit per-order notional cap (legacy percentage-based fallback).
+    max_by_notional: Optional[int] = None
+    if max_notional_usd is not None:
+        max_by_notional = int(Decimal(str(max_notional_usd)) // contract_cost_usd)
+        if max_by_notional < 1:
+            logger.warning(
+                "[UNIFIED-SIZING] CAPITAL_INSUFFICIENT: asset=%s price=%dc contract_cost=%.2f "
+                "exceeds max_notional_usd=%.2f - rejecting order",
+                asset, price_cents, float(contract_cost_usd), float(max_notional_usd)
+            )
+            return 0, Decimal("0"), {
+                "bankroll_usd": float(bankroll_usd),
+                "price_cents": price_cents,
+                "asset": asset,
+                "reason": "capital_insufficient_max_notional",
+                "contract_cost_usd": float(contract_cost_usd),
+                "max_notional_usd": float(max_notional_usd),
+            }
+
     # Step 5: Check if we have enough exposure slot
     if available_exposure_usd < contract_cost_usd:
         logger.warning(
@@ -859,7 +968,7 @@ def compute_order_size(
                 )
         except Exception as e:
             logger.warning("[UNIFIED-SIZING] Failed to log slot allocator state: %s", e)
-        
+
         return 0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
@@ -869,18 +978,58 @@ def compute_order_size(
             "contract_cost_usd": float(contract_cost_usd),
             "existing_exposure_usd": float(existing_exposure_usd),
         }
-    
-    # Step 6: Allow 1 contract (slot-based)
-    contract_count = 1
-    order_notional_usd = contract_cost_usd
 
-    # Step 7: Get per-asset max contracts cap (should be 1)
+    # Step 6: Compute target contract count
+    # 2026-08-22: Size up to the configured per-asset max while staying inside the
+    # fixed $1 global exposure cap. The $1 allocation itself is not changed.
+    if _is_dynamic_sizing_enabled():
+        target_contracts = _get_dynamic_sizing_base_contracts()
+        if target_contracts < 1:
+            target_contracts = 1
+    else:
+        target_contracts = _get_max_contracts_per_asset(asset)
+
+    # Step 7: Get effective max contracts cap (per-asset and dynamic)
     max_contracts_cap = _get_max_contracts_per_asset(asset)
-    contract_count = min(contract_count, max_contracts_cap)
+    if _is_dynamic_sizing_enabled():
+        dynamic_max = _get_dynamic_sizing_max_contracts()
+        if dynamic_max < 1:
+            dynamic_max = 1
+        max_contracts_cap = min(max_contracts_cap, dynamic_max)
+
+    # Step 8: Cap by the number of whole contracts that fit in the available $2 exposure
+    max_by_exposure = int(available_exposure_usd // contract_cost_usd)
+
+    contract_count = min(target_contracts, max_contracts_cap, max_by_exposure)
+    if max_by_notional is not None:
+        contract_count = min(contract_count, max_by_notional)
+
+    if contract_count < 1:
+        # Defensive: should not reach here because of the exposure check above,
+        # but handle the case where a cap reduced the count to 0.
+        logger.warning(
+            "[UNIFIED-SIZING] Insufficient exposure for requested count: "
+            "available=$%.2f, price=%dc, target=%d, max_cap=%d, by_exposure=%d, asset=%s",
+            float(available_exposure_usd), price_cents, target_contracts, max_contracts_cap, max_by_exposure, asset
+        )
+        return 0, Decimal("0"), {
+            "bankroll_usd": float(bankroll_usd),
+            "price_cents": price_cents,
+            "asset": asset,
+            "reason": "insufficient_exposure_for_requested_count",
+            "available_exposure_usd": float(available_exposure_usd),
+            "contract_cost_usd": float(contract_cost_usd),
+            "existing_exposure_usd": float(existing_exposure_usd),
+            "max_contracts_cap": max_contracts_cap,
+            "target_contracts": target_contracts,
+            "max_by_exposure": max_by_exposure,
+        }
+
+    order_notional_usd = Decimal(contract_count) * contract_cost_usd
 
     # 2026-08-01: Apply FLB position sizing multiplier
     # FLB multiplier reduces effective position size based on FLB risk zones
-    # Since slot-based model enforces 1 contract, we pass this in metadata for downstream use
+    # Since slot-based model enforces the configured max, we pass this in metadata for downstream use
     # The order router can use this to adjust position sizing or reject high-risk trades
     if flb_position_multiplier != 1.0:
         logger.info(
@@ -926,6 +1075,10 @@ def compute_order_size(
         }
     
     # Return result
+    fee_adjusted = bool(
+        consider_fee_impact and estimated_fee_cents is not None and float(estimated_fee_cents) > 0
+    )
+
     metadata = {
         "bankroll_usd": float(bankroll_usd),
         "price_cents": price_cents,
@@ -936,21 +1089,40 @@ def compute_order_size(
         "available_exposure_usd": float(available_exposure_usd),
         "fixed_exposure_cap_usd": float(fixed_exposure_cap_usd),
         "flb_position_multiplier": flb_position_multiplier,  # 2026-08-01: FLB multiplier for downstream use
+        "consider_fee_impact": bool(consider_fee_impact),
+        "fee_adjusted": fee_adjusted,
+        "estimated_fee_cents": float(estimated_fee_cents) if estimated_fee_cents is not None else None,
     }
     
     # Add Kelly information if model_prob was provided
     if model_prob is not None:
         confidence_float = float(confidence) if confidence is not None else 0.5
+        _fee_cents: Optional[float] = None
+        _slippage_cents: Optional[int] = None
+        if consider_fee_impact or estimated_fee_cents is not None:
+            if estimated_fee_cents is not None:
+                _fee_cents = float(estimated_fee_cents)
+            _all_in_cost_cents = compute_all_in_cost_cents(price_cents, _fee_cents, _slippage_cents)
+            _ev_net = (model_prob * 100.0) - _all_in_cost_cents
+            metadata["all_in_cost_cents"] = _all_in_cost_cents
+            metadata["ev_net_cents"] = _ev_net
+            metadata["fee_cents"] = compute_fee_cents(price_cents) if _fee_cents is None else _fee_cents
+            metadata["slippage_cents"] = _slippage_cents if _slippage_cents is not None else _get_slippage_cents()
+
         kelly_fraction = calculate_kelly_fraction(
             model_prob=model_prob,
             price_cents=price_cents,
             confidence=confidence_float,
-            fractional_kelly=0.25
+            fractional_kelly=0.25,
+            side=side,
+            consider_fee_impact=consider_fee_impact or estimated_fee_cents is not None,
+            fee_cents=_fee_cents,
+            slippage_cents=_slippage_cents,
         )
         metadata["model_prob"] = model_prob
         metadata["confidence"] = confidence_float
         metadata["kelly_fraction"] = kelly_fraction
-    
+
     logger.info(
         "[UNIFIED-SIZING] Final sizing: asset=%s contracts=%d notional=$%.2f price=%dc "
         "total_exposure_after=$%.2f",
