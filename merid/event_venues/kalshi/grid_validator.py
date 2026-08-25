@@ -152,9 +152,9 @@ def validate_kalshi_grid(strict: bool = True) -> Dict[str, CellStatus]:
                 try:
                     import os
                     # Use fixed $1 exposure cap from environment variable
-                    notional = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+                    notional = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
                 except Exception:
-                    notional = 1.0  # Fail closed to $1 default on error
+                    notional = 2.0  # Fail closed to $2 default on error
             cell.max_notional_usd = notional
             if notional < 0:
                 cell.errors.append(

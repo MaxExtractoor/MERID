@@ -31,6 +31,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
+from merid.event_venues.kalshi.binary_price_space import (
+    require_consistent_outcome_side,
+    SideValidationError,
+)
+
 # Import threshold config for dynamic thresholds
 from merid.event_venues.kalshi.threshold_config import get_threshold_config
 _threshold_config = get_threshold_config()
@@ -181,6 +186,12 @@ class LocalOrderbook:
         self.ticker = ticker
         self.yes_levels: Dict[int, int] = defaultdict(int)  # price_cents -> size
         self.no_levels: Dict[int, int] = defaultdict(int)
+        # Per-level sequence numbers.  Kalshi orderbook_deltas are one-sided,
+        # so the side that was *not* updated can carry stale prices.  When a
+        # crossed/locked book is detected, we remove the price level with the
+        # older sequence number (the stale side).
+        self._yes_level_seq: Dict[int, int] = {}
+        self._no_level_seq: Dict[int, int] = {}
         self._initialized = False
         self._last_seq: Optional[int] = None
         self._snapshot_ts: Optional[float] = None
@@ -218,40 +229,57 @@ class LocalOrderbook:
         
         self.yes_levels.clear()
         self.no_levels.clear()
+        self._yes_level_seq.clear()
+        self._no_level_seq.clear()
 
         # Parse yes side
+        # CRITICAL FIX (2026-08-03): Unit-robust price normalization.
+        # Callers now pass prices as either:
+        #   - integer cents (e.g. 42) from local paths, or
+        #   - dollar floats (e.g. 0.42) straight from the Kalshi API.
+        # Float inputs are always treated as dollars and converted to cents;
+        # integer inputs are used as-is.  This removes the previous heuristic
+        # that mis-classified sub-penny cent values as dollars.
+        def _to_cents(price) -> int:
+            if isinstance(price, float):
+                return int(round(price * 100))
+            return int(price)
+
+        snap_seq = snapshot.get("seq") or snapshot.get("sequence") or 0
+
         for level in snapshot.get("yes", []):
             if isinstance(level, (list, tuple)) and len(level) >= 2:
                 price, size = level[0], level[1]
                 if size > 0:
-                    # CRITICAL FIX: Prices are already in cents from ingestion point
-                    # (main_15m_lean.py WS-REFRESH and ws_bridge.py REST fallback)
-                    # No conversion needed here - just clamp to valid range
-                    price_cents = int(price) if not isinstance(price, int) else price
+                    price_cents = _to_cents(price)
                     # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
                     # Clamp to valid range to handle rounding edge cases
                     price_cents = max(1, min(99, price_cents))
                     if price_cents > 0 and price_cents < 100:
                         self.yes_levels[price_cents] = int(size)
+                        self._yes_level_seq[price_cents] = snap_seq
 
         # Parse no side
         for level in snapshot.get("no", []):
             if isinstance(level, (list, tuple)) and len(level) >= 2:
                 price, size = level[0], level[1]
                 if size > 0:
-                    # CRITICAL FIX: Prices are already in cents from ingestion point
-                    # (main_15m_lean.py WS-REFRESH and ws_bridge.py REST fallback)
-                    # No conversion needed here - just clamp to valid range
-                    price_cents = int(price) if not isinstance(price, int) else price
+                    price_cents = _to_cents(price)
                     # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
                     # Clamp to valid range to handle rounding edge cases
                     price_cents = max(1, min(99, price_cents))
                     if price_cents > 0 and price_cents < 100:
                         self.no_levels[price_cents] = int(size)
+                        self._no_level_seq[price_cents] = snap_seq
 
         self._initialized = True
         self._last_seq = snapshot.get("seq")
-        self._snapshot_ts = snapshot.get("ts") or time.monotonic()
+        # CRITICAL FIX (2026-08-22): Keep in-process staleness in a single monotonic
+        # clock domain.  Exchange/wall timestamps from ``snapshot.get("ts")`` are
+        # stored separately for logging only and must never be subtracted from
+        # ``time.monotonic()``.
+        self._snapshot_ts = time.monotonic()
+        self._last_exchange_ts = snapshot.get("ts")
 
         logger.debug(f"Orderbook snapshot applied for {self.ticker} - "
                     f"yes_levels={len(self.yes_levels)}, no_levels={len(self.no_levels)}")
@@ -282,7 +310,16 @@ class LocalOrderbook:
             # PERFORMANCE FIX: Alert manager calls removed - reduces latency by ~10-20ms
             return
 
-        side = delta.get("side", "yes")
+        # Fail-closed: orderbook deltas without a valid side are discarded.
+        try:
+            side = require_consistent_outcome_side(
+                delta,
+                context="orderbook.apply_delta",
+                fields=("side", "outcome_side", "kalshi_side"),
+            )
+        except SideValidationError as side_err:
+            logger.error("[ORDERBOOK-SIDE-INVALID] Discarding delta: %s", side_err)
+            return
         
         # Normalize WS format (price_dollars, delta_fp) to internal format (price_cents, size_delta)
         # WS may send numbers as strings, so convert to float first
@@ -321,7 +358,31 @@ class LocalOrderbook:
         else:
             levels[price] = new_size
 
-        self._last_seq = delta.get("seq", self._last_seq)
+        seq = delta.get("seq")
+        if seq is not None:
+            self._last_seq = int(seq)
+
+        # Record the sequence number for the price level that was touched.
+        # This allows us to remove stale crossed levels from the side that
+        # was *not* updated when the two best levels disagree.
+        if side == "yes":
+            if price in self.yes_levels:
+                self._yes_level_seq[price] = self._last_seq or 0
+            else:
+                self._yes_level_seq.pop(price, None)
+        else:
+            if price in self.no_levels:
+                self._no_level_seq[price] = self._last_seq or 0
+            else:
+                self._no_level_seq.pop(price, None)
+
+        # Remove stale, crossed levels caused by one-sided delta streams.
+        # Kalshi orderbook_delta messages are per-side; a fresh NO bid lowers
+        # the YES ask, so stale YES bids above the new YES ask must be removed.
+        # Conversely, a fresh YES bid raises the NO ask, so stale NO bids above
+        # the new NO ask must be removed.  We use per-level sequence numbers to
+        # decide which side is stale when both sides have crossed levels.
+        self._sanitize_crossed_levels()
 
         # Crossed-market invariant: yes_ask + no_ask must be >= 100.
         # If yes_bid + no_bid > 100 or yes_ask + no_ask < 100, the book is
@@ -338,7 +399,9 @@ class LocalOrderbook:
         """
         best_bid = self.get_best_bid()
         best_ask = self.get_best_ask()
-        best_no_bid = min(self.no_levels.keys()) if self.no_levels else None
+        # Both ``yes_levels`` and ``no_levels`` store bids.  Best bid on each
+        # side is the highest price; the corresponding ask is 100 - best bid.
+        best_no_bid = max(self.no_levels.keys()) if self.no_levels else None
 
         # yes_bid + no_bid > 100 → free arb (book crossed long)
         # Only check when both sides have meaningful depth - one-sided books are valid
@@ -373,8 +436,9 @@ class LocalOrderbook:
         # FIX: 2026-07-02 - Increased tolerance for 15m crypto market volatility
         # Thin crypto markets can have temporary crosses due to stale quotes and rapid price moves
         # Only alert on significant crosses (<97c) that indicate actual data corruption
-        if best_ask is not None and self.no_levels:
-            best_no_ask = min(self.no_levels.keys())
+        if best_ask is not None and best_bid is not None:
+            # NO ask is the complement of the best YES bid.
+            best_no_ask = 100 - best_bid[0]
             yes_ask_equiv = best_ask[0]  # already in yes-equivalent cents
             if yes_ask_equiv + best_no_ask < 97:
                 msg = (
@@ -398,6 +462,48 @@ class LocalOrderbook:
                 except Exception as e:
                     logger.debug(f"Crossed book alert failed (ask): {e}")
 
+    def _sanitize_crossed_levels(self) -> None:
+        """Remove stale, crossed levels after a one-sided delta.
+
+        Kalshi's ``orderbook_delta`` stream sends per-side updates.  When a
+        fresh NO bid raises the best NO price, the YES ask drops.  Any YES
+        bid above the new YES ask is stale and would have been matched by the
+        exchange.  Symmetrically, a fresh YES bid drops the NO ask, so any NO
+        bid above the new NO ask is stale.
+
+        To decide which side is stale when both best levels cross, we compare
+        the per-level sequence numbers recorded when each level was last
+        touched.  The newer level wins; the older level is removed.
+        """
+        while self.yes_levels and self.no_levels:
+            yes_best = max(self.yes_levels.keys())
+            no_best = max(self.no_levels.keys())
+
+            # Locked markets (yes_bid + no_bid == 100) are allowed.  A strict
+            # cross (sum > 100) means one side is stale and must be removed.
+            if yes_best + no_best <= 100:
+                break
+
+            yes_seq = self._yes_level_seq.get(yes_best, -1)
+            no_seq = self._no_level_seq.get(no_best, -1)
+
+            if yes_seq < no_seq:
+                # YES best is older -> it is the stale side.
+                self.yes_levels.pop(yes_best, None)
+                self._yes_level_seq.pop(yes_best, None)
+                logger.debug(
+                    "[ORDERBOOK-SANITIZE] %s removed stale YES bid %d (seq=%d < no_seq=%d)",
+                    self.ticker, yes_best, yes_seq, no_seq,
+                )
+            else:
+                # NO best is older or tied -> remove NO best.
+                self.no_levels.pop(no_best, None)
+                self._no_level_seq.pop(no_best, None)
+                logger.debug(
+                    "[ORDERBOOK-SANITIZE] %s removed stale NO bid %d (seq=%d <= yes_seq=%d)",
+                    self.ticker, no_best, no_seq, yes_seq,
+                )
+
     def get_best_bid(self) -> Optional[Tuple[int, int]]:
         """Get best bid (highest yes price with size).
 
@@ -415,26 +521,19 @@ class LocalOrderbook:
         return (best_price, self.yes_levels[best_price])
 
     def get_best_ask(self) -> Optional[Tuple[int, int]]:
-        """Get best ask (lowest no complement price with size).
+        """Get best YES ask from the best NO bid.
 
-        Kalshi YES/NO Symmetry (per Kalshi docs):
-        - YES and NO prices are duals: YES_bid + NO_ask = 100 cents
-        - The orderbook is bid-side-only; we derive the opposite side from 100 - price
-        - NO_ask (selling NO) is equivalent to YES_ask (buying YES)
-        - We convert NO prices to YES-equivalent: yes_equivalent = 100 - no_price
+        Kalshi's ``orderbook_fp`` carries YES bids and NO bids.  The best YES
+        ask is the complement of the best (highest) NO bid:
 
-        Example:
-        - If NO_ask = 40 cents (someone willing to sell NO at 40c)
-        - YES_equivalent = 100 - 40 = 60 cents (someone willing to buy YES at 60c)
-        - This maintains the invariant: YES_price + NO_price = 100
+            YES_ask = 100 - NO_bid
 
-        Returns:
-            Tuple of (yes_equivalent_price_cents, size) or None if no asks
+        This is the cheapest price at which we can buy YES right now.
         """
         if not self.no_levels:
             return None
-        # Convert no price to yes-equivalent ask per Kalshi YES/NO symmetry
-        best_no_price = min(self.no_levels.keys())
+        # The best NO bid is the highest NO price; its complement is the best YES ask.
+        best_no_price = max(self.no_levels.keys())
         
         # CRITICAL FIX: Handle invalid NO prices (0 or >=100)
         if best_no_price <= 0 or best_no_price >= 100:
@@ -511,16 +610,14 @@ class LocalOrderbook:
             top_n: Number of levels to return
 
         Returns:
-            List of (price, size) tuples, sorted by price (desc for yes, asc for no)
+            List of (price, size) tuples, sorted by price descending
+            (best bid first) on both sides.
         """
         levels = self.yes_levels if side == "yes" else self.no_levels
 
-        if side == "yes":
-            # Sort by price descending (best bids first)
-            sorted_levels = sorted(levels.items(), key=lambda x: x[0], reverse=True)
-        else:
-            # Sort by price ascending (lowest no prices first)
-            sorted_levels = sorted(levels.items(), key=lambda x: x[0])
+        # Both yes_levels and no_levels store bids; the best bid is the
+        # highest price on each side.
+        sorted_levels = sorted(levels.items(), key=lambda x: x[0], reverse=True)
 
         return sorted_levels[:top_n]
 
@@ -577,6 +674,8 @@ class LocalOrderbook:
         """Clear all orderbook state."""
         self.yes_levels.clear()
         self.no_levels.clear()
+        self._yes_level_seq.clear()
+        self._no_level_seq.clear()
         self._initialized = False
         self._last_seq = None
 

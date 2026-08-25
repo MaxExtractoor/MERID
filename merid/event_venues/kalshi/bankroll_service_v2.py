@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import threading
 import asyncio
+import inspect
 import os
 import time
 from dataclasses import dataclass
@@ -48,6 +49,9 @@ def log_bankroll_service_version() -> None:
 # EVIDENCE-BASED FIX: Increased to 45s based on production logs showing occasional API delays
 _BANKROLL_EQUITY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_EQUITY_TIMEOUT_S", "45.0"))  # increased from 30 to 45 for production stability
 _BANKROLL_SUMMARY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_SUMMARY_TIMEOUT_S", "30.0"))  # increased from 10 to 30 to prevent order blocking on slow fetches
+# CRITICAL FIX: Bound the actual /portfolio/balance API call so a single slow response
+# cannot starve the 15m strategy's refresh cadence.
+_BANKROLL_BALANCE_API_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_BALANCE_API_TIMEOUT_S", "10.0"))
 from merid.event_venues.kalshi.types import (
     BalanceResult, BalanceSuccess, BalanceTemporaryError, BalancePermanentError,
     InternalBankroll, BalanceState,
@@ -127,17 +131,21 @@ class BankrollServiceV2:
         client: Optional[KalshiClientV2] = None,
         refresh_interval_seconds: float = 10.0,  # PRODUCTION AUDIT: Explicit 10s cache window
         max_riskable_frac: Optional[Decimal] = None,
+        max_position_cap_usd: Optional[Decimal] = None,
     ):
         # CRITICAL DEBUGGING: Capture instantiation stack to identify 15m vs script divergence
         import traceback
         stack = traceback.extract_stack()
         caller = stack[-2] if len(stack) >= 2 else stack[-1]  # Get the calling frame
         logger.info(f"[BANKROLL-DIVERGENCE] BankrollServiceV2 instantiated from: {caller.filename}:{caller.lineno} in {caller.name}")
-        
+
         # CRITICAL DEBUGGING: Log KalshiClientV2 initialization
         if client is None:
             logger.info("[BANKROLL-CLIENT] Creating new KalshiClientV2 instance...")
-            self._client = KalshiClientV2(max_riskable_frac=max_riskable_frac)
+            self._client = KalshiClientV2(
+                max_riskable_frac=max_riskable_frac,
+                max_position_cap_usd=max_position_cap_usd,
+            )
             logger.info("[BANKROLL-CLIENT] KalshiClientV2 created successfully")
         else:
             logger.info("[BANKROLL-CLIENT] Using provided KalshiClientV2 instance")
@@ -162,6 +170,8 @@ class BankrollServiceV2:
         # Lock is created on first use in the correct event loop
         self._lock: Optional[asyncio.Lock] = None
         self._sync_lock: Optional[threading.Lock] = None  # For synchronous access
+        # Serialize in-flight balance fetches so slow API calls cannot stack.
+        self._fetch_lock: Optional[asyncio.Lock] = None
         self._refresh_task: Optional[asyncio.Task] = None
         self._shutdown = False
         
@@ -183,6 +193,12 @@ class BankrollServiceV2:
         if self._sync_lock is None:
             self._sync_lock = threading.Lock()
         return self._sync_lock
+    
+    def _get_fetch_lock(self) -> asyncio.Lock:
+        """Get or create the lock that serializes outbound balance fetches."""
+        if self._fetch_lock is None:
+            self._fetch_lock = asyncio.Lock()
+        return self._fetch_lock
     
     @property
     def is_demo(self) -> bool:
@@ -315,7 +331,13 @@ class BankrollServiceV2:
         logger.info("[BANKROLL-API] Attempting get_balance() call to Kalshi API...")
         start_time = time.time()
         try:
-            result = await self._client.get_balance()
+            # Serialize fetches so a slow response cannot create overlapping calls,
+            # and bound the API call so it cannot starve the strategy cadence.
+            async with self._get_fetch_lock():
+                result = await asyncio.wait_for(
+                    self._client.get_balance(),
+                    timeout=_BANKROLL_BALANCE_API_TIMEOUT_S,
+                )
             elapsed_ms = (time.time() - start_time) * 1000
             logger.info("[BANKROLL-API] get_balance() completed in %.1fms, result_type=%s", elapsed_ms, type(result).__name__)
             
@@ -330,6 +352,14 @@ class BankrollServiceV2:
                 equity_value = "unknown (structure mismatch)"
             
             logger.info(f"[BANKROLL-DIVERGENCE] get_balance() SUCCESS - equity={equity_value}")
+        except asyncio.TimeoutError:
+            elapsed_ms = (time.time() - start_time) * 1000
+            logger.error(
+                "[BANKROLL-API] get_balance() timed out after %.1fms (timeout=%.1fs). "
+                "Using cached bankroll until the next refresh cycle.",
+                elapsed_ms, _BANKROLL_BALANCE_API_TIMEOUT_S,
+            )
+            raise
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
             logger.error("[BANKROLL-API] get_balance() failed after %.1fms: %s", elapsed_ms, str(e), exc_info=True)
@@ -596,15 +626,27 @@ class BankrollServiceV2:
         async with self._get_lock():
             return self._current
     
-    async def get_summary(self, caller_module: str = "unknown") -> BankrollSummary:
+    async def get_summary(self, caller_module: Optional[str] = None) -> BankrollSummary:
         """Get current summary for UI display.
-        
+
         Args:
-            caller_module: Name of calling module for logging attribution
+            caller_module: Name of calling module for logging attribution.
+                         If not provided, the caller's module name is derived
+                         from the current call stack.
         """
+        if caller_module is None:
+            try:
+                frame = inspect.currentframe()
+                if frame is not None and frame.f_back is not None:
+                    caller_module = frame.f_back.f_globals.get("__name__", "unknown")
+                else:
+                    caller_module = "unknown"
+            except Exception:
+                caller_module = "unknown"
+
         async with self._get_lock():
             summary = self._build_summary_locked()
-            
+
             # PRODUCTION AUDIT (Step 2): Log whether using fresh (FRESH) data
             if summary.state == BalanceState.FRESH:
                 data_source = "FRESH"
@@ -892,6 +934,7 @@ def _ensure_bankroll_lock() -> asyncio.Lock:
 
 async def get_bankroll_service(
     max_riskable_frac: Optional[Decimal] = None,
+    max_position_cap_usd: Optional[Decimal] = None,
     refresh_interval_seconds: float = 30.0,
 ) -> Optional[BankrollServiceV2]:
     """Get the global bankroll service v2.
@@ -1135,4 +1178,23 @@ async def _get_summary_async(caller_module: str = "unknown") -> Optional[Bankrol
         return None  # Return None to unblock orders instead of hanging
     except Exception:
         logger.warning("[_get_summary_async] Exception during bankroll fetch - returning None to unblock orders")
+        return None
+
+
+async def get_equity_for_risk_calc_async() -> Optional[float]:
+    """Async, cache-only equity accessor for the entry-critical loop.
+
+    This never calls ``get_balance()`` directly; it returns the cached FRESH
+    equity if the bankroll service has one, otherwise ``None``.  Use this from
+    async code paths to avoid synchronous wrappers that could block the 15m
+    event loop while a slow balance fetch is in progress.
+    """
+    try:
+        service = await get_bankroll_service()
+        if service is None:
+            return None
+        equity = await service.get_equity_for_risk_calc()
+        return float(equity) if equity is not None else None
+    except Exception as exc:
+        logger.warning("[EQUITY-FETCH-ASYNC] Failed to read cached equity: %s", exc)
         return None

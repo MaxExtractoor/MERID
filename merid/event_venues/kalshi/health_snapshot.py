@@ -13,9 +13,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Any
 import time
+import threading
 from utils.logger import get_logger
 
 logger = get_logger("kalshi.health_snapshot")
+
+# Health snapshot cache: reduces thread-pool starvation and makes HTTP
+# health endpoints responsive even when the full snapshot takes seconds.
+# The trading loop should call with use_cache=False for fresh readiness.
+_HEALTH_SNAPSHOT_CACHE: Optional[Any] = None
+_HEALTH_SNAPSHOT_TS: float = 0.0
+_HEALTH_SNAPSHOT_LOCK = threading.Lock()
+_HEALTH_SNAPSHOT_TTL_SECONDS = 6.0
 
 
 class MDState(Enum):
@@ -158,85 +167,87 @@ def check_ws_forwarder_impossible_ok(loop_tick: int, ws_stats: dict, states: dic
     # CRITICAL FIX: Check if WS has actual subscriptions
     subscribed_markets = ws_stats.get("markets", [])
     has_subscriptions = len(subscribed_markets) > 0
-    
+    time_since_last_event = ws_stats.get("time_since_last_event", 0.0)
+
     # DIAGNOSTIC: Log subscription state for debugging
     logger.info("[WS-SUBSCRIPTION-CHECK] markets=%s has_subscriptions=%s", subscribed_markets[:5] if subscribed_markets else [], has_subscriptions)
-    
-    # If WS says OK, then counters must reflect actual activity
-    if ws_stats.get("ws_healthy", True):
-        raw_seen = ws_stats.get("ws_raw_messages_seen", 0)
-        enqueued = ws_stats.get("ws_events_enqueued", 0)
-        processed = ws_stats.get("ws_forwarder_events_processed", 0)
-        time_since_last_event = ws_stats.get("time_since_last_event", 0.0)
-        events_per_sec = ws_stats.get("events_per_sec", 0.0)
-        
-        # Check if any ticker has healthy WS transport
-        has_ws_state = any(
-            s.transport_mode == "ws" and not s.transport_stale
-            for s in states.values() if s
+
+    # Grace period for subscription setup: allow up to 10s after connection
+    # before requiring events or REST fallback.
+    if not has_subscriptions and time_since_last_event < 10.0:
+        return True
+
+    # If WS reports itself unhealthy, the forwarder invariant is not enforced here.
+    if not ws_stats.get("ws_healthy", True):
+        return True
+
+    raw_seen = ws_stats.get("ws_raw_messages_seen", 0)
+    enqueued = ws_stats.get("ws_events_enqueued", 0)
+    processed = ws_stats.get("ws_forwarder_events_processed", 0)
+    events_per_sec = ws_stats.get("events_per_sec", 0.0)
+
+    # Check if any ticker has healthy WS transport
+    has_ws_state = any(
+        s.transport_mode == "ws" and not s.transport_stale
+        for s in states.values() if s
+    )
+
+    # Check if any ticker has healthy REST transport (for fallback logic)
+    has_rest_state = any(
+        s.transport_mode == "rest" and not s.transport_stale
+        for s in states.values() if s
+    )
+
+    # If a healthy REST transport is available, the system can operate in
+    # degraded mode even if the WebSocket is stalled.
+    if has_rest_state:
+        return True
+
+    # Invariant: if WS is healthy, we must have processed events.
+    ws_is_working = raw_seen > 0 and enqueued > 0 and processed > 0 and has_ws_state
+
+    # If no events for >30s and no REST fallback, this is a violation.
+    time_violation = (
+        raw_seen == 0
+        and enqueued == 0
+        and processed == 0
+        and time_since_last_event > 30.0
+        and events_per_sec == 0.0
+    )
+
+    # Subscription violation: connected but no subscriptions after grace period.
+    subscription_violation = not has_subscriptions and time_since_last_event > 10.0
+
+    if subscription_violation:
+        logger.critical(
+            "[WS-FORWARDER-IMPOSSIBLE-OK] VIOLATION: SUBSCRIPTION_VIOLATION: connected but no subscriptions for %.1fs, ws_states=%s, subscriptions=%d",
+            time_since_last_event,
+            [(t, s.transport_mode, s.transport_stale) for t, s in states.items() if s],
+            len(subscribed_markets)
         )
-        
-        # Check if any ticker has healthy REST transport (for fallback logic)
-        has_rest_state = any(
-            s.transport_mode == "rest" and not s.transport_stale
-            for s in states.values() if s
+        return False
+
+    if ws_is_working:
+        return True
+
+    if time_violation:
+        logger.critical(
+            "[WS-FORWARDER-IMPOSSIBLE-OK] VIOLATION: TIME_VIOLATION: connected but no events for %.1fs (no REST fallback), ws_states=%s, subscriptions=%d",
+            time_since_last_event,
+            [(t, s.transport_mode, s.transport_stale) for t, s in states.items() if s],
+            len(subscribed_markets)
         )
-        
-        # CRITICAL FIX: Time-based check - if WS connected but no events for >30s
-        # while claiming to be healthy, this is a violation
-        time_violation = (
-            raw_seen == 0
-            and enqueued == 0
-            and processed == 0
-            and time_since_last_event > 30.0
-            and events_per_sec == 0.0
-        )
-        
-        # CRITICAL FIX: Subscription violation - WS connected but no subscriptions
-        # TEMPORARILY DISABLED: Allow trading while investigating subscription state issue
-        subscription_violation = False
-        # subscription_violation = (
-        #     has_subscriptions == False
-        #     and time_since_last_event > 10.0  # Give 10s grace period for subscription setup
-        # )
-        
-        # CRITICAL FIX: Improved invariant check with fallback logic
-        # If WS is stalled but REST is healthy, allow degraded mode (don't fail invariant)
-        # Only fail invariant if both WS and REST are degraded
-        rest_fallback_available = has_rest_state and not time_violation
-        
-        # Invariant: if WS is healthy, we must have processed events OR have REST fallback
-        invariant_holds = (
-            (raw_seen > 0 and enqueued > 0 and processed > 0 and has_ws_state)  # WS is working
-            or (rest_fallback_available)  # REST fallback is available
-        ) and not time_violation and not subscription_violation
-        
-        if not invariant_holds:
-            violation_reason = ""
-            if subscription_violation:
-                violation_reason = f"SUBSCRIPTION_VIOLATION: connected but no subscriptions for {time_since_last_event:.1f}s"
-            elif time_violation:
-                if rest_fallback_available:
-                    # Don't log as critical if REST fallback is available
-                    logger.warning(
-                        "[WS-FORWARDER-DEGRADED] WS stalled but REST fallback available: time_since_last_event=%.1fs",
-                        time_since_last_event
-                    )
-                    return True  # Pass invariant since REST fallback is available
-                violation_reason = f"TIME_VIOLATION: connected but no events for {time_since_last_event:.1f}s (no REST fallback)"
-            else:
-                violation_reason = f"COUNTER_VIOLATION: raw={raw_seen} enq={enqueued} proc={processed}"
-            
-            logger.critical(
-                "[WS-FORWARDER-IMPOSSIBLE-OK] VIOLATION: %s, ws_states=%s, subscriptions=%d",
-                violation_reason,
-                [(t, s.transport_mode, s.transport_stale) for t, s in states.items() if s],
-                len(subscribed_markets)
-            )
-        
-        return invariant_holds
-    
-    return True
+        return False
+
+    # Counters are still zero (but the 30s stall threshold has not been crossed)
+    # and no REST fallback is available. This is a transient degraded state.
+    logger.warning(
+        "[WS-FORWARDER-IMPOSSIBLE-OK] COUNTER_VIOLATION: raw=%s enq=%s proc=%s, ws_states=%s, subscriptions=%d",
+        raw_seen, enqueued, processed,
+        [(t, s.transport_mode, s.transport_stale) for t, s in states.items() if s],
+        len(subscribed_markets)
+    )
+    return False
 
 
 def check_ws_queue_pressure(loop_tick: int, ws_stats: dict) -> bool:
@@ -453,7 +464,9 @@ def check_spot_md_parity(loop_tick: int) -> bool:
         return True  # Don't fail on check errors
 
 
-def get_kalshi_health_snapshot(loop_tick: int = 0) -> KalshiHealthSnapshot:
+def get_kalshi_health_snapshot(
+    loop_tick: int = 0, use_cache: bool = True
+) -> KalshiHealthSnapshot:
     """
     Build a unified health snapshot for Kalshi venue.
     
@@ -462,10 +475,25 @@ def get_kalshi_health_snapshot(loop_tick: int = 0) -> KalshiHealthSnapshot:
     
     Args:
         loop_tick: Current loop tick counter for WS_FORWARDER_IMPOSSIBLE_OK check
+        use_cache: If True, return a cached snapshot when available (HTTP endpoint
+                   and quick checks). The trading loop should pass False.
     
     Returns:
         KalshiHealthSnapshot with all health information
     """
+    global _HEALTH_SNAPSHOT_CACHE, _HEALTH_SNAPSHOT_TS
+
+    if use_cache:
+        with _HEALTH_SNAPSHOT_LOCK:
+            if _HEALTH_SNAPSHOT_CACHE is not None:
+                cache_age = time.monotonic() - _HEALTH_SNAPSHOT_TS
+                if cache_age <= _HEALTH_SNAPSHOT_TTL_SECONDS:
+                    logger.debug(
+                        "[HEALTH-SNAPSHOT-CACHE] Returning cached snapshot age=%.2fs",
+                        cache_age,
+                    )
+                    return _HEALTH_SNAPSHOT_CACHE
+
     snapshot = KalshiHealthSnapshot(status=OverallStatus.HEALTHY)
     reasons = []
     
@@ -493,7 +521,6 @@ def get_kalshi_health_snapshot(loop_tick: int = 0) -> KalshiHealthSnapshot:
     try:
         from merid.event_venues.kalshi.ws_bridge import get_bridge
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-        import time
 
         ws_bridge = get_bridge()
         market_state_store = get_kalshi_market_state_store()
@@ -521,7 +548,10 @@ def get_kalshi_health_snapshot(loop_tick: int = 0) -> KalshiHealthSnapshot:
                     # Check if any state is fresh (age < 120s)
                     for state in asset_states:
                         if state.last_book_update_ts > 0:
-                            age = time.time() - state.last_book_update_ts
+                            # CRITICAL FIX: last_book_update_ts is set with time.monotonic()
+                            # (not time.time()). Using time.time() here produced ages of
+                            # billions of seconds and falsely marked all MD as stale.
+                            age = time.monotonic() - state.last_book_update_ts
                             if age < 120:  # 120s staleness threshold
                                 fresh_count += 1
                                 break
@@ -776,4 +806,9 @@ def get_kalshi_health_snapshot(loop_tick: int = 0) -> KalshiHealthSnapshot:
         # If we have reasons but status is still healthy, downgrade to degraded
         snapshot.status = OverallStatus.DEGRADED
     
+    # Cache the freshly computed snapshot for HTTP endpoint consumers.
+    with _HEALTH_SNAPSHOT_LOCK:
+        _HEALTH_SNAPSHOT_CACHE = snapshot
+        _HEALTH_SNAPSHOT_TS = time.monotonic()
+
     return snapshot

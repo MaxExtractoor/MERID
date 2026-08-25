@@ -13,7 +13,7 @@ import os
 import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import List, Optional, Tuple
 from utils.logger import get_logger
 
 logger = get_logger("expiry_fallback")
@@ -49,49 +49,154 @@ _MONTHS = {
     "DEC": 12,
 }
 
+# Search-based variant of the ticker body: -26AUG031530- → YY MON DD HHMM
+_RE_15M_SEARCH = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})(\d{4,6})-", re.IGNORECASE)
 
-def _infer_15m_window_end_utc(ticker: str) -> Optional[datetime]:
-    m = _RE_15M_BODY.match(ticker.strip())
+# Legacy test/live format used before 2026-08 canonical switch: DDMONHHMM[SS] in UTC
+# e.g. KXBTC15M-04Aug0035-50 (day=04, month=Aug, time=00:35 UTC) or KXBTC15M-04Aug003558-50 (with seconds)
+_RE_15M_LEGACY = re.compile(r"-(\d{2})([A-Z]{3})(\d{4,6})-", re.IGNORECASE)
+
+
+def parse_kalshi_15m_window_end_utc(ticker: str) -> Optional[datetime]:
+    """Canonical Kalshi 15m ticker expiry parser (single source of truth).
+
+    Ticker format: KXBTC15M-26AUG031530-30 where the body 26AUG031530 is
+    YY=26, MON=AUG, DD=03, HHMM=1530 in **America/New_York** (Kalshi's crypto
+    event timezone). The encoded time IS the window end (expiry).
+
+    API-confirmed: KXDOGE15M-26JUL111200-00 -> close_time 2026-07-11T16:00:00Z
+    (12:00 ET = 16:00 UTC).
+
+    CRITICAL FIX (2026-08-03): position_monitor, position_cache and diagnostics
+    previously parsed this as DD=26, MON, HHMMSS=031530 UTC - off by ~26 days
+    AND 4-5h. That neutered _is_expired_ticker (expired markets kept), the
+    T-30s forced-exit settlement guard (never fired), and
+    _calculate_dynamic_max_hold (always hit the >1day sanity fallback = 300s).
+
+    Returns UTC datetime, or None if unparseable.
+    """
+    if not ticker:
+        return None
+    m = _RE_15M_SEARCH.search(ticker.strip())
     if not m:
         return None
     yy_s, mon_s, dd_s, hhmm_s = m.groups()
+    month = _MONTHS.get(mon_s.upper())
+    if not month:
+        return None
     try:
         year = 2000 + int(yy_s)
-        month = _MONTHS.get(mon_s.upper())
-        if not month:
-            return None
         day = int(dd_s)
-        hh = int(hhmm_s) // 100
-        mm = int(hhmm_s) % 100
-        
-        # CRITICAL FIX: The ticker format is KXBTC15M-26JUL111200-00 where the time is the END time in Eastern Time
-        # The ticker represents the window END time (expiry), not the start time
-        # For example: KXBTC15M-26JUL111200-00 means the market closes at 12:00 ET on July 11, 2026
-        # The market runs for 15 minutes BEFORE this time (11:45-12:00 ET)
-        # This is confirmed by API data: KXDOGE15M-26JUL111200-00 has close_time=2026-07-11T16:00:00Z
-        # Ticker time 1200 ET = 16:00 UTC, which matches API close_time exactly
-        
-        if _ET:
-            end_et = datetime(year, month, day, hh, mm, tzinfo=_ET)
-            end_utc = end_et.astimezone(timezone.utc)
+
+        # Kalshi crypto 15m tickers encode time as either HHMM (canonical) or
+        # HHMMSS (legacy / test fixtures).  Anything else is unparseable.
+        if len(hhmm_s) == 4:
+            hh, mm = int(hhmm_s[:2]), int(hhmm_s[2:])
+            ss = 0
+        elif len(hhmm_s) == 6:
+            hh, mm, ss = int(hhmm_s[:2]), int(hhmm_s[2:4]), int(hhmm_s[4:])
         else:
-            # Fallback if ZoneInfo not available (treat as UTC, but this is incorrect)
-            end_utc = datetime(year, month, day, hh, mm, tzinfo=timezone.utc)
+            return None
+
+        if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+            return None
+
+        if _ET:
+            return datetime(year, month, day, hh, mm, ss, tzinfo=_ET).astimezone(timezone.utc)
+        # ZoneInfo unavailable (no tzdata): treat as UTC. Off by 4-5h from true
+        # ET expiry - log loudly since expiry math degrades.
+        logger.warning("[EXPIRY-PARSE] ZoneInfo/tzdata unavailable - parsing %s as UTC (ET intended)", ticker)
+        return datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
-    
-    # CRITICAL FIX: The ticker time IS the expiry time (window end)
-    # No need to add 15 minutes - the ticker already represents the window end
-    # end_utc = end_utc  # (already set above)
-    
-    # DEBUG: Log inferred expiry for debugging
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(
-        "[EXPIRY-FALLBACK] ticker=%s parsed: %s-%02d-%02d %02d:%02d ET → end_utc=%s (ticker time IS expiry)",
-        ticker, year, month, day, hh, mm, end_utc
-    )
+
+
+def _infer_15m_window_end_utc(ticker: str) -> Optional[datetime]:
+    end_utc = parse_kalshi_15m_window_end_utc(ticker)
+    if end_utc is not None:
+        logger.info("[EXPIRY-FALLBACK] ticker=%s → end_utc=%s (ticker time IS expiry, ET)", ticker, end_utc)
     return end_utc
+
+
+def _parse_legacy_15m_expiry(ticker: str) -> Optional[datetime]:
+    """Parse the legacy day-first UTC format DDMONHHMM[SS] (current year)."""
+    m = _RE_15M_LEGACY.search(ticker)
+    if not m:
+        return None
+
+    dd_s, mon_s, hhmmss_s = m.groups()
+    month = _MONTHS.get(mon_s.upper())
+    if not month:
+        return None
+
+    try:
+        year = datetime.now(timezone.utc).year
+        day = int(dd_s)
+        hh = int(hhmmss_s[:2])
+        mm = int(hhmmss_s[2:4])
+        ss = int(hhmmss_s[4:6]) if len(hhmmss_s) >= 6 else 0
+        if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+            return None
+        return datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_kalshi_15m_ticker_expiry(ticker: str) -> Tuple[Optional[datetime], bool]:
+    """Parse any supported Kalshi 15m crypto ticker expiry format.
+
+    Returns:
+        (expiry_utc, is_15m_pattern)
+        - Canonical YYMONDDHHMM[SS] ET (year-first).
+        - Legacy DDMONHHMMSS UTC (day-first, current year) used by old test
+          fixtures and some internal helpers.
+
+    The two formats are ambiguous in a raw 11-character body.  We resolve the
+    ambiguity by computing both candidates and choosing the one closest to the
+    current wall-clock time.  A legacy parse that fails because the date is
+    invalid (e.g. 30FEB) is treated as an expired/invalid 15m ticker.
+    """
+    if not ticker or "15M" not in ticker.upper():
+        return None, False
+
+    canonical_dt = parse_kalshi_15m_window_end_utc(ticker)
+    legacy_dt = _parse_legacy_15m_expiry(ticker)
+
+    canonical_match = bool(_RE_15M_SEARCH.search(ticker) or _RE_15M_BODY.search(ticker))
+    legacy_match = bool(_RE_15M_LEGACY.search(ticker))
+    is_15m_pattern = canonical_match or legacy_match
+
+    # CRITICAL FIX (2026-08-24): A legacy-regex body that fails to parse (e.g.
+    # 30FEB) is an invalid 15m ticker and must force-expire ONLY when the
+    # canonical year-first parse also failed.  The legacy day-first regex
+    # matches the SAME body as the canonical year-first one, and for any ticker
+    # with DD >= 24 the legacy read (DDMON + HHMMSS) yields hh >= 24 and fails.
+    # Before this fix, on days 24-31 every live 15m position was rejected by
+    # PositionMonitor as "expired/closed market" (canonical parse succeeded but
+    # was never consulted), so no exit policy ever ran and losing positions
+    # settled unmonitored at 100% loss.
+    if canonical_dt is None and legacy_match and legacy_dt is None:
+        return None, True
+
+    now = datetime.now(timezone.utc)
+
+    candidates: List[Tuple[datetime, str]] = []
+    if canonical_dt is not None:
+        candidates.append((canonical_dt, "canonical"))
+    if legacy_dt is not None:
+        candidates.append((legacy_dt, "legacy"))
+
+    if not candidates:
+        return None, is_15m_pattern
+
+    if len(candidates) == 1:
+        return candidates[0][0], True
+
+    # Both parsed; prefer the candidate closest to now.  This keeps canonical
+    # correct for live 15m tickers (YYMONDDHHMM-ET) while still handling the
+    # day-first UTC test fixtures (DDMONHHMMSS).
+    best = min(candidates, key=lambda c: abs((c[0] - now).total_seconds()))
+    return best[0], True
 
 
 def expiry_fallback_enabled() -> bool:

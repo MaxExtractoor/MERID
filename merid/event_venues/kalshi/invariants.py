@@ -459,13 +459,12 @@ VALID_KALSHI_WS_PATTERNS = sorted(ALLOWED_KALSHI_API_HOSTS)
 
 
 def is_test_environment() -> bool:
-    """Detect if running in pytest or test context."""
-    return (
-        "pytest" in sys.modules
-        or os.getenv("PYTEST_CURRENT_TEST") is not None
-        or os.getenv("CI", "").lower() in ("true", "1")
-        or "test" in sys.argv[0].lower()
-    )
+    """Explicit test environment detection.
+
+    Tests must set MERID_ENV=testing; do not infer test mode from the presence
+    of a test runner or CI artifact.
+    """
+    return os.getenv("MERID_ENV", "").strip().lower() in ("testing", "test")
 
 
 def require_kalshi_base_url(fail_in_prod: bool = True) -> Optional[str]:

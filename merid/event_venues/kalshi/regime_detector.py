@@ -322,7 +322,7 @@ class RegimeDetector:
             thresholds: Dict of ATR thresholds (LOW, NORMAL, HIGH, EXTREME)
         """
         self.atr_thresholds = thresholds
-        logger.info("[REGIME-DETECTOR] Updated ATR thresholds: %s", thresholds)
+        logger.info("[REGIME-DETECTOR] Updated ATR thresholds: %s", str(thresholds))
     
     def get_state(self) -> RegimeState:
         """Get current regime state."""

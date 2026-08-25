@@ -56,13 +56,13 @@ TIER_RATES: Dict[Tuple[int, int], Decimal] = {
 }
 
 MIN_FEE_CENTS: int = 1
-"""Minimum fee per contract in cents (Kalshi floor).
+"""Minimum fee per contract in cents (cent-rounding floor).
 
-CRITICAL FIX (2026-08-01): Changed from 2 to 1 to match Kalshi's official fee formula.
-The parabolic fee formula ceil(rate * C * P * (1-P) * 100) correctly calculates 1¢ for
-1 contract @ 11¢ (0.07 * 1 * 0.11 * 0.89 = 0.006853 → ceil(0.6853¢) = 1¢).
-Previous MIN_FEE_CENTS=2 was incorrectly overriding valid 1¢ calculations, doubling fees at low prices.
-Reference: https://kalshi.com/docs/kalshi-fee-schedule.pdf
+The parabolic fee formula ceil(rate * C * P * (1-P) * 100) produces the
+Kalshi-per-contract fee.  Live API verification (2026-08-17) confirms the
+minimum realized fee is the ceiling to the nearest cent (1¢ at OTM/ITM
+extremes), not a 2¢ floor.  This constant is kept as a defensive lower bound
+so an invalid zero-price input cannot return a sub-cent fee.
 """
 
 
@@ -101,7 +101,7 @@ def calculate_kalshi_fee_cents(
         use_decimal: Use Decimal for precision (recommended, default True)
         
     Returns:
-        Fee in cents (>= 2 for valid trades, 0 for invalid/edge cases)
+        Fee in cents (>= 1 for valid trades, 0 for invalid/edge cases)
         
     CRITICAL FIX: Added input validation for production safety
         

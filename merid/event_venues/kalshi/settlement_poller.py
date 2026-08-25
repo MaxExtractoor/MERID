@@ -1145,7 +1145,7 @@ class SettlementToGradingBridge:
         except Exception as exc:
             logger.debug("[TRACE-SETTLEMENT] Failed to finalize trace for market_id=%s: %s", settlement.market_id, exc)
         
-        # Session-based PnL tracking: notify fills_ledger of market settlement
+        # Session-based PnL tracking: notify fills_ledger and position_cache of market settlement
         try:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
@@ -1153,6 +1153,14 @@ class SettlementToGradingBridge:
             ledger.on_market_settlement(settlement.ticker, outcome)
         except Exception as exc:
             logger.warning(f"Failed to notify fills_ledger of settlement: {exc}")
+
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            outcome = "yes" if settlement.outcome_str == "YES" else "no"
+            await cache.on_market_settlement(settlement.ticker, outcome)
+        except Exception as exc:
+            logger.warning(f"Failed to notify position_cache of settlement: {exc}")
         
         # Notify grading callback
         if self.grading_callback:

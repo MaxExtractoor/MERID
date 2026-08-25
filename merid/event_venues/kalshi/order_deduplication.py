@@ -122,6 +122,40 @@ class OrderDeduplicationCache:
         )
         return coid, False
 
+    def is_duplicate(
+        self,
+        ticker: str,
+        side: str,
+        outcome: str,
+        price_cents: Optional[int],
+        count: int,
+    ) -> bool:
+        """Check whether an in-flight, already-submitted matching order exists.
+
+        Unlike ``get_or_create``, this does NOT create a cache entry and does
+        NOT remove stale un-submitted entries.  It is intended for pre-flight
+        validation guards.
+        """
+        self._prune_expired()
+        for pending in self._cache.values():
+            if (
+                pending.ticker == ticker
+                and pending.side == side
+                and pending.outcome == outcome
+                and pending.price_cents == price_cents
+                and pending.count == count
+                and pending.order_id is None
+                and pending.submitted_to_exchange
+            ):
+                logger.warning(
+                    "Duplicate order detected for %s %s %s %s×%d — "
+                    "reusing client_order_id %s (already submitted to exchange)",
+                    ticker, side, outcome, price_cents, count,
+                    pending.client_order_id,
+                )
+                return True
+        return False
+
     def mark_completed(self, client_order_id: str, order_id: str) -> None:
         """Record the Kalshi order_id once the API confirms the order."""
         if client_order_id in self._cache:
@@ -129,7 +163,7 @@ class OrderDeduplicationCache:
             self._cache[client_order_id].submitted_to_exchange = True
         else:
             logger.debug("mark_completed called for unknown coid %s", client_order_id)
-    
+
     def mark_submitted(self, client_order_id: str) -> None:
         """Record that the order was actually submitted to the exchange."""
         if client_order_id in self._cache:

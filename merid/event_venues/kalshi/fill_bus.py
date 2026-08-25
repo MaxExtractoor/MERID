@@ -61,14 +61,18 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
 
         price_cents = fill.price_cents
         asset = fill.resolved_asset() or ""
+        # 2026-08-12: Publish canonical position effect to the bus; raw exchange
+        # fields remain available on the KalshiFill for audit.
+        _can_side = fill.canonical_position_side or fill.side
+        _can_action = fill.canonical_position_action or fill.action
         payload = {
             "fill_id": fill.fill_id,
             "venue_fill_id": fill.trade_id or fill.fill_id,
             "order_id": fill.order_id or "",
             "market_id": fill.market_ticker,
             "asset": asset,
-            "side": fill.side,
-            "action": (fill.action or "buy").lower(),
+            "side": _can_side,
+            "action": (_can_action or "buy").lower(),
             "contracts": int(fill.count_fp),
             "price_cents": int(price_cents),
             "fee_cents": int(float(fill.fee_cost) * 100),
@@ -78,6 +82,10 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
             "source": "fills_ledger",
             "ingestion_source": fill.ingestion_source,
             "fill_source": fill.fill_source or "alpha",  # Task 1: Include fill_source
+            "execution_outcome_side": fill.side,
+            "execution_action": fill.action,
+            "canonical_position_side": _can_side,
+            "canonical_position_action": _can_action,
         }
         await event_stream.publish("kalshi:order_filled", payload)
         logger.debug(
@@ -95,15 +103,20 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
         try:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             cache = get_position_cache()
+            # 2026-08-12/13: Notify cache with canonical position side/action and
+            # explicit canonicalization state.  None or UNTRUSTED_* is fail-closed.
             await cache.on_fill(
                 market_id=fill.market_ticker,
                 contracts=int(fill.count_fp),
+                quantity_cc=getattr(fill, 'quantity_cc', None),
                 price_cents=int(price_cents),
                 fee_cents=int(float(fill.fee_cost) * 100),
-                side=fill.side,
+                side=_can_side,
                 client_order_id=fill.client_order_id,
                 fill_id=fill.fill_id,  # Task 1: Pass fill_id for ledger lookup
-                action=(fill.action or "buy").lower(),  # P0: action-aware close detection
+                action=(_can_action or "buy").lower(),
+                is_exit=getattr(fill, 'is_exit', None),
+                canonicalization_state=getattr(fill, 'canonicalization_state', None),
             )
             if fill.fill_source == "hedge":
                 logger.debug("fill_bus notified position_cache of hedge fill %s", fill.fill_id)

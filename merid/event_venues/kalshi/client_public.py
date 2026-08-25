@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,47 +45,81 @@ class KalshiPublicDataClient:
         # Allow injection of HTTP client for testing
         self._http = http_client
         self._series_cache = SeriesCache()
+        # CRITICAL FIX (2026-08-13): per-event-loop clients.  Closing an httpx
+        # client from a different event loop causes fatal asyncio InvalidStateError
+        # crashes on Windows (IocpProactor).
+        self._http_by_loop: Dict[int, httpx.AsyncClient] = {}
+        self._http_lock = threading.Lock()
 
     def _get_http(self) -> httpx.AsyncClient:
-        """Get or create HTTP client, recreating if bound to wrong event loop."""
-        import asyncio
-        
-        # CRITICAL FIX: Always recreate client when called from different event loop
-        # This prevents "bound to a different event loop" errors when the catalog
-        # refresh thread (with its own event loop) tries to use a client created
-        # in the main FastAPI event loop
+        """Get or create an HTTP client bound to the current event loop.
+
+        CRITICAL FIX (2026-08-13): Each event loop keeps its own httpx.AsyncClient.
+        The previous code closed the old client from the wrong loop using
+        run_coroutine_threadsafe(..., aclose()), which cancels pending I/O and
+        triggers asyncio.exceptions.InvalidStateError on the Windows proactor.
+        """
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop - this shouldn't happen in async context
             current_loop = None
-        
-        # Store the loop that created this client
-        if not hasattr(self, '_http_loop'):
+
+        current_loop_id = id(current_loop) if current_loop is not None else None
+
+        # Backward-compatible / test fixture path: honor an externally-injected
+        # client (e.g. FakeHttpClient, AsyncMock) if it belongs to the current loop.
+        if (self._http is not None and
+            not self._http.is_closed and
+            (getattr(self, '_http_loop', None) is None or self._http_loop is current_loop)):
+            if current_loop_id is not None:
+                with self._http_lock:
+                    self._http_by_loop[current_loop_id] = self._http
             self._http_loop = current_loop
-        
-        # If loop changed or client is closed, recreate it
-        if self._http is None or self._http.is_closed or self._http_loop != current_loop:
-            if self._http is not None and not self._http.is_closed:
-                # Close old client cleanly
-                try:
-                    import asyncio
-                    # Try to close in the loop that created it
-                    if self._http_loop is not None and self._http_loop.is_running():
-                        asyncio.run_coroutine_threadsafe(self._http.aclose(), self._http_loop)
-                except Exception:
-                    pass  # Best effort cleanup
-            
-            self._http = httpx.AsyncClient(
-                base_url=self._cfg.public_rest_api_url, timeout=self._timeout
-            )
-            self._http_loop = current_loop
-        
-        return self._http
+            return self._http
+
+        # Fast path: a client already exists for this loop.
+        if current_loop_id is not None:
+            with self._http_lock:
+                client = self._http_by_loop.get(current_loop_id)
+                if client is not None and not client.is_closed:
+                    self._http = client
+                    self._http_loop = current_loop
+                    return client
+
+        # Slow path: create a new client bound to this loop.
+        new_client = httpx.AsyncClient(
+            base_url=self._cfg.public_rest_api_url, timeout=self._timeout
+        )
+
+        if current_loop_id is not None:
+            with self._http_lock:
+                self._http_by_loop[current_loop_id] = new_client
+
+        self._http = new_client
+        self._http_loop = current_loop
+        return new_client
 
     async def close(self) -> None:
-        if self._http is not None:
-            await self._http.aclose()
+        """Close the current event loop's HTTP client.  Other loops' clients are
+        left for their own teardown to avoid cross-loop aclose() crashes."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        current_loop_id = id(current_loop) if current_loop is not None else None
+        if current_loop_id is not None:
+            with self._http_lock:
+                client = self._http_by_loop.pop(current_loop_id, None)
+        else:
+            client = self._http
+
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+        self._http = None
 
     async def refresh_crypto_15m_series(self, force: bool = False) -> Dict[str, PublicSeriesInfo]:
         now = time.time()

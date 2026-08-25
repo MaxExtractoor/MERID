@@ -119,9 +119,10 @@ def get_robust_kalshi_client(
     Example:
         client = get_robust_kalshi_client()
         await client.start()
-        
-        # Use client for operations
-        result = await client.place_order(order)
+
+        # DO NOT call client.place_order directly. All orders must flow through
+        # the canonical order router so the ExecutionRiskFirewall, identity, and
+        # circuit-breaker gates can enforce. Use merid.event_venues.kalshi.order_router.route_order_async(intent).
     """
     manager = get_kalshi_resilience_manager()
     

@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from merid.event_venues.kalshi.client import KalshiVenueClient
+from merid.event_venues.kalshi.execution_risk_firewall import ExecutionRiskFirewall
 from merid.event_venues.kalshi.market_catalog import get_market_catalog
 from merid.event_venues.base import EventMarket, VenueOrder, PlacedOrder, VenuePosition
 from merid.matching_engine import Order, Fill, OrderSide, get_matching_engine
@@ -554,6 +555,32 @@ class KalshiVenueAdapter:
         except ImportError:
             # dry_run module not available, proceed with normal order submission
             pass
+
+        # Final-venue-adapter gate: reducing orders in production must carry a
+        # valid ExecutionRiskFirewall approval token bound to their client_order_id.
+        # This is a defense-in-depth check; the canonical router and client also
+        # enforce it before reaching this adapter.
+        is_exit = bool(order.reduce_only) or order.side == "sell"
+        if is_exit:
+            from merid.settings import settings
+            if settings.is_production:
+                if not order.firewall_approval_id:
+                    raise KalshiVenueError(
+                        "submit_order",
+                        {"reason": "firewall:missing_approval_token", "ticker": order.market_id},
+                    )
+                decision = ExecutionRiskFirewall.get_instance().get_decision(
+                    order.client_order_id or ""
+                )
+                if decision is None or decision.decision_id != order.firewall_approval_id:
+                    raise KalshiVenueError(
+                        "submit_order",
+                        {
+                            "reason": "firewall:invalid_or_expired_approval_token",
+                            "ticker": order.market_id,
+                            "client_order_id": order.client_order_id,
+                        },
+                    )
 
         try:
             await asyncio.wait_for(self.client.connect(), timeout=10.0)

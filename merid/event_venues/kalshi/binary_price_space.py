@@ -39,7 +39,9 @@ a clean, symmetric interface for both YES and NO sides.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from decimal import Decimal
+from enum import StrEnum
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.binary_price_space")
@@ -249,6 +251,183 @@ def extract_action(kalshi_side: str) -> str:
     """
     _, action = parse_kalshi_side(kalshi_side)
     return action
+
+
+class SideValidationError(ValueError):
+    """A record is missing, invalid, or internally inconsistent about its outcome side."""
+
+
+class PositionDataError(SideValidationError):
+    """A position record has missing, invalid, or self-contradictory outcome side data."""
+
+
+class OutcomeSide(StrEnum):
+    """Canonical binary market outcome side."""
+
+    YES = "yes"
+    NO = "no"
+
+
+def _try_parse_side(value: Any) -> Optional[str]:
+    """Return canonical 'yes' or 'no' if ``value`` is parseable, otherwise None.
+
+    Interprets raw outcome side names and Kalshi order direction strings by
+    their resulting long exposure: BUY_YES and SELL_NO are long YES; BUY_NO
+    and SELL_YES are long NO.
+    """
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in ("yes", "no"):
+        return lowered
+    # Kalshi-formatted order direction -> resulting long exposure.
+    exposure_aliases = {
+        "buy_yes": "yes",
+        "sell_no": "yes",
+        "buy_no": "no",
+        "sell_yes": "no",
+    }
+    if lowered in exposure_aliases:
+        return exposure_aliases[lowered]
+    return None
+
+
+def canonical_outcome_side(raw: Any) -> OutcomeSide:
+    """Return the canonical OutcomeSide for a raw side value.
+
+    Raises PositionDataError for missing, blank, or unknown values.  Does not
+    default to YES under any circumstance.
+    """
+    if raw is None:
+        raise PositionDataError(f"unknown outcome side: {raw!r}")
+    value = str(raw).strip()
+    if not value:
+        raise PositionDataError(f"unknown outcome side: {raw!r}")
+    lowered = value.lower()
+    if lowered == "yes":
+        return OutcomeSide.YES
+    if lowered == "no":
+        return OutcomeSide.NO
+    # Allow legacy Kalshi action aliases but fail closed on anything else.
+    exposure_aliases = {
+        "buy_yes": OutcomeSide.YES,
+        "sell_no": OutcomeSide.YES,
+        "buy_no": OutcomeSide.NO,
+        "sell_yes": OutcomeSide.NO,
+    }
+    if lowered in exposure_aliases:
+        return exposure_aliases[lowered]
+    raise PositionDataError(f"unknown outcome side: {raw!r}")
+
+
+def _parse_signed_quantity(record: Mapping[str, Any]) -> Optional[Decimal]:
+    """Return a signed quantity from position_fp or signed_size, or None."""
+    for key in ("position_fp", "signed_size"):
+        raw = record.get(key)
+        if raw is None:
+            continue
+        try:
+            return Decimal(str(raw))
+        except Exception:
+            continue
+    return None
+
+
+def require_canonical_outcome_side(
+    record: Mapping[str, Any],
+    *,
+    context: str,
+    fields: tuple[str, ...] = ("outcome_side", "outcome_id", "side", "kalshi_side", "book_side"),
+    allow_signed_infer: bool = True,
+) -> OutcomeSide:
+    """Extract and validate a single canonical outcome side from ``record``.
+
+    - All present, parseable side fields must agree.  A conflict between
+      e.g. ``outcome_id=no`` and ``outcome_side=yes`` raises ``PositionDataError``.
+    - YES must correspond to a non-negative signed quantity; NO to a
+      non-positive signed quantity.  A contradiction raises ``PositionDataError``.
+    - If no side field is present and ``allow_signed_infer`` is true, the side
+      is inferred from ``position_fp`` / ``signed_size``: positive -> YES,
+      negative -> NO.  Zero or missing is an error.
+    - Never defaults to YES.
+    """
+    parsed_sides: list[tuple[str, OutcomeSide]] = []
+    for field_name in fields:
+        raw = record.get(field_name)
+        if raw is None:
+            continue
+        try:
+            side = canonical_outcome_side(raw)
+        except PositionDataError:
+            # Non-side value in this field (e.g. book_side='ask') is ignored.
+            continue
+        parsed_sides.append((field_name, side))
+
+    if parsed_sides:
+        first_field, selected = parsed_sides[0]
+        if len({s for _, s in parsed_sides}) > 1:
+            raise PositionDataError(
+                f"{context}: inconsistent side fields {parsed_sides!r}"
+            )
+    elif allow_signed_infer:
+        signed = _parse_signed_quantity(record)
+        if signed is None:
+            raise PositionDataError(f"{context}: missing or invalid outcome side")
+        if signed > 0:
+            selected = OutcomeSide.YES
+        elif signed < 0:
+            selected = OutcomeSide.NO
+        else:
+            raise PositionDataError(f"{context}: zero-size position has no side")
+    else:
+        raise PositionDataError(f"{context}: missing or invalid outcome side")
+
+    # Validate sign agreement when a signed quantity is available.
+    signed = _parse_signed_quantity(record)
+    if signed is not None:
+        if selected == OutcomeSide.YES and signed < 0:
+            raise PositionDataError(
+                f"{context}: side {selected.value} conflicts with negative signed quantity {signed}"
+            )
+        if selected == OutcomeSide.NO and signed > 0:
+            raise PositionDataError(
+                f"{context}: side {selected.value} conflicts with positive signed quantity {signed}"
+            )
+
+    return selected
+
+
+def require_outcome_side(
+    record: Mapping[str, Any],
+    *,
+    context: str,
+    fields: tuple[str, ...] = ("outcome_side", "outcome_id", "side", "kalshi_side"),
+) -> str:
+    """Extract a single canonical outcome side from ``record``.
+
+    Tries ``fields`` in order.  Missing or invalid values raise
+    ``SideValidationError`` instead of defaulting to a side.
+
+    Accepts: yes/no, BUY_YES/SELL_YES/BUY_NO/SELL_NO.
+    """
+    return require_canonical_outcome_side(
+        record, context=context, fields=fields, allow_signed_infer=False
+    ).value
+
+
+def require_consistent_outcome_side(
+    record: Mapping[str, Any],
+    *,
+    context: str,
+    fields: tuple[str, ...] = ("outcome_side", "outcome_id", "side", "kalshi_side"),
+) -> str:
+    """Extract outcome side and require all supplied side fields to agree."""
+    return require_canonical_outcome_side(
+        record, context=context, fields=fields
+    ).value
 
 
 def canonicalize(action: str, side: str) -> str:
@@ -570,11 +749,15 @@ def from_signed_yes_exposure(yes_delta: int) -> Tuple[str, int]:
 def normalize_rest_position(position_fp: int, outcome_or_side: str, ticker: str = "") -> int:
     """Convert a Kalshi REST position snapshot to signed YES exposure.
 
-    Kalshi may report a long NO position as either ``outcome_or_side='no'`` with
-    a positive ``position_fp`` or as a negative ``position_fp`` with an empty or
-    yes side.  This helper collapses both conventions into the canonical signed
-    YES representation so that REST, fills-ledger, and cache exposure can be
-    compared directly.
+    The canonical rule is:
+
+        - long YES  -> non-negative signed exposure
+        - long NO   -> non-positive signed exposure
+
+    When ``outcome_or_side`` is missing, the sign of ``position_fp`` is trusted:
+    positive -> long YES, negative -> long NO.  When ``outcome_or_side`` is
+    present, it is the source of truth and a contradictory ``position_fp`` sign
+    raises ``PositionDataError`` instead of silently choosing one field.
 
     Args:
         position_fp: Raw position size from Kalshi (negative for short YES / long NO
@@ -587,25 +770,28 @@ def normalize_rest_position(position_fp: int, outcome_or_side: str, ticker: str 
     """
     if position_fp is None:
         position_fp = 0
-    side = (outcome_or_side or "").lower().strip()
+    raw_side = (outcome_or_side or "").lower().strip()
 
-    # Kalshi sometimes represents NO exposure as a negative position_fp with no side.
-    if side in ("", "yes") and position_fp < 0:
-        return position_fp  # already negative => long NO / short YES
+    if not raw_side:
+        # No textual side: infer purely from the signed quantity.
+        if position_fp == 0:
+            return 0
+        return int(position_fp)
 
-    if side == "no":
+    canonical = canonical_outcome_side(raw_side)
+    if position_fp == 0:
+        return 0
+
+    if canonical == OutcomeSide.NO:
         return -abs(int(position_fp))
 
-    if side == "yes":
-        return abs(int(position_fp))
-
-    # Unknown side: log and treat as zero to avoid inventing exposure.
-    logger.warning(
-        "[NORMALIZE-REST-POSITION] Unknown outcome_or_side=%r for %s, returning 0 exposure",
-        outcome_or_side,
-        ticker,
-    )
-    return 0
+    # canonical == YES; the signed quantity must not be negative.
+    if int(position_fp) < 0:
+        raise PositionDataError(
+            f"[NORMALIZE-REST-POSITION] {ticker}: side={canonical.value} conflicts "
+            f"with negative position_fp={position_fp}"
+        )
+    return abs(int(position_fp))
 
 
 def fill_to_signed_yes_exposure(action: str, side: str, count: int) -> int:
@@ -631,11 +817,12 @@ def fill_to_signed_yes_exposure(action: str, side: str, count: int) -> int:
 # ── Canonical Price Range Checking ─────────────────────────────────────────────
 
 # Canonical price ranges (NON-NEGOTIABLE invariants)
-# CRITICAL FIX (2026-08-05): Side-aware canonical ranges aligned across the stack.
-# YES: 1c-75c, NO: 25c-99c. This matches the global allocator, agent_grid price
-# selection, and late-expiry NO trading research (88-95c NO inverse FLB band).
-CANONICAL_MIN_CENTS = 5   # Kept for legacy clamp_to_canonical_range only
-CANONICAL_MAX_CENTS = 85  # Kept for legacy clamp_to_canonical_range only
+# CRITICAL FIX (2026-08-14): Fail-closed to the symmetric 10c-75c entry range
+# that the GlobalAllocator enforces.  This is the single source of truth for
+# executable entry prices and prevents extreme longshot / shortshot losses.
+# It overrules the earlier 1c-85c / 15c-99c expansion that allowed 97c NO fills.
+CANONICAL_MIN_CENTS = 10  # Production entry range minimum
+CANONICAL_MAX_CENTS = 75  # Production entry range maximum
 SIDE_AWARE_YES_MIN_CENTS = 1
 SIDE_AWARE_YES_MAX_CENTS = 75
 SIDE_AWARE_NO_MIN_CENTS = 25
@@ -658,35 +845,32 @@ FLB_NO_EDGE_BAND_MAX = 95  # NO edge band end
 
 
 def is_price_in_canonical_range(price_cents: int, side: str) -> bool:
-    """Check if price is in canonical range (side-aware).
+    """Check if price is in the production canonical entry range.
 
-    CRITICAL FIX (2026-08-07): Align side-aware canonical ranges with the
-    expanded 15m crypto volatility ranges used by order_router and the
-    is_yes_in_range / is_no_in_range doc contract.
-    YES: 1c-85c (high YES prices mean paying too much for a long shot)
-    NO: 15c-99c (low NO prices mean insufficient edge for the risk taken)
+    CRITICAL FIX (2026-08-14): Fail-closed to the symmetric 10c-75c entry
+    range.  This is the single source of truth for order eligibility across
+    agent_grid, order_router, order_gate, loop_15m, and Kalshi client.  It
+    prevents the extreme longshot / shortshot fills (e.g. 97c) that drained
+    the bankroll.
 
     Args:
         price_cents: Price in cents (0-99)
         side: "yes" or "no" (for logging/context)
 
     Returns:
-        True if price is in canonical range
+        True if price is in canonical entry range
 
     Example:
         >>> is_price_in_canonical_range(25, "yes")
         True
-        >>> is_price_in_canonical_range(85, "yes")
+        >>> is_price_in_canonical_range(75, "yes")
         True
-        >>> is_price_in_canonical_range(1, "yes")
+        >>> is_price_in_canonical_range(10, "yes")
         True
         >>> is_price_in_canonical_range(94, "no")
-        True
+        False
     """
-    if side == "yes":
-        return 1 <= price_cents <= 85
-    else:  # side == "no"
-        return 15 <= price_cents <= 99
+    return CANONICAL_MIN_CENTS <= price_cents <= CANONICAL_MAX_CENTS
 
 
 def is_price_in_crisis_range(price_cents: int, side: str) -> bool:
@@ -810,11 +994,10 @@ def is_price_in_side_aware_range(price_cents: int, side: str) -> bool:
 
 
 def clamp_to_canonical_range(price_cents: int) -> int:
-    """Clamp price to canonical range (5c-85c).
+    """Clamp price to canonical entry range (10c-75c).
 
-    CRITICAL FIX (2026-08-01): Updated to 5c-85c to match expanded canonical range for 15m crypto volatility
-    DEPRECATED: Use is_price_in_canonical_range() with side parameter for side-aware ranges.
-    This function is kept for backward compatibility but does not use side-aware ranges.
+    CRITICAL FIX (2026-08-14): Aligned with the symmetric 10c-75c production
+    entry range.  DEPRECATED: prefer is_price_in_canonical_range() with side.
 
     Args:
         price_cents: Price in cents (0-99)

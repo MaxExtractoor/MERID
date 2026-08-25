@@ -314,10 +314,15 @@ class MarketOrderFallbackEngine:
                 result
             )
             
+            fallback_order_id = (
+                getattr(result, "order_id", None)
+                or (result.get("order_id") if hasattr(result, "get") else None)
+            )
+
             return {
                 "status": "executed",
                 "original_order_id": decision.original_order.kalshi_order_id,
-                "fallback_order_id": result.get("order_id"),
+                "fallback_order_id": fallback_order_id,
                 "reason": decision.reason,
                 "result": result
             }

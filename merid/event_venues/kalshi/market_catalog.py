@@ -179,12 +179,12 @@ async def diagnostic_broad_scan(client: KalshiVenueClient, now: datetime) -> Dic
     # Log diagnostic results
     logger.info(
         "[DIAG-TARGET-TICKERS] expected=%s",
-        target_tickers
+        str(target_tickers)
     )
     logger.info(
         "[DIAG-ALL-15M-TICKERS] count=%d sample=%s",
         len(all_15m_tickers),
-        all_15m_tickers[:10] if all_15m_tickers else []
+        str(all_15m_tickers[:10]) if all_15m_tickers else "[]"
     )
     
     if missing_targets:
@@ -198,10 +198,10 @@ async def diagnostic_broad_scan(client: KalshiVenueClient, now: datetime) -> Dic
             "[DIAG-ALL-TARGETS-PRESENT] all 5 expected tickers found in broad scan"
         )
     
-    logger.info("DIAG-TARGET-TICKERS: %s", target_tickers)
-    logger.info("DIAG-ALL-15M-TICKERS: count=%d sample=%s", len(all_15m_tickers), all_15m_tickers[:10] if all_15m_tickers else [])
+    logger.info("DIAG-TARGET-TICKERS: %s", str(target_tickers))
+    logger.info("DIAG-ALL-15M-TICKERS: count=%d sample=%s", len(all_15m_tickers), str(all_15m_tickers[:10]) if all_15m_tickers else "[]")
     if missing_targets:
-        logger.warning("DIAG-MISSING-TARGETS: series=%s targets=%s", missing_targets, [target_tickers[s] for s in missing_targets])
+        logger.warning("DIAG-MISSING-TARGETS: series=%s targets=%s", str(missing_targets), str([target_tickers[s] for s in missing_targets]))
     else:
         logger.info("DIAG-ALL-TARGETS-PRESENT: all 5 expected tickers found")
     
@@ -423,6 +423,7 @@ class CatalogMarket:
     yes_bid_size: Optional[float] = None
     yes_ask_size: Optional[float] = None
     liquidity: Optional[float] = None
+    exchange_index: Optional[int] = None  # Kalshi exchange shard index
 
 
 @dataclass
@@ -490,6 +491,11 @@ class CatalogSnapshot:
             logger.warning("[GET-CURRENT-15M] asset=%s no 15m markets found - returning None", asset)
             return None
 
+        # P0 FIX: require a small safety margin before market close to avoid
+        # subscribing to/entering a market that is about to expire (clock skew).
+        _MIN_SUBSCRIBE_TTE_S = 5.0
+        now_utc = datetime.now(timezone.utc)
+
         # Find the market that exactly matches the current ET window end time
         # This enforces the single-market invariant: no selection, just exact match
         for m in asset_markets:
@@ -521,6 +527,28 @@ class CatalogSnapshot:
                     m.market.market_id, time_diff
                 )
                 continue
+            # P0 FIX: enforce active/open status and close_time safety margin before subscribe
+            raw_data = m.market.raw_data or {}
+            market_status = raw_data.get("status", "").lower()
+            if market_status not in ("open", "active"):
+                logger.info(
+                    "[GET-CURRENT-15M] Skipping market=%s status=%s not open/active",
+                    m.market.market_id, market_status,
+                )
+                continue
+            if m.health_status == "invalid_metadata":
+                logger.warning(
+                    "[GET-CURRENT-15M] Skipping market=%s health_status=%s tradeable=%s",
+                    m.market.market_id, m.health_status, m.tradeable,
+                )
+                continue
+            tte = (close_time - now_utc).total_seconds()
+            if tte < _MIN_SUBSCRIBE_TTE_S:
+                logger.info(
+                    "[GET-CURRENT-15M] Skipping market=%s too close to expiry tte=%.1fs < %.1fs",
+                    m.market.market_id, tte, _MIN_SUBSCRIBE_TTE_S,
+                )
+                continue
             # CRITICAL FIX: Kalshi markets close 15 minutes after window end
             # Increase tolerance from 1s to 900s (15 minutes) to match market behavior
             if time_diff <= 900.0:
@@ -548,10 +576,10 @@ class KalshiMarketCatalog:
         _MAX_REFRESH_INTERVAL_S = 600.0  # Maximum 10 minutes to prevent stale catalog
         if refresh_interval_s is None:
             import os
-            # CRITICAL FIX: Reduce default refresh interval to 5s for 15m crypto markets
-            # 15m markets have a 15-minute trading window (0.5-15 min to expiry per profile YAML)
-            # 5s refresh ensures we catch window rollovers quickly
-            refresh_interval_s = float(os.getenv("MERID_KALSHI_CATALOG_REFRESH_INTERVAL_S", "5.0"))
+            # PERFORMANCE FIX: Default refresh interval is 30s for 15m crypto markets.
+            # 15m markets have a 15-minute trading window, and a 30s refresh still catches
+            # window rollovers while reducing GIL contention that starves the WS keepalive loop.
+            refresh_interval_s = float(os.getenv("MERID_KALSHI_CATALOG_REFRESH_INTERVAL_S", "30.0"))
         
         # CRITICAL FIX: Validate refresh_interval_s is reasonable
         if refresh_interval_s < 0:
@@ -1904,6 +1932,7 @@ class KalshiMarketCatalog:
                 "strike_price": cm.strike_price,
                 "floor_strike": cm.floor_strike,
                 "cap_strike": cm.cap_strike,
+                "exchange_index": getattr(cm, 'exchange_index', None),
             })
             applied += 1
             # Yield control every batch_size to avoid blocking the event loop
@@ -1974,6 +2003,7 @@ class KalshiMarketCatalog:
                 "strike_price": cm.strike_price,
                 "floor_strike": cm.floor_strike,
                 "cap_strike": cm.cap_strike,
+                "exchange_index": getattr(cm, 'exchange_index', None),
             })
             applied += 1
         return applied
@@ -2085,6 +2115,16 @@ class KalshiMarketCatalog:
                 strikes.setdefault("strike", float(raw["strike_price"]))
             except (TypeError, ValueError):
                 pass
+
+        # Fallback to nested custom_strike object when present (common on 15m contracts).
+        custom = raw.get("custom_strike")
+        if isinstance(custom, dict):
+            for key, target in (("floor_strike", "floor"), ("cap_strike", "cap"), ("strike_price", "strike")):
+                if custom.get(key) is not None:
+                    try:
+                        strikes.setdefault(target, float(custom[key]))
+                    except (TypeError, ValueError):
+                        pass
         
         # Extract liquidity fields from raw API data for zero-liquidity filtering
         yes_bid = None
@@ -2296,6 +2336,26 @@ class KalshiMarketCatalog:
             # No expiry time - not tradeable
             tradeable = False
         
+        # 15m crypto strike metadata validation.  A live 15m contract must carry
+        # either a floor (for UP/DOWN) or a single strike (for threshold/bracket).
+        # Missing strike terms are a metadata failure, not a generic data-state
+        # failure, and must not be marked tradeable.
+        if (
+            timeframe == "15m"
+            and asset in ("BTC", "ETH", "SOL", "XRP", "DOGE")
+            and health_status == "ok"
+            and strikes.get("floor") is None
+            and strikes.get("strike") is None
+        ):
+            logger.warning(
+                "[CATALOG-METADATA-INVALID] market_id=%s asset=%s missing floor/strike terms; "
+                "marking market as invalid_metadata and not tradeable",
+                mkt.market_id,
+                asset,
+            )
+            health_status = "invalid_metadata"
+            tradeable = False
+
         # DEBUG: Log individual conditions for 15m crypto markets
         if timeframe == "15m" and asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             logger.debug("[ENRICH-TRADEABLE] market_id=%s asset=%s health_status=%s expiry_time=%s mte=%s tradeable=%s", mkt.market_id, asset, health_status, expiry_time, minutes_to_expiry, tradeable)
@@ -2333,6 +2393,7 @@ class KalshiMarketCatalog:
             yes_bid_size=yes_bid_size,
             yes_ask_size=yes_ask_size,
             liquidity=liquidity,
+            exchange_index=raw.get("exchange_index"),
         )
 
     @staticmethod
@@ -2653,12 +2714,27 @@ class KalshiMarketCatalog:
             assets_without_markets = all_assets - assets_with_markets
             
             if assets_without_markets:
-                logger.warning(
-                    "KALSHI-15M-UNIVERSE Per-asset availability: %s have active 15m markets, %s do NOT. "
-                    "Exits allowed on available assets only.",
-                    sorted(assets_with_markets),
-                    sorted(assets_without_markets)
-                )
+                # 2026-08-11: This is routine during incremental catalog refresh and
+                # while individual assets are between 15m windows.  Only escalate to
+                # WARNING when the catalog is mature and an asset is still missing.
+                now = datetime.now(timezone.utc)
+                with self._refresh_lock:
+                    last_refresh = self._last_refresh
+                catalog_age_s = (now - last_refresh).total_seconds() if last_refresh else float('inf')
+                if catalog_age_s < 60:
+                    logger.info(
+                        "KALSHI-15M-UNIVERSE Per-asset availability (startup/refresh): %s have active 15m markets, %s do NOT. "
+                        "Exits allowed on available assets only.",
+                        sorted(assets_with_markets),
+                        sorted(assets_without_markets)
+                    )
+                else:
+                    logger.warning(
+                        "KALSHI-15M-UNIVERSE Per-asset availability: %s have active 15m markets, %s do NOT. "
+                        "Exits allowed on available assets only.",
+                        sorted(assets_with_markets),
+                        sorted(assets_without_markets)
+                    )
             
             # Only log venue-unavailable if ALL 5 assets have no markets
             if not markets:
@@ -2942,11 +3018,12 @@ class KalshiMarketCatalog:
         active_markets = []
         allowed_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
         
-        # Entry window: -2 to 17 minutes to expiry
-        # Allow negative MTE to include markets that just opened (next window)
-        # 17 minutes gives current window (0-15 min) + 2 min buffer for transition
-        MIN_MINUTES_TO_EXPIRY = -2.0
-        MAX_MINUTES_TO_EXPIRY = 17.0
+        # CRITICAL FIX (2026-08-22): Only subscribe/trade markets inside the live
+        # 15m window.  Negative MTE means already expired; >15m means the next
+        # window is not yet active for this 15m crypto instrument.  The 0.5m
+        # floor keeps us out of the final 30s where data and fills are unreliable.
+        MIN_MINUTES_TO_EXPIRY = 0.5
+        MAX_MINUTES_TO_EXPIRY = 15.0
         
         now = datetime.now(timezone.utc)
         

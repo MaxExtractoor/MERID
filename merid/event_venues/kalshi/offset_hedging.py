@@ -247,7 +247,7 @@ async def place_hedge_order(
         # Route hedge order
         result = await route_order_async(hedge_intent)
         
-        if result.status in ("filled_live", "accepted_live"):
+        if result.has_execution or (result.request_completed and not result.is_terminal):
             logger.info(
                 "[OFFSET-HEDGING] Hedge order placed successfully: ticker=%s side=%s count=%d status=%s",
                 ticker, hedge_side, hedge_contracts, result.status

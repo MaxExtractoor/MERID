@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from decimal import Decimal
 from typing import List, Optional
 
@@ -49,12 +50,26 @@ class KalshiTrader:
 
         Returns (allowed, reason).  Fail-closed: any import/runtime error blocks the order.
         """
-        # CRITICAL FIX: 2026-07-09 - Enforce max 1 contract per order
-        # This prevents multi-contract orders from bypassing the global $1 exposure cap
-        if count > 1:
+        # Direct KalshiTrader client bypass is not allowed in production.
+        # All production orders must flow through order_router so the
+        # ExecutionRiskFirewall and other invariants are enforced.
+        try:
+            from merid.settings import settings
+            if settings.is_production:
+                logger.critical(
+                    "[KalshiTrader] Direct client order bypass blocked in production. "
+                    "Use order_router instead."
+                )
+                return False, "direct_client_bypass_blocked_in_production"
+        except Exception as exc:
+            logger.warning("[KalshiTrader] Failed to read settings: %s", exc)
+        # CRITICAL FIX: 2026-07-09 - Enforce max 2 contracts per order
+        # This prevents multi-contract orders from bypassing the global $2 exposure cap
+        from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
+        if count > MAX_CONTRACTS_PER_ORDER:
             logger.error(
-                "[KalshiTrader] Order rejected: count=%d exceeds max 1 contract per order | ticker=%s",
-                count, ticker
+                "[KalshiTrader] Order rejected: count=%d exceeds max %d contracts per order | ticker=%s",
+                count, MAX_CONTRACTS_PER_ORDER, ticker
             )
             return False, f"max_contracts_exceeded:count={count}>1"
 
