@@ -111,14 +111,14 @@ class TestOffsetHedging:
         mock_result = MagicMock()
         mock_result.status = "filled_live"
         
-        with patch('merid.event_venues.kalshi.offset_hedging.route_order_async', new_callable=AsyncMock, return_value=mock_result):
+        with patch('merid.event_venues.kalshi.order_router.route_order_async', new_callable=AsyncMock, return_value=mock_result):
             success = await place_hedge_order(
                 ticker="KXBTC15M-26JUL020700-00",
                 hedge_side="no",
                 hedge_contracts=3,
                 fill_price_cents=50
             )
-            
+
             assert success is True
     
     @pytest.mark.asyncio
@@ -131,14 +131,14 @@ class TestOffsetHedging:
         mock_result.status = "rejected"
         mock_result.reason = "insufficient_balance"
         
-        with patch('merid.event_venues.kalshi.offset_hedging.route_order_async', new_callable=AsyncMock, return_value=mock_result):
+        with patch('merid.event_venues.kalshi.order_router.route_order_async', new_callable=AsyncMock, return_value=mock_result):
             success = await place_hedge_order(
                 ticker="KXBTC15M-26JUL020700-00",
                 hedge_side="no",
                 hedge_contracts=3,
                 fill_price_cents=50
             )
-            
+
             assert success is False
     
     @pytest.mark.asyncio
