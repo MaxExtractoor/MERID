@@ -37,6 +37,7 @@ class PositionSnapshot:
     market_id: str
     agent_id: str
     contracts: int
+    quantity_cc: int  # canonical signed-YES centi-contracts
     side: str
     avg_price_cents: Optional[int]
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -52,6 +53,9 @@ class DriftEvent:
     rest_contracts: int
     ledger_contracts: int
     cache_contracts: int
+    rest_quantity_cc: int = 0
+    ledger_quantity_cc: int = 0
+    cache_quantity_cc: int = 0
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     resolved: bool = False
     resolution_timestamp: Optional[datetime] = None
@@ -128,13 +132,35 @@ class PositionDriftDetector:
         """
         self._checks_run += 1
         
-        # Extract contract counts
+        # Extract canonical centi-contract counts (quantity_cc) and display contracts.
+        rest_qcc = int(rest_position.get("quantity_cc", 0)) if rest_position else 0
+        ledger_qcc = int(ledger_position.get("quantity_cc", 0)) if ledger_position else 0
+        cache_qcc = int(cache_position.get("quantity_cc", 0)) if cache_position else 0
+
         rest_contracts = rest_position.get("contracts", 0) if rest_position else 0
         ledger_contracts = ledger_position.get("contracts", 0) if ledger_position else 0
         cache_contracts = cache_position.get("contracts", 0) if cache_position else 0
-        
+
+        # Prefer canonical quantity_cc for drift detection; it preserves fractional contracts.
+        has_qcc = all(v is not None for v in (rest_qcc, ledger_qcc, cache_qcc))
+
         # Check if all sources agree
-        if rest_contracts == ledger_contracts == cache_contracts:
+        if (rest_qcc == ledger_qcc == cache_qcc) and has_qcc:
+            # No drift - check if we have an active drift to resolve
+            drift_key = f"{market_id}:{agent_id}"
+            if drift_key in self._active_drifts:
+                drift = self._active_drifts[drift_key]
+                drift.resolved = True
+                drift.resolution_timestamp = datetime.now(timezone.utc)
+                self._drifts_resolved += 1
+                del self._active_drifts[drift_key]
+                logger.info(
+                    "[DRIFT-RESOLVED] Position drift resolved for %s: all sources agree on %d cc",
+                    market_id, rest_qcc
+                )
+            return None
+
+        if rest_contracts == ledger_contracts == cache_contracts and not has_qcc:
             # No drift - check if we have an active drift to resolve
             drift_key = f"{market_id}:{agent_id}"
             if drift_key in self._active_drifts:
@@ -148,16 +174,24 @@ class PositionDriftDetector:
                     market_id, rest_contracts
                 )
             return None
-        
+
         # Drift detected
         self._drifts_detected += 1
-        
-        # Determine severity based on delta and duration
-        max_delta = max(
-            abs(rest_contracts - ledger_contracts),
-            abs(rest_contracts - cache_contracts),
-            abs(ledger_contracts - cache_contracts)
-        )
+
+        # Determine severity based on delta and duration (in whole-contract units)
+        if has_qcc:
+            max_delta_cc = max(
+                abs(rest_qcc - ledger_qcc),
+                abs(rest_qcc - cache_qcc),
+                abs(ledger_qcc - cache_qcc),
+            )
+            max_delta = max_delta_cc / 100.0
+        else:
+            max_delta = max(
+                abs(rest_contracts - ledger_contracts),
+                abs(rest_contracts - cache_contracts),
+                abs(ledger_contracts - cache_contracts)
+            )
         
         drift_key = f"{market_id}:{agent_id}"
         existing_drift = self._active_drifts.get(drift_key)
@@ -167,6 +201,9 @@ class PositionDriftDetector:
             existing_drift.rest_contracts = rest_contracts
             existing_drift.ledger_contracts = ledger_contracts
             existing_drift.cache_contracts = cache_contracts
+            existing_drift.rest_quantity_cc = rest_qcc
+            existing_drift.ledger_quantity_cc = ledger_qcc
+            existing_drift.cache_quantity_cc = cache_qcc
             existing_drift.timestamp = datetime.now(timezone.utc)
             
             # Check if drift has persisted long enough to escalate
@@ -191,10 +228,13 @@ class PositionDriftDetector:
                 market_id=market_id,
                 agent_id=agent_id,
                 severity=severity,
-                description=f"Position drift detected: REST={rest_contracts}, Ledger={ledger_contracts}, Cache={cache_contracts}",
+                description=f"Position drift detected: REST={rest_contracts} ({rest_qcc}cc), Ledger={ledger_contracts} ({ledger_qcc}cc), Cache={cache_contracts} ({cache_qcc}cc)",
                 rest_contracts=rest_contracts,
                 ledger_contracts=ledger_contracts,
-                cache_contracts=cache_contracts
+                cache_contracts=cache_contracts,
+                rest_quantity_cc=rest_qcc,
+                ledger_quantity_cc=ledger_qcc,
+                cache_quantity_cc=cache_qcc,
             )
             self._active_drifts[drift_key] = drift
             self._drift_history.append(drift)

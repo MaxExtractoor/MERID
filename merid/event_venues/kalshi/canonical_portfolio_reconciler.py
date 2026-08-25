@@ -118,6 +118,7 @@ def _yes_exposure_cc(side: str, quantity_fp: Decimal) -> int:
 
 def _yes_exposure_from_qcc(side: str, qcc: int) -> int:
     """Return signed-YES centi-contracts from a raw qcc value."""
+    qcc = int(qcc)
     if side == "no":
         return -qcc
     return qcc

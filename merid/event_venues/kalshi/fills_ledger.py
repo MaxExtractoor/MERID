@@ -3079,30 +3079,42 @@ class KalshiFillsLedger:
             else:
                 logger.debug(f"[RECONCILIATION-SIDE-AWARE] {ticker}: Kalshi={kalshi_pos.get('contracts', 0)}@{kalshi_side}, Ledger=None (no fills)")
 
-            kalshi_contracts = int(kalshi_pos.get("contracts", 0) or kalshi_pos.get("count", 0))
+            # Canonical comparison uses quantity_cc (centi-contracts).  contracts is display-only.
+            kalshi_qcc = kalshi_pos.get("quantity_cc")
+            if kalshi_qcc is None:
+                # Legacy fallback: reconstruct approximate quantity_cc from display contracts.
+                try:
+                    kalshi_qcc = int(Decimal(str(kalshi_pos.get("contracts", 0) or kalshi_pos.get("count", 0))) * Decimal("100"))
+                except Exception:
+                    kalshi_qcc = int(kalshi_pos.get("contracts", 0) or kalshi_pos.get("count", 0) or 0) * 100
+            kalshi_contracts = Decimal(kalshi_qcc) / Decimal("100")
             kalshi_avg_price_cents = int(kalshi_pos.get("avg_price_cents", 0) or kalshi_pos.get("avg_price", 0))
 
             if computed is None:
                 # Kalshi has position but we have no fills — ghost trade candidate
-                if kalshi_contracts > 0:
+                if kalshi_qcc > 0:
                     ghost_trade_candidates += 1
                     divergences.append({
                         "type": "position_without_fills",
                         "market": ticker,
-                        "kalshi_contracts": kalshi_contracts,
+                        "kalshi_contracts": float(kalshi_contracts),
+                        "kalshi_quantity_cc": kalshi_qcc,
                         "kalshi_side": kalshi_side,
                         "ledger_contracts": 0,
-                        "contract_diff": kalshi_contracts,
+                        "ledger_quantity_cc": 0,
+                        "contract_diff": float(kalshi_contracts),
                         "pct_diff": 100.0,  # 100% divergence
                     })
                 continue
 
-            our_contracts = computed["contracts"]
+            our_qcc = computed.get("quantity_cc", 0)
+            our_contracts = Decimal(our_qcc) / Decimal("100")
             our_side = computed["side"]
             our_avg_price_cents = computed["avg_price_cents"]
 
             # Calculate divergence metrics (facts only, no thresholds)
-            contract_diff = abs(kalshi_contracts - our_contracts)
+            qcc_diff = abs(kalshi_qcc - our_qcc)
+            contract_diff = Decimal(qcc_diff) / Decimal("100")
             price_diff_cents = abs(kalshi_avg_price_cents - our_avg_price_cents)
 
             # Percentage diff using Kalshi as reference (avoid div by zero)
@@ -3115,17 +3127,19 @@ class KalshiFillsLedger:
             side_mismatch = kalshi_side != our_side
 
             # Report all divergences > 0 (facts only)
-            if contract_diff > 0 or side_mismatch or price_diff_cents > 1:
+            if qcc_diff > 0 or side_mismatch or price_diff_cents > 1:
                 divergences.append({
                     "type": "side_mismatch" if side_mismatch else "contract_divergence",
                     "market": ticker,
-                    "kalshi_contracts": kalshi_contracts,
+                    "kalshi_contracts": float(kalshi_contracts),
+                    "kalshi_quantity_cc": kalshi_qcc,
                     "kalshi_side": kalshi_side,
                     "kalshi_avg_price_cents": kalshi_avg_price_cents,
-                    "ledger_contracts": our_contracts,
+                    "ledger_contracts": float(our_contracts),
+                    "ledger_quantity_cc": our_qcc,
                     "ledger_side": our_side,
                     "ledger_avg_price_cents": our_avg_price_cents,
-                    "contract_diff": contract_diff,
+                    "contract_diff": float(contract_diff),
                     "price_diff_cents": price_diff_cents,
                     "pct_diff": round(pct_diff, 2),
                 })
