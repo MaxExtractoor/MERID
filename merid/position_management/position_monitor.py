@@ -2976,7 +2976,11 @@ class PositionMonitor:
 
         # Build the signed-YES position from the monitor record (used as the
         # "system" position for the candidate; submission re-fetches exchange).
-        position_cc = to_signed_yes_exposure(position.side.value, position.size) * 100
+        # Position.size is in contracts (Decimal); canonical exposure is centi-contracts.
+        position_cc = to_signed_yes_exposure(
+            position.side.value,
+            int(position.size * Decimal("100")),
+        )
 
         # Edge stop: model fair value has crossed the executable bid + costs.
         # Falls back to legacy price stop if model fair value is unavailable.
