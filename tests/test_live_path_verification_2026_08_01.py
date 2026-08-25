@@ -304,7 +304,7 @@ class TestRestingBracketPositionDelta:
             ):
                 await cache._submit_resting_bracket(position)
 
-            assert mock_route.call_count == 2, "TP and SL bracket should both be submitted"
+            assert mock_route.call_count == 1, "Only TP bracket should be submitted (SL is handled by active stop candidate)"
             for call in mock_route.call_args_list:
                 intent = call.args[0]
                 assert isinstance(intent, OrderIntent)

@@ -101,6 +101,7 @@ PRICE_STOP_TRIGGER_REASONS = frozenset({
     "HARD_STOP",
     "SOFT_STOP",
     "TRAILING_STOP",
+    "EDGE_DECAY",
     "OPERATIONAL_RISK",
     "STALE_DATA",
     "POSITION_MISMATCH",
@@ -121,6 +122,7 @@ _STOP_TRIGGER_TO_EXIT_REASON = {
     "POSITION_MISMATCH": "RISK",
     "UNIFIED_POLICY_STOP": "STOP_LOSS",
     "EDGE_STOP": "STOP_LOSS",
+    "EDGE_DECAY": "EDGE_DECAY",
 }
 
 # Cutoff and freshness constants (seconds / ms).
@@ -178,6 +180,13 @@ class StopCandidate:
     entry_price_cents: Optional[int] = None
     held_contract: Optional[Literal["yes", "no"]] = None
 
+    # Edge-decay telemetry (2026-08-25): record entry/current edge and the
+    # derived hybrid stop level so the 7-day backtest can replay the decision.
+    entry_edge_cents: Optional[int] = None
+    current_edge_cents: Optional[int] = None
+    edge_decay_exit_cents: Optional[int] = None
+    stop_level_cents: Optional[int] = None
+
     def __post_init__(self) -> None:
         # Derive the held contract deterministically from the signed position.
         if self.held_contract is None and self.position_from_exchange_cc is not None:
@@ -209,6 +218,10 @@ class StopCandidate:
             "position_snapshot_age_ms": self.position_snapshot_age_ms,
             "seconds_to_expiry": self.seconds_to_expiry,
             "entry_price_cents": self.entry_price_cents,
+            "entry_edge_cents": self.entry_edge_cents,
+            "current_edge_cents": self.current_edge_cents,
+            "edge_decay_exit_cents": self.edge_decay_exit_cents,
+            "stop_level_cents": self.stop_level_cents,
         }
         return d
 
@@ -642,6 +655,7 @@ def build_stop_candidate(
     hysteresis_cents: Optional[int] = None,
     seconds_to_expiry: Optional[float] = None,
     source_book_sequence: Optional[int] = None,
+    hard_stop_cents: Optional[int] = None,
 ) -> StopCandidate:
     """Build a `StopCandidate` from live market and position state."""
     side, qty = from_signed_yes_exposure(exchange_position_cc)
@@ -672,6 +686,26 @@ def build_stop_candidate(
     if hysteresis_cents is None:
         hysteresis_cents = STOP_EDGE_HYSTERESIS_CENTS
 
+    # Edge-decay telemetry.  Entry/current edge are in the held contract's price
+    # space: positive means the model thought the position had an edge, negative
+    # means the model has flipped against the position.  edge_decay_exit is the
+    # price at which current edge would be zero (model fair = market price).
+    entry_edge = None
+    current_edge = None
+    edge_decay_exit = None
+    stop_level = None
+    if fair is not None and entry_price_cents is not None:
+        entry_edge = fair - entry_price_cents
+    if fair is not None and executable is not None:
+        current_edge = fair - executable
+        edge_decay_exit = fair
+    if hard_stop_cents is not None and edge_decay_exit is not None:
+        stop_level = max(hard_stop_cents, edge_decay_exit)
+    elif hard_stop_cents is not None:
+        stop_level = hard_stop_cents
+    elif edge_decay_exit is not None:
+        stop_level = edge_decay_exit
+
     return StopCandidate(
         market_ticker=market_ticker,
         trigger_reason=trigger_reason,
@@ -690,6 +724,10 @@ def build_stop_candidate(
         position_snapshot_age_ms=position_snapshot_age_ms,
         seconds_to_expiry=seconds,
         entry_price_cents=entry_price_cents,
+        entry_edge_cents=entry_edge,
+        current_edge_cents=current_edge,
+        edge_decay_exit_cents=edge_decay_exit,
+        stop_level_cents=stop_level,
     )
 
 
@@ -861,10 +899,21 @@ async def maybe_submit_stop_candidate(
     # observed best bid so a stale trigger cannot sweep the book to the floor.
     exit_price = max(1, exit_bid - STOP_MAX_SLIPPAGE_CENTS)
     logger.info(
-        "[STOP-CANDIDATE-PRICING] candidate=%s ticker=%s trigger_bid=%dc "
-        "submitted_limit=%dc slippage_cap=%dc",
-        candidate.candidate_id, candidate.market_ticker, exit_bid,
-        exit_price, STOP_MAX_SLIPPAGE_CENTS,
+        "[STOP-CANDIDATE-PRICING] candidate=%s ticker=%s trigger=%s "
+        "entry=%dc bid=%dc fair=%dc entry_edge=%dc current_edge=%dc "
+        "stop_level=%dc submitted_limit=%dc slippage_cap=%dc tte=%.1fs",
+        candidate.candidate_id,
+        candidate.market_ticker,
+        candidate.trigger_reason,
+        candidate.entry_price_cents or -1,
+        exit_bid,
+        candidate.fair_value_cents or -1,
+        candidate.entry_edge_cents or -99,
+        candidate.current_edge_cents or -99,
+        candidate.stop_level_cents or -1,
+        exit_price,
+        STOP_MAX_SLIPPAGE_CENTS,
+        candidate.seconds_to_expiry or -1.0,
     )
 
     kalshi_side = to_kalshi_side(held_side, "sell")
