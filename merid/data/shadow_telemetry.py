@@ -139,9 +139,48 @@ def persist_order_telemetry(intent: Any, result: Any) -> None:
             "confidence_valid": getattr(intent, "confidence_valid", None),
             "confidence_source": getattr(intent, "confidence_source", None),
             "settlement_reference": getattr(intent, "settlement_reference", None),
+            "data_state": getattr(intent, "data_state", None),
+            "regime_label": getattr(intent, "regime_label", None),
+            "regime_probability": getattr(intent, "regime_probability", None),
+            "p_yes": getattr(intent, "p_yes", None),
+            "p_no": getattr(intent, "p_no", None),
+            "p_selected": getattr(intent, "p_selected", None),
+            "gross_edge": getattr(intent, "gross_edge", None),
+            "net_edge_pretrade": getattr(intent, "net_edge_pretrade", None),
+            "selected_outcome_price_cents": getattr(intent, "selected_outcome_price_cents", None),
             "git_revision": os.environ.get("MERID_GIT_REVISION"),
             "config_hash": os.environ.get("MERID_CONFIG_HASH"),
         }
+
+        # CRITICAL FIX (2026-08-19): fill-adjusted edge accounting.
+        # Net edge must be recomputed from the actual basis (decision executable
+        # price), the submitted limit, and the actual fill price.  Pre-trade edge
+        # is not a substitute for realized fill edge.
+        fill_price = _json_safe(fill.get("price_cents")) if isinstance(fill, dict) else None
+        if isinstance(fill_price, (int, float)) and intent is not None:
+            try:
+                basis_price_cents = float(
+                    getattr(intent, "selected_outcome_price_cents", None) or 0
+                )
+                limit_price_cents = float(getattr(intent, "price_cents", 0) or 0)
+                if basis_price_cents <= 0 and limit_price_cents > 0:
+                    basis_price_cents = limit_price_cents
+                ev_net_cents = float(getattr(intent, "ev_net_cents", 0) or 0)
+                if basis_price_cents > 0 and limit_price_cents > 0 and ev_net_cents != 0:
+                    record["net_edge_pretrade_cents"] = ev_net_cents
+                    record["limit_slippage_cents"] = limit_price_cents - basis_price_cents
+                    record["net_edge_at_order_limit_cents"] = (
+                        ev_net_cents - record["limit_slippage_cents"]
+                    )
+                    record["slippage_cents"] = fill_price - basis_price_cents
+                    record["net_edge_at_fill_cents"] = (
+                        ev_net_cents - record["slippage_cents"]
+                    )
+                    record["fill_adjusted_edge_accepted"] = bool(
+                        record["net_edge_at_fill_cents"] >= 0
+                    )
+            except Exception:
+                pass
         write_shadow_record(record)
     except Exception:
         pass
