@@ -2872,11 +2872,23 @@ class PositionMonitor:
             return False, "none"
 
         # CRITICAL FIX (2026-08-11): Only act on stop-losses that came from the
-        # original entry intent. Fallback/default SL values can be inside the
+        # original entry intent or a trusted fallback derived from the exchange-
+        # reported entry price. Fallback/default SL values can be inside the
         # entry spread and cause an instant, deterministic round-trip loss.
+        has_trusted_entry_price = (
+            position.entry_fill_price_cents is not None
+            or position.avg_entry_price_cents is not None
+        )
+        trusted_fallback = (
+            position.risk_params_state == RiskParamsState.FALLBACK
+            and has_trusted_entry_price
+        )
         if (
-            position.risk_params_state != RiskParamsState.ORIGINAL_PERSISTED
-            or position.risk_params_schema_version < 2
+            position.risk_params_schema_version < 2
+            or (
+                position.risk_params_state != RiskParamsState.ORIGINAL_PERSISTED
+                and not trusted_fallback
+            )
         ):
             _bump_stop_counter(
                 "stop_disabled_unknown_provenance",
@@ -2914,8 +2926,24 @@ class PositionMonitor:
 
         # CRITICAL FIX (2026-08-11): Only act on a stop if the entry book was
         # captured at fill time.  A later/rest/reconstructed book is not a valid
-        # reference for spread-only or adverse-move invariants.
-        if position.entry_book_capture_quality != "AT_FILL":
+        # reference for spread-only or adverse-move invariants.  However, a
+        # trusted ORIGINAL_PERSISTED or FALLBACK stop anchored to the exchange-
+        # reported entry price can still use the catastrophic hard-stop path;
+        # the adverse-move guard is skipped when the captured book is unavailable.
+        # A trusted fallback/original stop may use the hard-stop path even when
+        # the entry book was not captured (UNKNOWN quality).  It must NOT use a
+        # known-bad capture such as POST_FILL or UNAVAILABLE, because those carry
+        # a stale or misleading book that would make the spread-only guard unsafe.
+        unknown_or_missing_quality = position.entry_book_capture_quality in (None, "", "UNKNOWN")
+        can_stop_without_at_fill = (
+            position.risk_params_state in (
+                RiskParamsState.ORIGINAL_PERSISTED,
+                RiskParamsState.FALLBACK,
+            )
+            and has_trusted_entry_price
+            and unknown_or_missing_quality
+        )
+        if position.entry_book_capture_quality != "AT_FILL" and not can_stop_without_at_fill:
             _bump_stop_counter(
                 "stop_disabled_unknown_provenance",
                 f"position={position.position_id[:8]} quality={position.entry_book_capture_quality}",
@@ -3932,16 +3960,11 @@ class PositionMonitor:
             )
             return None
 
-        # Age check: prefer the freshest of WS book or REST update, so REST fallback
-        # keeps exits enabled when the WebSocket orderbook is stale or not connected.
+        # Age check: use the orderbook timestamp only.  REST catalog metadata is
+        # not a quote refresh; a REST orderbook snapshot still updates
+        # last_book_update_ts, so REST-only exits remain enabled.
         last_book_update_ts = getattr(state, "last_book_update_ts", None)
-        last_rest_update_ts = getattr(state, "last_rest_update_ts", None)
-        ts_candidates = []
-        if isinstance(last_book_update_ts, (int, float)) and last_book_update_ts > 0:
-            ts_candidates.append(last_book_update_ts)
-        if isinstance(last_rest_update_ts, (int, float)) and last_rest_update_ts > 0:
-            ts_candidates.append(last_rest_update_ts)
-        effective_ts = max(ts_candidates) if ts_candidates else None
+        effective_ts = last_book_update_ts if isinstance(last_book_update_ts, (int, float)) and last_book_update_ts > 0 else None
         book_age_ms = 0
         if effective_ts is not None:
             try:
@@ -4105,15 +4128,9 @@ class PositionMonitor:
             )
             return None
 
-        # Age check: use the freshest of WS book or REST update.
+        # Age check: use the orderbook timestamp only.
         last_book_update_ts = getattr(state, 'last_book_update_ts', None)
-        last_rest_update_ts = getattr(state, 'last_rest_update_ts', None)
-        ts_candidates = []
-        if isinstance(last_book_update_ts, (int, float)) and last_book_update_ts > 0:
-            ts_candidates.append(last_book_update_ts)
-        if isinstance(last_rest_update_ts, (int, float)) and last_rest_update_ts > 0:
-            ts_candidates.append(last_rest_update_ts)
-        effective_ts = max(ts_candidates) if ts_candidates else None
+        effective_ts = last_book_update_ts if isinstance(last_book_update_ts, (int, float)) and last_book_update_ts > 0 else None
         if effective_ts is not None:
             try:
                 age_s = time.monotonic() - effective_ts

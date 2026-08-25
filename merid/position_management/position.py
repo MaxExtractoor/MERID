@@ -118,6 +118,12 @@ def migrate_legacy_key(
 # Override with MERID_TAKE_PROFIT_MIN_PROFIT_CENTS.
 TAKE_PROFIT_MIN_PROFIT_CENTS = int(os.getenv("MERID_TAKE_PROFIT_MIN_PROFIT_CENTS", "5"))
 
+# CRITICAL FIX (2026-08-25): Fallback stop-loss buffer for positions that arrive
+# without an explicit SL (e.g., REST-synced or legacy records).  The exchange-
+# reported average entry price is a trusted anchor, so we derive a hard floor
+# below it.  Override with MERID_FALLBACK_STOP_LOSS_BUFFER_CENTS.
+FALLBACK_STOP_LOSS_BUFFER_CENTS = int(os.getenv("MERID_FALLBACK_STOP_LOSS_BUFFER_CENTS", "5"))
+
 
 @dataclass
 class Position:
@@ -377,9 +383,46 @@ class Position:
             self.entry_book_timestamp = None
             self.entry_book_sequence = None
 
+        # CRITICAL FIX (2026-08-25): Positions without an explicit stop-loss
+        # (e.g., REST-synced or legacy fills) must still have a catastrophic
+        # hard stop.  The exchange-reported entry price is a trusted anchor;
+        # derive a soft stop a fixed buffer below it and promote the provenance
+        # state to FALLBACK so the monitor's provenance guard allows it.  We only
+        # do this when we have a trusted fill price or a non-unknown provenance
+        # state, so bare test objects with no provenance are not turned live.
+        has_trusted_entry_anchor = (
+            self.entry_fill_price_cents is not None
+            or self.risk_params_state in (
+                RiskParamsState.ORIGINAL_PERSISTED,
+                RiskParamsState.FALLBACK,
+            )
+        )
+        if (
+            self.stop_loss_enabled
+            and self.stop_loss_price_cents is None
+            and self.avg_entry_price_cents is not None
+            and self.avg_entry_price_cents > 0
+            and has_trusted_entry_anchor
+        ):
+            entry_ref = int(self.entry_fill_price_cents or self.avg_entry_price_cents)
+            fallback_sl = max(1, entry_ref - FALLBACK_STOP_LOSS_BUFFER_CENTS)
+            self.stop_loss_price_cents = fallback_sl
+            if self.risk_params_state == RiskParamsState.UNKNOWN:
+                self.risk_params_state = RiskParamsState.FALLBACK
+                self.risk_params_schema_version = max(self.risk_params_schema_version or 1, 2)
+                logger.info(
+                    "[POSITION-SL-FALLBACK] Set fallback stop-loss for position=%s: "
+                    "entry=%dc sl=%dc buffer=%dc state=fallback",
+                    self.position_id[:8],
+                    entry_ref,
+                    fallback_sl,
+                    FALLBACK_STOP_LOSS_BUFFER_CENTS,
+                )
+
         if self.risk_params_state == RiskParamsState.UNKNOWN:
-            # Unknown-provenance positions must not carry a stop-loss, regardless
-            # of any SL/TP fields that may have been present in a legacy record.
+            # Unknown-provenance positions that could not be anchored to a trusted
+            # entry price must not carry a stop-loss, regardless of any SL/TP
+            # fields that may have been present in a legacy record.
             self.stop_loss_enabled = False
             self.stop_loss_price_cents = None
             self.hard_stop_price_cents = None
@@ -412,6 +455,47 @@ class Position:
                         self.take_profit_r_multiple = (fallback_tp - entry_ref) / (100.0 - entry_ref) if (100 - entry_ref) > 0 else 0.0
                         if self.risk_params_state == RiskParamsState.UNKNOWN:
                             self.risk_params_state = RiskParamsState.FALLBACK
+                except Exception:
+                    pass
+
+            # CRITICAL FIX (2026-08-24): If the edge-based fallback did not set a TP,
+            # derive a conservative fee-aware take-profit from the trusted entry fill
+            # price. This is the canonical fallback for positions reconstructed from
+            # REST or from fills where model probabilities were not propagated,
+            # and it is gated by the same round-trip fee buffer used downstream.
+            if self.take_profit_price_cents is None and self.entry_fill_price_cents:
+                try:
+                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                    entry_ref = int(self.entry_fill_price_cents)
+                    if 0 < entry_ref < 100:
+                        estimated_entry_fee = calculate_kalshi_fee_cents(1, entry_ref)
+                        target_cents = entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS
+                        estimated_exit_fee = calculate_kalshi_fee_cents(1, target_cents)
+                        required_margin = max(
+                            TAKE_PROFIT_MIN_PROFIT_CENTS,
+                            estimated_entry_fee + estimated_exit_fee + 1,
+                        )
+                        fallback_tp = int(min(99, entry_ref + required_margin))
+                        if fallback_tp > entry_ref:
+                            self.take_profit_price_cents = fallback_tp
+                            self.take_profit_r_multiple = (
+                                (fallback_tp - entry_ref) / (100.0 - entry_ref)
+                                if (100 - entry_ref) > 0
+                                else 0.0
+                            )
+                            self.risk_params_schema_version = max(
+                                self.risk_params_schema_version or 1, 2
+                            )
+                            if self.risk_params_state == RiskParamsState.UNKNOWN:
+                                self.risk_params_state = RiskParamsState.FALLBACK
+                                logger.info(
+                                    "[POSITION-TP-FALLBACK] Set fee-aware TP for position=%s: "
+                                    "entry=%dc tp=%dc margin=%dc state=fallback",
+                                    self.position_id[:8],
+                                    entry_ref,
+                                    fallback_tp,
+                                    fallback_tp - entry_ref,
+                                )
                 except Exception:
                     pass
 
