@@ -49,6 +49,36 @@ def load_fills_from_csv(csv_path: str) -> List[Dict[str, Any]]:
     return fills
 
 
+def detect_trade_history_inversion(fills: List[Dict[str, Any]]) -> Optional[str]:
+    """Detect the known trade_history_7days.csv side/action/price inversion bug.
+
+    Inverted rows have the wrong side (e.g. side=YES for a sell NO fill),
+    action=sell, price equal to the opposite side's price, and the held side's
+    opposite price set to 0.00.  This guard prevents mis-analyzed PnL and win
+    rates from being regenerated.
+    """
+    if not fills:
+        return None
+    for row in fills:
+        side = (row.get('side') or '').upper()
+        action = (row.get('action') or '').lower()
+        no_price = row.get('no_price', None)
+        yes_price = row.get('yes_price', None)
+        if side == 'YES' and action == 'sell' and no_price == 0.0:
+            return (
+                f"Detected side/price inversion in {row.get('market_ticker')}: "
+                f"side=YES/action=sell with no_price=0.00. "
+                f"Use trade_history_raw_7d.csv or trade_analysis_raw_7d.json instead."
+            )
+        if side == 'NO' and action == 'buy' and yes_price == 0.0:
+            return (
+                f"Detected side/price inversion in {row.get('market_ticker')}: "
+                f"side=NO/action=buy with yes_price=0.00. "
+                f"Use trade_history_raw_7d.csv or trade_analysis_raw_7d.json instead."
+            )
+    return None
+
+
 def extract_asset_from_ticker(ticker: str) -> str:
     """Extract asset symbol from Kalshi ticker."""
     if ticker.startswith("KX"):
@@ -95,10 +125,11 @@ async def fetch_settlements(client: KalshiVenueClient, market_tickers: List[str]
 def calculate_pnl(fill: Dict[str, Any], settlement: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Calculate PnL for a fill given its settlement."""
     side = fill.get('side', '').upper()
+    action = fill.get('action', '').lower()
     quantity = fill.get('quantity', 0)
-    entry_price = fill.get('price', 0)
-    entry_cost = fill.get('net_cost', 0)
-    
+    total_cost = fill.get('total_cost', 0)
+    fee = fill.get('fee', 0)
+
     if not settlement:
         return {
             'status': 'PENDING',
@@ -107,12 +138,12 @@ def calculate_pnl(fill: Dict[str, Any], settlement: Optional[Dict[str, Any]]) ->
             'win': False,
             'loss': False
         }
-    
+
     # Get settlement result from Kalshi API response
     # Fields: "market_result" (yes/no), "value" (0 or 100), "revenue" (payout in cents)
     market_result = settlement.get('market_result', '').lower()
     settlement_value = settlement.get('value')  # This is in cents (0 or 100)
-    
+
     if settlement_value is None:
         return {
             'status': 'UNKNOWN',
@@ -121,26 +152,30 @@ def calculate_pnl(fill: Dict[str, Any], settlement: Optional[Dict[str, Any]]) ->
             'win': False,
             'loss': False
         }
-    
+
     # Convert to dollars (settlement_value is already in cents)
     settlement_price_dollars = settlement_value / 100.0 if settlement_value else 0
-    
-    # Calculate PnL
-    # For YES: if settlement is 1.0, you get $1 per contract
-    # For NO: if settlement is 0.0, you get $1 per contract
+
+    # Final payout per contract at settlement
     if side == 'YES':
         payout = quantity * settlement_price_dollars
-        pnl = payout - entry_cost
-        outcome = 'YES_WON' if market_result == 'yes' else 'NO_WON'
-        win = (market_result == 'yes')
-        loss = (market_result == 'no')
     else:  # NO
         payout = quantity * (1.0 - settlement_price_dollars)
-        pnl = payout - entry_cost
+
+    # Cash flow at entry: buyer pays cost + fees; seller receives cost - fees
+    if action == 'sell':
+        pnl = (total_cost - fee) - payout
+    else:  # buy
+        pnl = payout - (total_cost + fee)
+
+    if side == 'YES':
+        outcome = 'YES_WON' if market_result == 'yes' else 'NO_WON'
+    else:
         outcome = 'NO_WON' if market_result == 'no' else 'YES_WON'
-        win = (market_result == 'no')
-        loss = (market_result == 'yes')
-    
+
+    win = pnl > 0
+    loss = pnl < 0
+
     return {
         'status': 'SETTLED',
         'pnl': pnl,
@@ -192,7 +227,7 @@ def analyze_trades(fills: List[Dict[str, Any]], settlements: Dict[str, Dict[str,
             stats['by_asset'][asset]['wins'] += 1
         if trade['loss']:
             stats['by_asset'][asset]['losses'] += 1
-        if side == 'YES':
+        if str(side).upper() == 'YES':
             stats['by_asset'][asset]['yes'] += 1
         else:
             stats['by_asset'][asset]['no'] += 1
@@ -212,7 +247,7 @@ def analyze_trades(fills: List[Dict[str, Any]], settlements: Dict[str, Dict[str,
         elif price < 0.70:
             range_key = '$0.50-$0.70'
         else:
-            range_key = '≥ $0.70'
+            range_key = '>= $0.70'
         
         stats['by_price_range'][range_key]['trades'] += 1
         stats['by_price_range'][range_key]['pnl'] += pnl
@@ -314,6 +349,13 @@ async def main():
     logger.info(f"Loading fills from {args.input}")
     fills = load_fills_from_csv(args.input)
     logger.info(f"Loaded {len(fills)} fills")
+
+    # Guard against the known trade_history_7days.csv inversion bug
+    inversion = detect_trade_history_inversion(fills)
+    if inversion:
+        logger.error(f"[ANALYSIS-GUARD] {inversion}")
+        print(f"ERROR: {inversion}")
+        sys.exit(2)
     
     # Get unique market tickers
     unique_tickers = list(set(f.get('market_ticker', '') for f in fills if f.get('market_ticker')))

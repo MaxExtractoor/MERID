@@ -208,10 +208,12 @@ class TestBracketMetrics(unittest.TestCase):
     def test_metric_called_in_submit(self):
         from merid.event_venues.kalshi.position_cache import KalshiPositionCache
         src = inspect.getsource(KalshiPositionCache._submit_resting_bracket)
-        # Both legs must record their outcomes (success and failure paths)
+        # Only the TP leg is submitted as a resting bracket. Stop-loss is handled
+        # by the active StopCandidate path, so _record_bracket_metric must still
+        # be called for TP success/failure.
         self.assertGreaterEqual(
-            src.count("_record_bracket_metric"), 4,
-            "Both TP and SL legs must record success/failure metrics (4 calls minimum)",
+            src.count("_record_bracket_metric"), 2,
+            "TP leg must record success/failure metrics (2 calls minimum); SL is handled by active stop",
         )
 
 

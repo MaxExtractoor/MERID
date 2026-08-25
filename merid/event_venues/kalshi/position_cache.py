@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import time as _time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -18,22 +19,135 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from utils.logger import get_logger
 
+try:
+    from merid.position_management.position import PositionKey
+    POSITION_KEY_AVAILABLE = True
+except Exception as _pk_import_err:
+    POSITION_KEY_AVAILABLE = False
+
 if TYPE_CHECKING:
     from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger
 
+try:
+    from merid.position_management.entry_provenance import (
+        EntryProvenanceSnapshot,
+        ProvenanceState,
+        get_entry_provenance_store,
+    )
+    ENTRY_PROVENANCE_AVAILABLE = True
+except Exception as _ep_import_err:
+    ENTRY_PROVENANCE_AVAILABLE = False
+
 logger = get_logger("merid.event_venues.kalshi.position_cache")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (ValueError, TypeError):
+        return default
+
 
 try:
     from merid.event_venues.kalshi.binary_price_space import (
+        canonical_outcome_side,
         yes_delta,
         to_signed_yes_exposure,
         from_signed_yes_exposure,
         fill_to_signed_yes_exposure,
         normalize_rest_position,
+        require_canonical_outcome_side,
+        PositionDataError,
     )
     BINARY_PRICE_SPACE_AVAILABLE = True
 except ImportError:
     BINARY_PRICE_SPACE_AVAILABLE = False
+
+
+class SideValidationErrorLocal(Exception):
+    pass
+
+
+def _infer_side_from_signed_size(pos: Dict[str, Any]) -> Optional[str]:
+    """Infer outcome side from a signed position size (positive=YES, negative=NO).
+
+    Only ``position_fp`` or ``signed_size`` are trustworthy here.  ``contracts``
+    and other unsigned size fields are never used to infer direction.
+    """
+    for key in ("position_fp", "signed_size"):
+        raw = pos.get(key)
+        if raw is None:
+            continue
+        try:
+            value = Decimal(str(raw))
+        except Exception:
+            continue
+        if value > 0:
+            return "yes"
+        if value < 0:
+            return "no"
+    return None
+
+
+def _extract_canonical_rest_side(pos: Dict[str, Any], market_id: str) -> Optional[str]:
+    """Return a validated yes/no side from a REST position dict or None.
+
+    Tries ``outcome_id`` first (Kalshi's canonical outcome field), then
+    ``outcome_side``, ``side``, and ``kalshi_side``.  Unrecognised or missing
+    values return ``None`` rather than silently defaulting to YES.
+    """
+    for key in ("outcome_id", "outcome_side", "side", "kalshi_side"):
+        raw = pos.get(key)
+        if raw is None:
+            continue
+        try:
+            return canonical_outcome_side(raw).value
+        except PositionDataError:
+            # Non-side value in this field (e.g. book_side='ask') is ignored.
+            continue
+    return None
+
+
+def _require_outcome_side_for_position(
+    pos: Dict[str, Any],
+    market_id: str,
+) -> str:
+    """Parse REST position side fields, raising on missing/inconsistent sides.
+
+    If no textual side field is present, falls back to the signed position size
+    (``position_fp`` / ``signed_size``) so REST positions from venues that omit
+    the ``outcome_side`` key are not quarantined.
+    """
+    if BINARY_PRICE_SPACE_AVAILABLE:
+        try:
+            return require_canonical_outcome_side(
+                pos,
+                context=f"position_cache ticker={market_id}",
+            ).value
+        except PositionDataError as exc:
+            raise SideValidationErrorLocal(str(exc)) from exc
+
+    # Defensive fallback if binary_price_space is somehow unavailable.
+    for key in ("outcome_side", "outcome_id", "side", "kalshi_side"):
+        raw = pos.get(key)
+        if raw is None:
+            continue
+        normalized = str(raw).strip().lower()
+        if normalized in ("yes", "no"):
+            # Validate against signed size if available.
+            signed = _infer_side_from_signed_size(pos)
+            if signed is not None and signed != normalized:
+                raise SideValidationErrorLocal(
+                    f"position_cache ticker={market_id}: side={normalized} conflicts with signed size"
+                )
+            return normalized
+        raise SideValidationErrorLocal(f"position_cache ticker={market_id}: invalid side={raw!r}")
+
+    side = _infer_side_from_signed_size(pos)
+    if side is not None:
+        return side
+
+    raise SideValidationErrorLocal(f"position_cache ticker={market_id}: missing side")
 
 
 def _is_test_ticker(ticker: str) -> bool:
@@ -68,43 +182,58 @@ def _is_test_ticker(ticker: str) -> bool:
 
 
 def _is_expired_ticker(ticker: str) -> bool:
-    """Check if a ticker has expired (market is in the past).
+    """Check if a ticker has expired and should not carry a cached position.
 
-    Uses the canonical 15m ticker parser first.  If the catalog is available it
-    is consulted as an additional check.  A ticker that cannot be parsed is
-    treated as expired when it is clearly a 15m contract, to avoid holding
-    positions in malformed/legacy markets.
+    A market is considered expired only when:
+      - the position cache has been explicitly told it settled, or
+      - the catalog reports it as ``settled``/``finalized``, or
+      - the close time is older than ``MERID_POSITION_EXPIRY_GRACE_SECONDS``.
 
-    Args:
-        ticker: The market ticker to check
-
-    Returns:
-        True if the ticker has expired, False otherwise
+    ``closed`` status alone is NOT enough; the position remains an unresolved
+    financial exposure until settlement/finalization or the configured grace.
     """
     if not ticker:
         return False
 
     from datetime import datetime, timezone, timedelta
 
+    # Explicit settlement notification from the position cache or settlement poller.
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        cache = get_position_cache()
+        if cache is not None:
+            is_settled = cache.is_settled(ticker)
+            if isinstance(is_settled, bool) and is_settled:
+                return True
+    except Exception:
+        pass
+
+    grace_seconds = _env_int("MERID_POSITION_EXPIRY_GRACE_SECONDS", 900)
+    expiry_buffer = timedelta(seconds=grace_seconds)
+
     try:
         from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_ticker_expiry
         expiry_dt, is_15m_pattern = parse_kalshi_15m_ticker_expiry(ticker)
-        print(f"[DEBUG] parse {ticker} -> {expiry_dt}, is_15m={is_15m_pattern}")
         if expiry_dt is not None:
             now = datetime.now(timezone.utc)
-            # CRITICAL FIX (2026-08-08): 30s settlement buffer. A 15-minute buffer
-            # allowed stale positions to be rebuilt after the market had already
-            # closed, causing 404/closed-market exit-order failures.
-            expiry_buffer = timedelta(seconds=30)
-            result = expiry_dt < (now - expiry_buffer)
-            print(f"[DEBUG] compare {expiry_dt} < {now - expiry_buffer} = {result}")
-            return result
+            # If the only parseable interpretation is years in the future, the
+            # canonical year-first parser has been tripped by a day-first body
+            # with an invalid date (e.g. 30FEB).  Treat as expired/invalid.
+            if expiry_dt > now + timedelta(days=7):
+                logger.warning(
+                    "[EXPIRED-TICKER] %s parsed as implausibly far future %s; treating as expired",
+                    ticker,
+                    expiry_dt,
+                )
+                return True
+            return expiry_dt < (now - expiry_buffer)
 
         # 15m contract with an unparseable/invalid date segment -> expired
         if is_15m_pattern:
             return True
     except Exception as e:
-        logger.debug(f"[EXPIRED-TICKER] Exception parsing ticker {ticker}: {e}")
+        logger.debug("[EXPIRED-TICKER] Exception parsing ticker %s: %s", ticker, e)
         if "15M" in ticker.upper():
             return True
 
@@ -119,16 +248,21 @@ def _is_expired_ticker(ticker: str) -> bool:
         if not market:
             return False
 
-        if market.status in ("closed", "settled"):
+        status = getattr(market, "status", "").lower()
+        if status in ("settled", "finalized"):
             return True
 
+        if status == "closed":
+            # Closed-but-unsettled markets remain in the financial ledger.
+            close_time = getattr(market, "close_time", None)
+            if close_time:
+                return close_time < (datetime.now(timezone.utc) - expiry_buffer)
+            return False
+
         if hasattr(market, 'close_time') and market.close_time:
-            now = datetime.now(timezone.utc)
-            # CRITICAL FIX (2026-08-08): 30s settlement buffer (see ticker parsing above).
-            expiry_buffer = timedelta(seconds=30)
-            return market.close_time < (now - expiry_buffer)
+            return market.close_time < (datetime.now(timezone.utc) - expiry_buffer)
     except Exception as e:
-        logger.debug(f"[EXPIRED-TICKER] Exception checking catalog for {ticker}: {e}")
+        logger.debug("[EXPIRED-TICKER] Exception checking catalog for %s: %s", ticker, e)
 
     return False
 
@@ -256,7 +390,8 @@ class CachedPosition:
     # CRITICAL FIX (2026-07-23): Entry price state tracking
     entry_price_state: str = "unknown"  # "known", "unknown", "invalid" - tracks avg_price_cents data quality
     # CRITICAL FIX (2026-07-23): Risk parameters state tracking
-    risk_params_state: str = "unknown"  # "known", "unknown" - tracks SL/TP metadata availability
+    # Valid values align with RiskParamsState: "unknown", "original_persisted", "fallback"
+    risk_params_state: str = "unknown"
     # CRITICAL FIX (2026-08-11): Schema version for risk parameter provenance.
     # Schema 2 records were written with the 2026-08-11 spread-stop fixes and are
     # only trusted as original when paired with an entry linkage.
@@ -291,6 +426,25 @@ class CachedPosition:
     entry_book_timestamp: Optional[datetime] = None
     entry_book_sequence: Optional[int] = None
     entry_book_source: Optional[str] = None
+    # CRITICAL FIX (2026-08-23): Durable edge-decay policy provenance.
+    entry_provenance_snapshot_id: Optional[str] = None
+    tp_policy_id: Optional[str] = None
+    tp_policy_version: Optional[str] = None
+    sl_policy_id: Optional[str] = None
+    sl_policy_version: Optional[str] = None
+    provenance_state: str = "UNKNOWN_PROVENANCE"
+    # CRITICAL FIX (2026-08-23): Monotonic position version for deterministic dedupe/intent keys.
+    position_version: int = 1
+    # CRITICAL FIX (2026-08-23): Canonical position key. This is the immutable
+    # identity used by cache, monitor, ledger, and reconciliation. Asset labels
+    # (XRP15M, KXXRP15M, XRP) are aliases only and must never be a primary key.
+    position_key: Optional[Any] = None
+    # CRITICAL FIX (2026-08-25): Settlement lifecycle.  Positions are retained
+    # until explicit settlement/finalization or an authoritative zero position.
+    # ``settlement_status`` transitions to ``pending`` once the market is past
+    # its close buffer and an alert is raised, but the position is not deleted.
+    settlement_status: str = "open"
+    known_aliases: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         """Initialize canonical quantity_cc from contracts if not already set."""
@@ -660,11 +814,20 @@ class KalshiPositionCache:
             logger.debug("[POSITION-CACHE] Could not register reconciliation callbacks: %s", recon_err)
         self._applied_fill_ids: OrderedDict[str, float] = OrderedDict()
         self._applied_fill_ids_max = 10000  # Max fill_ids to track (fills are unique and don't expire)
+        # 2026-08-23: Persist applied fill ids so a process restart does not re-apply
+        # durable fills and double-count exposure / PnL.
+        self._applied_fill_ids_path = Path("data") / "kalshi_applied_fill_ids.json"
+        self._load_applied_fill_ids()
 
         # CRITICAL 2026-08-09: Fail-closed reconciliation gating. If exchange/ledger/cache
         # signed-YES exposure diverges for a ticker, new entry orders are blocked until
         # the mismatch is resolved. Exits are still allowed so positions can be closed.
         self._reconciliation_halted: Dict[str, bool] = {}
+
+        # Settled/finalized markets: the position is closed by settlement and should
+        # not be rebuilt from the fills ledger.  Populated by ``on_market_settlement``
+        # and used by ``_is_expired_ticker`` to decide when a position can be removed.
+        self._settled_tickers: Set[str] = set()
 
         # 2026-08-12/13: Latest known signed-YES exposure and sync timestamp per
         # ticker, populated by REST sync and used by the per-fill
@@ -688,6 +851,17 @@ class KalshiPositionCache:
         self._mutex = asyncio.Lock()
         # PRODUCTION FIX: Pending TP targets keyed by client_order_id for fill-time lookup
         self._pending_tp_targets: Dict[str, Dict[str, Any]] = {}
+        # CRITICAL FIX (2026-08-22): Persist pending TP targets so entry book/model
+        # provenance survives a process restart.  Without this, rest_sync positions
+        # rebuilt from the fills_ledger cannot recover AT_FILL spread-stop invariants
+        # and model-invalidation exits are blocked.
+        self._pending_tp_targets_path = Path("data") / "kalshi_pending_tp_targets.json"
+        self._load_pending_tp_targets()
+        # 2026-08-25: Watermark for this process instance. Fills whose ledger
+        # record was created before this cache started are durable state from a
+        # previous process and must not be re-applied (they will be rebuilt by
+        # the reconciler from the fills_ledger/exchange REST snapshot).
+        self._started_at = _time.time()
         # PRODUCTION FIX: Map Kalshi order_id -> client_tag for fill-to-intent linkage
         # This is needed because HTTP fills don't include client_order_id from Kalshi API
         self._order_id_to_client_tag: Dict[str, str] = {}
@@ -916,8 +1090,15 @@ class KalshiPositionCache:
         )
 
         # 2026-08-13: Confirmed order/fill contradiction (intent vs execution side)
-        # is a fail-closed condition: halt immediately.
-        if fill_record is not None and getattr(fill_record, 'side_conflict', False):
+        # is a fail-closed condition: halt immediately.  Only an exposure mismatch
+        # (signed-YES delta diverges from intent) is a true conflict; a counterparty
+        # side-label mismatch with matching exposure is a reporting artifact.
+        _exposure_mismatch = getattr(fill_record, 'exposure_mismatch', None)
+        _side_conflict = getattr(fill_record, 'side_conflict', False)
+        _has_exposure_mismatch = _exposure_mismatch is True or (
+            _exposure_mismatch is None and _side_conflict
+        )
+        if fill_record is not None and _has_exposure_mismatch:
             logger.critical(
                 "[INTENT-EXECUTION-SIDE-CONFLICT-HALT] ticker=%s fill_id=%s "
                 "execution_outcome_side=%s intent_target_side=%s. Halting new entries for this ticker.",
@@ -959,6 +1140,177 @@ class KalshiPositionCache:
         New entry orders should be rejected while this is True. Exits are not blocked.
         """
         return bool(self._reconciliation_halted.get(ticker, False))
+
+    def _upsert_monitor_position(
+        self,
+        cached_position: CachedPosition,
+        client_order_id: Optional[str],
+        fill_id: Optional[str],
+        fill_source: str,
+        is_exit: bool,
+        price_cents: int,
+    ) -> None:
+        """Build a Position from a CachedPosition and upsert it into the monitor.
+
+        This is the single path for creating or updating a monitored position
+        after a fill.  It preserves runtime state and provenance using
+        PositionMonitor.upsert_position.
+        """
+        try:
+            from merid.position_management.position_monitor import get_position_monitor
+            from merid.position_management.position import Position, PositionSide, TrailingType
+
+            monitor = get_position_monitor()
+
+            side = cached_position.side
+            market_id = cached_position.market_id
+            side_enum = PositionSide.YES if (side or "").lower() == "yes" else PositionSide.NO
+
+            # TP/SL target resolution: client_order_id, then fill_id, then cached fields.
+            tp_targets = {}
+            if client_order_id:
+                tp_targets = self._pending_tp_targets.get(client_order_id, {}) or {}
+
+            # Trailing stop profile config
+            trailing_distance_cents = 5
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                if is_profile_active():
+                    adapter = get_active_profile()
+                    profile = adapter.profile
+                    trailing_distance_cents = getattr(profile, "trailing_stop_trailing_distance_cents", 5)
+            except Exception:
+                pass
+
+            # Mandatory profit target (same logic as the original builder)
+            mandatory_tp_price = None
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                if is_profile_active():
+                    adapter = get_active_profile()
+                    profile = adapter.profile
+                    if getattr(profile, "mandatory_profit_exit_enabled", False):
+                        if price_cents < getattr(profile, "mandatory_profit_exit_threshold_low_cents", 30):
+                            profit_pct = getattr(profile, "mandatory_profit_exit_target_pct_low", 0.30)
+                        elif price_cents < getattr(profile, "mandatory_profit_exit_threshold_high_cents", 50):
+                            profit_pct = getattr(profile, "mandatory_profit_exit_target_pct_mid", 0.25)
+                        else:
+                            profit_pct = getattr(profile, "mandatory_profit_exit_target_pct_high", 0.20)
+                        mandatory_tp_price = price_cents + int((100 - price_cents) * profit_pct)
+            except Exception:
+                pass
+
+            tp_r = tp_targets.get("tp_r", 1.0) if tp_targets.get("tp_r") is not None else 1.0
+            sl_original = tp_targets.get("sl_price")
+            if sl_original is not None:
+                sl_enabled = bool(tp_targets.get("sl_enabled", True))
+            elif cached_position.stop_loss_price_cents is not None:
+                sl_original = cached_position.stop_loss_price_cents
+                sl_enabled = bool(cached_position.stop_loss_enabled)
+            else:
+                sl_enabled = bool(tp_targets.get("sl_enabled", True))
+            final_sl_price = sl_original if (sl_enabled and sl_original is not None) else None
+
+            final_tp_price = (
+                mandatory_tp_price
+                or tp_targets.get("tp_price")
+                or cached_position.take_profit_price_cents
+            )
+
+            # Scale-out target
+            risk_cents = abs(price_cents - final_sl_price) if final_sl_price is not None else 0
+            if final_sl_price is not None and risk_cents > 0:
+                scale_out_price = price_cents + int(risk_cents * 1.5)
+            elif final_tp_price and final_tp_price > price_cents:
+                scale_out_price = price_cents + int((final_tp_price - price_cents) * 0.5)
+            else:
+                scale_out_price = price_cents + 3
+            if tp_targets.get("tp_price"):
+                scale_out_price = price_cents + int((tp_targets.get("tp_price") - price_cents) * 0.75)
+
+            # 2026-08-23: Trust the CachedPosition's provenance if it is already
+            # known.  A residual position after a partial exit, or an add-to
+            # position, must keep the original entry's original_persisted state so
+            # its stop-loss remains active.  Only fall back to live-fill inference
+            # when the cached record is still unknown.
+            cached_risk_state = getattr(cached_position, "risk_params_state", "unknown")
+            if cached_risk_state in ("original_persisted", "fallback"):
+                monitor_risk_params_state = cached_risk_state
+            else:
+                has_entry_linkage = bool(
+                    client_order_id or fill_id or cached_position.client_order_id or cached_position.entry_fill_id
+                )
+                is_trusted_live_fill = (
+                    has_entry_linkage
+                    and fill_id
+                    and fill_source in ("ws", "http_poller", "alpha")
+                )
+                monitor_risk_params_state = "original_persisted" if is_trusted_live_fill else "unknown"
+
+            series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
+
+            # Size is exact fractional contracts from canonical quantity_cc.
+            size_fp = Decimal(cached_position.quantity_cc) / Decimal("100") if cached_position.quantity_cc else Decimal("0")
+
+            monitor_position = Position(
+                position_id=market_id,
+                market_id=market_id,
+                series_ticker=series_ticker,
+                side=side_enum,
+                size=size_fp,
+                avg_entry_price_cents=cached_position.avg_price_cents,
+                opened_at=cached_position.entry_fill_timestamp or datetime.now(timezone.utc),
+                take_profit_price_cents=final_tp_price,
+                stop_loss_enabled=sl_enabled and final_sl_price is not None,
+                stop_loss_price_cents=final_sl_price,
+                risk_params_state=monitor_risk_params_state,
+                risk_params_schema_version=2,
+                trailing_type=TrailingType.FIXED_CENTS,
+                trailing_param=trailing_distance_cents,
+                scale_out_price_cents=scale_out_price,
+                exit_policy_id=client_order_id or fill_id or "unknown",
+                vol_regime=cached_position.vol_regime or "unknown",
+                confidence=cached_position.confidence or "unknown",
+                thesis_side=(side or "").lower(),
+                outcome_side=(side or "").lower(),
+                book_side=cached_position.book_side or "ask",
+                entry_edge_pct=tp_targets.get("edge_pct") if tp_targets.get("edge_pct") is not None else cached_position.entry_edge_pct,
+                fill_source=fill_source or cached_position.fill_source or "ws",
+                entry_signal_id=tp_targets.get("entry_signal_id") or client_order_id or fill_id or "unknown",
+                entry_model=tp_targets.get("entry_model") or cached_position.entry_model,
+                entry_model_version=tp_targets.get("entry_model_version") or cached_position.entry_model_version,
+                entry_model_probability=tp_targets.get("entry_model_probability") or cached_position.entry_model_probability,
+                entry_market_probability=tp_targets.get("entry_market_probability") or cached_position.entry_market_probability,
+                entry_edge=tp_targets.get("entry_edge") or cached_position.entry_edge,
+                entry_book_snapshot_id=tp_targets.get("entry_book_snapshot_id") or cached_position.entry_book_snapshot_id,
+                entry_fill_id=cached_position.entry_fill_id or fill_id,
+                entry_order_id=tp_targets.get("entry_order_id") or client_order_id or cached_position.client_order_id,
+                entry_execution_mode=tp_targets.get("entry_execution_mode") or cached_position.entry_execution_mode,
+                client_order_id=client_order_id or cached_position.client_order_id,
+                entry_intent_id=client_order_id or fill_id or cached_position.client_order_id,
+                entry_executable_bid_cents=cached_position.entry_executable_bid_cents,
+                entry_executable_ask_cents=cached_position.entry_executable_ask_cents,
+                entry_book_capture_quality=cached_position.entry_book_capture_quality,
+                entry_fill_price_cents=cached_position.entry_fill_price_cents or price_cents,
+                entry_fill_timestamp=cached_position.entry_fill_timestamp,
+                entry_book_timestamp=cached_position.entry_book_timestamp,
+                entry_book_sequence=cached_position.entry_book_sequence,
+                entry_book_source=cached_position.entry_book_source,
+                entry_provenance_snapshot_id=cached_position.entry_provenance_snapshot_id,
+                provenance_state=cached_position.provenance_state,
+                position_version=cached_position.position_version or 1,
+                position_key=cached_position.position_key,
+                known_aliases=cached_position.known_aliases,
+            )
+
+            monitor.upsert_position(monitor_position, caller="position_cache")
+        except Exception as monitor_err:
+            logger.error(
+                "[POSITION-MONITOR-INTEGRATION] CRITICAL: Failed to upsert position to monitor: %s",
+                monitor_err,
+                exc_info=True,
+            )
+            raise RuntimeError(f"Failed to upsert position to monitor: {monitor_err}")
 
     def _infer_thesis_side_from_fill_history(self, market_id: str) -> Optional[str]:
         """Infer thesis_side from fill history for positions with unknown side.
@@ -1047,15 +1399,17 @@ class KalshiPositionCache:
     def register_tp_targets(
         self,
         client_order_id: str,
+        ticker: Optional[str] = None,
+        asset: Optional[str] = None,
+        outcome_side: Optional[str] = None,
         take_profit_price_cents: Optional[int] = None,
         take_profit_r_multiple: Optional[float] = None,
         stop_loss_price_cents: Optional[int] = None,
-        stop_loss_enabled: bool = True,  # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch
-        entry_price_cents: Optional[int] = None,  # CRITICAL FIX (2026-07-23): Persist entry price at order placement
-        vol_regime: Optional[str] = None,  # CRITICAL FIX (2026-08-01): Persist volatility regime at order placement
-        confidence: Optional[str] = None,  # CRITICAL FIX (2026-08-01): Persist signal confidence at order placement
-        entry_edge_pct: Optional[float] = None,  # CRITICAL FIX (2026-08-03): Persist signal edge for dynamic TP adjustment
-        # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution
+        stop_loss_enabled: bool = True,
+        entry_price_cents: Optional[int] = None,
+        vol_regime: Optional[str] = None,
+        confidence: Optional[str] = None,
+        entry_edge_pct: Optional[float] = None,
         entry_signal_id: Optional[str] = None,
         entry_model: Optional[str] = None,
         entry_model_version: Optional[str] = None,
@@ -1064,32 +1418,48 @@ class KalshiPositionCache:
         entry_edge: Optional[float] = None,
         entry_book_snapshot_id: Optional[str] = None,
         entry_execution_mode: Optional[str] = None,
+        # CRITICAL FIX (2026-08-23): Edge-decay policy provenance.
+        exit_policy_id: Optional[str] = None,
+        window_resolution_id: Optional[str] = None,
+        edge_decay_model: str = "none",
+        edge_decay_parameters: Optional[Dict[str, Any]] = None,
+        tp_capture_fraction: Optional[float] = None,
+        minimum_remaining_edge: Optional[float] = None,
+        sl_parameters: Optional[Dict[str, Any]] = None,
+        market_close_time: Optional[datetime] = None,
+        tp_policy_id: Optional[str] = None,
+        sl_policy_id: Optional[str] = None,
+        tp_policy_version: Optional[str] = None,
+        sl_policy_version: Optional[str] = None,
+        order_intent_id: Optional[str] = None,
+        max_hold_seconds: Optional[int] = None,
     ) -> None:
-        """Register TP targets and entry price for an order before it fills.
+        """Register TP targets, edge-decay policy and entry provenance for an order before it fills.
 
         Called by order_router when placing orders with TP targets.
         Targets are looked up by client_order_id when fills arrive.
-
-        P1 fix: each entry has a registered_at timestamp so stale targets
-        from canceled / rejected orders can be reaped (see _purge_stale_tp_targets).
-
-        CRITICAL FIX (2026-07-23): Added entry_price_cents to persist intended entry price
-        at order placement time. This provides a fallback if REST API doesn't provide
-        avg_price_cents or if fill data is missing.
-
-        CRITICAL FIX (2026-08-01): Added vol_regime and confidence to persist market conditions
-        at order placement time. This ensures positions have valid metadata even if fills_ledger lookup fails.
         """
+        # Canonicalize outcome_side; never silently default to YES.
+        if outcome_side is not None:
+            try:
+                outcome_side = canonical_outcome_side(outcome_side).value
+            except PositionDataError:
+                logger.warning(
+                    "[POSITION-CACHE-TP-REGISTER] client_order_id=%s: invalid outcome_side=%r; skipping provenance snapshot",
+                    client_order_id,
+                    outcome_side,
+                )
+                outcome_side = None
+
         self._pending_tp_targets[client_order_id] = {
             "tp_price": take_profit_price_cents,
             "tp_r": take_profit_r_multiple,
             "sl_price": stop_loss_price_cents,
             "sl_enabled": stop_loss_enabled,
-            "entry_price": entry_price_cents,  # CRITICAL FIX (2026-07-23): Persist entry price
-            "vol_regime": vol_regime,  # CRITICAL FIX (2026-08-01): Persist volatility regime
-            "confidence": confidence,  # CRITICAL FIX (2026-08-01): Persist signal confidence
-            "edge_pct": entry_edge_pct,  # CRITICAL FIX (2026-08-03): Persist signal edge
-            # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution
+            "entry_price": entry_price_cents,
+            "vol_regime": vol_regime,
+            "confidence": confidence,
+            "edge_pct": entry_edge_pct,
             "entry_signal_id": entry_signal_id,
             "entry_model": entry_model,
             "entry_model_version": entry_model_version,
@@ -1098,11 +1468,63 @@ class KalshiPositionCache:
             "entry_edge": entry_edge,
             "entry_book_snapshot_id": entry_book_snapshot_id,
             "entry_execution_mode": entry_execution_mode,
+            # CRITICAL FIX (2026-08-22): Capture the executable entry book so
+            # reconstructed positions after restart have AT_FILL spread-stop provenance.
+            "entry_executable_bid_cents": None,
+            "entry_executable_ask_cents": None,
+            "entry_book_capture_quality": "UNAVAILABLE",
+            "entry_book_timestamp": None,
+            "entry_book_sequence": None,
+            "entry_book_source": None,
             "registered_at": _time.time(),
         }
+
+        # CRITICAL FIX (2026-08-23): Persist a durable edge-decay policy snapshot
+        # keyed by client_order_id. This survives process restarts and is re-linked
+        # to REST positions via fills / client_order_id.
+        if ENTRY_PROVENANCE_AVAILABLE and ticker and asset and outcome_side:
+            try:
+                snapshot = EntryProvenanceSnapshot(
+                    snapshot_id=f"eps_{uuid.uuid4().hex[:12]}",
+                    client_order_id=client_order_id,
+                    ticker=ticker,
+                    asset=asset,
+                    outcome_side=outcome_side,
+                    order_intent_id=order_intent_id or entry_signal_id,
+                    exit_policy_id=exit_policy_id,
+                    window_resolution_id=window_resolution_id,
+                    tp_policy_id=tp_policy_id,
+                    tp_policy_version=tp_policy_version,
+                    sl_policy_id=sl_policy_id,
+                    sl_policy_version=sl_policy_version,
+                    entry_fair_value=entry_model_probability,
+                    entry_market_value=entry_market_probability,
+                    entry_edge=entry_edge or entry_edge_pct,
+                    entry_price_cents=entry_price_cents,
+                    edge_decay_model=edge_decay_model,
+                    edge_decay_parameters=edge_decay_parameters or {},
+                    tp_capture_fraction=tp_capture_fraction
+                    if tp_capture_fraction is not None
+                    else 0.75,
+                    minimum_remaining_edge=minimum_remaining_edge
+                    if minimum_remaining_edge is not None
+                    else 0.02,
+                    sl_parameters=sl_parameters or {},
+                    market_close_time=market_close_time,
+                    tp_price_cents=take_profit_price_cents,
+                    sl_price_cents=stop_loss_price_cents,
+                    take_profit_r_multiple=take_profit_r_multiple,
+                    stop_loss_enabled=stop_loss_enabled,
+                    max_hold_seconds=max_hold_seconds,
+                )
+                get_entry_provenance_store().register(snapshot)
+            except Exception as ep_err:
+                logger.warning("[POSITION-CACHE] Failed to register entry provenance snapshot: %s", ep_err)
+
         # Opportunistic GC every 100 registrations to keep the dict bounded.
         if len(self._pending_tp_targets) % 100 == 0:
             self._purge_stale_tp_targets()
+        self._save_pending_tp_targets()
 
     def register_order_id_mapping(self, kalshi_order_id: str, client_tag: str) -> None:
         """Register Kalshi order_id -> client_tag mapping for fill-to-intent linkage.
@@ -1143,6 +1565,74 @@ class KalshiPositionCache:
         except Exception as exc:
             logger.warning("[POSITION-CACHE] Failed to load order_id -> client_tag map: %s", exc)
 
+    def _save_applied_fill_ids(self) -> None:
+        """Persist applied fill ids so a restart does not re-apply durable fills."""
+        try:
+            self._applied_fill_ids_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._applied_fill_ids_path, "w", encoding="utf-8") as f:
+                json.dump(dict(self._applied_fill_ids), f, indent=2, default=str)
+        except Exception as exc:
+            logger.warning("[POSITION-CACHE] Failed to persist applied fill ids: %s", exc)
+
+    def _load_applied_fill_ids(self) -> None:
+        """Load previously-persisted applied fill ids."""
+        try:
+            if not self._applied_fill_ids_path.exists():
+                return
+            with open(self._applied_fill_ids_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict):
+                self._applied_fill_ids.update(payload)
+                logger.debug(
+                    "[POSITION-CACHE] Loaded %d applied fill ids",
+                    len(self._applied_fill_ids),
+                )
+        except Exception as exc:
+            logger.warning("[POSITION-CACHE] Failed to load applied fill ids: %s", exc)
+
+    def _save_pending_tp_targets(self) -> None:
+        """Persist pending TP targets so entry provenance survives restarts."""
+        try:
+            self._pending_tp_targets_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._pending_tp_targets_path, "w", encoding="utf-8") as f:
+                json.dump(self._pending_tp_targets, f, indent=2, default=str)
+        except Exception as exc:
+            logger.warning("[POSITION-CACHE] Failed to persist pending TP targets: %s", exc)
+
+    def _load_pending_tp_targets(self) -> None:
+        """Load previously-persisted pending TP targets from disk."""
+        try:
+            if not self._pending_tp_targets_path.exists():
+                return
+            with open(self._pending_tp_targets_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                return
+            for coid, target in payload.items():
+                if not isinstance(target, dict):
+                    continue
+                # Restore datetime fields that were serialized as ISO strings.
+                if isinstance(target.get("entry_book_timestamp"), str):
+                    try:
+                        target["entry_book_timestamp"] = datetime.fromisoformat(
+                            target["entry_book_timestamp"].replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        pass
+                # Keep the newest registration if a duplicate is already in memory.
+                existing = self._pending_tp_targets.get(coid)
+                if existing and float(existing.get("registered_at", 0.0)) >= float(
+                    target.get("registered_at", 0.0)
+                ):
+                    continue
+                self._pending_tp_targets[coid] = target
+            logger.debug(
+                "[POSITION-CACHE] Loaded %d pending TP targets",
+                len(self._pending_tp_targets),
+            )
+        except Exception as exc:
+            logger.warning("[POSITION-CACHE] Failed to load pending TP targets: %s", exc)
+
     def _purge_stale_tp_targets(self, max_age_seconds: float = 86400.0) -> int:
         """Remove tp_target entries older than ``max_age_seconds`` (default 24h).
 
@@ -1162,6 +1652,7 @@ class KalshiPositionCache:
                 "[TP-TARGET-GC] purged %d stale TP targets (>%ds old)",
                 len(stale_ids), int(max_age_seconds),
             )
+            self._save_pending_tp_targets()
         return len(stale_ids)
 
     def discard_tp_targets(self, client_order_id: str) -> bool:
@@ -1170,7 +1661,10 @@ class KalshiPositionCache:
         Called by order_router when an order is canceled before any fill so
         the registry doesn't leak the (never-used) targets.
         """
-        return self._pending_tp_targets.pop(client_order_id, None) is not None
+        removed = self._pending_tp_targets.pop(client_order_id, None) is not None
+        if removed:
+            self._save_pending_tp_targets()
+        return removed
 
     async def on_fill(
         self,
@@ -1227,23 +1721,31 @@ class KalshiPositionCache:
             if fill_id:
                 if fill_id in self._applied_fill_ids:
                     logger.warning(
-                        "[POSITION-CACHE-IDEMPOTENCY] fill_id=%s already applied in this process - skipping",
+                        "[POSITION-CACHE-IDEMPOTENCY] fill_id=%s already applied - skipping",
                         fill_id
                     )
                     return
 
-                ledger = self._get_fills_ledger()
-                if ledger:
+                # 2026-08-25: Fail-safe for process restart. If a fill with this id
+                # already exists in the durable fills_ledger and predates this cache
+                # instance, it was applied by a previous process. Do not re-apply it;
+                # the reconciler will rebuild the position from the ledger/exchange.
+                if self._fills_ledger:
                     try:
-                        if ledger.get_fill_by_id(fill_id):
-                            logger.warning(
-                                "[POSITION-CACHE-IDEMPOTENCY] fill_id=%s already exists in durable fills ledger - skipping",
-                                fill_id
-                            )
-                            self._applied_fill_ids[fill_id] = _time.time()
-                            return
-                    except Exception as ledger_err:
-                        logger.debug("[POSITION-CACHE-IDEMPOTENCY] Durable fill_id check failed: %s", ledger_err)
+                        _ledger_fill = self._fills_ledger.get_fill_by_id(fill_id)
+                        if _ledger_fill and _ledger_fill.created_time:
+                            _fill_ts = _ledger_fill.created_time.timestamp()
+                            if _fill_ts < self._started_at - 5.0:
+                                logger.warning(
+                                    "[POSITION-CACHE-IDEMPOTENCY-LEDGER] fill_id=%s created at %.3f "
+                                    "predates this process (started %.3f) - skipping re-application",
+                                    fill_id, _fill_ts, self._started_at
+                                )
+                                self._applied_fill_ids[fill_id] = _time.time()
+                                self._save_applied_fill_ids()
+                                return
+                    except Exception as _ledger_guard_err:
+                        logger.debug("[POSITION-CACHE] Ledger predate guard failed (non-fatal): %s", _ledger_guard_err)
 
             # 2026-08-12: If a durable canonical KalshiFill record exists, prefer
             # its canonical side/action/price/yes-delta.  This prevents a caller
@@ -1918,13 +2420,42 @@ class KalshiPositionCache:
                 # CRITICAL FIX (2026-08-11): Record the captured entry executable book
                 # in the pending TP targets so fills_ledger can carry the AT_FILL book
                 # if it is still present at lookup time.
-                if client_order_id and tp_targets:
+                # CRITICAL FIX (2026-08-22): Always write the TP target back so HTTP fills
+                # that recovered client_order_id via order_id mapping still persist the
+                # AT_FILL book.  Without this, restarts lose spread-stop provenance.
+                if client_order_id:
+                    if not tp_targets:
+                        tp_targets = {}
+                        self._pending_tp_targets[client_order_id] = tp_targets
                     tp_targets["entry_executable_bid_cents"] = entry_executable_bid_cents
                     tp_targets["entry_executable_ask_cents"] = entry_executable_ask_cents
                     tp_targets["entry_book_capture_quality"] = entry_book_capture_quality
                     tp_targets["entry_book_timestamp"] = entry_book_timestamp
                     tp_targets["entry_book_sequence"] = entry_book_sequence
                     tp_targets["entry_book_source"] = entry_book_source
+                    self._save_pending_tp_targets()
+
+                    # CRITICAL FIX (2026-08-23): Persist the captured AT_FILL book in the
+                    # durable entry-provenance snapshot so REST-synced positions can recover
+                    # spread-stop invariants without depending on the in-memory TP target map.
+                    if ENTRY_PROVENANCE_AVAILABLE:
+                        try:
+                            eps = get_entry_provenance_store().get(client_order_id)
+                            if eps:
+                                eps.entry_fill_price_cents = price_cents
+                                eps.entry_fill_timestamp = datetime.now(timezone.utc)
+                                eps.entry_executable_bid_cents = entry_executable_bid_cents
+                                eps.entry_executable_ask_cents = entry_executable_ask_cents
+                                eps.entry_book_capture_quality = entry_book_capture_quality
+                                eps.entry_book_timestamp = entry_book_timestamp
+                                eps.entry_book_sequence = entry_book_sequence
+                                eps.entry_book_source = entry_book_source
+                                get_entry_provenance_store().register(eps)
+                        except Exception as ep_book_err:
+                            logger.debug(
+                                "[POSITION-CACHE] Could not persist AT_FILL book to provenance store: %s",
+                                ep_book_err,
+                            )
 
                 # A missing TP can be replaced with a default profit target.
                 if tp_price is None:
@@ -1954,6 +2485,34 @@ class KalshiPositionCache:
                     if is_trusted_live_entry
                     else "unknown"
                 )
+
+                # CRITICAL FIX (2026-08-23): Resolve durable edge-decay policy snapshot.
+                provenance_snapshot = None
+                provenance_state = ProvenanceState.UNKNOWN_PROVENANCE
+                fill_order_id = getattr(fill_record, 'order_id', None) if fill_record else None
+                if client_order_id and ENTRY_PROVENANCE_AVAILABLE:
+                    try:
+                        provenance_snapshot = get_entry_provenance_store().get(client_order_id)
+                        if provenance_snapshot:
+                            provenance_state = ProvenanceState.PROVENANCE_RECOVERED
+                            # Stamp actual fill time on the snapshot for edge-decay
+                            # and executable edge calculations.
+                            provenance_snapshot.entry_fill_time = datetime.now(timezone.utc)
+                            # If the caller gave us a fill ID, stamp the snapshot
+                            # order intent ID for audit.
+                            if fill_id:
+                                provenance_snapshot.order_intent_id = (
+                                    provenance_snapshot.order_intent_id or client_order_id or fill_id
+                                )
+                        # Link the snapshot to this fill's order_id/fill_id for later
+                        # REST provenance recovery.
+                        get_entry_provenance_store().register_fill_linkage(
+                            client_order_id=client_order_id,
+                            order_id=fill_order_id,
+                            fill_id=fill_id,
+                        )
+                    except Exception as ep_lookup_err:
+                        logger.debug("[POSITION-CACHE] Provenance snapshot lookup failed: %s", ep_lookup_err)
 
                 new_position = CachedPosition(
                     market_id=market_id,
@@ -2007,6 +2566,13 @@ class KalshiPositionCache:
                     ratchet_activated=False,
                     ratchet_floor_price_cents=None,
                     ratchet_activation_timestamp=None,
+                    # CRITICAL FIX (2026-08-23): Durable edge-decay policy provenance.
+                    entry_provenance_snapshot_id=provenance_snapshot.snapshot_id if provenance_snapshot else None,
+                    tp_policy_id=(provenance_snapshot.tp_policy_id if provenance_snapshot else None),
+                    tp_policy_version=(provenance_snapshot.tp_policy_version if provenance_snapshot else None),
+                    sl_policy_id=(provenance_snapshot.sl_policy_id if provenance_snapshot else None),
+                    sl_policy_version=(provenance_snapshot.sl_policy_version if provenance_snapshot else None),
+                    provenance_state=provenance_state.value,
                 )
 
                 # Phase 5.4: Record entry in RoundTripMonitor with calibration data
@@ -2045,6 +2611,12 @@ class KalshiPositionCache:
                 except Exception as rt_err:
                     logger.warning("[POSITION-CACHE] Failed to record entry in RoundTripMonitor: %s", rt_err)
                 self._positions[market_id] = new_position
+
+                # CRITICAL FIX (2026-08-23): Attach canonical position key to the cached
+                # position. Asset aliases (XRP15M, KXXRP15M) are not identities.
+                if POSITION_KEY_AVAILABLE:
+                    new_position.position_key = PositionKey(market_ticker=market_id)
+                    new_position.known_aliases = [market_id]
 
                 # CRITICAL FIX: Add position to PositionMonitor for TP/SL enforcement
                 # This wires the position cache into the exit policy system
@@ -2102,201 +2674,17 @@ class KalshiPositionCache:
                     except Exception as hedge_err:
                         logger.warning("[POSITION-CACHE] Failed to trigger hedging: %s", hedge_err)
 
-                # Add position to PositionMonitor for TP/SL enforcement
-                try:
-                    from merid.position_management.position_monitor import get_position_monitor
-                    from merid.position_management.position import Position, PositionSide, TrailingType
-
-                    monitor = get_position_monitor()
-
-                    # Convert CachedPosition to Position for monitoring
-                    side_enum = PositionSide.YES if side.lower() == "yes" else PositionSide.NO
-
-                    # CRITICAL: Configure trailing stop based on profile configuration
-                    # Read from kalshi_crypto_15m.yaml trailing_stop section
-                    trailing_enabled = False
-                    trailing_distance_cents = 5
-                    min_profit_cents = 12  # Default from profile (align with 2026 research)
-                    activation_delay_sec = 30
-
-                    try:
-                        from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
-                        if is_profile_active():
-                            adapter = get_active_profile()
-                            profile = adapter.profile
-                            trailing_enabled = profile.trailing_stop_enabled
-                            trailing_distance_cents = profile.trailing_stop_trailing_distance_cents
-                            min_profit_cents = profile.trailing_stop_min_profit_cents
-                            activation_delay_sec = profile.trailing_stop_activation_delay_sec
-                    except Exception as ts_err:
-                        logger.debug("[POSITION-CACHE] Could not read trailing stop config: %s", ts_err)
-
-                    # CRITICAL: Mandatory profit exit (2026-07-08)
-                    # Calculate profit target based on entry price and profile configuration
-                    # This ensures quick wins and forces entries in sweet spot (10-75c)
-                    mandatory_profit_enabled = False
-                    profit_target_pct = 0.25  # Default 25%
-                    try:
-                        from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
-                        if is_profile_active():
-                            adapter = get_active_profile()
-                            profile = adapter.profile
-                            mandatory_profit_enabled = profile.mandatory_profit_exit_enabled
-
-                            # Determine profit target based on entry price band
-                            if price_cents < profile.mandatory_profit_exit_threshold_low_cents:
-                                # Entry 10-30c: 30% profit target (quick flips)
-                                profit_target_pct = profile.mandatory_profit_exit_target_pct_low
-                            elif price_cents < profile.mandatory_profit_exit_threshold_high_cents:
-                                # Entry 30-50c: 25% profit target
-                                profit_target_pct = profile.mandatory_profit_exit_target_pct_mid
-                            else:
-                                # Entry 50-75c: 20% profit target
-                                profit_target_pct = profile.mandatory_profit_exit_target_pct_high
-                    except Exception as mpe_err:
-                        logger.debug("[POSITION-CACHE] Could not read mandatory profit exit config: %s", mpe_err)
-
-                    # Calculate mandatory profit target price
-                    # CRITICAL FIX (2026-08-12): profit target is a % of MAX GAIN (100 - entry),
-                    # not a % of entry price. Old formula produced tiny 3-4c targets for high entries.
-                    mandatory_tp_price = None
-                    if mandatory_profit_enabled:
-                        profit_cents = int((100 - price_cents) * profit_target_pct)
-                        mandatory_tp_price = price_cents + profit_cents
-                        logger.info(
-                            "[MANDATORY-PROFIT-EXIT] Set mandatory profit target: entry=%dc target=%dc profit_pct=%.0f%% profit_cents=%d",
-                            price_cents, mandatory_tp_price, profit_target_pct * 100, profit_cents
-                        )
-
-                    tp_r = tp_targets.get("tp_r", 1.0)
-                    sl_original = tp_targets.get("sl_price")
-                    sl_enabled = bool(tp_targets.get("sl_enabled", True))
-
-                    # CRITICAL FIX (2026-08-11): Stop-loss must come from the original
-                    # entry intent.  Do not synthesise a default SL inside the spread.
-                    if sl_enabled and sl_original is not None:
-                        sl_price = sl_original
-                    else:
-                        sl_price = None
-
-                    risk_cents = abs(price_cents - sl_price) if sl_price is not None else 0
-
-                    # CRITICAL: Clamp trailing stops to mandatory FIXED_CENTS mode
-                    # This ensures all positions have trailing stop protection regardless of profile config
-                    # Trailing stops are mandatory for production safety
-                    trailing_type = TrailingType.FIXED_CENTS
-                    trailing_param = trailing_distance_cents  # e.g., 5 cents
-
-                    # CRITICAL: Use mandatory profit target if enabled (2026-07-08)
-                    # This overrides the agent's TP to ensure quick wins
-                    final_tp_price = mandatory_tp_price if mandatory_profit_enabled and mandatory_tp_price else tp_targets.get("tp_price")
-
-                    # CRITICAL FIX (2026-08-12): Do not invent a price TP from max gain.
-                    # If no registered TP was provided by the trusted entry path,
-                    # let the Position __post_init__ fallback decide using the entry model.
-                    if final_tp_price is None:
-                        logger.debug(
-                            "[POSITION-MONITOR-INTEGRATION] No TP registered for %s (entry=%dc side=%s) - relying on Position fallback",
-                            market_id, price_cents, side
-                        )
-
-                    # Research: Configure scale-out target at 1.5-2R (Pay Yourself strategy)
-                    # Close 50% at 1.5-2R to lock profits while letting "runner" capture larger moves
-                    scale_out_r = 1.5  # Scale out at 1.5R
-                    if sl_price is not None and risk_cents > 0:
-                        scale_out_price = price_cents + int(risk_cents * scale_out_r)
-                    elif final_tp_price and final_tp_price > price_cents:
-                        # If no SL, scale out at 50% of the TP distance
-                        scale_out_price = price_cents + int((final_tp_price - price_cents) * 0.5)
-                    else:
-                        scale_out_price = price_cents + 3  # Sensible minimum
-                    if tp_targets.get("tp_price"):
-                        # If TP is set, scale out at 75% of TP (between 1.5-2R)
-                        scale_out_price = price_cents + int((tp_targets.get("tp_price") - price_cents) * 0.75)
-
-                    # CRITICAL FIX (2026-08-13): Trusted live entries carry ORIGINAL_PERSISTED
-                    # provenance independent of whether a stop-loss is attached.  SL is optional;
-                    # a TP-only trusted position is still eligible for take-profit exits.
-                    final_sl_price = tp_targets.get("sl_price") if (sl_enabled and tp_targets.get("sl_price") is not None) else None
-                    has_entry_linkage = bool(client_order_id or fill_id)
-                    is_trusted_live_entry = (
-                        has_entry_linkage
-                        and (not is_exit)
-                        and fill_id
-                        and fill_source in ("ws", "http_poller", "alpha")
-                    )
-                    monitor_risk_params_state = (
-                        "original_persisted" if is_trusted_live_entry else "unknown"
-                    )
-
-                    # Extract series_ticker from market_id (e.g., KXBTC15M-26JUL162015-15 -> KXBTC15M)
-                    series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
-
-                    monitor_position = Position(
-                        position_id=market_id,  # Use market_id as position_id
-                        market_id=market_id,
-                        series_ticker=series_ticker,  # CRITICAL: Required for asset extraction
-                        side=side_enum,
-                        size=contracts,
-                        avg_entry_price_cents=price_cents,
-                        take_profit_price_cents=final_tp_price,  # Use mandatory TP or fallback
-                        stop_loss_enabled=sl_enabled and final_sl_price is not None,
-                        stop_loss_price_cents=final_sl_price,  # Use SL from original intent only
-                        risk_params_state=monitor_risk_params_state,
-                        risk_params_schema_version=2,
-                        trailing_type=trailing_type,
-                        trailing_param=trailing_param,
-                        scale_out_price_cents=scale_out_price,  # Research: Scale-out at 1.5-2R
-                        exit_policy_id=client_order_id or fill_id or "unknown",
-                        # CRITICAL FIX (2026-08-01): Pass entry metadata to PositionMonitor
-                        vol_regime=new_position.vol_regime or "unknown",
-                        confidence=new_position.confidence or "unknown",
-                        thesis_side=side.lower(),
-                        outcome_side=side.lower(),
-                        book_side="ask",
-                        # CRITICAL FIX (2026-08-07): Wire real signal edge for dynamic TP adjustment
-                        # Priority: tp_targets edge_pct (from intent) > position field > default
-                        entry_edge_pct=tp_targets.get("edge_pct") if tp_targets.get("edge_pct") is not None else new_position.entry_edge_pct,
-                        # CRITICAL FIX (2026-08-09): Track entry provenance for edge-decay guards
-                        fill_source=fill_source or "ws",
-                        entry_signal_id=tp_targets.get("entry_signal_id") or client_order_id or fill_id or "unknown",
-                        # CRITICAL FIX (2026-08-10): Durable entry-model provenance
-                        entry_model=tp_targets.get("entry_model"),
-                        entry_model_version=tp_targets.get("entry_model_version"),
-                        entry_model_probability=tp_targets.get("entry_model_probability"),
-                        entry_market_probability=tp_targets.get("entry_market_probability"),
-                        entry_edge=tp_targets.get("entry_edge"),
-                        entry_book_snapshot_id=tp_targets.get("entry_book_snapshot_id"),
-                        entry_fill_id=fill_id,
-                        entry_order_id=tp_targets.get("entry_order_id") or client_order_id,
-                        entry_execution_mode=tp_targets.get("entry_execution_mode"),
-                        client_order_id=client_order_id,
-                        entry_intent_id=client_order_id or fill_id,
-                        # CRITICAL FIX (2026-08-11): Executable entry book for spread-only exit invariants
-                        entry_executable_bid_cents=entry_executable_bid_cents,
-                        entry_executable_ask_cents=entry_executable_ask_cents,
-                        entry_book_capture_quality=entry_book_capture_quality,
-                        entry_fill_price_cents=price_cents,
-                        entry_fill_timestamp=datetime.now(timezone.utc),
-                        entry_book_timestamp=entry_book_timestamp,
-                        entry_book_sequence=entry_book_sequence,
-                        entry_book_source=entry_book_source,
-                    )
-
-                    monitor.add_position(monitor_position)
-                    logger.info(
-                        "[POSITION-MONITOR-INTEGRATION] Added position to monitor: market=%s side=%s size=%d TP=%s SL=%s trail=%sR",
-                        market_id, side, contracts,
-                        f"{final_tp_price}c" if final_tp_price is not None else "None",
-                        f"{final_sl_price}c" if final_sl_price is not None else "None",
-                        trailing_param
-                    )
-                except Exception as monitor_err:
-                    logger.error("[POSITION-MONITOR-INTEGRATION] CRITICAL: Failed to add position to monitor: %s", monitor_err, exc_info=True)
-                    # CRITICAL FIX (2026-07-17): Do not silently swallow position monitor failures
-                    # If a position cannot be added to the monitor, it will ride to settlement without exit enforcement
-                    # This is a critical safety violation. Re-raise to surface the issue.
-                    raise RuntimeError(f"Failed to add position to monitor - exit policies will not execute: {monitor_err}")
+                # Add/upsert position in PositionMonitor for TP/SL enforcement.
+                # 2026-08-23: Centralized in _upsert_monitor_position so every fill
+                # (new, added-to, or residual) uses the same provenance logic.
+                self._upsert_monitor_position(
+                    cached_position=new_position,
+                    client_order_id=client_order_id,
+                    fill_id=fill_id,
+                    fill_source=fill_source,
+                    is_exit=bool(is_exit),
+                    price_cents=price_cents,
+                )
 
                 # Log entry timing for audit (correlate with [SCHEDULER-CHECK] for full timing metrics)
                 # Calculate TCA metrics: arrival price slippage and early cost
@@ -2417,6 +2805,7 @@ class KalshiPositionCache:
                         evict_count = len(self._applied_fill_ids) // 2
                         for _ in range(evict_count):
                             self._applied_fill_ids.popitem(last=False)
+                    self._save_applied_fill_ids()
             else:
                 # Update existing
                 pre_contracts = position.contracts
@@ -2473,13 +2862,13 @@ class KalshiPositionCache:
                         logger.debug("[POSITION-CACHE] Could not validate exit fill invariant: %s", invariant_err)
 
                 # Mark this fill as applied in the in-memory idempotency set.
-                # The durable duplicate check is done at the top of on_fill.
                 if fill_id:
                     self._applied_fill_ids[fill_id] = _time.time()
                     if len(self._applied_fill_ids) > self._applied_fill_ids_max:
                         evict_count = len(self._applied_fill_ids) // 2
                         for _ in range(evict_count):
                             self._applied_fill_ids.popitem(last=False)
+                    self._save_applied_fill_ids()
 
                 position.apply_fill(contracts, price_cents, fee_cents, side, action=action, is_exit=is_exit, quantity_cc=quantity_cc)
                 logger.debug(
@@ -2500,6 +2889,19 @@ class KalshiPositionCache:
                     pre_position_yes=pre_position_yes,
                 )
 
+                # 2026-08-23: Keep PositionMonitor in sync on every fill (partial adds,
+                # partial closes, and residual positions).  The monitor's upsert
+                # preserves runtime state and provenance.
+                if position.quantity_cc > 0:
+                    self._upsert_monitor_position(
+                        cached_position=position,
+                        client_order_id=client_order_id,
+                        fill_id=fill_id,
+                        fill_source=fill_source,
+                        is_exit=bool(is_exit),
+                        price_cents=price_cents,
+                    )
+
                 # P0 Task 2: cancel resting brackets when position is fully closed
                 # so stale TP/SL orders don't keep sitting on the book and trigger
                 # phantom re-entry.
@@ -2515,10 +2917,15 @@ class KalshiPositionCache:
                             )
                     # P1 fix: drop the now-unneeded TP target entry so registry
                     # doesn't grow unbounded across long-running sessions.
+                    # 2026-08-22: Persist the removal so the on-disk registry stays
+                    # in sync and does not resurrect closed positions on restart.
+                    tp_removed = False
                     if client_order_id:
-                        self._pending_tp_targets.pop(client_order_id, None)
+                        tp_removed = self._pending_tp_targets.pop(client_order_id, None) is not None or tp_removed
                     if position.client_order_id:
-                        self._pending_tp_targets.pop(position.client_order_id, None)
+                        tp_removed = self._pending_tp_targets.pop(position.client_order_id, None) is not None or tp_removed
+                    if tp_removed:
+                        self._save_pending_tp_targets()
 
                     # CRITICAL FIX: Remove position from PositionMonitor when closed
                     # This ensures the monitor doesn't track closed positions
@@ -2671,10 +3078,14 @@ class KalshiPositionCache:
                         )
                 # P1 fix: drop the now-unneeded TP target entry so registry
                 # doesn't grow unbounded across long-running sessions.
+                # 2026-08-22: Persist the removal so the on-disk registry stays in sync.
+                tp_removed = False
                 if client_order_id:
-                    self._pending_tp_targets.pop(client_order_id, None)
+                    tp_removed = self._pending_tp_targets.pop(client_order_id, None) is not None or tp_removed
                 if position.client_order_id:
-                    self._pending_tp_targets.pop(position.client_order_id, None)
+                    tp_removed = self._pending_tp_targets.pop(position.client_order_id, None) is not None or tp_removed
+                if tp_removed:
+                    self._save_pending_tp_targets()
 
             # 2026 Research-Based Risk Management: Update agent grid session tracking
             # This integrates session limit, consecutive loss pause, and session risk cap
@@ -3180,8 +3591,11 @@ class KalshiPositionCache:
         thesis_side = None
         entry_intent_id = None
         fill_source = "alpha"
+        first_fill: Any = None
 
         for fill in sorted_fills:
+            if first_fill is None:
+                first_fill = fill
             # CRITICAL 2026-08-09: Use canonical centi-contracts. Fallback to count_fp legacy.
             fill_quantity_cc = fill.quantity_cc or 0
             if not fill_quantity_cc and fill.count_fp:
@@ -3237,7 +3651,39 @@ class KalshiPositionCache:
         thesis_side, quantity_cc = from_signed_yes_exposure(yes_exposure)
         contracts = int(quantity_cc / 100)
 
-        # Build reconstructed position
+        # CRITICAL FIX (2026-08-22): Recover full entry provenance from the first
+        # entry fill and the persisted TP-target registry.  This allows a position
+        # rebuilt from the fills_ledger after a restart to pass the spread-stop and
+        # model-invalidation exit gates (ORIGINAL_PERSISTED, schema >= 2, AT_FILL book).
+        tp_targets: Dict[str, Any] = {}
+        client_order_id: Optional[str] = None
+        if first_fill is not None:
+            client_order_id = getattr(first_fill, 'client_order_id', None)
+            # HTTP fills sometimes lose client_order_id; recover via order_id mapping.
+            if not client_order_id and getattr(first_fill, 'order_id', None):
+                client_order_id = self._order_id_to_client_tag.get(first_fill.order_id)
+            if client_order_id:
+                tp_targets = self._pending_tp_targets.get(client_order_id, {}) or {}
+
+        # Determine whether we have a trusted AT_FILL book from the persisted registry.
+        has_at_fill_book = (
+            tp_targets.get("entry_book_capture_quality") == "AT_FILL"
+            and tp_targets.get("entry_executable_bid_cents") is not None
+            and tp_targets.get("entry_executable_ask_cents") is not None
+        )
+        risk_params_state = "unknown"
+        risk_params_schema_version = 1
+        if first_fill is not None and client_order_id and has_at_fill_book:
+            risk_params_state = "original_persisted"
+            risk_params_schema_version = 2
+
+        # Build reconstructed position with durable provenance.
+        entry_signal_id = (
+            tp_targets.get("entry_signal_id")
+            or getattr(first_fill, 'entry_signal_id', None)
+            or client_order_id
+            or getattr(first_fill, 'fill_id', None)
+        )
         reconstructed = CachedPosition(
             market_id=market_id,
             agent_id=agent_id,
@@ -3251,16 +3697,220 @@ class KalshiPositionCache:
             realized_pnl_usd=realized_pnl_usd,
             unrealized_pnl_usd=Decimal("0"),  # Would need current market price
             last_updated=datetime.now(timezone.utc),
-            entry_intent_id=entry_intent_id,
-            fill_source=fill_source
+            entry_intent_id=entry_intent_id or tp_targets.get("entry_signal_id") or client_order_id,
+            fill_source=fill_source,
+            client_order_id=client_order_id,
+            # CRITICAL FIX (2026-08-22): Restore trusted risk parameter provenance.
+            risk_params_state=risk_params_state,
+            risk_params_schema_version=risk_params_schema_version,
+            # Entry model/book metadata from persisted TP targets.
+            entry_signal_id=entry_signal_id,
+            entry_model=tp_targets.get("entry_model") or getattr(first_fill, 'entry_model', None),
+            entry_model_version=tp_targets.get("entry_model_version") or getattr(first_fill, 'entry_model_version', None),
+            entry_model_probability=tp_targets.get("entry_model_probability") if tp_targets.get("entry_model_probability") is not None else getattr(first_fill, 'entry_model_probability', None),
+            entry_market_probability=tp_targets.get("entry_market_probability") if tp_targets.get("entry_market_probability") is not None else getattr(first_fill, 'entry_market_probability', None),
+            entry_edge=tp_targets.get("entry_edge") if tp_targets.get("entry_edge") is not None else getattr(first_fill, 'entry_edge', None),
+            entry_book_snapshot_id=tp_targets.get("entry_book_snapshot_id") or getattr(first_fill, 'entry_book_snapshot_id', None),
+            entry_execution_mode=tp_targets.get("entry_execution_mode") or getattr(first_fill, 'entry_execution_mode', None),
+            entry_fill_id=getattr(first_fill, 'fill_id', None) if first_fill else None,
+            entry_order_id=getattr(first_fill, 'order_id', None) if first_fill else None,
+            entry_fill_price_cents=avg_price_cents,
+            entry_fill_timestamp=getattr(first_fill, 'created_time', None) if first_fill else None,
+            entry_executable_bid_cents=tp_targets.get("entry_executable_bid_cents"),
+            entry_executable_ask_cents=tp_targets.get("entry_executable_ask_cents"),
+            entry_book_capture_quality=tp_targets.get("entry_book_capture_quality", "UNKNOWN"),
+            entry_book_timestamp=tp_targets.get("entry_book_timestamp"),
+            entry_book_sequence=tp_targets.get("entry_book_sequence"),
+            entry_book_source=tp_targets.get("entry_book_source"),
+            # TP/SL from persisted targets (if any).
+            take_profit_price_cents=tp_targets.get("tp_price"),
+            take_profit_r_multiple=tp_targets.get("tp_r"),
+            stop_loss_enabled=bool(tp_targets.get("sl_enabled", True)),
+            stop_loss_price_cents=tp_targets.get("sl_price"),
+            # Volatility/confidence from persisted targets.
+            vol_regime=tp_targets.get("vol_regime") or "unknown",
+            confidence=tp_targets.get("confidence") or "unknown",
+            entry_edge_pct=tp_targets.get("edge_pct") or 0.03,
         )
 
+        # CRITICAL FIX (2026-08-23): Attach canonical position key to REST-reconstructed
+        # positions. Asset aliases are not identities.
+        if POSITION_KEY_AVAILABLE:
+            reconstructed.position_key = PositionKey(market_ticker=market_id)
+            reconstructed.known_aliases = [market_id]
+
+        # CRITICAL FIX (2026-08-23): Resolve durable entry-provenance for REST-reconstructed
+        # positions. Only PROVENANCE-RESOLVED positions receive TP/SL/edge-decay metadata.
+        try:
+            self.rehydrate_cached_position(reconstructed)
+        except Exception as prov_err:
+            logger.warning("[POSITION-CACHE] Provenance rehydration failed: %s", prov_err)
+
         logger.info(
-            "[POSITION-RECOMPUTE] Reconstructed position for %s: %d contracts @ %dc, thesis_side=%s",
-            market_id, contracts, avg_price_cents, thesis_side
+            "[POSITION-RECOMPUTE] Reconstructed position for %s: %d contracts @ %dc, thesis_side=%s, provenance=%s",
+            market_id, contracts, avg_price_cents, thesis_side,
+            "AT_FILL" if has_at_fill_book else "POST_FILL/UNKNOWN"
         )
 
         return reconstructed
+
+    def _apply_provenance_snapshot_to_cached_position(
+        self,
+        position: CachedPosition,
+        snapshot,
+        complete: bool,
+        provenance_state_value: Optional[str] = None,
+    ) -> CachedPosition:
+        """Merge durable entry-provenance metadata into a CachedPosition."""
+        if snapshot is None:
+            return position
+
+        position.entry_provenance_snapshot_id = snapshot.snapshot_id
+        position.tp_policy_id = snapshot.tp_policy_id
+        position.tp_policy_version = snapshot.tp_policy_version
+        position.sl_policy_id = snapshot.sl_policy_id
+        position.sl_policy_version = snapshot.sl_policy_version
+        position.client_order_id = position.client_order_id or snapshot.client_order_id
+        position.entry_intent_id = position.entry_intent_id or snapshot.client_order_id
+        position.entry_fill_id = position.entry_fill_id or snapshot.fill_id
+        position.entry_order_id = position.entry_order_id or snapshot.order_id
+        position.entry_signal_id = position.entry_signal_id or snapshot.client_order_id
+        position.provenance_state = (
+            provenance_state_value or ProvenanceState.PROVENANCE_RECOVERED.value
+        )
+
+        if not complete:
+            return position
+
+        position.risk_params_state = "original_persisted"
+        position.risk_params_schema_version = 2
+        position.take_profit_price_cents = (
+            position.take_profit_price_cents or snapshot.tp_price_cents
+        )
+        position.take_profit_r_multiple = (
+            position.take_profit_r_multiple or snapshot.take_profit_r_multiple
+        )
+        position.stop_loss_enabled = snapshot.stop_loss_enabled
+        position.stop_loss_price_cents = (
+            position.stop_loss_price_cents or snapshot.sl_price_cents
+        )
+        position.entry_fill_price_cents = (
+            position.entry_fill_price_cents
+            or snapshot.entry_fill_price_cents
+            or snapshot.entry_price_cents
+        )
+        position.entry_fill_timestamp = (
+            position.entry_fill_timestamp or snapshot.entry_fill_timestamp
+        )
+        position.entry_executable_bid_cents = (
+            position.entry_executable_bid_cents or snapshot.entry_executable_bid_cents
+        )
+        position.entry_executable_ask_cents = (
+            position.entry_executable_ask_cents or snapshot.entry_executable_ask_cents
+        )
+        position.entry_book_capture_quality = (
+            snapshot.entry_book_capture_quality
+            if snapshot.entry_book_capture_quality != "UNKNOWN"
+            else position.entry_book_capture_quality
+        )
+        position.entry_book_timestamp = (
+            position.entry_book_timestamp or snapshot.entry_book_timestamp
+        )
+        position.entry_book_sequence = (
+            position.entry_book_sequence or snapshot.entry_book_sequence
+        )
+        position.entry_book_source = (
+            position.entry_book_source or snapshot.entry_book_source
+        )
+        position.entry_model_probability = snapshot.entry_fair_value
+        position.entry_market_probability = snapshot.entry_market_value
+        position.entry_edge = snapshot.entry_edge
+        position.entry_edge_pct = (
+            snapshot.entry_edge
+            if snapshot.entry_edge is not None
+            else position.entry_edge_pct
+        )
+        position.entry_model = snapshot.exit_policy_id or position.entry_model
+        position.entry_model_version = snapshot.tp_policy_version or position.entry_model_version
+        position.vol_regime = position.vol_regime or "unknown"
+        position.confidence = position.confidence or "unknown"
+
+        # Fall back to a trusted entry price if the REST price is missing/invalid.
+        if (
+            position.avg_price_cents is None or position.avg_price_cents == 0
+        ) and snapshot.entry_fill_price_cents:
+            position.avg_price_cents = int(snapshot.entry_fill_price_cents)
+            position.entry_price_state = "provenance"
+
+        return position
+
+    def rehydrate_cached_position(self, position: CachedPosition) -> CachedPosition:
+        """Attempt to recover the original exit plan from durable provenance.
+
+        This is a synchronous, idempotent lookup that may be called from
+        ``sync_from_rest`` or ``PositionMonitor.start`` for any cached position
+        whose provenance is not already original.
+        """
+        if not ENTRY_PROVENANCE_AVAILABLE:
+            return position
+
+        cached_state = getattr(position, "risk_params_state", None)
+        if (
+            position.entry_provenance_snapshot_id
+            and cached_state == "original_persisted"
+            and position.risk_params_schema_version >= 2
+        ):
+            return position
+
+        raw_side = position.outcome_side or position.side
+        try:
+            side = canonical_outcome_side(raw_side).value if raw_side else None
+        except PositionDataError:
+            side = None
+        if side is None:
+            logger.warning(
+                "[POSITION-CACHE-REHYDRATE] %s: cannot rehydrate without a canonical side (outcome_side=%r, side=%r)",
+                position.market_id,
+                position.outcome_side,
+                position.side,
+            )
+            return position
+
+        fills = None
+        if self._fills_ledger:
+            try:
+                fills = self._fills_ledger.get_fills_by_market(position.market_id)
+            except Exception:
+                fills = None
+
+        try:
+            resolution = get_entry_provenance_store().rehydrate_for_position(
+                ticker=position.market_id,
+                position_side=side,
+                client_order_id=position.client_order_id,
+                fill_id=position.entry_fill_id,
+                order_id=position.entry_order_id,
+                position_qty_cc=position.quantity_cc,
+                fills=fills,
+            )
+            if resolution and resolution.snapshot:
+                logger.info(
+                    "[POSITION-CACHE-REHYDRATE] market=%s side=%s state=%s complete=%s",
+                    position.market_id,
+                    side,
+                    resolution.state.value,
+                    resolution.complete,
+                )
+                self._apply_provenance_snapshot_to_cached_position(
+                    position,
+                    resolution.snapshot,
+                    resolution.complete,
+                    resolution.state.value,
+                )
+        except Exception as err:
+            logger.debug("[POSITION-CACHE-REHYDRATE] failed for %s: %s", position.market_id, err)
+
+        return position
 
     def get_asset_exposure(self, asset: str) -> Dict[str, Any]:
         """Get total exposure for an asset across all markets.
@@ -3378,7 +4028,7 @@ class KalshiPositionCache:
                     # If REST returns empty but cache is also empty, we may have missed positions
                     # during a restart. Rebuild from fills ledger (canonical source) to recover.
                     if not self._positions:
-                        logger.warning(
+                        logger.info(
                             "[POSITION-CACHE-EMPTY-REST] REST returned empty positions and cache is empty - "
                             "attempting to rebuild from fills ledger (canonical source)"
                         )
@@ -3499,7 +4149,9 @@ class KalshiPositionCache:
                                         rest_quantity_cc = int(Decimal(str(pos.get('contracts', 0))) * Decimal("100"))
                                     except Exception:
                                         rest_quantity_cc = int(pos.get('contracts', 0)) * 100
-                            rest_side = (pos.get('side') or 'yes').lower()
+                            rest_side = _extract_canonical_rest_side(pos, market_id)
+                            if rest_side is None:
+                                continue
                             exchange_signed_yes = to_signed_yes_exposure(rest_side, rest_quantity_cc)
                             ledger_signed_yes = expected_signed_yes[market_id]
 
@@ -3556,7 +4208,9 @@ class KalshiPositionCache:
                                         rest_quantity_cc = int(Decimal(str(pos.get('contracts', 0))) * Decimal("100"))
                                     except Exception:
                                         rest_quantity_cc = int(pos.get('contracts', 0)) * 100
-                            rest_side = (pos.get('side') or 'yes').lower()
+                            rest_side = _extract_canonical_rest_side(pos, market_id)
+                            if rest_side is None:
+                                continue
                             exchange_signed_yes = to_signed_yes_exposure(rest_side, rest_quantity_cc)
                             ledger_signed_yes = expected_signed_yes.get(market_id, 0)
                             cache_signed_yes = self._get_cache_signed_yes(market_id)
@@ -3600,25 +4254,44 @@ class KalshiPositionCache:
                     if not market_id:
                         continue
 
-                    incoming_market_ids.add(market_id)
-
-                    # DEBUG: Log all positions from API before filtering
-                    logger.info(
-                        f"[POSITION-CACHE-DEBUG] API returned position: market_id={market_id} "
-                        f"contracts={pos.get('contracts', 0)} side={pos.get('side', 'yes')} "
-                        f"avg_price_cents={pos.get('avg_price_cents', 'N/A')}"
-                    )
-
-                    # PRODUCTION FIX (2026-05-10): Filter out test positions
+                    # PRODUCTION FIX (2026-05-10): Filter out test positions before side validation
                     if _is_test_ticker(market_id):
                         logger.warning(f"Skipping test ticker in position cache sync: {market_id}")
                         positions_filtered += 1
                         continue
 
-                    # PRODUCTION FIX (2026-07-03): Filter out expired positions
-                    # Expired markets should not be in the cache as they can't be traded
+                    # PRODUCTION FIX (2026-07-03): Filter out expired positions before side validation.
+                    # Expired markets should not be in the cache as they can't be traded.
+                    # The exchange may report a settled market with an unparseable/unknown side,
+                    # which should be ignored, not quarantined as a data-quality failure.
+                    # Also remove any zero-contract cached position for an expired market so it
+                    # does not survive and block the next 15m window.
                     if _is_expired_ticker(market_id):
-                        logger.warning(f"Skipping expired ticker in position cache sync: {market_id}")
+                        is_zero = (
+                            pos.get("quantity_cc") == 0
+                            or pos.get("contracts") == 0
+                            or pos.get("position_fp") == 0
+                        )
+                        if market_id in self._positions and is_zero:
+                            logger.warning(
+                                f"[POSITION-CACHE-SYNC-CLOSE] Removing settled expired position from cache: {market_id} (contracts=0)"
+                            )
+                            del self._positions[market_id]
+                            try:
+                                from merid.position_management.position_monitor import get_position_monitor
+                                monitor = get_position_monitor()
+                                monitor.remove_position(market_id)
+                                logger.info(
+                                    "[POSITION-MONITOR-INTEGRATION] Removed closed position from monitor: market=%s",
+                                    market_id
+                                )
+                            except Exception as monitor_err:
+                                logger.warning(
+                                    "[POSITION-MONITOR-INTEGRATION] Failed to remove closed position from monitor: %s",
+                                    monitor_err
+                                )
+                        else:
+                            logger.warning(f"Skipping expired ticker in position cache sync: {market_id}")
                         positions_filtered += 1
                         continue
 
@@ -3641,7 +4314,9 @@ class KalshiPositionCache:
                     contracts = int(quantity_cc / 100)
 
                     # PRODUCTION FIX (2026-05-11): Only cache open positions (contracts > 0)
-                    # Closed positions (contracts=0) should not be in the cache
+                    # Closed positions (contracts=0) should not be in the cache.
+                    # Handle this before side validation so a missing/unknown side on a
+                    # settled/closed position is treated as an exit, not a data-quality failure.
                     if quantity_cc == 0:
                         if market_id in self._positions:
                             logger.warning(
@@ -3666,6 +4341,29 @@ class KalshiPositionCache:
                         positions_filtered += 1
                         continue
 
+                    # CRITICAL: Validate side before any use.  Missing/inconsistent
+                    # exchange side metadata is a data-quality failure, not a YES default.
+                    try:
+                        validated_rest_side = _require_outcome_side_for_position(pos, market_id)
+                    except (SideValidationError, SideValidationErrorLocal) as side_err:
+                        logger.error(
+                            "[POSITION-CACHE-SIDE-INVALID] %s: quarantining position (not caching) due to %s",
+                            market_id, side_err,
+                        )
+                        self.require_rest_reconciliation(market_id, reason=f"invalid_outcome_side:{side_err}")
+                        positions_filtered += 1
+                        continue
+
+                    incoming_market_ids.add(market_id)
+
+                    # DEBUG: Log all positions from API before filtering
+                    logger.info(
+                        "[POSITION-CACHE-DEBUG] API returned position: market_id=%s "
+                        "contracts=%s side=%s avg_price_cents=%s",
+                        market_id, contracts, validated_rest_side,
+                        pos.get('avg_price_cents', 'N/A')
+                    )
+
                     # CRITICAL FIX (2026-08-04): Preserve existing position on invalid/negative REST data
                     # instead of discarding it. A single bad REST response should not wipe a tracked position.
                     # The Kalshi client now normalizes negative position_fp, so this path is defensive.
@@ -3678,7 +4376,7 @@ class KalshiPositionCache:
                         else:
                             logger.warning(
                                 f"Skipping invalid position in position cache sync: {market_id} "
-                                f"(contracts={contracts} side={pos.get('side', 'yes')}) - negative contracts indicate side inversion or API error"
+                                f"(contracts={contracts} side={validated_rest_side}) - negative contracts indicate side inversion or API error"
                             )
                             positions_filtered += 1
                         continue
@@ -3792,10 +4490,10 @@ class KalshiPositionCache:
                             )
 
                     # CRITICAL FIX (2026-07-21): Use preserved thesis_side from fill-based cache instead of REST API
-                    # Kalshi REST API always reports side="yes" (YES-side perspective), which would
+                    # Kalshi REST API reports positions from a YES-side perspective, which can
                     # invert the side for NO positions. We preserve the thesis_side (immutable strategy thesis).
                     # The 'side' field may be refreshed from REST for diagnostics, but thesis_side is immutable.
-                    preserved_side = pos.get("side", "yes")  # REST side for diagnostics only
+                    preserved_side = validated_rest_side  # REST side for diagnostics only
                     if market_id in existing_positions:
                         existing_thesis_side = existing_positions.get(market_id).thesis_side
                         # CRITICAL FIX (2026-08-09): If an existing position has unknown thesis_side,
@@ -3811,8 +4509,8 @@ class KalshiPositionCache:
                                     market_id, preserved_thesis_side
                                 )
                             else:
-                                # Best-effort: REST outcome_id / side and signed position_fp.
-                                rest_side = (pos.get("side") or pos.get("outcome_id") or "").lower().strip()
+                                # Best-effort: canonical REST side and signed position_fp.
+                                rest_side = validated_rest_side
                                 position_fp = pos.get("position_fp") or pos.get("signed_size")
                                 if rest_side in ("yes", "no"):
                                     preserved_thesis_side = rest_side
@@ -3842,13 +4540,13 @@ class KalshiPositionCache:
 
                         logger.info(
                             "[POSITION-CACHE-THESIS-PRESERVE] market=%s using preserved thesis_side=%s from fill-based cache (REST reported side=%s)",
-                            market_id, preserved_thesis_side, pos.get("side", "yes")
+                            market_id, preserved_thesis_side, validated_rest_side
                         )
 
                         # CRITICAL FIX (2026-07-21): Desync detection - compute rest_side_sign from position_fp
                         # If REST reports opposite exposure to thesis_side, raise sync alarm and mark as dirty
                         # This detects strategy sync errors where REST and our thesis disagree
-                        rest_side = pos.get("side", "yes")
+                        rest_side = validated_rest_side
                         rest_contracts = contracts
 
                         # Compute REST side sign: positive contracts = long, negative = short
@@ -3909,10 +4607,9 @@ class KalshiPositionCache:
                         # ambiguous and have produced side inversions in this path.
                         preserved_thesis_side = "unknown"
 
-                        # 1. Explicit REST outcome_id / side (authoritative when present).
-                        rest_side = (pos.get("outcome_id") or pos.get("side") or "").lower().strip()
-                        if rest_side in ("yes", "no"):
-                            preserved_thesis_side = rest_side
+                        # 1. Canonical REST side from fail-closed parser.
+                        if validated_rest_side in ("yes", "no"):
+                            preserved_thesis_side = validated_rest_side
                             logger.info(
                                 "[POSITION-CACHE-NEW-POSITION-REST-SIDE] market=%s thesis_side=%s from REST outcome_id/side",
                                 market_id, preserved_thesis_side,
@@ -4008,27 +4705,44 @@ class KalshiPositionCache:
                     # positions, create a fresh record with no provenance (REST alone
                     # is not a trusted source).
                     existing_position = existing_positions.get(market_id)
-                    if existing_position is not None:
+
+                    # CRITICAL FIX (2026-08-22): For new or unprovenanced REST positions,
+                    # try to rebuild the position from the fills_ledger and the persisted
+                    # TP target registry before creating a rest_sync record.  This
+                    # recovers AT_FILL book capture and model provenance across restarts
+                    # and prevents "Model-invalidation loss exit blocked" on real positions.
+                    recomputed_position: Optional[CachedPosition] = None
+                    if existing_position is None and sync_agent_id != "unknown_agent":
+                        try:
+                            recomputed_position = await self.recompute_position_from_ledger(market_id, sync_agent_id)
+                        except Exception as recompute_err:
+                            logger.debug(
+                                "[POSITION-CACHE-REST-SYNC] Could not recompute %s from ledger: %s",
+                                market_id, recompute_err
+                            )
+
+                    if existing_position is not None or recomputed_position is not None:
                         # Determine whether REST-provided SL/TP are allowed to override
                         # the existing record. Only original-persisted schema-2 records
                         # with a linkage may carry TP/SL; otherwise keep the existing
                         # provenance (and any existing TP/SL it has).
-                        existing_risk_state = getattr(existing_position, "risk_params_state", "unknown")
-                        existing_schema = getattr(existing_position, "risk_params_schema_version", 1)
-                        existing_linkage = (
-                            existing_position.client_order_id
-                            or existing_position.entry_fill_id
-                            or existing_position.entry_intent_id
-                            or existing_position.entry_order_id
+                        base_position = existing_position if existing_position is not None else recomputed_position
+                        base_risk_state = getattr(base_position, "risk_params_state", "unknown")
+                        base_schema = getattr(base_position, "risk_params_schema_version", 1)
+                        base_linkage = (
+                            base_position.client_order_id
+                            or base_position.entry_fill_id
+                            or base_position.entry_intent_id
+                            or base_position.entry_order_id
                         )
                         keep_existing_risk = (
-                            existing_risk_state == "original_persisted"
-                            and existing_schema >= 2
-                            and existing_linkage
+                            base_risk_state == "original_persisted"
+                            and base_schema >= 2
+                            and base_linkage
                         )
 
                         self._positions[market_id] = replace(
-                            existing_position,
+                            base_position,
                             market_id=market_id,
                             agent_id=sync_agent_id,
                             contracts=contracts,
@@ -4043,31 +4757,31 @@ class KalshiPositionCache:
                             unrealized_pnl_usd=Decimal(str(pos.get("unrealized_pnl", 0))),
                             take_profit_price_cents=(
                                 pos.get("take_profit_price_cents")
-                                if keep_existing_risk
-                                else existing_position.take_profit_price_cents
+                                if keep_existing_risk and pos.get("take_profit_price_cents") is not None
+                                else base_position.take_profit_price_cents
                             ),
                             take_profit_r_multiple=(
                                 pos.get("take_profit_r_multiple")
-                                if keep_existing_risk
-                                else existing_position.take_profit_r_multiple
+                                if keep_existing_risk and pos.get("take_profit_r_multiple") is not None
+                                else base_position.take_profit_r_multiple
                             ),
                             stop_loss_price_cents=(
                                 pos.get("stop_loss_price_cents")
-                                if keep_existing_risk
-                                else existing_position.stop_loss_price_cents
+                                if keep_existing_risk and pos.get("stop_loss_price_cents") is not None
+                                else base_position.stop_loss_price_cents
                             ),
                             stop_loss_enabled=(
-                                pos.get("stop_loss_enabled", existing_position.stop_loss_enabled)
+                                pos.get("stop_loss_enabled", base_position.stop_loss_enabled)
                                 if keep_existing_risk
-                                else existing_position.stop_loss_enabled
+                                else base_position.stop_loss_enabled
                             ),
                             risk_params_state=(
-                                "original_persisted" if keep_existing_risk else existing_position.risk_params_state
+                                "original_persisted" if keep_existing_risk else base_position.risk_params_state
                             ),
-                            risk_params_schema_version=existing_position.risk_params_schema_version,
-                            ratchet_activated=pos.get("ratchet_activated", existing_position.ratchet_activated),
-                            ratchet_floor_price_cents=pos.get("ratchet_floor_price_cents", existing_position.ratchet_floor_price_cents),
-                            ratchet_activation_timestamp=pos.get("ratchet_activation_timestamp", existing_position.ratchet_activation_timestamp),
+                            risk_params_schema_version=base_position.risk_params_schema_version,
+                            ratchet_activated=pos.get("ratchet_activated", base_position.ratchet_activated),
+                            ratchet_floor_price_cents=pos.get("ratchet_floor_price_cents", base_position.ratchet_floor_price_cents),
+                            ratchet_activation_timestamp=pos.get("ratchet_activation_timestamp", base_position.ratchet_activation_timestamp),
                         )
                     else:
                         self._positions[market_id] = CachedPosition(
@@ -4086,13 +4800,28 @@ class KalshiPositionCache:
                             take_profit_price_cents=pos.get("take_profit_price_cents"),
                             take_profit_r_multiple=pos.get("take_profit_r_multiple"),
                             stop_loss_price_cents=pos.get("stop_loss_price_cents"),
-                            # CRITICAL FIX (2026-07-23): Set risk_params_state based on SL/TP availability
-                            risk_params_state="known" if (pos.get("stop_loss_price_cents") is not None) else "unknown",
+                            # CRITICAL FIX (2026-07-23): Set risk_params_state based on SL/TP availability.
+                            # 2026-08-24: "known" is not a valid RiskParamsState; use "fallback" when
+                            # REST provides an SL (or TP) and "unknown" otherwise.
+                            risk_params_state="fallback" if (pos.get("stop_loss_price_cents") is not None) else "unknown",
+                            # CRITICAL FIX (2026-08-23): Record that this position was discovered via REST sync.
+                            fill_source="rest_sync",
                             # Preserve ratchet state from cache if available (defaults to inactive)
                             ratchet_activated=pos.get("ratchet_activated", False),
                             ratchet_floor_price_cents=pos.get("ratchet_floor_price_cents"),
                             ratchet_activation_timestamp=pos.get("ratchet_activation_timestamp"),
                         )
+
+                    # CRITICAL FIX (2026-08-23): Rehydrate the exit plan from durable
+                    # provenance for any REST-synced position that is not already trusted.
+                    try:
+                        self.rehydrate_cached_position(self._positions[market_id])
+                    except Exception as rehydrate_err:
+                        logger.debug(
+                            "[POSITION-CACHE-REST-SYNC] Could not rehydrate %s: %s",
+                            market_id, rehydrate_err
+                        )
+
                     positions_processed += 1
 
                 # CRITICAL FIX (2026-08-12): When force=True and cleanup_stale=True, REST is
@@ -4267,7 +4996,10 @@ class KalshiPositionCache:
                                 # Any policy coming from this path is fallback provenance.
                                 if sl_price is not None or tp_price is not None:
                                     cached_risk_state = "fallback"
-                                    schema_version = 1
+                                    # CRITICAL FIX (2026-08-24): Fallback SL/TP records must
+                                    # carry schema version 2 so the exit-policy fallback profit
+                                    # exit path (which requires schema >= 2) can authorize them.
+                                    schema_version = 2
 
                             # CRITICAL FIX (2026-08-11): Do not derive risk from a REST-synced
                             # or fallback average price.  initial_risk is meaningful only when
@@ -4290,7 +5022,11 @@ class KalshiPositionCache:
                                 thesis_side=side_enum.value.lower(),
                                 outcome_side=side_enum.value.lower(),
                                 book_side=cached_pos.book_side or "ask",
-                                size=cached_pos.contracts,
+                                size=(
+                                    Decimal(cached_pos.quantity_cc) / Decimal("100")
+                                    if cached_pos.quantity_cc
+                                    else Decimal(str(cached_pos.contracts))
+                                ),
                                 avg_entry_price_cents=cached_pos.avg_price_cents,
                                 take_profit_price_cents=tp_price,
                                 stop_loss_enabled=sl_price is not None,
@@ -4299,19 +5035,54 @@ class KalshiPositionCache:
                                 risk_params_schema_version=(schema_version if is_original else schema_version),
                                 trailing_type=trailing_type,
                                 trailing_param=trailing_param,
-                                exit_policy_id="rest_sync",
-                                # CRITICAL FIX (2026-08-09): Mark REST-synced / replayed positions
-                                fill_source="rest_sync",
-                                entry_signal_id=cached_pos.client_order_id or "rest_sync",
+                                exit_policy_id=cached_pos.exit_policy_id or "rest_sync",
+                                # CRITICAL FIX (2026-08-22): Preserve the recovered fill source
+                                # (alpha/ws/http_poller) when provenance is present.  Only
+                                # force "rest_sync" when the cache record itself is a REST-only
+                                # synthetic with no fill linkage.
+                                fill_source=(
+                                    cached_pos.fill_source
+                                    if is_original and cached_pos.fill_source
+                                    else "rest_sync"
+                                ),
+                                entry_signal_id=(
+                                    cached_pos.entry_signal_id
+                                    or cached_pos.client_order_id
+                                    or "rest_sync"
+                                ),
+                                entry_intent_id=cached_pos.entry_intent_id or cached_pos.client_order_id,
+                                # CRITICAL FIX (2026-08-22): Pass the recovered AT_FILL book
+                                # and model provenance to PositionMonitor so spread-stop and
+                                # model-invalidation exits are allowed after restart.
+                                entry_fill_id=cached_pos.entry_fill_id,
+                                entry_order_id=cached_pos.entry_order_id,
+                                client_order_id=cached_pos.client_order_id,
+                                entry_model=cached_pos.entry_model,
+                                entry_model_version=cached_pos.entry_model_version,
+                                entry_model_probability=cached_pos.entry_model_probability,
+                                entry_market_probability=cached_pos.entry_market_probability,
+                                entry_edge=cached_pos.entry_edge,
+                                entry_book_snapshot_id=cached_pos.entry_book_snapshot_id,
+                                entry_execution_mode=cached_pos.entry_execution_mode,
+                                entry_book_capture_quality=cached_pos.entry_book_capture_quality,
+                                entry_executable_bid_cents=cached_pos.entry_executable_bid_cents,
+                                entry_executable_ask_cents=cached_pos.entry_executable_ask_cents,
+                                entry_book_timestamp=cached_pos.entry_book_timestamp,
+                                entry_book_sequence=cached_pos.entry_book_sequence,
+                                entry_book_source=cached_pos.entry_book_source,
                                 # CRITICAL FIX (2026-08-11): Only pass a trusted fill price;
                                 # if unknown, leave it unset so no fallback TP is invented.
                                 entry_fill_price_cents=entry_fill_price_cents,
                                 entry_fill_timestamp=cached_pos.entry_fill_timestamp,
+                                # CRITICAL FIX (2026-08-23): Propagate durable provenance state
+                                # so the exit policy can distinguish recovered from unknown.
+                                entry_provenance_snapshot_id=cached_pos.entry_provenance_snapshot_id,
+                                provenance_state=cached_pos.provenance_state,
                             )
 
-                            monitor.add_position(monitor_position)
+                            monitor.upsert_position(monitor_position, caller="rest_sync")
                             logger.info(
-                                "[POSITION-MONITOR-REST-SYNC] Added REST-synced position to monitor: "
+                                "[POSITION-MONITOR-REST-SYNC] Upserted REST-synced position to monitor: "
                                 "market=%s side=%s size=%d TP=%s SL=%s risk_state=%s",
                                 market_id, cached_pos.side, cached_pos.contracts,
                                 f"{tp_price}c" if tp_price is not None else "none",
@@ -4468,7 +5239,7 @@ class KalshiPositionCache:
             recent_fills = ledger.get_fills(since=cutoff_time, limit=100)
 
             if not recent_fills:
-                logger.warning("[POSITION-CACHE-REBUILD] No recent fills found in ledger")
+                logger.info("[POSITION-CACHE-REBUILD] No recent fills found in ledger")
                 return
 
             # Compute net positions from fills
@@ -4741,6 +5512,7 @@ class KalshiPositionCache:
         """
         async with self._ensure_mutex():
             self._positions.clear()
+            self._settled_tickers.clear()
             logger.info("Position cache cleared")
 
     def clear_sync(self) -> None:
@@ -4750,35 +5522,111 @@ class KalshiPositionCache:
         synchronous contexts where the event loop is not available.
         """
         self._positions.clear()
+        self._settled_tickers.clear()
         logger.info("Position cache cleared (sync)")
 
     async def clear_expired_positions(self) -> int:
-        """Remove positions with expired tickers from the cache.
+        """Clean up positions for expired/closed markets.
 
-        This should be called periodically (e.g., every 15 minutes at window rollover)
-        to ensure the cache doesn't accumulate stale positions from expired markets.
+        A position is only removed when one of the following is true:
+
+        - The market has been explicitly marked settled or finalized.
+        - The position is authoritatively zero.
+        - The position's ``settlement_status`` is already ``settled``.
+
+        When a market is past its close buffer but has not yet settled, the
+        position is transitioned to ``settlement_status=pending`` and a critical
+        alert is logged.  Financial exposure is retained until settlement.
 
         Returns:
             Number of positions removed.
         """
         async with self._ensure_mutex():
             removed_count = 0
-            expired_tickers = []
+            pending_count = 0
+            removed_tickers = []
+            pending_tickers = []
 
             for ticker, position in list(self._positions.items()):
-                if _is_expired_ticker(ticker):
-                    expired_tickers.append(ticker)
+                if not _is_expired_ticker(ticker):
+                    continue
+
+                # Authorized removal conditions.
+                can_remove = (
+                    position.settlement_status == "settled"
+                    or position.quantity_cc == 0
+                    or self.is_settled(ticker)
+                )
+
+                if can_remove:
+                    removed_tickers.append(ticker)
                     del self._positions[ticker]
                     removed_count += 1
+                else:
+                    # Closed-but-unsettled market: retain exposure, alert, and
+                    # transition to settlement_pending.
+                    if position.settlement_status != "pending":
+                        position.settlement_status = "pending"
+                        pending_tickers.append(ticker)
+                        pending_count += 1
+                        logger.critical(
+                            "[POSITION-CACHE-SETTLEMENT-PENDING] ticker=%s "
+                            "quantity_cc=%d side=%s avg_price_cents=%s - "
+                            "market is past close buffer but has not settled; "
+                            "retaining position and raising alert",
+                            ticker,
+                            position.quantity_cc,
+                            position.side,
+                            position.avg_price_cents,
+                        )
+
+            if pending_count > 0:
+                logger.warning(
+                    "[POSITION-CACHE-CLEANUP] %d positions transitioned to settlement_pending: %s",
+                    pending_count,
+                    pending_tickers,
+                )
 
             if removed_count > 0:
                 logger.info(
-                    f"[POSITION-CACHE-CLEANUP] Removed {removed_count} expired positions: {expired_tickers}"
+                    f"[POSITION-CACHE-CLEANUP] Removed {removed_count} settled/expired positions: {removed_tickers}"
                 )
                 # Log cache health after cleanup
                 self.log_health()
 
             return removed_count
+
+    def is_settled(self, market_ticker: str) -> bool:
+        """Return True if the market has been finalized by settlement."""
+        return market_ticker in self._settled_tickers
+
+    async def mark_settled(self, market_ticker: str) -> None:
+        """Mark a market as settled and remove its cached position."""
+        self._settled_tickers.add(market_ticker)
+        self._reconciliation_halted.pop(market_ticker, None)
+        if market_ticker in self._positions:
+            self._positions[market_ticker].settlement_status = "settled"
+            await self._remove_position_and_monitor(market_ticker)
+            logger.info(
+                "[POSITION-CACHE-SETTLEMENT] Removed settled position for %s",
+                market_ticker,
+            )
+
+    async def on_market_settlement(
+        self, market_ticker: str, outcome: str
+    ) -> None:
+        """Handle a market settlement event by finalizing the cached position.
+
+        This is the canonical hook for the settlement poller.  It records the
+        settlement outcome, removes the position, and ensures the ticker is not
+        rebuilt from the fills ledger.
+        """
+        logger.info(
+            "[POSITION-CACHE-SETTLEMENT] market=%s outcome=%s",
+            market_ticker,
+            outcome,
+        )
+        await self.mark_settled(market_ticker)
 
     async def _lookup_fill_source(
         self,
@@ -5070,16 +5918,16 @@ class KalshiPositionCache:
             return 300  # Conservative 5-minute fallback
 
     async def _submit_resting_bracket(self, position: CachedPosition) -> None:
-        """Submit a GTC limit sell at the take-profit price (and optional SL).
+        """Submit a GTC limit sell at the take-profit price.
+
+        Stop-loss is intentionally handled by the active StopCandidate path
+        (PositionMonitor -> StopCandidate -> route_order_async); a GTC limit
+        at or below the SL price cannot cut a fast loss and is not submitted.
 
         For a Kalshi binary contract:
         - Long YES → exit by selling YES at TP price (closing limit ABOVE entry).
         - Long NO  → exit by selling NO at TP price (closing limit ABOVE entry).
         Either way the action is ``sell`` on the same side that was bought.
-
-        SL bracket only submitted if ``stop_loss_price_cents`` is set. SL is a
-        marketable limit (sells at any price ≤ SL) — not a true stop-market;
-        Kalshi does not natively support stops.
         """
         from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
         from merid.event_venues.kalshi.binary_price_space import to_kalshi_side
@@ -5176,61 +6024,17 @@ class KalshiPositionCache:
                 position.market_id, tp_tag, exc,
             )
 
-        # SL leg (optional)
+        # SL leg: intentionally not submitted.  A GTC limit *at or below* the
+        # stop price is not a true stop; it only fills if the market recovers
+        # to that level, so it cannot cut a fast loss.  Active stop-loss
+        # handling (PositionMonitor -> StopCandidate -> route_order_async) now
+        # provides the protective exit instead.
         if sl_price and sl_price > 0:
-            sl_tag = self._bracket_client_tag(position.market_id, "sl", sl_price)
             logger.info(
-                "[BRACKET-CREATION-DEBUG] Creating SL bracket: market=%s side=%s action=sell price=%dc count=%d",
-                position.market_id, position.side, sl_price, position.contracts
+                "[BRACKET] SL bracket not submitted for %s; active stop-loss handles loss protection",
+                position.market_id,
             )
-            sl_intent = OrderIntent(
-                ticker=position.market_id,
-                side=kalshi_side,
-                action="sell",
-                price_cents=int(sl_price),
-                count=int(position.contracts),
-                source="resting_bracket_stop_loss",
-                agent_id="position_cache_bracket",
-                client_tag=sl_tag,
-                group_id="bracket",
-                rationale=f"resting_sl:{position.market_id}:{sl_price}c",
-                # CRITICAL FIX: Add exit policy metadata to satisfy validation for exit orders
-                # Exit orders require exit_policy_id for tracking per _validate_risk_contract_linkage
-                exit_policy_id=position.exit_policy_id or "bracket_exit",
-                window_resolution_id=position.window_resolution_id or "bracket_window",
-                risk_tier="A",  # Default to tier A for bracket exits
-                max_hold_seconds=max_hold_seconds,  # Dynamic based on remaining TTE
-                # CRITICAL FIX (2026-08-01): Set entry_or_exit to prevent ENTRY-ORDER-INVARIANT-VIOLATION
-                # Bracket orders are exit orders and must bypass entry guards
-                entry_or_exit="exit",
-                exit_reason="BRACKET_STOP_LOSS",
-                reduce_only=True,
-                # CRITICAL FIX (2026-08-07): Bracket exit intents must carry position-delta
-                # contract fields. _route_live enforces pre_position_size>0 for every exit,
-                # and bracket orders close the full position so expected_post_position_size=0.
-                pre_position_size=int(position.contracts),
-                expected_post_position_size=0,
-            )
-            logger.info(
-                "[BRACKET-CREATION-DEBUG] SL intent created: side=%s action=%s price=%dc count=%d",
-                sl_intent.side, sl_intent.action, sl_intent.price_cents, sl_intent.count
-            )
-            position.sl_bracket_client_tag = sl_tag
-            try:
-                res = await route_order_async(sl_intent)
-                ok = res is not None and (res.has_execution or (res.request_completed and not res.is_terminal))
-                self._record_bracket_metric("sl", ok)
-                logger.info(
-                    "[BRACKET] SL submitted market=%s side=%s qty=%d @ %d¢ tag=%s ok=%s",
-                    position.market_id, position.side, position.contracts,
-                    sl_price, sl_tag, ok,
-                )
-            except Exception as exc:
-                self._record_bracket_metric("sl", False)
-                logger.warning(
-                    "[BRACKET] SL submission failed market=%s tag=%s err=%s",
-                    position.market_id, sl_tag, exc,
-                )
+            position.sl_bracket_client_tag = None
 
     # ── Trailing Stop Monitoring (TUNED 2026-05-25) ─────────────────────────────
 
