@@ -8,7 +8,7 @@ gated until replay tests pass.
 
 import pytest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from merid.event_venues.kalshi.binary_price_space import to_signed_yes_exposure
 from merid.event_venues.kalshi.stop_candidate import (
@@ -225,6 +225,9 @@ class TestStopCandidateReplay:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
+        from datetime import datetime, timedelta
+        from merid.position_management.position import RiskParamsState
+        opened_at = datetime.utcnow() - timedelta(seconds=100)
         position = Position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
@@ -232,7 +235,16 @@ class TestStopCandidateReplay:
             size=10,
             avg_entry_price_cents=50,
             stop_loss_price_cents=49,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            entry_fill_id="test-fill-001",
+            entry_fill_timestamp=opened_at,
+            entry_book_capture_quality="AT_FILL",
+            entry_executable_bid_cents=49,
+            entry_executable_ask_cents=50,
+            opened_at=opened_at,
         )
+        position.soft_stop_observations = 1
         monitor.add_position(position)
 
         from merid.position_management.exit_audit import ExitPriceSnapshot
@@ -263,3 +275,75 @@ class TestStopCandidateReplay:
         assert candidate.market_ticker == position.market_id
         assert candidate.held_contract == "yes"
         assert candidate.position_from_exchange_cc == 1000
+
+
+class TestStopCandidateSubmissionIntent:
+    """A submitted stop-candidate must produce an exit OrderIntent with safety provenance."""
+
+    @pytest.mark.asyncio
+    async def test_hard_stop_builds_safety_exit_intent(
+        self, monkeypatch, tmp_path
+    ):
+        """A HARD_STOP candidate produces a reduce-only IOC close with parent linkage."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from merid.event_venues.kalshi import stop_candidate
+        from merid.event_venues.kalshi.order_router import (
+            OrderResult,
+            TradingMode,
+        )
+
+        stop_candidate._STOP_CANDIDATE_LEDGER_PATH = tmp_path / "stop_candidates.jsonl"
+        monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "true")
+
+        cached_position = SimpleNamespace(
+            exit_policy_id="ep_test_001",
+            entry_fill_id="fill_test_001",
+            entry_order_id="order_test_001",
+            client_order_id="coid_test_001",
+            entry_signal_id="signal_test_001",
+            _yes_exposure=lambda: 200,
+            avg_price_cents=45,
+            side="yes",
+        )
+        fake_cache = SimpleNamespace(get_position=lambda _t: cached_position)
+
+        candidate = StopCandidate(
+            market_ticker="KXBTC15M-TEST",
+            trigger_reason="HARD_STOP",
+            position_from_exchange_cc=200,
+            executable_exit_cents=30,
+            seconds_to_expiry=600.0,
+            quote_age_ms=0,
+        )
+
+        expected_result = OrderResult(
+            status="rejected",
+            mode=TradingMode.PAPER,
+            reason="test_paper",
+        )
+
+        with patch(
+            "merid.event_venues.kalshi.position_cache.get_position_cache",
+            return_value=fake_cache,
+        ), patch(
+            "merid.event_venues.kalshi.order_router.route_order_async",
+            new=AsyncMock(return_value=expected_result),
+        ) as mock_route:
+            result = await maybe_submit_stop_candidate(candidate, force=False)
+
+        assert result is expected_result
+        assert mock_route.called, "route_order_async should be called"
+        intent = mock_route.call_args[0][0]
+        assert intent.source == "stop_candidate"
+        assert intent.agent_id == "stop_candidate"
+        assert intent.exit_reason == "HARD_STOP"
+        assert intent.exit_policy_id == "ep_test_001"
+        assert intent.parentage_status == "CANONICAL_FILL"
+        assert intent.parent_entry_fill_id == "fill_test_001"
+        assert intent.parent_entry_order_id == "order_test_001"
+        assert intent.parent_entry_signal_id == "signal_test_001"
+        assert intent.reduce_only is True
+        assert intent.time_in_force == "ioc"
+        assert intent.entry_or_exit == "exit"
