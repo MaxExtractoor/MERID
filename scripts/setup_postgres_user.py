@@ -20,6 +20,33 @@ except ImportError:
     pass
 
 
+def _validate_identifier(name: str) -> bool:
+    """Validate PostgreSQL identifier (role name, database name) to prevent SQL injection.
+    
+    Only allows alphanumeric characters, underscores, and hyphens.
+    Must start with a letter or underscore.
+    Maximum length is 63 characters (PostgreSQL limit).
+    
+    Args:
+        name: The identifier to validate
+        
+    Returns:
+        True if the identifier is safe to use in SQL queries
+    """
+    if not name:
+        return False
+    if len(name) > 63:
+        return False
+    # Must start with letter or underscore
+    if not (name[0].isalpha() or name[0] == '_'):
+        return False
+    # Only allow alphanumeric, underscore, and hyphen
+    for char in name:
+        if not (char.isalnum() or char in ('_', '-')):
+            return False
+    return True
+
+
 async def setup():
     import asyncpg
 
@@ -34,6 +61,14 @@ async def setup():
         print("ERROR: POSTGRES_PASSWORD not set in .env")
         sys.exit(1)
 
+    # SECURITY: Validate identifiers to prevent SQL injection
+    if not _validate_identifier(merid_user):
+        print(f"ERROR: Invalid POSTGRES_USER '{merid_user}': must be alphanumeric with underscores/hyphens")
+        sys.exit(1)
+    if not _validate_identifier(merid_db):
+        print(f"ERROR: Invalid POSTGRES_DB '{merid_db}': must be alphanumeric with underscores/hyphens")
+        sys.exit(1)
+
     conn = await asyncpg.connect(
         host=host, port=port, user="postgres",
         password=superuser_password, database="postgres",
@@ -43,13 +78,19 @@ async def setup():
             "SELECT 1 FROM pg_roles WHERE rolname = $1", merid_user
         )
         if role_exists:
+            # SECURITY FIX: Use parameterized query for password to prevent SQL injection
+            # Use asyncpg.Identifier for role name to prevent SQL injection
             await conn.execute(
-                f"ALTER ROLE {merid_user} WITH LOGIN PASSWORD '{merid_password}'"
+                "ALTER ROLE {} WITH LOGIN PASSWORD $1",
+                asyncpg.Identifier(merid_user), merid_password
             )
             print(f"Role '{merid_user}' exists - password reset")
         else:
+            # SECURITY FIX: Use parameterized query for password to prevent SQL injection
+            # Use asyncpg.Identifier for role name to prevent SQL injection
             await conn.execute(
-                f"CREATE ROLE {merid_user} WITH LOGIN PASSWORD '{merid_password}'"
+                "CREATE ROLE {} WITH LOGIN PASSWORD $1",
+                asyncpg.Identifier(merid_user), merid_password
             )
             print(f"Role '{merid_user}' created")
 
@@ -59,10 +100,19 @@ async def setup():
         if db_exists:
             print(f"Database '{merid_db}' exists")
         else:
-            await conn.execute(f"CREATE DATABASE {merid_db} OWNER {merid_user}")
+            # SECURITY FIX: Use asyncpg.Identifier for database and role names
+            # to prevent SQL injection through proper identifier quoting
+            await conn.execute(
+                "CREATE DATABASE {} OWNER {}",
+                asyncpg.Identifier(merid_db), asyncpg.Identifier(merid_user)
+            )
             print(f"Database '{merid_db}' created")
 
-        await conn.execute(f"ALTER DATABASE {merid_db} OWNER TO {merid_user}")
+        # SECURITY FIX: Use asyncpg.Identifier for database ownership
+        await conn.execute(
+            "ALTER DATABASE {} OWNER TO {}",
+            asyncpg.Identifier(merid_db), asyncpg.Identifier(merid_user)
+        )
         print(f"Database '{merid_db}' owned by '{merid_user}'")
     finally:
         await conn.close()
