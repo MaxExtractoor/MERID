@@ -191,7 +191,7 @@ class KalshiCfRtiStream:
             raw = await asyncio.wait_for(self._ws.recv(), timeout=timeout)
         except asyncio.TimeoutError:
             return None
-        except websockets.exceptions.ConnectionClosed:
+        except websockets.ConnectionClosed:
             raise
 
         try:
@@ -387,18 +387,36 @@ class KalshiCfRtiStream:
             logger.error("[KALSHI-CF-RTI-WS] on_frame error: %s", e)
 
     async def _process_messages(self) -> None:
+        # CRITICAL FIX (2026-08-24): Silence watchdog.  A socket that stays open
+        # but stops delivering RTI frames must not spin forever on 5s timeouts;
+        # force a reconnect so the subscription is re-established.  Observed in
+        # production: frames stopped at the 15m window roll and never recovered
+        # because the socket stayed open but silent.
+        #
+        # NOTE: _recv_one swallows asyncio.TimeoutError and returns None, so the
+        # silence check must be performed on a None result, not in an except clause.
+        last_data_ts = time.monotonic()
+        silence_threshold_s = float(os.environ.get("MERID_CFB_RTI_SILENCE_RECONNECT_S", "45"))
         while self._running and self._ws:
             try:
                 data = await self._recv_one(timeout=5.0)
                 if data is not None:
+                    last_data_ts = time.monotonic()
                     await self._handle_message(data)
-            except websockets.exceptions.ConnectionClosed:
+                else:
+                    silent_for = time.monotonic() - last_data_ts
+                    if silent_for > silence_threshold_s:
+                        logger.error(
+                            "[KALSHI-CF-RTI-WS] No RTI frames for %.1fs (threshold=%ss) - forcing reconnect",
+                            silent_for,
+                            silence_threshold_s,
+                        )
+                        self._call_callback(self.on_disconnect)
+                        break
+            except websockets.ConnectionClosed:
                 logger.info("[KALSHI-CF-RTI-WS] Connection closed")
                 self._call_callback(self.on_disconnect)
                 break
-            except asyncio.TimeoutError:
-                # No data for 5 seconds is fine; the loop will reconnect if needed.
-                continue
             except Exception as e:
                 logger.warning("[KALSHI-CF-RTI-WS] recv error: %s", e)
                 self._call_callback(self.on_disconnect)
@@ -417,7 +435,12 @@ class KalshiCfRtiStream:
             try:
                 self._sid = None
                 self._index_ids = []
+                run_started = time.monotonic()
                 await self._run_once()
+                # Reset backoff after a healthy run so a later failure does not
+                # inherit a stale 60s delay from a previous outage.
+                if time.monotonic() - run_started > 60.0:
+                    self._reconnect_delay = 1.0
             except Exception as e:
                 logger.error("[KALSHI-CF-RTI-WS] Run-cycle error: %s", e)
                 if self._running:

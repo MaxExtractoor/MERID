@@ -53,7 +53,7 @@ _ASSET_TO_CFB_SYMBOL = {
 # Kalshi crypto contracts settle on a one-minute average of CF RTI per-second
 # observations.  The 60-second average field is required when trading inside the
 # final minute window.
-_MAX_CFB_RTI_AGE_MS = int(os.environ.get("MERID_MAX_CFB_RTI_AGE_MS", "5000"))
+_MAX_CFB_RTI_AGE_MS = int(os.environ.get("MERID_MAX_CFB_RTI_AGE_MS", "7000"))
 _FINAL_MINUTE_CUTOFF_S = float(os.environ.get("MERID_FINAL_MINUTE_CUTOFF_S", "60"))
 _REQUEST_TIMEOUT = float(os.environ.get("MERID_CFB_RTI_TIMEOUT_S", "5"))
 
@@ -63,21 +63,45 @@ class CfbRtiObservation:
     """Immutable CF Benchmarks Real-Time Index observation.
 
     This is the canonical settlement input.  No public-spot fallback is allowed.
+
+    Time fields:
+      - ``source_ts_ms``: upstream wall-clock publish timestamp when known and
+        valid; ``None`` when malformed or missing.
+      - ``observed_ts_ms``: local wall-clock (``time.time_ns()``) when the frame
+        was received.  Used for observability, not as the primary freshness gate.
+      - ``observed_ts_mono_ns``: local monotonic time (``time.monotonic_ns()``)
+        when the frame was received.  This is the authoritative clock for
+        staleness because wall-clock time can jump.
+      - ``timestamp_quality``: ``"source"`` | ``"missing"`` | ``"invalid"``.
+      - ``execution_eligible``: True only when the source timestamp is valid,
+        the feed is fresh on both wall and monotonic clocks, ordering holds,
+        and all other health gates pass.  Downstream trading code must check it.
     """
     asset: str
     cfb_symbol: str
     value: float
-    source_ts_ms: int
-    received_ts_ms: int
+    source_ts_ms: Optional[int] = None
+    observed_ts_ms: Optional[int] = None
+    observed_ts_mono_ns: Optional[int] = None
     sequence: Optional[int] = None
     source: str = "cf_benchmarks"
     settlement_reference: str = "cfb_rti_live"
     cfb_60s_average: Optional[float] = None
+    timestamp_quality: str = "source"
+    execution_eligible: bool = True
     price_source_health: str = "healthy"
 
     @property
-    def age_ms(self) -> int:
-        return max(0, self.received_ts_ms - self.source_ts_ms)
+    def age_ms(self) -> Optional[int]:
+        """Source-to-observed age in milliseconds; None if source time is missing/invalid."""
+        if self.source_ts_ms is None or self.observed_ts_ms is None:
+            return None
+        return max(0, self.observed_ts_ms - self.source_ts_ms)
+
+    @property
+    def received_ts_ms(self) -> Optional[int]:
+        """Legacy alias for ``observed_ts_ms``."""
+        return self.observed_ts_ms
 
 
 # Adapter state for ordering, stream liveness, and last-success tracking.
@@ -146,16 +170,41 @@ def _ensure_kalshi_stream() -> Optional[Any]:
                 )
                 return
 
-            _state.last_observation_by_asset[asset] = obs
-            _state.last_source_ts_ms_by_asset[asset] = obs.source_ts_ms
+            # Validate immediately so the cache and logs separate eligible from
+            # observability-only frames.  A missing/invalid source timestamp is
+            # logged as a reject and not allowed to drive trading.
+            validated = _validate_observation(asset, cfb_symbol, obs)
+            if validated is None:
+                reason = _state.last_failure_reason_by_asset.get(asset, "unknown")
+                logger.warning(
+                    "[CF-RTI-ADAPTER] stream_observation_rejected "
+                    "asset=%s cfb_symbol=%s value=%.4f "
+                    "timestamp_quality=%s execution_eligible=%s reason=%s",
+                    asset,
+                    cfb_symbol,
+                    obs.value,
+                    obs.timestamp_quality,
+                    obs.execution_eligible,
+                    reason,
+                )
+                return
+
+            _state.last_observation_by_asset[asset] = validated
+            _state.last_source_ts_ms_by_asset[asset] = validated.source_ts_ms
             _state.consecutive_failures_by_asset[asset] = 0
             _state.last_failure_reason_by_asset[asset] = ""
             logger.info(
-                "[CF-RTI-ADAPTER] stream_observation_accepted asset=%s cfb_symbol=%s value=%.4f source_ts_ms=%s",
+                "[CF-RTI-ADAPTER] stream_observation_accepted "
+                "asset=%s cfb_symbol=%s value=%.4f "
+                "source_ts_ms=%s observed_ts_ms=%s age_ms=%s timestamp_quality=%s execution_eligible=%s",
                 asset,
                 cfb_symbol,
-                obs.value,
-                obs.source_ts_ms,
+                validated.value,
+                validated.source_ts_ms,
+                validated.observed_ts_ms,
+                validated.age_ms,
+                validated.timestamp_quality,
+                validated.execution_eligible,
             )
 
         _kalshi_stream = KalshiCfRtiStream(
@@ -194,7 +243,34 @@ def stop_kalshi_rti_stream() -> None:
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    """Return the current wall-clock time in whole milliseconds.
+
+    Uses ``time.time_ns()`` to avoid floating-point precision loss from
+    ``time.time() * 1000`` and to keep the millisecond integer exact.
+    """
+    return time.time_ns() // 1_000_000
+
+
+def _now_mono_ns() -> int:
+    """Return the current monotonic time in whole nanoseconds.
+
+    Monotonic time is the authoritative clock for internal latency / freshness
+    because it never jumps.  Use it to compute how long an observation has been
+    in the adapter cache.
+    """
+    return time.monotonic_ns()
+
+
+# Reasonable epoch-ms window: 2001-01-01 to 2099-12-31.
+_MIN_SOURCE_TS_MS = 978_307_200_000
+_MAX_SOURCE_TS_MS = 4_102_444_800_000
+
+
+def _is_valid_epoch_ms(value: Any) -> bool:
+    """Return True if ``value`` is a plausible millisecond Unix timestamp."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return False
+    return _MIN_SOURCE_TS_MS <= value <= _MAX_SOURCE_TS_MS
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -234,15 +310,25 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
         return None
 
     source_ts_ms = None
+    timestamp_quality = "source"
     for field in ("ts", "timestamp", "time", "source_ts_ms", "published_at"):
         if field in data and data[field] is not None:
             candidate = data[field]
             parsed = _parse_timestamp(candidate)
             if parsed is not None:
-                source_ts_ms = parsed
-                break
-    if source_ts_ms is None:
-        source_ts_ms = _now_ms()
+                if _is_valid_epoch_ms(parsed):
+                    source_ts_ms = parsed
+                    break
+                timestamp_quality = "invalid"
+            else:
+                timestamp_quality = "invalid"
+    if source_ts_ms is None and timestamp_quality == "source":
+        timestamp_quality = "missing"
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_timestamp_missing asset=%s cfb_symbol=%s "
+            "using_observed_time_for_logging_only",
+            asset, cfb_symbol,
+        )
 
     sequence = None
     for field in ("sequence", "seq", "id"):
@@ -263,17 +349,24 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
             except (TypeError, ValueError):
                 pass
 
+    observed_wall_ms = _now_ms()
+    observed_mono_ns = _now_mono_ns()
+    execution_eligible = source_ts_ms is not None
+
     return CfbRtiObservation(
         asset=asset,
         cfb_symbol=cfb_symbol,
         value=value,
         source_ts_ms=source_ts_ms,
-        received_ts_ms=_now_ms(),
+        observed_ts_ms=observed_wall_ms,
+        observed_ts_mono_ns=observed_mono_ns,
         sequence=sequence,
         source="cf_benchmarks",
         settlement_reference="cfb_rti_live",
         cfb_60s_average=cfb_60s_average,
-        price_source_health="healthy",
+        timestamp_quality=timestamp_quality,
+        execution_eligible=execution_eligible,
+        price_source_health="healthy" if execution_eligible else "suspect",
     )
 
 
@@ -408,6 +501,7 @@ def _validate_observation(
 ) -> Optional[CfbRtiObservation]:
     """Apply all fail-closed health gates.  Returns ``None`` and logs the reason on failure."""
     now_ms = _now_ms()
+    now_mono_ns = _now_mono_ns()
 
     # Source identity
     if obs.source != "cf_benchmarks":
@@ -445,15 +539,48 @@ def _validate_observation(
         )
         return None
 
-    # Freshness
-    age_ms = now_ms - obs.source_ts_ms
-    if age_ms > _MAX_CFB_RTI_AGE_MS:
+    # Timestamp must be valid before it can be execution-eligible.  A missing or
+    # malformed source timestamp is an observability-only event; it is never
+    # allowed to back a trading signal.
+    if not obs.execution_eligible or obs.source_ts_ms is None:
+        reason = f"cfb_rti_{obs.timestamp_quality}_timestamp"
+        _state.last_failure_reason_by_asset[asset] = reason
+        logger.error(
+            "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=%s "
+            "timestamp_quality=%s execution_eligible=%s",
+            asset, cfb_symbol, reason, obs.timestamp_quality, obs.execution_eligible
+        )
+        return None
+
+    # Freshness.  ``source_ts_ms`` is an upstream wall-clock epoch in milliseconds,
+    # not a duration, so compare it to the local wall clock (``now_ms``).  Also
+    # use monotonic time for the local latency because wall-clock time can jump.
+    wall_age_ms = now_ms - obs.source_ts_ms
+    if wall_age_ms < -5_000:
+        # Source clock is more than 5s ahead of ours.  Warn but do not reject;
+        # the data is still fresh from its own perspective.
+        logger.warning(
+            "[CF-RTI-ADAPTER] source_timestamp_in_future asset=%s cfb_symbol=%s "
+            "source_ts_ms=%d now_ms=%d skew_ms=%d",
+            asset, cfb_symbol, obs.source_ts_ms, now_ms, -wall_age_ms,
+        )
+    if wall_age_ms > _MAX_CFB_RTI_AGE_MS:
         _state.last_failure_reason_by_asset[asset] = "cfb_rti_stale"
         logger.error(
             "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_stale "
-            "age_ms=%s max_age_ms=%s", asset, cfb_symbol, age_ms, _MAX_CFB_RTI_AGE_MS
+            "wall_age_ms=%s max_age_ms=%s", asset, cfb_symbol, wall_age_ms, _MAX_CFB_RTI_AGE_MS
         )
         return None
+
+    if obs.observed_ts_mono_ns is not None:
+        mono_age_ms = (now_mono_ns - obs.observed_ts_mono_ns) // 1_000_000
+        if mono_age_ms > _MAX_CFB_RTI_AGE_MS:
+            _state.last_failure_reason_by_asset[asset] = "cfb_rti_stale"
+            logger.error(
+                "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_stale "
+                "mono_age_ms=%s max_age_ms=%s", asset, cfb_symbol, mono_age_ms, _MAX_CFB_RTI_AGE_MS
+            )
+            return None
 
     # Stream liveness: if the previous observation for this asset was more recent
     # than the current one, the stream is going backwards or has stalled.
@@ -466,22 +593,8 @@ def _validate_observation(
         )
         return None
 
-    # Subscription integrity: the adapter must have seen a successful observation
-    # within the heartbeat window.  A long run of failures triggers this gate.
-    failures = _state.consecutive_failures_by_asset.get(asset, 0)
-    heartbeat_window_ms = max(_MAX_CFB_RTI_AGE_MS * 3, 30000)
-    last_success = _state.last_observation_by_asset.get(asset)
-    if last_success is not None:
-        since_last_success = now_ms - last_success.source_ts_ms
-        if since_last_success > heartbeat_window_ms:
-            _state.last_failure_reason_by_asset[asset] = "cfb_rti_subscription_unconfirmed"
-            logger.error(
-                "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_subscription_unconfirmed "
-                "since_last_success_ms=%s", asset, cfb_symbol, since_last_success
-            )
-            return None
-
     # Ordering: sequence numbers must not go backward.
+    last_success = _state.last_observation_by_asset.get(asset)
     if obs.sequence is not None and last_success is not None and last_success.sequence is not None:
         if obs.sequence < last_success.sequence:
             _state.last_failure_reason_by_asset[asset] = "cfb_rti_nonmonotonic"

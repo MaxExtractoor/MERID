@@ -15,50 +15,14 @@ from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
 
 def parse_close_time_from_ticker(ticker: str) -> datetime:
     """
-    Parse close time from ticker using current parsing function.
-    
-    This is the existing ticker-based inference logic that may be flawed.
+    Parse close time from ticker using the canonical YYMONDD-HHMM-ET parser.
+
+    CRITICAL FIX (2026-08-03): delegates to parse_kalshi_15m_window_end_utc.
+    The previous hand-rolled parse (DD=first two digits, HHMM=next, UTC,
+    current-year assumed) was off by ~26 days and 4-5h vs Kalshi close_ts truth.
     """
-    # Example ticker: KXBTC15M-26JUN141300-00
-    # Format: SERIES-DDMONHHMM-SS
-    
-    try:
-        # Extract the date/time part after the dash
-        parts = ticker.split('-')
-        if len(parts) < 2:
-            return None
-        
-        dt_str = parts[1]  # e.g., "26JUN141300"
-        
-        # Parse day
-        day = int(dt_str[:2])
-        
-        # Parse month
-        month_str = dt_str[2:5].upper()
-        month_map = {
-            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
-        }
-        month = month_map.get(month_str)
-        
-        # Parse time (HHMM)
-        hour = int(dt_str[5:7])
-        minute = int(dt_str[7:9])
-        
-        # Determine year (current year or next year if date has passed)
-        now = datetime.now(timezone.utc)
-        year = now.year
-        
-        # Create the datetime
-        close_time = datetime(year, month, day, hour, minute, 0, tzinfo=timezone.utc)
-        
-        # If this date is in the past, assume next year
-        if close_time < now:
-            close_time = close_time.replace(year=year + 1)
-        
-        return close_time
-    except Exception as e:
-        return None
+    from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_window_end_utc
+    return parse_kalshi_15m_window_end_utc(ticker)
 
 
 def compute_close_time_from_ts(close_ts: int) -> datetime:
