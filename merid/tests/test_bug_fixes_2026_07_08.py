@@ -115,8 +115,12 @@ class TestWebSocketStallDetection:
     @pytest.mark.asyncio
     async def test_stall_detection_triggers_reconnect(self):
         """Test that stall detection triggers automatic reconnection."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        
+        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge, reset_bridge
+
+        # Ensure the singleton bridge flag is cleared; other tests may have
+        # created an instance in the same process.
+        reset_bridge()
+
         # Create a mock bridge
         bridge = KalshiWebSocketBridge()
         
@@ -198,7 +202,15 @@ class TestDecimalPrecision:
     
     def test_format_price_precision_for_all_assets(self):
         """Test that format_price uses correct precision for all 5 assets."""
-        from utils.logger import format_price
+        # 2026-08-18: Load directly from the repo root to avoid namespace-package
+        # shadowing when this test runs after other test collections.
+        import importlib.util
+        from pathlib import Path
+        logger_path = Path(__file__).resolve().parents[2] / "utils" / "logger.py"
+        spec = importlib.util.spec_from_file_location("_test_utils_logger", str(logger_path))
+        _test_utils_logger = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_test_utils_logger)
+        format_price = _test_utils_logger.format_price
         
         # Test each asset with expected precision
         test_cases = [
@@ -282,26 +294,73 @@ class TestDecimalPrecision:
 
 
 class TestCooldownTimestampInitialization:
-    """Test cooldown timestamp initialization fix."""
-    
-    def test_last_trade_time_initialization_source_code(self):
-        """Test that _last_trade_time is initialized to current time in source code."""
-        import inspect
+    """Test cooldown timestamp initialization fix.
+
+    Classification (2026-08-18): The original source-string assertion was a
+    **stale test**.  It has been replaced with a behavioral test that proves the
+    intended invariant: a freshly-initialized agent has a per-asset
+    `_last_trade_time` close to the current wall time, not epoch 0.
+    """
+
+    def test_last_trade_time_behavioral_initialization(self):
+        """A new LeanAgent15m instance must initialize _last_trade_time near now."""
+        import time
+        from unittest.mock import MagicMock
         from merid.prediction.agent_grid_15m import LeanAgent15m
-        
-        # Get the source code of the __init__ method
-        source = inspect.getsource(LeanAgent15m.__init__)
-        
-        # Verify that the initialization uses time.time() instead of 0.0
-        assert "current_time = time.time()" in source, \
-            "Cooldown timestamp initialization should use time.time() instead of 0.0"
-        assert "self._last_trade_time[asset] = current_time" in source, \
-            "Cooldown timestamp should be initialized to current_time"
-        
-        # Verify that the old buggy pattern is NOT present
-        assert "self._last_trade_time[asset] = 0.0" not in source, \
-            "Cooldown timestamp should NOT be initialized to 0.0 (the bug)"
-    
+
+        mock_config = MagicMock()
+        mock_config.name = "TEST_AGENT"
+        mock_config.alpha_0 = 0.0
+        mock_config.alpha_1 = 0.0
+        mock_config.rolling_buffer_enabled = False
+        mock_config.dynamic_components_enabled = False
+        mock_config.velocity_windows = [10, 30, 60]
+        mock_config.momentum_weights = [0.2, 0.3, 0.5]
+        mock_config.velocity_ema_period = 5
+        mock_config.atr_period = 14
+        mock_config.zscore_period = 20
+        mock_config.logit_fusion_velocity_weight = 0.7
+        mock_config.logit_fusion_mean_reversion_weight = 0.3
+        mock_config.near_expiry_guard_sec = 300
+        mock_config.calibration_enabled = False
+        mock_config.calibration_auto_fit = True
+        mock_config.calibration_min_samples = 100
+        mock_config.calibration_fit_interval_hours = 24
+        mock_config.calibration_regularization = 0.0001
+        mock_config.regime_detector_enabled = False
+        mock_config.panic_fade_enabled = False
+        mock_config.panic_fade_threshold = 0.0002
+        mock_config.panic_fade_zscore_threshold = 2.0
+        mock_config.panic_fade_rsi_oversold = 25.0
+        mock_config.panic_fade_rsi_overbought = 75.0
+        mock_config.panic_fade_min_velocity = 0.0001
+        mock_config.calibration_max_samples = 1000
+        mock_config.btc_sentiment_bias_enabled = False
+        mock_config.signal_mode = "momentum_fvg"
+        mock_config.profile_version = "2.0"
+
+        before_init = time.time()
+        agent = LeanAgent15m(
+            config=mock_config,
+            catalog=None,
+            market_state_store=None,
+            spot_provider=None,
+            order_router=None,
+            risk_config=None,
+        )
+        after_init = time.time()
+
+        assert hasattr(agent, "_last_trade_time"), "LeanAgent15m must expose _last_trade_time"
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            assert asset in agent._last_trade_time, f"Missing _last_trade_time for {asset}"
+            ts = agent._last_trade_time[asset]
+            assert before_init <= ts <= after_init, \
+                f"_last_trade_time[{asset}]={ts} not initialized to current time"
+
+        # Demonstrate the bug that is now fixed: 0.0 would produce an enormous cooldown.
+        assert time.time() - 0.0 > 1000000000.0, \
+            "Zero-initialized timestamp would produce an impossibly large cooldown"
+
     def test_cooldown_initialization_logic(self):
         """Test the cooldown initialization logic without full agent instantiation."""
         import time
