@@ -56,7 +56,9 @@ class CoinbaseVelocitySignalGenerator:
       contract still has enough lag to buy YES"
     """
     
-    # Velocity thresholds (per asset, aligned with research)
+    # Velocity thresholds (per asset, aligned with research).
+    # These are total 60-second returns, not per-second rates, so they can be
+    # compared directly to the output of CoinbaseWebSocketClient._calculate_velocity.
     # Updated 2026-06-29: Reduced by 25% to capture more trades in calm market conditions
     VELOCITY_THRESHOLDS = {
         "BTC-USD": 0.00015,  # 0.015% - reduced by 25% from 0.0002 to capture more trades in calm conditions

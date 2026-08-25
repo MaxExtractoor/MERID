@@ -78,6 +78,9 @@ class VenueOrder:
     take_profit_price_cents: Optional[int] = None  # Take profit price in cents
     take_profit_r_multiple: Optional[float] = None  # R-multiple target (e.g., 1.5R, 2.0R)
     stop_loss_price_cents: Optional[int] = None  # Protective stop in cents
+    reduce_only: bool = False  # Local reduce-only flag: do not increase net exposure
+    firewall_approval_id: Optional[str] = None  # ExecutionRiskFirewall decision id
+    exchange_index: Optional[int] = None  # Venue exchange shard index (Kalshi)
 
 
 @dataclass
@@ -107,6 +110,7 @@ class VenuePosition:
     realized_pnl: Optional[Decimal] = None
     venue: str = ""
     created_at: Optional[datetime] = None
+    raw_data: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -132,6 +136,7 @@ class VenueOrderBook:
     asks: List[tuple[Decimal, Decimal]]  # (price, size)
     timestamp: datetime
     venue: str = ""
+    raw_data: Optional[Dict[str, Any]] = None
 
 
 @dataclass
