@@ -547,6 +547,34 @@ def test_rsi_macd_confluence_scoring():
     assert snap2.bias in ("up", "down", "neutral")
 
 
+def test_macd_histogram_not_forced_to_zero_across_asset_price_scales():
+    """Stacks for a high-priced asset and a low-priced asset, both driven by
+    the same percentage trend, must produce non-zero MACD histograms and the
+    same MACD/price ratio. This guards against the alt-MACD=0 problem.
+    """
+    import pytest
+    btc = Crypto15mIndicatorStack()
+    doge = Crypto15mIndicatorStack()
+
+    # 60 bars of the same +0.01% per bar trend, scaled to BTC (~$95k) and DOGE (~$0.10)
+    for i in range(60):
+        btc.update(95000.0 * (1.0 + i * 0.0001))
+        doge.update(0.10 * (1.0 + i * 0.0001))
+
+    snap_btc = btc.snapshot()
+    snap_doge = doge.snapshot()
+
+    assert snap_btc.bars_available == snap_doge.bars_available
+    assert snap_btc.macd_histogram != 0.0
+    assert snap_doge.macd_histogram != 0.0
+
+    # MACD as a percentage of price should be roughly equal (same trend)
+    btc_macd_pct = snap_btc.macd_histogram / snap_btc.price
+    doge_macd_pct = snap_doge.macd_histogram / snap_doge.price
+    assert btc_macd_pct == pytest.approx(doge_macd_pct, abs=1e-9)
+
+
+
 def test_snapshot_handles_empty_deque():
     """Verify snapshot() handles empty deque gracefully without IndexError."""
     stack = Crypto15mIndicatorStack()

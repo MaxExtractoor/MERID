@@ -10,6 +10,16 @@ from trading.router import (
 from trading.adapters.base import TradeSide, OrderResult
 
 
+def setup_module(module):
+    """Provide a mock trading guard so ExecutionRouter can instantiate."""
+    module._guard_patch = patch("merid.execution.router.get_trading_guard", return_value=Mock())
+    module._guard_patch.start()
+
+
+def teardown_module(module):
+    module._guard_patch.stop()
+
+
 # =============================================================================
 # _adapter_executor_factory Tests
 # =============================================================================

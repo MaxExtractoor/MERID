@@ -55,11 +55,11 @@ def test_bankroll_service_adapter():
 
 # Test 3: Global rate limit reduction
 def test_global_rate_limit_reduced():
-    """Test that global rate limit was reduced from 6s to 3s."""
+    """Test that global rate limit was reduced for 15m opportunity capture."""
     from merid.event_venues.kalshi.order_router import _MIN_SECONDS_BETWEEN_ORDERS
     
-    # Verify the rate limit is 3 seconds
-    assert _MIN_SECONDS_BETWEEN_ORDERS == 3.0, f"Expected 3.0s, got {_MIN_SECONDS_BETWEEN_ORDERS}s"
+    # Current 15m setting is 0.1s between orders (reduced from earlier 0.3s/6s caps)
+    assert _MIN_SECONDS_BETWEEN_ORDERS == 0.1, f"Expected 0.1s, got {_MIN_SECONDS_BETWEEN_ORDERS}s"
 
 
 # Test 4: Velocity threshold reduction
@@ -80,16 +80,16 @@ def test_velocity_threshold_reduced():
 
 # Test 5: Microstructure threshold optimization
 def test_microstructure_threshold_optimized():
-    """Test that max_spread_cents was optimized to 10c based on 2026 research."""
+    """Test that max_spread_cents default matches the 15m microstructure gate."""
     from merid.event_venues.kalshi.order_router import check_market_microstructure
     import inspect
     
     # Get the function signature
     sig = inspect.signature(check_market_microstructure)
     
-    # Verify max_spread_cents default is 10.0 (2026-07-09 optimized from 20c)
+    # Default is 20.0c for 15m crypto markets (2026-07-12 research)
     max_spread_default = sig.parameters['max_spread_cents'].default
-    assert max_spread_default == 10.0, f"Expected 10.0, got {max_spread_default}"
+    assert max_spread_default == 20.0, f"Expected 20.0, got {max_spread_default}"
 
 
 # Test 6: Signal strength filter
@@ -98,11 +98,11 @@ def test_signal_strength_filter():
     from merid.prediction.agent_grid_15m import LeanAgentConfig
     import inspect
     
-    # Verify the min_edge_threshold is set in the signal generation logic
+    # Verify the minimum edge threshold is set in the signal generation logic
     # This is tested by checking the code has the filter
     from merid.prediction import agent_grid_15m
     source = inspect.getsource(agent_grid_15m)
-    assert "min_edge_threshold" in source, "min_edge_threshold should be in signal generation code"
+    assert "minimum edge threshold" in source, "minimum edge threshold should be in signal generation code"
     assert "0.02" in source, "0.02% threshold should be in signal generation code"
 
 
@@ -121,32 +121,32 @@ def test_asset_specific_velocity_thresholds():
     assert hasattr(config, 'velocity_threshold_xrp'), "Should have velocity_threshold_xrp"
     assert hasattr(config, 'velocity_threshold_doge'), "Should have velocity_threshold_doge"
     
-    # Verify values (BTC/ETH lower, others higher)
-    assert config.velocity_threshold_btc == 0.0013, f"Expected 0.0013 for BTC, got {config.velocity_threshold_btc}"
-    assert config.velocity_threshold_eth == 0.0013, f"Expected 0.0013 for ETH, got {config.velocity_threshold_eth}"
-    assert config.velocity_threshold_sol == 0.0018, f"Expected 0.0018 for SOL, got {config.velocity_threshold_sol}"
-    assert config.velocity_threshold_xrp == 0.0018, f"Expected 0.0018 for XRP, got {config.velocity_threshold_xrp}"
-    assert config.velocity_threshold_doge == 0.0020, f"Expected 0.0020 for DOGE, got {config.velocity_threshold_doge}"
+    # Verify values (BTC/ETH lower, others higher) - 2026-07-24 aligned with profile YAML
+    assert config.velocity_threshold_btc == 0.00015, f"Expected 0.00015 for BTC, got {config.velocity_threshold_btc}"
+    assert config.velocity_threshold_eth == 0.00015, f"Expected 0.00015 for ETH, got {config.velocity_threshold_eth}"
+    assert config.velocity_threshold_sol == 0.000225, f"Expected 0.000225 for SOL, got {config.velocity_threshold_sol}"
+    assert config.velocity_threshold_xrp == 0.000225, f"Expected 0.000225 for XRP, got {config.velocity_threshold_xrp}"
+    assert config.velocity_threshold_doge == 0.0003, f"Expected 0.0003 for DOGE, got {config.velocity_threshold_doge}"
 
 
 # Test 8: Integration test - rate limit check
 def test_rate_limit_check_allows_3s_interval():
-    """Test that rate limit check allows orders 3 seconds apart."""
+    """Test that rate limit check allows orders at the configured interval."""
     from merid.event_venues.kalshi.order_router import _check_global_rate_limit
     import time
     
     # This test verifies the logic by checking the constant
     # Actual rate limit testing would require manipulating the global state
     from merid.event_venues.kalshi.order_router import _MIN_SECONDS_BETWEEN_ORDERS
-    assert _MIN_SECONDS_BETWEEN_ORDERS == 3.0, "Rate limit should allow 3s intervals"
+    assert _MIN_SECONDS_BETWEEN_ORDERS == 0.1, f"Rate limit should allow 0.1s intervals, got {_MIN_SECONDS_BETWEEN_ORDERS}s"
 
 
 # Test 9: Integration test - microstructure check
 def test_microstructure_check_allows_10c_spread():
-    """Test that microstructure check allows 10c spread (2026-07-09 optimized from 20c)."""
+    """Test that side-aware microstructure check allows 10c and rejects 11c for YES side."""
     from merid.event_venues.kalshi.order_router import check_market_microstructure
     
-    # Test with 20c spread (should pass)
+    # Test with 10c YES spread (should pass)
     # Need sufficient depth: 400 contracts at 50c mid = $200 depth USD
     passes, reason = check_market_microstructure(
         yes_bid_cents=45,
@@ -155,12 +155,13 @@ def test_microstructure_check_allows_10c_spread():
         no_ask_cents=55,
         yes_depth=400,  # 400 contracts at 50c = $200 depth USD
         no_depth=400,
-        max_spread_cents=30.0  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
+        order_side="yes",
+        max_spread_cents=10.0
     )
     
     assert passes, f"10c spread should pass: {reason}"
     
-    # Test with 11c spread (should fail)
+    # Test with 11c YES spread (should fail)
     passes, reason = check_market_microstructure(
         yes_bid_cents=45,
         yes_ask_cents=56,  # 11c spread
@@ -168,96 +169,43 @@ def test_microstructure_check_allows_10c_spread():
         no_ask_cents=56,
         yes_depth=400,
         no_depth=400,
-        max_spread_cents=30.0  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c entry price canonical range
+        order_side="yes",
+        max_spread_cents=10.0
     )
     
     assert not passes, "11c spread should fail"
     assert "yes_spread_too_wide" in reason, f"Should fail with spread error: {reason}"
 
 
-# Test 10: Kalshi V2 API side conversion fix for NO orders
+# Test 10: Kalshi V2 API side conversion for NO orders (book-side mapping)
 def test_kalshi_v2_side_conversion_no_orders():
-    """Test that V2 API side conversion correctly uses outcome-side format.
-    
-    CRITICAL FIX (2026-07-19): This test was updated to reflect the correct
-    outcome-side format instead of the buggy bid/ask book-side mapping.
-    
-    The previous implementation used bid/ask book-side terminology which
-    caused order inversion (BUY_NO was converted to sell YES).
-    
-    The CORRECT mapping is:
-    - side: "yes" or "no" (the outcome you're trading)
-    - action: "buy" or "sell" (your action on that outcome)
-    
-    Kalshi API expects outcome-side format, NOT bid/ask book-side.
+    """Verify Kalshi V2 /portfolio/events/orders uses BookSide only.
+
+    V2 does NOT use the legacy ``action``/``side`` (yes/no) fields.  It uses a
+    single YES-centric book side: ``bid`` (outcome=yes) or ``ask`` (outcome=no).
+    Price is always quoted in YES-space dollars.
+
+    Canonical mapping:
+    - BUY_YES  -> bid
+    - SELL_YES -> ask
+    - BUY_NO   -> ask  (buying NO == selling YES)
+    - SELL_NO  -> bid  (selling NO == buying YES)
     """
-    from decimal import Decimal
-    from merid.event_venues.base import VenueOrder
     import inspect
     from merid.event_venues.kalshi.client import KalshiVenueClient
-    
-    # Get the source code of place_order_result to verify the fix
+
     source = inspect.getsource(KalshiVenueClient.place_order_result)
-    
-    # Verify the OLD BUGGY bid/ask logic is REMOVED
-    assert 'v2_side = "bid" if order.side == "buy" else "ask"' not in source, \
-        "OLD BUGGY bid/ask logic should be removed"
-    assert 'v2_side = "ask" if order.side == "buy" else "bid"' not in source, \
-        "OLD BUGGY bid/ask logic should be removed"
-    
-    # Verify the CORRECT outcome-side format is present
-    assert '"side": outcome' in source or 'side: outcome' in source, \
-        "Should use outcome-side format: side=outcome"
-    assert '"action": order.side' in source or 'action: order.side' in source, \
-        "Should use action directly: action=order.side"
-    
-    # Verify the fix comment is present
-    assert "CRITICAL FIX (2026-07-19)" in source or "Kalshi V2 API uses outcome-side format" in source, \
-        "Fix comment should be present"
-    
-    # Test the actual mapping logic by creating VenueOrder objects
-    # and verifying the expected API format would be computed correctly
-    
-    # Test BUY_YES -> side="bid", action="buy" (FIXED 2026-07-19)
-    order_yes_buy = VenueOrder(
-        market_id="KXBTC15M-26JUL021900-00",
-        side="buy",
-        size=Decimal("1"),
-        price=Decimal("0.50"),
-        outcome_id="yes"
-    )
-    # The fix ensures: outcome="yes" + action="buy" -> API: side="bid", action="buy"
-    
-    # Test SELL_YES -> side="ask", action="sell" (FIXED 2026-07-19)
-    order_yes_sell = VenueOrder(
-        market_id="KXBTC15M-26JUL021900-00",
-        side="sell",
-        size=Decimal("1"),
-        price=Decimal("0.50"),
-        outcome_id="yes"
-    )
-    # The fix ensures: outcome="yes" + action="sell" -> API: side="ask", action="sell"
-    
-    # Test BUY_NO -> side="bid", action="buy" (FIXED 2026-07-19)
-    order_no_buy = VenueOrder(
-        market_id="KXBTC15M-26JUL021900-00",
-        side="buy",
-        size=Decimal("1"),
-        price=Decimal("0.50"),
-        outcome_id="no"
-    )
-    # The fix ensures: outcome="no" + action="buy" -> API: side="bid", action="buy"
-    # This was the bug: old logic converted this to sell YES (ask side)
-    
-    # Test SELL_NO -> side="ask", action="sell" (FIXED 2026-07-19)
-    order_no_sell = VenueOrder(
-        market_id="KXBTC15M-26JUL021900-00",
-        side="sell",
-        size=Decimal("1"),
-        price=Decimal("0.50"),
-        outcome_id="no"
-    )
-    # The fix ensures: outcome="no" + action="sell" -> API: side="ask", action="sell"
+
+    # V2 CreateOrderV2Request has no `action` field; it is derived from BookSide.
+    # Ensure the wire payload no longer carries a conflicting legacy action.
+    assert '"action": action' not in source, \
+        "V2 request must not include the deprecated `action` field"
+
+    # Verify the canonical book-side mapping is present.
+    assert 'outcome == "no" and action == "buy"' in source, \
+        "BUY_NO must branch on outcome/action to choose the correct book side"
+    assert 'kalshi_side = "ask"' in source, "BUY_NO/SELL_YES must map to ask"
+    assert 'kalshi_side = "bid"' in source, "BUY_YES/SELL_NO must map to bid"
 
 
 if __name__ == "__main__":

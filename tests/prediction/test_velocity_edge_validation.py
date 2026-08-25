@@ -83,17 +83,16 @@ class TestVelocityEdgeValidation:
         or calculation errors, not for signal quality validation.
         """
         # Simulate extreme edge indicating data error
-        # p_model = 0.50
-        # p_mkt = 0.99 (heavily skewed market)
-        # edge = (0.50 - 0.99) * 100 = -49% (should be allowed)
-        # But if edge > 90%, it indicates data corruption
+        # p_model = 0.99
+        # p_mkt = 0.05 (heavily skewed market)
+        # edge = (0.99 - 0.05) * 100 = 94% (should be rejected as data error)
         
-        p_model = 0.50
+        p_model = 0.99
         p_mkt = 0.05  # Extreme market skew
         edge_pct = (p_model - p_mkt) * 100.0
         
         # Edge > 90% should be rejected as data error
-        assert abs(edge_pct) > 90.0, "Edge should be extreme (>90%)"
+        assert abs(edge_pct) > 90.0, f"Edge should be extreme (>90%), got {edge_pct}%"
         
         # This should trigger the sanity check rejection
         max_edge_threshold = 90.0
@@ -188,7 +187,7 @@ class TestVelocityEdgeValidation:
             "..", "..", "merid", "prediction", "agent_grid_15m.py"
         )
         
-        with open(agent_grid_path, 'r') as f:
+        with open(agent_grid_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Check that min_edge_threshold is NOT set to -100.0 (the workaround)
@@ -215,7 +214,7 @@ class TestVelocityEdgeValidation:
             "..", "..", "merid", "prediction", "agent_grid_15m.py"
         )
         
-        with open(agent_grid_path, 'r') as f:
+        with open(agent_grid_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Check that max_edge_threshold is 90.0 (sanity check)

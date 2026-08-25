@@ -265,7 +265,16 @@ class TestMomentumFVGSignalGeneration:
 
 class TestMomentumFVGIntegration:
     """Integration tests for momentum_fvg signal generation."""
-    
+
+    def setup_method(self, method):
+        """Ensure the 15m profile is active for profile-backed assertions."""
+        import os
+        import merid.risk.profiles.crypto_15m_profile as cp
+        os.environ['MERID_PROFILE'] = 'kalshi_crypto_15m_v2'
+        # Force a fresh adapter load for this test so conftest env cleanup
+        # does not leave a stale None adapter from a previous non-15m test.
+        cp._active_adapter = None
+
     def test_signal_generation_with_macd_dead_zone(self):
         """Test that signals are skipped when MACD is in dead zone."""
         # Test the dead zone logic

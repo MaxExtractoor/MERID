@@ -125,7 +125,7 @@ class TestConstants:
 
     def test_crypto_frequencies(self):
         """Test CRYPTO_FREQUENCIES list."""
-        assert CRYPTO_FREQUENCIES == ["15m", "hourly", "daily", "weekly"]
+        assert CRYPTO_FREQUENCIES == ["15m"]
 
     def test_series_prefixes(self):
         """Test CRYPTO_SERIES_PREFIXES mapping."""

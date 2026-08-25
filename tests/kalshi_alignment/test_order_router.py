@@ -28,7 +28,8 @@ class TestOrderRouterPricingValidation:
             action="buy",
             price_cents=55,  # Valid: 1-99 cents
             count=1,  # Valid: 1 contract per order rule
-            source="merid.prediction.agent_grid_15m"  # Valid: allowed source for kalshi_crypto_15m_v2 profile
+            source="merid.prediction.agent_grid_15m",  # Valid: allowed source for kalshi_crypto_15m_v2 profile
+            time_to_expiry_seconds=900
         )
     
     @pytest.mark.asyncio
@@ -156,9 +157,9 @@ class TestOrderRouterPricingValidation:
     
     @pytest.mark.asyncio
     async def test_valid_price_boundary_values(self, valid_order_intent):
-        """Test that boundary values (1 and 99) are accepted."""
-        # Test price_cents = 1
-        valid_order_intent.price_cents = 1
+        """Test that canonical boundary values (10 and 75) are accepted."""
+        # Test price_cents = 10
+        valid_order_intent.price_cents = 10
         
         with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
              patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
@@ -175,8 +176,8 @@ class TestOrderRouterPricingValidation:
             result = await route_order_async(valid_order_intent)
             assert result.status != "rejected" or "invalid_price" not in result.reason
         
-        # Test price_cents = 99
-        valid_order_intent.price_cents = 99
+        # Test price_cents = 75
+        valid_order_intent.price_cents = 75
         
         with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
              patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
@@ -206,7 +207,8 @@ class TestOrderRouterRateLimits:
             action="buy",
             price_cents=55,
             count=1,  # Valid: 1 contract per order rule
-            source="merid.prediction.agent_grid_15m"  # Valid: allowed source for kalshi_crypto_15m_v2 profile
+            source="merid.prediction.agent_grid_15m",  # Valid: allowed source for kalshi_crypto_15m_v2 profile
+            time_to_expiry_seconds=900
         )
     
     def setup_method(self):
@@ -268,11 +270,13 @@ class TestOrderRouterRateLimits:
         # Mock other dependencies
         with patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
              patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
-             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk:
-            
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._round_trip_net_of_cost_gate') as mock_net:
+
             mock_resolve_mode.return_value = "paper"
             mock_invariant.return_value = None
             mock_risk.return_value = (True, None)
+            mock_net.return_value = None
             
             # First order should succeed
             result1 = await route_order_async(valid_order_intent)
@@ -379,7 +383,8 @@ class TestOrderRouterIntegration:
             action="buy",
             price_cents=55,
             count=1,  # Valid: 1 contract per order rule
-            source="merid.prediction.agent_grid_15m"  # Valid: allowed source for kalshi_crypto_15m_v2 profile
+            source="merid.prediction.agent_grid_15m",  # Valid: allowed source for kalshi_crypto_15m_v2 profile
+            time_to_expiry_seconds=900
         )
     
     def setup_method(self):
@@ -437,28 +442,42 @@ class TestOrderRouterIntegration:
         """Test rate limiting across different assets."""
         limiter = get_rate_limiter()
         limiter.config.burst_capacity = 1  # Very low limit for testing
-        
+        limiter.config.requests_per_second = 0.0  # No refill, so second order exhausts the burst
+
+        # Bypass the process startup grace period so this test is deterministic
+        # when run in isolation or in different collection orders.
+        import merid.event_venues.kalshi.order_router as _router
+        _router._startup_time = 0.0
+
         # Mock other dependencies
         with patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
              patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
-             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk:
-            
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._round_trip_net_of_cost_gate') as mock_net:
+
             mock_resolve_mode.return_value = "paper"
             mock_invariant.return_value = None
             mock_risk.return_value = (True, None)
+            mock_net.return_value = None
             
             # BTC order
             btc_order = OrderIntent(
                 intent_id="btc-123",
                 ticker="KXBTC15M-26JUN022230-30",
-                side="yes", action="buy", price_cents=55, count=1, source="merid.prediction.agent_grid_15m"
+                side="yes", action="buy", price_cents=55, count=1,
+                agent_id="BTC_15M",
+                source="merid.prediction.agent_grid_15m",
+                time_to_expiry_seconds=900,
             )
-            
+
             # ETH order
             eth_order = OrderIntent(
-                intent_id="eth-123", 
+                intent_id="eth-123",
                 ticker="KXETH15M-26JUN022230-30",
-                side="yes", action="buy", price_cents=55, count=1, source="merid.prediction.agent_grid_15m"
+                side="yes", action="buy", price_cents=55, count=1,
+                agent_id="ETH_15M",
+                source="merid.prediction.agent_grid_15m",
+                time_to_expiry_seconds=900,
             )
             
             # First order (BTC) should succeed
@@ -501,7 +520,8 @@ class TestOrderRouterExitOrderBypass:
             window_resolution_id="test_window",
             exit_policy_id="test_policy",
             risk_tier="A",
-            max_hold_seconds=900
+            max_hold_seconds=900,
+            time_to_expiry_seconds=900
         )
     
     @pytest.mark.asyncio
@@ -565,7 +585,8 @@ class TestOrderRouterSingleContractLimit:
             source="merid.prediction.agent_grid_15m",  # Valid: allowed source for kalshi_crypto_15m_v2 profile
             window_resolution_id="test_window",
             risk_tier="A",
-            max_hold_seconds=900
+            max_hold_seconds=900,
+            time_to_expiry_seconds=900
         )
 
     @pytest.mark.asyncio
@@ -701,7 +722,8 @@ class TestOrderRouterDuplicateOrderPrevention:
             model_prob=0.70,
             window_resolution_id="BTC_15M",
             risk_tier="A",
-            max_hold_seconds=600
+            max_hold_seconds=600,
+            time_to_expiry_seconds=900
         )
 
     @pytest.mark.asyncio
@@ -786,7 +808,8 @@ class TestOrderRouterDuplicateOrderPrevention:
                 action="buy",
                 price_cents=55,
                 count=1,
-                source="BTC_15M"
+                source="BTC_15M",
+                time_to_expiry_seconds=900
             )
             _record_order_placed(test_intent)
 
@@ -834,7 +857,8 @@ class TestOrderRouterDuplicateOrderPrevention:
                 action="buy",
                 price_cents=55,
                 count=1,
-                source="BTC_15M"
+                source="BTC_15M",
+                time_to_expiry_seconds=900
             )
             _record_order_placed(test_intent)
 
@@ -860,7 +884,8 @@ class TestOrderRouterConfidenceValidation:
             source="BTC_15M",
             confidence=0.70,  # Above production threshold
             edge_pct=0.05,
-            model_prob=0.70
+            model_prob=0.70,
+            time_to_expiry_seconds=900
         )
 
     @pytest.mark.asyncio

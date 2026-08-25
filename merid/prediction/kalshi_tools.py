@@ -326,7 +326,7 @@ async def _kalshi_place_order(
     All orders MUST go through order_router.route_order_async to enforce:
     - Asset-window duplicate checks
     - Global $1 exposure cap
-    - One-contract-per-asset-per-15-minute rule
+    - Up-to-2-contracts-per-asset-per-15-minute rule (bounded by $1 exposure cap)
     - Position cache and resting order monitor validation
     
     This function is only allowed in test environments. Production calls will be rejected.
@@ -775,7 +775,7 @@ async def _kalshi_place_order(
             elif "DOGE" in ticker_upper:
                 asset = "DOGE"
             
-            max_contracts_limit = 1  # CRITICAL FIX: Default fallback to 1 to enforce $1 exposure cap (was 2, allowing >1 contract per order)
+            max_contracts_limit = 2  # 2026-08-22: Default fallback to 2 (still capped by $1 exposure)
             if asset:
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -787,7 +787,7 @@ async def _kalshi_place_order(
                             if hasattr(asset_config, 'max_contracts'):
                                 max_contracts_limit = asset_config.max_contracts
                 except Exception as e:
-                    logger.debug("[kalshi_tools] Failed to load max_contracts from profile: %s, using default 1", e)
+                    logger.debug("[kalshi_tools] Failed to load max_contracts from profile: %s, using default 2", e)
             
             # Resolve risk contract fields for crypto 15m markets
             window_resolution_id = "15m"  # Default window resolution for 15m markets
@@ -900,7 +900,7 @@ async def _kalshi_place_order(
                 )
             
             # Record successful order submission in GlobalAllocator
-            if result.status in ("submitted", "filled_paper", "filled_live", "filled_mock") and asset:
+            if (result.has_execution or (result.request_completed and not result.is_terminal)) and asset:
                 try:
                     from merid.risk.profiles.global_allocator import get_global_allocator
                     allocator = get_global_allocator()
@@ -911,7 +911,7 @@ async def _kalshi_place_order(
                     logger.debug("[kalshi_tools] Failed to record submission in GlobalAllocator: %s", cb_exc)
             
             # Handle ambiguous or unknown statuses
-            if result.status in ("duplicate_unknown",):
+            if result.requires_recovery:
                 logger.warning(
                     "[kalshi_tools] Order status ambiguous: %s reason=%s",
                     result.status, result.reason
@@ -966,7 +966,7 @@ async def _kalshi_place_order(
                         logger.warning("live trade record failed: %s", _lte)
 
             return ToolResult(
-                success=True,
+                success=result.request_completed and not result.requires_recovery,
                 payload=payload,
                 source="kalshi",
                 validity=ToolValidity.FRESH,
@@ -1301,7 +1301,7 @@ def build_live_route_order_intent(
     elif "DOGE" in ticker_upper:
         asset = "DOGE"
     
-    max_contracts_limit = 1  # CRITICAL FIX: Default fallback to 1 to enforce $1 exposure cap (was 2, allowing >1 contract per order)
+    max_contracts_limit = 2  # 2026-08-22: Default fallback to 2 (still capped by $1 exposure)
     if asset:
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile

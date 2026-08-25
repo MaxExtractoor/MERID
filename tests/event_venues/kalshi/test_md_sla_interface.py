@@ -10,7 +10,7 @@ SLA interface is tested through integration tests in the production stack.
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="MD SLA interface tests require complex setup - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P2-INTEGRATION: TRACKER-018: MD SLA interface")
 
 from merid.event_venues.kalshi.md_sla_interface import (
     get_md_status,

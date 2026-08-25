@@ -19,7 +19,7 @@ class TestPriceBasedThresholdInvariants:
     """Test that price-based thresholds are correctly configured and not inverted."""
 
     def test_buy_threshold_below_50_percent(self):
-        """Buy threshold must be < 0.5 to buy YES when cheap."""
+        """Buy threshold must be <= 0.5 to buy YES when cheap or fair."""
         with patch.dict(os.environ, {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}, clear=False):
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             from merid.risk.profiles.crypto_15m_profile import _active_adapter
@@ -27,11 +27,11 @@ class TestPriceBasedThresholdInvariants:
             profile_module._active_adapter = None
             
             profile = get_active_profile().profile
-            assert 0 < profile.price_based_buy_threshold < 0.5, \
-                f"price_based_buy_threshold={profile.price_based_buy_threshold} must be in (0, 0.5) to buy YES when cheap"
+            assert 0 < profile.price_based_buy_threshold <= 0.5, \
+                f"price_based_buy_threshold={profile.price_based_buy_threshold} must be in (0, 0.5] to buy YES when cheap or fair"
 
     def test_sell_threshold_above_50_percent(self):
-        """Sell threshold must be > 0.5 to buy NO when expensive."""
+        """Sell threshold must be >= 0.5 to buy NO when YES is expensive or fair."""
         with patch.dict(os.environ, {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}, clear=False):
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             from merid.risk.profiles.crypto_15m_profile import _active_adapter
@@ -39,11 +39,11 @@ class TestPriceBasedThresholdInvariants:
             profile_module._active_adapter = None
             
             profile = get_active_profile().profile
-            assert 0.5 < profile.price_based_sell_threshold < 1.0, \
-                f"price_based_sell_threshold={profile.price_based_sell_threshold} must be in (0.5, 1.0) to buy NO when expensive"
+            assert 0.5 <= profile.price_based_sell_threshold < 1.0, \
+                f"price_based_sell_threshold={profile.price_based_sell_threshold} must be in [0.5, 1.0) to buy NO when YES is expensive or fair"
 
-    def test_buy_threshold_less_than_sell_threshold(self):
-        """Buy threshold must be less than sell threshold for symmetric trading."""
+    def test_buy_threshold_less_than_or_equal_sell_threshold(self):
+        """Buy threshold must be <= sell threshold for symmetric trading."""
         with patch.dict(os.environ, {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}, clear=False):
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             from merid.risk.profiles.crypto_15m_profile import _active_adapter
@@ -51,8 +51,8 @@ class TestPriceBasedThresholdInvariants:
             profile_module._active_adapter = None
             
             profile = get_active_profile().profile
-            assert profile.price_based_buy_threshold < profile.price_based_sell_threshold, \
-                f"price_based_buy_threshold={profile.price_based_buy_threshold} must be < " \
+            assert profile.price_based_buy_threshold <= profile.price_based_sell_threshold, \
+                f"price_based_buy_threshold={profile.price_based_buy_threshold} must be <= " \
                 f"price_based_sell_threshold={profile.price_based_sell_threshold} for symmetric trading"
 
     def test_no_dead_zone_between_thresholds(self):
@@ -94,9 +94,9 @@ class TestPriceBasedStrategyEconomics:
     @pytest.mark.parametrize("price,expected_side", [
         (0.05, "yes"),   # Very cheap YES
         (0.20, "yes"),   # Cheap YES
-        (0.30, "yes"),   # At buy threshold
-        (0.50, None),    # Mid-band (no signal)
-        (0.70, "no"),    # At sell threshold
+        (0.30, "yes"),   # Cheap YES
+        (0.50, None),    # At 50c fair value (no positive edge)
+        (0.70, "no"),    # Expensive YES (cheap NO)
         (0.80, "no"),    # Expensive YES (cheap NO)
         (0.90, "no"),    # Very expensive YES (very cheap NO)
     ])
@@ -104,9 +104,9 @@ class TestPriceBasedStrategyEconomics:
         """Test that price-based strategy selects correct side for given prices.
         
         This is a table-driven test that verifies the economic assumptions:
-        - YES signals only when price <= buy_threshold (cheap YES)
-        - NO signals only when price >= sell_threshold (expensive YES = cheap NO)
-        - No signal in the mid-band where momentum/other modes should dominate
+        - YES signals only when price < buy_threshold (cheap YES)
+        - NO signals only when price > sell_threshold (expensive YES = cheap NO)
+        - No signal at the 50c fair value where both edges are zero
         """
         with patch.dict(os.environ, {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}, clear=False):
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -118,10 +118,11 @@ class TestPriceBasedStrategyEconomics:
             buy_threshold = profile.price_based_buy_threshold
             sell_threshold = profile.price_based_sell_threshold
             
-            # Simulate the price-based side selection logic
-            if price <= buy_threshold:
+            # Simulate the price-based side selection logic.
+            # At the exact 50c fair value both edges are zero, so there is no signal.
+            if price < buy_threshold:
                 actual_side = "yes"
-            elif price >= sell_threshold:
+            elif price > sell_threshold:
                 actual_side = "no"
             else:
                 actual_side = None
@@ -200,7 +201,7 @@ class TestThresholdRegression:
         """Ensure the swing mode thresholds (0.48/0.72) are not present.
         
         The swing mode thresholds were an intermediate attempt that still
-        had a 24c dead zone. The correct symmetric thresholds are 0.30/0.70.
+        had a 24c dead zone. The correct symmetric thresholds are 0.50/0.50.
         """
         with patch.dict(os.environ, {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}, clear=False):
             from merid.risk.profiles.crypto_15m_profile import get_active_profile

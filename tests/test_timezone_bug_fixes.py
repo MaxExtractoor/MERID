@@ -241,7 +241,7 @@ def test_market_state_transport_mode_set_for_ws_snapshots():
     # Verify transport_mode is set to 'ws'
     if state:
         assert state.transport_mode == "ws"
-        assert state.data_source == "WS_ORDERBOOK_SNAPSHOT_BOOTSTRAP"
+        assert state.data_source == "BOOTSTRAP_VALID_BUT_UNCONFIRMED"
         assert state.book_initialized == True
 
 

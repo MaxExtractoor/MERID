@@ -21,6 +21,13 @@ import tracemalloc
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
+@pytest.fixture(autouse=True)
+def pressure_test_env(monkeypatch):
+    """Relax the 1-contract/position rule and resting brackets for throughput tests."""
+    monkeypatch.setenv("MERID_DISABLE_CONTRACT_LIMIT", "true")
+    monkeypatch.setenv("MERID_RESTING_BRACKETS_ENABLED", "false")
+
+
 class TestHighFillVolume:
     """Test system behavior under high fill volume."""
     

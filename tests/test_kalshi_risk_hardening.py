@@ -107,11 +107,11 @@ class TestKalshiFeeCents:
         assert kalshi_fee_cents(price_cents=100, contracts=10) == 0
         assert kalshi_fee_cents(price_cents=-5, contracts=10) == 0
 
-    def test_fee_minimum_2_cents(self):
-        """Fee has a 2 cent minimum."""
-        # Very small trade should still have 2 cent min
+    def test_fee_minimum_1_cent(self):
+        """Fee has a 1 cent cent-rounding floor."""
+        # Very small trade rounds up to 1 cent
         fee = kalshi_fee_cents(price_cents=1, contracts=1)
-        assert fee >= 2
+        assert fee == 1
 
     def test_fee_tier_1_to_99(self):
         """7% rate for 1-99 contracts."""
@@ -119,8 +119,8 @@ class TestKalshiFeeCents:
         fee_50 = kalshi_fee_cents(price_cents=50, contracts=50)
         fee_99 = kalshi_fee_cents(price_cents=50, contracts=99)
 
-        # 50 cent price, 7% rate, 1 contract: ceil(0.07 * 1 * 0.5 * 0.5 * 100) = 2 (min)
-        assert fee_1 >= 2
+        # 50 cent price, 7% rate, 1 contract: ceil(0.07 * 1 * 0.5 * 0.5 * 100) = 2
+        assert fee_1 >= 1
         # Rate should be 7% tier
         assert kalshi_fee_rate(50) == 0.07
 
@@ -136,11 +136,11 @@ class TestKalshiFeeCents:
         assert kalshi_fee_rate(5000) == 0.03
 
     def test_fee_formula_correctness(self):
-        """Verify fee formula: ceil(rate * C * P * (1-P) * 100) with 2c min."""
+        """Verify fee formula: ceil(rate * C * P * (1-P) * 100) with 1c floor."""
         # price_cents=50, contracts=100, rate=0.05
         # fee = ceil(0.05 * 100 * 0.5 * 0.5 * 100) = ceil(125) = 125 cents
         fee = kalshi_fee_cents(price_cents=50, contracts=100)
-        expected = max(2, math.ceil(0.05 * 100 * 0.5 * 0.5 * 100))
+        expected = max(1, math.ceil(0.05 * 100 * 0.5 * 0.5 * 100))
         assert fee == expected
 
 

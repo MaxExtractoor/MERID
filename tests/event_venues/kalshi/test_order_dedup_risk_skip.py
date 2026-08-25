@@ -13,8 +13,6 @@ from __future__ import annotations
 import pytest
 from unittest.mock import MagicMock, patch
 
-pytestmark = pytest.mark.skip(reason="Order deduplication tests require complex setup - tested via integration tests")
-
 from merid.event_venues.kalshi.order_deduplication import (
     OrderDeduplicationCache,
     get_order_cache,
@@ -35,7 +33,10 @@ def test_duplicate_order_skips_risk_checks():
     )
     assert is_dup1 is False
     assert coid1 != ""
-    
+
+    # Mark as actually submitted so the duplicate guard fires
+    cache.mark_submitted(coid1)
+
     # Second identical order is detected as duplicate
     coid2, is_dup2 = cache.get_or_create(
         ticker="KXBTC15M-TEST",

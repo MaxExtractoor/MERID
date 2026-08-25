@@ -2213,15 +2213,15 @@ def test_execute_candidate_returns_false_on_rejected_order():
         loop_source = f.read()
     
     # Verify return False after order rejection
-    assert "Order REJECTED by router" in loop_source, \
+    assert "ROUTER-REJECTED" in loop_source, \
         "_execute_candidate should log order rejection"
-    
+
     # Find the return False statement after rejection
     lines = loop_source.split('\n')
     found_reject_log = False
     found_return_false = False
     for i, line in enumerate(lines):
-        if "Order REJECTED by router" in line:
+        if "ROUTER-REJECTED" in line:
             found_reject_log = True
         elif found_reject_log and "return False" in line and i < len(lines) and i < lines.index(line) + 5:
             found_return_false = True
@@ -2232,7 +2232,7 @@ def test_execute_candidate_returns_false_on_rejected_order():
 
 
 def test_executed_candidates_only_tracked_on_true_return():
-    """CRITICAL FIX (2026-07-24): Calling code only tracks candidates when _execute_candidate returns True.
+    """CRITICAL FIX (2026-08-04): Calling code only tracks candidates when _execute_candidate returns True.
     
     This ensures only actually submitted orders are tracked in the duplicate exposure prevention set,
     preventing false positive duplicate exposure warnings.
@@ -2248,7 +2248,8 @@ def test_executed_candidates_only_tracked_on_true_return():
     assert "if order_submitted:" in loop_source, \
         "Calling code should only track candidates when order_submitted is True"
     
-    # Verify asset_window_key is only added inside the if block
+    # Verify asset_window_key is only tracked inside the if block
+    # _executed_candidates_this_window is a dict, so look for a dict assignment.
     lines = loop_source.split('\n')
     found_if_order_submitted = False
     found_asset_window_key_add = False
@@ -2258,7 +2259,7 @@ def test_executed_candidates_only_tracked_on_true_return():
         if "if order_submitted:" in line:
             found_if_order_submitted = True
             indent_level = len(line) - len(line.lstrip())
-        elif found_if_order_submitted and "_executed_candidates_this_window.add(asset_window_key)" in line:
+        elif found_if_order_submitted and "_executed_candidates_this_window[asset_window_key] =" in line:
             # Check if this line is indented more than the if statement
             current_indent = len(line) - len(line.lstrip())
             if current_indent > indent_level:

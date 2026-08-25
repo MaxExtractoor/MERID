@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 
-pytestmark = pytest.mark.skip(reason="Settlement poller tests require complex setup - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P1-SETTLEMENT: TRACKER-012: Historical settlement is P1 per strategy")
 
 
 @dataclass

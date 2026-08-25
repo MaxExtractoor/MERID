@@ -25,17 +25,17 @@ class TestUnifiedRiskManagerDefaults:
     """Test that UnifiedRiskManager defaults align with profile YAML."""
 
     def test_fixed_exposure_cap_default(self):
-        """Test that fixed_exposure_cap_usd defaults to $1.00 (global slot allocator model)."""
+        """Test that fixed_exposure_cap_usd defaults to $2.00 (global slot allocator model)."""
         limits = RiskLimits()
-        assert limits.fixed_exposure_cap_usd == 1.00, (
-            f"Expected 1.00 ($1 global slot allocator cap), got {limits.fixed_exposure_cap_usd}"
+        assert limits.fixed_exposure_cap_usd == 2.00, (
+            f"Expected 2.00 ($2 global slot allocator cap), got {limits.fixed_exposure_cap_usd}"
         )
 
     def test_max_cycle_risk_pct_aligned(self):
-        """Test that max_cycle_risk_pct is DISABLED (fixed $1 exposure model).
+        """Test that max_cycle_risk_pct is DISABLED (fixed $2 exposure model).
 
         2026-07-16: Percentage-based allocation PRUNED - pct==0.0 defers to the
-        $1 global slot allocator (single source of truth).
+        $2 global slot allocator (single source of truth).
         """
         limits = RiskLimits()
         assert limits.max_cycle_risk_pct == 0.0, (
@@ -71,21 +71,21 @@ class TestUnifiedRiskManagerDefaults:
         )
 
     def test_per_trade_max_notional_pct_aligned(self):
-        """Test that per_trade_max_notional_pct is DISABLED (fixed $1 exposure model).
+        """Test that per_trade_max_notional_pct is DISABLED (fixed $2 exposure model).
 
-        2026-07-16: pct==0.0 makes check_order use fixed_exposure_cap_usd ($1)
+        2026-07-16: pct==0.0 makes check_order use fixed_exposure_cap_usd ($2)
         as the per-trade cap instead of a percentage of bankroll.
         """
         limits = RiskLimits()
         assert limits.per_trade_max_notional_pct == 0.0, (
-            f"Expected 0.0 (DISABLED - fixed $1 model), got {limits.per_trade_max_notional_pct}"
+            f"Expected 0.0 (DISABLED - fixed $2 model), got {limits.per_trade_max_notional_pct}"
         )
 
     def test_per_trade_max_contracts_slot_model(self):
-        """Test that per_trade_max_contracts matches slot model (1 contract per order)."""
+        """Test that per_trade_max_contracts matches slot model (2 contracts per order)."""
         limits = RiskLimits()
-        assert limits.per_trade_max_contracts == 1, (
-            f"Expected 1 (slot model MAX_CONTRACTS_PER_ORDER), got {limits.per_trade_max_contracts}"
+        assert limits.per_trade_max_contracts == 2, (
+            f"Expected 2 (slot model MAX_CONTRACTS_PER_ORDER), got {limits.per_trade_max_contracts}"
         )
 
 
@@ -221,10 +221,10 @@ class TestUnifiedRiskManagerBehavior:
     """Test UnifiedRiskManager behavior with aligned parameters."""
 
     def test_check_order_slot_model_contract_limit(self):
-        """Test check_order under the slot model: 1 contract allowed, 2 rejected.
+        """Test check_order under the slot model: 2 contracts allowed, 3 rejected.
 
-        2026-07-16: per_trade_max_contracts=1 (slot model MAX_CONTRACTS_PER_ORDER).
-        Per-trade notional cap is the fixed $1 exposure cap, NOT a pct of bankroll.
+        2026-07-16: per_trade_max_contracts=2 (slot model MAX_CONTRACTS_PER_ORDER).
+        Per-trade notional cap is the fixed $2 exposure cap, NOT a pct of bankroll.
         """
         UnifiedRiskManager.reset_for_tests()
         manager = UnifiedRiskManager()
@@ -232,20 +232,7 @@ class TestUnifiedRiskManagerBehavior:
         # Calibrate with $1000 bankroll
         manager.calibrate_from_balance(balance_cents=100000)  # $1000
         
-        # 1 contract at 50c ($0.50 <= $1 fixed cap) - should be allowed
-        allowed, reason = manager.check_order(
-            ticker="KXBTC15M-TEST",
-            contracts=1,
-            price_cents=50,
-            category="crypto",
-            underlying="BTC"
-        )
-        assert allowed, f"1-contract order should be allowed, but was rejected: {reason}"
-        
-        # 2 contracts - should be rejected by slot model contract limit
-        UnifiedRiskManager.reset_for_tests()
-        manager = UnifiedRiskManager()
-        manager.calibrate_from_balance(balance_cents=100000)
+        # 2 contracts at 50c ($1.00 <= $2 fixed cap) - should be allowed
         allowed, reason = manager.check_order(
             ticker="KXBTC15M-TEST",
             contracts=2,
@@ -253,7 +240,20 @@ class TestUnifiedRiskManagerBehavior:
             category="crypto",
             underlying="BTC"
         )
-        assert not allowed, "2-contract order should be rejected under slot model (max 1)"
+        assert allowed, f"2-contract order should be allowed, but was rejected: {reason}"
+        
+        # 3 contracts - should be rejected by slot model contract limit
+        UnifiedRiskManager.reset_for_tests()
+        manager = UnifiedRiskManager()
+        manager.calibrate_from_balance(balance_cents=100000)
+        allowed, reason = manager.check_order(
+            ticker="KXBTC15M-TEST",
+            contracts=3,
+            price_cents=50,
+            category="crypto",
+            underlying="BTC"
+        )
+        assert not allowed, "3-contract order should be rejected under slot model (max 2)"
         assert "MAX_CONTRACTS" in reason
 
 

@@ -70,13 +70,17 @@ class TestExitPolicyResolution:
     """Test that resolve_exit_policy uses YAML config correctly."""
     
     def test_resolve_exit_policy_uses_yaml_config(self):
-        """Test that resolve_exit_policy loads TP/SL from YAML."""
+        """Test that resolve_exit_policy loads TP/SL from YAML and computes a fee/fair-capped TP."""
         from merid.event_venues.kalshi.order_router import resolve_exit_policy
         
-        # Mock edge result
+        # Mock edge result and entry model context
         edge_result = {
             'confidence': 0.8,
-            'net_edge_cents': 5.0
+            'net_edge_cents': 18.0
+        }
+        strip_context = {
+            'entry_price_cents': 42,
+            'entry_model_probability': 0.60,
         }
         
         # Resolve exit policy for BTC
@@ -84,7 +88,7 @@ class TestExitPolicyResolution:
             edge_result=edge_result,
             asset='BTC',
             regime='normal',
-            strip_context={}
+            strip_context=strip_context,
         )
         
         # Check that resolution was created
@@ -92,32 +96,41 @@ class TestExitPolicyResolution:
         assert resolution.asset == 'BTC'
         assert resolution.regime == 'normal'
         
-        # Check that TP/SL were set
+        # Check that a valid, enabled TP and an SL are present
+        assert resolution.take_profit_enabled is True
         assert resolution.tp_r_multiple > 0
+        assert resolution.tp_price_cents is not None
+        assert resolution.tp_price_cents > strip_context['entry_price_cents']
         assert resolution.sl_cents > 0
     
     def test_resolve_exit_policy_asset_specific_tp(self):
-        """Test that different assets get different TP distances."""
+        """Test that different assets get valid TP distances when model edge is provided."""
         from merid.event_venues.kalshi.order_router import resolve_exit_policy
+        
+        strip_context = {'entry_price_cents': 50, 'entry_model_probability': 0.65}
         
         # Resolve for different assets
-        btc_resolution = resolve_exit_policy(None, 'BTC', 'normal', {})
-        eth_resolution = resolve_exit_policy(None, 'ETH', 'normal', {})
-        sol_resolution = resolve_exit_policy(None, 'SOL', 'normal', {})
+        btc_resolution = resolve_exit_policy(None, 'BTC', 'normal', strip_context)
+        eth_resolution = resolve_exit_policy(None, 'ETH', 'normal', strip_context)
+        sol_resolution = resolve_exit_policy(None, 'SOL', 'normal', strip_context)
         
-        # Check that they have TP values
-        assert btc_resolution.tp_r_multiple > 0
-        assert eth_resolution.tp_r_multiple > 0
-        assert sol_resolution.tp_r_multiple > 0
+        # Check that they have valid TP values
+        for resolution in [btc_resolution, eth_resolution, sol_resolution]:
+            assert resolution.take_profit_enabled is True
+            assert resolution.tp_r_multiple > 0
+            assert resolution.tp_price_cents is not None
+            assert resolution.tp_price_cents > strip_context['entry_price_cents']
     
     def test_resolve_exit_policy_regime_adjustments(self):
-        """Test that regime adjustments affect TP/SL."""
+        """Test that regime adjustments affect TP when model edge is provided."""
         from merid.event_venues.kalshi.order_router import resolve_exit_policy
         
+        strip_context = {'entry_price_cents': 50, 'entry_model_probability': 0.65}
+        
         # Resolve for different regimes
-        conservative = resolve_exit_policy(None, 'BTC', 'conservative', {})
-        normal = resolve_exit_policy(None, 'BTC', 'normal', {})
-        aggressive = resolve_exit_policy(None, 'BTC', 'aggressive', {})
+        conservative = resolve_exit_policy(None, 'BTC', 'conservative', strip_context)
+        normal = resolve_exit_policy(None, 'BTC', 'normal', strip_context)
+        aggressive = resolve_exit_policy(None, 'BTC', 'aggressive', strip_context)
         
         # Conservative should have lower TP
         assert conservative.tp_r_multiple <= normal.tp_r_multiple
@@ -130,15 +143,15 @@ class TestBinaryOptionsTPSLCalculation:
     """Test TP/SL calculation for binary options."""
     
     def test_tp_calculation_uses_percentage(self):
-        """Test that TP is calculated as percentage of entry price."""
-        # For binary options: TP = entry + (entry * tp_r_multiple)
-        # Example: 42c entry with 15% TP = 42 + 6.3 = 48.3c
+        """Test that TP is a percentage of max gain (100 - entry), not entry price."""
+        # For binary options: TP = entry + (tp_r_multiple * (100 - entry))
+        # Example: 42c entry with 15% of 58c max gain = 42 + 8.7 = 50.7c -> 50c
         
         entry_price = 42
-        tp_r_multiple = 0.15  # 15%
-        expected_tp = int(entry_price * (1 + tp_r_multiple))
+        tp_r_multiple = 0.15  # 15% of max gain
+        expected_tp = int(entry_price + tp_r_multiple * (100 - entry_price))
         
-        assert expected_tp == 48  # 42 * 1.15 = 48.3 -> 48c
+        assert expected_tp == 50  # 42 + 0.15*58 = 50.7 -> 50c
     
     def test_sl_calculation_uses_offset_yes(self):
         """Test that SL for YES uses cent offset from entry."""
@@ -228,15 +241,19 @@ class TestExitPolicyIntegration:
         """Test that exit policy flows from resolution to position."""
         from merid.event_venues.kalshi.order_router import resolve_exit_policy
         
-        # Resolve exit policy
-        resolution = resolve_exit_policy(None, 'BTC', 'normal', {})
+        # Resolve exit policy with a trusted entry model
+        strip_context = {'entry_price_cents': 42, 'entry_model_probability': 0.60}
+        resolution = resolve_exit_policy(None, 'BTC', 'normal', strip_context)
         
-        # Simulate position creation with TP/SL
-        entry_price = 42
-        tp_price = int(entry_price * (1 + resolution.tp_r_multiple))
+        # Use the absolute TP price when available, otherwise derive from max-gain fraction
+        entry_price = strip_context['entry_price_cents']
+        tp_price = resolution.tp_price_cents
+        if tp_price is None:
+            tp_price = int(entry_price * (1 + resolution.tp_r_multiple))
         sl_offset = resolution.sl_cents
         
         # Check that TP/SL are reasonable
+        assert resolution.take_profit_enabled is True
         assert tp_price > entry_price
         assert tp_price <= 99
         assert sl_offset > 0

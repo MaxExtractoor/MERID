@@ -13,7 +13,7 @@ import pytest
 from unittest.mock import Mock, patch
 import os
 
-pytestmark = pytest.mark.skip(reason="Credentials tests have ImportError for KalshiConfig - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-023: `KalshiConfig` import errors; not used in production stack")
 
 
 class TestKalshiCredentials:

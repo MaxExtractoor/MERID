@@ -15,7 +15,9 @@ def client():
     from fastapi import FastAPI
     from web.api.kalshi_api import router
     app = FastAPI()
-    app.include_router(router, prefix="/api/v1/kalshi")
+    # 2026-08-24: kalshi_api.router already carries prefix="/api/v1/kalshi",
+    # so we must not double-prefix it when mounting in a test app.
+    app.include_router(router)
     return TestClient(app)
 
 

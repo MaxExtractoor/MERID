@@ -13,6 +13,7 @@ candidate (and therefore no executable order).
 from __future__ import annotations
 
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -137,16 +138,22 @@ def _p_selected_cents(intent) -> float:
 
 
 def _healthy_rti_observation(asset: str) -> CfbRtiObservation:
+    # Test helper: valid source timestamp, very fresh wall and monotonic times.
+    now_wall_ms = int(time.time() * 1000)
+    now_mono_ns = time.monotonic_ns()
     return CfbRtiObservation(
         asset=asset,
         cfb_symbol="BRTI",
         value=_HEALTHY_RTI_VALUE,
-        source_ts_ms=1_700_000_000_000,
-        received_ts_ms=1_700_000_000_050,
+        source_ts_ms=now_wall_ms,
+        observed_ts_ms=now_wall_ms,
+        observed_ts_mono_ns=now_mono_ns,
         sequence=1,
         source="cf_benchmarks",
         settlement_reference="cfb_rti_live",
         cfb_60s_average=None,
+        timestamp_quality="source",
+        execution_eligible=True,
         price_source_health="healthy",
     )
 
@@ -217,6 +224,18 @@ async def test_healthy_rti_eligibility_path():
     assert captured_intent.settlement_reference == "cfb_rti_live"
     assert captured_intent.confidence_valid is True
     assert captured_intent.confidence_source == "uncertainty_engine"
+    # CRITICAL: decision/run provenance and economic state must propagate from
+    # the TradeDecision into the OrderIntent so the router never rejects for
+    # missing order identity.
+    assert captured_intent.run_id is not None
+    assert captured_intent.decision_id is not None
+    assert captured_intent.run_id == candidate["run_id"]
+    assert captured_intent.decision_id == candidate["decision_id"]
+    assert captured_intent.data_state is not None
+    assert captured_intent.regime_label is not None
+    assert captured_intent.gross_edge is not None
+    assert captured_intent.net_edge_pretrade is not None
+    assert captured_intent.selected_outcome_price_cents is not None
 
     # Side-neutral probability assertion: the selected outcome must be believed.
     outcome_side = _outcome_side(captured_intent)

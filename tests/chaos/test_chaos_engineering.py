@@ -434,7 +434,7 @@ class TestNetworkPartition:
         # for _ in range(3):
         #     coord._consecutive_timeouts["SYM1"] += 1
         # assert coord._consecutive_timeouts["SYM1"] == 3
-        self.skipTest("Consensus module deleted")
+        pytest.skip("Consensus module deleted")
 
     def test_heartbeat_deadman_switch_levels(self):
         """Test heartbeat dead-man's switch at all severity levels."""
@@ -454,7 +454,7 @@ class TestNetworkPartition:
         # # 2 min stale → defensive
         # coord._last_heartbeat = time.time() - 130
         # assert coord.check_heartbeat() == "defensive"
-        self.skipTest("Consensus module deleted")
+        pytest.skip("Consensus module deleted")
 
     def test_partial_fill_metadata(self):
         """Test partial fill detection metadata structure."""

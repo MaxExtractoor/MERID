@@ -34,7 +34,7 @@ from merid.event_venues.kalshi.client import (
 from merid.event_venues.kalshi.models import KalshiConfig
 
 
-pytestmark = pytest.mark.skip(reason="Rate limit tests require complex async client setup - retry logic is tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P2-INTEGRATION: TRACKER-014: Rate-limit retry logic; external API surface")
 
 
 @pytest.fixture(autouse=True)

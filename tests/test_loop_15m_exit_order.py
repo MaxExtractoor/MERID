@@ -153,6 +153,74 @@ class TestLoop15mTPComputation:
         assert take_profit_price_cents is None
 
 
+class TestLoop15mMarketMakerEntryOrExitField:
+    """Tests for market maker entry_or_exit field (critical fix for entry/exit invariant)."""
+    
+    def test_market_maker_quote_has_entry_or_exit_field(self):
+        """Test market maker quotes include entry_or_exit='entry' field.
+        
+        This test verifies the fix for the entry/exit invariant where market maker
+        quotes were bypassing validation because they lacked the entry_or_exit field.
+        """
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        from merid.event_venues.kalshi.market_maker_15m import Quote, MarketMakingPhase
+        
+        # Simulate a market maker quote
+        quote = Quote(
+            ticker="KXBTC15M-TEST",
+            side="yes",
+            action="buy",
+            price_cents=47,
+            size_contracts=15,
+            phase=MarketMakingPhase.PHASE1_TWO_SIDED
+        )
+        
+        # Simulate conversion to OrderIntent (as done in loop_15m.py)
+        from merid.event_venues.kalshi.binary_price_space import to_kalshi_side
+        kalshi_side = to_kalshi_side(quote.side, quote.action)
+        
+        quote_intent = OrderIntent(
+            ticker=quote.ticker,
+            side=kalshi_side,
+            action=quote.action,
+            price_cents=quote.price_cents,
+            count=quote.count,
+            source="market_maker_15m",
+            intent_id=f"mm_{quote.ticker}_{quote.side}_{quote.action}_123456",
+            entry_or_exit="entry",  # CRITICAL: Explicitly mark as entry order
+        )
+        
+        # Verify entry_or_exit field is set
+        assert hasattr(quote_intent, 'entry_or_exit'), "OrderIntent must have entry_or_exit field"
+        assert quote_intent.entry_or_exit == "entry", "Market maker quotes must be marked as entry orders"
+    
+    def test_market_maker_quote_action_is_buy_only(self):
+        """Test market maker quotes only use BUY actions (entry/exit invariant)."""
+        from merid.event_venues.kalshi.market_maker_15m import MarketMakingConfig, MarketMaker15m
+        from datetime import datetime, timezone
+        
+        config = MarketMakingConfig(enabled=True)
+        mm = MarketMaker15m(config)
+        mm.start(datetime.now(timezone.utc))
+        
+        # Generate Phase 1 quotes
+        quotes = mm.generate_quotes(
+            ticker="KXBTCD-TEST",
+            yes_bid=48,
+            yes_ask=52,
+            no_bid=48,
+            no_ask=52,
+            seconds_to_expiry=600
+        )
+        
+        # CRITICAL INVARIANT: All market maker quotes must be BUY actions
+        for quote in quotes:
+            assert quote.action == "buy", (
+                f"Market maker entry invariant violation: quote has action={quote.action}, "
+                f"only 'buy' allowed for entries. SELL actions are for exits only."
+            )
+
+
 class TestLoop15mExitOrderCorrectSideMapping:
     """Tests for correct Kalshi side mapping in exit orders (critical fix for duplicate startup bug)."""
     
@@ -188,23 +256,40 @@ class TestLoop15mExitOrderCorrectSideMapping:
         
         # Verify correct Kalshi side format
         assert kalshi_side == "SELL_YES"
-        
-        # Create exit order with correct side
-        intent = OrderIntent(
-            ticker=position.market_id,
-            side=kalshi_side,
-            action=action,
-            price_cents=60,
-            count=position.size,
-            order_type="limit",
-            time_in_force="gtc",
-            source="position_monitor_exit",
-            agent_id="merid.position_management.position_monitor",
-            exit_policy_id=position.exit_policy_id,
+
+
+class TestLoop15mExitOrderCanonicalPortfolioImport:
+    """Tests that the exit execution path imports canonical portfolio correctly."""
+
+    def test_canonical_portfolio_reconciler_factory_is_importable(self):
+        """The real factory lives in canonical_portfolio_reconciler, not canonical_portfolio."""
+        from merid.event_venues.kalshi.canonical_portfolio_reconciler import (
+            get_canonical_portfolio_reconciler,
         )
-        
-        # Verify side is SELL_YES (not 'no')
-        assert intent.side == "SELL_YES"
+
+        reconciler = get_canonical_portfolio_reconciler()
+        assert reconciler is not None
+        assert hasattr(reconciler, "build_snapshot")
+
+    def test_canonical_portfolio_store_is_importable(self):
+        from merid.event_venues.kalshi.canonical_portfolio import get_canonical_portfolio_store
+
+        store = get_canonical_portfolio_store()
+        assert store is not None
+        assert hasattr(store, "current")
+
+    def test_exit_execution_source_uses_correct_reconciler_import(self):
+        """Static check: _execute_exit_order must import the reconciler from the right module."""
+        import inspect
+        from merid import loop_15m
+
+        source = inspect.getsource(loop_15m)
+        # The bad import was: from merid.event_venues.kalshi.canonical_portfolio import ... get_canonical_portfolio_reconciler
+        assert "from merid.event_venues.kalshi.canonical_portfolio import" not in source or "get_canonical_portfolio_reconciler" not in source.split("from merid.event_venues.kalshi.canonical_portfolio import")[1].split("\n")[0], (
+            "loop_15m.py must not import get_canonical_portfolio_reconciler from canonical_portfolio.py"
+        )
+        # The correct import must be present.
+        assert "from merid.event_venues.kalshi.canonical_portfolio_reconciler import get_canonical_portfolio_reconciler" in source
     
     def test_exit_order_no_position_uses_sell_no(self):
         """Test NO position exit uses SELL_NO (not 'yes' + 'buy' from wrong callback).

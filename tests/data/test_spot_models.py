@@ -173,7 +173,7 @@ class TestSpotAlignment:
         )
         rti = CfbRtiObservation(
             asset=Asset.BTC,
-            price=49875.0,  # 125 USD diff = 25 bps
+            price=49925.0,  # 75 USD diff = 15 bps (between 5 and 20 bps)
             ts=datetime.now(timezone.utc),
         )
         alignment = SpotAlignment.from_composite_and_rti(
@@ -184,8 +184,8 @@ class TestSpotAlignment:
             threshold2_bps=20.0,
         )
         assert alignment.health == AlignmentHealth.MILD_DRIFT
-        assert alignment.basis_abs == 125.0
-        assert alignment.basis_bps == pytest.approx(25.0, rel=0.1)
+        assert alignment.basis_abs == 75.0
+        assert alignment.basis_bps == pytest.approx(15.0, rel=0.1)
     
     def test_from_composite_and_rti_severe_drift(self):
         """Alignment is SEVERE_DRIFT when basis exceeds threshold2."""

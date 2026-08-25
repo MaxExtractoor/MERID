@@ -118,19 +118,19 @@ class TestSideRecording:
 
 
 class TestPositionSizingLimits:
-    """Test position sizing limits for $1 fixed exposure cap enforcement."""
+    """Test position sizing limits for $2 fixed exposure cap enforcement."""
     
-    def test_max_contracts_equals_one(self):
-        """Verify max_contracts=1 to enforce $1 fixed exposure cap."""
+    def test_max_contracts_equals_two(self):
+        """Verify max_single_order_contracts=2 to enforce $2 fixed exposure cap."""
         profile_path = Path('config/profiles/kalshi_crypto_15m_v2.yaml')
         if not profile_path.exists():
             pytest.skip("kalshi_crypto_15m_v2.yaml not found")
         
         content = profile_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that max_single_order_contracts is 1
-        has_max_contracts_one = 'max_single_order_contracts: 1' in content
-        assert has_max_contracts_one, "max_single_order_contracts should be 1 for $1 fixed exposure cap"
+        # Check that max_single_order_contracts is 2
+        has_max_contracts_two = 'max_single_order_contracts: 2' in content
+        assert has_max_contracts_two, "max_single_order_contracts should be 2 for $2 fixed exposure cap"
     
     def test_unified_risk_manager_enforces_single_contract(self):
         """Verify UnifiedRiskManager enforces single contract limit."""
@@ -140,9 +140,9 @@ class TestPositionSizingLimits:
         
         content = risk_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that per_trade_max_contracts defaults to 1
-        has_single_contract = 'per_trade_max_contracts: int = 1' in content
-        assert has_single_contract, "per_trade_max_contracts should default to 1"
+        # Check that per_trade_max_contracts defaults to 2
+        has_single_contract = 'per_trade_max_contracts: int = 2' in content
+        assert has_single_contract, "per_trade_max_contracts should default to 2"
         
         # Check that contracts > max_contracts is enforced
         has_enforcement = 'contracts > self._limits.per_trade_max_contracts' in content
@@ -235,33 +235,37 @@ class TestSingleContractPerOrder:
         has_single_contract = 'count=1' in content or '"count": 1' in content
         assert has_single_contract, "Orders should use count=1"
     
-    def test_unified_sizing_enforces_max_one(self):
-        """Verify unified_sizing.py enforces max 1 contract."""
-        sizing_path = Path('merid/prediction/unified_sizing.py')
-        if not sizing_path.exists():
-            pytest.skip("unified_sizing.py not found")
-        
-        content = sizing_path.read_text(encoding='utf-8', errors='ignore')
-        
-        # Check that contract_count is capped at 1
-        has_cap_at_one = 'contract_count = 1' in content or 'min(contract_count, 1)' in content
-        assert has_cap_at_one, "Contract count should be capped at 1"
-        
-        # Check that max_contracts is enforced via profile config
-        has_max_contracts_check = '_get_max_contracts_per_asset' in content
-        assert has_max_contracts_check, "Should check max contracts from profile config"
-        
-        # Verify profile config has max_contracts=1 for all assets
-        profile_path = Path('config/profiles/kalshi_crypto_15m_v2.yaml')
-        if profile_path.exists():
-            profile_content = profile_path.read_text(encoding='utf-8', errors='ignore')
-            # Check that all 5 assets have max_contracts: 1
-            assets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']
-            for asset in assets:
-                has_asset_max_one = f'{asset}:' in profile_content and 'max_contracts: 1' in profile_content
-                # This is a weak check - just verify max_contracts: 1 exists somewhere
-            has_global_max_one = 'max_contracts: 1' in profile_content
-            assert has_global_max_one, "Profile should have max_contracts: 1"
+    def test_unified_sizing_respects_notional_and_contract_cap(self):
+        """Verify unified_sizing returns counts that respect both the per-order
+        contract cap and the fixed notional exposure cap."""
+        from decimal import Decimal
+        from merid.prediction.unified_sizing import compute_order_size, _get_max_contracts_per_asset
+
+        # v2.4.0 profile allows up to 2 contracts within the $2 exposure cap.
+        max_contracts = _get_max_contracts_per_asset("BTC")
+        assert max_contracts >= 1, "Profile must allow at least 1 contract"
+
+        fixed_exposure_cap_cents = 200  # $2.00 cap expressed in cents
+
+        for price_cents in (10, 43, 75, 99):
+            contract_count, notional, _ = compute_order_size(
+                bankroll_usd=Decimal("1000"),
+                price_cents=price_cents,
+                asset="BTC",
+            )
+            assert contract_count >= 1, f"Should size at least one contract at {price_cents}c"
+            assert contract_count <= max_contracts, (
+                f"contract_count={contract_count} exceeds per-asset cap {max_contracts} at {price_cents}c"
+            )
+
+            # Ceiling-safe notional cap: price * qty_cc <= cap_cents * 100
+            qty_cc = contract_count * 100
+            assert price_cents * qty_cc <= fixed_exposure_cap_cents * 100, (
+                f"notional {price_cents * qty_cc} exceeds cap {fixed_exposure_cap_cents * 100} at {price_cents}c"
+            )
+
+            # Kalshi wire quantity is an integer number of centi-contracts (0.01 lot step)
+            assert qty_cc % 1 == 0, "qty_cc must be an integer centi-contract quantity"
 
 
 class TestDuplicatePricePrevention:
@@ -427,25 +431,47 @@ class TestOrderScalingDoesNotViolateConstraints:
 class TestAgentSignalGenerationConstraints:
     """Test that agent signal generation respects constraints."""
     
-    def test_lean_agent_generates_single_contract_signals(self):
-        """Verify LeanAgent15m generates signals with count=1."""
-        agent_grid_path = Path('merid/prediction/agent_grid_15m.py')
-        if not agent_grid_path.exists():
-            pytest.skip("agent_grid_15m.py not found")
-        
-        content = agent_grid_path.read_text(encoding='utf-8', errors='ignore')
-        
-        # Check _generate_signal method
-        has_generate_signal = 'def _generate_signal' in content
-        assert has_generate_signal, "Should have _generate_signal method"
-        
-        # Check that signal doesn't specify count > 1
-        # Look for the signal dictionary creation
-        has_signal_dict = '"ticker"' in content and '"side"' in content
-        if has_signal_dict:
-            # Check that count is not set to > 1
-            has_count_gt_one = '"count":' in content and any(f'"{i}"' in content for i in range(2, 10))
-            assert not has_count_gt_one, "Signal should not specify count > 1"
+    def test_order_intent_count_is_quantized_and_capped(self):
+        """Verify the canonical order-intent contract enforces exchange
+        quantization and the v2.4.0 notional/contract cap for arbitrary counts."""
+        from decimal import Decimal
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        from merid.event_venues.kalshi.order_intent_contract import normalize_order
+        from merid.prediction.unified_sizing import _get_max_contracts_per_asset
+
+        max_contracts = _get_max_contracts_per_asset("BTC")
+        max_order_qty_cc = max_contracts * 100
+        fixed_exposure_cap_cents = 200
+
+        # Test a fractional count (0.75 contracts) and a whole count (1.5 contracts)
+        for count_fp in (Decimal("0.75"), Decimal("1.50"), Decimal("2.00")):
+            price_cents = 43
+            intent = OrderIntent(
+                ticker="KXBTC15M-TEST",
+                side="yes",
+                action="buy",
+                price_cents=price_cents,
+                count=int(count_fp),  # display-only floor
+                count_fp=count_fp,
+                entry_or_exit="entry",
+            )
+            canonical = normalize_order(intent, position_side="yes")
+
+            qty_cc = canonical.qty_cc
+            # Centi-contract quantization (Kalshi 0.01 contract step)
+            assert qty_cc >= 0, "qty_cc must be non-negative"
+            assert qty_cc % 1 == 0, "qty_cc must be an integer centi-contract quantity"
+            assert qty_cc == int(count_fp * Decimal("100")), "qty_cc must match count_fp exactly"
+
+            # Per-order contract cap
+            assert qty_cc <= max_order_qty_cc, (
+                f"qty_cc={qty_cc} exceeds per-order cap {max_order_qty_cc} for count_fp={count_fp}"
+            )
+
+            # Notional cap (ceiling-safe)
+            assert price_cents * qty_cc <= fixed_exposure_cap_cents * 100, (
+                f"notional {price_cents * qty_cc} exceeds cap {fixed_exposure_cap_cents * 100} for count_fp={count_fp}"
+            )
     
     def test_agent_grid_prevents_duplicate_price_signals(self):
         """Verify agent grid prevents generating signals for same price."""

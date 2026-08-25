@@ -22,9 +22,10 @@ class TestAgentGridGateState:
         
         def create_gate_state(state: str, can_trade: bool = True, reasons: list = None):
             return ExecutionGateStatus(
-                gate_state=GateState(state),
-                can_trade=can_trade,
-                blocking_reasons=reasons or [],
+                blocked=(state == "blocked"),
+                safe_to_trade=can_trade,
+                gate_state=state,
+                reasons=reasons or [],
             )
         
         return create_gate_state
@@ -39,7 +40,7 @@ class TestAgentGridGateState:
         # In real implementation, this would call agent.generate_signal()
         # and verify gate check passes
         assert gate_status.can_trade == True
-        assert gate_status.gate_state.value == "clear"
+        assert gate_status.gate_state == "clear"
 
     @pytest.mark.kalshi_agent_grid
     def test_agents_respect_gate_limited_reduce_only(self, mock_gate_status):
@@ -58,7 +59,7 @@ class TestAgentGridGateState:
         
         # Act: Verify gate allows trading but with restrictions
         assert gate_status.can_trade == True
-        assert gate_status.gate_state.value == "limited"
+        assert gate_status.gate_state == "limited"
         # Agents should only allow reduce/close operations, no new risk
 
     @pytest.mark.kalshi_agent_grid
@@ -78,7 +79,7 @@ class TestAgentGridGateState:
         
         # Act: Verify gate blocks all trading
         assert gate_status.can_trade == False
-        assert gate_status.gate_state.value == "blocked"
+        assert gate_status.gate_state == "blocked"
         # Agents should not generate any trading signals
 
     @pytest.mark.kalshi_agent_grid
@@ -93,8 +94,8 @@ class TestAgentGridGateState:
         )
         
         # Act: Simulate transition
-        assert open_state.gate_state.value == "clear"
-        assert limited_state.gate_state.value == "limited"
+        assert open_state.gate_state == "clear"
+        assert limited_state.gate_state == "limited"
         # Agent grid should detect transition and adjust behavior
         # Existing positions can be reduced, no new positions opened
 
@@ -182,7 +183,7 @@ class TestAgentGridGateState:
         
         # Act: Verify logging occurs
         # In real implementation, check logs for gate state change entries
-        assert old_state.gate_state.value != new_state.gate_state.value
+        assert old_state.gate_state != new_state.gate_state
         # Logs should include: timestamp, old state, new state, reasons
 
     @pytest.mark.kalshi_agent_grid
@@ -212,7 +213,7 @@ class TestAgentGridGateState:
         # Act: Verify metrics are emitted
         # In real implementation, check Prometheus metrics
         # Metrics should include: gate_state, can_trade, blocking_reasons
-        assert gate_state.gate_state.value == "clear"
+        assert gate_state.gate_state == "clear"
         assert gate_state.can_trade == True
 
 

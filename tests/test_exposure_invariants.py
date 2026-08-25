@@ -48,8 +48,8 @@ class TestGlobalExposureCap:
         assert limits.max_cycle_risk_pct == 0.0, "Cycle risk percentage must be disabled"
         assert limits.max_total_risk_pct == 0.0, "Total risk percentage must be disabled"
         assert limits.per_trade_max_notional_pct == 0.0, "Per-trade risk percentage must be disabled"
-        # Verify fixed cap is used
-        assert limits.fixed_exposure_cap_usd == 1.00, "Fixed exposure cap must be $1.00"
+        # Verify fixed cap is used (canonical $2.00 cap, raised 2026-08-22)
+        assert limits.fixed_exposure_cap_usd == 2.00, "Fixed exposure cap must be $2.00"
 
 
 class TestPerContractExposure:
@@ -233,12 +233,12 @@ class TestExposureInvariants:
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         allocator = GlobalSlotAllocator()
         
-        # Verify cap is $1.00
+        # Verify cap is $2.00 (canonical fixed cap, raised 2026-08-22)
         original_cap = allocator.MAX_EXPOSURE_USD
-        assert original_cap == 1.00, "Initial cap must be $1.00"
+        assert original_cap == 2.00, "Initial cap must be $2.00"
         
-        # Verify cap is still $1.00 (class constant should not change)
-        assert allocator.MAX_EXPOSURE_USD == 1.00, "Cap must remain $1.00"
+        # Verify cap is still $2.00 (class constant should not change)
+        assert allocator.MAX_EXPOSURE_USD == 2.00, "Cap must remain $2.00"
 
 
 if __name__ == "__main__":

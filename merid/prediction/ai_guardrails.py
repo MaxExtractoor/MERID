@@ -270,7 +270,8 @@ class AIGuardrails:
     def _check_trade(self, s: AISuggestion) -> GuardrailResult:
         """Validate a trade suggestion."""
         # Price sanity
-        price = s.price_cents
+        price = int(s.price_cents) if s.price_cents is not None else 0
+        contracts = int(s.contracts) if s.contracts is not None else 0
         if price < self.config.min_price_cents or price > self.config.max_price_cents:
             return self._reject(
                 s, RejectionReason.INVALID_PRICE,

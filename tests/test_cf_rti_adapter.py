@@ -18,6 +18,9 @@ from merid.data.cf_rti_adapter import (
     CfbRtiObservation,
     _ASSET_TO_CFB_SYMBOL,
     _now_ms,
+    _now_mono_ns,
+    _state,
+    _validate_observation,
     get_last_observation,
     get_last_rejection_reason,
     get_live_rti,
@@ -234,3 +237,44 @@ def test_get_live_rti_not_live_when_env_disabled():
     os.environ["MERID_CFB_RTI_ADAPTER"] = "false"
     obs = get_live_rti("BTC")
     assert obs is None
+
+
+def test_validate_observation_recovers_after_long_gap():
+    """A fresh observation must be accepted even if the previous success is stale.
+
+    This is the rollover lockout regression: at the 15m window roll the feed may
+    go quiet for tens of seconds.  When a fresh frame finally arrives it must not
+    be rejected with ``cfb_rti_subscription_unconfirmed`` just because the cached
+    success is older than the heartbeat window.
+    """
+    now_ms = _now_ms()
+    now_mono_ns = _now_mono_ns()
+
+    # Seed a stale prior observation (60 seconds old) so the old heartbeat gate
+    # would have rejected the next frame.
+    stale_obs = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65000.0,
+        source_ts_ms=now_ms - 60_000,
+        observed_ts_ms=now_ms - 60_000,
+        observed_ts_mono_ns=now_mono_ns - 60_000_000_000,
+        sequence=100,
+    )
+    _state.last_observation_by_asset["BTC"] = stale_obs
+    _state.last_source_ts_ms_by_asset["BTC"] = stale_obs.source_ts_ms
+
+    # Fresh frame that is valid on both wall and monotonic clocks.
+    fresh_obs = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65100.0,
+        source_ts_ms=now_ms,
+        observed_ts_ms=now_ms,
+        observed_ts_mono_ns=now_mono_ns,
+        sequence=101,
+    )
+
+    result = _validate_observation("BTC", "BRTI", fresh_obs)
+    assert result is fresh_obs
+    assert get_last_rejection_reason("BTC") == ""

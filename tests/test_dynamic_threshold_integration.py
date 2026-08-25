@@ -132,7 +132,7 @@ class TestCanonicalDefaultAlignment:
         with open('config/profiles/kalshi_crypto_15m_v2.yaml', 'r', encoding='utf-8') as f:
             profile = yaml.safe_load(f)
         
-        # Profile guardrails should use 100c (relaxed for current market conditions)
-        # This is intentional for the 15m crypto profile
+        # Profile guardrails use a research-aligned 15m crypto fallback (20c).
+        # This is intentional for the 15m crypto profile and should be at least 20c.
         guardrails_max_spread = profile['guardrails']['max_spread_cents']
-        assert guardrails_max_spread >= 30, f"Profile guardrails should be >= canonical default (30c), got {guardrails_max_spread}c"
+        assert guardrails_max_spread >= 20, f"Profile guardrails should be >= 20c research-aligned fallback, got {guardrails_max_spread}c"

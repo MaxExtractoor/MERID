@@ -13,8 +13,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Market state tests have expiry assertion errors - tested via integration tests")
-
 # Configure logging to prevent test hanging
 logging.basicConfig(level=logging.WARNING)
 
@@ -455,13 +453,13 @@ class TestResolveTif:
         assert tif == "IOC"
         assert exp_ts is None
 
-    def test_gtt_when_expiration_ts_provided(self):
+    def test_gtc_with_expiration_ts_provided(self):
         from merid.event_venues.kalshi.order_router import _resolve_tif
         store = self._store_with_secs("KXBTC15M-T", 3600)
         future_ts = int(time.time()) + 1800
         with patch(self._PATCH, return_value=store):
             tif, exp_ts = _resolve_tif(self._make_intent("gtc", order_expiration_ts=future_ts))
-        assert tif == "GTT"
+        assert tif == "GTC"
         assert exp_ts == future_ts
 
     def test_ioc_intent_stays_ioc_no_expiry(self):
@@ -491,11 +489,12 @@ class TestResolveTif:
     def test_no_market_state_passes_through(self):
         """If no state exists for the ticker, _resolve_tif should not crash."""
         from merid.event_venues.kalshi.order_router import _resolve_tif
+        import time as _t
         empty_store = KalshiMarketStateStore()
         with patch(self._PATCH, return_value=empty_store):
             tif, exp_ts = _resolve_tif(self._make_intent("gtc"))
         assert tif == "GTC"
-        assert exp_ts is None
+        assert exp_ts is not None and exp_ts > _t.time()
 
 
 # ── VenueOrder.expiration_ts ───────────────────────────────────────────────
@@ -553,15 +552,18 @@ class TestMarketStateStoreQuote:
         assert state.ticker == "KXBTC15M-T"
 
     def test_apply_quote_sets_bid_ask_mid_spread(self):
-        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+        """PRODUCTION AUDIT: Quotes are not an executable orderbook source."""
         from unittest.mock import patch
         store = KalshiMarketStateStore()
         with patch.object(store, '_notify_subscribers'):
             state = store.apply_quote("KXBTC15M-T", bid_cents=40, ask_cents=60)
-        assert state.best_bid_cents == 40
-        assert state.best_ask_cents == 60
+        assert state.quoted_bid_cents == 40
+        assert state.quoted_ask_cents == 60
         assert state.mid_cents == 50
         assert state.spread_cents == 20
+        assert state.book_initialized is False
+        assert state.best_bid_cents is None
+        assert state.best_ask_cents is None
 
     def test_apply_quote_sets_volume(self):
         """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
@@ -614,15 +616,15 @@ class TestMarketStateStoreQuote:
         # volume should always update
         assert state.volume_24h == 5000
 
-    def test_apply_quote_updates_timestamp(self):
-        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+    def test_apply_quote_does_not_refresh_book_timestamp(self):
+        """Quotes must not mark the orderbook as fresh."""
         from unittest.mock import patch
         store = KalshiMarketStateStore()
-        t0 = time.monotonic()
         with patch.object(store, '_notify_subscribers'):
             store.apply_quote("KXBTC15M-T", bid_cents=45, ask_cents=55)
         state = store.get("KXBTC15M-T")
-        assert state.last_book_update_ts >= t0
+        assert state.last_book_update_ts is None or state.last_book_update_ts == 0.0
+        assert state.quote_received_ts is not None
 
 
 # ── WS bridge → MarketStateStore pipeline tests ─────────────────────────
@@ -696,3 +698,141 @@ class TestWSBridgeMarketStatePipeline:
         ), _patch.object(bridge, "_publish_to_bus", new_callable=AsyncMock):
             # Should not crash
             asyncio.run(bridge._publish_event(quote_event))
+
+
+# ── REST quote freshness split and is_quote_coherent tests ──────────────────
+
+
+class TestRestQuoteFreshnessSplit:
+    """Verify REST quote freshness is tracked separately from catalog metadata."""
+
+    def test_apply_rest_market_does_not_touch_quote_timestamp(self):
+        """Catalog metadata refresh must not bump the per-feed quote clock."""
+        from unittest.mock import patch
+        store = KalshiMarketStateStore()
+        with patch.object(store, '_notify_subscribers'):
+            state = store.apply_rest_market({"ticker": "KXBTC15M-T", "volume_24h": 100})
+
+        assert state is not None
+        assert state.last_rest_update_ts > 0.0
+        assert state.last_rest_quote_update_ts == 0.0
+        assert state.last_rest_bid_cents is None
+        assert state.last_rest_ask_cents is None
+
+    def test_rest_orderbook_updates_quote_timestamp(self):
+        """REST orderbook snapshots must own the quote BBO and its clock."""
+        from unittest.mock import patch
+        store = KalshiMarketStateStore()
+        before = time.monotonic()
+        with patch.object(store, '_notify_subscribers'):
+            state = store.apply_orderbook_message(
+                _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5]], [[0.40, 8]]),
+                via="rest_bootstrap",
+            )
+
+        assert state is not None
+        assert state.best_bid_cents == 60
+        assert state.best_ask_cents == 60  # 100 - best no bid (40)
+        assert state.last_rest_quote_update_ts >= before
+        assert state.last_rest_bid_cents == 60
+        assert state.last_rest_ask_cents == 60
+        # General REST metadata is still untouched because this came from orderbook.
+        # It may be 0 if no catalog has run; that is correct.
+
+
+class TestIsQuoteCoherent:
+    """Unit tests for is_quote_coherent REST-optional behavior."""
+
+    def _fresh_ws_state(self, store, ticker):
+        state = store._get_or_create(ticker)
+        now = time.monotonic()
+        state.last_ws_bid_cents = 45
+        state.last_ws_ask_cents = 55
+        state.last_ws_update_ts = now
+        return state
+
+    def _fresh_rest_state(self, state, bid=45, ask=55):
+        now = time.monotonic()
+        state.last_rest_bid_cents = bid
+        state.last_rest_ask_cents = ask
+        state.last_rest_quote_update_ts = now
+
+    def test_ws_only_is_coherent(self):
+        store = KalshiMarketStateStore()
+        self._fresh_ws_state(store, "KXBTC15M-T")
+        ok, reason = store.is_quote_coherent("KXBTC15M-T")
+        assert ok is True
+        assert reason is None
+
+    def test_stale_rest_ignored_when_optional(self):
+        """A stale REST quote must not block a fresh WS quote unless mandatory."""
+        store = KalshiMarketStateStore()
+        state = self._fresh_ws_state(store, "KXBTC15M-T")
+        state.last_rest_bid_cents = 44
+        state.last_rest_ask_cents = 56
+        state.last_rest_quote_update_ts = time.monotonic() - 60.0  # stale
+
+        ok, reason = store.is_quote_coherent("KXBTC15M-T")
+        assert ok is True
+        assert reason is None
+
+    def test_stale_rest_fails_when_mandatory(self, monkeypatch):
+        monkeypatch.setenv("MERID_QUOTE_COHERENCE_REST_MANDATORY", "true")
+        store = KalshiMarketStateStore()
+        state = self._fresh_ws_state(store, "KXBTC15M-T")
+        state.last_rest_bid_cents = 44
+        state.last_rest_ask_cents = 56
+        state.last_rest_quote_update_ts = time.monotonic() - 60.0
+
+        ok, reason = store.is_quote_coherent("KXBTC15M-T")
+        assert ok is False
+        assert reason is not None
+        assert "REST_STALE" in reason
+
+    def test_ws_stale_fails_even_with_fresh_rest(self):
+        """WS is the primary feed and must be fresh."""
+        store = KalshiMarketStateStore()
+        state = store._get_or_create("KXBTC15M-T")
+        state.last_ws_bid_cents = 45
+        state.last_ws_ask_cents = 55
+        state.last_ws_update_ts = time.monotonic() - 60.0  # stale WS
+        self._fresh_rest_state(state, 45, 55)
+
+        ok, reason = store.is_quote_coherent("KXBTC15M-T")
+        assert ok is False
+        assert "WS_STALE" in reason
+
+    def test_divergence_fails_when_both_fresh(self):
+        store = KalshiMarketStateStore()
+        state = self._fresh_ws_state(store, "KXBTC15M-T")
+        self._fresh_rest_state(state, 30, 70)  # 15c away
+
+        ok, reason = store.is_quote_coherent("KXBTC15M-T", max_divergence_cents=10)
+        assert ok is False
+        assert "DIVERGENCE" in reason
+
+    def test_rest_only_fresh_is_coherent(self):
+        store = KalshiMarketStateStore()
+        state = store._get_or_create("KXBTC15M-T")
+        self._fresh_rest_state(state, 45, 55)
+
+        ok, reason = store.is_quote_coherent("KXBTC15M-T")
+        assert ok is True
+        assert reason is None
+
+    def test_stale_rest_only_fails(self):
+        store = KalshiMarketStateStore()
+        state = store._get_or_create("KXBTC15M-T")
+        state.last_rest_bid_cents = 45
+        state.last_rest_ask_cents = 55
+        state.last_rest_quote_update_ts = time.monotonic() - 60.0
+
+        ok, reason = store.is_quote_coherent("KXBTC15M-T")
+        assert ok is False
+        assert "REST_STALE" in reason
+
+    def test_no_quotes_fails(self):
+        store = KalshiMarketStateStore()
+        ok, reason = store.is_quote_coherent("KXBTC15M-T")
+        assert ok is False
+        assert reason == "NO_STATE"

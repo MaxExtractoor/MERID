@@ -56,30 +56,26 @@ class TestKalshiOfficialFeeExamples:
 
 
 class TestLegacyFeesVsParabolicFees:
-    """Shadow comparison: legacy fees.py with MIN_FEE_CENTS=2 vs canonical formula.
+    """Shadow comparison: fees.py (tiered rates) vs canonical parabolic formula.
 
-    The legacy module is what unified_sizing currently uses for EV.  These
-    tests capture the overestimate for low/high-priced one-contract orders
-    so it can be reconciled with real Kalshi fill data before changing live
-    trading.
+    For 1-contract, low/high-priced orders the per-contract 2c floor has been
+    removed; both calculators now agree at 1c.  The only remaining discrepancy
+    is tiered rates (5% for 100-999 contracts, 3% for 1000+) in fees.py versus
+    the flat 7% taker rate in parabolic_fees.py.  These tests document that
+    divergence for large-size fills.
     """
 
     @pytest.mark.parametrize(
         "price_cents",
         [10, 14, 16, 91],
     )
-    def test_legacy_fee_floor_overstates_one_contract(self, price_cents):
-        """For 1 contract at OTM/ITM prices the raw Kalshi fee is 1c.
-
-        The legacy fees.py clamps at MIN_FEE_CENTS=2, so it returns 2c.
-        This is a known discrepancy to be validated with actual fills.
-        """
+    def test_one_contract_matches_canonical_at_extremes(self, price_cents):
+        """For 1 contract at OTM/ITM prices the Kalshi fee rounds to 1c."""
         legacy_fee = calculate_kalshi_fee_per_contract_cents(1, price_cents)
         canonical_fee = kalshi_taker_fee_cents_parabolic(price_cents / 100.0, 1)
 
         assert canonical_fee == 1
-        assert legacy_fee == 2.0
-        assert legacy_fee == canonical_fee + 1
+        assert legacy_fee == float(canonical_fee)
 
     @pytest.mark.parametrize(
         "price_cents",
@@ -92,12 +88,12 @@ class TestLegacyFeesVsParabolicFees:
         assert legacy_fee == float(canonical_fee)
 
     def test_canonical_total_fee_for_100_contracts(self):
-        """Larger sizes must not be affected by the per-contract 2c floor.
+        """Larger sizes are affected by tiered rates, not the per-contract floor.
 
-        The legacy fees.py has tiered rates (0.07 for <100, 0.05 for 100-999,
-        0.03 for 1000+). The canonical parabolic fee currently uses a flat
-        0.07 taker rate. This test documents the resulting shadow discrepancy
-        so it can be reconciled with actual Kalshi series fee metadata.
+        fees.py has tiered rates (0.07 for <100, 0.05 for 100-999, 0.03 for
+        1000+). The canonical parabolic fee currently uses a flat 0.07 taker
+        rate. This test documents the resulting shadow discrepancy so it can be
+        reconciled with actual Kalshi series fee metadata.
         """
         price_cents = 10
         total_legacy = calculate_kalshi_fee_cents(100, price_cents)

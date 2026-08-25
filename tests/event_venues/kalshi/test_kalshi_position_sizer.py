@@ -6,7 +6,7 @@ Position sizing is tested through integration tests in the production stack.
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Position sizer tests require complex setup with division errors - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P0-SIZING: TRACKER-009: Position sizing is live execution path")
 
 from merid.event_venues.kalshi.position_sizer import (
     DEFAULT_SIZER_CONFIG,

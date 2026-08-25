@@ -24,7 +24,8 @@ def test_envelope_e2e_flow_bankroll_to_envelope_to_kill_switch_to_agent():
         safe_update_envelope_equity
     )
     
-    envelope = get_kalshi_crypto_15m_risk_envelope()
+    # Use test bankroll to avoid depending on live bankroll service
+    envelope = get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd=1000.0)
     
     # Step 2: Verify envelope initializes correctly
     assert envelope is not None
@@ -47,6 +48,7 @@ def test_envelope_e2e_flow_bankroll_to_envelope_to_kill_switch_to_agent():
     assert risk_multiplier > 0.0  # Should allow trades initially
     
     # Step 5: Verify safe_update_envelope_equity works
+    # Patch the bankroll service source used by the local import in safe_update_envelope_equity
     with patch("merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync") as mock_bankroll:
         mock_bankroll.return_value = 1000.0
         result = safe_update_envelope_equity(envelope)
@@ -65,7 +67,7 @@ def test_envelope_e2e_flow_recovery_after_bankroll_recovery():
         safe_update_envelope_equity
     )
     
-    envelope = get_kalshi_crypto_15m_risk_envelope()
+    envelope = get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd=1000.0)
     
     # Verify initial state
     assert envelope.per_trade_risk_multiplier == 1.0  # Full risk initially
@@ -80,7 +82,7 @@ def test_envelope_e2e_flow_band_transitions():
         safe_update_envelope_equity
     )
     
-    envelope = get_kalshi_crypto_15m_risk_envelope()
+    envelope = get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd=1000.0)
     
     # Verify initial state
     assert envelope.per_trade_risk_multiplier == 1.0  # Full risk initially

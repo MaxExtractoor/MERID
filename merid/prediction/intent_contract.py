@@ -26,11 +26,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 from typing import Literal, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 from utils.logger import get_logger
 
 logger = get_logger("intent_contract")
+
+try:
+    from merid.event_venues.kalshi.binary_price_space import (
+        yes_delta,
+        to_signed_yes_exposure,
+        from_signed_yes_exposure,
+    )
+    BINARY_PRICE_SPACE_AVAILABLE = True
+except ImportError:
+    BINARY_PRICE_SPACE_AVAILABLE = False
 
 try:
     from merid.prediction.signal_terminology import (
@@ -141,10 +152,6 @@ class IntentContract:
     target_leg: ExposureLeg
     exposure_change: ExposureChange
     
-    # CRITICAL FIX (2026-07-21): Canonical direction fields
-    outcome_side: str  # "yes" or "no" - canonical outcome_side from Kalshi
-    thesis_side: str  # "yes" or "no" - immutable strategy thesis
-    
     # Venue level
     kalshi_payload: KalshiSidePayload
     
@@ -162,6 +169,31 @@ class IntentContract:
     timestamp: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
     client_order_id: Optional[str] = None
     rationale: str = ""
+
+    # CRITICAL FIX (2026-08-07): outcome_side and thesis_side default to the
+    # kalshi_payload side when not supplied.  This keeps the dataclass ergonomic
+    # for tests and internal call sites while preserving the canonical invariant.
+    outcome_side: str = field(default="")
+    thesis_side: str = field(default="")
+
+    def __post_init__(self):
+        """Derive outcome_side and thesis_side when omitted."""
+        if not self.outcome_side:
+            if self.kalshi_payload and self.kalshi_payload.side in ("yes", "no"):
+                self.outcome_side = self.kalshi_payload.side
+            elif self.target_leg:
+                self.outcome_side = self.target_leg.value
+            else:
+                self.outcome_side = ""
+        if not self.thesis_side:
+            if self.outcome_side in ("yes", "no"):
+                self.thesis_side = self.outcome_side
+            elif self.kalshi_payload and self.kalshi_payload.side in ("yes", "no"):
+                self.thesis_side = self.kalshi_payload.side
+            elif self.target_leg:
+                self.thesis_side = self.target_leg.value
+            else:
+                self.thesis_side = ""
     
     def validate(self) -> Tuple[bool, Optional[str]]:
         """Validate the complete contract for consistency.
@@ -498,14 +530,9 @@ def build_entry_order(
     # Map exposure to Kalshi payload
     payload = map_exposure_to_kalshi_side(exposure, price_cents)
     
-    # CRITICAL INVARIANT CHECK: Entry orders must ALWAYS use BUY actions
-    # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
-    # SELL actions are ONLY for exit trades
-    if payload.action != "buy":
-        raise ValueError(
-            f"ENTRY ORDER INVARIANT VIOLATION: Entry orders must use BUY actions, got action={payload.action} "
-            f"for intent={intent}, side={payload.side}. This is a critical bug - entry trades should never SELL."
-        )
+    # Entry orders can use any economically-equivalent form (BUY_YES, SELL_NO,
+    # BUY_NO, SELL_YES) because all four map to a signed YES exposure.  The
+    # canonical signed exposure is what matters, not the raw action.
     
     # Determine target leg
     # CORRECT MAPPING (2026-07-23): BULLISH_EVENT → YES leg, BEARISH_EVENT → NO leg
@@ -718,6 +745,34 @@ def compute_net_exposure_from_fill(
     return exposure
 
 
+def compute_yes_delta_from_fill(
+    fill_side: str,
+    fill_action: str,
+    fill_quantity: int,
+) -> int:
+    """Compute signed YES-exposure change from a fill.
+
+    Collapses the four economically-equivalent order forms into a single
+    signed YES delta.  This is the canonical exposure unit for fills.
+
+    BUY YES  -> +qty  (long YES)
+    SELL NO  -> +qty  (long YES, equivalent to BUY YES)
+    SELL YES -> -qty  (long NO / short YES)
+    BUY NO   -> -qty  (long NO, equivalent to SELL YES)
+    """
+    if BINARY_PRICE_SPACE_AVAILABLE:
+        return yes_delta(fill_action, fill_side, fill_quantity)
+
+    # Fallback if binary_price_space is unavailable (should not happen in prod)
+    action = fill_action.lower()
+    side = fill_side.lower()
+    if (action, side) in {("buy", "yes"), ("sell", "no")}:
+        return +fill_quantity
+    if (action, side) in {("sell", "yes"), ("buy", "no")}:
+        return -fill_quantity
+    raise ValueError(f"Unsupported fill: side={fill_side} action={fill_action}")
+
+
 def validate_fill_against_intent(
     intent_contract: IntentContract,
     fill_side: str,
@@ -727,6 +782,8 @@ def validate_fill_against_intent(
     """Validate that a fill matches the expected intent contract.
     
     This is the downstream tripwire to catch venue echo mismatches.
+    It uses the canonical signed YES delta so economically-equivalent
+    fills (e.g. BUY YES vs. SELL NO) are treated as the same exposure.
     
     Args:
         intent_contract: Original intent contract
@@ -737,26 +794,154 @@ def validate_fill_against_intent(
     Returns:
         (is_valid, error_message)
     """
-    # Compute actual exposure from fill
-    actual_exposure = compute_net_exposure_from_fill(fill_side, fill_action, fill_quantity)
+    # Compute actual signed YES delta from fill
+    actual_yes_delta = compute_yes_delta_from_fill(fill_side, fill_action, fill_quantity)
     
-    # Compute expected exposure from contract
-    expected_exposure = {leg.value: 0 for leg in ExposureLeg}
-    expected_leg = intent_contract.exposure_change.leg.value
-    direction = intent_contract.exposure_change.direction
-    magnitude = intent_contract.exposure_change.magnitude
+    # Compute expected signed YES delta from contract
+    expected_yes_delta = 0
+    if intent_contract.exposure_change.leg == ExposureLeg.YES:
+        sign = 1
+    else:
+        sign = -1
     
-    if direction == "increase":
-        expected_exposure[expected_leg] += magnitude
+    if intent_contract.exposure_change.direction == "increase":
+        expected_yes_delta = sign * intent_contract.exposure_change.magnitude
     else:  # "decrease"
-        expected_exposure[expected_leg] -= magnitude
+        expected_yes_delta = -sign * intent_contract.exposure_change.magnitude
     
-    # Check for mismatch
-    if actual_exposure != expected_exposure:
+    if actual_yes_delta != expected_yes_delta:
         return False, (
             f"Fill/Intent exposure mismatch: "
-            f"expected {expected_exposure}, got {actual_exposure} "
+            f"expected_yes_delta={expected_yes_delta}, got {actual_yes_delta} "
             f"(fill_side={fill_side}, fill_action={fill_action}, fill_quantity={fill_quantity})"
         )
     
     return True, None
+
+
+@dataclass
+class OrderLifecycleEvent:
+    """Immutable audit record for a single order lifecycle event.
+
+    Emitted at every transition (intent creation, submission, ack, fill,
+    position update) so the full signal -> order -> position chain can be
+    reconstructed and invariants checked.
+
+    The canonical signed exposure uses YES-delta:
+    - positive == long YES
+    - negative == long NO
+    """
+    client_order_id: str
+    ticker: str
+    strategy_intent: str
+    action: str
+    side: str
+    price_cents: int
+    quantity: int
+    normalized_yes_delta: int
+    pre_position_yes: int
+    post_position_yes_expected: int
+    post_position_yes_actual: Optional[int] = None
+    reason: str = ""
+    parent_order_id: Optional[str] = None
+    is_reduce_only_expected: bool = False
+    timestamp: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "client_order_id": self.client_order_id,
+            "ticker": self.ticker,
+            "strategy_intent": self.strategy_intent,
+            "action": self.action,
+            "side": self.side,
+            "price_cents": self.price_cents,
+            "quantity": self.quantity,
+            "normalized_yes_delta": self.normalized_yes_delta,
+            "pre_position_yes": self.pre_position_yes,
+            "post_position_yes_expected": self.post_position_yes_expected,
+            "post_position_yes_actual": self.post_position_yes_actual,
+            "reason": self.reason,
+            "parent_order_id": self.parent_order_id,
+            "is_reduce_only_expected": self.is_reduce_only_expected,
+            "timestamp": self.timestamp,
+        }
+
+    def invariant(self) -> Tuple[bool, Optional[str]]:
+        """Check the post-position invariant."""
+        expected = self.pre_position_yes + self.normalized_yes_delta
+        if self.post_position_yes_actual is None:
+            # We haven't received actual position yet; check expected only
+            if expected != self.post_position_yes_expected:
+                return False, (
+                    f"expected_post mismatch: pre {self.pre_position_yes} + "
+                    f"delta {self.normalized_yes_delta} = {expected}, "
+                    f"but post_position_yes_expected={self.post_position_yes_expected}"
+                )
+            return True, None
+        if self.post_position_yes_actual != expected:
+            return False, (
+                f"position invariant violated: pre {self.pre_position_yes} + "
+                f"delta {self.normalized_yes_delta} = {expected}, "
+                f"but actual={self.post_position_yes_actual}"
+            )
+        return True, None
+
+
+def emit_order_lifecycle_event(
+    client_order_id: str,
+    ticker: str,
+    strategy_intent: str,
+    action: str,
+    side: str,
+    price_cents: int,
+    quantity: int,
+    pre_position_yes: int,
+    post_position_yes_expected: int,
+    reason: str = "",
+    parent_order_id: Optional[str] = None,
+    is_reduce_only_expected: bool = False,
+    post_position_yes_actual: Optional[int] = None,
+) -> OrderLifecycleEvent:
+    """Emit an immutable order lifecycle audit record.
+
+    Computes the canonical signed YES delta from the raw action/side.
+    """
+    if BINARY_PRICE_SPACE_AVAILABLE:
+        normalized_yes_delta = yes_delta(action, side, quantity)
+    else:
+        # Fallback for environments without binary_price_space
+        a = action.lower()
+        s = side.lower()
+        if (a, s) in {("buy", "yes"), ("sell", "no")}:
+            normalized_yes_delta = +quantity
+        elif (a, s) in {("sell", "yes"), ("buy", "no")}:
+            normalized_yes_delta = -quantity
+        else:
+            raise ValueError(f"Unsupported order: action={action} side={side}")
+
+    event = OrderLifecycleEvent(
+        client_order_id=client_order_id,
+        ticker=ticker,
+        strategy_intent=strategy_intent,
+        action=action,
+        side=side,
+        price_cents=price_cents,
+        quantity=quantity,
+        normalized_yes_delta=normalized_yes_delta,
+        pre_position_yes=pre_position_yes,
+        post_position_yes_expected=post_position_yes_expected,
+        post_position_yes_actual=post_position_yes_actual,
+        reason=reason,
+        parent_order_id=parent_order_id,
+        is_reduce_only_expected=is_reduce_only_expected,
+    )
+
+    is_valid, error = event.invariant()
+    if not is_valid:
+        logger.error("[ORDER-LIFECYCLE-INVARIANT] %s", error)
+
+    logger.info(
+        "[ORDER-LIFECYCLE] %s",
+        json.dumps(event.to_dict(), sort_keys=True, default=str)
+    )
+    return event

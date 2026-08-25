@@ -11,4 +11,4 @@ API signatures.
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Test file quarantined due to API incompatibilities - needs update to match current KalshiVenueClient API")
+pytestmark = pytest.mark.skip(reason="P0-RECONCILIATION: TRACKER-010: End-to-end restart/reconciliation")

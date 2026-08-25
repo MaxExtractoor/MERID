@@ -103,19 +103,19 @@ class TestMarketValidationRegime:
         
         assert regime == "no_liquidity"
     
-    def test_classify_regime_normal_fallback(self):
-        """Test that regime defaults to 'normal' when market_state_store is None."""
+    def test_classify_regime_unknown_fallback(self):
+        """Test that regime defaults to 'unknown' when market_state_store is None."""
         agent = Mock()
         agent.market_state_store = None
         agent.config = Mock()
         agent.config.name = "BTC_15M"
-        
+
         from merid.prediction.agent_grid_15m import LeanAgent15m
         agent._classify_regime = LeanAgent15m._classify_regime.__get__(agent, LeanAgent15m)
-        
+
         regime = agent._classify_regime("BTC-26JUN021930-30")
-        
-        assert regime == "normal"
+
+        assert regime == "unknown"
 
 
 class TestMarketValidationDepthThreshold:

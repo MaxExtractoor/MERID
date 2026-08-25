@@ -79,6 +79,7 @@ class UniversalAgentState:
     markets_evaluated: int = 0
     orders_placed: int = 0
     orders_rejected: int = 0
+    orders_unfilled: int = 0
     last_cycle_at: Optional[datetime] = None
     last_error: Optional[str] = None
     errors: List[str] = field(default_factory=list)
@@ -95,6 +96,7 @@ class UniversalAgentState:
             "markets_evaluated": self.markets_evaluated,
             "orders_placed": self.orders_placed,
             "orders_rejected": self.orders_rejected,
+            "orders_unfilled": self.orders_unfilled,
             "last_cycle_at": self.last_cycle_at.isoformat() if self.last_cycle_at else None,
             "last_error": self.last_error,
             "category_counts": dict(self.category_counts),
@@ -300,41 +302,52 @@ class KalshiUniversalAgent:
         # BUY_NO, SELL_YES → outcome_side=no (long NO exposure)
         from merid.event_venues.kalshi.strategy_positions import ThesisSide
         
-        # Determine outcome_side from signal action
-        if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES):
+        # DIRECTION POLICY (2026-08-07): Enforce canonical long-only contract handling
+        # Entry orders must use BUY actions only. Cross-leg equivalence is prohibited.
+        # - BUY YES → long YES
+        # - BUY NO → long NO
+        # SELL actions are ONLY for exits (same-leg close)
+        if signal.action in (SignalAction.BUY_YES,):
             outcome_side = "yes"
             thesis_side = ThesisSide.YES
-        elif signal.action in (SignalAction.BUY_NO, SignalAction.SELL_YES):
+            action = "buy"
+        elif signal.action in (SignalAction.BUY_NO,):
             outcome_side = "no"
             thesis_side = ThesisSide.NO
-        else:
-            # Fallback for unexpected actions
-            outcome_side = "yes"
-            thesis_side = ThesisSide.YES
-            self.logger.warning(
-                "[SIGNAL-LAYER-THESIS] Unexpected signal action=%s, defaulting to thesis_side=YES",
+            action = "buy"
+        elif signal.action in (SignalAction.SELL_YES, SignalAction.SELL_NO):
+            # SELL actions are only for exits - reject as entry
+            self.logger.error(
+                "[DIRECTION-POLICY-BREACH] signal.action=%s is a SELL action, which is only allowed for exits. "
+                "Entry orders must use BUY actions (BUY_YES or BUY_NO). Rejecting candidate.",
                 signal.action
             )
-        
-        action = "buy" if signal.action in (SignalAction.BUY_YES, SignalAction.BUY_NO) else "sell"
+            return None
+        else:
+            # Fallback for unexpected actions
+            self.logger.warning(
+                "[SIGNAL-LAYER-THESIS] Unexpected signal action=%s, rejecting candidate",
+                signal.action
+            )
+            return None
+
         price_cents = int(signal.limit_price_cents or 50)
         contracts = max(1, min(int(signal.contracts or 1), self.config.max_contracts))
 
-        # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
-        # Use thesis_side.value for canonical mapping
+        # DIRECTION POLICY (2026-08-07): Convert to Kalshi format using canonical mapping
+        # Entry orders are always BUY actions with thesis_side determining the leg
         side_upper = thesis_side.value.upper()
-        action_lower = action.lower()
-        if side_upper == "YES" and action_lower == "buy":
+        if side_upper == "YES":
             kalshi_side = "BUY_YES"
-        elif side_upper == "YES" and action_lower == "sell":
-            kalshi_side = "SELL_YES"
-        elif side_upper == "NO" and action_lower == "buy":
+        elif side_upper == "NO":
             kalshi_side = "BUY_NO"
-        elif side_upper == "NO" and action_lower == "sell":
-            kalshi_side = "SELL_NO"
         else:
             # Fallback for unexpected combinations
-            kalshi_side = f"{action.upper()}_{side_upper}"
+            self.logger.warning(
+                "[SIGNAL-LAYER-THESIS] Unexpected thesis_side=%s, defaulting to BUY_YES",
+                side_upper
+            )
+            kalshi_side = "BUY_YES"
 
         # Risk check
         if self._risk:
@@ -410,7 +423,10 @@ class KalshiUniversalAgent:
             log_entry["result_status"] = result.status
             log_entry["latency_ms"] = result.latency_ms
 
-            if result.status in ("filled_paper", "filled_live", "filled_mock"):
+            # Only actual fills count as placed trades.
+            # unfilled_ioc is a completed request with zero execution and must not
+            # be counted as a rejection or a strategy trade.
+            if result.has_execution:
                 self.state.orders_placed += 1
                 self._append_log(self.state.fill_log, {**log_entry, "fill": result.fill})
                 self.logger.info(
@@ -418,7 +434,11 @@ class KalshiUniversalAgent:
                     self.config.name, mode.upper(), ticker, side, contracts,
                     price_cents, result.status, result.latency_ms,
                 )
-            else:
+            elif result.status == "unfilled_ioc":
+                self.state.orders_unfilled += 1
+                log_entry["unfilled_reason"] = result.reason
+                self.logger.debug("Order unfilled IOC %s: %s", ticker, result.reason)
+            elif result.status == "rejected":
                 self.state.orders_rejected += 1
                 log_entry["reject_reason"] = result.reason
                 self.logger.debug("Order rejected %s: %s", ticker, result.reason)
@@ -605,17 +625,31 @@ class KalshiUniversalAgent:
                             # CRITICAL FIX (2026-07-21): Use ThesisSide enum for canonical direction
                             from merid.event_venues.kalshi.strategy_positions import ThesisSide
                             
-                            # Determine outcome_side from signal action
-                            if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES):
+                            # DIRECTION POLICY (2026-08-07): Enforce canonical long-only contract handling
+                            # Entry orders must use BUY actions only. Cross-leg equivalence is prohibited.
+                            if signal.action in (SignalAction.BUY_YES,):
                                 side = "yes"
                                 thesis_side = ThesisSide.YES
-                            elif signal.action in (SignalAction.BUY_NO, SignalAction.SELL_YES):
+                                action = "buy"
+                            elif signal.action in (SignalAction.BUY_NO,):
                                 side = "no"
                                 thesis_side = ThesisSide.NO
+                                action = "buy"
+                            elif signal.action in (SignalAction.SELL_YES, SignalAction.SELL_NO):
+                                # SELL actions are only for exits - reject as entry
+                                self.logger.error(
+                                    "[DIRECTION-POLICY-BREACH] signal.action=%s is a SELL action, which is only allowed for exits. "
+                                    "Entry orders must use BUY actions (BUY_YES or BUY_NO). Rejecting candidate.",
+                                    signal.action
+                                )
+                                continue
                             else:
                                 # Fallback for unexpected actions
-                                side = "yes"
-                                thesis_side = ThesisSide.YES
+                                self.logger.warning(
+                                    "[SIGNAL-LAYER-THESIS] Unexpected signal action=%s, rejecting candidate",
+                                    signal.action
+                                )
+                                continue
                             
                             contracts = max(1, min(int(signal.contracts or 1), self.config.max_contracts))
                             price_cents = int(signal.limit_price_cents or 50)
@@ -638,8 +672,9 @@ class KalshiUniversalAgent:
                     
                     # Create OrderCandidate from signal
                     from merid.prediction.trading_agent import OrderCandidate
-                    action = "buy" if signal.action in (SignalAction.BUY_YES, SignalAction.BUY_NO) else "sell"
-                    side = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+                    # DIRECTION POLICY (2026-08-07): Entry orders are always BUY actions
+                    action = "buy"
+                    side = side  # Use the side determined from thesis_side above
                     
                     candidate = OrderCandidate(
                         market_id=cm.market.market_id,

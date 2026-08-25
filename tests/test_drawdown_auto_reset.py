@@ -15,7 +15,7 @@ class TestKalshiRiskEngineDrawdownAutoReset:
     def test_auto_reset_when_drawdown_recovers(self):
         """Verify halt is auto-reset when drawdown drops below reduce threshold."""
         # P2: Use venue config instead of deprecated PM config
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine, KalshiRiskConfig
+        from archive.legacy.kalshi_risk_engine import KalshiRiskEngine, KalshiRiskConfig
 
         config = KalshiRiskConfig(
             drawdown_halt_pct=0.20,  # 20% halt
@@ -43,7 +43,7 @@ class TestKalshiRiskEngineDrawdownAutoReset:
     def test_no_reset_when_still_in_reduce_zone(self):
         """Verify halt is NOT reset when drawdown is still above reduce threshold."""
         # P2: Use venue config instead of deprecated PM config
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine, KalshiRiskConfig
+        from archive.legacy.kalshi_risk_engine import KalshiRiskEngine, KalshiRiskConfig
 
         config = KalshiRiskConfig(
             drawdown_halt_pct=0.20,
@@ -64,7 +64,7 @@ class TestKalshiRiskEngineDrawdownAutoReset:
     def test_reset_only_when_previously_halted(self):
         """Verify no special handling when not previously halted."""
         # P2: Use venue config instead of deprecated PM config
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine, KalshiRiskConfig
+        from archive.legacy.kalshi_risk_engine import KalshiRiskEngine, KalshiRiskConfig
 
         config = KalshiRiskConfig(
             drawdown_halt_pct=0.20,

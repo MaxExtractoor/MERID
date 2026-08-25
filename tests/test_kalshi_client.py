@@ -187,7 +187,7 @@ class TestPagination:
 
     @pytest.mark.asyncio
     async def test_get_positions_pagination(self, client):
-        """Test positions pagination with both market and event positions."""
+        """Test positions pagination. Event positions are aggregates, not market positions."""
         responses = [
             MagicMock(
                 status_code=200,
@@ -196,6 +196,7 @@ class TestPagination:
                         {"ticker": "A", "side": "yes", "count": 10, "avg_price": 50}
                     ],
                     "event_positions": [
+                        # Aggregate event exposure must not be returned as a VenuePosition.
                         {"event_ticker": "EVT-1", "event_exposure": 100}
                     ],
                     "cursor": "cursor_1"
@@ -206,7 +207,9 @@ class TestPagination:
             MagicMock(
                 status_code=200,
                 json=MagicMock(return_value={
-                    "market_positions": [],
+                    "market_positions": [
+                        {"ticker": "B", "side": "no", "count": 5, "avg_price": 30}
+                    ],
                     "event_positions": [],
                     "cursor": None
                 }),
@@ -214,13 +217,15 @@ class TestPagination:
                 text="",
             ),
         ]
-        
+
         client._http_client.request = AsyncMock(side_effect=responses)
-        
+
         result = await client.get_positions_result()
-        
+
         assert result.success is True
-        assert len(result.data) == 2  # 1 market + 1 event position
+        assert len(result.data) == 2  # 2 market positions (event position ignored)
+        assert result.data[0].market_id == "A"
+        assert result.data[1].market_id == "B"
 
 
 class TestFilters:
@@ -401,43 +406,192 @@ class TestOrderOperations:
         assert len(json_data["order_ids"]) == 20
 
     @pytest.mark.asyncio
-    async def test_place_order_converts_price_to_cents(self, client, noop_execution_guard):
+    async def test_place_order_converts_price_to_cents(self, client):
         """Verify price is converted from dollars to cents."""
         # Enable manual orders for testing
         import os
         os.environ["DEBUG_ALLOW_MANUAL_ORDERS"] = "true"
-        
-        # Patch global execution guard singleton to use noop guard
-        with patch('merid.guards.global_execution_guard.get_global_execution_guard', return_value=noop_execution_guard):
-            response = MagicMock(
-                status_code=201,
-                json=MagicMock(return_value={
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(return_value={
+                "order": {
+                    "order_id": "o1",
+                    "ticker": "KXBTC15M-001",
+                    "status": "resting"
+                }
+            }),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",  # Valid Kalshi ticker format
+            side="buy",
+            outcome_id="yes",
+            size=Decimal("5"),
+            price=Decimal("0.65"),  # $0.65 = 65 cents
+            order_type="limit"
+        )
+
+        await client.place_order_result(order)
+
+        call_args = client._http_client.request.call_args
+        json_data = call_args.kwargs["json"]
+        # Kalshi V2 API uses "price" field as string in fixed-point dollars (e.g., "0.6500")
+        assert json_data["price"] == "0.6500"  # Converted to dollars with 4 decimal places
+
+    @pytest.mark.parametrize(
+        "side,outcome_id,expected_book_side,expected_yes_price",
+        [
+            ("buy", "yes", "bid", "0.6500"),   # BUY_YES  -> bid, YES price
+            ("sell", "yes", "ask", "0.6500"),  # SELL_YES -> ask, YES price
+            ("buy", "no", "ask", "0.3500"),    # BUY_NO   -> ask, YES price = 1 - NO price
+            ("sell", "no", "bid", "0.3500"),   # SELL_NO  -> bid, YES price = 1 - NO price
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_place_order_v2_wire_mapping(
+        self, client, side, outcome_id, expected_book_side, expected_yes_price
+    ):
+        """V2 CreateOrderV2Request uses BookSide only; no deprecated action/outcome fields."""
+        import os
+        os.environ["DEBUG_ALLOW_MANUAL_ORDERS"] = "true"
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(return_value={"order": {"order_id": "o1", "ticker": "KXBTC15M-001", "status": "resting"}}),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side=side,
+            outcome_id=outcome_id,
+            size=Decimal("1"),
+            price=Decimal("0.65"),  # internal NO-space price for NO orders
+            order_type="limit",
+        )
+
+        await client.place_order_result(order)
+
+        json_data = client._http_client.request.call_args.kwargs["json"]
+
+        # V2 direction is carried exclusively by BookSide (bid/ask).
+        assert json_data["side"] == expected_book_side
+        # Legacy V1 action/side/outcome fields must not leak into the V2 wire.
+        assert "action" not in json_data
+        # Price is always in YES-space dollars.
+        assert json_data["price"] == expected_yes_price
+
+    @pytest.mark.parametrize(
+        "side,outcome_id,expected_action,expected_side,expected_price_field,expected_price",
+        [
+            ("buy", "yes", "buy", "yes", "yes_price_dollars", "0.6500"),
+            ("sell", "yes", "sell", "yes", "yes_price_dollars", "0.6500"),
+            ("buy", "no", "buy", "no", "no_price_dollars", "0.6500"),
+            ("sell", "no", "sell", "no", "no_price_dollars", "0.6500"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_place_order_legacy_v1_wire_mapping(
+        self,
+        client,
+        monkeypatch,
+        side,
+        outcome_id,
+        expected_action,
+        expected_side,
+        expected_price_field,
+        expected_price,
+    ):
+        """Legacy V1 CreateOrderRequest preserves user action/side and side-space price."""
+        monkeypatch.setenv("DEBUG_ALLOW_MANUAL_ORDERS", "true")
+        monkeypatch.setenv("KALSHI_ORDER_API_VERSION", "legacy")
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(
+                return_value={
                     "order": {
                         "order_id": "o1",
                         "ticker": "KXBTC15M-001",
-                        "status": "resting"
+                        "status": "resting",
+                        "action": expected_action,
+                        "side": expected_side,
+                        expected_price_field: expected_price,
+                        "initial_count_fp": "1.00",
                     }
-                }),
-                headers={},
-                text="",
-            )
-            client._http_client.request = AsyncMock(return_value=response)
-            
-            order = VenueOrder(
-                market_id="KXBTC15M-001",  # Valid Kalshi ticker format
-                side="buy",
-                outcome_id="yes",
-                size=Decimal("5"),
-                price=Decimal("0.65"),  # $0.65 = 65 cents
-                order_type="limit"
-            )
-            
-            await client.place_order_result(order)
-            
-            call_args = client._http_client.request.call_args
-            json_data = call_args.kwargs["json"]
-            # Kalshi V2 API uses "price" field as string in fixed-point dollars (e.g., "0.6500")
-            assert json_data["price"] == "0.6500"  # Converted to dollars with 4 decimal places
+                }
+            ),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side=side,
+            outcome_id=outcome_id,
+            size=Decimal("1"),
+            price=Decimal("0.65"),  # internal side-space price (NO-space for NO orders)
+            order_type="limit",
+        )
+
+        result = await client.place_order_result(order)
+
+        call_args = client._http_client.request.call_args
+        assert call_args.kwargs["method"] == "POST"
+        assert "/portfolio/orders" in call_args.kwargs["url"]
+
+        json_data = call_args.kwargs["json"]
+
+        # V1 direction is explicit action + side.
+        assert json_data["action"] == expected_action
+        assert json_data["side"] == expected_side
+        # V2 single-book "price"/"book_side" fields must not leak into V1 wire.
+        assert "price" not in json_data
+        assert "book_side" not in json_data
+        # Price stays in the order's own side-space (no V2 YES-space inversion).
+        assert json_data[expected_price_field] == expected_price
+
+        # PlacedOrder should preserve the user's action and parse the price.
+        assert result.success is True
+        assert result.data is not None
+        assert result.data.side == expected_action
+        assert result.data.price == Decimal(expected_price)
+
+    @pytest.mark.asyncio
+    async def test_place_order_v2_reduce_only_wire(self, client):
+        """Exit orders must set reduce_only=True on the V2 wire."""
+        import os
+        os.environ["DEBUG_ALLOW_MANUAL_ORDERS"] = "true"
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(return_value={"order": {"order_id": "o1", "ticker": "KXBTC15M-001", "status": "resting"}}),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side="sell",
+            outcome_id="no",
+            size=Decimal("1"),
+            price=Decimal("0.81"),
+            order_type="limit",
+            reduce_only=True,
+        )
+
+        await client.place_order_result(order)
+
+        json_data = client._http_client.request.call_args.kwargs["json"]
+        assert json_data["reduce_only"] is True
 
 
 class TestSubaccountOperations:

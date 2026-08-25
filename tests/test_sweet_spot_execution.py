@@ -1,17 +1,17 @@
 """Test sweet spot order execution logic in order_router.
 
-Tests verify:
-- Market orders are used when price is in optimal range (40-55c)
-- Limit orders are placed at sweet spot (40-45c) when price is below optimal
-- Sweet spot logic is based on 2026 Turbine research
+SWEET-SPOT-EXECUTION is now bypassed for BUY NO / BUY YES to avoid blind
+repricing (e.g. 40c/48c -> 55c) that was crossing the spread and causing
+rejections. SELL orders may still use the block. These tests reflect the
+new bypass behavior.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
 
 
-def test_sweet_spot_market_order_in_optimal_range():
-    """Test that market orders are used when price is in 40-55c range."""
+def test_sweet_spot_bypassed_for_buy_yes():
+    """Test that BUY YES bypasses the sweet spot block (returns limit)."""
     # Mock the state with price in optimal range
     mock_state = MagicMock()
     mock_state.mid_cents = 50  # In optimal range
@@ -25,7 +25,7 @@ def test_sweet_spot_market_order_in_optimal_range():
         price_cents=50,
         count=10,
     )
-    intent.order_type = "limit"  # Will be overridden by sweet spot logic
+    intent.order_type = "limit"
     
     # Import the function
     from merid.event_venues.kalshi.order_router import _determine_dynamic_order_type
@@ -33,13 +33,15 @@ def test_sweet_spot_market_order_in_optimal_range():
     # Call the function
     order_type, tif = _determine_dynamic_order_type(intent, mock_state)
     
-    # Should return market order
-    assert order_type == "market", \
-        f"Should use market order in optimal range, got {order_type}"
+    # BUY orders now bypass SWEET-SPOT-EXECUTION and keep limit/gtc
+    assert order_type == "limit", \
+        f"BUY YES should bypass sweet spot and return limit, got {order_type}"
+    assert tif == "gtc", f"Expected gtc, got {tif}"
+    assert intent.price_cents == 50, f"BUY price should not be adjusted, got {intent.price_cents}c"
 
 
-def test_sweet_spot_limit_order_below_optimal():
-    """Test that limit orders are placed at sweet spot when price is below 40c."""
+def test_sweet_spot_buy_bypassed_below_optimal():
+    """Test that BUY orders below the optimal range are not repriced."""
     # Mock the state with price below optimal range
     mock_state = MagicMock()
     mock_state.mid_cents = 35  # Below optimal range
@@ -61,31 +63,29 @@ def test_sweet_spot_limit_order_below_optimal():
     # Call the function
     order_type, tif = _determine_dynamic_order_type(intent, mock_state)
     
-    # Should return limit order
+    # BUY orders bypass SWEET-SPOT-EXECUTION and keep the original price
     assert order_type == "limit", \
-        f"Should use limit order below optimal range, got {order_type}"
-    
-    # Price should be adjusted to sweet spot (40-45c)
-    assert 40 <= intent.price_cents <= 45, \
-        f"Price should be adjusted to sweet spot (40-45c), got {intent.price_cents}c"
+        f"BUY should bypass sweet spot and return limit, got {order_type}"
+    assert intent.price_cents == 35, \
+        f"BUY price should not be adjusted by sweet spot, got {intent.price_cents}c"
 
 
 def test_sweet_spot_constants():
-    """Test that sweet spot constants are defined correctly."""
+    """Test that side-aware sweet spot constants are defined correctly."""
     with open('merid/event_venues/kalshi/order_router.py', 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # Verify optimal entry range constants
-    assert 'OPTIMAL_ENTRY_MIN = 40' in content, \
-        "OPTIMAL_ENTRY_MIN should be 40"
-    assert 'OPTIMAL_ENTRY_MAX = 55' in content, \
-        "OPTIMAL_ENTRY_MAX should be 55"
+    # Verify side-aware optimal entry range constants (YES-space and NO-space)
+    assert 'OPTIMAL_ENTRY_MIN_YES = 40' in content, \
+        "OPTIMAL_ENTRY_MIN_YES should be 40"
+    assert 'OPTIMAL_ENTRY_MAX_YES = 55' in content, \
+        "OPTIMAL_ENTRY_MAX_YES should be 55"
     
-    # Verify sweet spot constants
-    assert 'SWEET_SPOT_MIN = 40' in content, \
-        "SWEET_SPOT_MIN should be 40"
-    assert 'SWEET_SPOT_MAX = 45' in content, \
-        "SWEET_SPOT_MAX should be 45"
+    # Verify side-aware sweet spot constants
+    assert 'SWEET_SPOT_MIN_YES = 40' in content, \
+        "SWEET_SPOT_MIN_YES should be 40"
+    assert 'SWEET_SPOT_MAX_YES = 45' in content, \
+        "SWEET_SPOT_MAX_YES should be 45"
 
 
 def test_sweet_spot_research_comment():

@@ -25,7 +25,7 @@ from merid.event_venues.kalshi.ws_bridge import (
 )
 
 
-pytestmark = pytest.mark.skip(reason="LEGACY: Tests deprecated merid.event_venues.kalshi.ws_bridge - 15m lean stack uses merid_core.kalshi.ws_bridge")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-030: Deprecated `merid.event_venues.kalshi.ws_bridge`")
 
 
 class TestSpawnCrashLoudWrapper:

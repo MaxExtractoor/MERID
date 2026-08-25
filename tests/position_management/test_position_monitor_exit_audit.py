@@ -22,6 +22,24 @@ from merid.position_management.position_monitor import (
 )
 
 
+def _trusted_position(**kwargs) -> Position:
+    """Build a Position with version-2 provenance for test fixtures."""
+    entry_price = kwargs.get("avg_entry_price_cents", 50)
+    defaults = {
+        "risk_params_state": "original_persisted",
+        "risk_params_schema_version": 2,
+        "client_order_id": "test-client",
+        "entry_fill_id": "test-fill",
+        "fill_source": "test",
+        "entry_book_capture_quality": "AT_FILL",
+        "entry_executable_bid_cents": entry_price - 1,
+        "entry_executable_ask_cents": entry_price + 1,
+        "entry_fill_price_cents": entry_price,
+    }
+    defaults.update(kwargs)
+    return Position(**defaults)
+
+
 class TestPositionMonitorExitPriceSnapshot:
     """Exit pricing must use the executable same-side bid, not mid or stale data."""
 
@@ -53,13 +71,15 @@ class TestPositionMonitorExitPriceSnapshot:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=10,
             avg_entry_price_cents=50,
             stop_loss_price_cents=49,
+            entry_executable_bid_cents=49,
+            entry_executable_ask_cents=50,
         )
         monitor.add_position(position)
 
@@ -68,6 +88,11 @@ class TestPositionMonitorExitPriceSnapshot:
             position.market_id, position.side, bid=48, ask=51, mid=50
         )
 
+        # Age the position so the 5s arming guard does not suppress the stop, then
+        # provide the two confirmations required for a production hard stop.
+        position.opened_at = datetime.utcnow() - timedelta(seconds=5)
+        position.time_since_entry_seconds = 5.0
+        await monitor._check_position(position, snapshot)
         await monitor._check_position(position, snapshot)
 
         # Direct exit callback must NOT fire while replay tests are in progress.
@@ -86,7 +111,7 @@ class TestPositionMonitorExitPriceSnapshot:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -112,7 +137,7 @@ class TestPositionMonitorExitPriceSnapshot:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -144,7 +169,7 @@ class TestPositionMonitorHardSoftStop:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -154,7 +179,9 @@ class TestPositionMonitorHardSoftStop:
         )
         monitor.add_position(position)
 
-        # 35 is below 40 - HARD_STOP_EXTRA_BUFFER_CENTS, so this is a hard stop
+        # 35 is below 40 - HARD_STOP_EXTRA_BUFFER_CENTS, so this is a hard stop.
+        # Hard stops now require executable book + confirmation; two observations needed.
+        await monitor._legacy_check_position(position, 35)
         await monitor._legacy_check_position(position, 35)
 
         callback.assert_not_called()
@@ -172,7 +199,7 @@ class TestPositionMonitorHardSoftStop:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -202,7 +229,7 @@ class TestPositionMonitorHardSoftStop:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -229,7 +256,7 @@ class TestPositionMonitorTrailingStateMachine:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -270,7 +297,7 @@ class TestPositionMonitorEdgeDecayGuard:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -311,7 +338,7 @@ class TestPositionMonitorEdgeDecayGuard:
 
         # Opened long enough ago to pass the hold guard
         opened_at = datetime.utcnow() - timedelta(seconds=60)
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -347,7 +374,7 @@ class TestPositionMonitorEdgeDecayGuard:
         callback = Mock()
         monitor.register_exit_intent_callback(callback)
 
-        position = Position(
+        position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -383,7 +410,7 @@ class TestExitConditionsEvaluator:
 
     @pytest.fixture
     def base_position(self):
-        return Position(
+        return _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
@@ -504,7 +531,7 @@ class TestExitDecisionRecordProvenance:
 
     @pytest.fixture
     def position(self):
-        return Position(
+        return _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,

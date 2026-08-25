@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 from decimal import Decimal
 
 
-pytestmark = pytest.mark.skip(reason="Tests deprecated merid.prediction.dynamic_sizing module")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-028: Tests deprecated `merid.prediction.dynamic_sizing`")
 
 
 class TestPriceCentsFallbackFix:

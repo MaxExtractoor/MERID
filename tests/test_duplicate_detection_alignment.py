@@ -157,8 +157,7 @@ class TestDuplicateDetectionAlignment:
     def test_order_router_duplicate_check_deprecated(self):
         """Verify _check_duplicate_order in order_router.py is deprecated."""
         from merid.event_venues.kalshi.order_router import _check_duplicate_order, OrderIntent
-        import warnings
-        
+
         # Create a test intent
         intent = OrderIntent(
             ticker="KXDOGE15M-TEST",
@@ -167,16 +166,14 @@ class TestDuplicateDetectionAlignment:
             price_cents=50,
             count=1,
         )
-        
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            result = _check_duplicate_order(intent)
-            
-            # Should have issued a DeprecationWarning
-            assert len(w) == 1
-            assert issubclass(w[0].category, DeprecationWarning)
-            assert "deprecated" in str(w[0].message).lower()
-            assert "OrderDeduplicationCache" in str(w[0].message)
+
+        result = _check_duplicate_order(intent)
+
+        # The deprecation is now indicated in the docstring, not via a runtime
+        # warning (which would spam the test suite and production logs).
+        assert result is None
+        assert "DEPRECATED" in _check_duplicate_order.__doc__
+        assert "OrderDeduplicationCache" in _check_duplicate_order.__doc__
 
 
 if __name__ == "__main__":

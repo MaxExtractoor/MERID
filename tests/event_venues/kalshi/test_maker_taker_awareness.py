@@ -13,7 +13,7 @@ Maker-taker awareness is tested through integration tests in the production stac
 import pytest
 from decimal import Decimal
 
-pytestmark = pytest.mark.skip(reason="Maker-taker awareness tests require complex setup with API changes - tested via integration tests")
+
 
 from merid.event_venues.kalshi.order_router import OrderIntent, _price_for_side
 from merid.event_venues.kalshi.maker_taker_integration import apply_maker_taker_policy

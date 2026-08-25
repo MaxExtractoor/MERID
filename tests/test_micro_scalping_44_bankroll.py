@@ -89,8 +89,7 @@ class TestMicroScalpingPositionSizing:
     def test_position_sizing_with_44_bankroll(self):
         """Position sizing should produce at least 1 contract with $44 bankroll."""
         # P2: Use venue config instead of deprecated PM config
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
+        from archive.legacy.kalshi_risk_engine import KalshiRiskEngine, KalshiRiskConfig
         from decimal import Decimal
 
         config = KalshiRiskConfig()
@@ -147,15 +146,16 @@ class TestTimeframeFiltering:
         tf_daily = catalog._detect_timeframe("KXETH-TEST", expiry_daily, now)
         assert tf_daily == "daily", f"Expected daily, got {tf_daily}"
     
+    @pytest.mark.skip(reason="kalshi_strike_selector module removed during 15m cleanup")
     def test_strike_selector_uses_correct_timeframe(self):
         """Strike selector should use market's actual timeframe, not agent config."""
         from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
+
         # ETH hourly should allow up to 40% distance (actual is 0.18, using actual value)
         eth_hourly_max = DEFAULT_MAX_DISTANCE.get(("ETH", "1h"))
         assert eth_hourly_max is not None, "ETH hourly max distance should be defined"
         assert eth_hourly_max >= 0.15, f"ETH hourly max distance {eth_hourly_max} too restrictive"
-        
+
         # ETH daily should allow up to 55% distance (actual is 0.28)
         eth_daily_max = DEFAULT_MAX_DISTANCE.get(("ETH", "daily"))
         assert eth_daily_max is not None, "ETH daily max distance should be defined"

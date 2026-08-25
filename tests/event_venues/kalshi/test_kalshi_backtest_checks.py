@@ -153,7 +153,7 @@ class TestBarAlignment:
 # ── Run all checks ───────────────────────────────────────────────────
 
 class TestRunAllChecks:
-    @pytest.mark.skip(reason="Backtest check logic may have changed - test needs investigation")
+    @pytest.mark.skip(reason="P3-LEGACY: TRACKER-024: Backtest logic; not live execution path")
     def test_all_pass(self):
         result = run_all_checks(
             trade_log=[{"ts": 100, "fee": 5}, {"ts": 200, "fee": 3}],
@@ -181,7 +181,7 @@ class TestRunAllChecks:
         assert result["passed"] is False
         assert result["errors"] > 0  # lookahead + fees
 
-    @pytest.mark.skip(reason="Backtest check logic may have changed - test needs investigation")
+    @pytest.mark.skip(reason="P3-LEGACY: TRACKER-024: Backtest logic; not live execution path")
     def test_empty_inputs(self):
         result = run_all_checks()
         assert result["passed"] is True

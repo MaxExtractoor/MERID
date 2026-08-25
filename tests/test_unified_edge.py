@@ -330,8 +330,8 @@ class TestCanonicalFeeWiring:
         expected_fee = calculate_kalshi_fee_cents(contracts=1, price_cents=50)
         assert fee_cost_cents == expected_fee / 1  # Per-contract fee
         
-        # Fee should be at least 2 cents (floor)
-        assert fee_cost_cents >= 2
+        # Fee should be at least 1 cent (cent-rounding floor)
+        assert fee_cost_cents >= 1
         
         # Edge should be reduced by fee probability
         expected_fee_prob = fee_cost_cents / 100.0

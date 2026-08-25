@@ -9,6 +9,7 @@ Also tests expired ticker filtering and cache cleanup functionality.
 import pytest
 import asyncio
 import time
+import types
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
@@ -19,9 +20,21 @@ from merid.event_venues.kalshi.position_cache import KalshiPositionCache, _is_ex
 async def clear_cache():
     """Clear cache before each test to prevent state leakage."""
     cache = KalshiPositionCache()
+    # Some legacy tests replace _ensure_mutex with a mock; restore the real lock.
+    if not isinstance(cache._ensure_mutex, types.MethodType):
+        try:
+            del cache._ensure_mutex
+        except AttributeError:
+            pass
     await cache.clear()
     cache._last_sync = None  # Reset sync timestamp for clean state
     yield
+    # Re-check in case a test replaced it during the test body.
+    if not isinstance(cache._ensure_mutex, types.MethodType):
+        try:
+            del cache._ensure_mutex
+        except AttributeError:
+            pass
     await cache.clear()
     cache._last_sync = None  # Reset sync timestamp for clean state
 
@@ -155,16 +168,16 @@ class TestExpiredTickerFiltering:
         assert _is_expired_ticker(ticker)
 
     def test_is_expired_ticker_buffer_window(self):
-        """Ticker within 15-minute buffer should not be expired."""
-        # Create a ticker for 10 minutes ago (within buffer)
+        """Ticker within 15-minute settlement buffer should not be expired."""
+        # Create a ticker for 10 minutes ago (within 15-minute buffer)
         past_time = datetime.now(timezone.utc) - timedelta(minutes=10)
         ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
         assert not _is_expired_ticker(ticker)
 
     def test_is_expired_ticker_exactly_buffer_boundary(self):
-        """Ticker exactly at 15-minute buffer boundary should be expired."""
-        # Create a ticker for exactly 15 minutes ago
-        past_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+        """Ticker beyond the 15-minute settlement buffer should be expired."""
+        # Create a ticker for 20 minutes ago (past the 15-minute buffer)
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=20)
         ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
         assert _is_expired_ticker(ticker)
 
@@ -180,10 +193,9 @@ class TestExpiredTickerFiltering:
         assert _is_expired_ticker(ticker)
 
     def test_is_expired_ticker_current_window(self):
-        """Ticker for current 15-minute window should not be expired."""
-        now = datetime.now(timezone.utc)
-        # Floor to 15-minute boundary
-        window_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+        """Ticker for window that just opened should not be expired."""
+        # Create a ticker 10 minutes ago (within the 15-minute settlement buffer)
+        window_start = datetime.now(timezone.utc) - timedelta(minutes=10)
         ticker = f"KXBTC15M-{window_start.strftime('%d%b%H%M%S')}-50"
         assert not _is_expired_ticker(ticker)
 
@@ -192,111 +204,298 @@ class TestClearExpiredPositions:
     """Test clear_expired_positions method for cache cleanup."""
 
     @pytest.mark.asyncio
-    async def test_clear_expired_positions_removes_expired(self):
-        """Expired positions should be removed from cache."""
+    async def test_clear_expired_positions_removes_settled(self):
+        """Positions only removed once explicitly settled or zero."""
         cache = KalshiPositionCache()
-        
-        # Add some positions
+
+        # Add a closed-but-unsettled position and a settled position.
         past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
-        expired_ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
-        
+        closed_ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+        past_time2 = datetime.now(timezone.utc) - timedelta(minutes=35)
+        settled_ticker = f"KXETH15M-{past_time2.strftime('%d%b%H%M%S')}-50"
+
         future_time = datetime.now(timezone.utc) + timedelta(minutes=30)
-        valid_ticker = f"KXETH15M-{future_time.strftime('%d%b%H%M%S')}-50"
-        
-        cache._positions[expired_ticker] = type('CachedPosition', (), {
+        valid_ticker = f"KXSOL15M-{future_time.strftime('%d%b%H%M%S')}-50"
+
+        cache._positions[closed_ticker] = type('CachedPosition', (), {
             'contracts': 10,
+            'quantity_cc': 1000,
             'avg_price_cents': 5000,
             'side': 'yes',
             'realized_pnl_usd': 0,
             'notional_usd': 0,
-            'unrealized_pnl_usd': 0
+            'unrealized_pnl_usd': 0,
+            'settlement_status': 'open',
         })()
-        
-        cache._positions[valid_ticker] = type('CachedPosition', (), {
+
+        cache._positions[settled_ticker] = type('CachedPosition', (), {
             'contracts': 5,
+            'quantity_cc': 500,
             'avg_price_cents': 6000,
             'side': 'no',
             'realized_pnl_usd': 0,
             'notional_usd': 0,
-            'unrealized_pnl_usd': 0
+            'unrealized_pnl_usd': 0,
+            'settlement_status': 'settled',
         })()
-        
+
+        cache._positions[valid_ticker] = type('CachedPosition', (), {
+            'contracts': 2,
+            'quantity_cc': 200,
+            'avg_price_cents': 5500,
+            'side': 'yes',
+            'realized_pnl_usd': 0,
+            'notional_usd': 0,
+            'unrealized_pnl_usd': 0,
+            'settlement_status': 'open',
+        })()
+
         # Clear expired positions
         removed = await cache.clear_expired_positions()
-        
-        # Should have removed 1 expired position
+
+        # Only the explicitly settled position should be removed.
         assert removed == 1
-        assert expired_ticker not in cache._positions
+        assert settled_ticker not in cache._positions
+        assert closed_ticker in cache._positions
+        assert closed_ticker in [t for t, p in cache._positions.items() if p.settlement_status == 'pending']
         assert valid_ticker in cache._positions
 
     @pytest.mark.asyncio
     async def test_clear_expired_positions_no_expired(self):
-        """If no expired positions, should return 0 and not modify cache."""
+        """If no positions are expired/closed, should return 0 and not modify cache."""
         cache = KalshiPositionCache()
-        
+
         # Add only valid positions
         future_time = datetime.now(timezone.utc) + timedelta(minutes=30)
         valid_ticker = f"KXETH15M-{future_time.strftime('%d%b%H%M%S')}-50"
-        
+
         cache._positions[valid_ticker] = type('CachedPosition', (), {
             'contracts': 5,
+            'quantity_cc': 500,
             'avg_price_cents': 6000,
             'side': 'no',
             'realized_pnl_usd': 0,
             'notional_usd': 0,
-            'unrealized_pnl_usd': 0
+            'unrealized_pnl_usd': 0,
+            'settlement_status': 'open',
         })()
-        
+
         # Clear expired positions
         removed = await cache.clear_expired_positions()
-        
+
         # Should have removed 0 positions
         assert removed == 0
         assert valid_ticker in cache._positions
 
     @pytest.mark.asyncio
-    async def test_clear_expired_positions_all_expired(self):
-        """If all positions are expired, cache should be empty."""
+    async def test_clear_expired_positions_removes_zero_positions(self):
+        """Authoritative zero positions are removed even before settlement."""
         cache = KalshiPositionCache()
-        
-        # Add only expired positions
+
         past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
-        expired_ticker1 = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
-        expired_ticker2 = f"KXETH15M-{past_time.strftime('%d%b%H%M%S')}-50"
-        
-        cache._positions[expired_ticker1] = type('CachedPosition', (), {
-            'contracts': 10,
+        zero_ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+
+        cache._positions[zero_ticker] = type('CachedPosition', (), {
+            'contracts': 0,
+            'quantity_cc': 0,
             'avg_price_cents': 5000,
             'side': 'yes',
             'realized_pnl_usd': 0,
             'notional_usd': 0,
-            'unrealized_pnl_usd': 0
+            'unrealized_pnl_usd': 0,
+            'settlement_status': 'open',
         })()
-        
-        cache._positions[expired_ticker2] = type('CachedPosition', (), {
-            'contracts': 5,
-            'avg_price_cents': 6000,
-            'side': 'no',
+
+        removed = await cache.clear_expired_positions()
+
+        assert removed == 1
+        assert zero_ticker not in cache._positions
+
+    @pytest.mark.asyncio
+    async def test_clear_expired_positions_mark_settled_removes(self):
+        """mark_settled removes the cached position."""
+        cache = KalshiPositionCache()
+
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
+        settled_ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+
+        cache._positions[settled_ticker] = type('CachedPosition', (), {
+            'contracts': 1,
+            'quantity_cc': 100,
+            'avg_price_cents': 5000,
+            'side': 'yes',
             'realized_pnl_usd': 0,
             'notional_usd': 0,
-            'unrealized_pnl_usd': 0
+            'unrealized_pnl_usd': 0,
+            'settlement_status': 'open',
         })()
-        
-        # Clear expired positions
-        removed = await cache.clear_expired_positions()
-        
-        # Should have removed 2 positions
-        assert removed == 2
-        assert len(cache._positions) == 0
+
+        # mark_settled does not need a monitor patch; it removes from _positions.
+        await cache.mark_settled(settled_ticker)
+
+        assert settled_ticker not in cache._positions
+        assert cache.is_settled(settled_ticker)
 
     @pytest.mark.asyncio
     async def test_clear_expired_positions_empty_cache(self):
         """Clearing expired positions on empty cache should return 0."""
         cache = KalshiPositionCache()
-        
+
         # Clear expired positions
         removed = await cache.clear_expired_positions()
-        
+
         # Should have removed 0 positions
         assert removed == 0
         assert len(cache._positions) == 0
+
+
+class TestRestPriceNormalization:
+    """Test that sync_from_rest keeps REST-reported avg price in the position's
+    own outcome space and derives the side from the canonical outcome_id / side
+    or the signed position_fp (2026-08-13 side/price fix)."""
+
+    @pytest.mark.asyncio
+    @patch("merid.event_venues.kalshi.position_cache._is_expired_ticker", return_value=False)
+    async def test_rest_sync_no_position_from_position_fp(self, _mock_expired):
+        """A raw MarketPosition with negative position_fp and positive market_exposure
+        becomes a NO position with the NO price unchanged."""
+        cache = KalshiPositionCache()
+
+        rest_positions = [
+            {
+                "market_id": "KXBTC15M-26AUG121500-00",
+                "contracts": 1,
+                # No outcome_id/side: side must be inferred from signed position_fp.
+                "position_fp": -1.0,
+                # market_exposure_dollars is the cost paid for the NO position.
+                "market_exposure_dollars": 0.47,
+                "realized_pnl": 0,
+                "unrealized_pnl": 0,
+            }
+        ]
+
+        await cache.sync_from_rest(rest_positions, rest_timestamp=time.time(), force=True)
+
+        pos = cache._positions.get("KXBTC15M-26AUG121500-00")
+        assert pos is not None, "Position should be in cache"
+        assert pos.thesis_side == "no", f"Expected NO thesis, got {pos.thesis_side}"
+        assert pos.avg_price_cents == 47, f"NO position avg price should be 47, got {pos.avg_price_cents}"
+
+    @pytest.mark.asyncio
+    @patch("merid.event_venues.kalshi.position_cache._is_expired_ticker", return_value=False)
+    async def test_rest_sync_no_position_keeps_avg_price(self, _mock_expired):
+        """A canonical long NO position with avg_price_cents=47 stays entry=47."""
+        cache = KalshiPositionCache()
+
+        rest_positions = [
+            {
+                "market_id": "KXBTC15M-26AUG121500-00",
+                "contracts": 1,
+                "side": "no",
+                "avg_price_cents": 47,
+                "realized_pnl": 0,
+                "unrealized_pnl": 0,
+            }
+        ]
+
+        await cache.sync_from_rest(rest_positions, rest_timestamp=time.time(), force=True)
+
+        pos = cache._positions.get("KXBTC15M-26AUG121500-00")
+        assert pos is not None, "Position should be in cache"
+        assert pos.thesis_side == "no", f"Expected NO thesis, got {pos.thesis_side}"
+        assert pos.avg_price_cents == 47, f"NO position avg price should be 47, got {pos.avg_price_cents}"
+
+    @pytest.mark.asyncio
+    @patch("merid.event_venues.kalshi.position_cache._is_expired_ticker", return_value=False)
+    async def test_rest_sync_yes_position_uses_avg_price(self, _mock_expired):
+        """A long YES position with REST avg_price_cents=47 stays entry=47."""
+        cache = KalshiPositionCache()
+
+        rest_positions = [
+            {
+                "market_id": "KXBTC15M-26AUG121500-00",
+                "contracts": 1,
+                "side": "yes",
+                "avg_price_cents": 47,
+                "realized_pnl": 0,
+                "unrealized_pnl": 0,
+            }
+        ]
+
+        await cache.sync_from_rest(rest_positions, rest_timestamp=time.time(), force=True)
+
+        pos = cache._positions.get("KXBTC15M-26AUG121500-00")
+        assert pos is not None, "Position should be in cache"
+        assert pos.thesis_side == "yes", f"Expected YES thesis, got {pos.thesis_side}"
+        assert pos.avg_price_cents == 47, f"YES position avg price should be 47, got {pos.avg_price_cents}"
+
+    @pytest.mark.asyncio
+    @patch("merid.event_venues.kalshi.position_cache._is_expired_ticker", return_value=False)
+    async def test_rest_sync_no_position_outcome_id(self, _mock_expired):
+        """A canonical NO position with outcome_id has its own-side price preserved."""
+        cache = KalshiPositionCache()
+
+        rest_positions = [
+            {
+                "market_id": "KXBTC15M-26AUG121500-00",
+                "contracts": 1,
+                "outcome_id": "no",
+                "avg_price_cents": 47,
+                "realized_pnl": 0,
+                "unrealized_pnl": 0,
+            }
+        ]
+
+        await cache.sync_from_rest(rest_positions, rest_timestamp=time.time(), force=True)
+
+        pos = cache._positions.get("KXBTC15M-26AUG121500-00")
+        assert pos is not None, "Position should be in cache"
+        assert pos.thesis_side == "no", f"Expected NO thesis, got {pos.thesis_side}"
+        assert pos.avg_price_cents == 47, f"NO position avg price should be 47, got {pos.avg_price_cents}"
+
+    @pytest.mark.asyncio
+    @patch("merid.event_venues.kalshi.position_cache._is_expired_ticker", return_value=False)
+    async def test_rest_sync_yes_position_outcome_id(self, _mock_expired):
+        """A long YES position with outcome_id="yes" is preserved."""
+        cache = KalshiPositionCache()
+
+        rest_positions = [
+            {
+                "market_id": "KXBTC15M-26AUG121500-00",
+                "contracts": 1,
+                "outcome_id": "YES",
+                "avg_price_cents": 47,
+                "realized_pnl": 0,
+                "unrealized_pnl": 0,
+            }
+        ]
+
+        await cache.sync_from_rest(rest_positions, rest_timestamp=time.time(), force=True)
+
+        pos = cache._positions.get("KXBTC15M-26AUG121500-00")
+        assert pos is not None, "Position should be in cache"
+        assert pos.thesis_side == "yes", f"Expected YES thesis, got {pos.thesis_side}"
+        assert pos.avg_price_cents == 47, f"YES position avg price should be 47, got {pos.avg_price_cents}"
+
+    @pytest.mark.asyncio
+    @patch("merid.event_venues.kalshi.position_cache._is_expired_ticker", return_value=False)
+    async def test_rest_sync_outcome_id_outcome_side_conflict_is_quarantined(self, _mock_expired):
+        """Conflicting outcome_id and outcome_side must not create a position."""
+        cache = KalshiPositionCache()
+
+        rest_positions = [
+            {
+                "market_id": "KXBTC15M-26AUG121500-00",
+                "contracts": 1,
+                "outcome_id": "no",
+                "outcome_side": "yes",
+                "avg_price_cents": 47,
+                "realized_pnl": 0,
+                "unrealized_pnl": 0,
+            }
+        ]
+
+        await cache.sync_from_rest(rest_positions, rest_timestamp=time.time(), force=True)
+
+        pos = cache._positions.get("KXBTC15M-26AUG121500-00")
+        assert pos is None, "Conflicting side fields must not produce a cached position"

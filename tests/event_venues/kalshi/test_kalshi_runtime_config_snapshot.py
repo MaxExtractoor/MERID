@@ -14,10 +14,10 @@ from config.kalshi_universe import kalshi_ct_default_series_tickers
 # from merid.diagnostics.kalshi_runtime_config import build_kalshi_crypto_runtime_snapshot  # Module not found - likely deprecated
 from web.api.system_endpoints import router
 
-pytestmark = pytest.mark.skip(reason="Runtime config tests require HTTP endpoint setup with 404 errors - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-025: Runtime config diagnostics; HTTP endpoint not in live stack")
 
 
-@pytest.mark.skip(reason="build_kalshi_crypto_runtime_snapshot module (merid.diagnostics.kalshi_runtime_config) not found - likely deprecated")
+@pytest.mark.skip(reason="P3-LEGACY: TRACKER-025: Runtime config diagnostics; HTTP endpoint not in live stack")
 def test_runtime_snapshot_matches_ct_allowlist_and_trader_defaults() -> None:
     snap = build_kalshi_crypto_runtime_snapshot()
     expected = sorted(kalshi_ct_default_series_tickers())

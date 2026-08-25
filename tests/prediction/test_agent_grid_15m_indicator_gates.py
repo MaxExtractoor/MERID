@@ -660,7 +660,7 @@ class TestVelocityBiasFix:
         current_price = 65200.0
         
         # Calculate velocity
-        velocity = agent._calculate_velocity(asset, current_price)
+        velocity = agent._calculate_multi_window_velocity(asset, current_price)
         
         # Velocity should be positive (price increased)
         # Epsilon should be positive because recent_trend = (65200 - 65150) / 65150 > 0
@@ -694,7 +694,7 @@ class TestVelocityBiasFix:
         current_price = 64800.0
         
         # Calculate velocity
-        velocity = agent._calculate_velocity(asset, current_price)
+        velocity = agent._calculate_multi_window_velocity(asset, current_price)
         
         # Velocity should be negative (price decreased)
         # Epsilon should be negative because recent_trend = (64800 - 64850) / 64850 < 0
@@ -763,10 +763,12 @@ class TestVelocityBiasFix:
         
         for prev_price, mid_price, current_price, should_be_positive in test_cases:
             agent._spot_price_history[asset].clear()
+            agent._velocity_ema_history[asset].clear()
+            agent._velocity_zscore_history[asset].clear()
             agent._spot_price_history[asset].append((current_time - 10.0, prev_price))
             agent._spot_price_history[asset].append((current_time - 5.0, mid_price))
             
-            velocity = agent._calculate_velocity(asset, current_price)
+            velocity = agent._calculate_multi_window_velocity(asset, current_price)
             
             if should_be_positive:
                 assert velocity > 0, \
@@ -774,6 +776,63 @@ class TestVelocityBiasFix:
             else:
                 assert velocity < 0, \
                     f"Velocity should be negative for price {prev_price}->{mid_price}->{current_price}, got {velocity}"
+
+    def test_fresh_coinbase_velocity_is_used_as_source(self, caplog):
+        """Core invariant: a fresh Coinbase snapshot must be the authoritative velocity source."""
+        from unittest.mock import Mock
+        import logging
+
+        config = LeanAgentConfig(name="BTC_15M", series_tickers=["KXBTC15M"])
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+
+        # Inject a fresh Coinbase velocity snapshot (neutral is a valid fresh type)
+        agent.set_velocity_snapshot({
+            "BTC": {"velocity": 0.000123, "timestamp": time.time(), "signal_type": "neutral"}
+        })
+
+        with caplog.at_level(logging.INFO, logger="merid.prediction.agent_grid_15m"):
+            velocity = agent._calculate_multi_window_velocity("BTC", 65000.0)
+
+        assert abs(velocity - 0.000123) < 1e-9, f"Expected coinbase velocity 0.000123, got {velocity}"
+        assert "source=coinbase" in caplog.text, f"Expected source=coinbase in logs, got: {caplog.text}"
+
+    def test_stale_coinbase_velocity_falls_back_to_internal(self, caplog):
+        """Core invariant: a stale Coinbase snapshot must fall back to internal velocity."""
+        from unittest.mock import Mock
+        import logging
+
+        config = LeanAgentConfig(name="BTC_15M", series_tickers=["KXBTC15M"])
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+
+        # Provide stale snapshot (> 120s old)
+        agent.set_velocity_snapshot({
+            "BTC": {"velocity": 0.000123, "timestamp": time.time() - 300.0, "signal_type": "neutral"}
+        })
+
+        # Add minimal internal history to avoid 0.0 fallback
+        current_time = time.time()
+        agent._spot_price_history["BTC"].append((current_time - 15.0, 65000.0))
+        agent._spot_price_history["BTC"].append((current_time, 65150.0))
+
+        with caplog.at_level(logging.INFO, logger="merid.prediction.agent_grid_15m"):
+            velocity = agent._calculate_multi_window_velocity("BTC", 65150.0)
+
+        assert "source=internal_fallback" in caplog.text, f"Expected fallback source, got: {caplog.text}"
+        assert "source=coinbase" not in caplog.text, "Stale snapshot should not be logged as coinbase source"
 
 
 class TestIndicatorStackInitialization:
@@ -1118,10 +1177,10 @@ class TestPriceBasedStrategy:
             series_tickers=["KXBTC15M"],
         )
         
-        # NOTE: Default thresholds are 0.3/0.7 (buy at 0.30, sell at 0.70)
+        # NOTE: Default thresholds are 0.5/0.5 (complement-symmetric fair value)
         # This test is updated to reflect the actual defaults
-        assert config.price_based_buy_threshold == 0.3
-        assert config.price_based_sell_threshold == 0.7
+        assert config.price_based_buy_threshold == 0.5
+        assert config.price_based_sell_threshold == 0.5
     
     def test_price_based_mid_price_calculation(self):
         """Test price-based strategy uses mid price correctly."""
@@ -2041,3 +2100,96 @@ class TestDataQualityTracking:
         metrics["BTC"]["ohlcv_corruption"] = 999
         assert agent._data_quality_issues["BTC"]["ohlcv_corruption"] == 1
 
+
+
+class TestSignalGenerationRejection:
+    """Test structured signal-generation rejection diagnostics."""
+
+    def test_warmup_records_signal_generation_rejection(self, caplog):
+        """Momentum FVG warmup should record a structured rejection reason."""
+        from unittest.mock import Mock
+        import logging
+
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+
+        # Reset and set minimal context
+        agent._reset_rejection_waterfall("BTC")
+        agent._last_velocity_value = 0.0001
+        agent._last_velocity_source = "coinbase"
+        agent._last_velocity_age_ms = 1000.0
+        agent._last_velocity_signal_type = "neutral"
+
+        # Simulate the rejection path directly
+        agent._record_signal_rejection(
+            "momentum_fvg_warmup",
+            market_id="KXBTC15M-TEST",
+            market_time_remaining_s=600.0,
+            reference_price=65000.0,
+            candles_available=15,
+            feature_flags="signal_mode=momentum_fvg min_bars_required=26 bars_needed=11",
+        )
+
+        with caplog.at_level(logging.INFO, logger="merid.prediction.agent_grid_15m"):
+            logger = logging.getLogger("merid.prediction.agent_grid_15m")
+            reason = agent._last_signal_rejection.get("reason") or "_generate_signal returned None"
+            context = agent._last_signal_rejection.get("context") or {}
+            logger.info(
+                "[SIGNAL-GENERATION-REJECT] asset=%s market=%s reason=%s spot_price=%s "
+                "velocity=%s velocity_source=%s velocity_age_ms=%s signal_type=%s "
+                "threshold=%s market_time_remaining_s=%s candles_available=%s feature_flags=%s",
+                config.name,
+                context.get("market_id"),
+                reason,
+                context.get("reference_price", "N/A"),
+                context.get("velocity", "N/A"),
+                context.get("velocity_source", "N/A"),
+                context.get("velocity_age_ms", "N/A"),
+                context.get("signal_type", "N/A"),
+                context.get("threshold", "N/A"),
+                context.get("market_time_remaining_s", "N/A"),
+                context.get("candles_available", "N/A"),
+                context.get("feature_flags", "N/A"),
+            )
+
+        assert agent._last_signal_rejection["reason"] == "momentum_fvg_warmup"
+        assert "candles_available=15" in caplog.text
+        assert "velocity_source=coinbase" in caplog.text
+
+    def test_signal_rejection_backfills_velocity_freshness(self):
+        """_record_signal_rejection should backfill velocity source/age when available."""
+        from unittest.mock import Mock
+
+        config = LeanAgentConfig(name="BTC_15M", series_tickers=["KXBTC15M"])
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+
+        agent._reset_rejection_waterfall("BTC")
+        agent._last_velocity_value = -0.000250
+        agent._last_velocity_source = "coinbase"
+        agent._last_velocity_age_ms = 2100.0
+        agent._last_velocity_signal_type = "negative"
+
+        agent._record_signal_rejection("macd_dead_zone")
+
+        ctx = agent._last_signal_rejection["context"]
+        assert ctx["velocity"] == -0.000250
+        assert ctx["velocity_source"] == "coinbase"
+        assert ctx["velocity_age_ms"] == 2100.0
+        assert ctx["signal_type"] == "negative"

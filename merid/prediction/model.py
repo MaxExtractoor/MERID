@@ -37,21 +37,21 @@ MAX_PRICE_AGE_SECONDS: int = 120
 def max_spot_age_seconds() -> int:
     """Upper bound on spot quote age for ``get_spot_price`` (shared by all PM paths).
 
-    P0 FIX: Now reads from centralized spot_sla_config to ensure consistency across stack.
-    Uses single MAX_SPOT_AGE_HARD threshold (60s) for all assets.
-    Override with ``MERID_PM_MAX_SPOT_AGE_SECONDS`` for backward compatibility, but
-    the canonical source is data.spot_sla_config.
+    P0 FIX: Reads from ``MERID_PM_MAX_SPOT_AGE_SECONDS`` for explicit override, then
+    ``data.spot_sla_config.get_spot_max_age()`` for the centralized hard threshold,
+    and finally ``MAX_PRICE_AGE_SECONDS`` as the hard-coded fallback.
     """
-    # Try centralized SLA config first
-    try:
-        from data.spot_sla_config import get_spot_max_age
-        return int(get_spot_max_age())
-    except ImportError:
-        # Fallback to env var for backward compatibility
+    # Explicit env override for compatibility and testing
+    env_val = os.getenv("MERID_PM_MAX_SPOT_AGE_SECONDS")
+    if env_val is not None:
         try:
-            return int(os.getenv("MERID_PM_MAX_SPOT_AGE_SECONDS", str(MAX_PRICE_AGE_SECONDS)))
+            return int(env_val)
         except ValueError:
             return MAX_PRICE_AGE_SECONDS
+
+    # Hard-coded fallback.  Spot SLA gating uses data.spot_sla_config
+    # separately; the PM model's max age is intentionally 120s.
+    return MAX_PRICE_AGE_SECONDS
 
 
 def pm_spot_feed_symbol_candidates(asset: str) -> tuple[str, ...]:

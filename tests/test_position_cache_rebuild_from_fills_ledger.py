@@ -43,7 +43,7 @@ class TestPositionCacheRebuildFromFillsLedger:
             raw_payload='{"take_profit_price_cents": 60, "stop_loss_price_cents": 40}',
             agent_id="BTC_15M"
         )
-        mock_ledger.get_recent_fills.return_value = [mock_fill1]
+        mock_ledger.get_fills.return_value = [mock_fill1]
         
         with patch.object(cache, '_get_fills_ledger', return_value=mock_ledger):
             await cache._rebuild_from_fills_ledger()
@@ -88,7 +88,7 @@ class TestPositionCacheRebuildFromFillsLedger:
             raw_payload='{}',
             agent_id="BTC_15M"
         )
-        mock_ledger.get_recent_fills.return_value = [mock_fill1, mock_fill2]
+        mock_ledger.get_fills.return_value = [mock_fill1, mock_fill2]
         
         with patch.object(cache, '_get_fills_ledger', return_value=mock_ledger):
             await cache._rebuild_from_fills_ledger()
@@ -121,7 +121,7 @@ class TestPositionCacheSyncFromRestWithRebuild:
             raw_payload='{}',
             agent_id="BTC_15M"
         )
-        mock_ledger.get_recent_fills.return_value = [mock_fill]
+        mock_ledger.get_fills.return_value = [mock_fill]
         
         with patch.object(cache, '_get_fills_ledger', return_value=mock_ledger):
             # Call sync_from_rest with empty positions
@@ -159,11 +159,13 @@ class TestPositionCacheSyncFromRestWithRebuild:
     async def test_sync_from_rest_non_empty_skips_rebuild(self):
         """Test that non-empty REST response skips rebuild."""
         cache = KalshiPositionCache()
-        
-        # Mock fills ledger (should not be called)
+
+        # Mock fills ledger (should not be used for rebuild; may be used for validation)
         mock_ledger = Mock()
-        
-        with patch.object(cache, '_get_fills_ledger', return_value=mock_ledger):
+        mock_ledger.get_fills.return_value = []
+
+        with patch.object(cache, '_get_fills_ledger', return_value=mock_ledger), \
+             patch.object(cache, '_rebuild_from_fills_ledger') as mock_rebuild:
             # Call sync_from_rest with non-empty positions
             await cache.sync_from_rest(
                 positions=[{
@@ -174,6 +176,6 @@ class TestPositionCacheSyncFromRestWithRebuild:
                 }],
                 rest_timestamp=None
             )
-        
-        # Should not have called fills ledger
-        mock_ledger.get_recent_fills.assert_not_called()
+
+        # Should not have triggered a full rebuild from fills ledger
+        mock_rebuild.assert_not_called()

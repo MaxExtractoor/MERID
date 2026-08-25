@@ -186,6 +186,8 @@ def _entry_intent(
     count: int = 1,
     tif: str = "ioc",
     aggressiveness: float = 1.0,
+    liquidity_role: str = "taker",
+    post_only: bool = False,
 ) -> OrderIntent:
     return OrderIntent(
         ticker=TICKER,
@@ -194,9 +196,9 @@ def _entry_intent(
         price_cents=price_cents,
         count=count,
         time_in_force=tif,
-        post_only=False,
+        post_only=post_only,
         aggressiveness=aggressiveness,
-        liquidity_role="taker",
+        liquidity_role=liquidity_role,
         order_type="limit",
         source="agent_grid",
         snapshot_ts=time.time(),
@@ -243,10 +245,11 @@ def _fresh_state() -> SimpleNamespace:
     return SimpleNamespace(
         last_book_update_ts=time.monotonic(),
         last_rest_update_ts=time.monotonic(),
+        book_initialized=True,
         depth_10c=100,
-        mid_cents=None,
-        best_bid_cents=None,
-        best_ask_cents=None,
+        mid_cents=50,
+        best_bid_cents=45,
+        best_ask_cents=55,
         best_no_bid_cents=None,
         best_no_ask_cents=None,
         yes_depth=100,
@@ -379,7 +382,16 @@ async def test_ioc_zero_fill_records_zero_exposure(
         bid_size=Decimal("10"), ask_size=Decimal("10"),
     )
 
-    intent = _entry_intent(price_cents=40, count=1, tif="ioc", aggressiveness=1.0)
+    # Use a maker/post_only IOC so the order intentionally does not cross the
+    # spread and is cancelled by the venue, exercising the zero-fill path.
+    intent = _entry_intent(
+        price_cents=40,
+        count=1,
+        tif="ioc",
+        aggressiveness=0.0,
+        liquidity_role="maker",
+        post_only=True,
+    )
     _reserve_gate(intent, monkeypatch)
 
     result = await _route_entry(intent)

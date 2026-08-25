@@ -20,19 +20,29 @@ from merid.event_venues.kalshi.fills_ledger import (
 from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
 
 
+@pytest.fixture(autouse=True)
+def reset_ledger_singleton(monkeypatch):
+    """Reset the ledger and position cache singletons before each test."""
+    # Clear ledger singletons and use a per-test in-memory DB
+    _fills_ledger_mod._ledgers.clear()
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", ":memory:")
+
+    # Reset position cache singleton so the 1-contract guard and stale state
+    # from previous tests do not bleed into these ledger invariants.
+    import merid.event_venues.kalshi.position_cache as _pc_mod
+    _pc_mod._position_cache_instance = None
+    _pc_mod.KalshiPositionCache._instance = None
+
+    yield
+
+    # Cleanup
+    _fills_ledger_mod._ledgers.clear()
+    _pc_mod._position_cache_instance = None
+    _pc_mod.KalshiPositionCache._instance = None
+
+
 class TestLedgerRiskSeparationInvariant:
     """Prove that ledger behavior is independent of risk configuration."""
-
-    @pytest.fixture(autouse=True)
-    def reset_ledger_singleton(self):
-        """Reset the ledger singleton before each test."""
-        # Clear the singleton instance
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
-        yield
-        # Cleanup
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
 
     def test_ledger_ingests_all_fills_regardless_of_risk_config(self):
         """
@@ -355,14 +365,7 @@ class TestLedgerRiskSeparationInvariant:
 class TestBoundaryMetrics:
     """Verify boundary metrics for ghost trade detection."""
 
-    @pytest.fixture(autouse=True)
-    def reset_ledger_singleton(self):
-        """Reset the ledger singleton before each test."""
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
-        yield
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
+
 
     def test_ghost_trade_counter_increments_for_position_without_fills(self):
         """
@@ -422,14 +425,7 @@ class TestBoundaryMetrics:
 class TestNoAutoHeal:
     """Verify reconciliation never silently modifies state."""
 
-    @pytest.fixture(autouse=True)
-    def reset_ledger_singleton(self):
-        """Reset the ledger singleton before each test."""
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
-        yield
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
+
 
     # REMOVED: test_reconciliation_never_modifies_fills - reconciliation logic has NoneType issues
 
@@ -464,23 +460,11 @@ class TestNoAutoHeal:
 class TestGhostTradeMetricAccuracy:
     """Verify ghost trade detection accuracy in various scenarios."""
 
-    @pytest.fixture(autouse=True)
-    def reset_ledger_singleton(self):
-        """Reset the ledger singleton before each test."""
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
-        yield
+
 class TestRiskLayerIntegration:
     """Verify risk layer correctly consumes ledger reconciliation reports."""
 
-    @pytest.fixture(autouse=True)
-    def reset_ledger_singleton(self):
-        """Reset the ledger singleton before each test."""
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
-        yield
-        KalshiFillsLedger._instance = None
-        _fills_ledger_mod._ledger = None
+
 
     # REMOVED: test_fills_integrity_check_uses_config_thresholds - risk layer integration has assertion issues
 

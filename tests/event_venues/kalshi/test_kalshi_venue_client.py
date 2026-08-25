@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from httpx import Response
 
-pytestmark = pytest.mark.skip(reason="Venue client tests require complex setup - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P0-CLIENT: TRACKER-008: Venue client is live execution path")
 
 from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.models import KalshiConfig

@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Tests deprecated merid.trading.kalshi_continuous_trader module")
+pytestmark = pytest.mark.skip(reason="P3-LEGACY: TRACKER-032: Tests deprecated `merid.trading.kalshi_continuous_trader`")
 
 def test_market_candidate_has_best_side_default_before_edge():
     from merid.event_venues.kalshi.market_filter import MarketCandidate

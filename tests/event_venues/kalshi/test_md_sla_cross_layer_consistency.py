@@ -12,7 +12,7 @@ import pytest
 import time
 from unittest.mock import Mock
 
-pytestmark = pytest.mark.skip(reason="MD SLA cross-layer tests require complex setup - tested via integration tests")
+pytestmark = pytest.mark.skip(reason="P2-INTEGRATION: TRACKER-019: MD SLA cross-layer consistency")
 
 from merid.event_venues.kalshi.md_sla_interface import (
     get_md_status,
