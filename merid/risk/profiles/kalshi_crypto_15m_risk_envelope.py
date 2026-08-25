@@ -79,6 +79,14 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
     import time
     current_ts = time.time()
 
+    # Skip the (expensive) reset if window exposure is already zero and there
+    # are no agents tracked. This prevents the fills-poller from re-logging a
+    # force reset on every empty-position reconciliation cycle while still
+    # clearing genuine stale exposure on startup or after stuck positions.
+    with _WINDOW_TRACKING_LOCK:
+        if _WINDOW_TRACKING_STATE["total_exposure_usd"] == 0.0 and not _WINDOW_TRACKING_STATE["agent_exposure_usd"]:
+            return
+
     # Capture stale exposure before reset for logging
     with _WINDOW_TRACKING_LOCK:
         stale_agent_exposure = dict(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
@@ -254,6 +262,74 @@ def _roll_window_if_needed_locked(current_ts: float, current_bankroll_usd: float
             f"exposure_reset"
         )
 
+
+def detect_and_correct_window_exposure_drift(
+    actual_position_exposure_usd: float,
+    current_ts: float,
+    correction_threshold_usd: float = 0.01,
+) -> tuple[bool, float, str]:
+    """
+    CRITICAL FIX (2026-08-01): Detect and correct window exposure state drift.
+    
+    Window exposure tracking can drift from actual positions due to:
+    - Missing position closure events (positions closed outside system)
+    - Process restarts before closure events processed
+    - Race conditions in recording executions
+    - Network failures causing event loss
+    
+    This function compares tracked window exposure with actual position exposure
+    and automatically corrects drift when detected beyond threshold.
+    
+    Args:
+        actual_position_exposure_usd: Actual exposure from position cache (sum of open positions)
+        current_ts: Current timestamp for window alignment
+        correction_threshold_usd: Minimum drift amount to trigger correction (default $0.01)
+    
+    Returns:
+        Tuple of (drift_detected, drift_amount_usd, correction_message)
+        - drift_detected: True if drift was detected and corrected
+        - drift_amount_usd: Amount of drift detected (positive = tracked > actual)
+        - correction_message: Description of correction action taken
+    """
+    with _WINDOW_TRACKING_LOCK:
+        _roll_window_if_needed_locked(current_ts, 0.0)
+        
+        tracked_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+        drift_amount = tracked_exposure - actual_position_exposure_usd
+        drift_detected = abs(drift_amount) > correction_threshold_usd
+        
+        if drift_detected:
+            # Correct the drift by adjusting tracked exposure to match actual
+            old_tracked = tracked_exposure
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = actual_position_exposure_usd
+            
+            # Also correct per-agent exposure proportionally
+            if old_tracked > 0:
+                scale_factor = actual_position_exposure_usd / old_tracked
+                for agent_id in _WINDOW_TRACKING_STATE["agent_exposure_usd"]:
+                    _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] *= scale_factor
+            else:
+                # If tracked was 0 but actual > 0, distribute evenly among agents
+                agent_count = len(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
+                if agent_count > 0:
+                    per_agent_exposure = actual_position_exposure_usd / agent_count
+                    for agent_id in _WINDOW_TRACKING_STATE["agent_exposure_usd"]:
+                        _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = per_agent_exposure
+            
+            correction_message = (
+                f"[WINDOW-TRACKING-DRIFT] Corrected exposure drift: "
+                f"tracked=${old_tracked:.2f} -> actual=${actual_position_exposure_usd:.2f} "
+                f"(drift=${drift_amount:.2f}) at ts={current_ts:.0f}"
+            )
+            logger.warning(correction_message)
+            
+            # Persist corrected state
+            save_window_state()
+        else:
+            correction_message = ""
+        
+        return drift_detected, drift_amount, correction_message
+
 # VERSION TAG: This log identifies the deployed revision of kalshi_crypto_15m_risk_envelope.py
 # Changes in v20260529a:
 # - Added operation_mode support (test/prod) for daily loss limit
@@ -313,7 +389,7 @@ class KalshiCrypto15mRiskEnvelope:
     max_total_notional_usd: float
     
     # Max concurrent trades (from profile agent_defaults)
-    # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
+    # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $2 exposure cap is the limit
     
     # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ───────────────────────────────
     # Each asset has its own notional cap as percentage of capital
@@ -332,10 +408,10 @@ class KalshiCrypto15mRiskEnvelope:
     # ── Cycle Risk Cap ───────────────────────────────────────────────────────
     max_cycle_risk_pct: float  # Maximum risk per cycle as percentage of capital
     
-    # ── Window-Based Risk Tracking REMOVED (2026-07-08: Fixed $1 exposure cap) ─────────────────
-    # CRITICAL: Uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+    # ── Window-Based Risk Tracking REMOVED (2026-07-08: Fixed $2 exposure cap) ─────────────────
+    # CRITICAL: Uses fixed $2.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
     # Percentage-based limits (3% per-agent, 5% total venue) REMOVED
-    # Global slot allocator enforces $1.00 total cap across all 5 assets
+    # Global slot allocator enforces $2.00 total cap across all 5 assets
     # Window tracking fields retained for monitoring only, not enforcement
     
     # Window tracking state
@@ -371,13 +447,29 @@ class KalshiCrypto15mRiskEnvelope:
     correlation_threshold: float  # Threshold for exposure reduction
     correlation_multiplier: float  # Current correlation-based size multiplier
     
-    # ── Legacy Window Limits (Retained for backward compatibility, not enforced) ─────────────
+    # ── Legacy / Deprecated fields (Retained for backward compatibility, not enforced) ─
     # 2026-07-12: Added these fields to prevent AttributeError when code accesses them
-    # These are set to the fixed $1.00 cap but are NOT used for enforcement
+    # These are set to the fixed $2.00 cap but are NOT used for enforcement
     # MUST be at the end of dataclass to avoid "non-default argument follows default argument" error
-    per_agent_window_limit_usd: float = 1.00  # Deprecated: Fixed $1 global cap (not per-agent)
-    total_venue_window_limit_usd: float = 1.00  # Deprecated: Fixed $1 global cap (not per-venue)
-    
+    guardrails_per_window_risk_pct: float = 0.0  # Deprecated; percentage windows removed
+    guardrails_total_venue_risk_pct: float = 0.0  # Deprecated; percentage venue cap removed
+    per_agent_window_limit_usd: float = 2.00  # Deprecated: Fixed $2 global cap (not per-agent)
+    total_venue_window_limit_usd: float = 2.00  # Deprecated: Fixed $2 global cap (not per-agent)
+
+    def __post_init__(self):
+        # 2026-08-18: Fail-closed validation. Do not silently default to
+        # permissive values if the constructor is called with bad inputs.
+        if self.live_bankroll_usd is None or self.live_bankroll_usd < 0:
+            raise ValueError(f"live_bankroll_usd must be non-negative, got {self.live_bankroll_usd}")
+        if self.max_single_order_notional_usd is None or self.max_single_order_notional_usd < 0:
+            raise ValueError(f"max_single_order_notional_usd must be non-negative, got {self.max_single_order_notional_usd}")
+        if self.max_total_notional_usd is None or self.max_total_notional_usd < 0:
+            raise ValueError(f"max_total_notional_usd must be non-negative, got {self.max_total_notional_usd}")
+        if self.is_halted is None:
+            self.is_halted = False
+        if self.current_risk_band is None:
+            self.current_risk_band = RiskBand.NORMAL
+
     def update_drawdown(self, current_equity_usd: float):
         """Update drawdown tracking with current equity.
         
@@ -464,13 +556,13 @@ class KalshiCrypto15mRiskEnvelope:
     def get_per_trade_risk_pct(self) -> float:
         """Get per-trade risk percentage.
         
-        2026-07-08 UPDATE: DISABLED in favor of fixed $1 exposure model.
+        2026-07-08 UPDATE: DISABLED in favor of fixed $2 exposure model.
         Per-trade risk is now enforced via slot-based position management:
-        - Total exposure across all positions must be ≤ $1
+        - Total exposure across all positions must be ≤ $2
         - Each contract consumes its price in USD from the $1 cap
         - Sequential trading blocks new entries until positions exit
         """
-        # 2026-07-08: DISABLED - using fixed $1 exposure cap instead
+        # 2026-07-08: DISABLED - using fixed $2 exposure cap instead
         # Return 0.0 to indicate percentage-based sizing is disabled
         return 0.0
     
@@ -493,18 +585,19 @@ class KalshiCrypto15mRiskEnvelope:
     def get_effective_per_trade_risk_usd(self) -> float:
         """Get effective per-trade risk in USD (with adaptive scaling).
         
-        2026-07-08 UPDATE: DISABLED percentage-based calculation in favor of fixed $1 exposure model.
+        2026-07-08 UPDATE: DISABLED percentage-based calculation in favor of fixed $2 exposure model.
         Per-trade risk is now enforced via slot-based position management:
-        - Total exposure across all positions must be ≤ $1
+        - Total exposure across all positions must be ≤ $2
         - Each contract consumes its price in USD from the $1 cap
         - Sequential trading blocks new entries until positions exit
         
-        Returns fixed $1 exposure cap (or override from environment variable).
+        Returns fixed $2 exposure cap (or override from environment variable), clamped to live bankroll.
         """
-        # 2026-07-08: DISABLED percentage-based calculation - using fixed $1 exposure cap
+        # 2026-07-08: DISABLED percentage-based calculation - using fixed $2 exposure cap
+        # 2026-08-16: Clamped to live bankroll so an underfunded account cannot overallocate.
         import os
-        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-        return fixed_exposure_cap_usd
+        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+        return min(fixed_exposure_cap_usd, self.live_bankroll_usd)
     
     def distance_to_halt_pct(self) -> float:
         """Distance from current drawdown to halt threshold."""
@@ -579,32 +672,53 @@ class KalshiCrypto15mRiskEnvelope:
         order_notional_usd: float,
         current_ts: float,
         asset: Optional[str] = None,
+        actual_position_exposure_usd: Optional[float] = None,
     ) -> tuple[bool, str]:
         """Check if order would exceed window-based risk limits (HARD STOP).
         
         CRITICAL FIX (2026-07-23): Removed percentage-based parameters.
-        This function now enforces ONLY absolute-dollar limits based on the fixed $1.00 exposure cap.
+        This function now enforces ONLY absolute-dollar limits based on the fixed $2.00 exposure cap.
         No percentage-based overrides are allowed to prevent drift above the fixed cap.
+        
+        CRITICAL FIX (2026-08-01): Added automatic drift detection and correction.
+        If actual_position_exposure_usd is provided, compares tracked exposure with actual
+        position exposure and corrects drift when detected beyond threshold.
         
         Args:
             agent_id: Agent identifier (e.g., "BTC_15M", "ETH_15M")
             order_notional_usd: Notional value of order in USD
             current_ts: Current timestamp
             asset: Asset symbol (e.g., "BTC", "ETH") for per-asset exposure tracking
+            actual_position_exposure_usd: Optional actual exposure from position cache for drift detection
             
         Returns:
             Tuple of (allowed, reason)
             - allowed: True if order is within window limits, False if blocked
             - reason: Reason string if blocked, empty string if allowed
         """
+        # 2026-08-18: Halted envelope must block all new orders immediately.
+        if self.is_halted:
+            return False, "envelope_halted: trading is halted"
+
         # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
         assert self.live_bankroll_usd > 0, "Bankroll must be positive for window limit check"
         # CRITICAL FIX (2026-07-23): Allow zero notional in check_window_limit for zero-fill orders
         # Zero notional orders are valid (e.g., IOC orders that don't fill)
-        # 2026-07-08: DISABLED percentage-based assertions - using fixed $1 exposure model
-        # Percentage-based limits are obsolete; system uses MERID_FIXED_EXPOSURE_CAP_USD=$1.00
+        # 2026-07-08: DISABLED percentage-based assertions - using fixed $2 exposure model
+        # Percentage-based limits are obsolete; system uses MERID_FIXED_EXPOSURE_CAP_USD=$2.00
         assert order_notional_usd >= 0, "Order notional must be non-negative"
         assert agent_id, "Agent ID must be provided"
+        
+        # CRITICAL FIX (2026-08-01): Automatic drift detection and correction
+        # If actual position exposure is provided, detect and correct drift before checking limits
+        if actual_position_exposure_usd is not None:
+            drift_detected, drift_amount, correction_msg = detect_and_correct_window_exposure_drift(
+                actual_position_exposure_usd,
+                current_ts,
+                correction_threshold_usd=0.01,
+            )
+            if drift_detected:
+                logger.info(f"[WINDOW-TRACKING] {correction_msg}")
         
         # CRITICAL (2026-07-06): Read cumulative exposure from module-level shared
         # state. Envelope instances are recomputed on every call, so instance
@@ -624,22 +738,24 @@ class KalshiCrypto15mRiskEnvelope:
             if asset:
                 current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
         
-        # CRITICAL: System uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+        # CRITICAL: System uses fixed $2.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
         # Percentage-based limits (3% per-agent, 5% total venue) are DISABLED
-        # Global slot allocator is the single source of truth for $1.00 total cap enforcement
+        # Global slot allocator is the single source of truth for $2.00 total cap enforcement
+        # 2026-08-16: Cap cannot exceed peak/live bankroll (underfunded account protection).
         import os
-        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-        total_venue_limit_usd = fixed_exposure_cap_usd  # No percentage overrides allowed
+        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+        effective_cap_usd = min(fixed_exposure_cap_usd, peak_bankroll_usd)
+        total_venue_limit_usd = effective_cap_usd  # No percentage overrides allowed
         
         # Per-agent and per-asset limit checks are DISABLED
-        # The global slot allocator (global_slot_allocator.py) enforces $1.00 total cap
+        # The global slot allocator (global_slot_allocator.py) enforces $2.00 total cap
         # across all 5 assets (BTC+ETH+SOL+XRP+DOGE) based on edge quality competition
         if asset:
             # Per-asset limit check DISABLED - slot allocator handles this
             pass
         
         # Calculate total venue window limit (including resting orders)
-        # CRITICAL: Uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+        # CRITICAL: Uses fixed $2.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
         new_total_exposure = current_total_exposure + order_notional_usd
         new_total_venue = new_total_exposure + current_total_resting  # Executed + Resting
         
@@ -676,6 +792,8 @@ class KalshiCrypto15mRiskEnvelope:
             order_notional_usd: Notional value of executed order in USD
             asset: Asset symbol (e.g., "BTC", "ETH") for per-asset tracking
         """
+        # 2026-08-09: Defensive cast to float to prevent Decimal/float TypeError.
+        order_notional_usd = float(order_notional_usd) if order_notional_usd is not None else 0.0
         # CRITICAL FIX (2026-07-23): Short-circuit on zero notional (zero-fill orders)
         # Zero-fill orders are normal outcomes and should not trigger errors
         if order_notional_usd <= 0:
@@ -741,6 +859,8 @@ class KalshiCrypto15mRiskEnvelope:
         # CRITICAL (2026-07-06): Operate on module-level shared state (see
         # record_order_execution for rationale).
         import time as _time_mod
+        # 2026-08-09: Defensive cast to float to prevent Decimal/float TypeError in window tracking.
+        position_notional_usd = float(position_notional_usd) if position_notional_usd is not None else 0.0
         with _WINDOW_TRACKING_LOCK:
             _roll_window_if_needed_locked(_time_mod.time(), self.live_bankroll_usd)
             current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
@@ -785,6 +905,8 @@ class KalshiCrypto15mRiskEnvelope:
             agent_id: Agent identifier
             order_notional_usd: Notional value to refund in USD
         """
+        # 2026-08-09: Defensive cast to float to prevent Decimal/float TypeError.
+        order_notional_usd = float(order_notional_usd) if order_notional_usd is not None else 0.0
         # CRITICAL (2026-07-07): Operate on module-level shared state (see
         # record_order_execution for rationale).
         with _WINDOW_TRACKING_LOCK:
@@ -944,10 +1066,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # Extract Phase 1 profitability enhancements
     correlation_tracking_config = profile_config.get('correlation_tracking', {})
     
-    # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
+    # Window-based risk limits REMOVED (2026-07-08: Fixed $2 exposure cap)
     # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
     logger.info(
-        "[RISK-ENVELOPE] Window-based limits: REMOVED (using fixed $1 exposure model via global_slot_allocator)"
+        "[RISK-ENVELOPE] Window-based limits: REMOVED (using fixed $2 exposure model via global_slot_allocator)"
     )
 
     # Extract cycle risk cap (handle nested dict format)
@@ -1021,15 +1143,20 @@ def compute_kalshi_crypto_15m_risk_envelope(
             )
     
     # ── Compute Venue-Level Caps ────────────────────────────────────────────
-    # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
-    # Fixed exposure cap from environment variable or default $1.00
-    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+    # 2026-07-08: DISABLED percentage-based calculations - using fixed $2 exposure model
+    # Fixed exposure cap from environment variable or default $2.00
+    # CRITICAL FIX (2026-08-16): Cap cannot exceed live bankroll. An underfunded account
+    # cannot expose more notional than it has, so the effective cap is the smaller of the
+    # configured fixed cap and the live bankroll.
+    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+    fixed_exposure_cap_usd = min(fixed_exposure_cap_usd, live_bankroll_usd)
+    # Per-trade cap = total cap because slot allocator may allocate all exposure to single best edge
     max_single_order_notional_usd = fixed_exposure_cap_usd
-    max_total_notional_usd = fixed_exposure_cap_usd  # Total exposure cap = $1
+    max_total_notional_usd = fixed_exposure_cap_usd  # Total exposure cap = fixed cap (clamped)
     
-    # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
+    # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $2 exposure cap is the limit
     
-    # 2026-07-08: DISABLED percentage-based venue caps - using fixed $1 exposure model
+    # 2026-07-08: DISABLED percentage-based venue caps - using fixed $2 exposure model
     logger.info(
         f"[RISK-ENVELOPE] Venue caps: "
         f"max_single_order=${max_single_order_notional_usd:.2f}, "
@@ -1037,25 +1164,25 @@ def compute_kalshi_crypto_15m_risk_envelope(
     )
     
     # ── Compute Per-Asset Caps ────────────────────────────────────────────────
-    # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
-    # Global $1 exposure cap is shared across all assets (not per-asset)
+    # 2026-07-08: DISABLED percentage-based calculations - using fixed $2 exposure model
+    # Global $2 exposure cap is shared across all assets (not per-asset)
     # The global slot allocator enforces the $1 total cap across all assets
-    # Per-asset caps here are set to $1.00 as upper bounds, but actual allocation
-    # is managed by the slot allocator which enforces the $1.00 total exposure limit
-    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+    # Per-asset caps here are set to $2.00 as upper bounds, but actual allocation
+    # is managed by the slot allocator which enforces the $2.00 total exposure limit
+    # fixed_exposure_cap_usd already clamped to live bankroll above
     
     asset_max_notional_usd = {}
     asset_depth_thresholds = {}
     
     for asset_symbol, asset_config in assets.items():
-        # Per-asset cap equals global cap - slot allocator enforces $1.00 total across all assets
-        # This means while each asset theoretically has $1.00 upper bound, the slot allocator
-        # will only allow total exposure of $1.00 across BTC + ETH + SOL + XRP + DOGE
+        # Per-asset cap equals global cap - slot allocator enforces $2.00 total across all assets
+        # This means while each asset theoretically has $2.00 upper bound, the slot allocator
+        # will only allow total exposure of $2.00 across BTC + ETH + SOL + XRP + DOGE
         asset_max_notional_usd[asset_symbol] = fixed_exposure_cap_usd
         
-        # 2026-07-08: DISABLED percentage-based floor logic - using fixed $1 exposure model
+        # 2026-07-08: DISABLED percentage-based floor logic - using fixed $2 exposure model
         
-        # 2026-07-08: DISABLED percentage-based asset caps - using fixed $1 exposure model
+        # 2026-07-08: DISABLED percentage-based asset caps - using fixed $2 exposure model
         logger.info(
             f"[RISK-ENVELOPE] Asset {asset_symbol}: "
             f"max_notional=${asset_max_notional_usd[asset_symbol]:.2f} "
@@ -1074,14 +1201,14 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Compute Per-Agent Defaults ────────────────────────────────────────────
-    # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
-    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+    # 2026-07-08: DISABLED percentage-based calculations - using fixed $2 exposure model
+    # fixed_exposure_cap_usd already clamped to live bankroll above
     agent_max_notional_usd = fixed_exposure_cap_usd
     agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 24)  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
     agent_max_yes_position = agent_defaults.get('max_yes_position', 1)  # FIXED: Default 1 to match YAML (2026-07-14 fix)
     agent_max_no_position = agent_defaults.get('max_no_position', 1)  # FIXED: Default 1 to match YAML (2026-07-14 fix)
     
-    # 2026-07-08: DISABLED percentage-based agent defaults - using fixed $1 exposure model
+    # 2026-07-08: DISABLED percentage-based agent defaults - using fixed $2 exposure model
     logger.info(
         f"[RISK-ENVELOPE] Agent defaults: "
         f"max_notional=${agent_max_notional_usd:.2f}, "
@@ -1146,7 +1273,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         max_daily_loss_pct = None
         max_daily_loss_usd = float('inf')  # Effectively disabled
     
-    # 2026-07-08: DISABLED percentage-based guardrails - using fixed $1 exposure model
+    # 2026-07-08: DISABLED percentage-based guardrails - using fixed $2 exposure model
     logger.info(
         f"[RISK-ENVELOPE] Guardrails: "
         f"per_trade_risk=DISABLED, "
@@ -1211,7 +1338,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # This was causing equal $0.20 caps per asset, defeating edge-based allocation
     
     # CRITICAL FIX: 2026-07-10 - Removed sum_caps calculation since global allocator
-    # enforces $1.00 total exposure cap across all assets. The sum of per-asset caps
+    # enforces $2.00 total exposure cap across all assets. The sum of per-asset caps
     # is no longer relevant since the global allocator dynamically allocates under
     # the venue cap based on edge ranking, not fixed per-asset allocations.
     
@@ -1250,10 +1377,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Return Envelope ────────────────────────────────────────────────────────
-    # 2026-07-08: DISABLED percentage-based window limits - using fixed $1 exposure model
+    # 2026-07-08: DISABLED percentage-based window limits - using fixed $2 exposure model
     # CRITICAL FIX (2026-07-10): per_agent_window_limit_usd should be global across all 5 assets, not per-agent
-    # The $1.00 cap is TOTAL exposure across BTC+ETH+SOL+XRP+DOGE, not per agent
-    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+    # The fixed cap is TOTAL exposure across BTC+ETH+SOL+XRP+DOGE, not per agent
+    # CRITICAL FIX (2026-08-16): Window limits also clamped to live bankroll above.
     per_agent_window_limit_usd = fixed_exposure_cap_usd  # This is GLOBAL limit, not per-agent
     total_venue_window_limit_usd = fixed_exposure_cap_usd  # Same global limit
     
@@ -1262,7 +1389,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         profile_capital_usd=profile_capital,
         max_single_order_notional_usd=max_single_order_notional_usd,
         max_total_notional_usd=max_total_notional_usd,
-        # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
+        # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $2 exposure cap is the limit
         asset_max_notional_usd=asset_max_notional_usd,
         asset_depth_thresholds=asset_depth_thresholds,
         agent_max_notional_usd=agent_max_notional_usd,
@@ -1270,7 +1397,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         agent_max_yes_position=agent_max_yes_position,
         agent_max_no_position=agent_max_no_position,
         max_cycle_risk_pct=max_cycle_risk_pct,
-        # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
+        # Window-based risk limits REMOVED (2026-07-08: Fixed $2 exposure cap)
         window_start_ts=window_start_ts,
         agent_window_exposure_usd=agent_window_exposure_usd,
         total_window_exposure_usd=total_window_exposure_usd,
@@ -1292,12 +1419,16 @@ def compute_kalshi_crypto_15m_risk_envelope(
         correlation_tracking_enabled=correlation_tracking_enabled,
         correlation_threshold=correlation_threshold,
         correlation_multiplier=correlation_multiplier,
+        # CRITICAL FIX (2026-08-16): Pass clamped window limits into the envelope dataclass
+        # so callers and logs see the bankroll-capped value, not the default $2.00.
+        per_agent_window_limit_usd=fixed_exposure_cap_usd,
+        total_venue_window_limit_usd=fixed_exposure_cap_usd,
     )
     
     # ── Log Envelope Snapshot ───────────────────────────────────────────────────
     # CRITICAL FIX: 2026-07-10 - Removed profile_capital and sum_caps from snapshot
     # profile_capital is only used in validation mode, not production
-    # sum_caps is no longer relevant since global allocator enforces $1.00 total cap
+    # sum_caps is no longer relevant since global allocator enforces $2.00 total cap
     logger.debug(
         "[RISK-ENVELOPE-SNAPSHOT] "
         f"live_bankroll=${live_bankroll_usd:.2f} "
@@ -1311,7 +1442,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         f"[RISK-ENVELOPE-SNAPSHOT] Per-asset upper bounds below are NOT individual caps - slot allocator enforces ${fixed_exposure_cap_usd:.2f} TOTAL"
     )
     for asset_symbol, cap in asset_max_notional_usd.items():
-        # 2026-07-08: DISABLED percentage-based snapshot - using fixed $1 exposure model
+        # 2026-07-08: DISABLED percentage-based snapshot - using fixed $2 exposure model
         logger.debug(
             f"[RISK-ENVELOPE-SNAPSHOT] {asset_symbol}: "
             f"upper_bound=${cap:.2f} (NOT a per-asset cap - total cap is ${fixed_exposure_cap_usd:.2f} across all assets)"

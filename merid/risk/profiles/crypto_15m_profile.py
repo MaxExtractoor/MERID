@@ -150,7 +150,7 @@ class Crypto15mProfile:
     agent_max_orders_per_window: int
     agent_max_yes_position: int
     agent_max_no_position: int
-    # CRITICAL FIX (2026-07-17): Removed agent_max_concurrent_trades - $1 exposure cap is the limit
+    # CRITICAL FIX (2026-07-17): Removed agent_max_concurrent_trades - $2 exposure cap is the limit
     agent_minutes_before_expiry: int
     agent_cutoff_minutes_before_expiry: int
     
@@ -173,9 +173,9 @@ class Crypto15mProfile:
     guardrails_per_trade_risk_pct: float  # Per-trade risk percentage (sizing control)
     guardrails_min_time_to_expiry_min: int  # Minimum time to expiry for entry in minutes
     
-    # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
-    # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
-    # Risk is now enforced via global_slot_allocator with fixed $1.00 exposure cap
+    # Window-based risk limits REMOVED (2026-07-08: Fixed $2 exposure cap)
+    # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $2 slot allocation
+    # Risk is now enforced via global_slot_allocator with fixed $2.00 exposure cap
     guardrails_drawdown_halt_pct: float
     guardrails_drawdown_unwind_pct: float
     guardrails_max_daily_loss_usd: float
@@ -219,9 +219,9 @@ class Crypto15mProfile:
     contract_caps_max_single_order_contracts: int
     
     # Risk policy
-    # 2026-07-08 UPDATE: Fixed $1 exposure model for small bankroll optimization
-    # Replaces percentage-based sizing with fixed dollar cap to ensure $1+ profit per 15m window
-    risk_policy_fixed_exposure_cap_usd: float  # Fixed $1 max exposure (NEW)
+    # 2026-07-08 UPDATE: Fixed $2 exposure model for small bankroll optimization
+    # Replaces percentage-based sizing with fixed dollar cap to ensure $2+ profit per 15m window
+    risk_policy_fixed_exposure_cap_usd: float  # Fixed $2 max exposure (NEW)
     risk_policy_sequential_trading: bool  # No new entries until all positions exit (NEW)
     # Mandatory profit exit parameters (NEW)
     mandatory_profit_exit_enabled: bool  # Enable automatic profit exits
@@ -250,7 +250,7 @@ class Crypto15mProfile:
     throttling_global_orders_window_sec: float
     throttling_global_orders_limit: int
     throttling_per_asset_cooldown_sec: float
-    # CRITICAL FIX (2026-07-17): Removed throttling_per_strip_order_limit and throttling_max_orders_per_15m_window - $1 exposure cap is the limit
+    # CRITICAL FIX (2026-07-17): Removed throttling_per_strip_order_limit and throttling_max_orders_per_15m_window - $2 exposure cap is the limit
     throttling_per_strip_notional_usd: float
     throttling_consecutive_loss_pause: int  # 2026 research: Pause after N consecutive losses
     throttling_max_session_risk_pct: float  # 2026 research: Max session risk as % of capital
@@ -390,7 +390,7 @@ class Crypto15mProfile:
     dynamic_sizing_base_contracts: int = 1
     dynamic_sizing_edge_multiplier: float = 2.0
     dynamic_sizing_confidence_multiplier: float = 1.0
-    dynamic_sizing_max_contracts: int = 1  # CRITICAL: 1 contract per order to respect $1 fixed exposure cap
+    dynamic_sizing_max_contracts: int = 2  # CRITICAL: 2 contracts per order to respect $2 fixed exposure cap
     dynamic_sizing_min_contracts: int = 1
     # Crypto markets are near well-calibrated (slope ~1.08) but still benefit from dynamic adjustment
     calibration_enabled: bool = True  # Enable/disable probability calibration (ENABLED for dynamic adjustment)
@@ -417,7 +417,7 @@ class Crypto15mProfile:
     # Research shows BTC typically has 2c spreads in middle of window, other assets slightly wider
     # 20c threshold allows realistic trading while blocking extreme illiquidity
     market_microstructure_enabled: bool = True  # Enable market microstructure filters
-    market_microstructure_max_spread_cents: float = 60.0  # 2026-08-02: INCREASED from 20c to 60c based on spread distribution analysis - accommodates wider spreads in less liquid assets (SOL, XRP, DOGE) and time-bucket variations
+    market_microstructure_max_spread_cents: float = 20.0  # ALIGNED with YAML 20c max for 15m crypto
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold
@@ -888,23 +888,23 @@ class Crypto15mProfileAdapter:
             # intentionally omits these keys. Defaults must NOT resurrect pct caps.
             # The $1 global slot allocator is the single source of truth for exposure.
             # Handle nested dict format: {value: 0.0, dynamic: bankroll, description: "..."}
-            venue_max_single_order_pct = venue.get('max_single_order_pct', 0.0)  # DISABLED - fixed $1 model
+            venue_max_single_order_pct = venue.get('max_single_order_pct', 0.0)  # DISABLED - fixed $2 model
             if isinstance(venue_max_single_order_pct, dict):
                 venue_max_single_order_pct = venue_max_single_order_pct.get('value', 0.0)
             
-            venue_max_total_notional_pct = venue.get('max_total_notional_pct', 0.0)  # DISABLED - fixed $1 model
+            venue_max_total_notional_pct = venue.get('max_total_notional_pct', 0.0)  # DISABLED - fixed $2 model
             if isinstance(venue_max_total_notional_pct, dict):
                 venue_max_total_notional_pct = venue_max_total_notional_pct.get('value', 0.0)
             
-            venue_max_category_notional_pct = venue.get('max_category_notional_pct', 0.0)  # DISABLED - fixed $1 model
+            venue_max_category_notional_pct = venue.get('max_category_notional_pct', 0.0)  # DISABLED - fixed $2 model
             if isinstance(venue_max_category_notional_pct, dict):
                 venue_max_category_notional_pct = venue_max_category_notional_pct.get('value', 0.0)
             
-            venue_bankroll_cap_pct = venue.get('bankroll_cap_pct', 0.0)  # DISABLED - fixed $1 model
+            venue_bankroll_cap_pct = venue.get('bankroll_cap_pct', 0.0)  # DISABLED - fixed $2 model
             if isinstance(venue_bankroll_cap_pct, dict):
                 venue_bankroll_cap_pct = venue_bankroll_cap_pct.get('value', 0.0)
             
-            agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.0)  # DISABLED - fixed $1 model
+            agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.0)  # DISABLED - fixed $2 model
             if isinstance(agent_max_notional_pct, dict):
                 agent_max_notional_pct = agent_max_notional_pct.get('value', 0.0)
             
@@ -930,7 +930,7 @@ class Crypto15mProfileAdapter:
             
             # PERCENTAGE CONSISTENCY ASSERTIONS: DISABLED (2026-07-15: Fixed $1 exposure model)
             # Percentage-based consistency checks removed as percentage fields are DISABLED in YAML
-            # Risk is now enforced via global_slot_allocator with fixed $1.00 exposure cap
+            # Risk is now enforced via global_slot_allocator with fixed $2.00 exposure cap
             # All percentage fields (max_single_order_pct, agent_max_notional_pct, etc.) are DISABLED
             
             # Compute per-asset USD values
@@ -946,11 +946,11 @@ class Crypto15mProfileAdapter:
             # Extract drawdown thresholds from nested dict format
             guardrails_drawdown_halt_pct = self._normalize_percentage_value(guardrails.get('drawdown_halt_pct', 0.20))  # CRITICAL FIX: 20% - aligned with profile (was 0.10)
             guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.25))  # CRITICAL FIX: 25% - aligned with profile (was 0.15)
-            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.0))  # DISABLED (2026-07-16) - fixed $1 model via global slot allocator
+            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.0))  # DISABLED (2026-07-16) - fixed $2 model via global slot allocator
             
-            # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
-            # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
-            # Risk is now enforced via global_slot_allocator with fixed $1.00 exposure cap
+            # Window-based risk limits REMOVED (2026-07-08: Fixed $2 exposure cap)
+            # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $2 slot allocation
+            # Risk is now enforced via global_slot_allocator with fixed $2.00 exposure cap
             
             # Parse Kelly
             kelly = raw.get('kelly', {})
@@ -1010,12 +1010,13 @@ class Crypto15mProfileAdapter:
                 signal_mode=raw.get('signal_mode', 'hybrid'),  # Default: hybrid for maximum opportunity capture
                 
                 # Price-based strategy parameters
-                # CRITICAL FIX (2026-07-22): Fixed inverted thresholds causing YES-side bias
-                # Previous defaults: 0.70/0.90 created 20c dead zone and bought YES at expensive prices
-                # Correct defaults: 0.30/0.70 for symmetric trading around 0.50
+                # CRITICAL FIX (2026-08-19): 0.50/0.50 complement-symmetric fair value.
+                # Both YES and NO fair probabilities are 0.50; trade either side when
+                # it is cheap relative to the 50c fair.  This removes the dead zone
+                # and YES bias of the old 0.30/0.70 split.
                 # These defaults are used if YAML values are not present
-                price_based_buy_threshold=raw.get('price_based', {}).get('buy_threshold', 0.30),
-                price_based_sell_threshold=raw.get('price_based', {}).get('sell_threshold', 0.70),
+                price_based_buy_threshold=raw.get('price_based', {}).get('buy_threshold', 0.50),
+                price_based_sell_threshold=raw.get('price_based', {}).get('sell_threshold', 0.50),
                 
                 # Price range configuration for entry band restrictions
                 # CRITICAL FIX: max_price_cents default 75 to match guardrails_max_contract_price_cents (75c expanded range)
@@ -1091,15 +1092,15 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_spread_gate_cents=momentum_fvg_config.get('spread_gate_cents', 40),
                 momentum_fvg_spread_gate_obi_persistence_boost=momentum_fvg_config.get('spread_gate_obi_persistence_boost', 0.75),
                 
-                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.0)),  # 2026-07-15: DISABLED - fixed $1 model (default 0.0)
+                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.0)),  # 2026-07-15: DISABLED - fixed $2 model (default 0.0)
                 max_cycle_risk_usd=raw.get('max_cycle_risk_usd', 0.0),
                 
-                # Venue-level caps (percentage-based DISABLED 2026-07-16 - fixed $1 model)
+                # Venue-level caps (percentage-based DISABLED 2026-07-16 - fixed $2 model)
                 # Defaults are 0.0 so absent YAML keys can never resurrect pct caps.
-                venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.0)),  # DISABLED - fixed $1 model
-                venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.0)),  # DISABLED - fixed $1 model
-                venue_max_category_notional_pct=self._normalize_percentage_value(venue.get('max_category_notional_pct', 0.0)),  # DISABLED - fixed $1 model
-                venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.0)),  # DISABLED - fixed $1 model
+                venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.0)),  # DISABLED - fixed $2 model
+                venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.0)),  # DISABLED - fixed $2 model
+                venue_max_category_notional_pct=self._normalize_percentage_value(venue.get('max_category_notional_pct', 0.0)),  # DISABLED - fixed $2 model
+                venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.0)),  # DISABLED - fixed $2 model
                 venue_max_orders_per_minute=venue.get('max_orders_per_minute', 30),
                 venue_max_orders_per_hour=venue.get('max_orders_per_hour', 300),
                 
@@ -1111,12 +1112,12 @@ class Crypto15mProfileAdapter:
                 # Per-asset caps
                 asset_configs=asset_configs,
                 
-                # Per-agent defaults (percentage-based DISABLED 2026-07-16 - fixed $1 model)
-                agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.0)),  # DISABLED - fixed $1 model
+                # Per-agent defaults (percentage-based DISABLED 2026-07-16 - fixed $2 model)
+                agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.0)),  # DISABLED - fixed $2 model
                 agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 24),  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
-                agent_max_yes_position=agent_defaults.get('max_yes_position', 1),  # FIXED: Default 1 to match YAML (2026-07-14 fix)
-                agent_max_no_position=agent_defaults.get('max_no_position', 1),  # FIXED: Default 1 to match YAML (2026-07-14 fix)
-                # CRITICAL FIX (2026-07-17): Removed agent_max_concurrent_trades - $1 exposure cap is the limit
+                agent_max_yes_position=agent_defaults.get('max_yes_position', 2),  # FIXED: Default 2 to match YAML (2026-07-14 fix)
+                agent_max_no_position=agent_defaults.get('max_no_position', 2),  # FIXED: Default 2 to match YAML (2026-07-14 fix)
+                # CRITICAL FIX (2026-07-17): Removed agent_max_concurrent_trades - $2 exposure cap is the limit
                 agent_minutes_before_expiry=agent_defaults.get('minutes_before_expiry', 15),  # FIXED: Default 15 to match YAML (2026-07-16 fix)
                 agent_cutoff_minutes_before_expiry=agent_defaults.get('cutoff_minutes_before_expiry', 0),  # FIXED: Default 0 to match YAML (2026-07-16 fix)
                 
@@ -1139,7 +1140,7 @@ class Crypto15mProfileAdapter:
                 guardrails_min_post_fee_edge=self._normalize_percentage_value(guardrails.get('min_post_fee_edge', 0.02)),  # FIXED: Default 0.02 to match YAML (was 0.01)
                 guardrails_per_trade_risk_pct=guardrails_per_trade_risk_pct,  # Per-trade risk percentage (sizing control)
                 guardrails_min_time_to_expiry_min=guardrails.get('min_time_to_expiry_min', 2.5),  # FIXED: Default 2.5 to match YAML (was 3)
-                # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
+                # Window-based risk limits REMOVED (2026-07-08: Fixed $2 exposure cap)
                 guardrails_drawdown_halt_pct=guardrails_drawdown_halt_pct,
                 guardrails_drawdown_unwind_pct=guardrails_drawdown_unwind_pct,
                 guardrails_max_daily_loss_usd=guardrails.get('max_daily_loss_usd', 200.0),
@@ -1182,12 +1183,12 @@ class Crypto15mProfileAdapter:
                 contract_caps_max_contracts_per_cluster=contract_caps.get('max_contracts_per_cluster', 750),
                 # Handle nested dict format for max_single_order_contracts
                 contract_caps_max_single_order_contracts=self._normalize_contracts_value(
-                    contract_caps.get('max_single_order_contracts', 1)  # CRITICAL FIX (2026-07-08): Default 1 to enforce 3% risk limit
+                    contract_caps.get('max_single_order_contracts', 2)  # CRITICAL FIX (2026-07-08): Default 2 to enforce 3% risk limit
                 ),
                 
                 # Risk policy (normalize dict format for percentage fields)
-                # 2026-07-08 UPDATE: Fixed $1 exposure model parameters
-                risk_policy_fixed_exposure_cap_usd=float(risk_policy.get('fixed_exposure_cap_usd', 1.00)),
+                # 2026-07-08 UPDATE: Fixed $2 exposure model parameters
+                risk_policy_fixed_exposure_cap_usd=float(risk_policy.get('fixed_exposure_cap_usd', 2.00)),
                 risk_policy_sequential_trading=bool(risk_policy.get('sequential_trading', True)),
                 # Mandatory profit exit parameters
                 mandatory_profit_exit_enabled=bool(risk_policy.get('mandatory_profit_exit', {}).get('enabled', True)),
@@ -1221,7 +1222,7 @@ class Crypto15mProfileAdapter:
                 throttling_global_orders_window_sec=float(throttling.get('global_orders_window_sec', 60.0)),
                 throttling_global_orders_limit=int(throttling.get('global_orders_limit', 30)),  # FIXED: Default 30 to match YAML (2026-07-16 fix)
                 throttling_per_asset_cooldown_sec=float(throttling.get('per_asset_cooldown_sec', 3.0)),  # 2026-07-11: updated to 3s for 15m alignment
-                # CRITICAL FIX (2026-07-17): Removed throttling_per_strip_order_limit and throttling_max_orders_per_15m_window - $1 exposure cap is the limit
+                # CRITICAL FIX (2026-07-17): Removed throttling_per_strip_order_limit and throttling_max_orders_per_15m_window - $2 exposure cap is the limit
                 throttling_per_strip_notional_usd=float(throttling.get('per_strip_notional_usd', 0.0)),
                 throttling_consecutive_loss_pause=int(throttling.get('consecutive_loss_pause', 3)),
                 throttling_max_session_risk_pct=self._normalize_percentage_value(throttling.get('max_session_risk_pct', 0.10)),
@@ -1346,7 +1347,7 @@ class Crypto15mProfileAdapter:
                 dynamic_sizing_base_contracts=raw.get('dynamic_sizing', {}).get('base_contracts', 1),
                 dynamic_sizing_edge_multiplier=raw.get('dynamic_sizing', {}).get('edge_multiplier', 2.0),
                 dynamic_sizing_confidence_multiplier=raw.get('dynamic_sizing', {}).get('confidence_multiplier', 1.0),
-                dynamic_sizing_max_contracts=raw.get('dynamic_sizing', {}).get('max_contracts', 1),  # CRITICAL FIX (2026-07-08): Default 1 to enforce 3% risk limit
+                dynamic_sizing_max_contracts=raw.get('dynamic_sizing', {}).get('max_contracts', 2),  # CRITICAL FIX (2026-07-08): Default 2 to enforce 3% risk limit
                 dynamic_sizing_min_contracts=raw.get('dynamic_sizing', {}).get('min_contracts', 1),
                 # Phase 2: Strategy definitions
                 strategies=strategies,
@@ -1400,6 +1401,16 @@ class Crypto15mProfileAdapter:
                 # Updated adaptive risk bands (2026 research: more granular)
                 guardrails_adaptive_risk_bands=guardrails.get('adaptive_risk_bands', []),
             )
+
+            # Extra decision-engine wiring that does not belong in the core
+            # dataclass but must be available to the agent and loop.
+            self._profile.model_uncertainty = float(
+                raw.get('model_uncertainty',
+                    raw.get('strategy_policy', {}).get('model_uncertainty', 0.02)
+                )
+            )
+            self._profile.market_making = raw.get('market_making', {})
+            self._profile.yes_no_arbitrage = raw.get('yes_no_arbitrage', {})
             
             logger.info(f"[Crypto15mProfileAdapter] Loaded profile {self._profile.profile_name} v{self._profile.profile_version}")
             

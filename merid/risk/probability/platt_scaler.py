@@ -43,15 +43,18 @@ class PlattScaler:
         metrics = scaler.evaluate_metrics(logits, outcomes)
     """
     
-    def __init__(self, regularization: float = 1e-4):
+    def __init__(self, regularization: float = 1e-4, min_samples: int = 10):
         """
         Initialize Platt Scaler.
-        
+
         Args:
             regularization: L2 regularization parameter to prevent overfitting.
                            Default is 1e-4 as recommended in Platt's paper.
+            min_samples: Minimum number of (logit, outcome) pairs required before
+                        fitting.  Callers can lower this for tests; production keeps 10.
         """
         self.regularization = regularization
+        self.min_samples = min_samples
         self._a: Optional[float] = None  # Slope parameter
         self._b: Optional[float] = None  # Intercept parameter
         self._is_fitted: bool = False
@@ -60,20 +63,20 @@ class PlattScaler:
     def fit(self, logits: List[float], outcomes: List[int]) -> None:
         """
         Fit Platt scaling parameters using logistic regression.
-        
+
         Args:
             logits: Raw model logits (can be probabilities transformed to logit space)
             outcomes: Binary outcomes (0 or 1)
-            
+
         Raises:
             ValueError: If logits and outcomes have different lengths
             ValueError: If insufficient data for fitting
         """
         if len(logits) != len(outcomes):
             raise ValueError(f"Logits and outcomes must have same length: {len(logits)} vs {len(outcomes)}")
-        
-        if len(logits) < 10:
-            raise ValueError(f"Insufficient data for fitting: need at least 10 samples, got {len(logits)}")
+
+        if len(logits) < self.min_samples:
+            raise ValueError(f"Insufficient data for fitting: need at least {self.min_samples} samples, got {len(logits)}")
         
         # Convert to numpy arrays
         logits_arr = np.array(logits, dtype=np.float64)
