@@ -11,11 +11,14 @@ final order side.
 Reference: https://help.kalshi.com/en/articles/13823806-buying-yes-vs-selling-no
 """
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 import json
+import os
+import time
 
 
 class ExposureIntent(str, Enum):
@@ -330,3 +333,172 @@ def reset_parity_metrics() -> None:
     global _parity_metrics
     if _parity_metrics is not None:
         _parity_metrics.reset()
+
+
+# ── Directional Anomaly Circuit Breaker (2026-08-19) ─────────────────────────
+# Temporary safety guard that blocks signals when YES/NO selection cannot be
+# explained by the raw model probabilities and market prices.  Disabled by
+# setting MERID_DIRECTIONAL_ANOMALY_BREAKER_DISABLED=1.
+
+MERID_DIRECTIONAL_ANOMALY_BREAKER_DISABLED = (
+    os.getenv("MERID_DIRECTIONAL_ANOMALY_BREAKER_DISABLED", "0") == "1"
+)
+MERID_DIRECTIONAL_TRACE_ENABLED = (
+    os.getenv("MERID_DIRECTIONAL_TRACE_ENABLED", "1") == "1"
+)
+DIRECTIONAL_ANOMALY_WINDOW_SIZE = int(
+    os.getenv("MERID_DIRECTIONAL_ANOMALY_WINDOW_SIZE", "30")
+)
+DIRECTIONAL_ANOMALY_SIDE_RATIO = float(
+    os.getenv("MERID_DIRECTIONAL_ANOMALY_SIDE_RATIO", "0.8")
+)
+DIRECTIONAL_ANOMALY_PRICE_EPS = float(
+    os.getenv("MERID_DIRECTIONAL_ANOMALY_PRICE_EPS", "0.05")
+)
+
+
+def emit_directional_trace(logger, payload: Dict[str, Any]) -> None:
+    """Emit a one-line structured directional-trace JSON event."""
+    if not MERID_DIRECTIONAL_TRACE_ENABLED:
+        return
+    try:
+        logger.info("[DIRECTIONAL-TRACE] %s", json.dumps(payload, default=str))
+    except Exception:
+        pass
+
+
+class DirectionalAnomalyCircuitBreaker:
+    """Rolling-window guard against structural YES/NO selection bias.
+
+    Blocks when:
+    1. The model probabilities for YES/NO do not sum to ~1 (parity failure).
+    2. The selected side is not the side with the highest net edge.
+    3. A side is selected > ``side_ratio`` of the time while the average
+       executable price of those selections is not in the configured entry
+       zone (i.e. the raw signal distribution cannot explain the frequency).
+    """
+
+    def __init__(
+        self,
+        window_size: int = DIRECTIONAL_ANOMALY_WINDOW_SIZE,
+        side_ratio: float = DIRECTIONAL_ANOMALY_SIDE_RATIO,
+        price_eps: float = DIRECTIONAL_ANOMALY_PRICE_EPS,
+    ) -> None:
+        self._window_size = window_size
+        self._side_ratio = side_ratio
+        self._price_eps = price_eps
+        self._windows: Dict[str, deque] = {}
+
+    def record_and_check(
+        self,
+        asset: str,
+        ticker: str,
+        buy_threshold: float,
+        sell_threshold: float,
+        yes_model_prob: float,
+        no_model_prob: float,
+        yes_edge: float,
+        no_edge: float,
+        selected_side: Optional[str],
+        selected_action: str,
+        market_price: float,
+    ) -> tuple[bool, str]:
+        """Return (allowed, reason).  ``reason`` is empty when allowed."""
+        # Re-read the env var on every call so tests and ops can toggle it live.
+        if os.getenv("MERID_DIRECTIONAL_ANOMALY_BREAKER_DISABLED", "0") == "1":
+            return True, ""
+
+        # 1. Probability parity (complement symmetry)
+        prob_sum = yes_model_prob + no_model_prob
+        if abs(prob_sum - 1.0) > 1e-6:
+            return False, (
+                f"prob_parity_violation: prob_sum={prob_sum:.6f} "
+                f"yes_model_prob={yes_model_prob:.6f} no_model_prob={no_model_prob:.6f}"
+            )
+
+        # 2. Edge-winner parity (only when a side is selected)
+        if selected_side in ("yes", "no"):
+            if selected_side == "yes" and no_edge > yes_edge + 1e-9:
+                return False, (
+                    f"edge_winner_mismatch: selected=yes but no_edge={no_edge:.6f} > "
+                    f"yes_edge={yes_edge:.6f}"
+                )
+            if selected_side == "no" and yes_edge > no_edge + 1e-9:
+                return False, (
+                    f"edge_winner_mismatch: selected=no but yes_edge={yes_edge:.6f} > "
+                    f"no_edge={no_edge:.6f}"
+                )
+
+        # 3. Rolling-window frequency / price fairness
+        window = self._windows.setdefault(asset, deque(maxlen=self._window_size))
+        if selected_side in ("yes", "no"):
+            # Record the executable YES price associated with the selection.
+            # For a YES trade we record the YES market price; for a NO trade we
+            # record the complementary YES price (1 - NO market price).
+            if selected_side == "yes":
+                yes_price = float(market_price)
+            else:
+                # For a NO trade the analogous "expensive YES / cheap NO" signal is
+                # the YES market price.  Cheap NO means YES is high, so we record the
+                # YES price and block NO trades whose average YES price is too low.
+                yes_price = float(market_price)
+            window.append({
+                "time": time.time(),
+                "side": selected_side,
+                "yes_price": yes_price,
+            })
+
+        if len(window) >= 5:
+            total = len(window)
+            yes_count = sum(1 for r in window if r["side"] == "yes")
+            no_count = total - yes_count
+            yes_ratio = yes_count / total
+            no_ratio = no_count / total
+
+            if yes_ratio >= self._side_ratio and yes_count > 0:
+                avg_yes_price = (
+                    sum(r["yes_price"] for r in window if r["side"] == "yes")
+                    / yes_count
+                )
+                if avg_yes_price > buy_threshold + self._price_eps:
+                    return False, (
+                        f"yes_frequency_anomaly: yes_ratio={yes_ratio:.2f} "
+                        f"avg_yes_price={avg_yes_price:.4f} "
+                        f"buy_threshold={buy_threshold:.4f}"
+                    )
+
+            if no_ratio >= self._side_ratio and no_count > 0:
+                # NO trades should only fire when YES is expensive (>= sell_threshold).
+                avg_yes_price_for_no = (
+                    sum(r["yes_price"] for r in window if r["side"] == "no")
+                    / no_count
+                )
+                if avg_yes_price_for_no < sell_threshold - self._price_eps:
+                    return False, (
+                        f"no_frequency_anomaly: no_ratio={no_ratio:.2f} "
+                        f"avg_yes_price_for_no={avg_yes_price_for_no:.4f} "
+                        f"sell_threshold={sell_threshold:.4f}"
+                    )
+
+        return True, ""
+
+    def reset(self) -> None:
+        """Clear all rolling windows."""
+        self._windows.clear()
+
+
+_directional_anomaly_breaker: Optional[DirectionalAnomalyCircuitBreaker] = None
+
+
+def get_directional_anomaly_breaker() -> DirectionalAnomalyCircuitBreaker:
+    """Get singleton directional anomaly circuit breaker instance."""
+    global _directional_anomaly_breaker
+    if _directional_anomaly_breaker is None:
+        _directional_anomaly_breaker = DirectionalAnomalyCircuitBreaker()
+    return _directional_anomaly_breaker
+
+
+def reset_directional_anomaly_breaker() -> None:
+    """Reset the singleton directional anomaly circuit breaker."""
+    global _directional_anomaly_breaker
+    _directional_anomaly_breaker = None
