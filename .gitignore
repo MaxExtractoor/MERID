@@ -211,7 +211,7 @@ trust/
 marketing_swarm/
 
 # Legacy infra / tooling
-artifacts/
+/artifacts/
 baselines/
 examples/
 experiments/
@@ -324,6 +324,8 @@ test_*.sh
 SESSION_COMPLETE_PROGRESS.md
 PROJECT_COMPLETE.md
 MEMORY.md
+*.bak
+web/health_diagnostic.txt
 web/react/test-output.txt
 web/react/tsc-errors.txt
 web/react/tsc_out.txt
@@ -397,6 +399,8 @@ data/shadow/cfb_rti/
 data/shadow/cfb_rti_report/
 data/shadow/reports/
 data/shadow/segments/
+data/shadow/artifacts/*.json
+data/shadow/artifacts/*.sha256
 data/shadow/first_failure_report_*.json
 data/shadow/startup_record_shadow_*.json
 data/*.txt

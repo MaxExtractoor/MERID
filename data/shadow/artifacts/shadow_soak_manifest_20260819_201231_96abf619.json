@@ -2,7 +2,7 @@
   "manifest_schema_version": 1,
   "run_id": "shadow_20260819_201231_96abf619",
   "created_at_utc": "2026-08-19T20:12:31Z",
-  "git_head": "afd38fc7ee107c81f8bfc06157b9e44d06664a0e",
+  "git_head": "b80b2a8a16609889107a4a0d21bad55cc18c0e5a",
   "patch_base_git_head": "96abf61924ebd0e1625237d10df14bef630aa285",
   "rti_postgres_patch_sha256": "C06D5703C519D3CF2365A8619DF6BA881B921064E594E9E5C5C5BD3D41DC489B  data/shadow/artifacts/rti_postgres_preflight.patch",
   "private_env_sha256": "EB532755676BAE683EB7AB386312AE7F312EE34D141E93B6501F9171A83E0A97",

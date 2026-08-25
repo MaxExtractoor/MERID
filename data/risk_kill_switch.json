@@ -1,7 +1,7 @@
 {
   "active": false,
   "manual_emergency_halt": false,
-  "reason": "",
-  "details": "",
-  "activated_at": ""
+  "reason": null,
+  "details": null,
+  "activated_at": null
 }
