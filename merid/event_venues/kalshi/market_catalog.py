@@ -3019,11 +3019,13 @@ class KalshiMarketCatalog:
         allowed_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
         
         # CRITICAL FIX (2026-08-22): Only subscribe/trade markets inside the live
-        # 15m window.  Negative MTE means already expired; >15m means the next
-        # window is not yet active for this 15m crypto instrument.  The 0.5m
-        # floor keeps us out of the final 30s where data and fills are unreliable.
+        # 15m window plus a small rollover buffer.  Negative MTE means already
+        # expired; >17m means the next window is not yet active for this 15m
+        # crypto instrument.  The 0.5m floor keeps us out of the final 30s where
+        # data and fills are unreliable.  17m matches the catalog fetch horizon
+        # and gives a 2-minute buffer past the 15m trading window for rollover.
         MIN_MINUTES_TO_EXPIRY = 0.5
-        MAX_MINUTES_TO_EXPIRY = 15.0
+        MAX_MINUTES_TO_EXPIRY = 17.0
         
         now = datetime.now(timezone.utc)
         
