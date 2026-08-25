@@ -15,17 +15,40 @@ This ensures:
 - No artificial per-asset limits
 - Concentration on highest expected returns
 - 1 contract per asset per window
-- Entry prices use side-aware ranges: YES 1c-75c, NO 25c-99c (CRITICAL FIX 2026-07-31)
-- Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.0% (actual percentage)
+- Entry prices must fall within [min_price_cents, max_price_cents] (default 10-75c)
+- Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.5% (industry standard)
 """
 
 import time
-from typing import List, Dict, Any, Optional
+from collections import defaultdict
+from typing import List, Dict, Any, Optional, Tuple
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from utils.logger import get_logger
+from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 
 logger = get_logger("merid.risk.profiles.global_allocator")
+
+
+def _to_edge_fraction(edge: float) -> float:
+    """Normalize an edge value to a fraction (0.025 = 2.5%).
+
+    The codebase passes edge as either percentage points (e.g. 5.0) or as a
+    fraction (e.g. 0.05).  Values whose absolute magnitude is >= 1.0 are
+    treated as percentage points and divided by 100; all other values are
+    kept as fractions.  This is a defensive bridge while the stack converges
+    on a single edge convention.
+    """
+    if edge is None:
+        return 0.0
+    return edge / 100.0 if abs(edge) >= 1.0 else edge
+
+
+def _to_edge_percent(edge: float) -> float:
+    """Inverse of _to_edge_fraction: return a value formatted in percent."""
+    if edge is None:
+        return 0.0
+    return edge if abs(edge) >= 1.0 else edge * 100.0
 
 
 @dataclass
@@ -41,19 +64,121 @@ class OrderCandidate:
     confidence: float
     model_prob: float
     agent_name: str
-    
+    candidate_id: str = ""
+
     @property
     def notional_usd(self) -> float:
         """Calculate order notional in USD."""
         return (self.price_cents * self.count) / 100.0
-    
+
     @property
     def edge_score(self) -> float:
         """
         Composite edge score for ranking.
         Combines edge_pct and confidence.
         """
-        return self.edge_pct * self.confidence
+        return _to_edge_fraction(self.edge_pct) * self.confidence
+
+
+@dataclass
+class CanonicalLivePosition:
+    """Exchange-confirmed live exposure for a single market/ticker.
+
+    This is the authoritative input for allocation decisions.  It carries the
+    asset, full market ticker, side, size, average entry price, and whether the
+    position is confirmed by the exchange or by an outstanding (non-terminal)
+    open order.  The GlobalAllocator uses only positions whose ticker matches the
+    candidate's ticker, preventing stale asset-level positions from blocking new
+    entries in a different window.
+    """
+    asset: str
+    ticker: str
+    side: str  # "yes" or "no"
+    contracts: int
+    avg_price_cents: int
+    notional_usd: float
+    exchange_confirmed_open: bool = True
+    pending_order_open: bool = False
+
+    @property
+    def is_open(self) -> bool:
+        """An exposure is live if it is either filled on exchange or resting on the book."""
+        return self.exchange_confirmed_open or self.pending_order_open
+
+
+@dataclass
+class AllocationDecision:
+    """Structured allocation outcome for a single candidate.
+
+    Replaces the opaque `allocator_loss` label with explicit constraint reasons
+    and lifecycle accounting fields.  A decision is recorded for every input
+    candidate; rejected candidates carry a concrete terminal reason and the
+    stage where they were eliminated.  Selected candidates have no terminal
+    reason and their approved_quantity_fp is set.
+    """
+
+    cycle_id: Any = None
+    candidate_id: str = ""
+    asset: str = ""
+    ticker: str = ""
+    selected: bool = False
+    constraint_reasons: List[str] = field(default_factory=list)
+    terminal_reason: Optional[str] = None
+    rejection_stage: Optional[str] = None
+    requested_quantity_fp: float = 0.0
+    approved_quantity_fp: float = 0.0
+    expected_value_cents: Optional[float] = None
+    stage_results: Dict[str, str] = field(default_factory=dict)
+
+
+# Allocation evaluation stages, in the order they are applied.
+_ALLOCATION_STAGES = (
+    "EDGE",
+    "CONFIDENCE",
+    "PRICE",
+    "COUNT",
+    "EXISTING_POSITION",
+    "PENDING_ORDER",
+    "POSITION_CAP",
+    "ASSET_CAP",
+    "BUDGET",
+    "KNAPSACK",
+)
+
+# Concrete terminal reason codes used in AllocationDecision.constraint_reasons.
+REASON_EXPECTED_VALUE_BELOW_MINIMUM = "EXPECTED_VALUE_BELOW_MINIMUM"
+REASON_CONFIDENCE_BELOW_MINIMUM = "CONFIDENCE_BELOW_MINIMUM"
+REASON_PRICE_OUT_OF_RANGE = "PRICE_OUT_OF_RANGE"
+REASON_DUPLICATE_EXPOSURE = "DUPLICATE_EXPOSURE"
+REASON_EXISTING_POSITION = "EXISTING_POSITION"
+REASON_PENDING_ORDER = "PENDING_ORDER"
+REASON_POSITION_CAP = "POSITION_CAP"
+REASON_ASSET_CAP = "ASSET_CAP"
+REASON_BUDGET_LIMIT = "BUDGET_LIMIT"
+REASON_MIN_NOTIONAL = "MIN_NOTIONAL"
+REASON_QUANTITY_ROUNDED_TO_ZERO = "QUANTITY_ROUNDED_TO_ZERO"
+REASON_KNAPSACK_CAP = "KNAPSACK_CAP"
+
+# Generic terminal reason for candidates that survive all pre-knapsack stages
+# and are then eliminated by the knapsack/budget/asset-cap phase.
+_ALLOCATION_TERMINAL = "ALLOCATOR_REJECTED"
+
+
+def _mark_terminal(decision: AllocationDecision, stage: str, reason: str) -> None:
+    """Record a terminal rejection without overwriting an earlier one.
+
+    Pre-knapsack failures keep their concrete reason as the terminal reason.
+    Knapsack- and cap-phase failures use the generic ``_ALLOCATION_TERMINAL``
+    label while the concrete reason is preserved in ``constraint_reasons``.
+    """
+    if decision.terminal_reason is not None:
+        return
+    if stage in ("ASSET_CAP", "BUDGET", "KNAPSACK"):
+        decision.terminal_reason = _ALLOCATION_TERMINAL
+    else:
+        decision.terminal_reason = reason
+    decision.rejection_stage = stage
+    decision.constraint_reasons.append(reason)
 
 
 class GlobalAllocator:
@@ -64,8 +189,8 @@ class GlobalAllocator:
     
     CRITICAL RULES:
     - $1 total exposure cap across ALL assets (shared pool, not per-asset)
-    - 1 contract per asset per window
-    - Entry price uses side-aware ranges: YES 1c-75c, NO 25c-99c (CRITICAL FIX 2026-07-31)
+    - Up to 2 contracts per asset per window (capped by $1 exposure)
+    - Entry price must fall within [min_price_cents, max_price_cents] (default 10-75c)
     - Confidence must be ≥ 50% (matches signal generation range: 0.5 + edge)
     - Edge must be ≥ 2.5% (matches profile edge_bands - industry standard)
     - Assets compete for capital (no per-asset budgets)
@@ -79,8 +204,8 @@ class GlobalAllocator:
                                       # Display multiplies by 100 for logging, but internal comparison uses fraction
         min_confidence: float = 0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
                                       # Signal generation produces confidence = 0.5 + edge (edge is 0.02-0.08), resulting in 52-58%
-        min_price_cents: int = 1,  # 2026-07-31: Lowered to 1c for YES orders (side-aware filtering applied later)
-        max_price_cents: int = 99,  # 2026-07-31: Expanded to 99c for NO orders (side-aware filtering applied later)
+        min_price_cents: int = 10,  # CRITICAL 2026-08-14: Restore 10c hard floor (was 1c)
+        max_price_cents: int = 75,  # CRITICAL 2026-08-14: Restore 75c hard cap (was 99c)
         max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
         # 2026-07-14: Per-asset edge thresholds aligned with profile edge_bands (2.5% unified - industry standard)
@@ -121,6 +246,10 @@ class GlobalAllocator:
         self._pending_orders: Dict[str, str] = {}  # asset -> order_id (pending submission)
         self._pending_order_timestamps: Dict[str, float] = {}  # asset -> submission timestamp
         self._pending_order_timeout = 30.0  # 30 seconds timeout for pending orders
+
+        # CRITICAL FIX (2026-08-23): Record per-candidate allocation decisions keyed by
+        # cycle_id so stale results from previous ticks are never returned.
+        self._allocation_decisions: Dict[Any, List[AllocationDecision]] = defaultdict(list)
         
         logger.info(
             "[GLOBAL-ALLOCATOR] Initialized: venue_cap=$%.2f, min_edge=%.3f%% (fraction=%.3f), min_conf=%.0f%%, price_range=[%dc-%dc], max_single=%.1f%%",
@@ -130,35 +259,137 @@ class GlobalAllocator:
             "[GLOBAL-ALLOCATOR] Per-asset edge thresholds: %s",
             ", ".join(f"{k}={v}%" for k, v in self.per_asset_min_edge_pct.items())
         )
-    
+
+    def _has_live_exposure_for_ticker(
+        self,
+        candidate: OrderCandidate,
+        canonical_live_positions: List[CanonicalLivePosition]
+    ) -> bool:
+        """Return True if an exchange-confirmed or pending live exposure exists for this exact ticker."""
+        return any(
+            p.asset == candidate.asset
+            and p.ticker == candidate.ticker
+            and p.is_open
+            for p in canonical_live_positions
+        )
+
+    def _current_notional_for_ticker(
+        self,
+        candidate: OrderCandidate,
+        canonical_live_positions: List[CanonicalLivePosition]
+    ) -> float:
+        """Return the total live notional for this exact candidate ticker."""
+        return sum(
+            p.notional_usd
+            for p in canonical_live_positions
+            if p.asset == candidate.asset
+            and p.ticker == candidate.ticker
+            and p.is_open
+        )
+
+    def _has_pending_order_for_ticker(
+        self,
+        candidate: OrderCandidate
+    ) -> bool:
+        """Check the order gate for an active pending/resting order on this exact ticker."""
+        if candidate.asset not in self._pending_orders:
+            return False
+
+        order_id = self._pending_orders[candidate.asset]
+
+        # First, treat any in-memory pending record that is not stale as active.
+        # This prevents the same asset from being double-entered while an order is
+        # in flight, even if the gate lookup is momentarily unavailable.
+        timestamp = self._pending_order_timestamps.get(candidate.asset, 0.0)
+        if time.time() - timestamp <= self._pending_order_timeout:
+            # Still within the pending timeout window; block the candidate.
+            # Cross-validate with the gate in the background to clean terminal states.
+            try:
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                order_gate = get_pre_trade_gate()
+                if order_gate:
+                    order_record = order_gate.lookup(order_id)
+                    if order_record and order_record.status in ("filled", "canceled", "rejected", "expired"):
+                        # Stale/terminal pending order; clean it up and allow.
+                        logger.warning(
+                            "[GLOBAL-ALLOCATOR] Clearing terminal pending order %s for %s (status=%s)",
+                            order_id, candidate.asset, order_record.status
+                        )
+                        del self._pending_orders[candidate.asset]
+                        del self._pending_order_timestamps[candidate.asset]
+                        return False
+            except Exception as e:
+                logger.warning(
+                    "[GLOBAL-ALLOCATOR] Failed to cross-validate pending order %s for %s: %s",
+                    order_id, candidate.asset, e
+                )
+            return True
+
+        # Stale pending order; clear and allow.
+        logger.warning(
+            "[GLOBAL-ALLOCATOR] Clearing stale pending order %s for %s (>%.0fs old)",
+            order_id, candidate.asset, self._pending_order_timeout
+        )
+        del self._pending_orders[candidate.asset]
+        del self._pending_order_timestamps[candidate.asset]
+        return False
+
     def allocate(
         self,
         candidates: List[OrderCandidate],
-        current_positions: Optional[Dict[str, float]] = None
+        current_positions: Optional[Dict[str, float]] = None,
+        canonical_live_positions: Optional[List[CanonicalLivePosition]] = None,
+        cycle_id: Any = None,
     ) -> List[OrderCandidate]:
         """
         Allocate orders based on edge ranking under venue cap with shared $1 pool.
-        
+
         CRITICAL: This implements the shared $1 pool model where assets compete for capital.
-        No per-asset budgets - total exposure across all assets must be ≤ $1.00.
-        
+        No per-asset budgets - total exposure across all assets must be <= $1.00.
+
+        One ``AllocationDecision`` is produced for every input candidate and keyed by
+        ``cycle_id``.  Each candidate is evaluated through the fixed stage pipeline;
+        the first failing stage records a concrete terminal reason.  Candidates that
+        survive all pre-knapsack stages are then passed to the optimal-knapsack stage.
+
         Args:
             candidates: List of all potential orders from agents
-            current_positions: Current position notional per asset (optional)
-        
+            current_positions: Current position notional per asset (optional, legacy).
+                Prefer ``canonical_live_positions`` for authoritative per-ticker exposure.
+            canonical_live_positions: Exchange-confirmed live positions keyed by market
+                ticker.  When provided, this is used in place of ``current_positions``
+                to avoid stale asset-level exposure blocking a different window.
+            cycle_id: Optional cycle/tick identifier.  When supplied, previous decisions
+                for this cycle are cleared at the start of the call.
+
         Returns:
             List of chosen orders that fit under venue cap
         """
+        # Clear any previous decisions for this cycle so telemetry never reads stale data.
+        if cycle_id is not None:
+            self._allocation_decisions[cycle_id] = []
+        decisions = self._allocation_decisions.get(cycle_id, [])
+
         if not candidates:
             logger.info("[GLOBAL-ALLOCATOR] No candidates to allocate")
             return []
-        
+
         current_positions = current_positions or {}
-        
+        canonical_live_positions = canonical_live_positions or []
+
+        use_canonical = bool(canonical_live_positions)
+
         # CRITICAL FIX: Sync internal _asset_positions with authoritative current_positions
         # This ensures lifecycle callbacks don't drift from actual position cache state
         self._asset_positions = current_positions.copy()
-        
+
+        if use_canonical:
+            # Overwrite with notional from authoritative canonical live positions (per ticker)
+            self._asset_positions = {}
+            for p in canonical_live_positions:
+                if p.is_open:
+                    self._asset_positions[p.asset] = self._asset_positions.get(p.asset, 0.0) + p.notional_usd
+
         # CRITICAL FIX (2026-07-31): Clear pending orders for assets that already have positions
         # This handles the case where fills occurred but global_allocator wasn't notified
         # (e.g., before the fills_ledger fix was applied)
@@ -170,82 +401,92 @@ class GlobalAllocator:
                 )
                 del self._pending_orders[asset]
                 del self._pending_order_timestamps[asset]
-        
-        # Filter by minimum edge (per-asset thresholds aligned with risk_parameters.py)
-        filtered = []
+
+        # Build one AllocationDecision per candidate and keep (candidate, decision) pairs
+        # for the staged evaluation pipeline.  All decisions are stored by cycle_id.
+        working: List[Tuple[OrderCandidate, AllocationDecision]] = []
         for c in candidates:
+            d = AllocationDecision(
+                cycle_id=cycle_id,
+                candidate_id=c.candidate_id or f"oc-{id(c)}",
+                asset=c.asset,
+                ticker=c.ticker,
+                selected=False,
+                requested_quantity_fp=float(c.count),
+                approved_quantity_fp=0.0,
+            )
+            decisions.append(d)
+            working.append((c, d))
+
+        # STAGE: EDGE
+        edge_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
+        for c, d in working:
             asset_min_edge = self.per_asset_min_edge_pct.get(c.asset, self.min_edge_pct)
-            if c.edge_pct >= asset_min_edge:
-                filtered.append(c)
+            candidate_edge_frac = _to_edge_fraction(c.edge_pct)
+            asset_min_edge_frac = _to_edge_fraction(asset_min_edge)
+            if candidate_edge_frac >= asset_min_edge_frac:
+                d.stage_results["EDGE"] = "PASS"
+                edge_passed.append((c, d))
             else:
+                d.stage_results["EDGE"] = "FAIL"
+                _mark_terminal(d, "EDGE", REASON_EXPECTED_VALUE_BELOW_MINIMUM)
                 logger.info(
                     "[GLOBAL-ALLOCATOR] SKIP %s: edge=%.3f%% < per_asset_min_edge=%.3f%%",
-                    c.asset, c.edge_pct, asset_min_edge
+                    c.asset, _to_edge_percent(c.edge_pct), _to_edge_percent(asset_min_edge)
                 )
-        
-        if len(filtered) < len(candidates):
-            logger.info(
-                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates below per-asset min edge thresholds",
-                len(candidates) - len(filtered), len(candidates)
-            )
-        
-        # Filter by minimum confidence (50%)
-        conf_filtered = [c for c in filtered if c.confidence >= self.min_confidence]
-        if len(conf_filtered) < len(filtered):
-            logger.info(
-                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates below min confidence %.0f%%",
-                len(filtered) - len(conf_filtered), len(filtered), self.min_confidence * 100
-            )
-        
-        # CRITICAL FIX (2026-07-31): Use side-aware price ranges to prevent NO order rejection
-        # YES orders: 1c-75c (expanded low end for late-expiry markets)
-        # NO orders: 25c-99c (expanded high end for late-expiry markets)
-        # This prevents systematic rejection of NO orders at high prices (90c+) which is where NO typically trades
-        def is_price_in_side_range(candidate: OrderCandidate) -> bool:
-            """Check if candidate price is within side-appropriate range."""
-            if candidate.side.lower() == "yes":
-                # YES: 1c-75c range
-                return 1 <= candidate.price_cents <= 75
-            else:  # NO
-                # NO: 25c-99c range
-                return 25 <= candidate.price_cents <= 99
-        
-        price_filtered = [c for c in conf_filtered if is_price_in_side_range(c)]
-        if len(price_filtered) < len(conf_filtered):
-            # Log which candidates were filtered and why
-            filtered_candidates = [c for c in conf_filtered if not is_price_in_side_range(c)]
-            for c in filtered_candidates:
+
+        # STAGE: CONFIDENCE
+        conf_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
+        for c, d in edge_passed:
+            if c.confidence >= self.min_confidence:
+                d.stage_results["CONFIDENCE"] = "PASS"
+                conf_passed.append((c, d))
+            else:
+                d.stage_results["CONFIDENCE"] = "FAIL"
+                _mark_terminal(d, "CONFIDENCE", REASON_CONFIDENCE_BELOW_MINIMUM)
                 logger.info(
-                    "[GLOBAL-ALLOCATOR] Filtered candidate outside side-aware range: "
-                    "asset=%s ticker=%s side=%s price=%dc (YES: 1-75c, NO: 25-99c)",
-                    c.asset, c.ticker, c.side, c.price_cents
+                    "[GLOBAL-ALLOCATOR] SKIP %s: confidence=%.2f%% < min=%.2f%%",
+                    c.asset, c.confidence * 100, self.min_confidence * 100
                 )
-            logger.info(
-                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates outside side-aware price ranges "
-                "(YES: 1c-75c, NO: 25c-99c)",
-                len(conf_filtered) - len(price_filtered), len(conf_filtered)
-            )
-        
-        # CRITICAL FIX (2026-07-31): Filter by contract count (must be 1 for entry orders)
-        # This enforces the $1 allocation rule: each asset can only trade 1 contract at a time
-        count_filtered = [c for c in price_filtered if c.count == 1]
-        if len(count_filtered) < len(price_filtered):
-            logger.warning(
-                "[GLOBAL-ALLOCATOR] CRITICAL: Filtered %d/%d candidates with count != 1 (violates $1 allocation rule). This indicates a bug in the sizing pipeline.",
-                len(price_filtered) - len(count_filtered), len(price_filtered)
-            )
-            # Log the violating candidates for debugging
-            for c in price_filtered:
-                if c.count != 1:
-                    logger.warning(
-                        "[GLOBAL-ALLOCATOR] VIOLATING CANDIDATE: asset=%s ticker=%s count=%d price=%dc edge=%.2f%%",
-                        c.asset, c.ticker, c.count, c.price_cents, c.edge_pct
-                    )
-        
-        # 2026-07-13: Filter by per-asset position and pending order status
-        # This prevents multiple contracts per asset (the core issue)
-        position_filtered = []
-        for c in count_filtered:
+
+        # STAGE: PRICE
+        price_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
+        for c, d in conf_passed:
+            if self.min_price_cents <= c.price_cents <= self.max_price_cents:
+                d.stage_results["PRICE"] = "PASS"
+                price_passed.append((c, d))
+            else:
+                d.stage_results["PRICE"] = "FAIL"
+                _mark_terminal(d, "PRICE", REASON_PRICE_OUT_OF_RANGE)
+                logger.info(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: price=%dc outside range [%dc-%dc]",
+                    c.asset, c.price_cents, self.min_price_cents, self.max_price_cents
+                )
+
+        # STAGE: COUNT
+        count_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
+        for c, d in price_passed:
+            if c.count <= 0:
+                d.stage_results["COUNT"] = "FAIL"
+                _mark_terminal(d, "COUNT", REASON_QUANTITY_ROUNDED_TO_ZERO)
+                logger.warning(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: count=%d invalid / rounded to zero",
+                    c.asset, c.count
+                )
+            elif c.count > MAX_CONTRACTS_PER_ORDER:
+                d.stage_results["COUNT"] = "FAIL"
+                _mark_terminal(d, "COUNT", REASON_POSITION_CAP)
+                logger.warning(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: count=%d exceeds max contracts per order=%d",
+                    c.asset, c.count, MAX_CONTRACTS_PER_ORDER
+                )
+            else:
+                d.stage_results["COUNT"] = "PASS"
+                count_passed.append((c, d))
+
+        # STAGE: EXISTING_POSITION
+        existing_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
+        for c, d in count_passed:
             # CRITICAL FIX (2026-08-01): Check for phantom positions in position cache
             # Phantom positions have contracts > 0 but invalid avg_price_cents (None or 0)
             # This can happen when fills ledger shows net_contracts=0 but cache shows contracts > 0
@@ -254,7 +495,7 @@ class GlobalAllocator:
                 cache = get_position_cache()
                 phantom_deleted = False
                 for market_id, position in list(cache._positions.items()):
-                    if (position.contracts > 0 and 
+                    if (position.contracts > 0 and
                         (position.avg_price_cents is None or position.avg_price_cents == 0) and
                         c.asset in market_id.upper()):
                         if cache.force_delete_phantom_position(market_id):
@@ -273,170 +514,200 @@ class GlobalAllocator:
                     "[GLOBAL-ALLOCATOR] Failed to clean up phantom positions for %s: %s",
                     c.asset, cleanup_err
                 )
-            
-            # CRITICAL FIX (2026-07-31): Validate position data integrity before using it
-            # Filter out assets with corrupted position data (exposure = None)
-            # This prevents corrupted positions from blocking all trades
-            asset_exposure = current_positions.get(c.asset, 0.0)
-            if asset_exposure is None:
-                # Asset has corrupted position data (None), skip it
-                logger.warning(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: asset has corrupted position data (exposure=None), treating as no position",
-                    c.asset
-                )
-                # Don't add to position_filtered - allow this asset to trade
-                position_filtered.append(c)
-                continue
-            
-            # CRITICAL FIX: Use current_positions from position cache instead of internal _asset_positions
-            # The internal dict is only for lifecycle tracking and may be stale
-            # current_positions is the authoritative source from the actual position cache
-            if c.asset in current_positions and current_positions[c.asset] > 0:
-                logger.info(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: asset has existing position ($%.2f)",
-                    c.asset, current_positions[c.asset]
-                )
-                continue
-            
-            # Check if asset has pending order (and not stale)
-            # CRITICAL FIX (2026-08-01): Cross-validate with order gate before clearing
-            if c.asset in self._pending_orders:
-                time_since_submit = time.time() - self._pending_order_timestamps.get(c.asset, 0)
-                if time_since_submit < self._pending_order_timeout:
+
+            if use_canonical:
+                if self._has_live_exposure_for_ticker(c, canonical_live_positions):
+                    current_notional = self._current_notional_for_ticker(c, canonical_live_positions)
+                    d.stage_results["EXISTING_POSITION"] = "FAIL"
+                    _mark_terminal(d, "EXISTING_POSITION", REASON_EXISTING_POSITION)
                     logger.info(
-                        "[GLOBAL-ALLOCATOR] SKIP %s: asset has pending order %s (%.1fs old)",
-                        c.asset, self._pending_orders[c.asset], time_since_submit
+                        "[GLOBAL-ALLOCATOR] SKIP %s: exchange-confirmed exposure on same ticker %s ($%.2f)",
+                        c.asset, c.ticker, current_notional
                     )
                     continue
-                else:
-                    # CRITICAL FIX (2026-08-01): Cross-validate with order gate before clearing
-                    # This prevents clearing pending orders that are still active
-                    try:
-                        from merid.event_venues.kalshi.order_gate import get_order_gate
-                        order_gate = get_order_gate()
-                        order_id = self._pending_orders[c.asset]
-                        
-                        # Check if order still exists in order gate
-                        if order_gate:
-                            order_record = order_gate.lookup(order_id)
-                            # Order is still active if it exists and is not in terminal state
-                            if order_record and order_record.status not in ("filled", "canceled", "rejected"):
-                                logger.warning(
-                                    "[GLOBAL-ALLOCATOR] Pending order %s for %s still active in order gate "
-                                    "(status=%s), not clearing despite timeout (%.1fs old)",
-                                    order_id, c.asset, order_record.status, time_since_submit
-                                )
-                                continue
-                            else:
-                                # Order not active in gate - safe to clear
-                                logger.warning(
-                                    "[GLOBAL-ALLOCATOR] Clearing stale pending order for %s: %.1fs old "
-                                    "(order not active in gate, status=%s)",
-                                    c.asset, time_since_submit, order_record.status if order_record else "not_found"
-                                )
-                                del self._pending_orders[c.asset]
-                                del self._pending_order_timestamps[c.asset]
-                        else:
-                            # Order gate not available - clear to avoid permanent block
-                            logger.warning(
-                                "[GLOBAL-ALLOCATOR] Order gate not available, clearing pending order for %s "
-                                "to avoid permanent block",
-                                c.asset
-                            )
-                            del self._pending_orders[c.asset]
-                            del self._pending_order_timestamps[c.asset]
-                    except Exception as e:
-                        # If order gate check fails, log but still clear to avoid permanent block
-                        logger.warning(
-                            "[GLOBAL-ALLOCATOR] Failed to cross-validate pending order with order gate: %s. "
-                            "Clearing pending order for %s to avoid permanent block",
-                            e, c.asset
-                        )
-                        del self._pending_orders[c.asset]
-                        del self._pending_order_timestamps[c.asset]
-            
-            position_filtered.append(c)
-        
-        if len(position_filtered) < len(count_filtered):
-            logger.info(
-                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates due to existing positions/pending orders",
-                len(count_filtered) - len(position_filtered), len(count_filtered)
-            )
-        
-        if not position_filtered:
+            else:
+                asset_exposure = current_positions.get(c.asset, 0.0)
+                if asset_exposure is None:
+                    logger.warning(
+                        "[GLOBAL-ALLOCATOR] SKIP %s: asset has corrupted position data (exposure=None), treating as no position",
+                        c.asset
+                    )
+                    d.stage_results["EXISTING_POSITION"] = "PASS"
+                    existing_passed.append((c, d))
+                    continue
+
+                if c.asset in current_positions and current_positions[c.asset] > 0:
+                    d.stage_results["EXISTING_POSITION"] = "FAIL"
+                    _mark_terminal(d, "EXISTING_POSITION", REASON_EXISTING_POSITION)
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR] SKIP %s: asset has existing position ($%.2f)",
+                        c.asset, current_positions[c.asset]
+                    )
+                    continue
+
+            d.stage_results["EXISTING_POSITION"] = "PASS"
+            existing_passed.append((c, d))
+
+        # STAGE: PENDING_ORDER
+        pending_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
+        for c, d in existing_passed:
+            # Check for an active pending/resting order on this exact ticker.
+            # CRITICAL FIX (2026-08-12): Use ticker-level match so a pending order for a
+            # stale or unrelated window does not block the current candidate.
+            if self._has_pending_order_for_ticker(c):
+                d.stage_results["PENDING_ORDER"] = "FAIL"
+                _mark_terminal(d, "PENDING_ORDER", REASON_PENDING_ORDER)
+                logger.info(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: active pending/resting order for ticker %s",
+                    c.asset, c.ticker
+                )
+                continue
+
+            d.stage_results["PENDING_ORDER"] = "PASS"
+            pending_passed.append((c, d))
+
+        # STAGE: POSITION_CAP
+        # Only one candidate per asset is eligible for the knapsack.  Duplicates are not
+        # an error; the first candidate in pipeline order keeps the slot.
+        position_cap_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
+        asset_seen: set = set()
+        for c, d in pending_passed:
+            if c.asset in asset_seen:
+                d.stage_results["POSITION_CAP"] = "FAIL"
+                _mark_terminal(d, "POSITION_CAP", REASON_DUPLICATE_EXPOSURE)
+                logger.info(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: duplicate candidate for asset %s",
+                    c.asset, c.asset
+                )
+                continue
+            asset_seen.add(c.asset)
+            d.stage_results["POSITION_CAP"] = "PASS"
+            position_cap_passed.append((c, d))
+
+        # STAGES: ASSET_CAP, BUDGET, KNAPSACK
+        unique_candidates = [c for c, d in position_cap_passed]
+        unique_decisions = {c.candidate_id or f"oc-{id(c)}": d for c, d in position_cap_passed}
+
+        if not unique_candidates:
             logger.info("[GLOBAL-ALLOCATOR] No candidates passed all filters (edge, confidence, price, position)")
             return []
-        
-        # Optimal knapsack-style allocation under $1 cap
-        # For small asset universe (5 assets), brute-force all combinations to find optimal
-        # This ensures we get the best combination of edges that fits under cap
+
+        # Optimal knapsack under $1 cap, preserving original candidate ordering.
         from itertools import combinations
-        
-        # Group candidates by asset (1 per asset max)
-        asset_candidates = {}
-        for candidate in position_filtered:
-            if candidate.asset not in asset_candidates:
-                asset_candidates[candidate.asset] = candidate  # Keep best per asset (already sorted by edge)
-        
-        unique_candidates = list(asset_candidates.values())
-        logger.info(
-            "[GLOBAL-ALLOCATOR] Evaluating %d unique candidates (1 per asset) for optimal $1 cap allocation",
-            len(unique_candidates)
-        )
-        
-        best_combination = []
+
+        n = len(unique_candidates)
+        best_combination: List[OrderCandidate] = []
         best_total_edge = 0.0
-        best_total_notional = float('inf')  # Initialize to infinity so first valid combo is selected
-        
-        # Try all combinations (2^n where n=5, so max 32 combinations)
-        for r in range(1, len(unique_candidates) + 1):
+        best_total_notional = float('inf')
+
+        for r in range(1, n + 1):
             for combo in combinations(unique_candidates, r):
                 total_notional = sum(c.notional_usd for c in combo)
-                
-                # Skip if exceeds cap
                 if total_notional > self.venue_cap_usd:
                     continue
-                
-                # Check per-asset concentration limit
+
                 combo_valid = True
                 for candidate in combo:
-                    asset_current = current_positions.get(candidate.asset, 0.0)
+                    if use_canonical:
+                        asset_current = self._current_notional_for_ticker(candidate, canonical_live_positions)
+                    else:
+                        asset_current = current_positions.get(candidate.asset, 0.0)
                     asset_with_order = candidate.notional_usd
                     max_asset_notional = self.venue_cap_usd * self.max_single_asset_fraction
-                    if asset_with_order > max_asset_notional:
+                    if (asset_current + asset_with_order) > max_asset_notional:
                         combo_valid = False
                         break
-                
+
                 if not combo_valid:
                     continue
-                
-                # Calculate total edge score for this combination
+
                 total_edge = sum(c.edge_score for c in combo)
-                
-                # 2026-07-13: Prefer higher edge first, then cheaper price for tiebreaker
-                # Primary: Higher total edge for better expected returns
-                # Secondary: Lower notional (cheaper) to maximize position count under $1 cap
-                # This allows more assets to trade within the $1 cap (e.g., 35c + 55c + 10c = $1)
                 if total_edge > best_total_edge or (total_edge == best_total_edge and total_notional < best_total_notional):
                     best_combination = list(combo)
                     best_total_edge = total_edge
                     best_total_notional = total_notional
-        
+
         chosen = best_combination
-        used_notional = best_total_notional
-        
-        # Log chosen orders
-        for candidate in chosen:
-            logger.info(
-                "[GLOBAL-ALLOCATOR] CHOOSE %s: edge=%.3f%%, conf=%.0f%%, price=%dc, notional=$%.2f",
-                candidate.asset, candidate.edge_pct, candidate.confidence * 100, candidate.price_cents, candidate.notional_usd
-            )
-        
+        used_notional = best_total_notional if best_total_notional != float('inf') else 0.0
+
+        # Determine knapsack feasibility for each unique candidate for precise telemetry.
+        max_asset_notional = self.venue_cap_usd * self.max_single_asset_fraction
+        feasible_by_candidate: Dict[str, bool] = {c.candidate_id or f"oc-{id(c)}": False for c in unique_candidates}
+        asset_cap_violation: Dict[str, bool] = {c.candidate_id or f"oc-{id(c)}": False for c in unique_candidates}
+
+        for r in range(1, n + 1):
+            for combo in combinations(unique_candidates, r):
+                total_notional = sum(c.notional_usd for c in combo)
+                if total_notional > self.venue_cap_usd:
+                    continue
+
+                combo_valid = True
+                for candidate in combo:
+                    if use_canonical:
+                        asset_current = self._current_notional_for_ticker(candidate, canonical_live_positions)
+                    else:
+                        asset_current = current_positions.get(candidate.asset, 0.0)
+                    asset_with_order = candidate.notional_usd
+                    if (asset_current + asset_with_order) > max_asset_notional:
+                        combo_valid = False
+                        break
+
+                if not combo_valid:
+                    continue
+
+                for candidate in combo:
+                    cid = candidate.candidate_id or f"oc-{id(candidate)}"
+                    feasible_by_candidate[cid] = True
+
+        for c in unique_candidates:
+            cid = c.candidate_id or f"oc-{id(c)}"
+            if use_canonical:
+                asset_current = self._current_notional_for_ticker(c, canonical_live_positions)
+            else:
+                asset_current = current_positions.get(c.asset, 0.0)
+            if (asset_current + c.notional_usd) > max_asset_notional:
+                asset_cap_violation[cid] = True
+
+        chosen_ids = {c.candidate_id or f"oc-{id(c)}" for c in chosen}
+        for c in unique_candidates:
+            cid = c.candidate_id or f"oc-{id(c)}"
+            d = unique_decisions.get(cid)
+            if d is None:
+                continue
+
+            if cid in chosen_ids:
+                d.stage_results["ASSET_CAP"] = "PASS"
+                d.stage_results["BUDGET"] = "PASS"
+                d.stage_results["KNAPSACK"] = "SELECTED"
+                d.selected = True
+                d.approved_quantity_fp = float(c.count)
+                logger.info(
+                    "[GLOBAL-ALLOCATOR] CHOOSE %s: edge=%.3f%%, conf=%.0f%%, price=%dc, notional=$%.2f",
+                    c.asset, _to_edge_percent(c.edge_pct), c.confidence * 100, c.price_cents, c.notional_usd
+                )
+            else:
+                d.stage_results["ASSET_CAP"] = "FAIL" if asset_cap_violation.get(cid, False) else "PASS"
+                if asset_cap_violation.get(cid, False):
+                    d.stage_results["BUDGET"] = "N/A"
+                    d.stage_results["KNAPSACK"] = "N/A"
+                    _mark_terminal(d, "ASSET_CAP", REASON_ASSET_CAP)
+                elif not feasible_by_candidate.get(cid, False):
+                    d.stage_results["ASSET_CAP"] = "PASS"
+                    d.stage_results["BUDGET"] = "FAIL"
+                    d.stage_results["KNAPSACK"] = "N/A"
+                    _mark_terminal(d, "BUDGET", REASON_BUDGET_LIMIT)
+                else:
+                    d.stage_results["ASSET_CAP"] = "PASS"
+                    d.stage_results["BUDGET"] = "PASS"
+                    d.stage_results["KNAPSACK"] = "FAIL"
+                    _mark_terminal(d, "KNAPSACK", REASON_KNAPSACK_CAP)
+
         logger.info(
             "[GLOBAL-ALLOCATOR] Allocation complete: %d/%d chosen, total_notional=$%.2f/$%.2f (%.1f%% utilization)",
-            len(chosen), len(candidates), used_notional, self.venue_cap_usd, (used_notional / self.venue_cap_usd) * 100
+            len(chosen), len(candidates), used_notional, self.venue_cap_usd,
+            (used_notional / self.venue_cap_usd) * 100 if self.venue_cap_usd else 0.0
         )
-        
+
         return chosen
     
     def get_allocation_summary(
@@ -466,7 +737,7 @@ class GlobalAllocator:
         for c in chosen:
             asset_breakdown[c.asset] = asset_breakdown.get(c.asset, 0.0) + c.notional_usd
         
-        avg_edge = sum(c.edge_pct for c in chosen) / len(chosen)
+        avg_edge = sum(_to_edge_percent(c.edge_pct) for c in chosen) / len(chosen)
         
         return {
             "total_orders": len(chosen),
@@ -475,7 +746,20 @@ class GlobalAllocator:
             "avg_edge": avg_edge,
             "utilization_pct": (total_notional / self.venue_cap_usd) * 100
         }
-    
+
+    def get_allocation_decisions(
+        self,
+        cycle_id: Any,
+    ) -> List[AllocationDecision]:
+        """
+        Return the per-candidate allocation decisions recorded for ``cycle_id``.
+
+        Decisions are cleared at the start of each ``allocate()`` call for the
+        supplied ``cycle_id`` so stale results from previous ticks are never
+        returned.
+        """
+        return self._allocation_decisions.get(cycle_id, [])
+
     def record_order_submitted(self, asset: str, order_id: str, notional_usd: float) -> None:
         """
         Record that an order was submitted for an asset.

@@ -253,7 +253,7 @@ class TestGlobalAllocator:
             ),
             OrderCandidate(
                 asset="ETH", ticker="KXETH15M-TEST", side="yes", action="buy",
-                price_cents=20, count=1, edge_pct=2.4, confidence=0.55,
+                price_cents=20, count=1, edge_pct=2.5, confidence=0.55,
                 model_prob=0.84, agent_name="ETH_15M"  # Above min
             ),
             OrderCandidate(

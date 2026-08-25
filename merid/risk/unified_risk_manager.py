@@ -41,8 +41,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import yaml
 
@@ -59,9 +60,9 @@ class RiskLimits:
     to ensure single source of truth across all risk components.
     """
     
-    # Fixed exposure cap (SINGLE SOURCE OF TRUTH: global slot allocator $1 model)
+    # Fixed exposure cap (SINGLE SOURCE OF TRUTH: global slot allocator $2 model)
     # Mirrors MERID_FIXED_EXPOSURE_CAP_USD used by global_slot_allocator and risk envelope.
-    fixed_exposure_cap_usd: float = 1.00
+    fixed_exposure_cap_usd: float = 2.00
     
     # Bankroll-based limits (DISABLED 2026-07-16: pct==0.0 defers to fixed $1 exposure cap)
     # Percentage-based allocation contradicts the $1 global slot allocator model.
@@ -85,9 +86,9 @@ class RiskLimits:
     per_asset_enabled: bool = False
     per_asset_min_cap_usd: float = 5.0
     
-    # Per-trade limits (DISABLED 2026-07-16: pct==0.0 defers to fixed $1 exposure cap)
-    per_trade_max_notional_pct: float = 0.0  # DISABLED - fixed $1 cap via global slot allocator
-    per_trade_max_contracts: int = 1  # Matches slot model MAX_CONTRACTS_PER_ORDER=1
+    # Per-trade limits (DISABLED 2026-07-16: pct==0.0 defers to fixed $2 exposure cap)
+    per_trade_max_notional_pct: float = 0.0  # DISABLED - fixed $2 cap via global slot allocator
+    per_trade_max_contracts: int = 2  # Matches slot model MAX_CONTRACTS_PER_ORDER=2
     
     # Drawdown limits (aligned with profile YAML)
     drawdown_halt_pct: float = 0.20  # 20% (was 0.10 - aligned with profile)
@@ -193,7 +194,7 @@ class UnifiedRiskManager:
             import os
             limits.fixed_exposure_cap_usd = float(
                 os.getenv('MERID_FIXED_EXPOSURE_CAP_USD',
-                          str(config.get('fixed_exposure_cap_usd', 1.00)))
+                          str(config.get('fixed_exposure_cap_usd', 2.00)))
             )
             
             # Bankroll limits (DISABLED defaults: 0.0 defers to fixed $1 exposure cap)
@@ -220,8 +221,8 @@ class UnifiedRiskManager:
             
             # Per-trade limits (DISABLED default: 0.0 defers to fixed $1 exposure cap)
             if 'per_trade' in config:
-                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.0)  # DISABLED - fixed $1 model
-                limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 1)  # Slot model: 1 contract per order
+                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.0)  # DISABLED - fixed $2 model
+                limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 2)  # Slot model: 2 contracts per order
             
             # Drawdown limits
             if 'drawdown' in config:
@@ -283,13 +284,18 @@ class UnifiedRiskManager:
 
         2026-07-16: Percentage-based cycle cap DISABLED (pct==0.0).
         The $1 global slot allocator is the single source of truth for exposure.
+        CRITICAL FIX (2026-08-16): Never let any cap exceed live bankroll; an
+        underfunded account cannot allocate more notional than it has.
         """
         if self._limits.max_cycle_risk_pct == 0.0:
-            return self._limits.fixed_exposure_cap_usd
+            return min(self._limits.fixed_exposure_cap_usd, self._bankroll_usd)
         # Legacy fallback for non-15m profiles that still configure a pct
-        return max(
-            self._bankroll_usd * self._limits.max_cycle_risk_pct,
-            0.10  # Minimum $0.10 for very small bankrolls
+        return min(
+            self._bankroll_usd,
+            max(
+                self._bankroll_usd * self._limits.max_cycle_risk_pct,
+                0.10  # Minimum $0.10 for very small bankrolls
+            )
         )
     
     def _get_total_cap_usd(self) -> float:
@@ -297,13 +303,17 @@ class UnifiedRiskManager:
 
         2026-07-16: Percentage-based total cap DISABLED (pct==0.0).
         The $1 global slot allocator is the single source of truth for exposure.
+        CRITICAL FIX (2026-08-16): Total exposure can never exceed live bankroll.
         """
         if self._limits.max_total_risk_pct == 0.0:
-            return self._limits.fixed_exposure_cap_usd
+            return min(self._limits.fixed_exposure_cap_usd, self._bankroll_usd)
         # Legacy fallback for non-15m profiles that still configure a pct
-        return max(
-            self._bankroll_usd * self._limits.max_total_risk_pct,
-            1.0  # Minimum $1
+        return min(
+            self._bankroll_usd,
+            max(
+                self._bankroll_usd * self._limits.max_total_risk_pct,
+                1.0  # Minimum $1
+            )
         )
     
     def _get_correlated_cap_usd(self) -> float:
@@ -311,14 +321,18 @@ class UnifiedRiskManager:
 
         2026-07-08: Updated to use fixed $1 total exposure cap.
         Never exceed $1 at any given time - only 1 active slot total.
+        CRITICAL FIX (2026-08-16): Correlated stack cannot exceed live bankroll.
         """
         # Use fixed $1 cap for correlated stack (hard cap)
         if self._limits.correlated_stack_max_notional_pct == 0.0:
-            return self._limits.correlated_stack_max_usd
+            return min(self._limits.correlated_stack_max_usd, self._bankroll_usd)
         # Fallback to percentage-based calculation if not disabled
-        return max(
-            self._bankroll_usd * self._limits.correlated_stack_max_notional_pct,
-            self._limits.correlated_stack_min_cap_usd
+        return min(
+            self._bankroll_usd,
+            max(
+                self._bankroll_usd * self._limits.correlated_stack_max_notional_pct,
+                self._limits.correlated_stack_min_cap_usd
+            )
         )
     
     def _get_category_cap_usd(self, category: str) -> float:
@@ -326,14 +340,18 @@ class UnifiedRiskManager:
 
         2026-07-16: Percentage-based category cap DISABLED (pct==0.0).
         Defers to the fixed $1 exposure cap (global slot allocator model).
+        CRITICAL FIX (2026-08-16): Category cap cannot exceed live bankroll.
         """
         if category == "crypto":
             if self._limits.category_crypto_max_notional_pct == 0.0:
-                return self._limits.fixed_exposure_cap_usd
+                return min(self._limits.fixed_exposure_cap_usd, self._bankroll_usd)
             # Legacy fallback for non-15m profiles that still configure a pct
-            return max(
-                self._bankroll_usd * self._limits.category_crypto_max_notional_pct,
-                self._limits.category_crypto_min_cap_usd
+            return min(
+                self._bankroll_usd,
+                max(
+                    self._bankroll_usd * self._limits.category_crypto_max_notional_pct,
+                    self._limits.category_crypto_min_cap_usd
+                )
             )
         return self._get_total_cap_usd()  # Default to total cap
     
@@ -366,6 +384,9 @@ class UnifiedRiskManager:
         Returns:
             Tuple of (allowed: bool, reason: str)
         """
+        contracts = int(contracts) if contracts is not None else 0
+        price_cents = int(price_cents) if price_cents is not None else 0
+
         with self._lock:
             # Emergency halt check
             if self._limits.emergency_halt:
@@ -394,11 +415,15 @@ class UnifiedRiskManager:
             # Per-trade notional limit
             # 2026-07-16: Percentage-based per-trade cap DISABLED (pct==0.0).
             # Defers to the fixed $1 exposure cap (global slot allocator model).
+            # CRITICAL FIX (2026-08-16): Per-trade cap can never exceed live bankroll.
             if self._limits.per_trade_max_notional_pct == 0.0:
-                per_trade_cap = self._limits.fixed_exposure_cap_usd
+                per_trade_cap = min(self._limits.fixed_exposure_cap_usd, self._bankroll_usd)
             else:
                 # Legacy fallback for non-15m profiles that still configure a pct
-                per_trade_cap = self._bankroll_usd * self._limits.per_trade_max_notional_pct
+                per_trade_cap = min(
+                    self._bankroll_usd,
+                    self._bankroll_usd * self._limits.per_trade_max_notional_pct
+                )
             if notional_usd > per_trade_cap:
                 reason = f"PER_TRADE_NOTIONAL: ${notional_usd:.2f} > ${per_trade_cap:.2f}"
                 self._rejections += 1
@@ -444,10 +469,13 @@ class UnifiedRiskManager:
                 return False, reason
             
             # Daily loss check
+            # CRITICAL FIX (2026-08-16): New order notional is NOT a realized loss.
+            # The daily loss guard should only trigger on realized PnL, not on open
+            # position sizing. Position sizing is bounded by per-trade/total caps above.
             daily_loss_cap = self._bankroll_usd * self._limits.daily_loss_pct
-            if self._daily_loss_usd + notional_usd > daily_loss_cap:
+            if self._daily_loss_usd > daily_loss_cap:
                 reason = (
-                    f"DAILY_LOSS: current=${self._daily_loss_usd:.2f}+${notional_usd:.2f} "
+                    f"DAILY_LOSS: realized=${self._daily_loss_usd:.2f} "
                     f"> ${daily_loss_cap:.2f}"
                 )
                 self._rejections += 1
@@ -459,20 +487,39 @@ class UnifiedRiskManager:
             if now - self._last_hour_reset > 3600:
                 self._trades_this_hour = 0
                 self._last_hour_reset = now
-            
+
+            remaining_cap = max(0, self._limits.rate_limit_max_trades_per_hour - self._trades_this_hour)
+            seconds_since_last = now - self._last_trade_time
+            re_enable_time = self._last_trade_time + self._limits.rate_limit_min_time_between_trades
+            rate_log = (
+                f"[UNIFIED_RISK] Rate limit scope: max_per_hour={self._limits.rate_limit_max_trades_per_hour} "
+                f"trades_this_hour={self._trades_this_hour} remaining_cap={remaining_cap} "
+                f"min_spacing_s={self._limits.rate_limit_min_time_between_trades} "
+                f"seconds_since_last={seconds_since_last:.1f} "
+                f"re_enable_time={re_enable_time:.3f}"
+            )
+            logger.info(rate_log)
+
             if self._trades_this_hour >= self._limits.rate_limit_max_trades_per_hour:
                 reason = f"RATE_LIMIT: {self._trades_this_hour} trades/hour > {self._limits.rate_limit_max_trades_per_hour}"
                 self._rejections += 1
-                logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
+                logger.warning(
+                    f"[UNIFIED_RISK] Order rejected: {reason}. "
+                    f"rate_limit_scope={self._limits.rate_limit_max_trades_per_hour} "
+                    f"re_enable_time={self._last_hour_reset + 3600:.3f}"
+                )
                 return False, reason
-            
+
             if now - self._last_trade_time < self._limits.rate_limit_min_time_between_trades:
                 reason = (
                     f"RATE_LIMIT: {now - self._last_trade_time:.1f}s since last trade "
                     f"< {self._limits.rate_limit_min_time_between_trades}s"
                 )
                 self._rejections += 1
-                logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
+                logger.warning(
+                    f"[UNIFIED_RISK] Order rejected: {reason}. "
+                    f"re_enable_time={re_enable_time:.3f}"
+                )
                 return False, reason
             
             # All checks passed
@@ -483,24 +530,30 @@ class UnifiedRiskManager:
     def record_fill(
         self,
         ticker: str,
-        contracts: int,
+        contracts: Union[int, Decimal],
         price_cents: int,
         category: str = "crypto",
         underlying: str = "",
     ) -> None:
         """Record a confirmed fill and update exposure tracking.
-        
+
         Call this after order is confirmed filled by Kalshi.
-        
+
         Args:
             ticker: Market ticker
-            contracts: Number of contracts filled
+            contracts: Number of contracts filled (whole or fractional)
             price_cents: Fill price per contract
             category: Category
             underlying: Underlying asset
         """
+        if contracts is None:
+            contracts_dec = Decimal("0")
+        else:
+            contracts_dec = Decimal(str(contracts))
+        price_cents = int(price_cents) if price_cents is not None else 0
+
         with self._lock:
-            notional_usd = (contracts * price_cents) / 100.0
+            notional_usd = float(contracts_dec * Decimal(price_cents) / Decimal("100"))
             
             # Update category exposure
             self._category_exposure[category] = self._category_exposure.get(category, 0.0) + notional_usd
@@ -533,24 +586,30 @@ class UnifiedRiskManager:
     def release(
         self,
         ticker: str,
-        contracts: int,
+        contracts: Union[int, Decimal],
         price_cents: int,
         category: str = "crypto",
         underlying: str = "",
     ) -> None:
         """Release exposure tracking for a closed/cancelled position.
-        
+
         Call this when a position is closed or order is cancelled.
-        
+
         Args:
             ticker: Market ticker
-            contracts: Number of contracts to release
+            contracts: Number of contracts to release (whole or fractional)
             price_cents: Price per contract
             category: Category
             underlying: Underlying asset
         """
+        if contracts is None:
+            contracts_dec = Decimal("0")
+        else:
+            contracts_dec = Decimal(str(contracts))
+        price_cents = int(price_cents) if price_cents is not None else 0
+
         with self._lock:
-            notional_usd = (contracts * price_cents) / 100.0
+            notional_usd = float(contracts_dec * Decimal(price_cents) / Decimal("100"))
             
             # Update category exposure
             self._category_exposure[category] = max(
@@ -610,6 +669,9 @@ class UnifiedRiskManager:
                     category, old, confirmed_open_notional_usd, delta
                 )
             self._category_exposure[category] = max(0.0, confirmed_open_notional_usd)
+            # Keep total exposure in sync with the category correction so the
+            # TOTAL_EXPOSURE gate does not lag behind the CATEGORY_CAP gate.
+            self._total_exposure_usd = max(0.0, self._total_exposure_usd + delta)
 
     def get_current_exposure(self) -> Dict[str, float]:
         """Get current exposure tracking state.

@@ -375,7 +375,11 @@ class RiskController:
         try:
             ks_path = _get_kill_switch_path()
             if ks_path.exists():
-                data = json.loads(ks_path.read_text(encoding="utf-8"))
+                raw = ks_path.read_text(encoding="utf-8").strip()
+                if not raw:
+                    logger.info("[risk] Kill switch persistence file is empty; treating as no persisted state.")
+                    return
+                data = json.loads(raw)
                 logger.info(
                     "[risk] Kill switch persistence file found: %s | active=%s | manual_halt=%s | reason=%s",
                     ks_path, data.get("active"), data.get("manual_emergency_halt"), data.get("reason")

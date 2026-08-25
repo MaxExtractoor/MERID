@@ -73,6 +73,10 @@ class ExitReason(str, Enum):
     STALE_DATA = "stale_data"
     ADAPTIVE_TIMING = "adaptive_timing"
     LOSS_CAP = "loss_cap"
+    LOSS_CUT_40PCT = "loss_cut_40pct"  # 2026-08-12: -40% loss cut when thesis changes
+    OPPORTUNITY_COST = "opportunity_cost"  # 2026-08-12: better opportunity exists
+    SETTLEMENT_GUARD = "settlement_guard"  # 2026-08-12: forced T-30s exit
+    MODEL_INVALIDATION_LOSS_EXIT = "model_invalidation_loss_exit"  # 2026-08-12: edge collapse below entry with loss
     MARKET_EXPIRED = "market_expired"
 
 
