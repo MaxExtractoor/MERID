@@ -8,6 +8,7 @@ from merid.position_management.position import Position, PositionSide, TrailingT
 from merid.position_management.position_monitor import get_position_monitor, PositionMonitor
 from merid.position_management.exit_policy import ExitPolicy, ExitAction, ExitReason
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver, ExitPolicyResolver
+from merid.position_management.exit_conditions import ExitCondition, evaluate_exit_conditions, choose_exit_condition
 
 __all__ = [
     "Position",

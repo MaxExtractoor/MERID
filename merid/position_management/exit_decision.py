@@ -37,16 +37,24 @@ class ExitPriority(int, Enum):
     11. CANDLE_REVERSAL (momentum reversal) - 50
     12. ADAPTIVE_TIMING (historical performance) - 45
     13. TIME_STOP (volatility-adjusted time-based) - 40
-    14. EDGE_DECAY (edge threshold) - 35
-    15. OPPORTUNITY_COST (better opportunity exists) - 33
-    16. SCALE_OUT (partial exit at 1.5-2R) - 30
-    17. TRAIL (trailing stop) - 25
+    14. TRAIL (trailing stop) - 36
+    15. EDGE_DECAY (edge threshold) - 35
+    16. OPPORTUNITY_COST (better opportunity exists) - 33
+    17. SCALE_OUT (partial exit at 1.5-2R) - 30
     18. MANUAL - 20
+    19. MODEL_INVALIDATION_LOSS_EXIT (thesis collapse at a loss) - 57
+    20. SETTLEMENT_GUARD (forced T-30s exit) - 94
+    21. MARKET_EXPIRED (settlement reconciliation) - 93
+    22. LOSS_CAP (break-even loss cap) - 56
     """
     AUTO_EXIT_99C = 95
     RISK = 100
     EXTREME_PROFIT = 90
     STALE_DATA = 85
+    MODEL_INVALIDATION_LOSS_EXIT = 57
+    SETTLEMENT_GUARD = 94
+    MARKET_EXPIRED = 93
+    LOSS_CAP = 56
     DYNAMIC_TAKE_PROFIT = 80
     RATCHET_TRIM = 75
     RATCHET_FLOOR = 70
@@ -56,10 +64,10 @@ class ExitPriority(int, Enum):
     CANDLE_REVERSAL = 50
     ADAPTIVE_TIMING = 45
     TIME_STOP = 40
+    TRAIL = 36
     EDGE_DECAY = 35
     OPPORTUNITY_COST = 33  # 2026-08-01: Exit when better opportunity exists
     SCALE_OUT = 30
-    TRAIL = 25
     MANUAL = 20
 
 
@@ -133,6 +141,10 @@ def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
         ExitReason.SCALE_OUT: ExitPriority.SCALE_OUT,
         ExitReason.TRAIL: ExitPriority.TRAIL,
         ExitReason.MANUAL: ExitPriority.MANUAL,
+        ExitReason.MODEL_INVALIDATION_LOSS_EXIT: ExitPriority.MODEL_INVALIDATION_LOSS_EXIT,
+        ExitReason.SETTLEMENT_GUARD: ExitPriority.SETTLEMENT_GUARD,
+        ExitReason.MARKET_EXPIRED: ExitPriority.MARKET_EXPIRED,
+        ExitReason.LOSS_CAP: ExitPriority.LOSS_CAP,
     }
     
     return priority_map.get(reason, ExitPriority.MANUAL)
