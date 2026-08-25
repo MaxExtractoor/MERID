@@ -16,6 +16,15 @@ from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+from merid.event_venues.kalshi.port_ledger_adapter import (
+    port_fill_to_ledger_dict,
+    port_position_to_ledger_dict,
+    PortLedgerAdapterError,
+)
+from merid.event_venues.kalshi.binary_price_space import (
+    require_consistent_outcome_side,
+    SideValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.fills_poller")
@@ -239,17 +248,17 @@ class FillsPoller:
         Returns:
             Number of new fills ingested
         """
-        # Get Kalshi client
+        # Get the normalized KalshiExecutionPort
         client = self._get_client()
         if not client:
             # Escalate to WARNING after first 3 polls so startup noise is suppressed
             # but operators notice a persistent credential misconfiguration in live mode.
             self._no_client_count = getattr(self, "_no_client_count", 0) + 1
             if self._no_client_count <= 3:
-                logger.debug("No Kalshi client available for fills poll (attempt %d)", self._no_client_count)
+                logger.debug("No Kalshi execution port available for fills poll (attempt %d)", self._no_client_count)
             else:
                 logger.warning(
-                    "No Kalshi client for fills poll (attempt %d) — "
+                    "No Kalshi execution port for fills poll (attempt %d) — "
                     "check KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH",
                     self._no_client_count,
                 )
@@ -260,21 +269,34 @@ class FillsPoller:
         # Kalshi API expects milliseconds since epoch
         since_ts = int((datetime.now(timezone.utc) - timedelta(seconds=self._poll_interval * 2)).timestamp() * 1000)
         
-        # Fetch fills
+        # Fetch fills through the normalized execution port
         try:
             await client.connect()
             # BUG-FIX (2026-05-12): Add timeout to get_fills call to prevent indefinite blocking
             # Wrap in asyncio.wait_for to prevent 30s timeout from blocking the event loop
-            result = await asyncio.wait_for(
+            # 2026-08-24: Allow a longer, configurable timeout for the Kalshi
+            # fills endpoint. Slow responses are common during high-load windows;
+            # a shorter 10s timeout produced frequent false-positive warnings.
+            _fills_poll_timeout = float(_os.getenv("MERID_FILLS_POLL_TIMEOUT_SECONDS", "20.0"))
+            response = await asyncio.wait_for(
                 client.get_fills(limit=200, since_ts=since_ts),
-                timeout=10.0  # 10 second timeout for Kalshi API call
+                timeout=_fills_poll_timeout
             )
             
-            if not result.success:
-                self._fills_ingestion_errors += 1
-                raise Exception(f"Kalshi API error: {result.error}")
-            
-            fills = result.data or []
+            # Convert normalized fills through the fail-closed adapter.
+            # Any malformed DTO is skipped rather than fed to the legacy parser.
+            fills: List[Dict[str, Any]] = []
+            for fill in response.fills:
+                try:
+                    fills.append(port_fill_to_ledger_dict(fill))
+                except PortLedgerAdapterError as exc:
+                    self._fills_ingestion_errors += 1
+                    logger.warning(
+                        "FillsPoller: skipping malformed fill from port: %s",
+                        exc,
+                        extra={"field": exc.field, "value": str(exc.value)},
+                    )
+
             if not fills:
                 return 0
             
@@ -303,7 +325,7 @@ class FillsPoller:
             
         except asyncio.TimeoutError:
             self._fills_ingestion_errors += 1
-            logger.warning("Fills poll timed out after 10s - Kalshi API slow to respond")
+            logger.warning("Fills poll timed out after %ss - Kalshi API slow to respond", _fills_poll_timeout)
             return 0
         except Exception as e:
             self._fills_ingestion_errors += 1
@@ -342,35 +364,25 @@ class FillsPoller:
             return {"status": "no_client"}
         
         try:
-            logger.info("[RECONCILE] Connecting to Kalshi client")
+            logger.info("[RECONCILE] Connecting to Kalshi execution port")
             await client.connect()
             
-            # Get positions from Kalshi
-            from merid.resilience import OperationResult
-            # CRITICAL FIX: Remove "nonzero" filter to get ALL positions including zero-quantity ones
-            # The "nonzero": "position" filter was causing REST to return empty positions
-            # when positions were closed/settled but still in the system.
+            # Get positions from Kalshi through the normalized execution port.
+            # Use the fail-closed adapter so missing identity/quantity fields do not
+            # silently become ledger entries with implied sides or zero prices.
             logger.info("[RECONCILE] Fetching positions from Kalshi API")
-            pos_result = await client.get_positions_with_filters({})
-            
-            if not pos_result.success:
-                return {"status": "error", "message": str(pos_result.error)}
-            
-            pos_data = pos_result.data or {}
-            positions = []
-            
-            # Normalize positions format (handle both "market_positions" and "positions" keys)
-            raw_positions = pos_data.get("market_positions") or pos_data.get("positions") or []
-            for mp in raw_positions:
-                ticker = mp.get("market_ticker") or mp.get("ticker") or mp.get("market_id")
-                contracts = int(mp.get("contracts", 0) or mp.get("count", 0) or mp.get("quantity", 0))
-                if ticker and contracts > 0:  # Only include valid positions with contracts
-                    positions.append({
-                        "market_ticker": ticker,
-                        "contracts": contracts,
-                        "side": mp.get("side", "yes"),
-                        "avg_price_cents": int(mp.get("avg_price_cents", mp.get("avg_price", 0))),
-                    })
+            pos_response = await client.get_positions()
+            positions: List[Dict[str, Any]] = []
+            for p in pos_response.positions:
+                try:
+                    positions.append(port_position_to_ledger_dict(p))
+                except PortLedgerAdapterError as exc:
+                    self._reconcile_errors += 1
+                    logger.warning(
+                        "FillsPoller: skipping malformed position from port: %s",
+                        exc,
+                        extra={"field": exc.field, "value": str(exc.value)},
+                    )
 
             # Debug logging for reconciliation diagnostics
             if positions:
@@ -412,10 +424,25 @@ class FillsPoller:
                     # Check drift
                     # Extract agent_id from position if available, otherwise use market ticker
                     agent_id = cache_pos.agent_id if cache_pos else "BTC_15M"
+
+                    # Fail-closed: missing/inconsistent REST side is a data-quality
+                    # failure, not a YES default.
+                    try:
+                        rest_side = require_consistent_outcome_side(
+                            rest_pos,
+                            context=f"fills_poller ticker={market_id}",
+                        )
+                    except SideValidationError as side_err:
+                        logger.error(
+                            "[FILLS-POLLER-SIDE-INVALID] %s: excluding REST position from drift check: %s",
+                            market_id, side_err,
+                        )
+                        rest_side = None
+
                     drift_event = await drift_detector.check_drift(
                         market_id=market_id,
                         agent_id=agent_id,
-                        rest_position={"contracts": rest_contracts, "side": rest_pos.get("side", "yes")},
+                        rest_position={"contracts": rest_contracts, "side": rest_side} if rest_side else None,
                         ledger_position={"contracts": ledger_contracts} if derived_pos else None,
                         cache_position={"contracts": cache_contracts} if cache_pos else None
                     )
@@ -715,15 +742,23 @@ class FillsPoller:
 
         await client.connect()
 
-        # Get last 24h of fills
+        # Get last 24h of fills through the normalized execution port
         # Kalshi API expects milliseconds since epoch
         since_ts = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
-        result = await client.get_fills(limit=500, since_ts=since_ts)
+        response = await client.get_fills(limit=500, since_ts=since_ts)
 
-        if not result.success:
-            raise Exception(f"Kalshi API error: {result.error}")
+        fills: List[Dict[str, Any]] = []
+        for fill in response.fills:
+            try:
+                fills.append(port_fill_to_ledger_dict(fill))
+            except PortLedgerAdapterError as exc:
+                self._fills_ingestion_errors += 1
+                logger.warning(
+                    "FillsPoller backfill: skipping malformed fill from port: %s",
+                    exc,
+                    extra={"field": exc.field, "value": str(exc.value)},
+                )
 
-        fills = result.data or []
         if not fills:
             return 0
 
@@ -741,26 +776,24 @@ class FillsPoller:
     # ── Helpers ───────────────────────────────────────────────────────────────
     
     def _get_client(self):
-        """Get KalshiVenueClient if available."""
-        try:
-            from merid.event_venues.kalshi.client import get_kalshi_client
-            from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
-            
-            # CRITICAL FIX: Always pass config to ensure correct credentials
-            # The singleton pattern ignores config if client already exists, BUT
-            # we need to ensure the singleton is created with the correct config
-            # from the start. By always passing get_kalshi_config(), we ensure
-            # that if the singleton doesn't exist yet, it's created with the
-            # correct environment-specific credentials (KALSHI_LIVE_* fallback to KALSHI_*).
-            if not hasattr(self, '_client'):
-                config = get_kalshi_config()
-                self._client = get_kalshi_client(config)
+        """Get the normalized KalshiExecutionPort for fills/poll lifecycle reads.
 
-            return self._client
-            
+        All account-affecting reads (fills, positions, market state for settlement)
+        go through `KalshiExecutionPort` so the poller, the router, and the ledger
+        share the same normalized lifecycle DTOs and cannot drift on raw client
+        field conventions.
+        """
+        try:
+            from merid.event_venues.kalshi.port import get_kalshi_execution_port
+
+            return get_kalshi_execution_port()
         except Exception as e:
-            logger.warning(f"Kalshi client unavailable: {e}")
+            logger.warning(f"Kalshi execution port unavailable: {e}")
             return None
+
+    # NOTE: DTO -> ledger conversion has moved to
+    # `merid.event_venues.kalshi.port_ledger_adapter` where it is tested as a
+    # fail-closed contract boundary.  The FillsPoller just calls those helpers.
     
     def _build_agent_map(self) -> Dict[str, str]:
         """Build mapping of client_order_id -> agent_id from active agents."""
@@ -788,21 +821,38 @@ class FillsPoller:
         Kalshi no longer reports a position for a market we have fills for.
         """
         for ticker in tickers:
+            # Historical test fills in the ledger (KXTEST-*, KX-SK, etc.) are
+            # not real markets; fetching them just spams 404s.
+            if _is_test_ticker(ticker):
+                logger.debug("settlement: skipping test ticker %s", ticker)
+                continue
             try:
                 # Fetch market to determine YES/NO settlement result
                 settled_yes: Optional[bool] = None
                 try:
                     await client.connect()
                     market_result = await client.get_market(ticker)
-                    if market_result and market_result.resolved:
-                        res = (getattr(market_result, "resolution", "") or "").lower()
-                        raw = getattr(market_result, "raw_data", {}) or {}
-                        result_str = str(raw.get("result", "")).lower()
-                        if res in ("yes", "true", "1") or result_str in ("yes", "true", "1"):
-                            settled_yes = True
-                        elif res in ("no", "false", "0") or result_str in ("no", "false", "0"):
-                            settled_yes = False
+                    if market_result and market_result.success and market_result.market:
+                        market = market_result.market
+                        if getattr(market, "resolved", False):
+                            res = (getattr(market, "resolution", "") or "").lower()
+                            raw = getattr(market, "raw_data", {}) or {}
+                            result_str = str(raw.get("result", "")).lower()
+                            if res in ("yes", "true", "1") or result_str in ("yes", "true", "1"):
+                                settled_yes = True
+                            elif res in ("no", "false", "0") or result_str in ("no", "false", "0"):
+                                settled_yes = False
                 except Exception as _mkt_exc:
+                    # 404 for a settled/deleted market means we cannot fetch the
+                    # official outcome and should stop retrying.
+                    status_code = getattr(_mkt_exc, "status_code", None)
+                    err_str = str(_mkt_exc).lower()
+                    if status_code == 404 or "not found" in err_str or "not_found" in err_str:
+                        self._settlement_notified[ticker] = time.time()
+                        logger.info(
+                            "settlement: market %s not found (404), marking notified and stopping retries",
+                            ticker,
+                        )
                     logger.debug("settlement: market fetch for %s failed: %s", ticker, _mkt_exc)
 
                 # Record in AgentPerformanceTracker

@@ -40,9 +40,13 @@ import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from utils.logger import get_logger
+from merid.event_venues.kalshi.binary_price_space import (
+    is_price_in_canonical_range,
+    parse_kalshi_side,
+)
 
 logger = get_logger("merid.event_venues.kalshi.order_gate")
 
@@ -58,6 +62,7 @@ class OrderStatus(str, Enum):
     """Lifecycle states for an idempotent order record."""
     PENDING = "pending"       # Intent created, not yet submitted to venue
     SUBMITTED = "submitted"   # Sent to venue, awaiting ack
+    SUBMISSION_UNKNOWN = "submission_unknown"  # Ack lost in flight; not terminal, must recover
     LIVE = "live"             # Resting on venue order book
     PARTIAL = "partial"       # Partially filled
     FILLED = "filled"         # Fully filled
@@ -95,15 +100,22 @@ class OrderRecord:
     contract_id: str
     side: str                    # "yes" or "no"
     action: str                  # "buy" or "sell"
-    target_count: int
+    target_count: int            # display/floor contracts (legacy, kept for logging)
     price_cents: int
     status: OrderStatus = OrderStatus.PENDING
     venue_order_id: Optional[str] = None
     filled_count: int = 0
+    target_qty_cc: int = 0       # canonical centi-contracts for this order
+    filled_qty_cc: int = 0       # canonical centi-contracts filled so far
     created_at: float = field(default_factory=_time.time)
     updated_at: float = field(default_factory=_time.time)
     decision_ts_bucket: str = ""
     intent_id: Optional[str] = None
+    # Direction/exposure metadata for fill-awareness and risk gating
+    entry_or_exit: Optional[str] = None
+    reduce_only: bool = False
+    # Track fill IDs to make duplicate fill updates idempotent
+    seen_fill_ids: Set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -320,7 +332,8 @@ class IdempotentOrderStore:
         # Define valid forward transitions
         valid_transitions = {
             OrderStatus.PENDING: {OrderStatus.SUBMITTED, OrderStatus.LIVE, OrderStatus.REJECTED, OrderStatus.CANCELED},
-            OrderStatus.SUBMITTED: {OrderStatus.LIVE, OrderStatus.REJECTED, OrderStatus.CANCELED},
+            OrderStatus.SUBMITTED: {OrderStatus.SUBMISSION_UNKNOWN, OrderStatus.LIVE, OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED},
+            OrderStatus.SUBMISSION_UNKNOWN: {OrderStatus.LIVE, OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED},
             OrderStatus.LIVE: {OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.CANCELED},
             OrderStatus.PARTIAL: {OrderStatus.FILLED, OrderStatus.CANCELED},
         }
@@ -341,40 +354,98 @@ class IdempotentOrderStore:
     def mark_submitted(self, client_order_id: str, venue_order_id: Optional[str] = None) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec:
-                # PHASE1-DUP-5: Check transition invariants
-                if not self._check_transition_allowed(rec, OrderStatus.SUBMITTED, "mark_submitted"):
-                    return
-                if rec.status in (OrderStatus.PENDING,):
-                    rec.status = OrderStatus.SUBMITTED
+            if not rec:
+                return
+            # Idempotent: multiple ack paths may report the same order as submitted.
+            if rec.status == OrderStatus.SUBMITTED:
+                if venue_order_id and not rec.venue_order_id:
                     rec.venue_order_id = venue_order_id
                     rec.updated_at = _time.time()
-                    self._metrics.submitted += 1
+                return
+            # PHASE1-DUP-5: Check transition invariants
+            if not self._check_transition_allowed(rec, OrderStatus.SUBMITTED, "mark_submitted"):
+                return
+            if rec.status in (OrderStatus.PENDING,):
+                rec.status = OrderStatus.SUBMITTED
+                rec.venue_order_id = venue_order_id
+                rec.updated_at = _time.time()
+                self._metrics.submitted += 1
+
+    def mark_submission_unknown(self, client_order_id: str) -> None:
+        """Acknowledge a submit call that timed out or was otherwise unacknowledged.
+
+        The record stays in ``SUBMISSION_UNKNOWN`` until a subsequent lookup by
+        ``client_order_id`` or ``order_id`` resolves it to ``LIVE``, ``PARTIAL``,
+        ``FILLED``, ``CANCELED``, or ``REJECTED``.
+        """
+        with self._lock:
+            rec = self._orders.get(client_order_id)
+            if rec:
+                if not self._check_transition_allowed(rec, OrderStatus.SUBMISSION_UNKNOWN, "mark_submission_unknown"):
+                    return
+                if rec.status == OrderStatus.SUBMITTED:
+                    rec.status = OrderStatus.SUBMISSION_UNKNOWN
+                    rec.updated_at = _time.time()
 
     def mark_live(self, client_order_id: str, venue_order_id: Optional[str] = None) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec:
-                # PHASE1-DUP-5: Check transition invariants
-                if not self._check_transition_allowed(rec, OrderStatus.LIVE, "mark_live"):
-                    return
-                if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
-                    rec.status = OrderStatus.LIVE
-                    if venue_order_id:
-                        rec.venue_order_id = venue_order_id
+            if not rec:
+                return
+            # Idempotent: multiple ack paths may report the same order as live.
+            if rec.status == OrderStatus.LIVE:
+                if venue_order_id and not rec.venue_order_id:
+                    rec.venue_order_id = venue_order_id
                     rec.updated_at = _time.time()
+                return
+            # PHASE1-DUP-5: Check transition invariants
+            if not self._check_transition_allowed(rec, OrderStatus.LIVE, "mark_live"):
+                return
+            if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.SUBMISSION_UNKNOWN):
+                rec.status = OrderStatus.LIVE
+                if venue_order_id:
+                    rec.venue_order_id = venue_order_id
+                rec.updated_at = _time.time()
 
-    def mark_filled(self, client_order_id: str, filled_count: int) -> None:
+    def mark_filled(
+        self,
+        client_order_id: str,
+        filled_count: int,
+        fill_id: Optional[str] = None,
+        filled_qty_cc: Optional[int] = None,
+    ) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
             if rec:
+                # CRITICAL FIX (2026-08-18): canonical centi-contracts; fall back to contracts*100
+                _filled_qty_cc = filled_qty_cc if filled_qty_cc is not None else filled_count * 100
+
+                # Monotonic fill quantity: never decrease filled_count.
+                if _filled_qty_cc < rec.filled_qty_cc:
+                    logger.warning(
+                        "[ORDER-FILL-INVARIANT] Non-monotonic fill ignored | coid=%s current=%d attempted=%d",
+                        client_order_id, rec.filled_qty_cc, _filled_qty_cc,
+                    )
+                    return
+
+                # Duplicate fill ID: no-op.
+                if fill_id and fill_id in rec.seen_fill_ids:
+                    logger.debug(
+                        "[ORDER-FILL-INVARIANT] Duplicate fill_id ignored | coid=%s fill_id=%s",
+                        client_order_id, fill_id,
+                    )
+                    return
+
                 # PHASE1-DUP-5: Check transition invariants (allow PARTIAL → FILLED)
-                target_status = OrderStatus.FILLED if filled_count >= rec.target_count else OrderStatus.PARTIAL
+                target_status = OrderStatus.FILLED if _filled_qty_cc >= rec.target_qty_cc else OrderStatus.PARTIAL
                 if not self._check_transition_allowed(rec, target_status, "mark_filled"):
                     return
                 if rec.status not in _TERMINAL_STATES:
+                    if fill_id:
+                        rec.seen_fill_ids.add(fill_id)
                     rec.filled_count = filled_count
-                    if filled_count >= rec.target_count:
+                    rec.filled_qty_cc = _filled_qty_cc
+                    if _filled_qty_cc >= rec.target_qty_cc:
                         rec.status = OrderStatus.FILLED
                     else:
                         rec.status = OrderStatus.PARTIAL
@@ -389,33 +460,37 @@ class IdempotentOrderStore:
     def mark_canceled(self, client_order_id: str) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec:
-                # PHASE1-DUP-5: Check transition invariants
-                if not self._check_transition_allowed(rec, OrderStatus.CANCELED, "mark_canceled"):
-                    return
-                if rec.status not in _TERMINAL_STATES:
-                    rec.status = OrderStatus.CANCELED
-                    rec.updated_at = _time.time()
-                    self._metrics.canceled += 1
-                    
-                    # CRITICAL FIX (2026-07-08): Release resting order exposure on cancel
-                    # Resting exposure was recorded at placement time in check()
-                    # When order is canceled, we must release the resting exposure
-                    try:
-                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                        envelope = get_kalshi_crypto_15m_risk_envelope()
-                        if envelope:
-                            order_notional_usd = (rec.target_count * rec.price_cents) / 100.0
-                            envelope.release_resting_order_exposure(
-                                agent_id=rec.agent_id,
-                                order_notional_usd=order_notional_usd
-                            )
-                            logger.info(
-                                "[order-gate-WINDOW-RELEASE] Released resting exposure on cancel: coid=%s agent=%s notional=$%.2f",
-                                client_order_id[:16], rec.agent_id, order_notional_usd
-                            )
-                    except Exception as e:
-                        logger.warning("[order-gate-WINDOW-RELEASE] Failed to release resting exposure on cancel: %s", e)
+            if not rec:
+                return
+            # Idempotent: multiple ack paths may report the same order as canceled.
+            if rec.status == OrderStatus.CANCELED:
+                return
+            # PHASE1-DUP-5: Check transition invariants
+            if not self._check_transition_allowed(rec, OrderStatus.CANCELED, "mark_canceled"):
+                return
+            if rec.status not in _TERMINAL_STATES:
+                rec.status = OrderStatus.CANCELED
+                rec.updated_at = _time.time()
+                self._metrics.canceled += 1
+
+                # CRITICAL FIX (2026-07-08): Release resting order exposure on cancel
+                # Resting exposure was recorded at placement time in check()
+                # When order is canceled, we must release the resting exposure
+                try:
+                    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                    envelope = get_kalshi_crypto_15m_risk_envelope()
+                    if envelope:
+                        order_notional_usd = (rec.target_count * rec.price_cents) / 100.0
+                        envelope.release_resting_order_exposure(
+                            agent_id=rec.agent_id,
+                            order_notional_usd=order_notional_usd
+                        )
+                        logger.info(
+                            "[order-gate-WINDOW-RELEASE] Released resting exposure on cancel: coid=%s agent=%s notional=$%.2f",
+                            client_order_id[:16], rec.agent_id, order_notional_usd
+                        )
+                except Exception as e:
+                    logger.warning("[order-gate-WINDOW-RELEASE] Failed to release resting exposure on cancel: %s", e)
 
     def mark_rejected(self, client_order_id: str, reason: str = "") -> None:
         # CRITICAL FIX (2026-07-07): Window exposure no longer recorded optimistically
@@ -425,35 +500,43 @@ class IdempotentOrderStore:
         # When order is rejected, we must release the resting exposure
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec:
-                # PHASE1-DUP-5: Check transition invariants
-                if not self._check_transition_allowed(rec, OrderStatus.REJECTED, "mark_rejected"):
-                    return
-                if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
-                    rec.status = OrderStatus.REJECTED
-                    rec.updated_at = _time.time()
-                    
-                    # Release resting exposure on reject
-                    try:
-                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                        envelope = get_kalshi_crypto_15m_risk_envelope()
-                        if envelope:
-                            order_notional_usd = (rec.target_count * rec.price_cents) / 100.0
-                            envelope.release_resting_order_exposure(
-                                agent_id=rec.agent_id,
-                                order_notional_usd=order_notional_usd
-                            )
-                            logger.info(
-                                "[order-gate-WINDOW-RELEASE] Released resting exposure on reject: coid=%s agent=%s notional=$%.2f reason=%s",
-                                client_order_id[:16], rec.agent_id, order_notional_usd, reason
-                            )
-                    except Exception as e:
-                        logger.warning("[order-gate-WINDOW-RELEASE] Failed to release resting exposure on reject: %s", e)
+            if not rec:
+                return
+            # Idempotent: multiple ack paths may report the same order as rejected.
+            if rec.status == OrderStatus.REJECTED:
+                return
+            # PHASE1-DUP-5: Check transition invariants
+            if not self._check_transition_allowed(rec, OrderStatus.REJECTED, "mark_rejected"):
+                return
+            if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
+                rec.status = OrderStatus.REJECTED
+                rec.updated_at = _time.time()
+
+                # Release resting exposure on reject
+                try:
+                    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                    envelope = get_kalshi_crypto_15m_risk_envelope()
+                    if envelope:
+                        order_notional_usd = (rec.target_count * rec.price_cents) / 100.0
+                        envelope.release_resting_order_exposure(
+                            agent_id=rec.agent_id,
+                            order_notional_usd=order_notional_usd
+                        )
+                        logger.info(
+                            "[order-gate-WINDOW-RELEASE] Released resting exposure on reject: coid=%s agent=%s notional=$%.2f reason=%s",
+                            client_order_id[:16], rec.agent_id, order_notional_usd, reason
+                        )
+                except Exception as e:
+                    logger.warning("[order-gate-WINDOW-RELEASE] Failed to release resting exposure on reject: %s", e)
 
     # ── Query helpers ────────────────────────────────────────────────────
 
     def filled_count_for_contract(self, contract_id: str, side: str, strategy_group: str) -> int:
-        """Total filled contracts for (contract, side, strategy_group)."""
+        """Total filled centi-contracts for (contract, side, strategy_group).
+
+        CRITICAL FIX (2026-08-18): Return canonical filled_qty_cc for fractional sizing.
+        Callers must treat the returned value as quantity in centi-contracts.
+        """
         with self._lock:
             total = 0
             for rec in self._orders.values():
@@ -463,7 +546,7 @@ class IdempotentOrderStore:
                     and rec.strategy_group == strategy_group
                     and rec.status in (OrderStatus.FILLED, OrderStatus.PARTIAL)
                 ):
-                    total += rec.filled_count
+                    total += rec.filled_qty_cc
             return total
 
     def find_resting_duplicate(
@@ -472,7 +555,7 @@ class IdempotentOrderStore:
         side: str,
         action: str,
         price_cents: int,
-        target_count: int,
+        target_qty_cc: int,
         exclude_coid: Optional[str] = None,
     ) -> Optional[OrderRecord]:
         """Find an identical resting order (same contract, side, action, price, count).
@@ -487,12 +570,14 @@ class IdempotentOrderStore:
         CRITICAL FIX 2026-07-09: Added target_count to duplicate detection to prevent
         multiple orders with different quantities from bypassing duplicate checks.
         
+        CRITICAL FIX (2026-08-18): target_qty_cc is canonical centi-contracts for fractional sizing.
+        
         Args:
             contract_id: Market ticker
             side: "yes" or "no"
             action: "buy" or "sell"
             price_cents: Limit price in cents
-            target_count: Number of contracts requested
+            target_qty_cc: Canonical centi-contracts requested
             exclude_coid: Optional client_order_id to exclude (current order)
             
         Returns:
@@ -510,21 +595,26 @@ class IdempotentOrderStore:
                     and rec.side == side
                     and rec.action == action
                     and rec.price_cents == price_cents
-                    and rec.target_count == target_count  # CRITICAL: Check count to prevent multi-contract bypass
+                    and rec.target_qty_cc == target_qty_cc  # CRITICAL: Check count to prevent multi-contract bypass
                     and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)
                 ):
-                    # CRITICAL FIX: Skip stale PENDING orders (older than 5 seconds)
-                    # These are likely failed orders that never transitioned properly
-                    # CRITICAL FIX 2026-07-10: Reduced threshold from 30s to 5s to match time bucket width
-                    # This prevents stale PENDING orders from blocking new orders when the 5s bucket changes
-                    if rec.status == OrderStatus.PENDING:
-                        age_seconds = now - rec.updated_at
-                        if age_seconds > 5:
-                            logger.debug(
-                                "[find_resting_duplicate] Skipping stale PENDING order coid=%s age=%.1fs (threshold=5s)",
-                                rec.client_order_id, age_seconds
-                            )
-                            continue
+                    age_seconds = now - rec.updated_at
+                    # CRITICAL FIX (2026-08-10): stale in-flight records must not block new orders forever.
+                    # PENDING that never transitioned is almost always a leak; SUBMITTED/LIVE without a fill
+                    # should also time out because the maintenance scheduler may not be running or may lag.
+                    # Use the same TTL as the orphan sweep so the gate is self-healing even without scheduled cleanup.
+                    if rec.status == OrderStatus.PENDING and age_seconds > self.ORPHAN_PENDING_TTL_S:
+                        logger.warning(
+                            "[find_resting_duplicate] Skipping stale PENDING order coid=%s age=%.1fs (threshold=%.0fs)",
+                            rec.client_order_id, age_seconds, self.ORPHAN_PENDING_TTL_S
+                        )
+                        continue
+                    if rec.status in (OrderStatus.SUBMITTED, OrderStatus.LIVE) and age_seconds > self.ORPHAN_SUBMITTED_TTL_S:
+                        logger.warning(
+                            "[find_resting_duplicate] Skipping stale %s order coid=%s age=%.1fs (threshold=%.0fs)",
+                            rec.status.value, rec.client_order_id, age_seconds, self.ORPHAN_SUBMITTED_TTL_S
+                        )
+                        continue
                     return rec
             return None
 
@@ -806,6 +896,10 @@ class PreTradeGate:
         max_hold_seconds: Optional[int] = None,
         # CRITICAL FIX: Entry/exit direction classification (2026-07-20)
         entry_or_exit: Optional[str] = None,
+        # CRITICAL FIX: Explicit exit/reduce-only flag (2026-08-09)
+        reduce_only: bool = False,
+        # CRITICAL FIX (2026-08-18): canonical fractional quantity in centi-contracts
+        target_qty_cc: Optional[int] = None,
     ) -> GateVerdict:
         """Run pre-trade gate checks.
 
@@ -834,13 +928,16 @@ class PreTradeGate:
         """
         self._store._metrics.checks += 1
 
+        # CRITICAL FIX (2026-08-18): canonical fractional quantity in centi-contracts
+        qty_cc = target_qty_cc if target_qty_cc is not None else target_count * 100
+
         # 1. Deterministic client_order_id
         coid = deterministic_client_order_id(
             agent_id=agent_id,
             strategy_group=strategy_group,
             contract_id=contract_id,
             side=side,
-            target_qty=target_count,
+            target_qty=qty_cc,
             decision_ts=decision_ts,
             price_cents=price_cents,
         )
@@ -873,12 +970,13 @@ class PreTradeGate:
         # 3b. Resting order deduplication (across time buckets)
         # Prevent identical resting orders even with different client_order_ids
         # This catches duplicates when the 5s time bucket changes between submissions
+        # CRITICAL FIX (2026-08-18): use canonical centi-contracts for fractional sizing
         resting_duplicate = self._store.find_resting_duplicate(
             contract_id=contract_id,
             side=side,
             action=action,
             price_cents=price_cents,
-            target_count=target_count,  # CRITICAL: Include count to prevent multi-contract bypass
+            target_qty_cc=qty_cc,  # CRITICAL: Include count to prevent multi-contract bypass
             exclude_coid=coid,  # Exclude the current order we just checked
         )
         if resting_duplicate is not None:
@@ -1084,58 +1182,55 @@ class PreTradeGate:
                 max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
         except Exception as e:
             logger.debug("[GATE] Failed to load contract price limits from profile: %s, using defaults", e)
-        
-        # For both YES and NO contracts, check the price directly
-        # - Low YES price (e.g., 5¢) = deep OTM longshot (betting on low-probability event)
-        # - Low NO price (e.g., 5¢) = deep OTM longshot (betting against high-probability event)
-        if price_cents < min_price_cents:
+
+        # CRITICAL FIX: Use side-aware executable range (YES 1-75, NO 25-99) to match
+        # agent_grid and avoid false rejection of late-expiry one-sided markets.
+        _canonical_side = side
+        if _canonical_side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"):
+            _canonical_side, _ = parse_kalshi_side(_canonical_side)
+        _canonical_side = _canonical_side.lower()
+
+        _is_exit = (entry_or_exit == "exit") or reduce_only
+        if not _is_exit and not is_price_in_canonical_range(price_cents, _canonical_side):
             self._store._metrics.blocked_price_guard += 1
             logger.warning(
-                "[GATE-ALERT] deep_otm_longshot_blocked coid=%s contract=%s side=%s price=%dc < %dc threshold (deep OTM longshot rejected)",
-                coid, contract_id, side, price_cents, min_price_cents,
+                "[GATE-ALERT] price_guard_blocked coid=%s contract=%s side=%s price=%dc outside side-aware executable range (rejected)",
+                coid, contract_id, side, price_cents,
             )
             return GateVerdict(
                 allowed=False,
                 client_order_id=coid,
-                reason=f"deep_otm_longshot:price={price_cents}c < {min_price_cents}c threshold",
-            )
-        
-        # - High YES price (e.g., 85¢) = low-profit trade (risk more than profit potential)
-        # - High NO price (e.g., 85¢) = low-profit trade (risk more than profit potential)
-        # CRITICAL FIX: Skip this check for exit orders (2026-07-20)
-        # Exit orders need to close positions even at high prices to realize PnL
-        if entry_or_exit != "exit" and price_cents > max_price_cents:
-            self._store._metrics.blocked_price_guard += 1
-            logger.warning(
-                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold "
-                "(poor risk/reward rejected) entry_or_exit=%s",
-                coid, contract_id, side, price_cents, max_price_cents, entry_or_exit or "entry",
-            )
-            return GateVerdict(
-                allowed=False,
-                client_order_id=coid,
-                reason=f"high_price_low_profit:price={price_cents}c > {max_price_cents}c threshold",
+                reason=f"price_guard:price={price_cents}c outside side-aware range for side={_canonical_side}",
             )
 
-        # 4. Fill-awareness: is the target already satisfied?
-        # CRITICAL FIX (2026-07-20): Apply to both buy and sell actions
-        # Exit orders (sell) should also check if already satisfied to prevent duplicate exits
-        already_filled = (
-            existing_filled
-            if existing_filled is not None
-            else self._store.filled_count_for_contract(contract_id, side, strategy_group)
+        # 4. Fill-awareness: is the buy target already satisfied?
+        # CRITICAL FIX (2026-08-09): Apply only to true entry orders. Exit permission is
+        # driven by explicit ``entry_or_exit`` and ``reduce_only`` metadata, not merely
+        # ``action == "buy"``. A ``buy`` order with ``reduce_only=True`` or
+        # ``entry_or_exit="exit"`` must be allowed to close a short/NO position.
+        # CRITICAL FIX (2026-08-18): Use canonical centi-contracts for fractional sizing.
+        is_entry = (
+            entry_or_exit == "entry"
+            or (entry_or_exit is None and action == "buy" and not reduce_only)
         )
-        if already_filled >= target_count:
-            self._store._metrics.blocked_already_satisfied += 1
-            logger.info(
-                "[GATE] already_satisfied coid=%s contract=%s filled=%d target=%d action=%s",
-                coid, contract_id, already_filled, target_count, action,
+        if is_entry:
+            already_filled = (
+                existing_filled
+                if existing_filled is not None
+                else self._store.filled_count_for_contract(contract_id, side, strategy_group)
             )
-            return GateVerdict(
-                allowed=False,
-                client_order_id=coid,
-                reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
-            )
+            if already_filled >= qty_cc:
+                self._store._metrics.blocked_already_satisfied += 1
+                logger.info(
+                    "[GATE] already_satisfied coid=%s contract=%s filled_cc=%d target_cc=%d action=%s entry_or_exit=%s reduce_only=%s",
+                    coid, contract_id, already_filled, qty_cc, action,
+                    entry_or_exit or "entry", reduce_only,
+                )
+                return GateVerdict(
+                    allowed=False,
+                    client_order_id=coid,
+                    reason=f"already_satisfied:filled_cc={already_filled}>=target_cc={qty_cc}",
+                )
 
         # 4b. CRYPTO15M Timeframe Budget + Expiry Cap Check (hard gate)
         # NOTE: This gate is DISABLED for lean 15m mode because the allocator (crypto15mallocator.py)
@@ -1251,9 +1346,12 @@ class PreTradeGate:
             side=side,
             action=action,
             target_count=target_count,
+            target_qty_cc=qty_cc,
             price_cents=price_cents,
             decision_ts_bucket=str(int(decision_ts) // DECISION_BUCKET_WIDTH_S),
             intent_id=intent_id,
+            entry_or_exit=entry_or_exit,
+            reduce_only=reduce_only,
         )
         inserted, conflict = self._store.insert_if_absent(record)
         if not inserted and conflict is not None:
@@ -1290,6 +1388,10 @@ class PreTradeGate:
         decision_ts: float,
         intent_id: Optional[str] = None,
         existing_filled: Optional[int] = None,
+        entry_or_exit: Optional[str] = None,
+        reduce_only: bool = False,
+        # CRITICAL FIX (2026-08-18): canonical fractional quantity in centi-contracts
+        target_qty_cc: Optional[int] = None,
     ) -> GateVerdict:
         """Async version of pre-trade gate check using asyncio.Lock.
 
@@ -1316,13 +1418,16 @@ class PreTradeGate:
         """
         self._store._metrics.checks += 1
 
+        # CRITICAL FIX (2026-08-18): canonical fractional quantity in centi-contracts
+        qty_cc = target_qty_cc if target_qty_cc is not None else target_count * 100
+
         # 1. Deterministic client_order_id
         coid = deterministic_client_order_id(
             agent_id=agent_id,
             strategy_group=strategy_group,
             contract_id=contract_id,
             side=side,
-            target_qty=target_count,
+            target_qty=qty_cc,
             decision_ts=decision_ts,
             price_cents=price_cents,
         )
@@ -1355,12 +1460,13 @@ class PreTradeGate:
         # 3b. Resting order deduplication (across time buckets)
         # Prevent identical resting orders even with different client_order_ids
         # This catches duplicates when the 5s time bucket changes between submissions
+        # CRITICAL FIX (2026-08-18): use canonical centi-contracts for fractional sizing
         resting_duplicate = self._store.find_resting_duplicate(
             contract_id=contract_id,
             side=side,
             action=action,
             price_cents=price_cents,
-            target_count=target_count,  # CRITICAL: Include count to prevent multi-contract bypass
+            target_qty_cc=qty_cc,  # CRITICAL: Include count to prevent multi-contract bypass
             exclude_coid=coid,  # Exclude the current order we just checked
         )
         if resting_duplicate is not None:
@@ -1418,58 +1524,55 @@ class PreTradeGate:
                 max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
         except Exception as e:
             logger.debug("[GATE] Failed to load contract price limits from profile: %s, using defaults", e)
-        
-        # For both YES and NO contracts, check the price directly
-        # - Low YES price (e.g., 5¢) = deep OTM longshot (betting on low-probability event)
-        # - Low NO price (e.g., 5¢) = deep OTM longshot (betting against high-probability event)
-        if price_cents < min_price_cents:
+
+        # CRITICAL FIX: Use side-aware executable range (YES 1-75, NO 25-99) to match
+        # agent_grid and avoid false rejection of late-expiry one-sided markets.
+        _canonical_side = side
+        if _canonical_side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"):
+            _canonical_side, _ = parse_kalshi_side(_canonical_side)
+        _canonical_side = _canonical_side.lower()
+
+        _is_exit = (entry_or_exit == "exit") or reduce_only
+        if not _is_exit and not is_price_in_canonical_range(price_cents, _canonical_side):
             self._store._metrics.blocked_price_guard += 1
             logger.warning(
-                "[GATE-ALERT] deep_otm_longshot_blocked coid=%s contract=%s side=%s price=%dc < %dc threshold (deep OTM longshot rejected)",
-                coid, contract_id, side, price_cents, min_price_cents,
+                "[GATE-ALERT] price_guard_blocked coid=%s contract=%s side=%s price=%dc outside side-aware executable range (rejected)",
+                coid, contract_id, side, price_cents,
             )
             return GateVerdict(
                 allowed=False,
                 client_order_id=coid,
-                reason=f"deep_otm_longshot:price={price_cents}c < {min_price_cents}c threshold",
-            )
-        
-        # - High YES price (e.g., 85¢) = low-profit trade (risk more than profit potential)
-        # - High NO price (e.g., 85¢) = low-profit trade (risk more than profit potential)
-        # CRITICAL FIX: Skip this check for exit orders (2026-07-20)
-        # Exit orders need to close positions even at high prices to realize PnL
-        if entry_or_exit != "exit" and price_cents > max_price_cents:
-            self._store._metrics.blocked_price_guard += 1
-            logger.warning(
-                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold "
-                "(poor risk/reward rejected) entry_or_exit=%s",
-                coid, contract_id, side, price_cents, max_price_cents, entry_or_exit or "entry",
-            )
-            return GateVerdict(
-                allowed=False,
-                client_order_id=coid,
-                reason=f"high_price_low_profit:price={price_cents}c > {max_price_cents}c threshold",
+                reason=f"price_guard:price={price_cents}c outside side-aware range for side={_canonical_side}",
             )
 
-        # 4. Fill-awareness: is the target already satisfied?
-        # CRITICAL FIX (2026-07-20): Apply to both buy and sell actions
-        # Exit orders (sell) should also check if already satisfied to prevent duplicate exits
-        already_filled = (
-            existing_filled
-            if existing_filled is not None
-            else self._store.filled_count_for_contract(contract_id, side, strategy_group)
+        # 4. Fill-awareness: is the buy target already satisfied?
+        # CRITICAL FIX (2026-08-09): Apply only to true entry orders. Exit permission is
+        # driven by explicit ``entry_or_exit`` and ``reduce_only`` metadata, not merely
+        # ``action == "buy"``. A ``buy`` order with ``reduce_only=True`` or
+        # ``entry_or_exit="exit"`` must be allowed to close a short/NO position.
+        # CRITICAL FIX (2026-08-18): Use canonical centi-contracts for fractional sizing.
+        is_entry = (
+            entry_or_exit == "entry"
+            or (entry_or_exit is None and action == "buy" and not reduce_only)
         )
-        if already_filled >= target_count:
-            self._store._metrics.blocked_already_satisfied += 1
-            logger.info(
-                "[GATE] already_satisfied coid=%s contract=%s filled=%d target=%d action=%s",
-                coid, contract_id, already_filled, target_count, action,
+        if is_entry:
+            already_filled = (
+                existing_filled
+                if existing_filled is not None
+                else self._store.filled_count_for_contract(contract_id, side, strategy_group)
             )
-            return GateVerdict(
-                allowed=False,
-                client_order_id=coid,
-                reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
-            )
+            if already_filled >= qty_cc:
+                self._store._metrics.blocked_already_satisfied += 1
+                logger.info(
+                    "[GATE] already_satisfied coid=%s contract=%s filled_cc=%d target_cc=%d action=%s entry_or_exit=%s reduce_only=%s",
+                    coid, contract_id, already_filled, qty_cc, action,
+                    entry_or_exit or "entry", reduce_only,
+                )
+                return GateVerdict(
+                    allowed=False,
+                    client_order_id=coid,
+                    reason=f"already_satisfied:filled_cc={already_filled}>=target_cc={qty_cc}",
+                )
 
         # 5. Insert new record (PENDING) using async lock
         record = OrderRecord(
@@ -1480,9 +1583,12 @@ class PreTradeGate:
             side=side,
             action=action,
             target_count=target_count,
+            target_qty_cc=qty_cc,
             price_cents=price_cents,
             decision_ts_bucket=str(int(decision_ts) // DECISION_BUCKET_WIDTH_S),
             intent_id=intent_id,
+            entry_or_exit=entry_or_exit,
+            reduce_only=reduce_only,
         )
         inserted, conflict = await self._store.async_insert_if_absent(record)
         if not inserted and conflict is not None:
@@ -1506,13 +1612,21 @@ class PreTradeGate:
         )
         return GateVerdict(allowed=True, client_order_id=coid)
 
+    def lookup(self, client_order_id: str) -> Optional[OrderRecord]:
+        """Return the existing record for this ID, or None."""
+        return self._store.lookup(client_order_id)
+
     def mark_submitted(self, client_order_id: str, venue_order_id: Optional[str] = None) -> None:
         """Transition order to SUBMITTED after successful venue dispatch."""
         self._store.mark_submitted(client_order_id, venue_order_id)
 
-    def mark_filled(self, client_order_id: str, filled_count: int) -> None:
+    def mark_filled(self, client_order_id: str, filled_count: int, fill_id: Optional[str] = None, filled_qty_cc: Optional[int] = None) -> None:
         """Update fill count from reconciliation / venue ack."""
-        self._store.mark_filled(client_order_id, filled_count)
+        self._store.mark_filled(client_order_id, filled_count, fill_id, filled_qty_cc=filled_qty_cc)
+
+    def mark_submission_unknown(self, client_order_id: str) -> None:
+        """Transition SUBMITTED -> SUBMISSION_UNKNOWN when the ack is lost in flight."""
+        self._store.mark_submission_unknown(client_order_id)
 
     def mark_canceled(self, client_order_id: str) -> None:
         self._store.mark_canceled(client_order_id)

@@ -223,22 +223,8 @@ def normalize_kalshi_contract(
                 ticker, asset
             )
     
-    # Try ticker-based inference ONLY as fallback (for non-15m contracts)
-    if expiry_ts is None and not is_15m_contract:
-        try:
-            from merid.event_venues.kalshi.expiry_fallback import _infer_15m_window_end_utc
-            expiry_ts = _infer_15m_window_end_utc(ticker)
-            if expiry_ts:
-                expiry_source = "ticker_inference_fallback"
-                logger.info(
-                    "[NORMALIZE-FALLBACK] ticker=%s asset=%s used ticker-based expiry inference (API fields missing)",
-                    ticker, asset
-                )
-        except Exception as e:
-            logger.warning(
-                "[NORMALIZE-FAIL] ticker=%s asset=%s ticker-based expiry inference failed: %s",
-                ticker, asset, e
-            )
+    # Non-15m contracts cannot be reliably inferred from the ticker alone; leave
+    # expiry_ts as None so the contract is marked invalid_metadata below.
     
     # Step 3: Compute seconds/minutes to expiry (fail-fast to 0.0 if invalid)
     if expiry_ts is None:

@@ -163,14 +163,15 @@ class KalshiWebSocket(EventVenueStream):
         masked_key = api_key[:4] + "****" + api_key[-4:] if api_key and len(api_key) > 8 else "****"
         
         logger.info(
-            "[KALSHI-CONFIG-DRIFT] KalshiWebSocket client config: class=%s module=%s "
-            "api_key=%s rest_url=%s ws_url=%s env=%s",
-            config_class_name,
-            config_module,
-            masked_key,
-            getattr(self.config, 'rest_base_url', getattr(self.config, 'rest_api_url', 'N/A')),
-            getattr(self.config, 'ws_base_url', getattr(self.config, 'ws_api_url', 'N/A')),
-            getattr(self.config, 'env', getattr(self.config, 'use_demo', 'N/A'))
+            "[KALSHI-CONFIG-DRIFT] KalshiWebSocket client config: class={} module={} "
+            "api_key={} rest_url={} ws_url={} env={}".format(
+                config_class_name,
+                config_module,
+                masked_key,
+                str(getattr(self.config, 'rest_base_url', getattr(self.config, 'rest_api_url', 'N/A'))),
+                str(getattr(self.config, 'ws_base_url', getattr(self.config, 'ws_api_url', 'N/A'))),
+                str(getattr(self.config, 'env', getattr(self.config, 'use_demo', 'N/A')))
+            )
         )
         
         # ── API KEY VALIDATION ───────────────────────────────────────────
@@ -253,10 +254,17 @@ class KalshiWebSocket(EventVenueStream):
         self._parse_lock = threading.Lock()
         
         # ── PERFORMANCE FIX: Dedicated thread pool for concurrent callback processing ──
-        # Prevents blocking under high load by avoiding default executor exhaustion
-        # 8 workers for concurrent callback processing (CPU-bound + I/O mixed workload)
+        # Use a small pool: the bridge callback is now async and processed sequentially
+        # in the event loop, so only fallback sync callbacks use this executor.
+        # P0 FIX (2026-08-23): Scale the callback executor with demand. The bridge
+        # is now an async coroutine run directly in the event loop, so this pool
+        # is only used for legacy sync callbacks; keep a generous size for burst
+        # absorption without blocking the receive path.
+        _max_workers = int(os.environ.get("MERID_WS_CALLBACK_WORKERS", "0"))
+        if _max_workers <= 0:
+            _max_workers = min(64, max(8, (os.cpu_count() or 2) * 4))
         self._callback_executor = ThreadPoolExecutor(
-            max_workers=8,
+            max_workers=_max_workers,
             thread_name_prefix="kalshi-ws-callback"
         )
         
@@ -324,6 +332,20 @@ class KalshiWebSocket(EventVenueStream):
         self._reconnect_circuit_threshold: int = int(os.getenv("KALSHI_WS_RECONNECT_CIRCUIT_THRESHOLD", "5"))
         self._reconnect_circuit_open: bool = False
 
+        # CONNECTION GENERATION: monotonic id bumped on every successful socket
+        # session. Used to invalidate market readiness and to reject stale
+        # callbacks/state from a superseded socket session.
+        self._connection_generation: int = 0
+        self._session_id: str = ""
+        self._session_recycle_requested_at: float = 0.0
+        # SESSION RECYCLE: in-band request flag. When set, the supervisor closes
+        # the current socket and reconnects WITHOUT tearing down the owning loop.
+        self._session_recycle_requested: bool = False
+        self._session_recycle_reason: str = ""
+        # Strong references to fire-and-forget background tasks so they are not
+        # garbage-collected while pending (Python keeps only weak refs to tasks).
+        self._background_tasks: set = set()
+
         # P0-1 WS UPSTREAM: Idle timer for connection stall detection
         self._last_raw_delivery_ts: float = 0.0
         self._ws_idle_threshold: float = float(os.getenv("KALSHI_WS_IDLE_THRESHOLD", "15.0"))  # 15s default
@@ -338,9 +360,9 @@ class KalshiWebSocket(EventVenueStream):
         to prevent overflow and sequence gaps.
         """
         if self._msg_queue is None:
-            # Increased from 32768 to 65536 to handle burst traffic
-            self._msg_queue = asyncio.Queue(maxsize=65536)
-            logger.info("[WS-QUEUE] Initialized message queue with maxsize=65536")
+            # Increased from 65536 to 131072 to handle burst traffic from 15m five-ticker rollover windows
+            self._msg_queue = asyncio.Queue(maxsize=131072)
+            logger.info("[WS-QUEUE] Initialized message queue with maxsize=131072")
         return self._msg_queue
 
     def _ensure_reconnect_lock(self) -> asyncio.Lock:
@@ -354,6 +376,18 @@ class KalshiWebSocket(EventVenueStream):
         if not hasattr(self, '_ws_recv_lock') or self._ws_recv_lock is None:
             self._ws_recv_lock = asyncio.Lock()
         return self._ws_recv_lock
+
+    def _spawn_tracked(self, coro, name: str = "") -> asyncio.Task:
+        """Create a background task and keep a strong reference until it completes.
+
+        Python's event loop keeps only a weak reference to tasks; an unreferenced
+        pending task can be garbage-collected mid-execution ("Task was destroyed
+        but it is pending!"). This helper prevents that class of bug.
+        """
+        task = asyncio.create_task(coro, name=name or None)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     # ── PHASE 1: Callback safety methods ───────────────────────────────────
     
@@ -552,11 +586,13 @@ class KalshiWebSocket(EventVenueStream):
             # CRITICAL FIX: Initialize _last_message_ts to connection time to prevent false stale detection
             self._last_message_ts = _time.monotonic()
             # P0-1 WS UPSTREAM: Add WS-CONNECTED log for connection lifecycle
-            logger.info("[WS-CONNECTED] Successfully connected to Kalshi WebSocket")
+            self._connection_generation += 1
+            self._session_id = f"kalshi-ws-{self._connection_generation:04d}-{_time.monotonic():.3f}"
+            logger.info("[WS-CONNECTED] Successfully connected to Kalshi WebSocket gen=%d sid=%s", self._connection_generation, self._session_id)
             # P0-1 WS UPSTREAM: Log ping configuration (ping_interval=30s, ping_timeout=60s)
             logger.info("[WS-KEEPALIVE-CONFIG] ping_interval=30s ping_timeout=60s")
             # Structured logging for WS_CLIENT_15M stage
-            logger.info("[WS_CLIENT_15M] event=open uri=%s reconnect_attempt=%d", self.config.ws_base_url, self._reconnect_count)
+            logger.info("[WS_CLIENT_15M] event=open uri=%s reconnect_attempt=%d gen=%d sid=%s", self.config.ws_base_url, self._reconnect_count, self._connection_generation, self._session_id)
         except TypeError as e:
             # Fall back to extra_headers for older websockets versions
             logger.warning(f"[WS-CONNECT-DIAG] additional_headers not supported ({e}), trying extra_headers")
@@ -575,11 +611,13 @@ class KalshiWebSocket(EventVenueStream):
                 # CRITICAL FIX: Initialize _last_message_ts to connection time to prevent false stale detection
                 self._last_message_ts = _time.monotonic()
                 # P0-1 WS UPSTREAM: Add WS-CONNECTED log for connection lifecycle
-                logger.info("[WS-CONNECTED] Successfully connected to Kalshi WebSocket (extra_headers fallback)")
+                self._connection_generation += 1
+                self._session_id = f"kalshi-ws-{self._connection_generation:04d}-{_time.monotonic():.3f}"
+                logger.info("[WS-CONNECTED] Successfully connected to Kalshi WebSocket (extra_headers fallback) gen=%d sid=%s", self._connection_generation, self._session_id)
                 # P0-1 WS UPSTREAM: Log ping configuration (ping_interval=30s, ping_timeout=60s)
                 logger.info("[WS-KEEPALIVE-CONFIG] ping_interval=30s ping_timeout=60s")
                 # Structured logging for WS_CLIENT_15M stage
-                logger.info("[WS_CLIENT_15M] event=open uri=%s reconnect_attempt=%d", self.config.ws_base_url, self._reconnect_count)
+                logger.info("[WS_CLIENT_15M] event=open uri=%s reconnect_attempt=%d gen=%d sid=%s", self.config.ws_base_url, self._reconnect_count, self._connection_generation, self._session_id)
             except TypeError as e2:
                 # If both fail, this is a fundamental incompatibility
                 logger.error(f"[WS-CONNECT-DIAG] Both additional_headers and extra_headers failed: {e2}")
@@ -600,7 +638,58 @@ class KalshiWebSocket(EventVenueStream):
                 logger.warning("[WS-PING-TIMEOUT] WebSocket ping/pong timeout: %s", e)
             logger.warning(f"Kalshi WebSocket connection error: {type(e).__name__}: {e}")
             raise ConnectionError(f"WebSocket connection failed: {e}")
-    
+
+    async def force_session_reconnect(self, reason: str = "requested") -> None:
+        """In-band socket recycle on the owning event loop.
+
+        Closes the current WebSocket, bumps the connection generation, and
+        resets the reconnect backoff so the running recv loop reconnects on
+        the same event loop. This avoids tearing down the WS I/O thread.
+        """
+        if not self._running:
+            logger.info("[WS-SESSION-RECYCLE] ignored: client not running")
+            return
+
+        if self._session_recycle_requested:
+            logger.info("[WS-SESSION-RECYCLE] already in progress, skipping")
+            return
+
+        # Serialize with the normal reconnect path to avoid storms.
+        if self._ensure_reconnect_lock().locked():
+            logger.info("[WS-SESSION-RECYCLE] reconnect lock held, skipping")
+            return
+
+        async with self._ensure_reconnect_lock():
+            self._session_recycle_requested = True
+            self._session_recycle_reason = reason
+            self._session_recycle_requested_at = _time.monotonic()
+
+            logger.info(
+                "[WS-SESSION-RECYCLE] request reason=%s gen=%d sid=%s",
+                reason, self._connection_generation, self._session_id,
+            )
+
+            # Close the existing socket so the recv loop breaks out and calls
+            # _reconnect() on this same loop. Keep _running True and preserve
+            # subscription sets so resubscribe replays them.
+            old_ws = self._ws
+            if old_ws is not None:
+                try:
+                    await old_ws.close(code=1001, reason=f"session recycle: {reason}")
+                except Exception as e:
+                    if not self._is_benign_ws_error(e):
+                        logger.warning("[WS-SESSION-RECYCLE] close error: %r", e)
+
+            # Reset the reconnect backoff to minimum so recovery is immediate.
+            self._reconnect_delay = 0.0
+            self._last_message_ts = _time.monotonic()
+            self._last_raw_delivery_ts = _time.monotonic()
+
+            # The _process_messages_until_disconnect() loop will catch the close,
+            # call _reconnect(), which will connect() and resubscribe.
+            self._session_recycle_requested = False
+            logger.info("[WS-SESSION-RECYCLE] socket closed, reconnecting on same loop")
+
     async def close(self) -> None:
         """Close WebSocket with hardened error handling for Windows I/O errors."""
         self._running = False
@@ -781,7 +870,7 @@ class KalshiWebSocket(EventVenueStream):
         params: Dict[str, Any] = {
             "channels": ["orderbook_delta"],
             "market_tickers": [market_id],
-            "use_yes_price": True,  # CRITICAL FIX (2026-07-30): Use unified YES-leg pricing for both YES and NO sides
+            "use_yes_price": False,  # NO-leg pricing: Kalshi sends side=no price_dollars in NO-space, matching LocalOrderbook no_levels
         }
         if event_ticker:
             params["event_ticker"] = event_ticker
@@ -830,7 +919,7 @@ class KalshiWebSocket(EventVenueStream):
                 "params": {
                     "channels": ["orderbook_delta"],
                     "market_tickers": chunk,
-                    "use_yes_price": True,  # CRITICAL FIX (2026-07-30): Use unified YES-leg pricing for both YES and NO sides
+                    "use_yes_price": False,  # NO-leg pricing: Kalshi sends side=no price_dollars in NO-space, matching LocalOrderbook no_levels
                 },
             }
             payload = json.dumps(message)
@@ -872,7 +961,7 @@ class KalshiWebSocket(EventVenueStream):
             # Fetch orderbooks via REST for all subscribed tickers
             for ticker in uniq:
                 try:
-                    orderbook = await client.get_orderbook(ticker)
+                    orderbook = await asyncio.wait_for(client.get_orderbook(ticker), timeout=5.0)
                     if orderbook:
                         # Convert REST orderbook to WS message format
                         yes_levels = []
@@ -886,23 +975,15 @@ class KalshiWebSocket(EventVenueStream):
                                 elif hasattr(bid, 'price') and hasattr(bid, 'size') and not isinstance(bid, tuple):
                                     yes_levels.append([float(bid.price), float(bid.size)])
                         
-                        # CRITICAL FIX (2026-07-30): REST API's asks are YES asks, which convert to NO bids
-                        # NO bids = 1.00 - YES_ask_price. These should go to no_levels (not asks)
-                        # The VenueOrderBook.asks field contains YES asks, which we convert to NO bids
+                        # VenueOrderBook.asks holds Kalshi's no_dollars, i.e. NO bids.
+                        # Pass them straight through; LocalOrderbook will convert dollar
+                        # floats to cents and derive the YES ask via duality.
                         if orderbook.asks:
                             for ask in orderbook.asks:
                                 if isinstance(ask, tuple) and len(ask) == 2:
-                                    yes_ask_price = float(ask[0])
-                                    size = float(ask[1])
-                                    # Convert YES ask to NO bid: NO_price = 1.00 - YES_ask_price
-                                    no_bid_price = 1.00 - yes_ask_price
-                                    no_levels.append([no_bid_price, size])
+                                    no_levels.append([float(ask[0]), float(ask[1])])
                                 elif hasattr(ask, 'price') and hasattr(ask, 'size') and not isinstance(ask, tuple):
-                                    yes_ask_price = float(ask.price)
-                                    size = float(ask.size)
-                                    # Convert YES ask to NO bid: NO_price = 1.00 - YES_ask_price
-                                    no_bid_price = 1.00 - yes_ask_price
-                                    no_levels.append([no_bid_price, size])
+                                    no_levels.append([float(ask.price), float(ask.size)])
                         
                         msg = {
                             "type": "orderbook_snapshot",
@@ -914,7 +995,10 @@ class KalshiWebSocket(EventVenueStream):
                         }
                         
                         logger.info("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] REST bootstrap fetched %s: %d yes, %d no", ticker, len(msg["yes"]), len(msg["no"]))
-                        store.apply_orderbook_message(msg, "ws_subscribe_bootstrap")
+                        # Offload to thread pool to avoid blocking the WebSocket event loop
+                        # while it must answer keepalive pings.
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, store.apply_orderbook_message, msg, "ws_subscribe_bootstrap")
                 except Exception as e:
                     logger.error("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] REST bootstrap failed for %s: %s", ticker, e)
             
@@ -988,6 +1072,41 @@ class KalshiWebSocket(EventVenueStream):
             "raw_messages_seen": getattr(self, '_raw_messages_seen', 0),
             "orderbook_msgs_seen": getattr(self, '_orderbook_msgs_seen', 0),
         }
+
+    async def aget_diagnostic_counters(self) -> Dict[str, int]:
+        """Async wrapper so callers can submit this to the WS-owned event loop."""
+        return self.get_diagnostic_counters()
+
+    def is_connected(self) -> bool:
+        """Best-effort connection health check (call from the WS loop)."""
+        if not self._running:
+            return False
+        if not self._ws:
+            return False
+        # websockets 10+ uses .state / .open; support both
+        if getattr(self._ws, 'state', None) is not None:
+            try:
+                from websockets.protocol import State
+                return self._ws.state is State.OPEN
+            except Exception:
+                pass
+        return getattr(self._ws, 'open', False)
+
+    async def is_connected_async(self) -> bool:
+        """Async alias for cross-loop submission."""
+        return self.is_connected()
+
+    def get_orderbook_tickers(self) -> set:
+        """Return a snapshot of the currently subscribed orderbook tickers."""
+        return set(self._orderbook_tickers)
+
+    async def get_orderbook_tickers_async(self) -> set:
+        """Async wrapper for cross-loop submission."""
+        return self.get_orderbook_tickers()
+
+    async def aget_stats(self) -> Dict[str, Any]:
+        """Async wrapper so stats() can be submitted to the WS loop."""
+        return self.stats()
 
     async def subscribe_order_group_updates(self) -> None:
         """Subscribe to order_group_updates channel for real-time group state.
@@ -1086,11 +1205,14 @@ class KalshiWebSocket(EventVenueStream):
 
         Messages are enqueued into an async queue and processed by a
         separate task so that slow callbacks cannot block pings.
-        
+        Runs a self-healing reconnection loop. May be called on an
+        unconnected client; it will connect on the first iteration.
+
         PHASE 1 FIX: Normalized callback signature with no-op async default.
         """
-        if not self._ws:
-            raise RuntimeError("WebSocket not connected")
+        # Remove the previously incorrect guard so listen() can bootstrap the
+        # connection itself. It is the canonical entry point for the dedicated
+        # WS event-loop thread.
 
         # PHASE 1 FIX: Normalize callback - use no-op default if None provided
         if callback is None:
@@ -1141,6 +1263,7 @@ class KalshiWebSocket(EventVenueStream):
 
         # SEV-0 FIX: Permanent self-healing main loop - never exits while process is running
         # This prevents the 476s blind periods by ensuring continuous reconnection attempts
+        self._running = True
         while self._running:
             try:
                 logger.info("[WS-MAIN] Starting connection attempt...")
@@ -1314,7 +1437,7 @@ class KalshiWebSocket(EventVenueStream):
                     self._raw_messages_seen = 0
                 self._raw_messages_seen += 1
                 if self._raw_messages_seen <= 10 or self._raw_messages_seen % 1000 == 0:
-                    logger.info("[WS-RAW-DELIVERY] count=%d sample=%s", self._raw_messages_seen, raw[:300])
+                    logger.debug("[WS-RAW-DELIVERY] count=%d sample=%s", self._raw_messages_seen, raw[:300])
                 
                 # Pipeline visibility: notify bridge of raw message receipt
                 # This allows tracking WS → bridge → forwarder pipeline health
@@ -1329,7 +1452,7 @@ class KalshiWebSocket(EventVenueStream):
                     data_preview = json.loads(raw[:200]) if len(raw) > 50 else {}
                     msg_type = data_preview.get("type", "unknown")
                     ticker = data_preview.get("ticker", data_preview.get("market_ticker", "unknown"))
-                    logger.info("[WS-RAW-DELIVERY] event_type=%s ticker=%s size=%d", msg_type, ticker, len(raw))
+                    logger.debug("[WS-RAW-DELIVERY] event_type=%s ticker=%s size=%d", msg_type, ticker, len(raw))
                 except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
                     # Truncated JSON is expected - don't log as error, just mark as unknown.
                     # AttributeError/TypeError guard the case where the (possibly truncated)
@@ -1347,7 +1470,7 @@ class KalshiWebSocket(EventVenueStream):
                     self._raw_msg_count = 0
                 if self._raw_msg_count < 10:
                     self._raw_msg_count += 1
-                    logger.info("[WS-RAW] message #%d: %s", self._raw_msg_count, raw[:500])
+                    logger.debug("[WS-RAW] message #%d: %s", self._raw_msg_count, raw[:500])
                 
                 # CRITICAL DIAGNOSTIC: Log ALL messages for first 60 seconds after subscription
                 if not hasattr(self, '_subscription_start_time'):
@@ -1355,7 +1478,7 @@ class KalshiWebSocket(EventVenueStream):
                 
                 time_since_sub = _time.monotonic() - self._subscription_start_time
                 if time_since_sub < 60.0:
-                    logger.info("[WS-RAW-ALL] t=%.1fs: %s", time_since_sub, raw[:200])
+                    logger.debug("[WS-RAW-ALL] t=%.1fs: %s", time_since_sub, raw[:200])
 
                 try:
                     data = json.loads(raw)
@@ -1378,12 +1501,14 @@ class KalshiWebSocket(EventVenueStream):
                         if not hasattr(self, '_orderbook_msgs_seen'):
                             self._orderbook_msgs_seen = 0
                         self._orderbook_msgs_seen += 1
-                        logger.info(
+                        _body = _kalshi_ws_payload(data)
+                        _ticker = _body.get("market_ticker") or _body.get("ticker", "unknown")
+                        logger.debug(
                             "[WS-ORDERBOOK-MSG] type=%s sid=%s seq=%s ticker=%s count=%d",
                             msg_type,
                             data.get("sid"),
                             data.get("seq"),
-                            data.get("msg", {}).get("market_ticker"),
+                            _ticker,
                             self._orderbook_msgs_seen,
                         )
 
@@ -1394,6 +1519,8 @@ class KalshiWebSocket(EventVenueStream):
                         # P1 FIX: Capture subscription ID (sid) for update_subscription commands
                         if msg_type == "subscribed":
                             msg_data = data.get("msg", {})
+                            if not isinstance(msg_data, dict):
+                                msg_data = {}
                             channel = msg_data.get("channel")
                             sid = data.get("sid")
                             if channel and sid:
@@ -1406,8 +1533,9 @@ class KalshiWebSocket(EventVenueStream):
                             self._orderbook_delta_count = 0
                         self._orderbook_delta_count += 1
                         if self._orderbook_delta_count % 50 == 1:
-                            ticker = data.get("msg", {}).get("market_ticker", "unknown")
-                            logger.info("[WS-MSG] type=orderbook_delta ticker=%s count=%d", ticker, self._orderbook_delta_count)
+                            _body = _kalshi_ws_payload(data)
+                            ticker = _body.get("market_ticker") or _body.get("ticker", "unknown")
+                            logger.debug("[WS-MSG] type=orderbook_delta ticker=%s count=%d", ticker, self._orderbook_delta_count)
 
                     # ── Handle error-type messages ─────────────────────
                     if data.get("type") == "error":
@@ -1427,14 +1555,15 @@ class KalshiWebSocket(EventVenueStream):
                         self._enqueue_count = 0
                     if self._enqueue_count < 10:
                         self._enqueue_count += 1
-                        logger.info("[WS-ENQUEUE-MSG] Message #%d enqueued: type=%s ticker=%s priority=%s", 
+                        logger.debug("[WS-ENQUEUE-MSG] Message #%d enqueued: type=%s ticker=%s priority=%s", 
                                    self._enqueue_count, data.get('type'), data.get('ticker', data.get('market_ticker', 'unknown')), msg_priority)
                     
                     # CRITICAL DIAGNOSTIC: Log ALL enqueues for first 30 seconds
                     if time_since_sub < 30.0:
                         # Extract ticker from nested msg structure for orderbook messages
-                        ticker = data.get('ticker', data.get('market_ticker', data.get('msg', {}).get('market_ticker', 'unknown')))
-                        logger.info("[WS-ENQUEUE-ALL] t=%.1fs: type=%s ticker=%s", 
+                        _body = _kalshi_ws_payload(data)
+                        ticker = data.get('ticker') or data.get('market_ticker') or _body.get('market_ticker') or _body.get('ticker') or 'unknown'
+                        logger.debug("[WS-ENQUEUE-ALL] t=%.1fs: type=%s ticker=%s", 
                                    time_since_sub, data.get('type'), ticker)
                     
                     # ── Phase 2: Coalescing buffer for redundant work reduction ───────────────────
@@ -1446,7 +1575,7 @@ class KalshiWebSocket(EventVenueStream):
                             self._direct_enqueue_count = 0
                         self._direct_enqueue_count += 1
                         if self._direct_enqueue_count <= 10:
-                            logger.info("[WS-DIRECT-ENQUEUE-BYPASS] #%d: type=%s queue_id=%s queue_size=%d", 
+                            logger.debug("[WS-DIRECT-ENQUEUE-BYPASS] #%d: type=%s queue_id=%s queue_size=%d", 
                                        self._direct_enqueue_count, data.get('type'), id(self._ensure_msg_queue()), self._ensure_msg_queue().qsize())
                         self._ensure_msg_queue().put_nowait((msg_priority, data))
                             
@@ -1574,18 +1703,20 @@ class KalshiWebSocket(EventVenueStream):
         """
         # CRITICAL DIAGNOSTIC: Log that processor task started
         logger.info("[WS-PROCESSOR] Queue processor task started with callback=%s", callback.__name__ if hasattr(callback, '__name__') else str(callback))
-        # PERFORMANCE FIX: Optimized batching for high-throughput scenarios
-        _BATCH_SIZE_LOW_PRESSURE = 5  # Increased from 1 to reduce context switching
-        _BATCH_SIZE_HIGH_PRESSURE = 100  # Increased from 50 for better burst handling
-        _PRESSURE_THRESHOLD = 0.50  # Lowered from 0.75 to trigger batch mode earlier
-        _COOPERATIVE_YIELD_EVERY = 50  # Increased from 25 for better throughput
+        # PERFORMANCE FIX: Process messages in small batches and await each callback
+        # to avoid hundreds of concurrent background tasks starving keepalive pings
+        # (1011 timeouts) while still draining the queue fast enough under load.
+        _BATCH_SIZE_LOW_PRESSURE = 5
+        _BATCH_SIZE_HIGH_PRESSURE = 100
+        _PRESSURE_THRESHOLD = 0.50
+        _COOPERATIVE_YIELD_EVERY = 25
         
         loop_iteration = 0
         while self._running:
             loop_iteration += 1
             # DIAGNOSTIC: Log every 10 iterations to confirm loop is running
             if loop_iteration % 10 == 1:
-                logger.info("[WS-PROCESSOR] Loop iteration %d, queue_size=%d, running=%s", loop_iteration, self._ensure_msg_queue().qsize(), self._running)
+                logger.debug("[WS-PROCESSOR] Loop iteration %d, queue_size=%d, running=%s", loop_iteration, self._ensure_msg_queue().qsize(), self._running)
             
             try:
                 # DIAGNOSTIC: Log at try block entry
@@ -1593,7 +1724,7 @@ class KalshiWebSocket(EventVenueStream):
                     self._try_entry_count = 0
                 self._try_entry_count += 1
                 if self._try_entry_count <= 10:
-                    logger.info("[WS-PROCESSOR] Try block entry #%d: queue_size=%d running=%s", 
+                    logger.debug("[WS-PROCESSOR] Try block entry #%d: queue_size=%d running=%s", 
                                self._try_entry_count, self._ensure_msg_queue().qsize(), self._running)
                 
                 # DIAGNOSTIC: Log before queue_util calculation
@@ -1601,7 +1732,7 @@ class KalshiWebSocket(EventVenueStream):
                     self._queue_util_count = 0
                 self._queue_util_count += 1
                 if self._queue_util_count <= 10:
-                    logger.info("[WS-PROCESSOR] Before queue_util: queue_size=%d maxsize=%d", 
+                    logger.debug("[WS-PROCESSOR] Before queue_util: queue_size=%d maxsize=%d", 
                                self._ensure_msg_queue().qsize(), self._ensure_msg_queue().maxsize)
                 
                 # Calculate current queue pressure for adaptive batch sizing
@@ -1616,61 +1747,55 @@ class KalshiWebSocket(EventVenueStream):
                         queue_size, queue_util * 100
                     )
                 elif queue_util > 0.75:  # 75% utilization is elevated
-                    logger.info(
+                    logger.debug(
                         "[WS-QUEUE-PRESSURE] ELEVATED: queue_size=%d (%.1f%%)",
                         queue_size, queue_util * 100
                     )
                 
                 # Batch drain: process multiple messages per iteration under pressure
                 messages_processed = 0
-                # DIAGNOSTIC: Log batch drain entry
-                if not hasattr(self, '_batch_drain_count'):
-                    self._batch_drain_count = 0
-                self._batch_drain_count += 1
-                if self._batch_drain_count <= 10:
-                    logger.info("[WS-PROCESSOR] Batch drain #%d: batch_size=%d queue_size=%d queue_util=%.2f", 
-                               self._batch_drain_count, batch_size, self._ensure_msg_queue().qsize(), queue_util)
-                
+                tasks: List[asyncio.Task] = []
+
                 for i in range(batch_size):
                     try:
-                        # Use shorter timeout in batch mode to stay responsive
-                        timeout = 0.001 if i > 0 else 1.0  # 1ms between batch items
-                        # DIAGNOSTIC: Log queue get attempt
-                        if not hasattr(self, '_dequeue_attempt_count'):
-                            self._dequeue_attempt_count = 0
-                        self._dequeue_attempt_count += 1
-                        if self._dequeue_attempt_count <= 20:
-                            logger.info("[WS-PROCESSOR] Attempting dequeue #%d, queue_size=%d, timeout=%s", self._dequeue_attempt_count, self._ensure_msg_queue().qsize(), timeout)
-                        item = await asyncio.wait_for(self._ensure_msg_queue().get(), timeout=timeout)
-                        if self._dequeue_attempt_count <= 20:
-                            logger.info("[WS-PROCESSOR] Dequeue #%d succeeded, queue_size after=%d", self._dequeue_attempt_count, self._ensure_msg_queue().qsize())
-                        
-                        # CRITICAL DIAGNOSTIC: Log first few dequeue operations (reduced from 10 to 3)
-                        if not hasattr(self, '_dequeue_count'):
-                            self._dequeue_count = 0
-                        if self._dequeue_count < 3:
-                            self._dequeue_count += 1
-                            data = item[1] if isinstance(item, tuple) and len(item) == 2 else item
-                            logger.info("[WS-DEQUEUE-MSG] Message #%d dequeued: type=%s ticker=%s", 
-                                       self._dequeue_count, data.get('type'), data.get('ticker', data.get('market_ticker', 'unknown')))
-                        
+                        # First message in a batch can wait briefly; subsequent messages
+                        # must not sleep or we lose throughput under a fast producer.
+                        if i == 0:
+                            try:
+                                item = await asyncio.wait_for(self._ensure_msg_queue().get(), timeout=1.0)
+                            except asyncio.TimeoutError:
+                                break
+                        else:
+                            try:
+                                item = self._ensure_msg_queue().get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
                     except asyncio.TimeoutError:
                         break  # No more messages available
-                    
+
                     # Unpack priority tuple (priority, data) - data may be last element
                     if isinstance(item, tuple) and len(item) == 2:
                         _, data = item
                     else:
                         data = item  # Fallback for non-priority items
-                    
-                    # Process the message (fire-and-forget)
-                    self._process_single_message(callback, data)
+
+                    # PERFORMANCE FIX (2026-08-23): Build a task for each message and gather
+                    # them as a bounded batch. This keeps the queue from growing while still
+                    # limiting the number of in-flight coroutines to a single batch.
+                    task = self._process_single_message(callback, data)
+                    if task is not None:
+                        tasks.append(task)
                     messages_processed += 1
-                    
-                    # Cooperative yield every N messages to prevent starving the event loop
-                    if i > 0 and i % _COOPERATIVE_YIELD_EVERY == 0:
-                        await asyncio.sleep(0)
-                        
+
+                if tasks:
+                    # return_exceptions=True keeps a single failed callback from cancelling
+                    # the rest of the batch and allows us to continue draining.
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Yield control briefly if we did not fill the first slot of a batch.
+                if messages_processed == 0:
+                    await asyncio.sleep(0.001)
+
                 # If we processed nothing in batch mode, yield control briefly
                 if messages_processed == 0 and batch_size > 1:
                     await asyncio.sleep(0.001)
@@ -1688,7 +1813,7 @@ class KalshiWebSocket(EventVenueStream):
             self._run_callback_count = 0
         self._run_callback_count += 1
         if self._run_callback_count <= 10:
-            logger.info("[WS-RUN-CALLBACK] #%d: callback=%s running=%s type=%s", 
+            logger.debug("[WS-RUN-CALLBACK] #%d: callback=%s running=%s type=%s", 
                        self._run_callback_count, 
                        self._callback.__name__ if hasattr(self._callback, '__name__') else str(self._callback),
                        self._running, data.get('type'))
@@ -1729,35 +1854,35 @@ class KalshiWebSocket(EventVenueStream):
         except Exception as e:
             logger.warning(f"WS callback execution failed: {e}")
 
-    def _process_single_message(self, callback: Optional[Callable[[Any], None]], data: Dict[str, Any]) -> None:
-        """Process a single WS message (sync part that creates the async task).
-        
-        PHASE 1 FIX: Added hard 'never crash' wrapper for message handling.
+    def _process_single_message(self, callback: Optional[Callable[[Any], None]], data: Dict[str, Any]) -> Optional[asyncio.Task]:
+        """Process a single WS message and return the async task for the caller to await.
+
+        The caller (``_process_queue``) is responsible for awaiting the task so that
+        only a small, predictable number of callbacks are in flight at once.
         """
         # CRITICAL DIAGNOSTIC: Log first few callbacks to confirm callback chain is working
         if not hasattr(self, '_callback_count'):
             self._callback_count = 0
         self._callback_count += 1
         if self._callback_count <= 20:
-            logger.info("[WS-CALLBACK] _process_single_message #%d invoked: type=%s ticker=%s callback=%s", 
+            logger.debug("[WS-CALLBACK] _process_single_message #%d invoked: type=%s ticker=%s callback=%s", 
                        self._callback_count, data.get('type'), data.get('ticker', data.get('market_ticker', 'unknown')), callback.__name__ if hasattr(callback, '__name__') else str(callback))
         
         t0 = _time.monotonic()
+        task: Optional[asyncio.Task] = None
         try:
             # PHASE 1 FIX: Hard 'never crash' wrapper - ensure we always have a valid callback
             safe_callback = callback or self._noop_async_callback
             if not callable(safe_callback):
                 logger.warning("[WS-CALLBACK] CRITICAL: callback is not callable - using no-op")
                 safe_callback = self._noop_async_callback
-            
+
             event = self._parse_message(data)
             if event:
-                # Offload to background task so slow callbacks don't block queue drain
                 # CRASH-002: Hardened exception handling with health degradation
                 # SHUTDOWN FIX: Check if loop is closing before creating task
                 loop = asyncio.get_running_loop()
                 # Windows compatibility: Use safe is_closing check
-                # _WindowsSelectorEventLoop doesn't have is_closing method
                 if hasattr(loop, 'is_closing') and callable(getattr(loop, 'is_closing')):
                     is_closing = loop.is_closing()
                 else:
@@ -1795,13 +1920,13 @@ class KalshiWebSocket(EventVenueStream):
                                 # Windows fallback: assume loop is not closing
                                 is_closing = False
                             if not is_closing:
-                                _reconnect_task = asyncio.create_task(self._reconnect())
+                                _reconnect_task = self._spawn_tracked(self._reconnect(), name="kalshi-ws-reconnect")
+                                def _on_reconnect_done(t):
+                                    if not t.cancelled() and t.exception():
+                                        logger.error("Reconnect task failed: %s", t.exception())
+                                _reconnect_task.add_done_callback(_on_reconnect_done)
                             else:
                                 logger.debug("[WS-RECONNECT] Skipping reconnect task - loop is closing")
-                            def _on_reconnect_done(t):
-                                if not t.cancelled() and t.exception():
-                                    logger.error("Reconnect task failed: %s", t.exception())
-                            _reconnect_task.add_done_callback(_on_reconnect_done)
                 task.add_done_callback(_task_done_cb)
         except (ValueError, TypeError, RuntimeError) as e:
             logger.warning(
@@ -1823,11 +1948,13 @@ class KalshiWebSocket(EventVenueStream):
             if elapsed > self._process_time_max:
                 self._process_time_max = elapsed
             if elapsed > 0.050:  # > 50ms is suspicious
-                logger.warning(
+                logger.debug(
                     f"Slow WS parse: {elapsed*1000:.1f}ms for "
                     f"type={data.get('type')} market={data.get('ticker', '?')}"
                 )
-    
+
+        return task
+
     async def _handle_event_async(self, callback: Callable[[Any], None], event: Any, raw_data: Dict[str, Any]) -> None:
         """Handle a single event callback with timing and error isolation.
         
@@ -1838,7 +1965,7 @@ class KalshiWebSocket(EventVenueStream):
             self._async_callback_count = 0
         self._async_callback_count += 1
         if self._async_callback_count <= 10:
-            logger.info("[WS-ASYNC-CALLBACK] Async callback #%d invoked: type=%s callback=%s", 
+            logger.debug("[WS-ASYNC-CALLBACK] Async callback #%d invoked: type=%s callback=%s", 
                        self._async_callback_count, raw_data.get('type'), callback.__name__ if hasattr(callback, '__name__') else str(callback))
         
         t0 = _time.monotonic()
@@ -1874,7 +2001,7 @@ class KalshiWebSocket(EventVenueStream):
                     # Windows fallback: assume loop is not closing
                     is_closing = False
                 if not is_closing:
-                    await loop.run_in_executor(None, callback, event)
+                    await loop.run_in_executor(self._callback_executor, callback, event)
                 else:
                     logger.debug("[WS-EVENT] Skipping sync callback - loop is closing")
                 
@@ -2034,7 +2161,7 @@ class KalshiWebSocket(EventVenueStream):
                 # Windows fallback: assume loop is not closing
                 is_closing = False
             if not is_closing:
-                asyncio.create_task(self._sync_sequence_gap_with_rest(market_id, last + 1, seq))
+                self._spawn_tracked(self._sync_sequence_gap_with_rest(market_id, last + 1, seq), name="kalshi-ws-seq-gap-sync")
             else:
                 logger.debug(f"[WS-SYNC] Skipping sequence gap sync - loop is closing")
 
@@ -2998,13 +3125,13 @@ class KalshiWebSocket(EventVenueStream):
                             # Windows fallback: assume loop is not closing
                             is_closing = False
                         if not is_closing:
-                            _close_task = asyncio.create_task(self._graceful_close())
+                            _close_task = self._spawn_tracked(self._graceful_close(), name="kalshi-ws-graceful-close")
+                            def _on_close_done(t):
+                                if not t.cancelled() and t.exception():
+                                    logger.error("Graceful close task failed: %s", t.exception())
+                            _close_task.add_done_callback(_on_close_done)
                         else:
                             logger.debug("[WS-CLOSE] Skipping graceful close task - loop is closing")
-                        def _on_close_done(t):
-                            if not t.cancelled() and t.exception():
-                                logger.error("Graceful close task failed: %s", t.exception())
-                        _close_task.add_done_callback(_on_close_done)
                     loop.call_soon(_schedule_graceful_close)
                     # BUG-FIX (2026-05-12): Removed blocking time.sleep(0.5) from signal handler
                     # Signal handlers run in main thread; blocking sleep here can cause

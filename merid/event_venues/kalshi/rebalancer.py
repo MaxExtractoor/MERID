@@ -222,6 +222,24 @@ class PortfolioRebalancer:
             except Exception as exc:
                 logger.warning(f"Kill switch check failed during rebalance: {exc}")
 
+            # Production hardening: direct client order submission from the
+            # portfolio rebalancer is retired. Rebalance orders must originate
+            # as canonical OrderIntent objects and flow through order_router.
+            try:
+                from merid.settings import settings
+                if settings.is_production:
+                    logger.critical(
+                        "[rebalancer] Direct client order execution is retired in production. "
+                        "Use merid.event_venues.kalshi.order_router.route_order_async."
+                    )
+                    return {
+                        "executed": False,
+                        "reason": "rebalancer direct order execution retired in production",
+                        "actions_blocked": len(actions),
+                    }
+            except Exception:
+                pass
+
             # G13: VenueGate — block real rebalance orders in paper/sim mode
             try:
                 from merid.prediction.venue_gate import get_venue_gate

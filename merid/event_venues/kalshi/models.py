@@ -56,6 +56,7 @@ class KalshiMarket:
     floor_strike: Optional[float] = None
     cap_strike: Optional[float] = None
     custom_strike: Optional[Dict[str, Any]] = None
+    exchange_index: Optional[int] = None  # Kalshi exchange shard index (e.g. 2 for crypto 15m)
 
     def __post_init__(self):
         if self.tags is None:
@@ -357,9 +358,12 @@ class KalshiMarketState:
     - WS orderbook path: book_initialized, best_bid/ask_cents, mid_cents,
       spread_cents, top_of_book_size, depth_10c, yes_bids, no_bids,
       last_book_update_ts.
-    - REST path: volume_24h, open_interest, notional_value_cents, all three
-      expiry fields, seconds_to_expiry, last_rest_update_ts,
+    - REST metadata path: volume_24h, open_interest, notional_value_cents,
+      all three expiry fields, seconds_to_expiry, last_rest_update_ts,
       underlying, strike_price, floor_strike, cap_strike.
+    - REST quote path (per-feed BBO for cross-feed coherence): last_rest_bid_cents,
+      last_rest_ask_cents, last_rest_quote_update_ts.  This is only touched by
+      authoritative REST orderbook snapshots/deltas, never by catalog metadata.
     """
 
     ticker: str
@@ -415,6 +419,19 @@ class KalshiMarketState:
     last_rest_update_ts: float = 0.0
     last_update: Optional[datetime] = None  # UTC datetime of last state update
 
+    # Ticker quote fallback (from WS ticker channel).  Used as a redundant
+    # source of top-of-book prices when the orderbook channel is crossed or
+    # one-sided due to one-sided delta streams.
+    quoted_bid_cents: Optional[int] = None
+    quoted_ask_cents: Optional[int] = None
+    quote_received_ts: float = 0.0
+
+    # Diagnostic fallback quote in YES price space.  These are stored for
+    # telemetry but must never overwrite executable BBO after a crossed/invalid
+    # book has been detected.
+    fallback_yes_bid_cents: Optional[int] = None
+    fallback_yes_ask_cents: Optional[int] = None
+
     # Last good book tracking (for audit - tracks last known good state)
     last_good_bid_cents: Optional[int] = None
     last_good_ask_cents: Optional[int] = None
@@ -427,16 +444,67 @@ class KalshiMarketState:
     # P0-1 DOWNSTREAM: Data source tracking (WS_LIVE, REST_BOOTSTRAP, STALE_WS)
     data_source: str = "UNKNOWN"
 
+    # 2026-08-24: Quote ownership and timestamp tracking for WS/REST divergence
+    # diagnosis.  Each feed records the last BBO it authored and the local time it
+    # was received.  quote_owner is the feed that currently owns the executable BBO.
+    last_ws_bid_cents: Optional[int] = None
+    last_ws_ask_cents: Optional[int] = None
+    last_ws_update_ts: float = 0.0
+    last_rest_bid_cents: Optional[int] = None
+    last_rest_ask_cents: Optional[int] = None
+    last_rest_quote_update_ts: float = 0.0
+    quote_owner: str = "UNKNOWN"
+
     # P0-2 UPSTREAM: Data quality tracking (GOOD, BAD_DUALITY, INCOMPLETE, UNKNOWN)
     data_quality: str = "UNKNOWN"
 
     # Book consistency tracking (GOOD, SUSPECT) for queue overflow detection
     book_consistency: str = "GOOD"
 
+    # State-transition label for diagnostics and tests.
+    # VALID, RESYNC_REQUIRED, CIRCUIT_BREAKER, INVALID_INVERTED,
+    # INVALID_SEQUENCE_GAP, INVALID_UNKNOWN_MARKET
+    transition: str = "VALID"
+
+    # Explicit loss-aware book health state machine (2026-08-23).
+    # Canonical source of truth for the book's trustworthiness lifecycle.
+    book_health: str = "NO_SNAPSHOT"
+
+    # P1 HARDENING (2026-08-22): Cause that made the book invalid/break.
+    invalidation_cause: str = ""
+
+    # P1 HARDENING (2026-08-22): Required source class to recover.
+    #   LIVE_DELTA      - a contiguous WS delta after invariants pass
+    #   FULL_SNAPSHOT   - a full REST or clean WS snapshot
+    #   OPERATOR_RESET  - manual/admin override only
+    recovery_required_source: str = ""
+
     # Trade eligibility flag (separate from quote availability)
     # True only when: book is initialized with live data, market is not suspended,
     # and health state allows trading. Fallback quotes are never executable.
     executable: bool = False
+
+    # P0-2 HARDENING (2026-08-22): Attested recovery tracking.
+    # recovery_attested is set to True only when a clean, authoritative source
+    # (REST full orderbook, contiguous WS deltas, or an explicit test fixture)
+    # restores an INVALID / CIRCUIT_BREAKER book.  Catalog metadata and quote
+    # fallbacks must never clear a circuit breaker.
+    recovery_attested: bool = False
+    recovery_source: Optional[str] = None
+    recovery_ts: float = 0.0
+
+    # P1 HARDENING (2026-08-22): A bootstrap snapshot is a full book, but it is
+    # not yet live-sequence confirmed.  New entries should remain blocked until
+    # a contiguous WS delta (or REST refresh) confirms the sequence.
+    live_sequence_confirmed: bool = False
+
+    # 2026-08-24: Snapshot completion flag.  True only when a valid full
+    # orderbook snapshot has been applied to this market.  It is set by
+    # orderbook_snapshot messages and authoritative REST snapshots, persisted
+    # across live deltas, and explicitly reset on sequence gaps, invalidation,
+    # resync, reconnect, or ticker rollover.  This is the canonical gate behind
+    # the ENTRY-READINESS ``ws_snapshot_complete`` field.
+    snapshot_complete: bool = False
 
     # Liquidity audit fields (for MD-HEALTH logging and validation)
     has_bid: bool = False  # whether bid side exists
@@ -533,6 +601,9 @@ class KalshiMarketState:
     # P1 FIX: State consistency field
     # True if YES+NO != 100c (indicates orderbook application bug)
     state_inconsistent: bool = False
+
+    # Kalshi exchange shard index (e.g. 2 for crypto 15m markets)
+    exchange_index: Optional[int] = None
 
     # ── Derived helpers for UI ─────────────────────────────────────────
 

@@ -202,20 +202,28 @@ class UniverseManager:
         # Send alert to monitoring system
         try:
             # Try to send alert via Prometheus metrics
-            from prometheus_client import Counter, Gauge
+            from prometheus_client import Counter, Gauge, REGISTRY
 
-            # Create or get existing metrics
-            invariant_violation_counter = Counter(
-                'merid_universe_invariant_violations_total',
-                'Total number of universe invariant violations',
-                ['violation_type']
-            )
+            # Create or get existing metrics (reuse to avoid duplicate registration)
+            counter_name = 'merid_universe_invariant_violations_total'
+            gauge_name = 'merid_universe_invariant_violation_current'
+            try:
+                invariant_violation_counter = Counter(
+                    counter_name,
+                    'Total number of universe invariant violations',
+                    ['violation_type']
+                )
+            except ValueError:
+                invariant_violation_counter = REGISTRY._names_to_collectors.get(counter_name)
 
-            invariant_violation_gauge = Gauge(
-                'merid_universe_invariant_violation_current',
-                'Current universe invariant violation status (1=violation, 0=ok)',
-                ['violation_type']
-            )
+            try:
+                invariant_violation_gauge = Gauge(
+                    gauge_name,
+                    'Current universe invariant violation status (1=violation, 0=ok)',
+                    ['violation_type']
+                )
+            except ValueError:
+                invariant_violation_gauge = REGISTRY._names_to_collectors.get(gauge_name)
 
             # Increment counter for each violation type
             for violation in violations:

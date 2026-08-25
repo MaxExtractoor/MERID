@@ -14,8 +14,10 @@ from utils.logger import get_logger
 logger = get_logger("merid.event_venues.kalshi.ticker_utils")
 
 # Kalshi ticker regex pattern for 15m crypto markets
-# Format: KX{ASSET}15M-{DD}{MMM}{YY}{HH}{MM}
-# Example: KXBTC15M-26MAR251500
+# Format: KX{ASSET}15M-{YY}{MMM}{DD}{HHMM}  (YYMONDD, time in America/New_York)
+# Example: KXBTC15M-26AUG031530 -> year 2026, AUG, day 03, 15:30 ET
+# CRITICAL FIX (2026-08-03): groups were previously mislabeled DDMMMYYHHMM,
+# swapping day/year. API-confirmed via close_ts (see expiry_fallback.py).
 KALSHI_15M_TICKER_PATTERN = re.compile(
     r'^KX([A-Z]+)15M-(\d{2})([A-Z]{3})(\d{2})(\d{4})$'
 )
@@ -129,9 +131,10 @@ def parse_kalshi_ticker(ticker: str) -> Optional[ParsedKalshiTicker]:
     match = KALSHI_15M_TICKER_PATTERN.match(ticker.upper())
     if not match:
         return None
-    
-    asset, day_str, month, year_short, time_str = match.groups()
-    
+
+    # Groups are YY, MON, DD, HHMM (NOT DD, MON, YY, HHMM - see pattern comment)
+    asset, year_short, month, day_str, time_str = match.groups()
+
     try:
         day = int(day_str)
         hour = int(time_str[:2])
@@ -139,7 +142,7 @@ def parse_kalshi_ticker(ticker: str) -> Optional[ParsedKalshiTicker]:
         year = 2000 + int(year_short)  # Convert YY to YYYY
     except ValueError:
         return None
-    
+
     # Validate asset
     if asset not in VALID_CRYPTO_ASSETS:
         return ParsedKalshiTicker(
@@ -191,9 +194,10 @@ def _parse_kalshi_ticker_loose(ticker: str) -> Optional[ParsedKalshiTicker]:
     match = KALSHI_15M_TICKER_PATTERN.match(ticker.upper())
     if not match:
         return None
-    
-    asset, day_str, month, year_short, time_str = match.groups()
-    
+
+    # Groups are YY, MON, DD, HHMM (NOT DD, MON, YY, HHMM - see pattern comment)
+    asset, year_short, month, day_str, time_str = match.groups()
+
     try:
         day = int(day_str)
         hour = int(time_str[:2])
@@ -246,10 +250,10 @@ def normalize_ticker_time(ticker: str) -> str:
     
     # Floor minute to nearest 15m boundary
     floored_minute = (parsed.minute // 15) * 15
-    
-    # Reconstruct ticker with normalized time
+
+    # Reconstruct ticker with normalized time (canonical YYMONDDHHMM order)
     new_time = f"{parsed.hour:02d}{floored_minute:02d}"
-    normalized = f"KX{parsed.asset}15M-{parsed.day:02d}{parsed.month}{str(parsed.year)[2:]}{new_time}"
+    normalized = f"KX{parsed.asset}15M-{str(parsed.year)[2:]}{parsed.month}{parsed.day:02d}{new_time}"
     
     if normalized != ticker:
         logger.warning(f"[KALSHI_TICKER_NORMALIZED] {ticker} -> {normalized}")
@@ -312,22 +316,26 @@ def format_ticker_for_15m_window(asset: str, window_time: datetime) -> str:
     Returns:
         Formatted ticker string (e.g., "KXDOGE15M-26APR251915")
     """
-    # Ensure time is floored to 15m boundary
-    floored = floor_time_to_15m(window_time)
-    
-    # Format: KX{ASSET}15M-{DD}{MMM}{YY}{HH}{MM}
+    # Kalshi 15m tickers encode the window end in America/New_York (ET), not UTC
+    try:
+        from zoneinfo import ZoneInfo
+        floored = floor_time_to_15m(window_time.astimezone(ZoneInfo("America/New_York")))
+    except Exception:
+        floored = floor_time_to_15m(window_time)
+
+    # Format: KX{ASSET}15M-{YY}{MMM}{DD}{HHMM}  (YYMONDDHHMM, ET)
     month_map = {
         1: 'JAN', 2: 'FEB', 3: 'MAR', 4: 'APR', 5: 'MAY', 6: 'JUN',
         7: 'JUL', 8: 'AUG', 9: 'SEP', 10: 'OCT', 11: 'NOV', 12: 'DEC'
     }
-    
+
     day = floored.day
     month = month_map[floored.month]
     year_short = str(floored.year)[2:]
     hour = floored.hour
     minute = floored.minute
-    
-    return f"KX{asset.upper()}15M-{day:02d}{month}{year_short}{hour:02d}{minute:02d}"
+
+    return f"KX{asset.upper()}15M-{year_short}{month}{day:02d}{hour:02d}{minute:02d}"
 
 
 def normalize_ticker_for_order(ticker: str) -> str:

@@ -44,6 +44,8 @@ from merid.event_venues.kalshi.models import (
 )
 from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
 from merid.event_venues.kalshi.api_metrics import emit_api_metrics
+from merid.event_venues.kalshi.binary_price_space import legacy_to_v2, require_consistent_outcome_side, SideValidationError
+from merid.event_venues.kalshi.canonical_portfolio import PaginationIncomplete
 from merid.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -189,6 +191,20 @@ KALSHI_LOOP_RESET_COOLDOWN_S = 30.0  # Cooldown when circuit breaker trips
 KALSHI_MAX_TOTAL_RETRY_DURATION_S = 120.0  # Max total time spent retrying (2 minutes)
 
 KALSHI_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _format_count_fp(size) -> str:
+    """Format a Decimal/float size as a fixed-point string with 0-2 decimals.
+
+    V2 ``count_fp`` must be a fixed-point decimal string with 0-2 decimal places.
+    """
+    try:
+        size_decimal = Decimal(str(size))
+    except Exception:
+        size_decimal = Decimal(0)
+    if size_decimal == size_decimal.to_integral_value():
+        return str(int(size_decimal))
+    return f"{size_decimal:.2f}"
 
 
 # ── Kalshi-specific exceptions ───────────────────────────────────────────
@@ -434,6 +450,13 @@ class KalshiVenueClient(EventVenueClient):
         self._request_semaphore: Optional[asyncio.Semaphore] = None
         self._async_network_init_lock = threading.Lock()
 
+        # CRITICAL FIX (2026-08-13): keep one httpx.AsyncClient per event loop.
+        # Sharing/closing a client across the main loop and the catalog daemon
+        # thread's loop causes Windows IocpProactor InvalidStateError crashes.
+        self._clients_by_loop: Dict[int, httpx.AsyncClient] = {}
+        self._client_init_locks: Dict[int, asyncio.Lock] = {}
+        self._clients_lock = threading.Lock()
+
         # Event-loop tracking for auto-reset on loop mismatch (Windows startup optimization)
         self._client_loop_id: Optional[int] = None
         self._loop_check_lock = threading.Lock()
@@ -504,18 +527,40 @@ class KalshiVenueClient(EventVenueClient):
             self._request_semaphore = asyncio.Semaphore(KALSHI_MAX_CONCURRENT_REQUESTS)
     
     async def _reset_http_client_after_loop_error(self) -> None:
-        """Drop httpx client when the bound event loop was closed or replaced (e.g. asyncio.run)."""
-        if self._http_client is not None:
+        """Drop the current event loop's httpx client after a recoverable error.
+
+        CRITICAL: Never aclose() a client that was created in a different event
+        loop.  Calling aclose() across loops on Windows cancels pending I/O in the
+        other loop and triggers a fatal asyncio.exceptions.InvalidStateError in the
+        IocpProactor.  We only close a client from the loop it was bound to.
+        """
+        current_loop_id = self._get_current_loop_id()
+
+        # Remove this loop's client from the per-loop registry.
+        if current_loop_id is not None:
+            with self._clients_lock:
+                client = self._clients_by_loop.pop(current_loop_id, None)
+        else:
+            client = self._http_client
+            self._http_client = None
+
+        if client is not None:
             try:
-                if not self._http_client.is_closed:
-                    await self._http_client.aclose()
+                if not client.is_closed:
+                    if current_loop_id is not None:
+                        # The client we popped was bound to the current loop.
+                        await client.aclose()
+                    else:
+                        # No running loop; we cannot safely close from here.
+                        logger.debug("[kalshi] Dropping client without aclose() because no running loop")
             except Exception as _close_err:
                 logger.debug("[kalshi] HTTP client close error during reset: %s", _close_err)
+
+        # Reset the cached current-loop pointer only if it matched the loop we
+        # just dropped.  Clients for other loops stay in _clients_by_loop.
+        if self._client_loop_id == current_loop_id:
+            self._client_loop_id = None
             self._http_client = None
-        self._auth_token = None
-        self._rate_limiter = None
-        self._request_semaphore = None
-        self._client_loop_id = None  # Reset loop tracking
 
     def _get_current_loop_id(self) -> Optional[int]:
         """Get ID of current event loop, or None if no loop running."""
@@ -586,112 +631,97 @@ class KalshiVenueClient(EventVenueClient):
             return False
 
     async def _ensure_client(self) -> httpx.AsyncClient:
-        """Ensure HTTP client is initialized and authenticated.
-        
-        Auto-resets client if bound to a different event loop (Windows startup optimization).
-        This prevents "Event loop is closed" errors during startup when the client singleton
-        was created in a different loop context.
-        
-        Includes circuit breaker for repeated event loop resets to prevent reset storms.
-        """
-        # Initialize async lock lazily (can't create asyncio.Lock in __init__ without loop)
-        # CRITICAL FIX: Check if lock is bound to a different event loop and reset if so
-        if self._client_init_lock is None or not self._is_lock_bound_to_current_loop(self._client_init_lock):
-            self._client_init_lock = asyncio.Lock()
-        
-        # Fast path: client exists and is healthy
-        if self._http_client is not None and not self._http_client.is_closed:
-            if not self._is_loop_mismatch():
-                return self._http_client
-        
-        # Slow path: need to create or reset client - hold lock
-        async with self._client_init_lock:
-            # Double-check after acquiring lock
-            if self._http_client is not None and not self._http_client.is_closed:
-                if not self._is_loop_mismatch():
-                    return self._http_client
-            
-            # Check for event-loop mismatch and auto-reset (prevents retry storms)
-            if self._http_client is not None and self._is_loop_mismatch():
-                # Check circuit breaker for loop resets
-                now = _time.time()
-                
-                # Clean old reset history outside window
-                self._loop_reset_history = [
-                    ts for ts in self._loop_reset_history
-                    if now - ts < KALSHI_LOOP_RESET_WINDOW_S
-                ]
-                
-                # Check if circuit breaker is tripped
-                if self._loop_reset_circuit_tripped:
-                    if self._loop_reset_circuit_reset_ts and (now - self._loop_reset_circuit_reset_ts < KALSHI_LOOP_RESET_COOLDOWN_S):
-                        # Circuit breaker still tripped - raise error
-                        cooldown_remaining = KALSHI_LOOP_RESET_COOLDOWN_S - (now - self._loop_reset_circuit_reset_ts)
-                        raise RuntimeError(
-                            f"Event loop reset circuit breaker tripped. "
-                            f"Too many resets ({KALSHI_LOOP_RESET_THRESHOLD} in {KALSHI_LOOP_RESET_WINDOW_S}s). "
-                            f"Cooldown: {cooldown_remaining:.1f}s remaining"
-                        )
-                    else:
-                        # Cooldown expired - reset circuit breaker
-                        self._loop_reset_circuit_tripped = False
-                        self._loop_reset_circuit_reset_ts = None
-                        self._loop_reset_history = []
-                        logger.warning("[kalshi] Event loop reset circuit breaker cooldown expired, allowing resets")
-                
-                # Record this reset
-                self._loop_reset_history.append(now)
-                
-                # Check if we've exceeded threshold
-                if len(self._loop_reset_history) >= KALSHI_LOOP_RESET_THRESHOLD:
-                    self._loop_reset_circuit_tripped = True
-                    self._loop_reset_circuit_reset_ts = now
-                    logger.error(
-                        f"[kalshi] Event loop reset circuit breaker TRIPPED: "
-                        f"{len(self._loop_reset_history)} resets in {KALSHI_LOOP_RESET_WINDOW_S}s "
-                        f"(threshold: {KALSHI_LOOP_RESET_THRESHOLD}). "
-                        f"Cooldown for {KALSHI_LOOP_RESET_COOLDOWN_S}s"
-                    )
-                    raise RuntimeError(
-                        f"Event loop reset circuit breaker tripped. "
-                        f"Too many resets ({len(self._loop_reset_history)} in {KALSHI_LOOP_RESET_WINDOW_S}s)"
-                    )
-                
-                logger.debug("[kalshi] Event-loop mismatch detected, resetting HTTP client proactively")
-                await self._reset_http_client_after_loop_error()
+        """Return an HTTP client bound to the current event loop.
 
-            if self._http_client is None or self._http_client.is_closed:
-                logger.debug("[kalshi] Initializing new HTTP client")
-                # BUG-4: per-operation timeouts instead of a single global value
-                # BUG-4: per-operation timeouts instead of a single global value
-                # C4-FIX: Add connection pool limits to prevent exhaustion under burst load
-                self._http_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(
-                        connect=_KALSHI_CONNECT_TIMEOUT,
-                        read=_KALSHI_READ_TIMEOUT,
-                        write=_KALSHI_WRITE_TIMEOUT,
-                        pool=_KALSHI_POOL_TIMEOUT,
-                    ),
-                    limits=httpx.Limits(
-                        max_connections=200,
-                        max_keepalive_connections=50,
-                        keepalive_expiry=30.0,
-                    ),
-                    headers={
-                        "User-Agent": "MERID-Kalshi-Client/1.0",
-                        "Content-Type": "application/json"
-                    },
-                    verify=get_shared_ssl_context(),
-                )
-                # Track which loop this client is bound to
-                self._client_loop_id = self._get_current_loop_id()
-                # Authenticate immediately on new client
-                await self._authenticate()
+        CRITICAL FIX (2026-08-13): Each event loop keeps its own httpx.AsyncClient.
+        The previous singleton shared one client across the main loop and the catalog
+        refresh thread; cross-loop aclose() cancelled pending I/O and caused a fatal
+        asyncio.exceptions.InvalidStateError in the Windows IocpProactor.
+        """
+        current_loop_id = self._get_current_loop_id()
+        if current_loop_id is None:
+            raise RuntimeError("[kalshi] _ensure_client called with no running event loop")
+
+        # Make sure this loop has its own asyncio.Lock.
+        with self._clients_lock:
+            if current_loop_id not in self._client_init_locks:
+                self._client_init_locks[current_loop_id] = asyncio.Lock()
+            self._client_init_lock = self._client_init_locks[current_loop_id]
+            existing_client = self._clients_by_loop.get(current_loop_id)
+
+        # Backward-compatible / test fixture path: honor an externally-injected
+        # client (AsyncMock or httpx.AsyncClient) if it claims to be on the
+        # current loop.  Register it so the fast path works next time.
+        if (self._http_client is not None and
+            not self._http_client.is_closed and
+            (self._client_loop_id is None or self._client_loop_id == current_loop_id)):
+            with self._clients_lock:
+                self._clients_by_loop[current_loop_id] = self._http_client
+            self._client_loop_id = current_loop_id
+            self._ensure_async_network_resources()
             return self._http_client
+
+        # Fast path: healthy client for this loop.
+        if existing_client is not None and not existing_client.is_closed:
+            self._http_client = existing_client
+            self._client_loop_id = current_loop_id
+            self._ensure_async_network_resources()
+            return existing_client
+
+        # Slow path: create a new client for this loop.
+        async with self._client_init_lock:
+            # Re-check under lock in case another coroutine created it.
+            with self._clients_lock:
+                existing_client = self._clients_by_loop.get(current_loop_id)
+
+            if existing_client is not None and not existing_client.is_closed:
+                self._http_client = existing_client
+                self._client_loop_id = current_loop_id
+                self._ensure_async_network_resources()
+                return existing_client
+
+            logger.debug("[kalshi] Initializing new HTTP client for loop %s", current_loop_id)
+            new_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=_KALSHI_CONNECT_TIMEOUT,
+                    read=_KALSHI_READ_TIMEOUT,
+                    write=_KALSHI_WRITE_TIMEOUT,
+                    pool=_KALSHI_POOL_TIMEOUT,
+                ),
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+                headers={
+                    "User-Agent": "MERID-Kalshi-Client/1.0",
+                    "Content-Type": "application/json"
+                },
+                verify=get_shared_ssl_context(),
+            )
+
+            with self._clients_lock:
+                self._clients_by_loop[current_loop_id] = new_client
+
+            self._http_client = new_client
+            self._client_loop_id = current_loop_id
+            self._ensure_async_network_resources()
+            await self._authenticate()
+            return new_client
 
     async def connect(self) -> None:
         """Initialize HTTP client and authenticate."""
         await self._ensure_client()
+        # CRITICAL FIX (2026-08-22): Start the canonical portfolio reconciler
+        # once we have an authenticated client.  It publishes the authoritative
+        # exposure snapshot that the entry gate and all telemetry consumers use.
+        try:
+            from merid.event_venues.kalshi.canonical_portfolio_reconciler import (
+                get_canonical_portfolio_reconciler,
+            )
+            await get_canonical_portfolio_reconciler().start()
+        except Exception as e:
+            logger.warning("[kalshi-client] Failed to start canonical portfolio reconciler: %s", e)
     
     async def _authenticate(self) -> None:
         """Authenticate with Kalshi API."""
@@ -812,10 +842,7 @@ class KalshiVenueClient(EventVenueClient):
             raise RuntimeError("RSA private key not loaded. Check credentials and private_key_path.")
 
         # Timestamp in milliseconds (Kalshi requires this)
-        # Add 10000ms buffer to prevent "header timestamp expired" errors
-        # Based on Kalshi API research: timestamps too far in future are rejected
-        # 10s buffer handles network latency while avoiding "timestamp out of range" errors
-        ts_ms = str(int(_time.time() * 1000) + 10000)
+        ts_ms = str(int(_time.time() * 1000))
         message = ts_ms + method.upper() + path
         signature = self._private_key.sign(
             message.encode(),
@@ -835,14 +862,32 @@ class KalshiVenueClient(EventVenueClient):
         }
     
     async def close(self) -> None:
-        """Close HTTP client and clear auth state.
+        """Close the current event loop's HTTP client and clear auth state.
 
-        Safe to call multiple times (idempotent).
+        Safe to call multiple times (idempotent).  Clients bound to other event
+        loops are left for their own teardown to avoid cross-loop aclose() crashes.
         """
-        if self._http_client is not None and not self._http_client.is_closed:
-            await self._http_client.aclose()
+        current_loop_id = self._get_current_loop_id()
+        if current_loop_id is not None:
+            with self._clients_lock:
+                client = self._clients_by_loop.pop(current_loop_id, None)
+        else:
+            client = self._http_client
+
+        if client is not None and not client.is_closed:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
         self._http_client = None
         self._auth_token = None
+
+        if getattr(self, "_public", None) is not None:
+            try:
+                await self._public.close()
+            except Exception:
+                pass
 
     def __del__(self) -> None:
         """CRITICAL FIX: Auto-close client to prevent resource leaks."""
@@ -852,12 +897,16 @@ class KalshiVenueClient(EventVenueClient):
             # Don't warn for singleton - it has a dedicated cleanup path via close_kalshi_client()
             if getattr(self, '_is_singleton', False):
                 return
-            
-            # CRITICAL FIX: Attempt to close the client to prevent resource leaks
+
+            # CRITICAL FIX: Attempt to close the client to prevent resource leaks.
+            # In __del__ we cannot await, so only call close() when it is a plain
+            # synchronous method.  Async clients (httpx.AsyncClient, AsyncMock) must
+            # be closed by the caller with await/aclose() or via the singleton path.
             try:
-                # Use synchronous close since we're in __del__
-                if hasattr(http_client, 'close'):
-                    http_client.close()
+                import inspect
+                close_fn = getattr(http_client, 'close', None)
+                if close_fn is not None and not inspect.iscoroutinefunction(close_fn):
+                    close_fn()
                 # Only log once per process to reduce noise
                 if not hasattr(self.__class__, '_del_logged'):
                     logger.info(
@@ -1948,17 +1997,24 @@ class KalshiVenueClient(EventVenueClient):
         result = await self.place_order_result(order)
         return result.unwrap_or(None)
     
-    async def place_order_result(self, order: VenueOrder, order_group_id: Optional[str] = None, self_trade_prevention_type: Optional[str] = None) -> OperationResult[Optional[PlacedOrder]]:
+    async def place_order_result(
+        self,
+        order: VenueOrder,
+        order_group_id: Optional[str] = None,
+        self_trade_prevention_type: Optional[str] = None,
+        exchange_index: Optional[int] = None,
+    ) -> OperationResult[Optional[PlacedOrder]]:
         """Place order with explicit result.
 
-        Kalshi order format:
-          POST /portfolio/orders
-          {ticker, side, action, type, count, {side}_price, time_in_force, client_order_id}
-        
+        Kalshi V2 order format:
+          POST /portfolio/events/orders
+          {ticker, side, count, price, time_in_force, self_trade_prevention_type, client_order_id, exchange_index}
+
         Args:
             order: VenueOrder to place
             order_group_id: Optional order group ID for aggregate limits
             self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
+            exchange_index: Optional Kalshi exchange shard index (e.g. 2 for crypto 15m)
         """
         # PRODUCTION SAFETY: Block manual test order pathways unless explicitly allowed
         # Orders should flow through agent grid → risk manager → order router pipeline
@@ -1966,9 +2022,18 @@ class KalshiVenueClient(EventVenueClient):
         _allow_manual = os.getenv("DEBUG_ALLOW_MANUAL_ORDERS", "false").strip().lower() in ("true", "1", "yes")
         if not _allow_manual:
             # Check if this is a manual order (not from order_router)
-            # Order router sets source="agent_grid"; manual orders typically don't
+            # Order router sets source to one of the known automated pipeline sources;
+            # manual orders typically don't set a known source.
+            _allowed_sources = frozenset({
+                "agent_grid",
+                "merid.prediction.agent_grid_15m",
+                "position_monitor_exit",
+                "market_maker_15m",
+                "resting_bracket_take_profit",
+                "resting_bracket_stop_loss",
+            })
             _is_manual = True
-            if hasattr(order, "source") and order.source == "agent_grid":
+            if hasattr(order, "source") and getattr(order, "source") in _allowed_sources:
                 _is_manual = False
 
             if _is_manual:
@@ -1976,11 +2041,57 @@ class KalshiVenueClient(EventVenueClient):
                     "[MANUAL-ORDER-BLOCKED] Direct client order placement blocked. "
                     "Set DEBUG_ALLOW_MANUAL_ORDERS=true to enable for testing. "
                     "Production orders should flow through agent grid → risk manager → order router. "
-                    "ticker=%s side=%s size=%s",
-                    order.market_id, order.side, order.size
+                    "ticker=%s side=%s size=%s source=%s",
+                    order.market_id, order.side, order.size, getattr(order, "source", None)
                 )
                 return OperationResult.fail(
                     "Manual order placement blocked - use agent grid pipeline or set DEBUG_ALLOW_MANUAL_ORDERS=true",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+
+        # EXECUTION RISK FIREWALL TOKEN: reduce-only / exit orders must carry
+        # a valid firewall approval token in production. Unapproved direct client
+        # bypasses are rejected even if the source guard passed.
+        if getattr(order, "reduce_only", False) or order.side == "sell":
+            try:
+                from merid.event_venues.kalshi.execution_risk_firewall import ExecutionRiskFirewall
+                from merid.settings import settings
+
+                fw = ExecutionRiskFirewall.get_instance()
+                _observe_only = (
+                    os.getenv("MERID_EXIT_FIREWALL_OBSERVE_ONLY", "").strip().lower()
+                    in ("true", "1", "yes")
+                )
+                if settings.is_production and not _observe_only and not _allow_manual:
+                    approval = getattr(order, "firewall_approval_id", None)
+                    if not approval:
+                        logger.critical(
+                            "[CLIENT-FIREWALL-REJECT] ticker=%s client_order_id=%s "
+                            "reduce_only/exit order missing firewall approval token",
+                            order.market_id, getattr(order, "client_order_id", None)
+                        )
+                        return OperationResult.fail(
+                            "firewall:missing_approval_token",
+                            latency_ms=0.0,
+                            retries=0,
+                        )
+                    decision = fw.get_decision(getattr(order, "client_order_id", None) or "")
+                    if not decision or decision.decision_id != approval:
+                        logger.critical(
+                            "[CLIENT-FIREWALL-REJECT] ticker=%s client_order_id=%s "
+                            "invalid firewall approval token",
+                            order.market_id, getattr(order, "client_order_id", None)
+                        )
+                        return OperationResult.fail(
+                            "firewall:invalid_approval_token",
+                            latency_ms=0.0,
+                            retries=0,
+                        )
+            except Exception as exc:
+                logger.critical("[CLIENT-FIREWALL-ERROR] %s", exc, exc_info=True)
+                return OperationResult.fail(
+                    f"firewall:client_check_error:{exc}",
                     latency_ms=0.0,
                     retries=0,
                 )
@@ -2009,110 +2120,198 @@ class KalshiVenueClient(EventVenueClient):
                 retries=0,
             )
 
-        outcome = order.outcome_id or "yes"
-        action = order.side or "buy"
-        
-        # Kalshi V2 API uses bid/ask side for orderbook placement
-        # Map outcome + action to bid/ask per Kalshi semantics:
-        # - BUY_YES = bid (bidding to buy YES)
-        # - SELL_YES = ask (asking to sell YES)
-        # - BUY_NO = ask (equivalent to SELL_YES, both are long NO)
-        # - SELL_NO = bid (equivalent to BUY_YES, both are long YES)
-        # Reference: Kalshi quotes everything from YES side
-        if outcome == "yes" and action == "buy":
-            kalshi_side = "bid"
-        elif outcome == "yes" and action == "sell":
-            kalshi_side = "ask"
-        elif outcome == "no" and action == "buy":
-            kalshi_side = "ask"
-        elif outcome == "no" and action == "sell":
-            kalshi_side = "bid"
-        else:
-            # Fallback for unexpected combinations
-            logger.warning(
-                "[KALSHI-SIDE-MAPPING] Unexpected outcome/action combination: outcome=%s action=%s, defaulting to bid",
-                outcome, action
+        # CRITICAL FIX (2026-08-07): Kalshi V2 uses a single book (bid/ask) and
+        # cannot express "buy no" / "sell no" as the user's action. A V2 "ask"
+        # order is the counterparty's "sell yes", so notifications/positions
+        # always show the inverted counterparty label. The legacy V1 endpoint
+        # still accepts action/side directly and shows the user's intended
+        # direction. Opt-in via KALSHI_ORDER_API_VERSION=legacy; default is v2.
+        order_api_version = os.getenv("KALSHI_ORDER_API_VERSION", "v2").strip().lower()
+        if order_api_version in ("legacy", "v1"):
+            return await self._place_order_legacy(
+                order,
+                order_group_id=order_group_id,
+                self_trade_prevention_type=self_trade_prevention_type,
+                exchange_index=exchange_index,
             )
-            kalshi_side = "bid"
-        
-        kalshi_order: Dict[str, Any] = {
-            "ticker": ticker,
-            "side": kalshi_side,           # "bid" or "ask" (book side)
-            "action": action,              # "buy" or "sell" (your action)
-            "count": str(int(order.size)),  # V2 API requires count as string
-            "type": order.order_type,       # "limit" or "market"
-            "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
-            "self_trade_prevention_type": "taker_at_cross",  # V2 API required field (valid values: taker_at_cross, maker)
-        }
-        
-        # CRITICAL FIX: Format count_fp as fixed-point decimal with 0-2 decimal places
-        # Kalshi API requires: "must be a fixed-point decimal string with 0-2 decimal places"
-        # Use 0 decimal places for whole numbers (e.g., "1"), 2 for fractional (e.g., "1.50")
-        if order.size == int(order.size):
-            count_fp_str = str(int(order.size))
-        else:
-            count_fp_str = f"{order.size:.2f}"
-        
-        kalshi_order["count_fp"] = count_fp_str
 
-        # CRITICAL: Kalshi V2 API requires price as string in fixed-point dollars (e.g., "0.5600")
-        # (including market orders - the price is accepted but ignored for market orders)
+        outcome = (order.outcome_id or "yes").lower()
+        action = (order.side or "buy").lower()
+
+        # ── Resolve raw price in the intent's own price space ──────────────────
+        # CRITICAL FIX (2026-08-04): Round dollar prices to nearest cent before
+        # converting to cents and again before building the wire string.  Float
+        # noise from earlier paths (e.g. sweet-spot math) would otherwise produce
+        # wire prices like 0.49060000000000004.
         if order.price is not None:
-            _price_cents = int(order.price * 100)
-            # CRITICAL: Reject zero or negative prices
-            if _price_cents <= 0:
-                logger.error(
-                    "[KALSHI_ORDER_VALIDATION] Invalid price for order: %s cents | "
-                    "ticker=%s outcome=%s type=%s",
-                    _price_cents, ticker, outcome, order.order_type
-                )
-                return OperationResult.fail(
-                    f"Invalid order price: {_price_cents} cents (must be > 0)",
-                    latency_ms=0.0,
-                    retries=0,
-                )
-            
-            # CRITICAL: Price guard - prevent deep OTM longshots (10¢ minimum)
-            # This is the FINAL safety net before API call
-            min_price_cents = 10  # CRITICAL FIX: 10 cents / $0.10 minimum to match profile (was 15c)
-            try:
-                from merid.risk.profiles.crypto_15m_profile import get_active_profile
-                profile_adapter = get_active_profile()
-                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
-                    min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
-            except Exception as e:
-                logger.debug("[KALSHI_CLIENT] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
-            
-            if _price_cents < min_price_cents:
-                logger.critical(
-                    "[KALSHI_CLIENT_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s outcome=%s",
-                    _price_cents, min_price_cents, ticker, outcome
-                )
-                return OperationResult.fail(
-                    f"Deep OTM longshot blocked: price={_price_cents}c < {min_price_cents}c threshold",
-                    latency_ms=0.0,
-                    retries=0,
-                )
-            
-            # V2 API uses "price" field as string in fixed-point dollars (e.g., "0.5600")
-            _price_dollars = _price_cents / 100.0
-            kalshi_order["price"] = f"{_price_dollars:.4f}"
+            raw_price_cents = int(round(float(order.price) * 100))
+            price_source = "order.price"
         else:
-            # BUG-FIX: If no price provided, use midpoint (default) as fallback
-            # Kalshi requires a price field even for market orders
+            # BUG-FIX: If no price provided, use midpoint (default) as fallback.
+            # Kalshi requires a price field even for market orders.
             from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+            raw_price_cents = DEFAULT_KALSHI_PRICE_CENTS
+            price_source = "default_fallback"
             logger.warning(
                 "[KALSHI_ORDER_VALIDATION] No price provided for %s order on %s, using default fallback",
                 order.order_type, ticker
             )
-            _price_dollars = DEFAULT_KALSHI_PRICE_CENTS / 100.0
-            kalshi_order["price"] = f"{_price_dollars:.4f}"
+
+        # CRITICAL: Reject zero or negative prices
+        if raw_price_cents <= 0:
+            logger.error(
+                "[KALSHI_ORDER_VALIDATION] Invalid price for order: %s cents | "
+                "ticker=%s outcome=%s type=%s source=%s",
+                raw_price_cents, ticker, outcome, order.order_type, price_source
+            )
+            return OperationResult.fail(
+                f"Invalid order price: {raw_price_cents} cents (must be > 0)",
+                latency_ms=0.0,
+                retries=0,
+            )
+
+        # CRITICAL: Price guard - canonical 10¢-75¢ entry range.
+        # This is the FINAL safety net before API call and applies in the
+        # order's own price space (YES or NO) per binary_price_space invariants.
+        from merid.event_venues.kalshi.binary_price_space import CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
+        min_price_cents = CANONICAL_MIN_CENTS
+        max_price_cents = CANONICAL_MAX_CENTS
+
+        if not getattr(order, "reduce_only", False):
+            if raw_price_cents < min_price_cents:
+                logger.critical(
+                    "[KALSHI_CLIENT_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s outcome=%s",
+                    raw_price_cents, min_price_cents, ticker, outcome
+                )
+                return OperationResult.fail(
+                    f"Deep OTM longshot blocked: price={raw_price_cents}c < {min_price_cents}c threshold",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+            if raw_price_cents > max_price_cents:
+                logger.critical(
+                    "[KALSHI_CLIENT_BLOCKED] Extreme price rejected: price=%dc > %dc threshold | ticker=%s outcome=%s",
+                    raw_price_cents, max_price_cents, ticker, outcome
+                )
+                return OperationResult.fail(
+                    f"Extreme price blocked: price={raw_price_cents}c > {max_price_cents}c threshold",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+
+        # ── Single canonical legacy-to-V2 conversion ───────────────────────────
+        # Kalshi V2 /portfolio/events/orders uses BookSide only: "bid" or "ask".
+        # The wire price is always quoted in YES-space cents.  The mapping is:
+        #   BUY_YES  @ Y -> bid @ Y
+        #   SELL_YES @ Y -> ask @ Y
+        #   BUY_NO   @ N -> ask @ (100 - N)
+        #   SELL_NO  @ N -> bid @ (100 - N)
+        try:
+            kalshi_side, yes_space_price_cents = legacy_to_v2(action, outcome, raw_price_cents)
+        except ValueError as e:
+            logger.error(
+                "[KALSHI-LEGACY-TO-V2] Invalid legacy direction for ticker=%s: %s",
+                ticker, e
+            )
+            return OperationResult.fail(
+                f"Invalid legacy direction: action={action}, outcome={outcome}",
+                latency_ms=0.0,
+                retries=0,
+            )
+
+        # Decisive invariant: the only allowed transformation is the 100-p complement
+        # for NO-side orders.  Log the full intent-to-wire audit record here.
+        if outcome == "no":
+            expected_yes_price = 100 - raw_price_cents
+        else:
+            expected_yes_price = raw_price_cents
+        if yes_space_price_cents != expected_yes_price:
+            logger.critical(
+                "[KALSHI-PRICE-SPACE-INVARIANT] ticker=%s action=%s outcome=%s "
+                "raw_price=%dc yes_space_price=%dc expected=%dc",
+                ticker, action, outcome, raw_price_cents, yes_space_price_cents, expected_yes_price
+            )
+            return OperationResult.fail(
+                f"Price-space invariant violation: yes_space_price={yes_space_price_cents} "
+                f"expected={expected_yes_price}",
+                latency_ms=0.0,
+                retries=0,
+            )
+
+        _price_dollars = yes_space_price_cents / 100.0
+        wire_price = f"{_price_dollars:.4f}"
+
+        canonical_coid = getattr(order, "client_order_id", None) or getattr(order, "idempotency_key", None)
+        if not canonical_coid:
+            # In manual/test mode a VenueOrder may reach the client without a
+            # pre-finalized client_order_id. Generate a durable UUID and attach it
+            # to the order so retries reuse the same idempotency key.
+            if _allow_manual:
+                canonical_coid = f"merid_{uuid.uuid4().hex[:20]}"
+                order.client_order_id = canonical_coid
+                logger.warning(
+                    "[KALSHI-V2-WIRE] auto-generated client_order_id=%s for ticker=%s (manual mode)",
+                    canonical_coid,
+                    ticker,
+                )
+            else:
+                logger.critical(
+                    "[KALSHI-V2-WIRE] client_order_id missing for ticker=%s; failing closed",
+                    ticker,
+                )
+                return OperationResult.fail(
+                    "client_order_id missing",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+
+        # count_fp is the canonical fixed-point quantity.  Both ``count`` and
+        # ``count_fp`` are sent as fixed-point strings so they always agree; the
+        # API documents that both fields must match when both are supplied.
+        count_fp_str = _format_count_fp(order.size)
+        count_str = count_fp_str
+
+        # Resolve exchange shard from explicit argument or the order itself.
+        # Kalshi crypto 15m markets live on exchange_index=2; routing without it
+        # lands on the default shard and produces a 404 market_not_found.
+        _wire_exchange_index = exchange_index if exchange_index is not None else getattr(order, "exchange_index", None)
+
+        kalshi_order: Dict[str, Any] = {
+            "ticker": ticker,
+            "side": kalshi_side,           # V2 BookSide: "bid" (outcome=yes) or "ask" (outcome=no)
+            "count": count_str,            # V2 API requires count as string
+            "type": order.order_type,       # "limit" or "market" (legacy helper, V2 ignores it)
+            "client_order_id": canonical_coid,
+            "self_trade_prevention_type": "taker_at_cross",  # V2 API required field (valid values: taker_at_cross, maker)
+            "reduce_only": getattr(order, "reduce_only", False),
+            "price": wire_price,
+        }
+        if _wire_exchange_index is not None:
+            kalshi_order["exchange_index"] = _wire_exchange_index
+
+        kalshi_order["count_fp"] = count_fp_str
 
         # Kalshi Trade API v2: enum is good_till_canceled | immediate_or_cancel | fill_or_kill
         kalshi_order["time_in_force"] = merid_time_in_force_to_kalshi_api(
             getattr(order, "time_in_force", None) or "GTC"
         )
-        
+
+        # CRITICAL FIX (2026-08-19): Kalshi V2 CreateOrderRequest uses the field name
+        # ``expiration_time`` (an absolute timestamp), not ``expiration_ts``.  The
+        # live API currently expects a Unix-epoch *seconds* integer; passing
+        # nanoseconds causes a 400 "expiration_time must be in seconds" rejection.
+        # IOC/FOK never carry an expiration.
+        if kalshi_order["time_in_force"] == "good_till_canceled":
+            exp_ts = getattr(order, "expiration_ts", None)
+            if exp_ts is not None:
+                try:
+                    kalshi_order["expiration_time"] = int(exp_ts)
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "[KALSHI-V2-WIRE] Invalid expiration_ts=%r for ticker=%s; omitting expiration_time",
+                        exp_ts, ticker
+                    )
+
         # Add optional STP and order group
         if order_group_id:
             kalshi_order["order_group_id"] = order_group_id
@@ -2123,10 +2322,59 @@ class KalshiVenueClient(EventVenueClient):
         if getattr(order, "post_only", False):
             kalshi_order["post_only"] = True
 
+        # Canonical V2 wire mapping: book_side is the *only* direction field in the
+        # CreateOrderV2 request.  Log it explicitly so the human-readable intent is
+        # unambiguous (e.g. "SELL_NO" -> bid, "BUY_NO" -> ask).
+        logger.info(
+            "[KALSHI-V2-WIRE] canonical=%s_%s book_side=%s price=%s yes_space_cents=%s ticker=%s size=%s exchange_index=%s",
+            action, outcome, kalshi_side,
+            kalshi_order.get("price", "N/A"),
+            yes_space_price_cents,
+            ticker, int(order.size),
+            _wire_exchange_index,
+        )
+
         # DEBUG: Log kalshi_order dict before sending to API to verify self_trade_prevention_type is present
         logger.info(f"[ORDER-SUBMIT-DEBUG] kalshi_order keys: {list(kalshi_order.keys())}")
         logger.info(f"[ORDER-SUBMIT-DEBUG] self_trade_prevention_type present: {'self_trade_prevention_type' in kalshi_order}, value: {kalshi_order.get('self_trade_prevention_type', 'MISSING')}")
         logger.info(f"[ORDER-SUBMIT-DEBUG] Full kalshi_order JSON: {kalshi_order}")
+
+        # ── Decisive audit trace (submit-time fields) ───────────────────────────
+        # This is the single correlated record the audit requires.  Fill-time
+        # fields are logged later in a matching record keyed by client_order_id.
+        tif = getattr(order, "time_in_force", None) or "GTC"
+        trace_record = {
+            "event": "submit",
+            "intent_id": getattr(order, "intent_id", None),
+            "client_order_id": kalshi_order["client_order_id"],
+            "ticker": ticker,
+            "strategy_thesis": getattr(order, "thesis_side", None),
+            "strategy_leg": getattr(order, "entry_or_exit", None),
+            "legacy_action": action,
+            "legacy_outcome_side": outcome,
+            "legacy_price_cents": raw_price_cents,
+            "canonical_exposure_before": None,  # filled by position_cache after fill
+            "v2_book_side": kalshi_side,
+            "v2_yes_price_cents": yes_space_price_cents,
+            "reduce_only": kalshi_order.get("reduce_only"),
+            "time_in_force": tif,
+            "exchange_index": _wire_exchange_index,
+            "raw_http_request_body": json.dumps(kalshi_order, sort_keys=True),
+        }
+        # Invariant: for every BUY_NO / SELL_NO the YES-space price is the 100-p complement.
+        if outcome == "no":
+            expected = 100 - raw_price_cents
+            if yes_space_price_cents != expected:
+                logger.critical(
+                    "[ORDER-TRACE-INVARIANT-FAIL] client_order_id=%s outcome=no "
+                    "legacy_price=%dc v2_yes_price=%dc expected=%dc",
+                    kalshi_order["client_order_id"], raw_price_cents,
+                    yes_space_price_cents, expected
+                )
+        logger.info(
+            "[ORDER-TRACE-SUBMIT] %s",
+            json.dumps(trace_record, default=str, sort_keys=True)
+        )
 
         # Log order submission with key metadata
         logger.info(
@@ -2156,13 +2404,258 @@ class KalshiVenueClient(EventVenueClient):
                 latency_ms=result.latency_ms,
                 retries=result.retries,
             )
-        
+
+        placed = self._to_placed_order(result.data.get("order", result.data))
+
+        # ── Decisive audit trace (fill/response-time fields) ────────────────────
+        response_data = result.data.get("order", result.data) or {}
+        _avg_fill_price_raw = response_data.get("average_fill_price")
+        try:
+            avg_fill_price = Decimal(str(_avg_fill_price_raw)) if _avg_fill_price_raw not in (None, "") else None
+        except (ValueError, TypeError):
+            avg_fill_price = None
+        avg_fill_yes_price_cents = (
+            int(round(float(avg_fill_price) * 100)) if avg_fill_price is not None else None
+        )
+        fill_count = response_data.get("fill_count") or response_data.get("filled_count")
+        try:
+            immediate_fill_count = int(fill_count) if fill_count is not None else None
+        except (ValueError, TypeError):
+            immediate_fill_count = None
+
+        fill_trace = {
+            "event": "fill",
+            "client_order_id": kalshi_order["client_order_id"],
+            "kalshi_order_id": placed.order_id if placed else response_data.get("order_id") or response_data.get("id"),
+            "immediate_fill_count": immediate_fill_count,
+            "average_fill_yes_price_cents": avg_fill_yes_price_cents,
+            "confirmed_exposure_after": None,  # updated by position_cache after reconciliation
+            "realized_pnl_cents": None,        # updated by position_cache after reconciliation
+        }
+        logger.info(
+            "[ORDER-TRACE-FILL] %s",
+            json.dumps(fill_trace, default=str, sort_keys=True)
+        )
+
+        return OperationResult.ok(
+            placed,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
+    
+    async def _place_order_legacy(
+        self,
+        order: VenueOrder,
+        order_group_id: Optional[str] = None,
+        self_trade_prevention_type: Optional[str] = None,
+        exchange_index: Optional[int] = None,
+    ) -> OperationResult[Optional[PlacedOrder]]:
+        """Place order using the legacy V1 ``POST /portfolio/orders`` endpoint.
+
+        Kalshi's V2 order endpoint models the unified order book with a single
+        ``book_side`` (``bid``/``ask``) and a single ``price``.  That means an
+        internally-canonical ``buy no`` must be wired as an ``ask`` (``sell
+        yes`` to the counterparty).  The user's Kalshi feed therefore shows the
+        *counterparty's* action, not MERID's intended action.
+
+        The legacy V1 endpoint still accepts explicit ``action`` (``buy``/
+        ``sell``) and ``side`` (``yes``/``no``) and returns an ``Order`` object
+        with those fields, so ``buy no``/``sell no`` orders appear with the
+        user's intended labels.  It is deprecated and rate-limited, but is the
+        only way to make NO-side entries/exits display correctly.
+
+        Price handling: ``order.price`` is in the selected outcome's own price
+        space (NO-space for NO orders, YES-space for YES orders).  V1 expects
+        the matching ``*_price_dollars`` field, so we send it directly without
+        the YES-space inversion required by V2.
+        """
+        # PRODUCTION SAFETY: Block manual test order pathways unless explicitly allowed
+        _allow_manual = (
+            os.getenv("DEBUG_ALLOW_MANUAL_ORDERS", "false").strip().lower()
+            in ("true", "1", "yes")
+        )
+        if not _allow_manual:
+            _allowed_sources = frozenset({
+                "agent_grid",
+                "merid.prediction.agent_grid_15m",
+                "position_monitor_exit",
+                "market_maker_15m",
+                "resting_bracket_take_profit",
+                "resting_bracket_stop_loss",
+            })
+            _is_manual = True
+            if hasattr(order, "source") and getattr(order, "source") in _allowed_sources:
+                _is_manual = False
+
+            if _is_manual:
+                logger.warning(
+                    "[MANUAL-ORDER-BLOCKED] Direct client order placement blocked. "
+                    "Set DEBUG_ALLOW_MANUAL_ORDERS=true to enable for testing. "
+                    "Production orders should flow through agent grid → risk manager → order router. "
+                    "ticker=%s side=%s size=%s source=%s",
+                    order.market_id, order.side, order.size, getattr(order, "source", None),
+                )
+                return OperationResult.fail(
+                    "Manual order placement blocked - use agent grid pipeline or set DEBUG_ALLOW_MANUAL_ORDERS=true",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+
+        ticker = order.market_id
+
+        # Pre-send validation: verify ticker exists in catalog to prevent 404s
+        valid, error_msg = await _validate_ticker_exists(ticker)
+        if not valid:
+            logger.error("[KALSHI_PRE_SEND_VALIDATION] Rejecting order for invalid ticker: %s", error_msg)
+            return OperationResult.fail(
+                error_msg or f"Invalid ticker: {ticker}",
+                latency_ms=0.0,
+                retries=0,
+            )
+
+        outcome = (order.outcome_id or "yes").lower()
+        action = (order.side or "buy").lower()
+
+        if outcome not in ("yes", "no"):
+            return OperationResult.fail(
+                f"Invalid outcome_id: {outcome}",
+                latency_ms=0.0,
+                retries=0,
+            )
+        if action not in ("buy", "sell"):
+            return OperationResult.fail(
+                f"Invalid side (action): {action}",
+                latency_ms=0.0,
+                retries=0,
+            )
+
+        # client_order_id is the V1 idempotency mechanism.
+        client_order_id = (
+            order.client_order_id
+            or order.idempotency_key
+            or f"merid_{datetime.now(timezone.utc).timestamp()}"
+        )
+
+        # Format count_fp as fixed-point decimal with 0-2 decimal places.
+        if order.size == int(order.size):
+            count_fp_str = str(int(order.size))
+        else:
+            count_fp_str = f"{order.size:.2f}"
+
+        kalshi_order: Dict[str, Any] = {
+            "ticker": ticker,
+            "action": action,
+            "side": outcome,
+            "client_order_id": client_order_id,
+            "count_fp": count_fp_str,
+            "type": order.order_type,
+            "time_in_force": merid_time_in_force_to_kalshi_api(
+                getattr(order, "time_in_force", None) or "GTC"
+            ),
+            "self_trade_prevention_type": self_trade_prevention_type or "taker_at_cross",
+        }
+        if exchange_index is not None:
+            kalshi_order["exchange_index"] = exchange_index
+
+        if order_group_id:
+            kalshi_order["order_group_id"] = order_group_id
+        if getattr(order, "post_only", False):
+            kalshi_order["post_only"] = True
+        if getattr(order, "reduce_only", False):
+            kalshi_order["reduce_only"] = True
+        if getattr(order, "expiration_ts", None) is not None:
+            kalshi_order["expiration_ts"] = int(order.expiration_ts)
+
+        if order.price is not None:
+            # CRITICAL: V1 uses side-appropriate *_price_dollars fields. The
+            # internal order.price is already in the selected outcome's own
+            # price space, so no YES-space inversion is required.
+            _price_cents = int(round(float(order.price) * 100))
+            if _price_cents <= 0:
+                logger.error(
+                    "[KALSHI_ORDER_VALIDATION] Invalid price for order: %s cents | ticker=%s outcome=%s type=%s",
+                    _price_cents, ticker, outcome, order.order_type,
+                )
+                return OperationResult.fail(
+                    f"Invalid order price: {_price_cents} cents (must be > 0)",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+
+            # CRITICAL: Price guard - canonical 10c-75c entry range (entries only).
+            # Exits/reduce-only orders may cross the book at any valid 1c-99c
+            # price to close a position.
+            from merid.event_venues.kalshi.binary_price_space import CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
+
+            if not getattr(order, "reduce_only", False):
+                if _price_cents < CANONICAL_MIN_CENTS:
+                    logger.critical(
+                        "[KALSHI_CLIENT_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s outcome=%s",
+                        _price_cents, CANONICAL_MIN_CENTS, ticker, outcome,
+                    )
+                    return OperationResult.fail(
+                        f"Deep OTM longshot blocked: price={_price_cents}c < {CANONICAL_MIN_CENTS}c threshold",
+                        latency_ms=0.0,
+                        retries=0,
+                    )
+                if _price_cents > CANONICAL_MAX_CENTS:
+                    logger.critical(
+                        "[KALSHI_CLIENT_BLOCKED] Extreme price rejected: price=%dc > %dc threshold | ticker=%s outcome=%s",
+                        _price_cents, CANONICAL_MAX_CENTS, ticker, outcome,
+                    )
+                    return OperationResult.fail(
+                        f"Extreme price blocked: price={_price_cents}c > {CANONICAL_MAX_CENTS}c threshold",
+                        latency_ms=0.0,
+                        retries=0,
+                    )
+
+            _price_dollars = _price_cents / 100.0
+            if outcome == "yes":
+                kalshi_order["yes_price_dollars"] = f"{_price_dollars:.4f}"
+            else:
+                kalshi_order["no_price_dollars"] = f"{_price_dollars:.4f}"
+        else:
+            # BUG-FIX: If no price provided, use midpoint (default) as fallback.
+            from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+
+            logger.warning(
+                "[KALSHI_ORDER_VALIDATION] No price provided for %s order on %s, using default fallback",
+                order.order_type, ticker,
+            )
+            _price_dollars = DEFAULT_KALSHI_PRICE_CENTS / 100.0
+            if outcome == "yes":
+                kalshi_order["yes_price_dollars"] = f"{_price_dollars:.4f}"
+            else:
+                kalshi_order["no_price_dollars"] = f"{_price_dollars:.4f}"
+
+        price_field = "yes_price_dollars" if outcome == "yes" else "no_price_dollars"
+        logger.info(
+            "[KALSHI-V1-WIRE] canonical=%s_%s action=%s side=%s %s=%s ticker=%s size=%s",
+            action, outcome,
+            action, outcome,
+            price_field,
+            kalshi_order.get(price_field, "N/A"),
+            ticker,
+            count_fp_str,
+        )
+
+        result = await self._request_with_resilience(
+            "POST", "/portfolio/orders", json_data=kalshi_order, operation_name="place_order_legacy"
+        )
+
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+
         return OperationResult.ok(
             self._to_placed_order(result.data.get("order", result.data)),
             latency_ms=result.latency_ms,
             retries=result.retries,
         )
-    
+
     async def cancel_order(self, order_id: str, market_id: Optional[str] = None) -> bool:
         """Cancel an order.
         
@@ -3390,6 +3883,15 @@ class KalshiVenueClient(EventVenueClient):
                 logger.warning(f"get_open_orders: Hit max_pages limit ({max_pages}), returning {len(all_orders)} orders")
                 break
 
+        if cursor:
+            return OperationResult.fail(
+                PaginationIncomplete("MAX_PAGES"),
+                latency_ms=total_latency,
+                retries=total_retries,
+                data=all_orders,
+                metadata={"truncated": True, "pages_fetched": page + 1, "records_fetched": len(all_orders)},
+            )
+
         return OperationResult.ok(
             all_orders,
             latency_ms=total_latency,
@@ -3445,20 +3947,26 @@ class KalshiVenueClient(EventVenueClient):
             for pos_data in result.data.get("market_positions", []):
                 position = self._parse_position(pos_data)
                 if position:
-                    all_positions.append(self._to_venue_position(position))
+                    venue_position = self._to_venue_position(position, raw_data=pos_data)
+                    if venue_position:
+                        all_positions.append(venue_position)
 
             # Parse event_positions (if present)
             for pos_data in result.data.get("event_positions", []):
                 position = self._parse_position(pos_data)
                 if position:
-                    all_positions.append(self._to_venue_position(position))
+                    venue_position = self._to_venue_position(position, raw_data=pos_data)
+                    if venue_position:
+                        all_positions.append(venue_position)
 
             # Fallback to legacy "positions" field if present
             if "positions" in result.data:
                 for pos_data in result.data.get("positions", []):
                     position = self._parse_position(pos_data)
                     if position:
-                        all_positions.append(self._to_venue_position(position))
+                        venue_position = self._to_venue_position(position, raw_data=pos_data)
+                        if venue_position:
+                            all_positions.append(venue_position)
 
             cursor = result.data.get("cursor")
             if not cursor:
@@ -3470,6 +3978,16 @@ class KalshiVenueClient(EventVenueClient):
             if page >= max_pages - 1:
                 logger.warning(f"get_positions: Hit max_pages limit ({max_pages}), returning {len(all_positions)} positions")
                 break
+
+        if cursor:
+            # Pagination was truncated.  Do not return a partial list as complete.
+            return OperationResult.fail(
+                PaginationIncomplete("MAX_PAGES"),
+                latency_ms=total_latency,
+                retries=total_retries,
+                data=all_positions,
+                metadata={"truncated": True, "pages_fetched": page + 1, "records_fetched": len(all_positions)},
+            )
 
         return OperationResult.ok(
             all_positions,
@@ -3525,7 +4043,7 @@ class KalshiVenueClient(EventVenueClient):
             for trade_data in result.data.get("trades", []):
                 trade = self._parse_trade(trade_data)
                 if trade:
-                    all_trades.append(self._to_venue_trade(trade))
+                    all_trades.append(self._to_venue_trade(trade, raw_data=trade_data))
                     remaining -= 1
 
             cursor = result.data.get("cursor")
@@ -3862,6 +4380,13 @@ class KalshiVenueClient(EventVenueClient):
 
         if cursor:
             logger.warning(f"get_fills: Hit max_pages limit ({max_pages}), returning partial data")
+            return OperationResult.fail(
+                PaginationIncomplete("MAX_PAGES"),
+                latency_ms=total_latency,
+                retries=total_retries,
+                data=all_fills,
+                metadata={"truncated": True, "pages_fetched": page + 1, "records_fetched": len(all_fills)},
+            )
 
         return OperationResult.ok(
             all_fills,
@@ -4053,7 +4578,20 @@ class KalshiVenueClient(EventVenueClient):
 
         for mp in mps:
             t = mp.get("market_ticker")
-            side = mp.get("side", "yes")
+
+            # Quarantine positions with missing or inconsistent side data.
+            try:
+                side = require_consistent_outcome_side(
+                    mp,
+                    context=f"kalshi_client pnl ticker={t}",
+                )
+            except SideValidationError as side_err:
+                logger.error(
+                    "[PNL-SIDE-INVALID] %s: excluding position from PnL calculation: %s",
+                    t, side_err,
+                )
+                continue
+
             contracts = int(mp.get("contracts", 0) or mp.get("count", 0))
             avg_price = Decimal(str(mp.get("avg_price", 0)))
             mark = marks.get(t)
@@ -4311,6 +4849,21 @@ class KalshiVenueClient(EventVenueClient):
             # Kalshi may use "subtitle" instead of "category"
             category = data.get("category") or data.get("subtitle")
             
+            # Preserve strike metadata from the raw market record so it flows
+            # into EventMarket.raw_data and the catalog enrich step.
+            floor = data.get("floor_strike")
+            cap = data.get("cap_strike")
+            strike = data.get("strike_price")
+            custom = data.get("custom_strike")
+
+            def _to_float(v):
+                if v is None:
+                    return None
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
             return KalshiMarket(
                 ticker=data.get("ticker", ""),
                 event_ticker=data.get("event_ticker", ""),
@@ -4334,7 +4887,12 @@ class KalshiVenueClient(EventVenueClient):
                 resolution_source=data.get("resolution_source"),
                 tags=data.get("tags", []),
                 can_close_position=data.get("can_close_position", True),
-                created_at=self._parse_datetime(data.get("created_at"))
+                created_at=self._parse_datetime(data.get("created_at")),
+                strike_price=_to_float(strike),
+                floor_strike=_to_float(floor),
+                cap_strike=_to_float(cap),
+                custom_strike=custom if isinstance(custom, dict) else None,
+                exchange_index=int(data["exchange_index"]) if data.get("exchange_index") not in (None, "") else None,
             )
             
         except (ValueError, TypeError, KeyError) as e:
@@ -4342,17 +4900,28 @@ class KalshiVenueClient(EventVenueClient):
             return None
     
     def _parse_datetime(self, value: Any) -> Optional[datetime]:
-        """Parse datetime from various formats."""
+        """Parse datetime from various formats.
+
+        CRITICAL FIX (2026-08-03): parse failures were silently swallowed with a
+        generic debug log, dropping critical timing fields (expiration_time,
+        close_time, created_at) with no trace. Now logs value + error at WARNING.
+        Also: int timestamps were assumed milliseconds - values < 1e12 are
+        seconds (1.7e9 range), otherwise ms (1.7e12 range).
+        """
         if not value:
             return None
         try:
-            if isinstance(value, int):
-                # Unix timestamp
-                return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+            if isinstance(value, (int, float)):
+                # Unix timestamp: heuristic ms vs s (now ~1.75e9 s / ~1.75e12 ms)
+                ts = value / 1000 if value > 1e12 else float(value)
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
             elif isinstance(value, str):
                 return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            logger.debug("silent catch in client:3074")
+            else:
+                logger.warning("[PARSE-DATETIME] Unsupported type %s value=%r - returning None",
+                               type(value).__name__, value)
+        except (ValueError, TypeError, OverflowError, OSError) as e:
+            logger.warning("[PARSE-DATETIME] Failed to parse %r: %s - timing field dropped", value, e)
         return None
     
     def _to_event_market(self, market: KalshiMarket) -> EventMarket:
@@ -4394,6 +4963,21 @@ class KalshiVenueClient(EventVenueClient):
                 "volume": int(market.volume) if market.volume is not None else None,
                 "status": market.status,
                 "close_time": market.close_time.isoformat() if market.close_time else None,
+                "strike_price": market.strike_price,
+                "floor_strike": market.floor_strike,
+                "cap_strike": market.cap_strike,
+                "custom_strike": market.custom_strike,
+                "yes_bid_dollars": (
+                    float(market.outcomes[0].best_bid) / 100
+                    if market.outcomes and market.outcomes[0].best_bid is not None
+                    else None
+                ),
+                "yes_ask_dollars": (
+                    float(market.outcomes[0].best_ask) / 100
+                    if market.outcomes and market.outcomes[0].best_ask is not None
+                    else None
+                ),
+                "exchange_index": market.exchange_index,
             }
         )
     
@@ -4455,26 +5039,116 @@ class KalshiVenueClient(EventVenueClient):
             bids=bids,
             asks=asks,
             timestamp=datetime.now(timezone.utc),
-            venue="kalshi"
+            venue="kalshi",
+            raw_data=data,
         )
     
     def _to_placed_order(self, data: Dict[str, Any]) -> Optional[PlacedOrder]:
-        """Convert to PlacedOrder."""
+        """Convert a Kalshi order response (V1 or V2) to PlacedOrder.
+
+        V1 ``Order`` objects expose ``action``, ``side``, ``*_price_dollars``
+        and ``*_count_fp`` fields.  V2 ``CreateOrderV2Response`` objects are
+        smaller and expose ``fill_count`` / ``remaining_count`` fixed-point
+        strings and ``average_fill_price`` in dollars.  This parser handles
+        both shapes and a number of legacy variants.
+        """
+
+        def _safe_decimal(value: Any) -> Optional[Decimal]:
+            if value is None or value == "":
+                return None
+            try:
+                return Decimal(str(value))
+            except (ValueError, TypeError):
+                return None
+
+        def _fp_count(*keys: str) -> Decimal:
+            for key in keys:
+                value = data.get(key)
+                if value is not None and value != "":
+                    dec = _safe_decimal(value)
+                    if dec is not None:
+                        return dec
+            return Decimal("0")
+
+        def _order_price() -> Optional[Decimal]:
+            # V1 order response: side-specific dollar price strings.
+            for field in ("yes_price_dollars", "no_price_dollars"):
+                value = data.get(field)
+                if value is not None and value != "":
+                    return _safe_decimal(value)
+
+            # V2 create response and some fills: average fill price in dollars.
+            avg = data.get("average_fill_price")
+            if avg is not None and avg != "":
+                return _safe_decimal(avg)
+
+            # Legacy V1 integer cents fields.
+            for field in ("yes_price", "no_price", "price"):
+                value = data.get(field)
+                if value is not None and value != "":
+                    dec = _safe_decimal(value)
+                    if dec is not None:
+                        # These are usually in cents when they are integer > 1.
+                        if dec > Decimal("1.0"):
+                            return dec / 100
+                        return dec
+            return None
+
         try:
+            # size: prefer initial/remaining/fill fixed-point strings.
+            size = _fp_count("initial_count_fp", "count_fp", "count")
+            if size == Decimal("0"):
+                # V2 create response only has fill_count + remaining_count;
+                # derive the initial size from those.
+                filled = _fp_count("fill_count", "filled_count")
+                remaining = _fp_count("remaining_count")
+                size = filled + remaining
+
+            filled_size = _fp_count("fill_count_fp", "fill_count", "filled_count")
+            remaining_size = _fp_count("remaining_count_fp", "remaining_count", "initial_count_fp", "count_fp", "count")
+
+            # side in PlacedOrder is the user action (buy/sell). V1 Order has
+            # action directly. V2 may lack it; fall back to outcome/book-side
+            # inference if available.
+            side = data.get("action") or ""
+            if side not in ("buy", "sell"):
+                book_side = (data.get("book_side") or "").lower()
+                outcome_side = (data.get("outcome_side") or data.get("side") or "").lower()
+                if outcome_side in ("yes", "no"):
+                    # V2 response semantics: the API reports the counterparty's
+                    # perspective.  Our BUY_NO appears as the counterparty's SELL_YES
+                    # (book=ask, outcome=yes), and our SELL_NO appears as the
+                    # counterparty's BUY_YES (book=bid, outcome=yes).  If Kalshi
+                    # instead echoes the user's outcome_side, the mapping below still
+                    # recovers the user's action correctly.
+                    #
+                    # User action -> response book/outcome:
+                    # BUY_YES  -> book=bid,  outcome=yes
+                    # SELL_YES -> book=ask,  outcome=yes
+                    # BUY_NO   -> book=ask,  outcome=no  (or counterparty: book=ask, outcome=yes)
+                    # SELL_NO  -> book=bid,  outcome=no  (or counterparty: book=bid, outcome=yes)
+                    if book_side == "bid":
+                        side = "buy" if outcome_side == "yes" else "sell"
+                    elif book_side == "ask":
+                        side = "sell" if outcome_side == "yes" else "buy"
+
+            price = _order_price()
+
             return PlacedOrder(
                 order_id=data.get("order_id", data.get("id", "")),
                 market_id=data.get("ticker", ""),
-                side=data.get("action", ""),
-                size=Decimal(str(data.get("count", 0))),
-                price=Decimal(str(data.get("price", 0))) / 100 if data.get("price") else None,
-                filled_size=Decimal(str(data.get("filled_count", 0))),
-                remaining_size=Decimal(str(data.get("remaining_count", data.get("count", 0)))),
+                side=side,
+                size=size,
+                price=price,
+                filled_size=filled_size,
+                remaining_size=remaining_size,
                 status=data.get("status", "pending"),
                 venue="kalshi",
-                created_at=self._parse_datetime(data.get("created_at"))
+                created_at=self._parse_datetime(data.get("created_at")),
+                raw_data=data,
             )
         except (ValueError, TypeError, KeyError) as e:
-            logger.warning(f"Failed to parse Kalshi order: {e}")
+            logger.warning("Failed to parse Kalshi order: %s", e)
             return None
     
     def _parse_position(self, data: Dict[str, Any]) -> Optional[KalshiPosition]:
@@ -4492,31 +5166,61 @@ class KalshiVenueClient(EventVenueClient):
             elif "count" in data:
                 # Legacy format: count is an integer
                 count = int(data.get("count", 0))
-            
+
+            # CRITICAL FIX (2026-08-04): Kalshi REST may express positions as negative
+            # `position_fp` values with an empty or missing `side` field. In the V2 API a
+            # negative position_fp conventionally means the position is on the NO side
+            # (short YES / long NO). Convert the sign into an explicit side so downstream
+            # components do not treat the position as invalid and wipe the cache.
+            side = data.get("side", "")
+            if count < 0:
+                count = -count
+                if side == "yes":
+                    side = "no"
+                elif side == "no":
+                    side = "yes"
+                else:
+                    side = "no"  # Fallback: negative position_fp convention = NO
+                logger.info(
+                    "[KALSHI-POSITION-PARSE] Negative position_fp for %s: normalized to side=%s count=%d",
+                    data.get("ticker") or data.get("market_ticker", "unknown"),
+                    side,
+                    count,
+                )
+            elif not side:
+                side = "yes"  # Default for legacy positive positions
+
+            ticker = data.get("ticker") or data.get("market_ticker") or data.get("market_id") or data.get("event_ticker", "")
+
             # Handle both new format (realized_pnl_dollars) and legacy format (realized_pnl)
+            # CRITICAL FIX (2026-08-03): *_dollars fields are DOLLARS; internal convention
+            # is CENTS (legacy fields were cents). Convert at parse time so
+            # _to_venue_position's /100 is correct for both paths (was 100x shrink).
             realized_pnl = None
             if "realized_pnl_dollars" in data:
-                realized_pnl = Decimal(str(data.get("realized_pnl_dollars", 0)))
+                realized_pnl = Decimal(str(data.get("realized_pnl_dollars", 0))) * 100
             elif "realized_pnl" in data:
                 realized_pnl = Decimal(str(data.get("realized_pnl", 0)))
-            
+
             # Handle both new format (market_exposure_dollars) and legacy format (unrealized_pnl)
             unrealized_pnl = None
             if "market_exposure_dollars" in data:
                 # New format: market_exposure_dollars is exposure, not unrealized PnL
                 # For now, treat as unrealized PnL for compatibility
-                unrealized_pnl = Decimal(str(data.get("market_exposure_dollars", 0)))
+                unrealized_pnl = Decimal(str(data.get("market_exposure_dollars", 0))) * 100
             elif "unrealized_pnl" in data:
                 unrealized_pnl = Decimal(str(data.get("unrealized_pnl", 0)))
-            
+
             # Handle avg_price - new format may not include it, calculate from exposure/position
+            # CRITICAL FIX (2026-08-03): exposure/count is in DOLLARS; convert to cents
+            # (was divided by 100 again downstream -> 100x too small entry prices).
             avg_price = Decimal("0")
             if "avg_price" in data:
                 avg_price = Decimal(str(data.get("avg_price", 0)))
             elif "market_exposure_dollars" in data and count > 0:
                 # Calculate avg_price from exposure and position count
                 exposure = Decimal(str(data.get("market_exposure_dollars", 0)))
-                avg_price = exposure / Decimal(count) if count > 0 else Decimal("0")
+                avg_price = (exposure / Decimal(count)) * 100 if count > 0 else Decimal("0")
             
             # Handle total_cost - new format uses total_cost_dollars
             total_cost = Decimal("0")
@@ -4525,9 +5229,16 @@ class KalshiVenueClient(EventVenueClient):
             elif "total_cost_dollars" in data:
                 total_cost = Decimal(str(data.get("total_cost_dollars", 0)))
             
+            # CRITICAL FIX (2026-08-13): Do NOT invert the average price for NO positions.
+            # Kalshi's MarketPosition exposes market_exposure_dollars (positive cost) and
+            # a signed position_fp. Dividing cost by the absolute position size yields the
+            # price in the position's own outcome space (NO price for a NO position).
+            # Legacy raw `avg_price` fields, when present, are also outcome-side.
+            pass
+
             return KalshiPosition(
-                ticker=data.get("ticker", ""),
-                side=data.get("side", ""),
+                ticker=ticker,
+                side=side,
                 count=count,
                 avg_price=avg_price,
                 total_cost=total_cost,
@@ -4539,8 +5250,16 @@ class KalshiVenueClient(EventVenueClient):
             logger.warning(f"Failed to parse Kalshi position: {e} data={data}")
             return None
     
-    def _to_venue_position(self, pos: KalshiPosition) -> VenuePosition:
-        """Convert to VenuePosition."""
+    def _to_venue_position(self, pos: KalshiPosition, raw_data: Optional[Dict[str, Any]] = None) -> Optional[VenuePosition]:
+        """Convert to VenuePosition.
+
+        Returns None for zero-size or unidentifiable positions so the port
+        does not feed closed/aggregate event positions into the ledger.
+        """
+        if not pos.ticker:
+            return None
+        if pos.count <= 0:
+            return None
         return VenuePosition(
             market_id=pos.ticker,
             outcome_id=pos.side,
@@ -4549,7 +5268,8 @@ class KalshiVenueClient(EventVenueClient):
             unrealized_pnl=pos.unrealized_pnl / 100 if pos.unrealized_pnl else None,
             realized_pnl=pos.realized_pnl / 100 if pos.realized_pnl else None,
             venue="kalshi",
-            created_at=pos.created_at
+            created_at=pos.created_at,
+            raw_data=raw_data,
         )
     
     def _parse_trade(self, data: Dict[str, Any]) -> Optional[KalshiTrade]:
@@ -4569,7 +5289,7 @@ class KalshiVenueClient(EventVenueClient):
             logger.warning(f"Failed to parse Kalshi trade: {e}")
             return None
     
-    def _to_venue_trade(self, trade: KalshiTrade) -> VenueTrade:
+    def _to_venue_trade(self, trade: KalshiTrade, raw_data: Optional[Dict[str, Any]] = None) -> VenueTrade:
         """Convert to VenueTrade."""
         return VenueTrade(
             trade_id=trade.trade_id,
@@ -4580,7 +5300,8 @@ class KalshiVenueClient(EventVenueClient):
             price=trade.price / 100,  # Convert cents to dollars
             fee=trade.fee / 100,
             timestamp=trade.timestamp,
-            venue="kalshi"
+            venue="kalshi",
+            raw_data=raw_data,
         )
 
     # ------------------------------------------------------------------------

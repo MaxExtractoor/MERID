@@ -14,7 +14,7 @@ Key features:
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List, Set
 from collections import defaultdict
 import time
@@ -201,15 +201,24 @@ class RoundTripMonitor:
         
         entry = self._entries[entry_intent_id]
         if exit_timestamp is None:
-            exit_timestamp = datetime.utcnow()
-        
+            exit_timestamp = datetime.now(timezone.utc)
+
+        # Normalize timestamps for subtraction (legacy entries may be naive)
+        if exit_timestamp.tzinfo is None:
+            exit_timestamp = exit_timestamp.replace(tzinfo=timezone.utc)
+        entry_timestamp = entry.timestamp
+        if entry_timestamp is None:
+            entry_timestamp = exit_timestamp
+        elif entry_timestamp.tzinfo is None:
+            entry_timestamp = entry_timestamp.replace(tzinfo=timezone.utc)
+
         # Calculate PnL
         if entry.action == "buy":
             pnl_cents = (exit_price_cents - entry.price_cents) * entry.count
         else:
             pnl_cents = (entry.price_cents - exit_price_cents) * entry.count
-        
-        hold_seconds = (exit_timestamp - entry.timestamp).total_seconds()
+
+        hold_seconds = (exit_timestamp - entry_timestamp).total_seconds()
         
         # Check for SL violation
         sl_violation = False

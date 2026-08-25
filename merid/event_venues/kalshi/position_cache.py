@@ -1261,7 +1261,11 @@ class KalshiPositionCache:
                 avg_entry_price_cents=cached_position.avg_price_cents,
                 opened_at=cached_position.entry_fill_timestamp or datetime.now(timezone.utc),
                 take_profit_price_cents=final_tp_price,
-                stop_loss_enabled=sl_enabled and final_sl_price is not None,
+                # CRITICAL FIX (2026-08-25): Do not disable the stop-loss just
+                # because no SL price is known.  Position.__post_init__ will
+                # derive a fallback hard stop from the exchange-reported entry
+                # price so REST-synced positions are protected.
+                stop_loss_enabled=sl_enabled,
                 stop_loss_price_cents=final_sl_price,
                 risk_params_state=monitor_risk_params_state,
                 risk_params_schema_version=2,

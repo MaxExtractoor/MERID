@@ -39,7 +39,7 @@ PRE_EXPIRY_CANCEL_THRESHOLD_MIN = 2  # 2 minutes before settlement
 
 # Max hold time for 15m markets: cancel unfilled limit orders after 2-3 minutes
 # This prevents stale orders from resting too long in fast-moving 15m markets
-MAX_HOLD_SECONDS_15M = 180  # 3 minutes for 15m markets
+MAX_HOLD_SECONDS_15M = 60  # 1 minute for 15m markets - stale IOC/GTC orders must not persist
 
 # Status constants for Kalshi portfolio endpoint normalization
 TERMINAL_STATUSES = {"filled", "canceled", "expired", "rejected", "executed"}
@@ -214,13 +214,18 @@ class RestingOrderMonitor:
         """
         try:
             import yaml
-            from merid.profile_resolver import get_active_profile
-            
-            profile_name = get_active_profile()
-            config_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / f"{profile_name}.yaml"
+            import os
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+
+            adapter = get_active_profile()
+            if adapter is not None:
+                config_path = adapter.profile_path
+            else:
+                profile_name = os.getenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+                config_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / f"{profile_name}.yaml"
             
             if config_path.exists():
-                with open(config_path, "r") as f:
+                with open(config_path, "r", encoding="utf-8") as f:
                     config = yaml.safe_load(f)
                 
                 exit_policy = config.get("exit_policy", {})
@@ -457,6 +462,10 @@ class RestingOrderMonitor:
             from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
             
             # Check if this is an exit order using client_order_id or intent_id as source
+            # CRITICAL FIX (2026-08-10): Use canonical signed-YES exposure against
+            # the current position, not the raw action string. A SELL that reduces
+            # an existing same-side position is an exit; a SELL that opens new
+            # exposure is an entry and may be cancelled by entry-specific rules.
             is_exit = False
             if record.client_order_id and is_exit_order_from_source(record.client_order_id):
                 is_exit = True
@@ -464,6 +473,25 @@ class RestingOrderMonitor:
                 is_exit = True
             elif record.exit_policy_id and is_exit_order_from_source(record.exit_policy_id):
                 is_exit = True
+            else:
+                try:
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                    from merid.event_venues.kalshi.exit_order_utils import (
+                        is_exit_order_from_signed_yes,
+                    )
+                    from merid.event_venues.kalshi.binary_price_space import yes_delta
+                    position = get_position_cache().get_position(record.ticker)
+                    if position is not None:
+                        pre_yes_cc = position._yes_exposure()
+                        size_cc = int(getattr(record, "remaining_size", 0) or 0) * 100
+                        order_yes_delta_cc = int(yes_delta(
+                            (record.action or "").lower(),
+                            (record.side or "").lower(),
+                            size_cc,
+                        ))
+                        is_exit = is_exit_order_from_signed_yes(pre_yes_cc, order_yes_delta_cc)
+                except Exception:
+                    is_exit = False
             
             if is_exit:
                 logger.info(
@@ -893,13 +921,31 @@ class RestingOrderMonitor:
     
     async def start(self) -> None:
         """Start the resting order monitor.
-        
+
         Starts both the portfolio polling loop and the signal re-check loop.
+        Before starting the loops, reconciles local risk exposure with the venue
+        and cancels stale resting orders so old GTC orders cannot block new IOC
+        entries.
         """
         if self._running:
             logger.warning("[RESTING_ORDER_MONITOR] Already running")
             return
-        
+
+        # STARTUP RECONCILIATION: cancel stale resting orders and align local
+        # exposure tracking with the venue before any new signals are handled.
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import reconcile_unified_risk_with_venue
+            recon_result = await reconcile_unified_risk_with_venue()
+            logger.info(
+                "[RESTING_ORDER_MONITOR] Startup reconciliation complete: "
+                "canceled=%s quarantined=%s confirmed_open_notional=$%.2f",
+                recon_result.get("canceled_order_ids", []),
+                recon_result.get("quarantined_order_ids", []),
+                recon_result.get("confirmed_open_notional_usd", 0.0),
+            )
+        except Exception as e:
+            logger.error("[RESTING_ORDER_MONITOR] Startup reconciliation failed (proceeding): %s", e)
+
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._task = asyncio.create_task(self._run_loop())
@@ -1156,7 +1202,9 @@ class RestingOrderMonitor:
             # Route the retry order
             result = await route_order_async(new_intent)
 
-            if result.success:
+            # Exit retries are only successful when they actually execute.
+            # A zero-fill IOC or resting order still leaves the original position open.
+            if result and result.has_execution:
                 # Update tracking with new order ID
                 new_order_id = result.order_id
                 del self._exit_states[state.order_id]

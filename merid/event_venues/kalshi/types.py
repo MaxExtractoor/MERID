@@ -83,24 +83,31 @@ class InternalBankroll:
     """
     equity_usd: Decimal           # Total equity (cash + positions)
     available_cash_usd: Decimal   # Spendable cash for new trades (conservative sizing)
-    max_riskable_frac: Decimal    # Configurable (e.g., 0.02 for 2%)
+    max_riskable_frac: Decimal    # Legacy percentage fallback (e.g., 0.02 for 2%)
     as_of: datetime
     source: str
     state: BalanceState
-    
+    max_position_cap_usd: Optional[Decimal] = None  # Absolute $ cap (takes precedence)
+
     @property
     def max_position_usd(self) -> Decimal:
-        """Maximum single position size based on available cash * risk fraction.
-        
-        Uses available_cash (not total equity) to avoid over-leveraging.
+        """Maximum single position size.
+
+        Uses the configured absolute cap if present, capped by available cash.
+        Falls back to the legacy percentage-based calculation only when no
+        absolute cap is configured (and logs a diagnostic).
         """
-        return self.available_cash_usd * self.max_riskable_frac
-    
+        if self.max_position_cap_usd is not None and self.max_position_cap_usd > 0:
+            return min(self.available_cash_usd, self.max_position_cap_usd)
+        if self.max_riskable_frac is not None and self.max_riskable_frac > 0:
+            return self.available_cash_usd * self.max_riskable_frac
+        return Decimal("0")
+
     @property
     def locked_cash_usd(self) -> Decimal:
         """Cash locked in positions (equity - available)."""
         return self.equity_usd - self.available_cash_usd
-    
+
     def with_state(self, state: BalanceState) -> InternalBankroll:
         """Return copy with different state (for stale/error transitions)."""
         return InternalBankroll(
@@ -110,6 +117,7 @@ class InternalBankroll:
             as_of=self.as_of,
             source=self.source,
             state=state,
+            max_position_cap_usd=self.max_position_cap_usd,
         )
 
 

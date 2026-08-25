@@ -79,11 +79,12 @@ import random
 import threading
 import time
 import asyncio
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from merid.event_venues.kalshi.models import KalshiMarketState
 from merid.event_venues.kalshi.orderbook import LocalOrderbook, MultiMarketOrderbook
@@ -258,6 +259,7 @@ _CROSS_VALIDATION_THRESHOLD_PCT = float(os.getenv("KALSHI_CROSS_VALIDATION_THRES
 
 # Production safeguards
 _MAX_QUOTE_TTL_SECONDS = float(os.getenv("KALSHI_MAX_QUOTE_TTL_SECONDS", "15.0"))  # Maximum age for any quote before rejection - relaxed for 15M markets
+_MAX_QUOTE_OVERRIDE_AGE_SECONDS = float(os.getenv("KALSHI_MAX_QUOTE_OVERRIDE_AGE_SECONDS", "5.0"))  # Max age for ticker fallback override
 _CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv("KALSHI_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "10"))  # Consecutive failures before suspension (relaxed for spotty internet)
 _CIRCUIT_BREAKER_RECOVERY_SECONDS = float(os.getenv("KALSHI_CIRCUIT_BREAKER_RECOVERY_SECONDS", "300.0"))  # Time before attempting recovery (5 min for spotty internet)
 _CIRCUIT_BREAKER_MAX_BACKOFF_SECONDS = float(os.getenv("KALSHI_CIRCUIT_BREAKER_MAX_BACKOFF_SECONDS", "60.0"))  # Maximum backoff for retries
@@ -268,10 +270,51 @@ _MAX_WS_AGE_SECONDS = float(os.getenv("KALSHI_MAX_WS_AGE_SECONDS", "30.0"))  # 3
 # P0-2 UPSTREAM: Duality violation threshold (YES + NO should be ~100c)
 _DUALITY_EPSILON_CENTS = float(os.getenv("KALSHI_DUALITY_EPSILON_CENTS", "1.0"))  # 1c tolerance
 
+# ── State recovery attestation constants (2026-08-22) ──────────────────────
+# Only these sources are allowed to lift an INVALID or CIRCUIT_BREAKER state
+# and mark a market executable again.  Catalog metadata / REST market feeds,
+# quote-only fallbacks, or unconfirmed WS snapshots must not silently recover.
+_RECOVERY_SOURCES = {"REST_FULL_ORDERBOOK", "WS_ORDERBOOK_DELTA_LIVE", "WS_CLEAN_SNAPSHOT"}
+
+# Bootstrap snapshot sources carry a full book but are not live-sequence
+# confirmed.  They can initialize a fresh market, but cannot recover an
+# INVALID/CIRCUIT_BREAKER state.
+_BOOTSTRAP_SOURCES = {"BOOTSTRAP_VALID_BUT_UNCONFIRMED"}
+
+
+def _recovery_required_for_transition(transition: Optional[str]) -> str:
+    """Return the class of recovery source required for a transition label."""
+    if transition == "CIRCUIT_BREAKER":
+        return "FULL_SNAPSHOT"
+    if transition == "INVALID_SEQUENCE_GAP":
+        return "FULL_SNAPSHOT"
+    if transition == "INVALID_UNKNOWN_MARKET":
+        return "FULL_SNAPSHOT"
+    if transition == "INVALID_INVERTED":
+        return "LIVE_DELTA"
+    return "LIVE_DELTA"
+
+
+def _source_satisfies_recovery(source: str, required: str) -> bool:
+    """Check whether ``source`` satisfies the ``required`` recovery class."""
+    if not required:
+        return source in _RECOVERY_SOURCES
+    if required == "LIVE_DELTA":
+        return source == "WS_ORDERBOOK_DELTA_LIVE"
+    if required == "FULL_SNAPSHOT":
+        return source in {"REST_FULL_ORDERBOOK", "WS_CLEAN_SNAPSHOT"}
+    if required == "OPERATOR_RESET":
+        return False  # not attested by any data feed
+    return source in _RECOVERY_SOURCES
+
 # ── Connection Health Watchdog Configuration ───────────────────────────────
 # Separate from data staleness - tracks WS connection health
 _WS_HEALTH_WATCHDOG_SECONDS = float(os.getenv("KALSHI_WS_HEALTH_WATCHDOG_SECONDS", "15.0"))  # 15s watchdog for WS health
 # If no WS message (heartbeat, ping/pong, or orderbook delta) received within this time, mark connection suspect
+
+# 2026-08-24: Maximum time to wait for a first/reset snapshot before declaring
+# a snapshot timeout and actively requesting a fresh one.
+_SNAPSHOT_TIMEOUT_SECONDS = float(os.getenv("MERID_KALSHI_SNAPSHOT_TIMEOUT_SECONDS", "10.0"))
 
 # ── Regime-Aware Staleness Thresholds ───────────────────────────────────────
 # Based on time-to-expiry and market conditions
@@ -299,6 +342,22 @@ class QuoteHealth(str, Enum):
     DEGRADED = "degraded"  # Using REST because primary missing/stale, but REST shows open & fresh
     STALE = "stale"  # Very old quote, use with caution (added for graduated health levels)
     SUSPENDED = "suspended"  # Conflicting data, closed/paused state, or repeated failures
+
+
+class BookHealth(str, Enum):
+    """Explicit lifecycle state for an orderbook under loss-aware WS processing.
+
+    These states are the canonical source of truth for the book's trustworthiness
+    and are designed to make every transition observable in logs.
+    """
+    NO_SNAPSHOT = "NO_SNAPSHOT"                # No snapshot yet; deltas are pending
+    SNAPSHOT_RECEIVED = "SNAPSHOT_RECEIVED"    # Authoritative full book received
+    SEQUENCE_VALIDATING = "SEQUENCE_VALIDATING"  # Checking first/next delta sequence
+    LIVE = "LIVE"                              # Contiguous deltas confirmed; book trusted
+    GAP_DETECTED = "GAP_DETECTED"              # Non-contiguous sequence observed
+    INVALID = "INVALID"                        # Book deemed untrusted
+    RESYNC_REQUESTED = "RESYNC_REQUESTED"      # Resync scheduled/in-flight
+    RECOVERED = "RECOVERED"                    # Clean snapshot or contiguous delta restored trust
 
 
 def is_book_degenerate(yes_bid_cents: Optional[int], yes_ask_cents: Optional[int],
@@ -601,12 +660,16 @@ class KalshiMarketStateStore:
         # LOCK CONTENTION FIX: Per-ticker queues for batched delta application
         # This eliminates LOCK BUSY drops by buffering deltas and applying them in batches
         self._delta_queues: Dict[str, deque] = {}  # Per-ticker queues for orderbook deltas
+        self._delta_queue_locks: Dict[str, threading.Lock] = {}  # Per-ticker locks for the queues
         self._MAX_PER_TICKER_QUEUE = 50000  # Max deltas per ticker before overflow (increased to handle extreme WS volume)
         self._batch_worker_running = False
         self._batch_worker_thread: Optional[threading.Thread] = None
-        # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume
-        # Process 500 deltas per batch every 0.5ms = 1M deltas/sec per ticker max throughput
-        self._batch_interval_ms = 10.0  # Process batches every 10ms (increased to reduce CPU contention and improve queue processing)
+        # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume.
+        # With the bridge queue at ~30k/32k, the batch worker must drain faster than the
+        # orderbook delta rate. Process 500 deltas every 10ms = 50k deltas/sec/ticker.
+        self._batch_interval_ms = 10.0  # Process batches every 10ms
+        # Event-driven adaptive batching: wake worker immediately on new deltas.
+        self._batch_worker_event = threading.Event()
 
         # DIAGNOSTIC: Update counter for tracking MD updates
         self._update_count = 0
@@ -636,6 +699,13 @@ class KalshiMarketStateStore:
         # P3 Gap 16: Per-asset lock contention monitoring
         self._lock_contention_count: Dict[str, int] = {}  # Lock contention count per ticker
         self._lock_wait_time_ms: Dict[str, float] = {}  # Total lock wait time per ticker (ms)
+        self._last_lock_wait_ms: Dict[str, float] = {}  # Last per-acquisition lock wait (ms)
+        self._last_batch_duration_ms: Dict[str, float] = {}  # Last batch processing duration per ticker (ms)
+
+        # 2026-08-24: Snapshot timeout tracking.  Records when a ticker last
+        # transitioned to ``snapshot_complete=False`` so we can resubscribe/request
+        # a fresh snapshot instead of staying stuck in ``NO_SNAPSHOT`` forever.
+        self._snapshot_wait_start_ts: Dict[str, float] = {}
 
         # DIAGNOSTIC: Track last log time per ticker for rate-limited update logging
         self._last_log_ts: Dict[str, float] = {}
@@ -711,6 +781,22 @@ class KalshiMarketStateStore:
 
         logger.debug("[BOOT-TRACE] KalshiMarketStateStore.__init__: initialization complete")
 
+    def set_main_event_loop(self, loop) -> None:
+        """Register the running event loop used to schedule async resync tasks.
+
+        KalshiMarketStateStore may be created before the WebSocket forwarder
+        event loop exists.  Call this from the forwarder thread once its loop
+        is running so REST re-sync tasks can be scheduled correctly.
+        """
+        import asyncio
+        if (
+            loop is not None
+            and isinstance(loop, asyncio.AbstractEventLoop)
+            and loop.is_running()
+        ):
+            self._main_event_loop = loop
+            logger.info("[MD-STORE-LOOP] Registered main event loop: %s", loop)
+
     def _get_ticker_lock(self, ticker: str) -> threading.Lock:
         """Get or create a lock for a specific ticker.
 
@@ -723,6 +809,119 @@ class KalshiMarketStateStore:
             if ticker not in self._ticker_locks:
                 self._ticker_locks[ticker] = threading.Lock()
             return self._ticker_locks[ticker]
+
+    def _get_delta_queue_lock(self, ticker: str) -> threading.Lock:
+        """Get or create a lock for a specific ticker delta queue.
+
+        LOCK CONTENTION FIX: Per-ticker queue locks allow concurrent enqueue
+        on different tickers and decouple enqueue from the orderbook state lock.
+        """
+        with self._ticker_locks_lock:
+            if ticker not in self._delta_queue_locks:
+                self._delta_queue_locks[ticker] = threading.Lock()
+            return self._delta_queue_locks[ticker]
+
+    def _resolve_book_source(self, via: str, channel: str) -> str:
+        """Map transport provenance to a canonical data-source label.
+
+        REST-derived full snapshots are authoritative.  WS snapshots from the
+        real-time bridge are bootstraps that require a contiguous delta to
+        become ``LIVE_SEQUENCE_CONFIRMED``.  Contiguous deltas are the only
+        source that confirms live sequence.
+        """
+        if via in ("rest_bootstrap", "ws_fallback", "subscribe_fallback", "rest_polling", "ws_subscribe_bootstrap"):
+            return "REST_FULL_ORDERBOOK"
+        if via == "bridge_queue":
+            if channel == "orderbook_snapshot":
+                return "BOOTSTRAP_VALID_BUT_UNCONFIRMED"
+            if channel == "orderbook_delta":
+                return "WS_ORDERBOOK_DELTA_LIVE"
+            return "UNKNOWN"
+        if via in ("manual", "test"):
+            if channel == "orderbook_delta":
+                return "WS_ORDERBOOK_DELTA_LIVE"
+            return "WS_CLEAN_SNAPSHOT"
+        if via == "quote_fallback":
+            return "WS_QUOTE"
+        return "UNKNOWN"
+
+    def _attest_state_recovery(
+        self,
+        state: KalshiMarketState,
+        source: str,
+        *,
+        prior_quality: Optional[str] = None,
+        prior_transition: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Central recovery attestation gate.
+
+        A state that is currently ``INVALID`` or has ``transition == CIRCUIT_BREAKER``
+        may only be restored to ``GOOD`` / ``executable`` by an authoritative source:
+        a full REST orderbook snapshot, a contiguous WS delta stream, or an explicit
+        clean WS snapshot (test/manually attested).  Quote fallbacks, catalog REST
+        market feeds, or unconfirmed WS snapshots must not silently lift a circuit
+        breaker.
+
+        Args:
+            state: The ``KalshiMarketState`` being promoted.
+            source: The provenance label for this recovery attempt.
+            prior_quality: Quality *before* the current update was applied, if known.
+            prior_transition: Transition label *before* the current update, if known.
+            force: If True, bypass the attestation gate (for test fixtures only).
+
+        Returns:
+            True if the state was promoted to / kept executable, False if recovery
+            was rejected and the state remains INVALID.
+        """
+        if prior_quality is None:
+            prior_quality = state.data_quality
+        if prior_transition is None:
+            prior_transition = state.transition
+
+        if not force and (prior_quality == "INVALID" or prior_transition == "CIRCUIT_BREAKER"):
+            # Determine the class of source required for recovery.  An explicit
+            # ``recovery_required_source`` on the state (set when the invalidation
+            # occurred) wins; otherwise derive from the transition label.
+            required = state.recovery_required_source or _recovery_required_for_transition(prior_transition)
+            if not _source_satisfies_recovery(source, required):
+                logger.critical(
+                    "[STATE-RECOVERY-REJECTED] ticker=%s prior_quality=%s prior_transition=%s "
+                    "attempted_source=%s required=%s - non-attested source tried to clear INVALID/CIRCUIT_BREAKER; "
+                    "keeping state invalid",
+                    state.ticker,
+                    prior_quality,
+                    prior_transition,
+                    source,
+                    required,
+                )
+                # Re-assert the invalid state in case a previous line softened it.
+                state.data_quality = "INVALID"
+                state.executable = False
+                state.book_initialized = False
+                # Preserve the most specific transition label.
+                if prior_transition == "CIRCUIT_BREAKER":
+                    state.transition = "CIRCUIT_BREAKER"
+                self._set_snapshot_complete(state.ticker, False, "recovery_rejected")
+                return False
+
+        state.data_quality = "GOOD"
+        state.book_consistency = "GOOD"
+        state.transition = "VALID"
+        state.executable = True
+        state.recovery_attested = True
+        state.recovery_source = source
+        state.recovery_ts = time.monotonic()
+        state.recovery_required_source = ""
+        state.invalidation_cause = ""
+        if source == "WS_ORDERBOOK_DELTA_LIVE":
+            state.live_sequence_confirmed = True
+        else:
+            # Snapshots (even authoritative REST ones) are not a confirmed live
+            # sequence; a contiguous WS delta is required to clear the bootstrap
+            # flag for new-entry gating.
+            state.live_sequence_confirmed = False
+        return True
 
     def _start_batch_worker(self) -> None:
         """Start the batch worker thread for processing queued deltas.
@@ -740,11 +939,21 @@ class KalshiMarketStateStore:
         logger.info("[BATCH-WORKER] Setting _batch_worker_running=True and starting thread")
 
         def _batch_worker_loop():
-            """Batch worker loop that processes queued deltas."""
+            """Batch worker loop that processes queued deltas.
+
+            LOCK CONTENTION FIX: Pops batches under a per-ticker queue lock, then
+            applies them under the per-ticker orderbook lock. This decouples
+            enqueue from apply and removes the global _ticker_locks_lock from
+            the hot path.
+            """
             logger.info("[BATCH-WORKER] Starting batch worker thread")
             while self._batch_worker_running:
                 try:
-                    # Process all ticker queues
+                    # Event-driven adaptive batching: clear the wake event so new deltas
+                    # that arrive during/after this batch can wake the worker immediately.
+                    self._batch_worker_event.clear()
+
+                    # Snapshot ticker list under the global dict lock (fast).
                     with self._ticker_locks_lock:
                         tickers_to_process = list(self._delta_queues.keys())
 
@@ -755,88 +964,122 @@ class KalshiMarketStateStore:
                         if not self._batch_worker_running:
                             break
 
-                        # Get queue for this ticker
+                        # CRITICAL FIX (2026-08-24): Resolve lock-order inversion between the
+                        # batch worker and the enqueue forwarder. The worker was acquiring
+                        # queue_lock then _ticker_locks_lock, while the forwarder acquires
+                        # _ticker_locks_lock then queue_lock. This produced constant 0.1s
+                        # queue-lock timeouts at high message cadence. Both paths now
+                        # acquire _ticker_locks_lock first to look up the queue/lock, then
+                        # acquire queue_lock; the worker releases _ticker_locks_lock before
+                        # waiting on queue_lock so a forwarder can still append.
                         with self._ticker_locks_lock:
-                            queue = self._delta_queues.get(ticker)
+                            if ticker not in self._delta_queues:
+                                self._delta_queues[ticker] = deque()
+                            if ticker not in self._delta_queue_locks:
+                                self._delta_queue_locks[ticker] = threading.Lock()
+                            queue = self._delta_queues[ticker]
+                            queue_lock = self._delta_queue_locks[ticker]
+
+                        lock_start = time.monotonic()
+                        if not queue_lock.acquire(blocking=True, timeout=2.0):
+                            logger.warning(
+                                "[BATCH-WORKER] Queue lock acquisition timeout for ticker=%s - contention detected",
+                                ticker
+                            )
+                            with self._ticker_locks_lock:
+                                self._lock_contention_count[ticker] = self._lock_contention_count.get(ticker, 0) + 1
+                            continue
+
+                        batch: List[Dict[str, Any]] = []
+                        try:
                             if not queue:
                                 continue
 
-                        # Check for overflow
-                        if len(queue) > self._MAX_PER_TICKER_QUEUE:
-                            # Track overflow count for metrics
-                            with self._ticker_locks_lock:
+                            # Check for overflow
+                            if len(queue) > self._MAX_PER_TICKER_QUEUE:
                                 self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
+                                logger.error(
+                                    f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
+                                    f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count.get(ticker, 0)} "
+                                    f"marking SUSPECT"
+                                )
+                                # Mark as SUSPECT and trigger REST bootstrap
+                                state = self._states.get(ticker)
+                                if state:
+                                    state.book_consistency = "SUSPECT"
+                                    self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow")
+                                    self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow")
+                                    try:
+                                        import asyncio
+                                        loop = asyncio.get_event_loop()
+                                        if loop.is_running():
+                                            asyncio.create_task(self._sync_invariant_violation_with_rest(ticker))
+                                    except Exception as e:
+                                        logger.error("[BATCH-WORKER] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
+                                queue.clear()
+                                continue
 
-                            logger.error(
-                                f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
-                                f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count.get(ticker, 0)} "
-                                f"marking SUSPECT"
-                            )
-                            # Mark as SUSPECT and trigger REST bootstrap
-                            state = self._states.get(ticker)
-                            if state:
-                                state.book_consistency = "SUSPECT"
-                                try:
-                                    import asyncio
-                                    loop = asyncio.get_event_loop()
-                                    if loop.is_running():
-                                        asyncio.create_task(self._sync_invariant_violation_with_rest(ticker))
-                                except Exception as e:
-                                    logger.error("[BATCH-WORKER] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
-                            # Clear queue to prevent further overflow
+                            # Pop a batch while holding the queue lock.
+                            batch_size = min(500, len(queue))
+                            batch = [queue.popleft() for _ in range(batch_size)]
+                        finally:
+                            queue_lock.release()
+                            lock_wait_ms = (time.monotonic() - lock_start) * 1000
                             with self._ticker_locks_lock:
-                                self._delta_queues[ticker].clear()
+                                self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
+                                self._last_lock_wait_ms[ticker] = lock_wait_ms
+
+                        if not batch:
                             continue
 
-                        # Batch process deltas for this ticker
+                        # Apply the batch under the orderbook ticker lock.
                         ticker_lock = self._get_ticker_lock(ticker)
                         lock_start = time.monotonic()
-                        # CRITICAL FIX: Add timeout to lock acquisition to prevent deadlock
-                        if ticker_lock.acquire(blocking=True, timeout=0.1):
-                            try:
-                                batch_count = 0
-                                batch_start = time.monotonic()
-                                with self._ticker_locks_lock:
-                                    queue = self._delta_queues.get(ticker)
-                                    if queue:
-                                        # CRITICAL FIX: Process up to 500 deltas per batch (increased from 100)
-                                        # This increases throughput to handle extreme WS volume
-                                        batch_size = min(500, len(queue))
-                                        batch = [queue.popleft() for _ in range(batch_size)]
-                                    else:
-                                        batch = []
-
-                                for msg in batch:
-                                    try:
-                                        self._apply_delta_internal(ticker, msg)
-                                        batch_count += 1
-                                    except Exception as e:
-                                        logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
-
-                                if batch_count > 0:
-                                    batch_duration_ms = (time.monotonic() - batch_start) * 1000
-                                    logger.debug(
-                                        "[BATCH-WORKER] Processed %d deltas for %s in %.1fms",
-                                        batch_count, ticker, batch_duration_ms
-                                    )
-                            finally:
-                                ticker_lock.release()
-                                # P3 Gap 16: Track lock wait time
-                                lock_wait_ms = (time.monotonic() - lock_start) * 1000
-                                with self._ticker_locks_lock:
-                                    self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
-                        else:
-                            # Lock acquisition timeout - log contention
+                        if not ticker_lock.acquire(blocking=True, timeout=2.0):
                             logger.warning(
-                                "[BATCH-WORKER] Lock acquisition timeout for ticker=%s - contention detected",
+                                "[BATCH-WORKER] Orderbook lock acquisition timeout for ticker=%s - contention detected",
                                 ticker
                             )
-                            # P3 Gap 16: Track lock contention (lock was busy)
                             with self._ticker_locks_lock:
                                 self._lock_contention_count[ticker] = self._lock_contention_count.get(ticker, 0) + 1
+                            continue
 
-                    # Sleep before next batch
-                    time.sleep(self._batch_interval_ms / 1000.0)
+                        try:
+                            batch_count = 0
+                            batch_start = time.monotonic()
+                            # Coalesce contiguous same-(side, price) delta_fp messages
+                            # before applying.  This reduces orderbook churn and CPU
+                            # under burst conditions while preserving sequence
+                            # contiguity and gap detection.
+                            coalesced = self._coalesce_deltas(ticker, batch)
+                            applied_batch = coalesced if coalesced is not None else batch
+                            for msg in applied_batch:
+                                try:
+                                    self._apply_delta_internal(ticker, msg)
+                                    batch_count += 1
+                                except Exception as e:
+                                    logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
+
+                            if batch_count > 0:
+                                batch_duration_ms = (time.monotonic() - batch_start) * 1000
+                                with self._ticker_locks_lock:
+                                    self._last_batch_duration_ms[ticker] = batch_duration_ms
+                                logger.debug(
+                                    "[BATCH-WORKER] Processed %d deltas for %s in %.1fms",
+                                    batch_count, ticker, batch_duration_ms
+                                )
+                        finally:
+                            ticker_lock.release()
+                            lock_wait_ms = (time.monotonic() - lock_start) * 1000
+                            with self._ticker_locks_lock:
+                                self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
+                                self._last_lock_wait_ms[ticker] = lock_wait_ms
+
+                    # Event-driven adaptive batching: block until the next delta
+                    # arrives or the batch interval elapses. This replaces the fixed
+                    # 10ms sleep, cutting latency when the queue is busy and throttling
+                    # when it is idle.
+                    self._batch_worker_event.wait(self._batch_interval_ms / 1000.0)
 
                 except Exception as e:
                     logger.error("[BATCH-WORKER] Batch worker error: %s", e, exc_info=True)
@@ -861,12 +1104,20 @@ class KalshiMarketStateStore:
         Returns True if enqueued successfully, False if queue overflow.
 
         On overflow, triggers immediate snapshot recovery to prevent selective staleness.
+
+        LOCK CONTENTION FIX: Uses a per-ticker queue lock so concurrent enqueues
+        for different tickers no longer serialize on the global _ticker_locks_lock.
         """
+        # Ensure the queue and its lock exist under the global dict lock.
         with self._ticker_locks_lock:
             if ticker not in self._delta_queues:
                 self._delta_queues[ticker] = deque()
-
+            if ticker not in self._delta_queue_locks:
+                self._delta_queue_locks[ticker] = threading.Lock()
             queue = self._delta_queues[ticker]
+            queue_lock = self._delta_queue_locks[ticker]
+
+        with queue_lock:
             if len(queue) >= self._MAX_PER_TICKER_QUEUE:
                 # Extract asset from ticker for selective staleness detection
                 asset = None
@@ -892,6 +1143,16 @@ class KalshiMarketStateStore:
                     f"triggering_immediate_snapshot_recovery"
                 )
 
+                state = self._states.get(ticker)
+                if state:
+                    state.book_consistency = "SUSPECT"
+                    state.data_quality = "INVALID"
+                    state.transition = "RESYNC_REQUIRED"
+                    state.executable = False
+                    self._set_snapshot_complete(ticker, False, "delta_queue_overflow")
+                    self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow_enqueue")
+                    self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow_enqueue")
+
                 # Trigger immediate snapshot recovery via WebSocket
                 try:
                     import asyncio
@@ -908,6 +1169,7 @@ class KalshiMarketStateStore:
                 return False
 
             queue.append(msg)
+            self._batch_worker_event.set()
             return True
 
     def _apply_delta_internal(self, ticker: str, msg: Dict[str, Any]) -> None:
@@ -918,6 +1180,8 @@ class KalshiMarketStateStore:
         ob = self._ob.get_book(ticker)
         if not ob or not ob.initialized:
             # Queue delta if book not yet initialized (legacy path)
+            # 2026-08-24: Guard against an indefinitely stuck NO_SNAPSHOT state.
+            self._check_snapshot_timeout(ticker)
             # CRITICAL FIX: Check pending deltas queue size to prevent unbounded growth
             pending = self._pending_deltas.get(ticker, [])
             if len(pending) >= self._MAX_PENDING_DELTAS:
@@ -928,11 +1192,12 @@ class KalshiMarketStateStore:
                 return
             self._pending_deltas.setdefault(ticker, []).append(msg)
 
-            # FIX: Update last_book_update_ts even when queuing to indicate we're receiving WS data
-            # This prevents perpetual staleness flags when waiting for snapshot bootstrap
+            # CRITICAL FIX (2026-08-22): A queued delta is NOT a book update.  Do not
+            # touch book staleness timestamps; doing so makes the health check report
+            # a fresh book while we are still waiting for a snapshot.  Only the
+            # all-purpose last_update_ts and data_source are updated so we can still
+            # see the connection is alive.
             state = self._get_or_create(ticker)
-            state.last_book_update_ts = time.monotonic()
-            state.last_book_update_wall_ts = time.time()
             state.last_update_ts = time.monotonic()
             state.data_source = "WS_ORDERBOOK_DELTA_PENDING"  # More specific: delta waiting for snapshot
 
@@ -954,10 +1219,10 @@ class KalshiMarketStateStore:
                         if isinstance(timestamp_str, str):
                             received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
                     except Exception as ts_error:
-                        logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
+                        logger.debug("[BOOK-FRESHNESS] Failed to parse timestamp for %s: %s", ticker, ts_error)
 
                 freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
-                logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from pending delta")
+                logger.debug("[BOOK-FRESHNESS] Updated state for %s from pending delta", ticker)
             except ImportError:
                 logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
             except Exception as e:
@@ -981,9 +1246,29 @@ class KalshiMarketStateStore:
             pending_count = len(self._pending_deltas.get(ticker, []))
             if pending_count >= 5 and pending_count % 5 == 0:
                 logger.warning(
-                    "[WS-DELTA-BOOTSTRAP] ticker=%s has %d pending deltas but no initialized book - triggering REST snapshot bootstrap",
+                    "[WS-DELTA-BOOTSTRAP] ticker=%s has %d pending deltas but no initialized book - triggering REST and WS snapshot bootstrap",
                     ticker, pending_count
                 )
+                # 2026-08-24: Explicitly request a WebSocket snapshot to break the
+                # dead-ready state where the book is subscribed but no snapshot is
+                # arriving.  This is the resubscribe/snapshot recovery path.
+                try:
+                    import asyncio
+                    loop = self._main_event_loop
+                    if loop and loop.is_running():
+                        ws_future = asyncio.run_coroutine_threadsafe(
+                            self._trigger_snapshot_recovery(ticker),
+                            loop,
+                        )
+                        logger.info(
+                            "[WS-SNAPSHOT-RECOVERY] Scheduled WS snapshot request for %s (future=%s)",
+                            ticker, ws_future,
+                        )
+                    else:
+                        logger.warning("[WS-SNAPSHOT-RECOVERY] Event loop not available for %s", ticker)
+                except Exception as e:
+                    logger.error("[WS-SNAPSHOT-RECOVERY] Failed to schedule WS snapshot for %s: %s", ticker, e, exc_info=True)
+
                 try:
                     import asyncio
                     loop = self._main_event_loop
@@ -1011,20 +1296,77 @@ class KalshiMarketStateStore:
 
             return
 
+        # CRITICAL FIX (2026-08-22): Lightweight WS sequence validator, separated
+        # from the orderbook state applier below.  A non-contiguous sequence means
+        # the in-memory book is missing levels and cannot be trusted for execution.
+        ob = self._ob.get_book(ticker)
+        is_valid, expected, msg_seq = self._validate_delta_sequence(ticker, msg, ob)
+        if not is_valid:
+            state = self._get_or_create(ticker)
+            state.data_quality = "INVALID"
+            state.book_consistency = "SUSPECT"
+            state.transition = "INVALID_SEQUENCE_GAP"
+            state.invalidation_cause = "INVALID_SEQUENCE_GAP"
+            state.recovery_required_source = "FULL_SNAPSHOT"
+            state.executable = False
+            self._set_snapshot_complete(ticker, False, "ws_sequence_gap")
+            self._set_book_health(
+                ticker,
+                BookHealth.GAP_DETECTED,
+                f"expected_seq={expected} got_seq={msg_seq}",
+            )
+            logger.warning(
+                "[WS-SEQUENCE-GAP] ticker=%s expected_seq=%d got_seq=%d - "
+                "invalidating book and scheduling resync",
+                ticker, expected, msg_seq
+            )
+            self._schedule_duality_resync(ticker)
+            self._set_book_health(
+                ticker,
+                BookHealth.RESYNC_REQUESTED,
+                f"expected_seq={expected} got_seq={msg_seq}",
+            )
+            # Drop the non-contiguous delta; a snapshot will rebuild.
+            return
+
+        if ob and ob.initialized and ob.last_seq is not None:
+            state = self._get_or_create(ticker)
+            if state.book_health != BookHealth.LIVE.value:
+                self._set_book_health(ticker, BookHealth.SEQUENCE_VALIDATING, f"expected_seq={ob.last_seq + 1}")
+
         # Apply delta
         self._ob.apply_delta(ticker, msg)
 
         # Sync state
         state = self._get_or_create(ticker)
+        prior_quality = state.data_quality
+        prior_transition = state.transition
+
         self._sync_book_fields(state, self._ob.get_book(ticker), ticker, via="bridge_queue")
         self._sync_unified_book(ticker, state)
 
-        # Set data source and quality - specific to orderbook_delta channel
         state.data_source = "WS_ORDERBOOK_DELTA_LIVE"
-        # CRITICAL FIX (2026-07-26): Do not overwrite SUSPECT quality set by the
-        # duality invariant check in _sync_book_fields - corrupt books must stay flagged.
-        if state.data_quality != "SUSPECT":
-            state.data_quality = "GOOD"
+
+        # A contiguous live delta can attest recovery from INVALID/CIRCUIT_BREAKER.
+        # _sync_book_fields has already provisionally set GOOD/SUSPECT/INVALID for
+        # this delta; we now apply the recovery-source gate.
+        if state.data_quality not in ("SUSPECT", "INVALID"):
+            self._attest_state_recovery(
+                state,
+                "WS_ORDERBOOK_DELTA_LIVE",
+                prior_quality=prior_quality,
+                prior_transition=prior_transition,
+            )
+            if state.live_sequence_confirmed:
+                self._set_book_health(ticker, BookHealth.LIVE, "contiguous_delta_confirmed")
+            else:
+                self._set_book_health(ticker, BookHealth.SNAPSHOT_RECEIVED, "delta_without_live_sequence")
+        else:
+            # Duality or crossed-market invariant failed for this delta.
+            self._set_book_health(ticker, BookHealth.INVALID, f"data_quality={state.data_quality} transition={state.transition}")
+            # 2026-08-24: A delta that invalidates the book means the last trusted
+            # snapshot no longer represents the current book; require a fresh one.
+            self._set_snapshot_complete(ticker, False, f"delta_invalidated_book data_quality={state.data_quality}")
 
         # Log raw book after delta (rate-limited to avoid spam)
         book = self._ob.get_book(ticker)
@@ -1037,7 +1379,7 @@ class KalshiMarketStateStore:
                 no_levels = []
             yes_raw = yes_levels[:5] if yes_levels else []
             no_raw = no_levels[:5] if no_levels else []
-            logger.info(
+            logger.debug(
                 "[KALSHI-RAW-BOOK] ticker=%s yes_raw=%s no_raw=%s side=orderbook_delta source=WS",
                 ticker, yes_raw, no_raw
             )
@@ -1059,7 +1401,7 @@ class KalshiMarketStateStore:
                     elif isinstance(level, (int, float)):
                         # Index-based format - count as 1 level per index
                         total_no_size += 1
-                logger.info(
+                logger.debug(
                     "[OB-SUMMARY] ticker=%s best_yes=%s best_no=%s depth_yes=%d depth_no=%d total_yes_levels=%d total_no_levels=%d yes_levels_sample=%s no_levels_sample=%s",
                     ticker,
                     state.best_bid_cents,
@@ -1076,13 +1418,13 @@ class KalshiMarketStateStore:
 
         # Log parsed book after computing top prices
         if state.best_bid_cents is not None or state.best_ask_cents is not None:
-            logger.info(
+            logger.debug(
                 "[KALSHI-PARSED-BOOK] ticker=%s yes_best=%s no_best=%s source=WS",
                 ticker, state.best_bid_cents, state.best_ask_cents
             )
 
         # Log state after write (rate-limited)
-        logger.info(
+        logger.debug(
             "[STATE-AFTER-WRITE] ticker=%s bid=%s ask=%s initialized=%s executable=%s",
             ticker,
             state.best_bid_cents,
@@ -1106,14 +1448,14 @@ class KalshiMarketStateStore:
                     if isinstance(timestamp_str, str):
                         received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
                 except Exception as ts_error:
-                    logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
+                    logger.debug("[BOOK-FRESHNESS] Failed to parse timestamp for %s: %s", ticker, ts_error)
 
             freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
-            logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} from delta data")
+            logger.debug("[BOOK-FRESHNESS] Updated state for %s from delta data", ticker)
         except ImportError:
             logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
         except Exception as e:
-            logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker} from delta: {e}")
+            logger.error("[BOOK-FRESHNESS] Failed to update freshness state for %s from delta: %s", ticker, e)
 
     def _record_metric(self, ticker: str, metric_name: str, value: float) -> None:
         """Record a metric for a ticker."""
@@ -1135,9 +1477,10 @@ class KalshiMarketStateStore:
             True if ticker is quarantined, False otherwise
         """
         now = time.monotonic()
-        # HARDENING-FIX: Use per-ticker lock for invariant violation tracking
-        ticker_lock = self._get_ticker_lock(ticker)
-        with ticker_lock:
+        # Use the reentrant global lock.  This method may be called from
+        # _sync_book_fields which already holds the per-ticker lock; the
+        # per-ticker lock is a plain Lock and would deadlock if re-acquired.
+        with self._lock:
             # Reset violation count if last violation was > 5 minutes ago
             if ticker in self._last_violation_ts and now - self._last_violation_ts[ticker] > 300:
                 self._invariant_violations[ticker] = 0
@@ -1437,7 +1780,6 @@ class KalshiMarketStateStore:
         # Note: staleness_threshold_ms parameter is deprecated for production 15m markets
         # Timing-aware thresholds are calculated per-contract in the loop below
 
-        now = time.monotonic()
         healthy_count = 0
         total_count = 0
         unhealthy_reasons = []
@@ -1451,51 +1793,15 @@ class KalshiMarketStateStore:
 
                 total_count += 1
 
-                # Phase 3: Use proper timestamp hierarchy for staleness calculation
-                # Prefer exchange timestamp for accurate data age, fallback to local timestamps
-                last_update = state.last_book_update_ts  # Already uses proper hierarchy
-                age_ms = (now - last_update) * 1000 if last_update > 0 else float('inf')
-
-                # Calculate timing-aware staleness threshold based on minutes_to_expiry
-                seconds_to_expiry = getattr(state, 'seconds_to_expiry', None)
-                minutes_to_expiry = seconds_to_expiry / 60.0 if seconds_to_expiry is not None else None
-                staleness_threshold_ms = get_md_max_age_seconds(minutes_to_expiry) * 1000 if minutes_to_expiry is not None else MAX_BOOK_STALENESS_MS
-
-                reasons = []
-                if HEALTH_CHECK_INITIALIZED and not state.book_initialized:
-                    unhealthy_reasons.append(f"{ticker}: not initialized")
-                if HEALTH_CHECK_FRESH and age_ms >= staleness_threshold_ms:
-                    unhealthy_reasons.append(f"{ticker}: stale (age={age_ms:.0f}ms, threshold={staleness_threshold_ms:.0f}ms, expiry={minutes_to_expiry:.1f}min)")
-                if HEALTH_CHECK_BID_ASK:
-                    if state.best_bid_cents is None:
-                        reasons.append("no_bid")
-                    elif state.best_ask_cents is None:
-                        reasons.append("no_ask")
-                    elif state.best_bid_cents >= state.best_ask_cents:
-                        reasons.append(f"crossed_bid_ask({state.best_bid_cents}>={state.best_ask_cents})")
-
-                    # CRITICAL FIX 2026-08-03: Check for degenerate books (ask >= 98c, one-sided, dust-only)
-                    # This prevents trading on corrupted orderbook data that fabricates phantom spreads
-                    degenerate, degenerate_reason = is_book_degenerate(
-                        state.best_bid_cents, state.best_ask_cents,
-                        state.no_bid_cents, state.no_ask_cents
-                    )
-                    if degenerate:
-                        reasons.append(f"degenerate_book({degenerate_reason})")
-
-                    # CRITICAL FIX 2026-08-03: Cross-validate with catalog to detect state corruption
-                    # This provides an independent data source check
-                    catalog_valid, catalog_reason = cross_validate_with_catalog(
-                        ticker, state.best_bid_cents, state.best_ask_cents,
-                        state.no_bid_cents, state.no_ask_cents
-                    )
-                    if not catalog_valid:
-                        reasons.append(f"catalog_mismatch({catalog_reason})")
-
-                if reasons:
-                    unhealthy_reasons.append(f"{ticker}:{','.join(reasons)}")
-                else:
+                # CRITICAL FIX (2026-08-22): Use the authoritative execution-readiness
+                # gate for every ticker.  This guarantees that the health check and the
+                # order-router stale-data gate evaluate the same predicate under the same
+                # monotonic clock domain.
+                ready, reason = self.is_market_execution_ready(ticker)
+                if ready:
                     healthy_count += 1
+                else:
+                    unhealthy_reasons.append(f"{ticker}:{reason}")
 
         # Trading is enabled if at least MIN_HEALTHY_BOOKS_FOR_TRADING are healthy
         trading_enabled = healthy_count >= MIN_HEALTHY_BOOKS_FOR_TRADING
@@ -1508,58 +1814,271 @@ class KalshiMarketStateStore:
 
         return trading_enabled
 
-    def is_ticker_tradeable(self, ticker: str) -> bool:
-        """P0-1 DOWNSTREAM: Check if a specific ticker is tradeable based on DATA_SOURCE, age, and data_quality.
+    def is_market_execution_ready(
+        self,
+        ticker: str,
+        max_age_seconds: Optional[float] = None,
+    ) -> Tuple[bool, str]:
+        """Authoritative per-ticker execution readiness gate.
 
-        Refuses to trade if:
-        - DATA_SOURCE not in ("WS_ORDERBOOK_DELTA_LIVE", "WS_LIVE") (i.e., REST_BOOTSTRAP or UNKNOWN)
-        - last_event_age > _MAX_WS_AGE_SECONDS (default 30s)
-        - data_quality != "GOOD" (i.e., BAD_DUALITY, INCOMPLETE, or UNKNOWN)
+        This is the single source of truth for whether a market is safe to use
+        for both signal generation and order submission.  It evaluates the same
+        predicate under a single monotonic clock domain.
 
-        Args:
-            ticker: Market ticker to check
+        A ticker is execution-ready only when:
+        - state exists and the orderbook is initialized;
+        - the book is marked executable (duality/quality OK);
+        - the data source is a post-snapshot live or bootstrap source;
+        - no snapshot resync is in progress;
+        - the most recent monotonic orderbook timestamp is within threshold;
+        - valid, non-crossed bid/ask are present.
 
-        Returns:
-            True if ticker is tradeable, False otherwise
+        Note: the orderbook timestamp (``last_book_update_ts``) is set by both
+        WebSocket and REST orderbook snapshots/deltas, so a REST-only book is
+        still covered.  Catalog metadata (``last_rest_update_ts``) is intentionally
+        not used here because it does not reflect quote freshness.
         """
         state = self.get(ticker)
         if not state:
-            logger.warning("[DATA-SOURCE-GATE] ticker=%s state=None - not tradeable", ticker)
-            return False
+            return False, "STATE-NONE"
 
-        # P0-1 DOWNSTREAM: Check DATA_SOURCE field - accept specific WS sources
-        # CRITICAL FIX: Include "rest_refresh" and "WS_ORDERBOOK_SNAPSHOT_BOOTSTRAP"
-        # REST refresh is used when WS delivers no deltas (common on Windows)
-        # BOOTSTRAP is the initial WS subscription snapshot
-        valid_ws_sources = ("WS_ORDERBOOK_DELTA_LIVE", "WS_LIVE", "rest_refresh", "WS_ORDERBOOK_SNAPSHOT_BOOTSTRAP")
-        if state.data_source not in valid_ws_sources:
-            logger.warning(
-                "[DATA-SOURCE-GATE] ticker=%s data_source=%s not in %s - not tradeable",
-                ticker, state.data_source, valid_ws_sources
+        if not state.book_initialized:
+            return False, "BOOK-NOT-INITIALIZED"
+
+        if not state.executable:
+            return False, "NOT-EXECUTABLE"
+
+        if self._needs_snapshot_resync(ticker):
+            return False, "RESYNC-IN-PROGRESS"
+
+        valid_sources = {
+            "WS_LIVE",
+            "WS_ORDERBOOK_DELTA_LIVE",
+            "rest_refresh",
+            "REST_BOOTSTRAP",
+            "REST_FULL_ORDERBOOK",
+            "BOOTSTRAP_VALID_BUT_UNCONFIRMED",
+            "WS_CLEAN_SNAPSHOT",
+            "WS_QUOTE",
+        }
+        if state.data_source not in valid_sources:
+            return False, (
+                f"DATA-SOURCE:{state.data_source} "
+                f"quality={state.data_quality} "
+                f"live_sequence_confirmed={getattr(state, 'live_sequence_confirmed', False)}"
             )
-            return False
 
-        # P0-1 DOWNSTREAM: Check last event age
+        if getattr(state, "data_quality", "UNKNOWN") != "GOOD":
+            return False, f"DATA-QUALITY:{state.data_quality}"
+
         now = time.monotonic()
-        last_update = state.last_book_update_ts
-        if last_update > 0:
-            age_seconds = now - last_update
-            if age_seconds > _MAX_WS_AGE_SECONDS:
-                logger.warning(
-                    "[DATA-SOURCE-GATE] ticker=%s age=%.1fs > %.1fs threshold - not tradeable",
-                    ticker, age_seconds, _MAX_WS_AGE_SECONDS
-                )
-                return False
+        last_update = state.last_book_update_ts or 0.0
+        if last_update <= 0.0:
+            return False, "NO-BOOK-UPDATE-TIMESTAMP"
 
-        # P0-2 DOWNSTREAM: Check data_quality field
-        if state.data_quality != "GOOD":
-            logger.warning(
-                "[DATA-QUALITY-GATE] ticker=%s data_quality=%s != GOOD - not tradeable",
-                ticker, state.data_quality
+        age_seconds = now - last_update
+        if max_age_seconds is None:
+            minutes_to_expiry = getattr(state, "seconds_to_expiry", None)
+            mte = minutes_to_expiry / 60.0 if minutes_to_expiry is not None else None
+            try:
+                from merid.event_venues.kalshi.sla_config import get_md_max_age_seconds
+                max_age_seconds = get_md_max_age_seconds(mte)
+            except Exception:
+                max_age_seconds = 60.0
+        if age_seconds > max_age_seconds:
+            return False, (
+                f"STALE:age={age_seconds:.1f}s>threshold={max_age_seconds:.1f}s "
+                f"last_book_update_ts={state.last_book_update_ts:.1f}"
             )
-            return False
 
-        return True
+        best_bid = getattr(state, "best_bid_cents", None)
+        best_ask = getattr(state, "best_ask_cents", None)
+        if best_bid is None or best_ask is None:
+            return False, "NO-BIDASK"
+        if best_bid > best_ask:
+            return False, f"CROSSED-BOOK:bid={best_bid}c>ask={best_ask}c"
+
+        return True, ""
+
+    def is_ticker_tradeable(self, ticker: str) -> bool:
+        """Compatibility wrapper around :meth:`is_market_execution_ready`."""
+        ready, reason = self.is_market_execution_ready(ticker)
+        if not ready:
+            logger.warning("[TICKER-TRADEABLE-GATE] ticker=%s not tradeable: %s", ticker, reason)
+        return ready
+
+    def is_market_entry_ready(
+        self,
+        ticker: str,
+        max_age_seconds: Optional[float] = None,
+    ) -> Tuple[bool, str]:
+        """Authoritative per-ticker *new entry* readiness gate.
+
+        A market may be execution-ready (suitable for exits and signal display)
+        but not yet confirmed for new capital commitment.  New entries require a
+        contiguous live WS delta sequence (``live_sequence_confirmed=True``) in
+        addition to the standard execution-ready checks.
+        """
+        ready, reason = self.is_market_execution_ready(ticker, max_age_seconds=max_age_seconds)
+        if not ready:
+            return False, reason
+
+        state = self.get(ticker)
+
+        # P0-1 15m crypto metadata guard: a live 15m market cannot be tradeable
+        # without an authoritative strike (floor, window, or single strike).  This
+        # prevents the agent from entering with a missing-strike model and surfacing
+        # a generic signal rejection later.
+        underlying = state.underlying if state else None
+        if not underlying:
+            underlying, _ = _parse_market_ticker(ticker)
+        if (
+            state
+            and "15M" in (ticker or "").upper()
+            and underlying in ("BTC", "ETH", "SOL", "XRP", "DOGE")
+        ):
+            strike_fields = (
+                getattr(state, "floor_strike", None),
+                getattr(state, "window_strike_price", None),
+                getattr(state, "strike_price", None),
+            )
+            has_strike = any(
+                v is not None and isinstance(v, (int, float)) and not isinstance(v, bool)
+                and v > 0 and math.isfinite(float(v))
+                for v in strike_fields
+            )
+            if not has_strike:
+                logger.warning(
+                    "[ENTRY-READY] ticker=%s METADATA-INVALID: missing floor/window/strike fields",
+                    ticker,
+                )
+                return False, "METADATA-INVALID: missing floor/window/strike"
+
+        if state and getattr(state, "live_sequence_confirmed", False):
+            return True, ""
+
+        # Allow new entries on an authoritative REST full snapshot only when it
+        # has been explicitly attested as a recovery source; this is a degraded
+        # but safe path for REST-only fallback operation.
+        if state and getattr(state, "recovery_source", None) == "REST_FULL_ORDERBOOK":
+            return True, ""
+
+        return False, (
+            f"NOT-LIVE-SEQUENCE-CONFIRMED "
+            f"data_source={getattr(state, 'data_source', 'UNKNOWN')} "
+            f"live_sequence_confirmed={getattr(state, 'live_sequence_confirmed', False)}"
+        )
+
+    def is_quote_coherent(
+        self,
+        ticker: str,
+        max_divergence_cents: Optional[int] = None,
+        max_rest_age_s: Optional[float] = None,
+        max_ws_age_s: Optional[float] = None,
+        rest_mandatory: Optional[bool] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """Return True if the last WS quote for this ticker is usable.
+
+        WS is the primary feed and must be present and fresh.  REST is optional:
+        a fresh REST quote is used for cross-feed divergence validation, but a
+        stale or missing REST quote is ignored unless
+        ``MERID_QUOTE_COHERENCE_REST_MANDATORY=true`` (or ``rest_mandatory=True``).
+        This prevents a slow REST orderbook refresh from blocking new entries on
+        an otherwise healthy WebSocket book.
+
+        Quote freshness is evaluated against ``last_rest_quote_update_ts`` (set
+        only by REST orderbook snapshots/deltas), not the general
+        ``last_rest_update_ts`` that catalog metadata refreshes.
+        """
+        import os
+
+        state = self.get(ticker)
+        if state is None:
+            return False, "NO_STATE"
+
+        if rest_mandatory is None:
+            rest_mandatory = os.getenv("MERID_QUOTE_COHERENCE_REST_MANDATORY", "false").lower() in ("true", "1", "yes")
+
+        max_ws_age_s = max_ws_age_s or float(os.getenv("MERID_QUOTE_COHERENCE_MAX_WS_AGE_S", "5.0"))
+        max_rest_age_s = max_rest_age_s or float(os.getenv("MERID_QUOTE_COHERENCE_MAX_REST_AGE_S", "5.0"))
+        max_divergence_cents = max_divergence_cents or int(os.getenv("MERID_QUOTE_COHERENCE_MAX_DIVERGENCE_CENTS", "10"))
+
+        ws_age_s = time.monotonic() - state.last_ws_update_ts if state.last_ws_update_ts > 0 else float("inf")
+        rest_age_s = time.monotonic() - state.last_rest_quote_update_ts if state.last_rest_quote_update_ts > 0 else float("inf")
+
+        has_ws = state.last_ws_bid_cents is not None and state.last_ws_ask_cents is not None
+        has_rest = state.last_rest_bid_cents is not None and state.last_rest_ask_cents is not None
+        rest_usable = has_rest and rest_age_s <= max_rest_age_s
+
+        if not has_ws and not has_rest:
+            return False, "NO_QUOTES"
+
+        # WS is mandatory.  A stale primary quote is a hard failure regardless of REST.
+        if has_ws and ws_age_s > max_ws_age_s:
+            return False, f"WS_STALE age_s={ws_age_s:.1f}"
+
+        if has_rest and not rest_usable:
+            if rest_mandatory:
+                return False, f"REST_STALE age_s={rest_age_s:.1f}"
+            logger.debug(
+                "[QUOTE-COHERENCE] ticker=%s REST quote stale (%.1fs > %.1fs) and "
+                "not mandatory; falling back to WS-only coherence",
+                ticker, rest_age_s, max_rest_age_s,
+            )
+            if not has_ws:
+                # No WS and stale REST means there is no fresh quote at all.
+                return False, f"REST_STALE age_s={rest_age_s:.1f}"
+
+        if not has_ws or not rest_usable:
+            # Single fresh feed: no cross-feed divergence to assert.
+            return True, None
+
+        # Both feeds have fresh quotes.  Validate cross-feed divergence.
+        bid_div = abs(state.last_ws_bid_cents - state.last_rest_bid_cents)
+        ask_div = abs(state.last_ws_ask_cents - state.last_rest_ask_cents)
+        max_div = max(bid_div, ask_div)
+
+        if max_div > max_divergence_cents:
+            return False, (
+                f"DIVERGENCE {max_div}c > {max_divergence_cents}c "
+                f"WS={state.last_ws_bid_cents}/{state.last_ws_ask_cents} "
+                f"REST={state.last_rest_bid_cents}/{state.last_rest_ask_cents}"
+            )
+
+        return True, None
+
+    def get_queue_lock_metrics(self, ticker: str) -> Dict[str, Any]:
+        """Return per-ticker queue/lock instrumentation for boundary diagnosis.
+
+        These metrics expose how long the batch worker is waiting on and holding
+        locks, and the duration of the last batch.  The ``total_lock_wait_ms``
+        field now reports the *last* observed lock wait (not a cumulative total)
+        so the ENTRY-READINESS ``queue_healthy`` threshold is sensitive to
+        current contention rather than an ever-growing lifetime total.
+        """
+        with self._ticker_locks_lock:
+            queue_depth = len(self._delta_queues.get(ticker, deque()))
+            last_wait = self._last_lock_wait_ms.get(ticker, 0.0)
+            cumulative_wait = self._lock_wait_time_ms.get(ticker, 0.0)
+            last_batch = self._last_batch_duration_ms.get(ticker, 0.0)
+
+            # INVARIANT ALARM: high per-ticker lock wait with an empty queue is a
+            # strong signal of a stuck consumer, a lock-order issue, or a stale
+            # metric poisoning the health gate.
+            if queue_depth == 0 and last_wait > 500.0:
+                logger.warning(
+                    "[QUEUE-INVARIANT] ticker=%s queue_depth=0 last_lock_wait_ms=%.1f "
+                    "cumulative_lock_wait_ms=%.1f - queue empty but lock wait exceeds threshold",
+                    ticker, last_wait, cumulative_wait,
+                )
+
+            return {
+                "lock_contention_count": self._lock_contention_count.get(ticker, 0),
+                "total_lock_wait_ms": last_wait,
+                "last_batch_duration_ms": last_batch,
+                "cumulative_lock_wait_ms": cumulative_wait,
+                "queue_depth": queue_depth,
+            }
 
     # ── WS path ────────────────────────────────────────────────────────
 
@@ -1693,6 +2212,10 @@ class KalshiMarketStateStore:
                 state = self._get_or_create(ticker)
                 state.executable = False
                 state.book_initialized = False
+                # 2026-08-24: Clear snapshot completion while we refetch; a stale
+                # completed flag could let entries through before the new book is
+                # validated.
+                self._set_snapshot_complete(ticker, False, "rest_sync_started")
 
             # Fetch fresh REST snapshot through the normalized execution port.
             from merid.event_venues.kalshi.port import get_kalshi_execution_port
@@ -1725,10 +2248,14 @@ class KalshiMarketStateStore:
                     self._ob.apply_snapshot(ticker, snapshot_msg)
 
                     # Update state from fresh book
+                    state = self._get_or_create(ticker)
+                    prior_quality = state.data_quality
+                    prior_transition = state.transition
+
                     book = self._ob.get_book(ticker)
                     if book and book.initialized:
-                        self._sync_book_fields(self._get_or_create(ticker), book, ticker, via="rest_bootstrap")
-                        self._sync_unified_book(ticker, self._get_or_create(ticker))
+                        self._sync_book_fields(state, book, ticker, via="rest_bootstrap")
+                        self._sync_unified_book(ticker, state)
 
                         # Validate the REST snapshot itself
                         yes_bid_ask = book.get_best_bid()
@@ -1747,14 +2274,30 @@ class KalshiMarketStateStore:
                         no_bid_cents = 100 - yes_ask_cents if yes_ask_cents is not None else None
 
                         if self._validate_yes_no_invariants(ticker, yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents):
-                            # Restore executable status
-                            state = self._get_or_create(ticker)
-                            state.executable = True
-                            state.book_initialized = True
+                            # A fresh REST snapshot is an authoritative recovery source.
+                            state.data_source = "REST_FULL_ORDERBOOK"
+                            self._attest_state_recovery(
+                                state,
+                                "REST_FULL_ORDERBOOK",
+                                prior_quality=prior_quality,
+                                prior_transition=prior_transition,
+                            )
+                            self._set_snapshot_complete(
+                                ticker, True, "rest_sync_snapshot_applied"
+                            )
                             logger.info(f"[PRODUCTION-SYNC] REST sync completed successfully for {ticker}")
                         else:
                             logger.error(f"[PRODUCTION-SYNC-SIDE-AWARE] REST snapshot also violates invariants for {ticker}")
                             # Keep non-executable - will retry on next update
+                            state.data_quality = "INVALID"
+                            state.executable = False
+                            state.book_initialized = False
+                            state.transition = "INVALID_REST_SYNC"
+                            state.invalidation_cause = "INVALID_REST_SYNC"
+                            state.recovery_required_source = "FULL_SNAPSHOT"
+                            self._set_snapshot_complete(
+                                ticker, False, "rest_sync_snapshot_invalid"
+                            )
                     else:
                         logger.error(f"[PRODUCTION-SYNC] REST snapshot failed to initialize book for {ticker}")
 
@@ -1953,7 +2496,7 @@ class KalshiMarketStateStore:
             has_delta_fp = "delta_fp" in msg and "side" in msg
 
             # CRITICAL DIAGNOSTIC: Log message structure to understand why batch worker isn't starting
-            logger.info(
+            logger.debug(
                 "[market-state] apply_orderbook_message: channel=%s ticker=%s keys=%s has_bids=%s has_asks=%s has_yes=%s has_no=%s has_delta_fp=%s",
                 channel, ticker, list(msg.keys()) if isinstance(msg, dict) else "N/A",
                 has_bids, has_asks, has_yes, has_no, has_delta_fp
@@ -2022,7 +2565,7 @@ class KalshiMarketStateStore:
         if channel == "orderbook_delta":
             # DIAGNOSTIC: Log delta enqueue
             payload = msg.get("msg", msg)
-            logger.info(
+            logger.debug(
                 "[OB-APPLY] ticker=%s channel=%s enqueuing_delta=True batch_worker_running=%s",
                 ticker, channel, self._batch_worker_running
             )
@@ -2053,7 +2596,7 @@ class KalshiMarketStateStore:
                 # DIAGNOSTIC: Log successful enqueue
                 queue = self._delta_queues.get(ticker)
                 queue_size = len(queue) if queue else 0
-                logger.info(
+                logger.debug(
                     "[OB-APPLY] ticker=%s delta_enqueued=True queue_size=%d",
                     ticker, queue_size
                 )
@@ -2077,36 +2620,30 @@ class KalshiMarketStateStore:
                 yes_count = len(yes_levels) if yes_levels else 0
                 no_count = len(no_levels) if no_levels else 0
 
-                # Reject completely empty orderbooks before applying
-                if yes_count == 0 and no_count == 0:
-                    logger.warning("[EMPTY-BOOK-REJECTION] Rejecting snapshot for %s: completely empty orderbook (validation before apply)", ticker)
-                    # Clear pending deltas when rejecting empty snapshot
-                    with self._ticker_locks_lock:
-                        self._pending_deltas.pop(ticker, None)
+                # EMPTY-SNAPSHOT POLICY: A completely empty snapshot is valid for a
+                # contract that has just opened and has no resting orders yet.  We
+                # must allow the LocalOrderbook to become initialized so that the
+                # first WebSocket orderbook deltas can be applied.  If a book is
+                # already initialized, an empty snapshot is suspect and is ignored
+                # to avoid overwriting live data.
+                ob = self._ob.get_book(ticker)
+                if yes_count == 0 and no_count == 0 and ob.initialized:
+                    logger.warning(
+                        "[EMPTY-BOOK-REJECTION] Ignoring empty snapshot for %s: existing book already initialized",
+                        ticker,
+                    )
                     return None
 
-                # Apply snapshot
+                # Apply snapshot (empty snapshots are accepted for uninitialized books)
                 self._ob.apply_snapshot(ticker, payload)
 
                 # Log book state after snapshot for validation
                 book = self._ob.get_book(ticker)
-                if book:
-                    # Simplified validation - just check if book has data
-                    yes_count = len(book.yes_levels) if book.yes_levels else 0
-                    no_count = len(book.no_levels) if book.no_levels else 0
-
-                    # Double-check after apply (defensive)
-                    if yes_count == 0 and no_count == 0:
-                        logger.warning("[EMPTY-BOOK-REJECTION-POST-APPLY] Rejecting snapshot for %s: completely empty orderbook after apply", ticker)
-                        self._ob.remove_book(ticker)
-                        # CRITICAL FIX (2026-08-01): Mark state as not initialized when book is removed
-                        # This prevents trading with no book data, violating the HEALTH_CHECK_BID_ASK invariant
-                        state = self._get_or_create(ticker)
-                        state.book_initialized = False
-                        state.executable = False
-                        with self._ticker_locks_lock:
-                            self._pending_deltas.pop(ticker, None)
-                        return None
+                if book and yes_count == 0 and no_count == 0:
+                    logger.info(
+                        "[EMPTY-BOOK-INIT] %s initialized with empty orderbook; expecting deltas to populate",
+                        ticker,
+                    )
 
                 # CRITICAL FIX (2026-08-01): Clear pending deltas after snapshot application
                 # The snapshot is the source of truth - replaying pending deltas can apply stale data
@@ -2120,27 +2657,66 @@ class KalshiMarketStateStore:
                             ticker, pending_count
                         )
                         self._pending_deltas.pop(ticker, None)
-                # CRITICAL FIX (2026-08-01): Clear pending deltas after snapshot application
-                # The snapshot is the source of truth - replaying pending deltas can apply stale data
-                # to fresh state, causing orderbook corruption. Deltas received after the snapshot
-                # will be processed normally through the batch worker.
-                with self._ticker_locks_lock:
-                    pending_count = len(self._pending_deltas.get(ticker, []))
-                    if pending_count > 0:
-                        logger.info(
-                            "[SNAPSHOT-DELTA-CLEAR] ticker=%s cleared %d pending deltas after snapshot (preventing stale data application)",
-                            ticker, pending_count
-                        )
-                        self._pending_deltas.pop(ticker, None)
 
-                # Sync state and mark as recovered
+                # Sync state and mark as recovered (only if the snapshot is clean).
+                # A clean snapshot is authoritative: reset any previous SUSPECT/INVALID
+                # state, then let _sync_book_fields downgrade again if the new book still
+                # violates duality or is crossed/locked.
                 state = self._get_or_create(ticker)
+                prior_quality = state.data_quality
+                prior_transition = state.transition
+
+                source = self._resolve_book_source(via, "orderbook_snapshot")
+                state.data_source = source
+
                 self._sync_book_fields(state, self._ob.get_book(ticker), ticker, via)
                 self._sync_unified_book(ticker, state)
-                state.data_source = "WS_ORDERBOOK_SNAPSHOT_BOOTSTRAP"  # More specific: REST snapshot for WS bootstrap
-                state.data_quality = "GOOD"
-                state.book_initialized = True  # CRITICAL FIX: Mark as initialized after snapshot
-                state.executable = True  # CRITICAL FIX: Mark as executable when book is initialized via WS snapshot
+
+                # A clean, authoritative snapshot can lift a circuit breaker;
+                # a bootstrap-only snapshot (unconfirmed WS snapshot) cannot.
+                if state.data_quality not in ("SUSPECT", "INVALID"):
+                    self._attest_state_recovery(
+                        state,
+                        source,
+                        prior_quality=prior_quality,
+                        prior_transition=prior_transition,
+                    )
+                    # A successful snapshot resets the inversion counter.
+                    if hasattr(self, "_book_inversion_counts"):
+                        self._book_inversion_counts.pop(ticker, None)
+                else:
+                    # _sync_book_fields already set the appropriate SUSPECT/INVALID
+                    # data_quality and executable flag; nothing to attest.
+                    pass
+
+                # Update explicit BookHealth state machine.
+                if state.data_quality in ("SUSPECT", "INVALID"):
+                    self._set_book_health(
+                        ticker,
+                        BookHealth.INVALID,
+                        f"snapshot_quality={state.data_quality} transition={state.transition}",
+                    )
+                    if state.recovery_required_source:
+                        self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "invalid_snapshot_requires_resync")
+                elif state.recovery_attested and state.live_sequence_confirmed:
+                    self._set_book_health(ticker, BookHealth.LIVE, "snapshot_recovered_with_live_sequence")
+                elif state.recovery_attested:
+                    self._set_book_health(ticker, BookHealth.RECOVERED, "authoritative_snapshot_restored")
+                else:
+                    self._set_book_health(ticker, BookHealth.SNAPSHOT_RECEIVED, f"source={source}")
+
+                # 2026-08-24: Persist or reset the snapshot completion flag.  A clean
+                # full-book snapshot sets it; an invalid snapshot clears it so entries
+                # remain blocked until the next clean snapshot.
+                if state.data_quality in ("SUSPECT", "INVALID"):
+                    self._set_snapshot_complete(
+                        ticker, False, f"ws_orderbook_snapshot_invalid source={source}"
+                    )
+                    self._check_snapshot_timeout(ticker)
+                else:
+                    self._set_snapshot_complete(
+                        ticker, True, f"ws_orderbook_snapshot_applied source={source}"
+                    )
 
                 # CRITICAL FIX: Ensure transport_mode is set to WS for WS snapshots
                 # This aligns with the data_source being WS-based
@@ -2165,7 +2741,7 @@ class KalshiMarketStateStore:
                             if isinstance(timestamp_str, str):
                                 received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
                         except Exception as ts_error:
-                            logger.debug(f"[BOOK-FRESHNESS] Failed to parse timestamp for {ticker}: {ts_error}")
+                            logger.debug("[BOOK-FRESHNESS] Failed to parse timestamp for %s: %s", ticker, ts_error)
 
                     # Update freshness state based on data source
                     if via == "bridge_queue":
@@ -2176,16 +2752,17 @@ class KalshiMarketStateStore:
                         is_fallback = via in ("ws_fallback", "rest_polling")
                         freshness_tracker.update_from_rest(ticker, received_ts=received_ts, is_fallback=is_fallback)
 
-                    logger.debug(f"[BOOK-FRESHNESS] Updated state for {ticker} via={via} state={freshness_tracker.get_state(ticker).state.value}")
+                    if logger.isEnabledFor(10):
+                        logger.debug(
+                            "[BOOK-FRESHNESS] Updated state for %s via=%s state=%s",
+                            ticker,
+                            via,
+                            freshness_tracker.get_state(ticker).state.value,
+                        )
                 except ImportError:
                     logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
                 except Exception as e:
-                    logger.error(f"[BOOK-FRESHNESS] Failed to update freshness state for {ticker}: {e}")
-
-                # SUSPECT→GOOD recovery after REST snapshot
-                if state.book_consistency == "SUSPECT":
-                    state.book_consistency = "GOOD"
-                    logger.info(f"[BOOK-RECOVERED] ticker={ticker} consistency=GOOD after REST snapshot")
+                    logger.error("[BOOK-FRESHNESS] Failed to update freshness state for %s: %s", ticker, e)
 
                 # Log raw book after snapshot
                 book = self._ob.get_book(ticker)
@@ -2198,14 +2775,14 @@ class KalshiMarketStateStore:
                         no_levels = []
                     yes_raw = yes_levels[:5] if yes_levels else []
                     no_raw = no_levels[:5] if no_levels else []
-                    logger.info(
+                    logger.debug(
                         "[KALSHI-RAW-BOOK] ticker=%s yes_raw=%s no_raw=%s side=%s source=WS",
                         ticker, yes_raw, no_raw, channel
                     )
 
                 # Log parsed book after computing top prices
                 if state.best_bid_cents is not None or state.best_ask_cents is not None:
-                    logger.info(
+                    logger.debug(
                         "[KALSHI-PARSED-BOOK] ticker=%s yes_best=%s no_best=%s source=WS",
                         ticker, state.best_bid_cents, state.best_ask_cents
                     )
@@ -2279,6 +2856,16 @@ class KalshiMarketStateStore:
         status = data.get("status", "open").lower()
         if hasattr(state, 'status'):
             state.status = status
+
+        # Capture the exchange shard index for sharded order routing.
+        # Crypto 15m markets live on exchange_index=2; routing without this lands
+        # on the default shard and returns 404 market_not_found.
+        exchange_index = data.get("exchange_index")
+        if exchange_index is not None:
+            try:
+                state.exchange_index = int(exchange_index)
+            except (TypeError, ValueError):
+                pass
 
         strike = data.get("strike_price")
         if strike is not None:
@@ -2368,6 +2955,9 @@ class KalshiMarketStateStore:
             except Exception as e:
                 logger.warning("[APPLY-REST-MARKET] Failed to parse updated_time for %s: %s", ticker, e)
 
+        # General REST metadata timestamp.  This must NOT update
+        # last_rest_quote_update_ts / last_rest_bid/ask_cents — those are owned
+        # exclusively by REST orderbook snapshots applied through _sync_book_fields.
         state.last_rest_update_ts = time.monotonic()
         logger.info("[APPLY-REST-MARKET] BEFORE _recompute_seconds_to_expiry ticker=%s", ticker)
         _recompute_seconds_to_expiry(state)
@@ -2431,10 +3021,9 @@ class KalshiMarketStateStore:
     ) -> Optional[KalshiMarketState]:
         """Lightweight update from a WS quote/ticker channel event.
 
-        Fills in bid/ask/mid/spread when no orderbook subscription exists
-        for this ticker.  If the book is already initialized from the
-        orderbook channel, this is a no-op for bid/ask (book data is
-        more authoritative), but volume is always updated.
+        Stores the most recent ticker BBO as a fallback.  The ticker quote is
+        used as a redundant source of top-of-book prices when the orderbook
+        channel is one-sided or crossed due to one-sided delta streams.
         """
         if not ticker:
             return None
@@ -2444,18 +3033,56 @@ class KalshiMarketStateStore:
             if volume is not None:
                 state.volume_24h = int(volume)
 
-            # Only fill bid/ask/mid from quotes when book is NOT initialized
-            # (orderbook data is higher fidelity).
+            now = time.monotonic()
+
+            # Always record the latest quote for potential fallback use.
+            # These are diagnostic fields only and must never overwrite executable
+            # BBO on an already-initialized or invalid book.
+            if bid_cents is not None:
+                state.quoted_bid_cents = bid_cents
+                state.fallback_yes_bid_cents = bid_cents
+                state.last_ws_bid_cents = bid_cents
+            if ask_cents is not None:
+                state.quoted_ask_cents = ask_cents
+                state.fallback_yes_ask_cents = ask_cents
+                state.last_ws_ask_cents = ask_cents
+            state.quote_received_ts = now
+            state.last_ws_update_ts = now
             if not state.book_initialized:
-                if bid_cents is not None:
-                    state.best_bid_cents = bid_cents
-                if ask_cents is not None:
-                    state.best_ask_cents = ask_cents
+                state.quote_owner = "WS_QUOTE"
+
+            # Capture pre-update quality/transition for the recovery attestation gate.
+            prior_quality = state.data_quality
+            prior_transition = state.transition
+
+            # If we have no orderbook yet, the quote is a *fallback* source only.
+            # It must not mark the book as initialized/executable, because a ticker
+            # quote is not a full orderbook and can become stale quickly (e.g. the
+            # orderbook channel has not caught up to a new window).  The executable
+            # BBO is only set by an orderbook snapshot or a contiguous delta stream.
+            if not state.book_initialized:
                 if bid_cents is not None and ask_cents is not None:
                     state.mid_cents = int(round((bid_cents + ask_cents) / 2))
                     state.spread_cents = int(round(ask_cents - bid_cents))
                 elif last_cents is not None:
                     state.mid_cents = int(round(last_cents))
+
+                if bid_cents is not None and ask_cents is not None and bid_cents >= ask_cents:
+                    # Crossed quote on a fresh market: record it as a fallback but
+                    # do not initialize the executable book.
+                    state.data_quality = "SUSPECT"
+                    state.book_consistency = "INVERTED"
+                    state.transition = "RESYNC_REQUIRED"
+                    state.executable = False
+                    state.book_initialized = False
+
+                # Propagate the quote-derived top-of-book into the unified state so
+                # fills, PnL, and risk all see the same mid/last.
+                self._sync_unified_book(ticker, state)
+
+                # FIX: Reset retry counter when we receive fresh WebSocket data
+                if ticker in self._quote_retry_count:
+                    del self._quote_retry_count[ticker]
 
             # DIAGNOSTIC: Rate-limited per-ticker update logging (every 30s)
             now = time.monotonic()
@@ -2467,12 +3094,6 @@ class KalshiMarketStateStore:
                     ticker, age_s, last_update,
                 )
                 self._last_log_ts[ticker] = now
-
-            state.last_book_update_ts = time.monotonic()
-            state.last_book_update_wall_ts = time.time()
-            # FIX: Reset retry counter when we receive fresh WebSocket data
-            if ticker in self._quote_retry_count:
-                del self._quote_retry_count[ticker]
 
             # CONNECTION HEALTH: Update WS connection health tracking
             self._update_ws_connection_health(ticker)
@@ -2602,27 +3223,54 @@ class KalshiMarketStateStore:
     def cleanup_stale_states(self, active_tickers: List[str]) -> None:
         """Remove market states for tickers that are no longer active.
 
-        Called when catalog refreshes to new time windows to prevent ticker mismatch.
+        Called when catalog refreshes or on WS reconnect to prevent expired
+        state from leaking into signal/edge computation and order routing.
 
         Args:
             active_tickers: List of currently active tickers from catalog
         """
+        active_set = set(active_tickers)
         with self._lock:
-            # Find tickers that are in store but not in active catalog
-            stale_tickers = []
-            for ticker in self._states:
-                if ticker not in active_tickers:
-                    stale_tickers.append(ticker)
+            stale_tickers = [t for t in self._states if t not in active_set]
 
-            # Remove stale states
             for ticker in stale_tickers:
                 del self._states[ticker]
-                if ticker in self._subscribers:
-                    del self._subscribers[ticker]
+                self._unified.pop(ticker, None)
+                self._subscribers.pop(ticker, None)
+                self._pending_deltas.pop(ticker, None)
+                self._overflow_count.pop(ticker, None)
+                self._last_snapshot_ts.pop(ticker, None)
+                self._snapshot_wait_start_ts.pop(ticker, None)
+                self._snapshots_applied_total.pop(ticker, None)
+                self._ticker_locks.pop(ticker, None)
+                self._delta_queues.pop(ticker, None)
+                self._needs_resync.pop(ticker, None)
                 logger.info(f"[MARKET-STATE-CLEANUP] Removed stale state for ticker={ticker}")
 
             if stale_tickers:
                 logger.info(f"[MARKET-STATE-CLEANUP] Cleaned up {len(stale_tickers)} stale tickers: {stale_tickers}")
+
+    def invalidate_all_live_sequence(self) -> None:
+        """Clear live_sequence_confirmed for all tracked markets.
+
+        Called on every WebSocket session recycle/reconnect so that new capital
+        commitment is gated until a fresh snapshot + contiguous WS delta sequence
+        has been observed.
+        """
+        with self._lock:
+            count = 0
+            for ticker, state in self._states.items():
+                if getattr(state, "live_sequence_confirmed", False):
+                    state.live_sequence_confirmed = False
+                    count += 1
+                # 2026-08-24: A session recycle invalidates any prior snapshot
+                # completion; entries must wait for a fresh snapshot.
+                self._set_snapshot_complete(ticker, False, "ws_reconnect")
+            logger.info(
+                "[MARKET-STATE] Invalidated live_sequence_confirmed for %d/%d states",
+                count,
+                len(self._states),
+            )
 
     def prune_expired_markets(self, max_age_seconds: float = 86400.0) -> int:
         """Remove market states that haven't been updated in a long time.
@@ -3752,8 +4400,9 @@ class KalshiMarketStateStore:
                     health = QuoteHealth.HEALTHY if primary_fresh else QuoteHealth.DEGRADED
                     is_fallback = not primary_fresh
 
-                    # Calculate age_ms and confidence
-                    ts_exchange = state.last_book_update_ts if primary_fresh else state.last_rest_update_ts
+                    # Calculate age_ms and confidence from the actual orderbook
+                    # timestamp; catalog metadata does not refresh prices.
+                    ts_exchange = state.last_book_update_ts
                     age_ms = (time.monotonic() - ts_exchange) * 1000.0
 
                     # Record quote age metric
@@ -4230,12 +4879,302 @@ class KalshiMarketStateStore:
         with self._global_lock:
             if ticker not in self._states:
                 self._states[ticker] = KalshiMarketState(ticker=ticker)
+                # 2026-08-24: Start the snapshot timeout clock when a ticker is first
+                # registered; if no valid snapshot arrives in time, we resubscribe.
+                self._snapshot_wait_start_ts[ticker] = time.monotonic()
                 underlying, timeframe = _parse_market_ticker(ticker)
                 logger.info(
                     "[MARKET-STATE] book_registered ticker=%s underlying=%s timeframe=%s total_states=%d",
                     ticker, underlying, timeframe, len(self._states)
                 )
             return self._states[ticker]
+
+    def _set_book_health(
+        self,
+        ticker: str,
+        health: BookHealth,
+        reason: str = "",
+    ) -> None:
+        """Set the explicit book health state for *ticker* and emit a canonical log.
+
+        The BookHealth state machine is the single source of truth for the
+        orderbook trust lifecycle.  It is updated at every snapshot, delta,
+        sequence gap, and resync boundary while leaving the legacy
+        data_quality / book_consistency / transition fields in place for
+        downstream compatibility.
+        """
+        state = self._get_or_create(ticker)
+        old = state.book_health
+        new = health.value
+        if old == new:
+            return
+        state.book_health = new
+        logger.info(
+            "[BOOK-HEALTH] ticker=%s old=%s new=%s reason=%s",
+            ticker, old, new, reason or "state_transition",
+        )
+
+    def _set_snapshot_complete(
+        self,
+        ticker: str,
+        complete: bool,
+        reason: str,
+    ) -> None:
+        """Set the ``snapshot_complete`` flag and emit a canonical lifecycle log.
+
+        This is the single mutation point for the snapshot completion flag.  It
+        is set to True only when a full, valid orderbook snapshot is applied (WS
+        orderbook_snapshot or authoritative REST snapshot) and reset to False on
+        sequence gaps, invalidation, resync, reconnect, or ticker rollover.  Deltas
+        alone must never set or re-assert this flag.
+        """
+        state = self._get_or_create(ticker)
+        old = bool(state.snapshot_complete)
+        new = bool(complete)
+        if old == new:
+            # Still log the reason when the state is being re-affirmed for
+            # traceability, but only at debug level to avoid spam.
+            logger.debug(
+                "[SNAPSHOT-COMPLETE-LIFECYCLE] ticker=%s ws_snapshot_complete=%s reason=%s (unchanged)",
+                ticker, new, reason,
+            )
+            return
+        state.snapshot_complete = new
+        if new:
+            self._snapshot_wait_start_ts.pop(ticker, None)
+        else:
+            self._snapshot_wait_start_ts[ticker] = time.monotonic()
+        logger.info(
+            "[SNAPSHOT-COMPLETE-LIFECYCLE] ticker=%s ws_snapshot_complete=%s reason=%s",
+            ticker, new, reason,
+        )
+
+    def _check_snapshot_timeout(self, ticker: str) -> None:
+        """If a ticker has been waiting for a snapshot too long, invalidate it
+        and request a fresh snapshot.  This breaks the dead-ready state where the
+        WebSocket is subscribed but no orderbook snapshot is ever received.
+        """
+        state = self._states.get(ticker)
+        if state is None or state.snapshot_complete:
+            return
+
+        wait_start = self._snapshot_wait_start_ts.get(ticker)
+        if wait_start is None:
+            # First time we have noticed this ticker needs a snapshot; start the clock.
+            self._snapshot_wait_start_ts[ticker] = time.monotonic()
+            return
+
+        elapsed = time.monotonic() - wait_start
+        if elapsed <= _SNAPSHOT_TIMEOUT_SECONDS:
+            return
+
+        # Only act once per timeout window by refreshing the wait start.
+        self._snapshot_wait_start_ts[ticker] = time.monotonic()
+
+        logger.warning(
+            "[SNAPSHOT-TIMEOUT] ticker=%s elapsed_since_reset=%.1fs timeout=%.1fs - "
+            "invalidating book and requesting fresh snapshot",
+            ticker, elapsed, _SNAPSHOT_TIMEOUT_SECONDS,
+        )
+
+        state.data_quality = "INVALID"
+        state.executable = False
+        state.book_initialized = False
+        state.transition = "SNAPSHOT_TIMEOUT"
+        state.invalidation_cause = "SNAPSHOT_TIMEOUT"
+        state.recovery_required_source = "FULL_SNAPSHOT"
+        self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "snapshot_timeout")
+        self._set_snapshot_complete(ticker, False, "snapshot_timeout")
+
+        # Request a fresh WebSocket snapshot if the event loop is available.
+        try:
+            loop = self._main_event_loop
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._trigger_snapshot_recovery(ticker), loop
+                )
+        except Exception as e:
+            logger.error("[SNAPSHOT-TIMEOUT] Failed to schedule snapshot recovery for %s: %s", ticker, e)
+
+    def _validate_delta_sequence(
+        self,
+        ticker: str,
+        msg: Dict[str, Any],
+        ob: Any,
+    ) -> Tuple[bool, Optional[int], Optional[int]]:
+        """Lightweight sequence-gap validator for a single WS orderbook delta.
+
+        Returns (is_valid, expected_seq, got_seq).  is_valid is True when the
+        message is contiguous with ``ob.last_seq`` (or when no sequence check
+        can be performed, e.g. no prior sequence).  This is intentionally stateless
+        with respect to ``KalshiMarketState``; callers handle invalidation and resync.
+        """
+        if not ob or not ob.initialized or ob.last_seq is None:
+            return True, None, None
+
+        msg_seq = msg.get("seq_first") or msg.get("seq")
+        if msg_seq is None:
+            return True, None, None
+
+        try:
+            msg_seq = int(msg_seq)
+        except Exception:
+            return True, None, None
+
+        expected = ob.last_seq + 1
+        if msg_seq != expected:
+            return False, expected, msg_seq
+
+        return True, expected, msg_seq
+
+    def _coalesce_deltas(
+        self,
+        ticker: str,
+        batch: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Coalesce a contiguous run of same-(side, price) delta_fp messages.
+
+        Returns a list of merged messages.  Each merged message carries:
+        - ``seq_first``: the first sequence number in the run (for the gap validator)
+        - ``seq``: the last sequence number in the run (for ``_last_seq``)
+        - ``delta_fp``: the sum of signed size changes
+        - ``price_dollars`` and ``side`` from the run
+
+        If the batch is not contiguous, or any message is not in the simple
+        ``delta_fp`` form, the original batch is returned unchanged.
+        """
+        ob = self._ob.get_book(ticker)
+        if not ob or not ob.initialized or ob.last_seq is None or not batch:
+            return batch
+
+        def _delta_key(msg: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], Optional[float], Optional[int]]:
+            # Extract side
+            side = msg.get("side") or msg.get("outcome_side") or msg.get("kalshi_side")
+            if side is None:
+                return None, None, None, None
+            side = side.lower()
+            if side not in ("yes", "no"):
+                return None, None, None, None
+
+            # Extract price in cents
+            price_cents: Optional[int] = None
+            if "price_dollars" in msg:
+                try:
+                    price_dollars = float(msg["price_dollars"]) if isinstance(msg["price_dollars"], str) else msg["price_dollars"]
+                    price_cents = int(round(price_dollars * 100))
+                except Exception:
+                    pass
+            elif "price" in msg:
+                try:
+                    price_cents = int(round(float(msg["price"])))
+                except Exception:
+                    pass
+
+            if price_cents is None or not 1 <= price_cents <= 99:
+                return None, None, None, None
+
+            # Extract size delta
+            size_delta: Optional[float] = None
+            if "delta_fp" in msg:
+                try:
+                    size_delta = float(msg["delta_fp"]) if isinstance(msg["delta_fp"], str) else float(msg["delta_fp"])
+                except Exception:
+                    pass
+            elif "size_delta" in msg:
+                try:
+                    size_delta = float(msg["size_delta"])
+                except Exception:
+                    pass
+            elif "delta" in msg:
+                try:
+                    size_delta = float(msg["delta"])
+                except Exception:
+                    pass
+
+            if size_delta is None:
+                return None, None, None, None
+
+            # Extract sequence
+            msg_seq = msg.get("seq")
+            if msg_seq is None:
+                return None, None, None, None
+            try:
+                msg_seq = int(msg_seq)
+            except Exception:
+                return None, None, None, None
+
+            return side, price_cents, size_delta, msg_seq
+
+        coalesced: List[Dict[str, Any]] = []
+        current: Optional[Dict[str, Any]] = None
+        contiguous = True
+        last_seq = ob.last_seq
+
+        for msg in batch:
+            side, price_cents, size_delta, msg_seq = _delta_key(msg)
+            if side is None:
+                # Cannot coalesce this message; flush any current group and fall back.
+                if current:
+                    coalesced.append(current)
+                    current = None
+                return batch
+
+            if msg_seq != last_seq + 1:
+                contiguous = False
+                break
+
+            if (
+                current is not None
+                and current["side"] == side
+                and current["price_cents"] == price_cents
+                and msg_seq == current["seq"] + 1
+            ):
+                # Extend the current contiguous same-(side, price) run.
+                current["delta_fp"] += size_delta
+                current["seq"] = msg_seq
+                current["_last_msg"] = msg
+            else:
+                if current is not None:
+                    coalesced.append(current)
+                template = dict(msg)
+                template["side"] = side
+                template["price_dollars"] = price_cents / 100.0
+                template["delta_fp"] = size_delta
+                template["seq"] = msg_seq
+                template["seq_first"] = msg_seq
+                template["price_cents"] = price_cents
+                template.pop("_last_msg", None)
+                current = template
+
+            last_seq = msg_seq
+
+        if current is not None:
+            coalesced.append(current)
+
+        if not contiguous or not coalesced:
+            return batch
+
+        # The first coalesced message must be contiguous with the book.
+        if coalesced[0]["seq_first"] != ob.last_seq + 1:
+            return batch
+
+        # Finalize: keep the last message as a template for metadata, but override
+        # the aggregated values and use the last message's timestamp if present.
+        finalized: List[Dict[str, Any]] = []
+        for c in coalesced:
+            last_msg = c.pop("_last_msg", None)
+            out = dict(last_msg) if last_msg is not None else c
+            out.update({
+                "side": c["side"],
+                "price_dollars": c["price_dollars"],
+                "delta_fp": round(c["delta_fp"], 8),
+                "seq": c["seq"],
+                "seq_first": c["seq_first"],
+                "price_cents": c["price_cents"],
+            })
+            finalized.append(out)
+
+        return finalized
 
     def _get_or_create_unified(self, ticker: str) -> UnifiedMarketState:
         """Return the ``UnifiedMarketState`` for *ticker*, creating it if absent.
@@ -4460,15 +5399,30 @@ class KalshiMarketStateStore:
         """
         # All operations here are under the caller's lock (from apply_orderbook_message)
 
-        # CRITICAL FIX (2026-08-02): Preserve upstream timestamp instead of discarding it
-        ob_ts = ob._snapshot_ts if hasattr(ob, '_snapshot_ts') else None
-        if ob_ts is not None:
-            state.last_book_update_ts = ob_ts
-            logger.info(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} PRESERVED upstream timestamp: ob._snapshot_ts={ob_ts}")
-        else:
-            state.last_book_update_ts = time.monotonic()
-            logger.warning(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} NO upstream timestamp, using monotonic fallback: {state.last_book_update_ts}")
+        # CRITICAL FIX (2026-08-22): Capture the pre-update quality/transition so
+        # that quote overrides and tentatively-set GOOD values do not silently
+        # clear an INVALID / CIRCUIT_BREAKER state.
+        prior_quality = state.data_quality
+        prior_transition = state.transition
+
+        # If the local orderbook has a fresh snapshot/delta, start from GOOD and
+        # let the invariant checks downgrade it.  A non-initialized book does not
+        # change the stored quality; callers (or apply_quote) attest recovery.
+        if ob.initialized:
+            state.data_quality = "GOOD"
+            state.book_consistency = "GOOD"
+            state.transition = "VALID"
+
+        # CRITICAL FIX (2026-08-22): Use a single monotonic clock for in-process
+        # staleness.  ``ob._snapshot_ts`` and any exchange ``ts`` are logged via
+        # wall-clock fields but are not safe for ``time.monotonic()`` subtraction.
+        state.last_book_update_ts = time.monotonic()
         state.last_book_update_wall_ts = time.time()
+        ob_ts = getattr(ob, '_last_exchange_ts', None) or getattr(ob, '_snapshot_ts', None)
+        if ob_ts is not None:
+            logger.debug(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} snapshot_applied exchange_ts={ob_ts} local_ts={state.last_book_update_ts}")
+        else:
+            logger.debug(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} snapshot_applied local_ts={state.last_book_update_ts}")
 
         state.book_initialized = ob.initialized
         state.last_update_ts = time.monotonic()  # FIX: Update last_update_ts for staleness checks
@@ -4561,7 +5515,7 @@ class KalshiMarketStateStore:
                 self._track_duality_violation(ticker, None)
 
         # DIAGNOSTIC: Log computed best_bid/best_ask for debugging
-        logger.info(
+        logger.debug(
             "[WS-ORDERBOOK-BBA] ticker=%s yes_bid=%s yes_ask=%s no_bid=%s no_ask=%s",
             ticker,
             best_bid[0] if best_bid else None,
@@ -4574,41 +5528,160 @@ class KalshiMarketStateStore:
         state.no_bids = no_bids
         state.best_bid_cents = best_bid[0] if best_bid else None
         state.best_ask_cents = best_ask[0] if best_ask else None
-        # CRITICAL FIX (2026-08-01): Populate NO-side specific fields from actual NO bid data
-        # NO-space: best NO bid is the highest NO price, best NO ask is the lowest NO price
-        # Since ob.no_levels contains NO bids in NO-space, we can extract them directly
-        if ob.no_levels:
-            state.best_no_bid_cents = max(ob.no_levels.keys())  # Highest NO bid
-            # NO ask is derived from YES bid (NO ask = 100 - YES bid)
-            state.best_no_ask_cents = 100 - state.best_bid_cents if state.best_bid_cents else None
+
+        # 2026-08-24: Track per-feed BBO ownership and timestamps.
+        now = time.monotonic()
+        if via == "bridge_queue":
+            state.last_ws_bid_cents = state.best_bid_cents
+            state.last_ws_ask_cents = state.best_ask_cents
+            state.last_ws_update_ts = now
+            state.quote_owner = "WS"
+        elif via.startswith("rest") or via == "ws_fallback" or via == "subscribe_fallback" or via == "rest_polling" or via == "ws_subscribe_bootstrap":
+            state.last_rest_bid_cents = state.best_bid_cents
+            state.last_rest_ask_cents = state.best_ask_cents
+            # Quote freshness is tracked separately from general REST metadata so
+            # that catalog/apply_rest_market cannot overwrite the quote clock.
+            state.last_rest_quote_update_ts = now
+            # Keep the legacy REST freshness marker for transport/health consumers.
+            state.last_rest_update_ts = now
+            state.quote_owner = "REST"
+
+        # Ticker quote fallback: the orderbook_delta stream is one-sided, so the
+        # local ladder can become crossed or one-sided if the opposite tape lags.
+        # The ticker channel is an independent top-of-book source; use it as a
+        # temporary BBO fallback while the orderbook rebuilds a consistent ladder.
+        # CRITICAL FIX (2026-08-22): Quote fallbacks must not clear an
+        # INVALID / CIRCUIT_BREAKER state; only authoritative REST snapshots or
+        # contiguous WS deltas can attest recovery.
+        quote_override_allowed = (
+            prior_quality != "INVALID"
+            and prior_transition != "CIRCUIT_BREAKER"
+        )
+        quote_override_used = False
+        if state.quoted_bid_cents is not None and state.quoted_ask_cents is not None:
+            quote_age_s = time.monotonic() - state.quote_received_ts if state.quote_received_ts > 0 else float('inf')
+            quote_valid = (
+                state.quoted_bid_cents < state.quoted_ask_cents
+                and 1 <= state.quoted_bid_cents <= 99
+                and 1 <= state.quoted_ask_cents <= 99
+                and quote_age_s <= _MAX_QUOTE_OVERRIDE_AGE_SECONDS
+            )
+            if quote_valid and quote_override_allowed:
+                ob_crossed = (
+                    state.best_bid_cents is not None
+                    and state.best_ask_cents is not None
+                    and state.best_bid_cents >= state.best_ask_cents
+                )
+                ob_one_sided = state.best_bid_cents is None or state.best_ask_cents is None
+                if ob_crossed or ob_one_sided:
+                    state.best_bid_cents = state.quoted_bid_cents
+                    state.best_ask_cents = state.quoted_ask_cents
+                    quote_override_used = True
+                    duality_violation = False
+                    self._clear_duality_violation(ticker)
+                    logger.debug(
+                        "[WS-TICKER-FALLBACK] ticker=%s bid=%s ask=%s quote_age_s=%.2f - "
+                        "using ticker BBO because orderbook was %s",
+                        ticker,
+                        state.quoted_bid_cents,
+                        state.quoted_ask_cents,
+                        quote_age_s,
+                        "crossed" if ob_crossed else "one-sided",
+                    )
+
+        # CRITICAL FIX (2026-08-01): Populate NO-side specific fields from the
+        # canonical YES BBO (which may come from ticker fallback).
+        if state.best_ask_cents is not None:
+            state.best_no_bid_cents = 100 - state.best_ask_cents
         else:
             state.best_no_bid_cents = None
+        if state.best_bid_cents is not None:
+            state.best_no_ask_cents = 100 - state.best_bid_cents
+        else:
             state.best_no_ask_cents = None
-        # Store mid/spread as whole cents.  ob.get_midpoint() returns a float
-        # (e.g. 32.5c) which later poisons limit-price arithmetic and can produce
-        # fractional-cent prices such as 31.5c.
-        state.mid_cents = int(round(mid)) if mid is not None else None
-        state.spread_cents = int(round(spread)) if spread is not None else None
+
+        # Crossed/locked detection.  Locked (bid == ask) is allowed; a strict
+        # cross (bid > ask) indicates a corrupt or split-tape book.  We no
+        # longer use an unbounded inversion counter that can spiral to a
+        # permanent CIRCUIT_BREAKER when transient one-sided deltas arrive.
+        book_inverted = False
+        if (
+            state.best_bid_cents is not None
+            and state.best_ask_cents is not None
+            and state.best_bid_cents > state.best_ask_cents
+        ):
+            book_inverted = True
+            cross_cents = state.best_bid_cents - state.best_ask_cents
+            logger.error(
+                "[MARKET-STATE-QUOTE-INVALID] ticker=%s bid=%dc ask=%dc cross=%dc - "
+                "crossed book. Marking non-executable, data_quality=SUSPECT, "
+                "transition=RESYNC_REQUIRED and scheduling REST/WS resync.",
+                ticker,
+                state.best_bid_cents,
+                state.best_ask_cents,
+                cross_cents,
+            )
+            state.executable = False
+            state.data_quality = "SUSPECT"
+            state.book_consistency = "INVERTED"
+            state.transition = "RESYNC_REQUIRED"
+
+            quarantined = self._record_invariant_violation(ticker, "crossed_book")
+            if quarantined:
+                state.book_initialized = False
+                state.data_quality = "INVALID"
+                state.transition = "CIRCUIT_BREAKER"
+                state.invalidation_cause = "CIRCUIT_BREAKER"
+                state.recovery_required_source = "FULL_SNAPSHOT"
+                state.executable = False
+                self._set_snapshot_complete(ticker, False, "crossed_book_quarantine")
+                logger.critical(
+                    "[MARKET-STATE-QUOTE-SUSPEND] ticker=%s quarantined - "
+                    "circuit-breaker. A clean snapshot or contiguous clean delta "
+                    "sequence is required before resuming.",
+                    ticker,
+                )
+
+            self._schedule_duality_resync(ticker)
+
+        # Store mid/spread as whole cents. Recompute from a valid BBO only when
+        # the book is not strictly crossed.  Locked or quote-fallback books are
+        # allowed for pricing.
+        if not book_inverted and state.best_bid_cents is not None and state.best_ask_cents is not None:
+            state.mid_cents = int(round((state.best_bid_cents + state.best_ask_cents) / 2.0))
+            state.spread_cents = state.best_ask_cents - state.best_bid_cents
+        else:
+            state.mid_cents = None
+            state.spread_cents = None
 
         # Update last good book tracking (for audit - tracks last known good state)
         from datetime import datetime, timezone
-        if best_bid is not None and best_ask is not None:
+        if not book_inverted and state.best_bid_cents is not None and state.best_ask_cents is not None:
             # Only update last good book if we have valid bid/ask
-            state.last_good_bid_cents = best_bid[0]
-            state.last_good_ask_cents = best_ask[0]
-            state.last_good_mid_cents = int(round(mid)) if mid is not None else None
+            state.last_good_bid_cents = state.best_bid_cents
+            state.last_good_ask_cents = state.best_ask_cents
+            state.last_good_mid_cents = state.mid_cents
             state.last_good_book_ts = datetime.now(timezone.utc)
             state.last_update = datetime.now(timezone.utc)
 
-        # Set executable flag: True only when book has live bid/ask data
-        state.executable = (best_bid is not None and best_ask is not None)
+        # Set executable flag: True only when we have live bid/ask data and the
+        # book is not strictly crossed.
+        state.executable = (
+            state.best_bid_cents is not None
+            and state.best_ask_cents is not None
+            and not book_inverted
+        )
 
         # CRITICAL FIX (2026-07-26): Books that violate YES/NO duality are corrupt
         # (stale window, missing snapshot, or one-sided ladder). Never mark them
         # executable - downstream pricing would produce non-marketable orders.
         if duality_violation:
             state.executable = False
-            state.data_quality = "SUSPECT"
+            # Do not downgrade an already-INVALID book to SUSPECT.
+            if state.data_quality != "INVALID":
+                state.data_quality = "SUSPECT"
+                state.book_consistency = "SUSPECT"
+                state.transition = "RESYNC_REQUIRED"
 
         # CRITICAL: Detect (0,100) anomaly - indicates no real liquidity
         # This pattern occurs when orderbook has no executable resting orders
@@ -4621,7 +5694,11 @@ class KalshiMarketStateStore:
             )
             state.executable = False  # Override executable flag for (0,100) anomaly
 
-        # Calculate depth
+        # Calculate depth.  If the orderbook channel is one-sided but the ticker
+        # quote gave us a valid mid, use the quote mid for the depth window.
+        if mid is None and state.mid_cents is not None:
+            mid = state.mid_cents
+
         top_of_book_size = (
             (best_bid[1] if best_bid else 0)
             + (best_ask[1] if best_ask else 0)
@@ -4652,16 +5729,24 @@ class KalshiMarketStateStore:
 
         # AUDIT: Populate new liquidity audit fields
         state.last_update_ts = time.monotonic()
-        state.has_bid = best_bid is not None
-        state.has_ask = best_ask is not None
+        state.has_bid = state.best_bid_cents is not None
+        state.has_ask = state.best_ask_cents is not None
         # CRITICAL FIX (2026-08-01): Populate NO-side liquidity flags
         state.has_no_bid = state.best_no_bid_cents is not None
         state.has_no_ask = state.best_no_ask_cents is not None
         # YES best bid and YES best ask are the two top levels of the unified order
         # book.  In a binary market each YES level is also a NO level at (100 - p),
         # so these sizes are reused for the opposite-side executable accessors.
-        new_depth_yes = best_bid[1] if best_bid else 0
-        new_depth_no = best_ask[1] if best_ask else 0
+        # Use the quote-override price if present, otherwise the raw orderbook BBO.
+        if state.best_bid_cents is not None:
+            new_depth_yes = ob.yes_levels.get(state.best_bid_cents, 0)
+        else:
+            new_depth_yes = best_bid[1] if best_bid else 0
+        if state.best_ask_cents is not None:
+            # YES ask = 100 - NO bid.  Look up the NO bid level that yields this ask.
+            new_depth_no = ob.no_levels.get(100 - state.best_ask_cents, 0)
+        else:
+            new_depth_no = best_ask[1] if best_ask else 0
 
         # Depth anomaly detection
         prev_depth_yes = state.min_depth_yes if hasattr(state, 'min_depth_yes') else None
@@ -4729,12 +5814,54 @@ class KalshiMarketStateStore:
                 ok_pct = (ok_samples / total_samples * 100) if total_samples > 0 else 0.0
                 liquidity_ok_pct.labels(asset=underlying).set(ok_pct)
 
+        # CRITICAL FIX (2026-08-23): Never leave a good book with an UNKNOWN source.
+        # Some callers (e.g., ws_subscribe_bootstrap) used an unmapped `via` and
+        # therefore set source=UNKNOWN, which fail-closed execution gates rejected.
+        if state.data_source == "UNKNOWN" and ob.initialized:
+            if via == "bridge_queue":
+                state.data_source = "WS_ORDERBOOK_DELTA_LIVE"
+            elif via in ("rest_bootstrap", "ws_fallback", "subscribe_fallback", "rest_polling", "ws_subscribe_bootstrap"):
+                state.data_source = "REST_FULL_ORDERBOOK"
+            elif via == "quote_fallback":
+                state.data_source = "WS_QUOTE"
+            elif via in ("manual", "test"):
+                state.data_source = "WS_CLEAN_SNAPSHOT"
+            else:
+                state.data_source = "BOOTSTRAP_VALID_BUT_UNCONFIRMED"
+            logger.debug(
+                "[BOOK-SOURCE-FALLBACK] ticker=%s via=%s source set to %s",
+                ticker, via, state.data_source,
+            )
+
+        # CRITICAL FIX (2026-08-23): An initialized but empty orderbook is a valid
+        # bootstrap for a newly opened contract, but it is not yet usable.  Keep it
+        # SUSPECT and non-executable until a contiguous delta populates at least one
+        # side.  Quote fallbacks must not make an empty book appear executable.
+        if ob.initialized and not ob.yes_levels and not ob.no_levels:
+            state.executable = False
+            state.live_sequence_confirmed = False
+            if state.data_quality != "INVALID":
+                state.data_quality = "SUSPECT"
+                state.book_consistency = "SUSPECT"
+                state.transition = "BOOTSTRAP_EMPTY"
+            state.best_bid_cents = None
+            state.best_ask_cents = None
+            state.best_no_bid_cents = None
+            state.best_no_ask_cents = None
+            state.mid_cents = None
+            state.spread_cents = None
+            state.has_bid = False
+            state.has_ask = False
+            state.has_no_bid = False
+            state.has_no_ask = False
+            state.liquidity_status = LiquidityStatus.MISSING
+
         # AUDIT: Update per-ticker snapshot counters
         self._snapshots_applied_total[ticker] = self._snapshots_applied_total.get(ticker, 0) + 1
         self._last_snapshot_ts[ticker] = state.last_update_ts
 
         # AUDIT: Log STATE-AFTER-WRITE with new liquidity audit fields
-        logger.info(
+        logger.debug(
             "[STATE-AFTER-WRITE] ticker=%s bid=%s ask=%s initialized=%s executable=%s "
             "update_ts=%.3f has_bid=%s has_ask=%s depth_yes=%s depth_no=%s liquidity_status=%s "
             "snapshots_total=%s",

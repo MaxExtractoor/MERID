@@ -20,6 +20,7 @@ Integration with PaperSession / KalshiRiskManager::
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -275,6 +276,15 @@ class OrderManager:
                     return None
             except Exception as _dce:
                 logger.debug("[order-manager] DeploymentController check skipped: %s", _dce)
+
+        from merid.settings import settings
+
+        if settings.is_production:
+            logger.critical(
+                "[order-manager] Direct client place_order bypass blocked in production. "
+                "Orders must flow through order_router."
+            )
+            return None
 
         placed = await self._client.place_order(order)
         if placed is None:
@@ -595,6 +605,18 @@ class OrderManager:
                     logger.debug("[order-manager] VenueGate check failed during flatten: %s", _vg_exc)
                 flatten_placed = None
                 if _allow_flatten:
+                    from merid.settings import settings
+
+                    if settings.is_production:
+                        logger.critical(
+                            "[order-manager] cancel_and_flatten direct client bypass "
+                            "blocked in production for order_id=%s. "
+                            "Flatten orders must be routed through order_router.",
+                            order_id,
+                        )
+                        result.error = "Direct client flatten bypass blocked in production"
+                        return result
+
                     from merid.event_venues.base import VenueOrder
                     # BUG-FIX: Pass price for ALL orders (including market) to avoid 50c fallback in Kalshi client
                     # PRODUCTION-FIX: Use actual market price from KalshiMarketStateStore instead of hardcoded 50c
@@ -615,6 +637,7 @@ class OrderManager:
                         price=Decimal(price_est) / 100,
                         order_type="market",
                         outcome_id=tracked.outcome,
+                        reduce_only=True,
                     )
                     flatten_placed = await self._client.place_order(flatten_order)
                 if flatten_placed is not None:
@@ -652,6 +675,9 @@ class OrderManager:
         outcome: str = "yes",
         requested_size: int = 0,
         price_cents: int = 0,
+        status: str = "pending",
+        terminal: bool = False,
+        cancel_requested: bool = False,
     ) -> TrackedOrder:
         """Manually register an order for tracking (e.g. placed externally)."""
         tracked = TrackedOrder(
@@ -663,6 +689,9 @@ class OrderManager:
             requested_size=requested_size,
             price_cents=price_cents,
             created_at=time.time(),
+            status=status,
+            terminal=terminal,
+            cancel_requested=cancel_requested,
         )
         self._orders[order_id] = tracked
         return tracked
@@ -698,3 +727,21 @@ class OrderManager:
             "total_partial_fill_events": self._total_partial_fills,
             "orders": {oid: o.to_dict() for oid, o in self._orders.items()},
         }
+
+
+# ── Singleton accessor ─────────────────────────────────────────────────────
+
+_order_manager: Optional[OrderManager] = None
+
+
+def get_order_manager(client: Optional[Any] = None) -> Optional[OrderManager]:
+    """Return the shared :class:`OrderManager` instance.
+
+    Pass ``client`` once during startup to bind the manager to the live
+    Kalshi client. Subsequent callers should pass no arguments and will
+    receive the existing singleton (or ``None`` if not initialized).
+    """
+    global _order_manager
+    if client is not None:
+        _order_manager = OrderManager(client=client)
+    return _order_manager

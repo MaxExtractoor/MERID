@@ -84,6 +84,19 @@ class KalshiRestClient:
             logger.error("Failed to fetch fills: %s", e)
             return {"fills": [], "cursor": None}
 
+    async def get_positions_with_filters(
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 200,
+    ):
+        """Fetch portfolio positions from Kalshi REST API.
+
+        Delegates to KalshiVenueClient.get_positions_with_filters.
+        Returns OperationResult with data containing market_positions/event_positions.
+        """
+        client = await self._ensure_client()
+        return await client.get_positions_with_filters(filters=filters or {}, limit=limit)
+
     async def get_recent_fills(
         self,
         minutes: int = 5,

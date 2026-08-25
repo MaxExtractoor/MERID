@@ -9611,10 +9611,11 @@ async def _route_live(
             series_markets = [k for k in store._states.keys() if k.startswith(series)]
             if series_markets:
                 total_count += 1
-                # Check if all markets in this series are stale
+                # Check if all markets in this series are stale.  Use the
+                # orderbook timestamp only; catalog metadata is not a quote refresh.
                 series_stale = all(
-                    (s is None or not s.executable or 
-                     (_time.monotonic() - (s.last_book_update_ts or s.last_rest_update_ts or 0)) > 5.0)
+                    (s is None or not s.executable or
+                     (_time.monotonic() - (s.last_book_update_ts or 0)) > 5.0)
                     for s in [store.get(k) for k in series_markets]
                 )
                 if series_stale:
@@ -9720,14 +9721,12 @@ async def _route_live(
         if not plan_done:
             # CRITICAL FIX (2026-08-22): Staleness SLO now uses the same single
             # monotonic clock domain as the execution-readiness gate.  It measures
-            # time since the last book or REST update, not the intent snapshot time.
+            # time since the last orderbook update, not the intent snapshot time.
             STALENESS_SLO_MS = float(os.getenv("MERID_STALENESS_SLO_MS", "5000.0"))
             book_age_ms = 0.0
             if state is not None:
-                last_update = max(
-                    getattr(state, "last_book_update_ts", 0.0) or 0.0,
-                    getattr(state, "last_rest_update_ts", 0.0) or 0.0,
-                )
+                # Use the book timestamp only.  REST catalog metadata is not a quote.
+                last_update = getattr(state, "last_book_update_ts", 0.0) or 0.0
                 if last_update > 0.0:
                     book_age_ms = (_time.monotonic() - last_update) * 1000.0
 
@@ -9892,17 +9891,14 @@ async def _route_live(
         except NameError as ne:
             logger.error(f"[DEBUG] NameError at line 1924: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
             raise
-        # CRITICAL FIX (2026-08-22): Use the most recent monotonic timestamp from
-        # either the WS orderbook or REST market refresh.  This stops the router
-        # from treating a freshly-REST-bootstrapped ticker as stale when the WS
-        # ``last_book_update_ts`` lags behind ``last_rest_update_ts``.
+        # CRITICAL FIX (2026-08-22): Staleness is measured from the orderbook
+        # timestamp (``last_book_update_ts``), which is set by both WS and REST
+        # orderbook snapshots/deltas.  Catalog metadata (``last_rest_update_ts``)
+        # is not a quote refresh and must not keep a stale book alive.
         now = _time.monotonic()
         last_update = 0.0
         if state is not None:
-            last_update = max(
-                getattr(state, "last_book_update_ts", 0.0) or 0.0,
-                getattr(state, "last_rest_update_ts", 0.0) or 0.0,
-            )
+            last_update = getattr(state, "last_book_update_ts", 0.0) or 0.0
         market_data_age = now - last_update if last_update > 0 else float('inf')
 
         # CRITICAL FIX (2026-07-22): Exit orders bypass the stale-market-data gate.
@@ -9914,17 +9910,15 @@ async def _route_live(
             )
         elif market_data_age > _MARKET_DATA_MAX_STALENESS_S:
             latency = (_time.monotonic() - t0) * 1000
-            # DIAGNOSTIC: Expand stale-data guard logging with both book and rest timestamps
+            # DIAGNOSTIC: Expand stale-data guard logging with book timestamp
             last_book_ts = state.last_book_update_ts or 0.0
-            last_rest_ts = state.last_rest_update_ts or 0.0
             logger.critical(
                 "[SEV-0-STALE-DATA] ticker=%s age_s=%.1f threshold_s=%.0f "
-                "last_book_update_ts=%.1f last_rest_update_ts=%.1f",
+                "last_book_update_ts=%.1f",
                 intent.ticker,
                 market_data_age,
                 _MARKET_DATA_MAX_STALENESS_S,
                 last_book_ts,
-                last_rest_ts,
             )
             
             # Drift detection: compare health check freshness vs router freshness
@@ -12987,7 +12981,7 @@ async def _route_live(
         
         # CRITICAL FIX (2026-07-13): Notify global_allocator of order fill for pending order tracking
         # This removes the asset from pending orders and updates position tracking
-        if filled_count > 0:
+        if _filled_quantity_cc > 0:
             try:
                 from merid.risk.profiles.global_allocator import get_global_allocator
                 allocator = get_global_allocator()
@@ -12997,22 +12991,22 @@ async def _route_live(
                     # Remove timeframe suffix
                     import re
                     asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
-                    fill_notional = (filled_count * fill_price_cents) / 100.0
+                    fill_notional = float(filled_count_fp * Decimal(fill_price_cents) / Decimal("100"))
                     allocator.record_order_filled(asset, _venue_oid, fill_notional)
                     logger.info(
-                        "[GLOBAL-ALLOCATOR-NOTIFY] Order filled: asset=%s order_id=%s notional=$%.2f",
+                        "[GLOBAL-ALLOCATOR-NOTIFY] Order filled: asset=%s order_id=%s notional=$%.4f",
                         asset, _venue_oid, fill_notional
                     )
             except Exception as alloc_err:
                 logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator of fill: %s", alloc_err)
-        
+
         # CRITICAL FIX (2026-07-14): Slot allocation moved to BEFORE order submission
         # Post-fill allocation removed to prevent race condition and double-allocation
         # The slot is now allocated at line 5424 (before client.place_order_result)
         # This ensures MAX_POSITIONS_PER_ASSET=1 is enforced before orders reach Kalshi
-        
+
         # ALERT THRESHOLDS MONITORING: Track order fill and latency
-        if filled_count > 0:
+        if _filled_quantity_cc > 0:
             try:
                 from merid.event_venues.kalshi.monitoring import get_monitor
                 monitor = get_monitor()
@@ -13077,40 +13071,40 @@ async def _route_live(
                 "[UNFILLED-IOC] ticker=%s order_id=%s requested=%d remaining=%d — no exposure recorded, slot released",
                 intent.ticker, _venue_oid, requested_count, remaining_count,
             )
-        elif status != "resting":
+        elif status not in {"resting", "filled_live"}:
             # Fallback for any other accepted-but-unclassified port outcome.
             status = "accepted_live"
 
         # Record executed notional in UnifiedRiskManager.  Buys add open exposure;
         # sells reduce it.  No pre-submission reservation is made, so there is no
         # unfilled remainder to release for IOC/FOK/GTC partial fills.
-        if filled_count > 0 and _reserved_category and _reserved_underlying:
+        if _filled_quantity_cc > 0 and _reserved_category and _reserved_underlying:
             try:
                 from merid.risk.unified_risk_manager import get_unified_risk_manager
                 unified_risk = get_unified_risk_manager()
                 if _is_sell:
                     unified_risk.release(
                         ticker=intent.ticker,
-                        contracts=filled_count,
+                        contracts=filled_count_fp,
                         price_cents=fill_price_cents,
                         category=_reserved_category,
                         underlying=_reserved_underlying
                     )
                     logger.info(
-                        "[UNIFIED-RISK] Sell fill released exposure: ticker=%s contracts=%d price=%dc",
-                        intent.ticker, filled_count, fill_price_cents
+                        "[UNIFIED-RISK] Sell fill released exposure: ticker=%s contracts=%s price=%dc",
+                        intent.ticker, filled_count_fp, fill_price_cents
                     )
                 else:
                     unified_risk.record_fill(
                         ticker=intent.ticker,
-                        contracts=filled_count,
+                        contracts=filled_count_fp,
                         price_cents=fill_price_cents,
                         category=_reserved_category,
                         underlying=_reserved_underlying
                     )
                     logger.info(
-                        "[UNIFIED-RISK] Buy fill recorded exposure: ticker=%s contracts=%d price=%dc",
-                        intent.ticker, filled_count, fill_price_cents
+                        "[UNIFIED-RISK] Buy fill recorded exposure: ticker=%s contracts=%s price=%dc",
+                        intent.ticker, filled_count_fp, fill_price_cents
                     )
 
                 # CRITICAL FIX 2026-08-21: Keep the slot allocator's view of

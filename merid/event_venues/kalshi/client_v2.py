@@ -76,6 +76,7 @@ class KalshiClientV2:
         private_key_path: Optional[str] = None,
         private_key_pem: Optional[str] = None,
         max_riskable_frac: Optional[Decimal] = None,
+        max_position_cap_usd: Optional[Decimal] = None,
         rate_limit_tier: str = "basic",
     ):
         # Verify config at initialization time (not relying on global flag which may have timing issues)
@@ -109,9 +110,15 @@ class KalshiClientV2:
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         
-        # Risk config - default 2% per position
+        # Risk config - default 2% per position (legacy fallback only)
         self._max_riskable_frac = max_riskable_frac or Decimal("0.02")
-        
+
+        # Absolute fixed exposure cap. When present, it takes precedence over the
+        # percentage-based max_riskable_frac. Production startup loads this from
+        # the active profile (risk_policy.fixed_exposure_cap_usd); tests may leave
+        # it None to exercise the legacy percentage path.
+        self._max_position_cap_usd = Decimal(str(max_position_cap_usd)) if max_position_cap_usd is not None else None
+
         # Rate limit tier configuration
         self._rate_limit_tier = rate_limit_tier
         tier_limits = KALSHI_RATE_TIERS.get(rate_limit_tier, KALSHI_RATE_TIERS["basic"])
@@ -526,12 +533,24 @@ class KalshiClientV2:
                 as_of=raw_balance.as_of,
                 source=raw_balance.source,
                 state=BalanceState.FRESH,
+                max_position_cap_usd=self._max_position_cap_usd,
             )
-            
+
             logger.info(
                 f"[{operation}] Success: equity=${bankroll.equity_usd} "
                 f"(cash=${bankroll.available_cash_usd}, positions=${bankroll.locked_cash_usd}), "
                 f"max_position=${bankroll.max_position_usd}, latency={latency_ms:.1f}ms"
+            )
+            logger.info(
+                "[BALANCE-RISK] equity_cents=%s available_cash_cents=%s "
+                "configured_max_position_cents=%s selected_limit_source=%s "
+                "computed_max_position_cents=%s computed_max_position=$%s",
+                int(bankroll.equity_usd * 100),
+                int(bankroll.available_cash_usd * 100),
+                int(bankroll.max_position_cap_usd * 100) if bankroll.max_position_cap_usd is not None else "None",
+                "absolute_config" if bankroll.max_position_cap_usd is not None else "legacy_percentage",
+                int(bankroll.max_position_usd * 100),
+                bankroll.max_position_usd,
             )
             
             return BalanceSuccess(
