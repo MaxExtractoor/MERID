@@ -1739,9 +1739,11 @@ class Kalshi15mLoop:
                         # off, new entries are rejected with PROTECTIVE_EXIT_DISABLED.
                         reason_str = getattr(exit_reason, "value", str(exit_reason)).lower()
                         if reason_str == "stop_loss":
+                            # Position.size is in contracts (Decimal); canonical exposure is centi-contracts.
                             position_cc = to_signed_yes_exposure(
-                                position.side.value, position.size
-                            ) * 100
+                                position.side.value,
+                                int(position.size * Decimal("100")),
+                            )
                             candidate = build_stop_candidate(
                                 market_ticker=position.market_id,
                                 exchange_position_cc=position_cc,
