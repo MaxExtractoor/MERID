@@ -54,6 +54,33 @@ CANONICAL_DISTANCE_BANDS: List[Tuple[float, float, str]] = [
 ]
 
 
+# ── Canonical Time-To-Expiry Buckets ─────────────────────────────────────────
+# Hard TTE cutoff is 90s. Buckets align with the expiry-phase regimes used by
+# the strategy.
+
+CANONICAL_TTE_BANDS: List[Tuple[float, float, str]] = [
+    (0.0, 90.0, "0-90s_forbidden"),
+    (90.0, 120.0, "90s-2min"),
+    (120.0, 300.0, "2min-5min"),
+    (300.0, 600.0, "5min-10min"),
+    (600.0, float('inf'), ">10min"),
+]
+
+
+# ── Canonical CF-RTI Basis Deciles ───────────────────────────────────────────
+# Public-spot-to-CF-RTI basis in bps. Used to identify calibration regimes.
+
+CANONICAL_BASIS_BANDS: List[Tuple[float, float, str]] = [
+    (-float('inf'), -50.0, "basis_below_-50bps"),
+    (-50.0, -25.0, "basis_-50_-25bps"),
+    (-25.0, -5.0, "basis_-25_-5bps"),
+    (-5.0, 5.0, "basis_-5_5bps"),
+    (5.0, 25.0, "basis_5_25bps"),
+    (25.0, 50.0, "basis_25_50bps"),
+    (50.0, float('inf'), "basis_above_50bps"),
+]
+
+
 # ── Bucket Lookup Functions ───────────────────────────────────────────────────
 
 def get_price_bucket(price_cents: int) -> str:
@@ -104,9 +131,30 @@ def get_distance_bucket(distance_pct: float) -> str:
     return "unknown"
 
 
+def get_tte_bucket(tte_seconds: Optional[float]) -> str:
+    """Canonical time-to-expiry bucket."""
+    if tte_seconds is None:
+        return "unknown"
+    for min_t, max_t, bucket in CANONICAL_TTE_BANDS:
+        if min_t <= tte_seconds < max_t:
+            return bucket
+    return "unknown"
+
+
+def get_basis_bucket(basis: Optional[float]) -> str:
+    """Canonical CF-RTI basis bucket in bps."""
+    if basis is None:
+        return "unknown"
+    basis_bps = basis * 10000.0
+    for min_b, max_b, bucket in CANONICAL_BASIS_BANDS:
+        if min_b <= basis_bps < max_b:
+            return bucket
+    return "unknown"
+
+
 def is_in_canonical_range(price_cents: int) -> bool:
     """
-    Check if a price is within the canonical trading range (5c-85c).
+    Check if a price is within the canonical trading range (10c-75c).
     
     Args:
         price_cents: Price in cents
@@ -117,14 +165,16 @@ def is_in_canonical_range(price_cents: int) -> bool:
     Examples:
         >>> is_in_canonical_range(25)
         True
-        >>> is_in_canonical_range(80)
+        >>> is_in_canonical_range(75)
         True
-        >>> is_in_canonical_range(5)
+        >>> is_in_canonical_range(10)
         True
+        >>> is_in_canonical_range(9)
+        False
         >>> is_in_canonical_range(90)
         False
     """
-    return 5 <= price_cents <= 85
+    return 10 <= price_cents <= 75
 
 
 # ── Data Classes for Bucket Statistics ───────────────────────────────────────

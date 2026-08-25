@@ -18,6 +18,8 @@ IMPORT BLOCKED: This module is deprecated and should not be imported in producti
 Use merid.risk.unified_risk_manager instead.
 """
 
+from __future__ import annotations
+
 # Import-time error to prevent accidental usage in production
 import sys
 import os
@@ -29,35 +31,6 @@ if os.getenv("ALLOW_DEPRECATED_RISK_GUARDS", "").lower() not in ("1", "true", "y
         "Use merid.risk.unified_risk_manager instead. "
         "Set ALLOW_DEPRECATED_RISK_GUARDS=1 to bypass this check (for tests only)."
     )
-
----
-
-Legacy documentation (deprecated):
-
-This module provides a SINGLE chokepoint that ALL order execution paths must
-call before submitting orders to Kalshi. It enforces:
-1. Global 3% bankroll cap (across ALL execution paths) - 2026 best practice
-2. Top-3 edge allocation check
-3. Total notional tracking (singleton across the process)
-4. Emergency circuit breaker
-
-Usage::
-    from merid.guards.global_execution_guard import get_global_execution_guard
-    
-    guard = get_global_execution_guard()
-    allowed, reason = guard.check_order(
-        ticker="KXBTC15M-...",
-        contracts=10,
-        price_cents=55,
-        source="trading_agent",  # or "pipeline_adapter", "kalshi_client", etc.
-    )
-    
-    if not allowed:
-        logger.error(f"[GLOBAL_GUARD_BLOCKED] {reason}")
-        return  # Do not submit order
-"""
-
-from __future__ import annotations
 
 import threading
 import time
@@ -172,6 +145,9 @@ class GlobalExecutionGuard:
             - allowed = True: Order may proceed
             - allowed = False: Order MUST be rejected
         """
+        contracts = int(contracts) if contracts is not None else 0
+        price_cents = int(price_cents) if price_cents is not None else 0
+
         with self._lock:
             # 0. Emergency halt check
             if self._emergency_halt:
@@ -226,7 +202,7 @@ class GlobalExecutionGuard:
                     min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
                 if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
                     max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
-            except Exception as e:15
+            except Exception as e:
                 logger.debug("[GLOBAL_GUARD] Failed to load price limits from profile: %s, using defaults 50-70c", e)
             
             if price_cents < min_price_cents:
@@ -466,6 +442,9 @@ class GlobalExecutionGuard:
         
         This should be called when an order actually fills (not just submits).
         """
+        contracts = int(contracts) if contracts is not None else 0
+        price_cents = int(price_cents) if price_cents is not None else 0
+
         with self._lock:
             notional_usd = (contracts * price_cents) / 100.0
             # For now, we track submitted notional as a conservative estimate

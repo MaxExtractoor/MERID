@@ -46,17 +46,18 @@ def _compute_kalshi_max_notional_from_config() -> float:
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
         envelope = get_kalshi_crypto_15m_risk_envelope()
         
+        # 2026-08-22: Removed max_concurrent_trades; the envelope's total notional cap
+        # is the single source of truth for maximum exposure.
         per_trade_max_notional = envelope.max_single_order_notional_usd
-        max_concurrent_trades = envelope.max_concurrent_trades
-        max_notional = per_trade_max_notional * max_concurrent_trades
-        
+        max_notional = envelope.max_total_notional_usd
+
         # P1-5: Cross-check assert to ensure envelope computation is correct
-        expected_max_notional = per_trade_max_notional * max_concurrent_trades
+        expected_max_notional = max_notional
         if abs(max_notional - expected_max_notional) > 0.01:  # 1 cent tolerance
             logger.error(
                 f"[KALSHI_CAPABILITY] CRITICAL: Computed max_notional ${max_notional:.2f} "
                 f"does not match expected ${expected_max_notional:.2f} "
-                f"(per_trade=${per_trade_max_notional:.2f} × concurrent={max_concurrent_trades})"
+                f"(per_trade=${per_trade_max_notional:.2f} × total={max_notional})"
             )
             raise AssertionError(f"Capability max_notional mismatch: computed ${max_notional:.2f} vs expected ${expected_max_notional:.2f}")
     except RuntimeError as e:

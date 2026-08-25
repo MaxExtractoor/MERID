@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set, Tuple
 
+from merid.prediction.trading_mode import TradingMode
 from utils.logger import get_logger
 
 logger = get_logger("merid.trading.ct_execution_adapter")
@@ -93,22 +94,10 @@ class CTExecutionAdapter:
         client_order_id = order_data.get("client_order_id")
         group_id = order_data.get("group_id")
 
-        # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
-        # CT uses lowercase 'yes'/'no' for side, but order_router expects Kalshi format
-        side_upper = side_raw.upper()
-        action_lower = action.lower()
-        action_upper = action.upper()
-        if side_upper == "YES" and action_lower == "buy":
-            kalshi_side = "BUY_YES"
-        elif side_upper == "YES" and action_lower == "sell":
-            kalshi_side = "SELL_YES"
-        elif side_upper == "NO" and action_lower == "buy":
-            kalshi_side = "BUY_NO"
-        elif side_upper == "NO" and action_lower == "sell":
-            kalshi_side = "SELL_NO"
-        else:
-            # Fallback for unexpected combinations
-            kalshi_side = f"{action_upper}_{side_upper}"
+        # Normalize side/action strings; order_router normalizes to Kalshi format
+        # internally, so keep the canonical lowercase form at the intent boundary.
+        side = side_raw.lower()
+        action = action.lower()
 
         # CT always uses limit orders
         order_type = "limit"
@@ -119,29 +108,26 @@ class CTExecutionAdapter:
         take_profit_r_multiple = None
         stop_loss_price_cents = None
         
-        # CRITICAL FIX (2026-07-31): Side-aware TP/SL calculation for binary options
-        # YES contracts: TP above entry, SL below entry (long probability)
-        # NO contracts: TP below entry, SL above entry (short probability)
-        # Previous bug: treated both sides identically, causing NO contracts to have inverted TP/SL
+        # CRITICAL FIX (2026-08-04): A position is always long its own side.
+        # Both YES and NO use SL below entry and TP above entry in their own price space.
         if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
             try:
                 from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
                 engine = DynamicTakeProfitEngine()
-                
-                # Default SL: side-aware 5 cent offset
-                if side == "yes":
-                    stop_loss_price_cents = max(1, price_cents - 5)  # YES: SL below entry
-                else:
-                    stop_loss_price_cents = min(99, price_cents + 5)  # NO: SL above entry
-                
+
+                # Default SL: 5 cent offset below entry (applies to both YES and NO longs)
+                stop_loss_price_cents = max(1, price_cents - 5)
+
                 # Compute dynamic TP with default confidence
+                # The stop price is always below entry, so direction is always LONG
+                # in the position's own price space (profit = price rises).
                 tp_plan = engine.compute_tp(
                     entry_price=price_cents / 100.0,
                     stop_price=stop_loss_price_cents / 100.0,
-                    direction="LONG" if side == "yes" else "SHORT",
+                    direction="LONG",
                     confidence=0.5,  # Default medium confidence
                 )
-                
+
                 take_profit_r_multiple = tp_plan.tp_r_multiple
                 logger.info(
                     "[CT-ADAPTER-TP] Computed default TP for %s: R=%.2f side=%s SL=%dc",
@@ -149,17 +135,14 @@ class CTExecutionAdapter:
                 )
             except Exception as tp_exc:
                 logger.warning("[CT-ADAPTER-TP] Failed to compute default TP: %s", tp_exc)
-                # Fallback to 1R (side-aware)
+                # Fallback to 1R
                 take_profit_r_multiple = 1.0
-                if side == "yes":
-                    stop_loss_price_cents = max(1, price_cents - 5)  # YES: SL below entry
-                else:
-                    stop_loss_price_cents = min(99, price_cents + 5)  # NO: SL above entry
+                stop_loss_price_cents = max(1, price_cents - 5)
 
         # Build canonical OrderIntent
         intent = OrderIntent(
             ticker=ticker,
-            side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, etc.)
+            side=side,
             action=action,
             price_cents=price_cents,
             count=count,
@@ -255,13 +238,11 @@ class CTExecutionAdapter:
 
         # Router status
         router_status = router_result.status
-        router_filled = 0
-        if router_result.fill:
-            router_filled = int(router_result.fill.get("count", 0))
+        router_filled = router_result.executed_count
 
         # Parity check: statuses should match (both filled or both rejected)
         # Note: In shadow mode, router is in paper/mock so exact fills may differ
-        parity_match = ("filled" in http_status.lower()) == ("filled" in router_status.lower())
+        parity_match = ("filled" in http_status.lower()) == router_result.has_execution
 
         if parity_match:
             self._parity_matches += 1
@@ -337,6 +318,7 @@ class CTExecutionAdapter:
                 )
                 return OrderResult(
                     status="rejected",
+                    mode=TradingMode.LIVE,
                     reason=f"pending_order_conflict:ticker={ticker}",
                     latency_ms=0.0,
                 )
@@ -381,7 +363,8 @@ class CTExecutionAdapter:
             # Return a synthetic OrderResult indicating signal submission
             # trading_agent will receive the signal and execute via route_order_async
             return OrderResult(
-                status="submitted_signal",
+                status="submitted_live",
+                mode=TradingMode.LIVE,
                 fill={
                     "signal_id": signal.signal_id,
                     "ticker": ticker,
