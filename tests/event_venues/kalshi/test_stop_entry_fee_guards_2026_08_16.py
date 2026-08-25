@@ -68,6 +68,7 @@ def _open_intent(ticker="KXBTC15M-26AUG160100-00", side="yes", client_order_id=N
         source="test_entry",
         intent_id=intent_id,
         client_order_id=client_order_id,
+        time_to_expiry_seconds=600.0,
     )
 
 
@@ -532,6 +533,7 @@ class TestOrderRouterIdempotencyLifecycle:
             source="test",
             agent_id="BTC_15M",
             client_order_id=client_order_id,
+            time_to_expiry_seconds=600.0,
         )
         canonical = normalize_order(intent, exchange_position_cc=0)
         if validate:
@@ -553,6 +555,7 @@ class TestOrderRouterIdempotencyLifecycle:
             source="test",
             agent_id="BTC_15M",
             client_order_id=client_order_id,
+            time_to_expiry_seconds=600.0,
         )
         return normalize_order(fresh, exchange_position_cc=0)
 

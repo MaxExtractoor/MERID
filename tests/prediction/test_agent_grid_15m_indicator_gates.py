@@ -15,6 +15,12 @@ from unittest.mock import Mock, MagicMock
 from merid.prediction.agent_grid_15m import LeanAgentConfig, LeanAgent15m
 
 
+@pytest.fixture(autouse=True)
+def _test_trading_mode(monkeypatch):
+    """Force a non-live trading mode so legacy signal paths stay enabled for these unit tests."""
+    monkeypatch.setenv("MERID_PM_TRADING_MODE", "testing")
+
+
 class TestSignalModeConfig:
     """Test signal_mode configuration."""
     

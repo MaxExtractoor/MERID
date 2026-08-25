@@ -152,35 +152,33 @@ class TestUnifiedSizing(unittest.TestCase):
     
     def test_sizing_with_cheap_contracts(self):
         """Test sizing with cheap contracts (10 cents).
-        
+
         CRITICAL FIX: 2026-07-06 - min_notional lowered from $0.50 to $0.15 to align with 15c price floor.
-        However, fractional_contract_override_threshold allows 1 contract if max_notional >= 50% of contract cost.
-        For 10c contracts: 50% threshold = $0.05, so if max_notional >= $0.05, allows 1 contract.
+        The $2 fixed exposure cap and profile max_contracts=2 allow 2 contracts for BTC at 10c.
         """
         bankroll = Decimal("100.00")
         price_cents = 10
         asset = "BTC"
-        
+
         count, notional_usd, metadata = compute_order_size(
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
             model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
-        
-        # Expected (new behavior with fractional_contract_override):
-        # max_notional = $100 × 0.03 (bankroll_cap) = $3.00
-        # contracts_from_notional = floor(3.00 / 0.10) = 30
-        # But capped at max_contracts_cap (1 for BTC with 1-contract-per-order rule)
-        # max_contracts = 1
-        # max_contracts_notional = 1 × $0.10 = $0.10
-        # fractional_contract_override_threshold = 0.5 (50%)
-        # $3.00 >= $0.05 (50% of $0.10), so allows 1 contract
-        # count = 1
-        # notional = $0.10
-        
-        self.assertEqual(count, 1, "Should allow 1 contract via fractional override")
-        self.assertEqual(notional_usd, Decimal("0.10"))
+
+        # Expected (profile-driven slot sizing):
+        # fixed_exposure_cap_usd = $2.00
+        # existing_exposure = $0.00
+        # available = $2.00
+        # contract_cost = $0.10
+        # max_by_exposure = floor(2.00 / 0.10) = 20
+        # max_contracts_cap = 2 (BTC per kalshi_crypto_15m_v2.yaml)
+        # count = min(2, 2, 20) = 2
+        # notional = 2 × $0.10 = $0.20
+
+        self.assertEqual(count, 2, f"Expected 2 contracts for {asset} at {price_cents}c, got {count}")
+        self.assertEqual(notional_usd, Decimal("0.20"))
     
     def test_sizing_with_expensive_contracts(self):
         """Test sizing with expensive contracts (75 cents - max canonical range).
@@ -385,7 +383,7 @@ class TestTwoContractSizing(unittest.TestCase):
     @patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=2)
     @patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=False)
     def test_sizing_caps_2_contracts_by_exposure(self, mock_dynamic, mock_max_contracts):
-        """Test that an expensive contract still caps at 1 when $1 cap doesn't allow 2."""
+        """Test that 2 contracts fit under the $2 fixed exposure cap at 60c."""
         bankroll = Decimal("1000.0")
         price_cents = 60
         asset = "BTC"
@@ -397,8 +395,10 @@ class TestTwoContractSizing(unittest.TestCase):
             model_prob=0.80  # Clear edge at 60c price
         )
 
-        self.assertEqual(count, 1, f"Expected 1 contract for {asset} at {price_cents}c, got {count}")
-        self.assertEqual(notional_usd, Decimal("0.60"))
+        # 2 contracts at 60c cost $1.20, which fits inside the $2 cap.
+        # max_by_exposure = floor(2.00 / 0.60) = 3, but max_contracts_cap is 2.
+        self.assertEqual(count, 2, f"Expected 2 contracts for {asset} at {price_cents}c, got {count}")
+        self.assertEqual(notional_usd, Decimal("1.20"))
 
 
 if __name__ == "__main__":
