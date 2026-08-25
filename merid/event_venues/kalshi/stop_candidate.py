@@ -71,6 +71,58 @@ ENABLE_STOP_CANDIDATE_SUBMISSION = _env_bool(
     "MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", False
 )
 
+
+def stop_submission_enabled() -> bool:
+    """Return True when stop candidates may be converted into live orders.
+
+    Read dynamically so ops can toggle the flag without a process restart.
+    ``MERID_STOP_SUBMISSION_KILL=1`` is an emergency kill switch that
+    overrides both the enable flag and any ``force=True`` caller.
+    """
+    if _env_bool("MERID_STOP_SUBMISSION_KILL", False):
+        return False
+    # Default to False (fail-closed) so monkeypatch.delenv() in tests and
+    # missing env both disable automatic submission.
+    return _env_bool(
+        "MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", False
+    )
+
+
+# Bounded liquidation policy: stop exits are submitted at
+# ``best executable bid - STOP_MAX_SLIPPAGE_CENTS`` (floor 1c) so a stale
+# trigger price cannot sweep a thin book to an unbounded low.
+STOP_MAX_SLIPPAGE_CENTS = _env_int("MERID_STOP_MAX_SLIPPAGE_CENTS", 3)
+
+# Trigger reasons that are explicit price/operational stops.  They do not
+# require a model fair value or edge persistence to be submitted.
+PRICE_STOP_TRIGGER_REASONS = frozenset({
+    "POSITION_MONITOR_STOP",
+    "STOP_LOSS",
+    "HARD_STOP",
+    "SOFT_STOP",
+    "TRAILING_STOP",
+    "OPERATIONAL_RISK",
+    "STALE_DATA",
+    "POSITION_MISMATCH",
+})
+
+# Map a stop-candidate trigger reason to a canonical safety exit-reason so the
+# order-router and execution-risk-firewall treat the close as a protective exit
+# (parentage may be backfilled from cache, but safety classification lets it
+# proceed even when the cache entry-fill linkage is temporarily unavailable).
+_STOP_TRIGGER_TO_EXIT_REASON = {
+    "HARD_STOP": "HARD_STOP",
+    "SOFT_STOP": "SOFT_STOP",
+    "TRAILING_STOP": "TRAILING_STOP",
+    "POSITION_MONITOR_STOP": "STOP_LOSS",
+    "STOP_LOSS": "STOP_LOSS",
+    "OPERATIONAL_RISK": "RISK",
+    "STALE_DATA": "STALE_DATA",
+    "POSITION_MISMATCH": "RISK",
+    "UNIFIED_POLICY_STOP": "STOP_LOSS",
+    "EDGE_STOP": "STOP_LOSS",
+}
+
 # Cutoff and freshness constants (seconds / ms).
 EXIT_CUTOFF_SECONDS = _env_int("MERID_EXIT_CUTOFF_SECONDS", 60)
 MAX_EXIT_QUOTE_AGE_MS = _env_int("MERID_MAX_EXIT_QUOTE_AGE_MS", 10_000)
@@ -176,7 +228,7 @@ class StopCandidateLedger:
     def record(self, candidate: StopCandidate) -> None:
         self._candidates.append(candidate)
         logger.warning(
-            "[STOP-CANDIDATE] %s (submission disabled until replay tests pass)",
+            "[STOP-CANDIDATE] %s (submission gated by stop_submission_enabled())",
             candidate.to_log_line(),
         )
         try:
@@ -184,17 +236,46 @@ class StopCandidateLedger:
         except Exception as exc:
             logger.debug("[STOP-CANDIDATE] failed to persist: %s", exc)
 
-    def record_submission(self, candidate: StopCandidate, result: Any) -> None:
+    def record_submission(
+        self,
+        candidate: StopCandidate,
+        result: Any,
+        *,
+        submitted_price_cents: Optional[int] = None,
+        reference_bid_cents: Optional[int] = None,
+    ) -> None:
+        fill_price_cents = None
+        for attr in ("avg_fill_price_cents", "fill_price_cents", "price_cents"):
+            val = getattr(result, attr, None)
+            if val is not None:
+                try:
+                    fill_price_cents = int(val)
+                    break
+                except (TypeError, ValueError):
+                    pass
+        realized_slippage_cents = (
+            reference_bid_cents - fill_price_cents
+            if (reference_bid_cents is not None and fill_price_cents is not None)
+            else None
+        )
         record = {
             "candidate_id": candidate.candidate_id,
             "submitted_at": time.time(),
+            "trigger_price_cents": candidate.executable_exit_cents,
+            "reference_bid_cents": reference_bid_cents,
+            "submitted_price_cents": submitted_price_cents,
+            "fill_price_cents": fill_price_cents,
+            "realized_slippage_cents": realized_slippage_cents,
             "result": _serialize_result(result),
         }
         self._submissions.append(record)
         logger.info(
-            "[STOP-CANDIDATE-SUBMISSION] candidate=%s status=%s",
+            "[STOP-CANDIDATE-SUBMISSION] candidate=%s status=%s submitted=%sc fill=%sc slippage=%sc",
             candidate.candidate_id,
             getattr(result, "status", "unknown"),
+            submitted_price_cents,
+            fill_price_cents,
+            realized_slippage_cents,
         )
 
     def recent(self, n: int = 100) -> List[StopCandidate]:
@@ -304,6 +385,11 @@ def settlement_phase_allows_stop(
 
     if seconds_to_expiry <= SETTLEMENT_CLOSE_BUFFER_SECONDS:
         return False, f"settlement_close_window:seconds_to_expiry={seconds_to_expiry:.1f}"
+
+    # Explicit price/operational stops do not need edge persistence; they are
+    # an unconditional invalidation of the position outside the close window.
+    if trigger_reason in PRICE_STOP_TRIGGER_REASONS:
+        return True, f"price_stop_allowed:trigger={trigger_reason}"
 
     if seconds_to_expiry <= STOP_NO_NORMAL_STOP_BELOW_SECONDS:
         if trigger_reason in ("OPERATIONAL_RISK", "STALE_DATA", "POSITION_MISMATCH"):
@@ -622,7 +708,23 @@ async def maybe_submit_stop_candidate(
     Returns the `OrderResult` if submitted, otherwise an ``OrderResult`` with
     status ``rejected`` and a diagnostic reason.
     """
-    if not (ENABLE_STOP_CANDIDATE_SUBMISSION or force):
+    if not (stop_submission_enabled() or force) or _env_bool("MERID_STOP_SUBMISSION_KILL", False):
+        kill = _env_bool("MERID_STOP_SUBMISSION_KILL", False)
+        reason = (
+            "stop_candidate_submission_kill_switch" if kill
+            else "stop_candidate_submission_disabled_until_replay_tests"
+        )
+        # High-severity alert: a stop fired but no protective exit was sent.
+        logger.critical(
+            "[ALERT][STOP-CANDIDATE-NOT-SUBMITTED] candidate=%s ticker=%s "
+            "trigger=%s position_cc=%d executable_exit_cents=%s reason=%s",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+            candidate.position_from_exchange_cc,
+            candidate.executable_exit_cents,
+            reason,
+        )
         record_stop_candidate(candidate)
         # Return a synthetic rejected result so callers do not misinterpret.
         try:
@@ -630,7 +732,7 @@ async def maybe_submit_stop_candidate(
             return OrderResult(
                 status="rejected",
                 mode=TradingMode.PAPER,
-                reason="stop_candidate_submission_disabled_until_replay_tests",
+                reason=reason,
             )
         except Exception:
             return None
@@ -694,30 +796,32 @@ async def maybe_submit_stop_candidate(
             reason=f"stop_candidate_settlement_gate:{gate_reason}",
         )
 
-    # A stop candidate is only actionable when it is an edge stop with a model
-    # fair value.  Legacy price stops are converted to candidates but never
-    # submitted automatically.
-    if candidate.fair_value_cents is None:
-        record_stop_candidate(candidate)
-        return OrderResult(
-            status="rejected",
-            mode=TradingMode.PAPER,
-            reason="stop_candidate_no_fair_value",
-        )
+    # Edge stops require a model fair value that has crossed the executable
+    # liquidation value.  Explicit price/operational stops (e.g.
+    # POSITION_MONITOR_STOP) are their own invalidation and skip this gate.
+    is_price_stop = candidate.trigger_reason in PRICE_STOP_TRIGGER_REASONS
+    if not is_price_stop:
+        if candidate.fair_value_cents is None:
+            record_stop_candidate(candidate)
+            return OrderResult(
+                status="rejected",
+                mode=TradingMode.PAPER,
+                reason="stop_candidate_no_fair_value",
+            )
 
-    edge_fired = evaluate_edge_stop(
-        candidate.fair_value_cents,
-        candidate.executable_exit_cents,
-        candidate.total_exit_cost_cents,
-        candidate.hysteresis_cents,
-    )
-    if not edge_fired:
-        record_stop_candidate(candidate)
-        return OrderResult(
-            status="rejected",
-            mode=TradingMode.PAPER,
-            reason="stop_candidate_edge_not_breached",
+        edge_fired = evaluate_edge_stop(
+            candidate.fair_value_cents,
+            candidate.executable_exit_cents,
+            candidate.total_exit_cost_cents,
+            candidate.hysteresis_cents,
         )
+        if not edge_fired:
+            record_stop_candidate(candidate)
+            return OrderResult(
+                status="rejected",
+                mode=TradingMode.PAPER,
+                reason="stop_candidate_edge_not_breached",
+            )
 
     # 4. Build the canonical close order.
     held_side, held_qty_cc = from_signed_yes_exposure(exchange_position_cc)
@@ -740,12 +844,12 @@ async def maybe_submit_stop_candidate(
             reason="stop_candidate_fractional_qty",
         )
 
-    exit_price = candidate.executable_exit_cents
-    if exit_price is None or not (1 <= exit_price <= 99):
+    exit_bid = candidate.executable_exit_cents
+    if exit_bid is None or not (1 <= exit_bid <= 99):
         # Fall back to best bid on the held side.
         kalshi, unified = _get_market_state(candidate.market_ticker)
-        exit_price = _get_executable_exit_cents(unified or kalshi, held_side)
-        if exit_price is None or not (1 <= exit_price <= 99):
+        exit_bid = _get_executable_exit_cents(unified or kalshi, held_side)
+        if exit_bid is None or not (1 <= exit_bid <= 99):
             record_stop_candidate(candidate)
             return OrderResult(
                 status="rejected",
@@ -753,10 +857,62 @@ async def maybe_submit_stop_candidate(
                 reason="stop_candidate_no_executable_price",
             )
 
+    # Bounded liquidation: cross at most STOP_MAX_SLIPPAGE_CENTS through the
+    # observed best bid so a stale trigger cannot sweep the book to the floor.
+    exit_price = max(1, exit_bid - STOP_MAX_SLIPPAGE_CENTS)
+    logger.info(
+        "[STOP-CANDIDATE-PRICING] candidate=%s ticker=%s trigger_bid=%dc "
+        "submitted_limit=%dc slippage_cap=%dc",
+        candidate.candidate_id, candidate.market_ticker, exit_bid,
+        exit_price, STOP_MAX_SLIPPAGE_CENTS,
+    )
+
     kalshi_side = to_kalshi_side(held_side, "sell")
 
     pre_contracts = held_qty_cc // 100
     held_contracts = qty_cc // 100
+
+    # Resolve durable parentage from the local cache so the exit is linked to
+    # its entry fill/order.  If the cache is unavailable, the safety exit-reason
+    # below still lets the protective close proceed.
+    parentage_status = "UNKNOWN"
+    parent_entry_fill_id: Optional[str] = None
+    parent_entry_order_id: Optional[str] = None
+    parent_entry_signal_id: Optional[str] = None
+    exit_policy_id = f"stop_candidate:{candidate.candidate_id}"
+    cached_position = None
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        cache = get_position_cache()
+        if cache is not None:
+            cached_position = cache.get_position(candidate.market_ticker)
+    except Exception as cache_exc:
+        logger.debug("[STOP-CANDIDATE] could not fetch local position for parentage: %s", cache_exc)
+
+    if cached_position is not None:
+        if getattr(cached_position, "exit_policy_id", None):
+            exit_policy_id = cached_position.exit_policy_id
+        if getattr(cached_position, "entry_fill_id", None):
+            parent_entry_fill_id = cached_position.entry_fill_id
+            parentage_status = "CANONICAL_FILL"
+        if getattr(cached_position, "entry_order_id", None):
+            parent_entry_order_id = cached_position.entry_order_id
+            if parentage_status == "UNKNOWN":
+                parentage_status = "ORDER_LINKED"
+                parent_entry_fill_id = parent_entry_fill_id or cached_position.entry_order_id
+        elif getattr(cached_position, "client_order_id", None):
+            parent_entry_order_id = cached_position.client_order_id
+            if parentage_status == "UNKNOWN":
+                parentage_status = "ORDER_LINKED"
+                parent_entry_fill_id = parent_entry_fill_id or cached_position.client_order_id
+        if getattr(cached_position, "entry_signal_id", None):
+            parent_entry_signal_id = cached_position.entry_signal_id
+
+    exit_reason = _STOP_TRIGGER_TO_EXIT_REASON.get(
+        candidate.trigger_reason, "STOP_LOSS"
+    )
+
     intent = OrderIntent(
         ticker=candidate.market_ticker,
         side=held_side,
@@ -766,12 +922,20 @@ async def maybe_submit_stop_candidate(
         order_type="limit",
         time_in_force="ioc",
         source="stop_candidate",
+        agent_id="stop_candidate",
         kalshi_side=kalshi_side,
         reduce_only=True,
         entry_or_exit="exit",
+        exit_reason=exit_reason,
+        exit_policy_id=exit_policy_id,
         pre_position_size=pre_contracts,
         expected_post_position_size=max(0, pre_contracts - held_contracts),
+        reason=f"stop_loss:{candidate.trigger_reason}:{candidate.candidate_id}",
         rationale=f"stop_candidate:{candidate.trigger_reason}:{candidate.candidate_id}",
+        parentage_status=parentage_status,
+        parent_entry_fill_id=parent_entry_fill_id,
+        parent_entry_order_id=parent_entry_order_id,
+        parent_entry_signal_id=parent_entry_signal_id,
         snapshot_age_ms=float(candidate.quote_age_ms or 0),
     )
 
@@ -829,7 +993,12 @@ async def maybe_submit_stop_candidate(
     # 7. Route the reduce-only IOC close.
     from merid.event_venues.kalshi.order_router import route_order_async
     result = await route_order_async(intent)
-    get_stop_candidate_ledger().record_submission(candidate, result)
+    get_stop_candidate_ledger().record_submission(
+        candidate,
+        result,
+        submitted_price_cents=exit_price,
+        reference_bid_cents=exit_bid,
+    )
     return result
 
 
@@ -849,5 +1018,10 @@ def maybe_submit_stop_candidate_sync(
             return asyncio.create_task(maybe_submit_stop_candidate(candidate, force=force))
     except Exception:
         pass
+    logger.critical(
+        "[ALERT][STOP-CANDIDATE-NOT-SUBMITTED] candidate=%s ticker=%s "
+        "trigger=%s reason=no_running_event_loop",
+        candidate.candidate_id, candidate.market_ticker, candidate.trigger_reason,
+    )
     record_stop_candidate(candidate)
     return None

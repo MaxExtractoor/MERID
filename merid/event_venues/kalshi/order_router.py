@@ -2423,6 +2423,9 @@ class OrderIntent:
     expected_realized_pnl_cents: Optional[int] = None  # Predicted close PnL in cents
     strategy_signal: Optional[str] = None  # "up" or "down" market signal
 
+    # Kalshi exchange shard index (e.g. 2 for crypto 15m markets). None means unresolved.
+    exchange_index: Optional[int] = None
+
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
         if self.kalshi_side and (not self.side or not self.action):
@@ -2606,14 +2609,20 @@ def _validate_order_identity(intent: OrderIntent, t0: float) -> Optional[OrderRe
                     )
                 elif order_link and isinstance(order_link, str) and order_link.strip():
                     intent.parent_entry_order_id = order_link
+                    # 2026-08-24: REST-synced/replayed positions often have a durable
+                    # order/intent id but no recorded fill id.  Use the order link as
+                    # the parent fill id so MERID_REQUIRE_EXIT_PARENTAGE=1 can still
+                    # authorize profit-taking exits for these positions.
+                    intent.parent_entry_fill_id = intent.parent_entry_fill_id or order_link
                     if intent.parentage_status != "SIGNAL_ONLY":
                         intent.parentage_status = "ORDER_LINKED"
                     logger.warning(
                         "[ORDER-IDENTITY-PARENT-BACKFILL] ticker=%s intent_id=%s "
-                        "parent_order_id=%s status=%s",
+                        "parent_order_id=%s parent_fill_id=%s status=%s",
                         intent.ticker,
                         intent.intent_id,
                         order_link,
+                        intent.parent_entry_fill_id,
                         intent.parentage_status,
                     )
                 elif signal_link and isinstance(signal_link, str) and signal_link.strip():
@@ -2845,6 +2854,130 @@ def _side_aware_book_for_intent(book: Dict[str, Any], side: Optional[str]) -> Di
     }
 
 
+async def _reconcile_submission_unknown(
+    intent: OrderIntent, port: Any, mode: TradingMode, t0: float
+) -> Optional[OrderResult]:
+    """Watchdog for a submission whose ack was lost in flight.
+
+    Called when ``port.create_order`` raises ``asyncio.TimeoutError``.  The
+    request may have reached Kalshi, so we look up the order by client tag,
+    check open orders for the ticker, and inspect recent fills.
+
+    We deliberately keep the router result as ``submission_unknown`` and do
+    NOT transition the gate record to a terminal state here; that transition
+    is reserved for the duplicate-retry or fills-poller path so the order
+    lifecycle remains deterministic.  We do, however, bind any discovered
+    ``order_id`` to the fills ledger and position cache so a racing
+    WebSocket/HTTP fill can be matched immediately.
+    """
+
+    _client_tag = intent.client_tag or ""
+    _client_order_id = intent.client_order_id or _client_tag
+    _order_data = None
+    _open_orders: List[Any] = []
+    _recent_fills: List[Any] = []
+
+    try:
+        _order_data = await asyncio.wait_for(
+            port.get_order(client_order_id=_client_tag),
+            timeout=5.0,
+        )
+    except Exception as _e:
+        logger.debug("[SUBMISSION-RECONCILE] get_order failed for %s: %s", _client_tag, _e)
+
+    try:
+        _open_orders = await asyncio.wait_for(
+            port.get_open_orders(ticker=intent.ticker),
+            timeout=5.0,
+        ) or []
+    except Exception as _e:
+        logger.debug("[SUBMISSION-RECONCILE] get_open_orders failed for %s: %s", intent.ticker, _e)
+
+    try:
+        _since_ts = int((_time.time() - 300.0) * 1000)
+        _fills_resp = await asyncio.wait_for(
+            port.get_fills(since_ts=_since_ts, limit=50),
+            timeout=5.0,
+        )
+        if _fills_resp is not None:
+            _recent_fills = getattr(_fills_resp, "fills", []) or []
+    except Exception as _e:
+        logger.debug("[SUBMISSION-RECONCILE] get_fills failed for %s: %s", intent.ticker, _e)
+
+    # Match by client_order_id or client_tag.
+    _open_match = next(
+        (o for o in _open_orders
+         if getattr(o, "client_order_id", "") == _client_order_id
+         or getattr(o, "client_tag", "") == _client_tag),
+        None,
+    )
+    _fill_match = next(
+        (f for f in _recent_fills
+         if getattr(f, "client_order_id", "") == _client_order_id
+         or getattr(f, "client_tag", "") == _client_tag),
+        None,
+    )
+
+    _order_id = (
+        getattr(_order_data, "order_id", None)
+        or getattr(_open_match, "order_id", None)
+        or getattr(_fill_match, "order_id", None)
+    )
+    _filled = (
+        int(getattr(_order_data, "filled_size", 0) or 0)
+        or int(getattr(_fill_match, "filled_size", 0) or 0)
+    )
+    _remaining = int(getattr(_order_data, "remaining_size", 0) or 0)
+    _order_status = (
+        getattr(_order_data, "status", None)
+        or getattr(_open_match, "status", None)
+        or ""
+    )
+
+    logger.info(
+        "[SUBMISSION-RECONCILE] intent_id=%s ticker=%s client_tag=%s "
+        "found=%s order_id=%s status=%s filled=%d remaining=%d open_matches=%d fill_matches=%d",
+        intent.intent_id,
+        intent.ticker,
+        _client_tag,
+        bool(_order_data or _open_match or _fill_match),
+        _order_id or "",
+        _order_status or "",
+        _filled,
+        _remaining,
+        1 if _open_match else 0,
+        1 if _fill_match else 0,
+    )
+
+    if _order_id:
+        # Bind the discovered order_id so WebSocket/HTTP fills arriving after
+        # this point can be resolved without a circuit breaker trip.
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            ledger = get_fills_ledger()
+            ledger.record_pending_order(
+                client_order_ids=[_client_order_id, _client_tag],
+                order_id=_order_id,
+                intent_id=intent.intent_id,
+            )
+        except Exception as _ledger_err:
+            logger.debug("[SUBMISSION-RECONCILE] ledger record failed: %s", _ledger_err)
+
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            if cache:
+                cache.register_order_id_mapping(
+                    _order_id,
+                    _client_order_id,
+                )
+        except Exception as _cache_err:
+            logger.debug("[SUBMISSION-RECONCILE] cache mapping failed: %s", _cache_err)
+
+    # Always return None so the caller keeps the submission_unknown result.
+    return None
+
+
 async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t0: float) -> Optional[OrderResult]:
     """Fetch a fresh REST book, verify snapshot coherence, and compare to WS.
 
@@ -2869,6 +3002,12 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         ws_state = market_state_store.get(intent.ticker) if market_state_store else None
 
         if not (ws_state and ws_state.best_bid_cents and ws_state.best_ask_cents):
+            logger.info(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_NO_CROSSFEED decision=ALLOW "
+                "reason=no_ws_bid_ask ws_state=%s",
+                intent.ticker,
+                "missing" if ws_state is None else "incomplete",
+            )
             return None
 
         # When the cached book is itself from a REST source, the cross-feed
@@ -2884,8 +3023,10 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         }
         if getattr(ws_state, "data_source", "UNKNOWN") in REST_DERIVED_SOURCES:
             logger.info(
-                "[WS-REST-DIVERGENCE-SKIP] ticker=%s data_source=%s - skipping cross-feed check for REST-derived book",
+                "EXECUTION-QUOTE-MODE ticker=%s mode=REST_DERIVED_SKIPPED decision=ALLOW "
+                "reason=rest_derived_book data_source=%s ws_snapshot_complete=%s",
                 intent.ticker, ws_state.data_source,
+                getattr(ws_state, "snapshot_complete", False),
             )
             return None
 
@@ -2896,16 +3037,20 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         )
         if not ob_result.success:
             logger.warning(
-                "[WS-REST-DIVERGENCE-SKIP] ticker=%s REST orderbook fetch failed (error=%s) - skipping divergence check",
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_UNAVAILABLE decision=ALLOW "
+                "reason=rest_orderbook_fetch_failed error=%s ws_snapshot_complete=%s rest_timeout_ms=3000",
                 intent.ticker, ob_result.error,
+                getattr(ws_state, "snapshot_complete", False),
             )
             return None
 
         rest_book = _canonical_yes_book_from_port(ob_result)
         if rest_book is None:
             logger.warning(
-                "[WS-REST-DIVERGENCE-SKIP] ticker=%s REST orderbook incomplete - skipping divergence check",
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_INCOMPLETE decision=ALLOW "
+                "reason=rest_book_incomplete ws_snapshot_complete=%s",
                 intent.ticker,
+                getattr(ws_state, "snapshot_complete", False),
             )
             return None
 
@@ -2917,8 +3062,10 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             # Non-authoritative REST: do not use it to reject the order, but do
             # not trust the comparison either.
             logger.warning(
-                "[WS-REST-DIVERGENCE-STALE] ticker=%s REST snapshot age=%.0fms > max=%.0fms - skipping divergence check",
-                intent.ticker, rest_age_ms, max_rest_age_ms,
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_STALE decision=ALLOW "
+                "reason=rest_snapshot_stale rest_age_ms=%.0f ws_snapshot_complete=%s",
+                intent.ticker, rest_age_ms,
+                getattr(ws_state, "snapshot_complete", False),
             )
             return None
 
@@ -2959,12 +3106,13 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
 
         if max_divergence_cents <= tolerance_cents:
             logger.info(
-                "[WS-REST-DIVERGENCE-PASS] ticker=%s intent_id=%s side=%s space=%s "
-                "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | max_divergence=%dc (tolerance=%dc)",
-                intent.ticker, intent.intent_id, intent.side, ws_book["space"],
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_COHERENT decision=ALLOW "
+                "reason=within_tolerance max_divergence=%dc tolerance=%dc rest_age_ms=%.0f "
+                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
+                intent.ticker, max_divergence_cents, tolerance_cents, rest_age_ms,
                 ws_book["bid_cents"], ws_book["ask_cents"],
                 rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                max_divergence_cents, tolerance_cents,
+                getattr(ws_state, "snapshot_complete", False),
             )
             return None
 
@@ -2984,10 +3132,12 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     max_div2 = max(bid_div2, ask_div2)
                     if max_div2 <= tolerance_cents:
                         logger.info(
-                            "[WS-REST-DIVERGENCE-RESOLVED-ON-REFETCH] ticker=%s intent_id=%s side=%s "
-                            "initial_divergence=%dc resolved to %dc on second REST snapshot",
-                            intent.ticker, intent.intent_id, intent.side,
+                            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_REFETCH_COHERENT decision=ALLOW "
+                            "reason=divergence_resolved_on_refetch initial_divergence=%dc final_divergence=%dc "
+                            "ws_snapshot_complete=%s",
+                            intent.ticker,
                             max_divergence_cents, max_div2,
+                            getattr(ws_state, "snapshot_complete", False),
                         )
                         return None
 
@@ -3012,38 +3162,36 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             )
             if is_marketable:
                 logger.warning(
-                    "[WS-REST-DIVERGENCE-EXIT-MARKETABLE] ticker=%s intent_id=%s side=%s space=%s "
-                    "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
-                    "max_divergence=%dc (tolerance=%dc) order_price=%dc action=%s - "
-                    "allowing exit/reduce order because it is marketable against REST",
-                    intent.ticker, intent.intent_id, intent.side, ws_book["space"],
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_EXIT_MARKETABLE decision=ALLOW "
+                    "reason=exit_marketable_against_rest max_divergence=%dc tolerance=%dc order_price=%dc action=%s "
+                    "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
+                    intent.ticker, max_divergence_cents, tolerance_cents,
+                    order_price, action,
                     ws_book["bid_cents"], ws_book["ask_cents"],
                     rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                    max_divergence_cents, tolerance_cents,
-                    order_price, action,
+                    getattr(ws_state, "snapshot_complete", False),
                 )
                 return None
 
             logger.error(
-                "[WS-REST-DIVERGENCE-REJECT-EXIT] ticker=%s intent_id=%s side=%s space=%s "
-                "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
-                "max_divergence=%dc (tolerance=%dc) order_price=%dc action=%s - "
-                "exit/reduce order is not marketable against REST; rejecting",
-                intent.ticker, intent.intent_id, intent.side, ws_book["space"],
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_EXIT_NOT_MARKETABLE decision=BLOCKED "
+                "reason=exit_not_marketable_against_rest max_divergence=%dc tolerance=%dc order_price=%dc action=%s "
+                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
+                intent.ticker, max_divergence_cents, tolerance_cents,
+                order_price, action,
                 ws_book["bid_cents"], ws_book["ask_cents"],
                 rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                max_divergence_cents, tolerance_cents,
-                order_price, action,
+                getattr(ws_state, "snapshot_complete", False),
             )
         else:
             logger.error(
-                "[WS-REST-DIVERGENCE-REJECT] ticker=%s intent_id=%s side=%s space=%s "
-                "WS: bid=%dc ask=%dc | REST: bid=%dc ask=%dc | "
-                "max_divergence=%dc (tolerance=%dc) - REJECTING ORDER to prevent trading on stale data",
-                intent.ticker, intent.intent_id, intent.side, ws_book["space"],
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_DIVERGENT decision=BLOCKED "
+                "reason=divergence_exceeds_tolerance max_divergence=%dc tolerance=%dc "
+                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
+                intent.ticker, max_divergence_cents, tolerance_cents,
                 ws_book["bid_cents"], ws_book["ask_cents"],
                 rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                max_divergence_cents, tolerance_cents,
+                getattr(ws_state, "snapshot_complete", False),
             )
 
         return OrderResult(
@@ -3053,10 +3201,20 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             latency_ms=round((_time.monotonic() - t0) * 1000, 2),
         )
     except asyncio.TimeoutError:
-        logger.warning("[WS-REST-DIVERGENCE-SKIP] ticker=%s REST fetch timeout - skipping divergence check", intent.ticker)
+        logger.warning(
+            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_TIMEOUT decision=ALLOW "
+            "reason=rest_fetch_timeout rest_timeout_ms=3000 ws_snapshot_complete=%s",
+            intent.ticker,
+            getattr(ws_state, "snapshot_complete", False) if ws_state else False,
+        )
         return None
     except Exception as divergence_err:
-        logger.warning("[WS-REST-DIVERGENCE-SKIP] ticker=%s divergence check failed: %s", intent.ticker, divergence_err)
+        logger.warning(
+            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_ERROR decision=ALLOW "
+            "reason=divergence_check_exception error=%s ws_snapshot_complete=%s",
+            intent.ticker, divergence_err,
+            getattr(ws_state, "snapshot_complete", False) if ws_state else False,
+        )
         return None
 
 
@@ -3117,7 +3275,8 @@ def _validate_canonical_price_placement(
 def _build_create_order_request(
     intent: "OrderIntent",
     *,
-    normalized_ticker: str,
+    ticker: str,
+    exchange_index: Optional[int],
     final_price_cents: int,
     effective_order_type: str,
     effective_tif: str,
@@ -3127,7 +3286,7 @@ def _build_create_order_request(
     """Build a normalized ``CreateOrderRequest`` for the KalshiExecutionPort.
 
     This is the single place where an ``OrderIntent`` plus the router's final
-    routing decisions (normalized ticker, final price, effective order type /
+    routing decisions (ticker, exchange index, final price, effective order type /
     TIF, expiration, post-only) are converted into the port wire format.
 
     Rules enforced here (mirroring the production invariants in ``_route_live``):
@@ -3235,7 +3394,8 @@ def _build_create_order_request(
     canonical_count = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
 
     return CreateOrderRequest(
-        ticker=normalized_ticker,
+        ticker=ticker,
+        exchange_index=exchange_index,
         side=side,
         outcome=outcome,
         size=canonical_count,
@@ -4162,35 +4322,7 @@ class OrderResult:
 
 # ── Typed rejections and execution plan ───────────────────────────────────
 
-class RepriceWouldCross(Exception):
-    """Raised when price adjustment would cross the spread for the intended role.
-    
-    This is a typed rejection for the repricing/planning stage. It carries enough
-    context to release the slot reservation exactly once and log the failure.
-    """
-    def __init__(
-        self,
-        ticker: str,
-        side: str,
-        action: str,
-        role: str,
-        attempted_price: int,
-        side_bid: Optional[int],
-        side_ask: Optional[int],
-        reason: str,
-    ):
-        self.ticker = ticker
-        self.side = side
-        self.action = action
-        self.role = role
-        self.attempted_price = attempted_price
-        self.side_bid = side_bid
-        self.side_ask = side_ask
-        self.reason = reason
-        super().__init__(
-            f"[REPRICE-WOULD-CROSS] {ticker} {role} {action} {side} "
-            f"attempted={attempted_price}c bid={side_bid}c ask={side_ask}c: {reason}"
-        )
+from merid.event_venues.kalshi.router_exceptions import RepriceWouldCross
 
 
 @dataclass
@@ -4865,7 +4997,11 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                     asset, qty_cc, price_cents_int, order_notional, current_exposure, fixed_exposure_cap
                 )
 
-                if current_exposure + order_notional > fixed_exposure_cap:
+                # CRITICAL FIX (2026-08-24): Round the sum to 2 decimals before
+                # comparing to the cap.  Floating-point epsilon (e.g. 1.58 + 0.42
+                # == 2.0000000000000004) was causing false "hard_exposure_cap_exceeded"
+                # rejections when the order exactly fills the remaining cap.
+                if round(current_exposure + order_notional, 2) > fixed_exposure_cap:
                     logger.error(
                         "[HARD-EXPOSURE-CAP] REJECTING: current_exposure=$%.2f + order_notional=$%.4f > $%.2f cap",
                         current_exposure, order_notional, fixed_exposure_cap
@@ -8657,6 +8793,11 @@ def _release_canonical_entry_idempotency(intent: OrderIntent) -> None:
     Safe to call from any rejection path.  Only pre-submit records are released;
     a record that has already progressed to submitted/executed is left untouched
     so a real in-flight order is not accidentally unlocked.
+
+    2026-08-24: Prefer ``_canonical_client_order_id`` (the client_order_id the
+    canonical record was created with) over ``client_tag``.  ``client_tag`` is
+    later overwritten by the pre-trade gate's deterministic client_order_id, so
+    using it for cleanup causes a mismatch that leaves a stale PENDING record.
     """
     key = getattr(intent, "_canonical_entry_key", None)
     if not key:
@@ -8666,10 +8807,11 @@ def _release_canonical_entry_idempotency(intent: OrderIntent) -> None:
             release_entry_idempotency,
         )
 
+        coid = getattr(intent, "_canonical_client_order_id", None) or intent.client_tag
         release_entry_idempotency(
             market_ticker=key[0],
             contract=key[1],
-            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+            client_order_id=coid,
         )
     except Exception as exc:
         logger.debug(
@@ -8687,10 +8829,11 @@ def _mark_canonical_entry_submitted(intent: OrderIntent, order_id: Optional[str]
             mark_entry_idempotency_submitted,
         )
 
+        coid = getattr(intent, "_canonical_client_order_id", None) or intent.client_tag
         mark_entry_idempotency_submitted(
             market_ticker=key[0],
             contract=key[1],
-            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+            client_order_id=coid,
             order_id=order_id,
         )
     except Exception as exc:
@@ -8711,10 +8854,11 @@ def _mark_canonical_entry_reconciliation_required(
             mark_entry_idempotency_reconciliation_required,
         )
 
+        coid = getattr(intent, "_canonical_client_order_id", None) or intent.client_tag
         mark_entry_idempotency_reconciliation_required(
             market_ticker=key[0],
             contract=key[1],
-            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+            client_order_id=coid,
             reason=reason,
         )
     except Exception as exc:
@@ -8733,16 +8877,73 @@ def _mark_canonical_entry_executed(intent: OrderIntent, fill_id: Optional[str] =
             mark_entry_idempotency_executed,
         )
 
+        coid = getattr(intent, "_canonical_client_order_id", None) or intent.client_tag
         mark_entry_idempotency_executed(
             market_ticker=key[0],
             contract=key[1],
-            client_order_id=intent.client_tag or getattr(intent, "_canonical_client_order_id", None),
+            client_order_id=coid,
             fill_id=fill_id,
         )
     except Exception as exc:
         logger.debug(
             "[order-router] canonical entry idempotency mark executed failed: %s", exc
         )
+
+
+def _terminalize_rejected_intent(
+    intent: OrderIntent,
+    result: OrderResult,
+) -> None:
+    """Synchronous terminalization of a rejected, no-execution, no-order_id intent.
+
+    Releases the contract-side entry idempotency record, the allocated slot,
+    and the pre-trade gate record so the ticker/side is not blocked by a stale
+    PENDING record.
+
+    After release, this function enforces the invariant that no canonical record
+    for this intent remains PENDING with ``submitted=False`` and ``order_id=None``.
+    If the record is still present (e.g. client_order_id mismatch), it is
+    force-removed and a critical alert is emitted.
+    """
+    _release_canonical_entry_idempotency(intent)
+    _release_gate_record(intent, result.reason or "post_route_terminal_reject")
+
+    # Defensive invariant: the canonical idempotency record must not be a stale
+    # PENDING/no-order_id/no-execution record after terminalization.
+    key = getattr(intent, "_canonical_entry_key", None)
+    coid = getattr(intent, "_canonical_client_order_id", None) or getattr(intent, "client_order_id", None)
+    if key is not None:
+        try:
+            from merid.event_venues.kalshi.order_intent_contract import (
+                assert_no_stale_pending_entry_record,
+            )
+
+            assert_no_stale_pending_entry_record(
+                market_ticker=key[0],
+                contract=key[1],
+                client_order_id=coid,
+            )
+        except AssertionError as inv_err:
+            logger.critical(
+                "[TERMINALIZE-INVARIANT] stale PENDING canonical record remains after "
+                "rejection; force-removing: ticker=%s coid=%s error=%s",
+                key[0], coid, inv_err,
+            )
+            try:
+                from merid.event_venues.kalshi.order_intent_contract import (
+                    release_entry_idempotency_by_key,
+                )
+
+                release_entry_idempotency_by_key(
+                    market_ticker=key[0],
+                    contract=key[1],
+                )
+            except Exception as force_err:
+                logger.critical(
+                    "[TERMINALIZE-INVARIANT] force-removal of stale record failed: %s", force_err
+                )
+        except Exception:
+            pass
 
 
 def _post_route_canonical_idempotency_cleanup(
@@ -8781,37 +8982,25 @@ def _post_route_canonical_idempotency_cleanup(
         )
         return
 
-    # rejected / unfilled_ioc / canceled / expired
+    # 2026-08-24: Required lifecycle invariant.  Any terminal no-execution
+    # outcome with no venue order_id must immediately terminalize the canonical
+    # record and the pre-trade gate record.  This prevents a router-rejected
+    # order from remaining PENDING and blocking retries.
     if result.status in ("rejected", "unfilled_ioc", "canceled", "expired"):
-        # A rejection that left the process without an ack or durable order ID
-        # is indistinguishable from a lost submission: keep the record locked
-        # for reconciliation rather than risk a duplicate live order.
-        if (
-            result.submission_attempted
-            and not result.exchange_ack_received
-            and not result.order_id
-        ):
+        # The only ambiguous terminal state is one where the request left the
+        # process and we never received an ack.  Those are marked as
+        # submission_unknown / duplicate_unknown above and require recovery.
+        # A status of "rejected" with no ack and no order_id from a pre-submit
+        # path is still safe to terminalize because no HTTP request reached the
+        # exchange (``result.submission_attempted`` is False for pre-submit
+        # rejections and True with an ack for live rejections).
+        if result.has_execution or result.requires_recovery:
             _mark_canonical_entry_reconciliation_required(
-                intent, reason=result.reason or "post_route_uncertain_reject"
+                intent, reason=result.reason or "post_route_uncertain_terminal"
             )
             return
 
-        # Safe to release only when we know no exchange request was sent,
-        # or when the venue confirmed the rejection terminal.
-        no_request = (
-            not result.submission_attempted
-            and not result.exchange_request_sent
-            and not result.order_id
-        )
-        acked_terminal = result.exchange_ack_received or result.request_completed
-        if no_request or acked_terminal:
-            _release_canonical_entry_idempotency(intent)
-            if getattr(intent, "client_tag", None):
-                _release_gate_record(intent, result.reason or "post_route_cleanup")
-        else:
-            _mark_canonical_entry_reconciliation_required(
-                intent, reason=result.reason or "post_route_uncertain_reject"
-            )
+        _terminalize_rejected_intent(intent, result)
         return
 
     # Unknown status: treat conservatively as reconciliation-required.
@@ -10476,7 +10665,6 @@ async def _route_live(
         from merid.event_venues.kalshi.client import get_kalshi_client
         from merid.event_venues.kalshi.order_group_manager import OrderGroupRiskManager
         from merid.event_venues.kalshi.port import get_kalshi_execution_port
-        from merid.event_venues.kalshi.ticker_utils import normalize_ticker_for_order
 
         # All account-affecting order lifecycle operations (create / lookup /
         # cancel) go through the normalized KalshiExecutionPort.
@@ -10488,15 +10676,12 @@ async def _route_live(
         # the balance probe after fills.  No order mutations go through it.
         client = get_kalshi_client()
 
-        # CRITICAL FIX (2026-05-01): Normalize ticker to strip strike suffix before any API calls
-        # Market discovery returns tickers with strike levels (e.g., -30, -T80199.99)
-        # but the order API expects the base market ticker without these suffixes.
-        _normalized_ticker = normalize_ticker_for_order(intent.ticker)
-        if _normalized_ticker != intent.ticker:
-            logger.info(
-                "[KALSHI_ORDER_NORMALIZE] ticker=%s normalized=%s for_api_calls",
-                intent.ticker, _normalized_ticker
-            )
+        # CRITICAL FIX (2026-08-25): The order ticker must be the exact Kalshi
+        # market ticker returned by the catalog. Do not strip strike-like suffixes
+        # (-15 is a contract/series identifier, not a strike) and do not mutate the
+        # market identifier before any API call.
+        _wire_ticker = intent.ticker
+        _preflight_exchange_index: Optional[int] = None
 
         # ── A5: Re-validate market conditions per-order ───────────────────
         # EXIT ORDERS BYPASS: Market condition checks for exit orders
@@ -10515,7 +10700,15 @@ async def _route_live(
         _market_check_passed = False
         try:
             from merid.event_venues.kalshi.market_filter import DEFAULT_FILTER_CONFIG
-            _market_result = await port.get_market(_normalized_ticker)
+            _market_result = await port.get_market(_wire_ticker)
+            if _market_result.success and _market_result.market is not None:
+                # Resolve the authoritative exchange shard from the market response.
+                _raw_exchange = getattr(_market_result.market, 'raw_data', {}).get('exchange_index')
+                if _raw_exchange is not None:
+                    try:
+                        _preflight_exchange_index = int(_raw_exchange)
+                    except (TypeError, ValueError):
+                        pass
             if not _market_result.success:
                 # Handle 404 / market not found (BUG-404 fix)
                 _error_str = str(_market_result.error or "").lower()
@@ -10656,6 +10849,42 @@ async def _route_live(
                     latency_ms=round(latency, 2),
                 )
             logger.debug("[order-router] A5: market condition check skipped (market found but check failed): %s", _exc)
+
+        # Resolve the exchange shard index. Priority: A5 preflight result >
+        # OrderIntent.exchange_index (from catalog). Without it we cannot route
+        # correctly on Kalshi's sharded exchanges.
+        _resolved_exchange_index: Optional[int] = _preflight_exchange_index
+        if _resolved_exchange_index is None and intent.exchange_index is not None:
+            _resolved_exchange_index = int(intent.exchange_index)
+        if _resolved_exchange_index is None:
+            try:
+                _market_lookup = await client.get_market_result(_wire_ticker)
+                if _market_lookup.success and _market_lookup.market is not None:
+                    _raw_exchange = getattr(_market_lookup.market, 'raw_data', {}).get('exchange_index')
+                    if _raw_exchange is not None:
+                        _resolved_exchange_index = int(_raw_exchange)
+            except Exception as _mkt_exc:
+                logger.debug("[order-router] A5: exchange_index fallback lookup failed for %s: %s", _wire_ticker, _mkt_exc)
+        if _resolved_exchange_index is None:
+            from merid.settings import settings
+            if settings.is_testing:
+                logger.warning(
+                    "[order-router] A5: exchange_index unresolved for %s in testing mode; continuing without shard routing",
+                    _wire_ticker,
+                )
+            else:
+                latency = (_time.monotonic() - t0) * 1000
+                logger.error(
+                    "[order-router] A5: exchange_index unresolved for %s; cannot route order safely",
+                    _wire_ticker,
+                )
+                _release_gate_record(intent, f"exchange_index_unresolved:{_wire_ticker}")
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"exchange_index_unresolved:{_wire_ticker}",
+                    latency_ms=round(latency, 2),
+                )
 
         # ── Order Group Risk Check ─────────────────────────────────────────
         # A3/RISK-05: track og_manager and whether a debit was recorded so we
@@ -11117,7 +11346,8 @@ async def _route_live(
         try:
             create_request = _build_create_order_request(
                 intent,
-                normalized_ticker=_normalized_ticker,
+                ticker=_wire_ticker,
+                exchange_index=_resolved_exchange_index,
                 final_price_cents=final_price_cents,
                 effective_order_type=effective_order_type,
                 effective_tif=effective_tif,
@@ -11169,7 +11399,7 @@ async def _route_live(
                     client_order_id=intent.client_order_id or intent.client_tag,
                     ticker=intent.ticker,
                     asset=extract_asset_from_ticker(intent.ticker) or "",
-                    outcome_side=intent.side or "yes",
+                    outcome_side=intent.side,
                     take_profit_price_cents=intent.take_profit_price_cents,
                     take_profit_r_multiple=intent.take_profit_r_multiple,
                     stop_loss_price_cents=intent.stop_loss_price_cents,
@@ -11873,10 +12103,48 @@ async def _route_live(
         except Exception as divergence_err:
             logger.warning("[WS-REST-DIVERGENCE-SKIP] ticker=%s divergence check failed: %s", intent.ticker, divergence_err)
 
-        # 2026-07-25: Log ORDER-SEND before submission
+        # 2026-08-25: Immutable order-attempt lifecycle record.
+        # This is the single pre-send audit log; terminal state is emitted in
+        # route_order_async after the result is finalized.
+        _order_lifecycle_send_ts = _time.time()
+        try:
+            _send_state = market_state_store.get(intent.ticker)
+        except Exception:
+            _send_state = None
+        _book_receive_age_ms = 0.0
+        _book_exchange_age_ms = 0.0
+        _book_sequence = None
+        _strategy_snapshot_age_ms = 0.0
+        _execution_price_source = "UNKNOWN"
+        if _send_state is not None:
+            _now = _time.time()
+            _book_receive_age_ms = max(0.0, (_now - getattr(_send_state, "last_book_update_ts", _now)) * 1000.0)
+            _book_exchange_age_ms = max(0.0, (_now - getattr(_send_state, "last_ws_update_ts", _now)) * 1000.0)
+            _book_sequence = getattr(_send_state, "last_sequence", None)
+            _execution_price_source = getattr(_send_state, "data_source", "UNKNOWN") or "UNKNOWN"
+        if getattr(intent, "snapshot_ts", 0):
+            _strategy_snapshot_age_ms = max(0.0, (_order_lifecycle_send_ts - intent.snapshot_ts) * 1000.0)
+
         logger.info(
-            "[ORDER-SEND] intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d client_tag=%s",
-            intent.intent_id, intent.ticker, intent.side, intent.action, intent.price_cents, intent.count, intent.client_tag
+            "ORDER-LIFECYCLE "
+            "attempt_id=%s intent_id=%s client_order_id=%s client_tag=%s "
+            "ticker=%s side=%s action=%s price_cents=%s count=%s "
+            "strategy_snapshot_age_ms=%.1f book_exchange_age_ms=%.1f book_receive_age_ms=%.1f "
+            "book_sequence=%s execution_price_source=%s",
+            intent.intent_id,
+            intent.intent_id,
+            intent.client_order_id or "",
+            intent.client_tag or "",
+            intent.ticker,
+            intent.side,
+            intent.action,
+            getattr(intent, "price_cents", "") or "",
+            getattr(intent, "count", "") or "",
+            _strategy_snapshot_age_ms,
+            _book_exchange_age_ms,
+            _book_receive_age_ms,
+            _book_sequence if _book_sequence is not None else "",
+            _execution_price_source,
         )
 
         # 2026-08-11: Register as pending before submission so a fast WebSocket fill
@@ -11971,6 +12239,25 @@ async def _route_live(
                 ).inc(labels={"ticker": intent.ticker})
             except Exception as _m_err:
                 logger.debug(f"Metric increment failed: {_m_err}")
+
+            # 2026-08-25: Submission-ack watchdog.  If the create-order call
+            # timed out, the HTTP request may still have reached Kalshi.  Query
+            # by client_order_id, open orders, and recent fills to resolve the
+            # terminal state before returning submission_unknown.
+            _reconciled_result = None
+            try:
+                _reconciled_result = await _reconcile_submission_unknown(
+                    intent, port, mode, t0
+                )
+            except Exception as _rec_err:
+                logger.warning(
+                    "[SUBMISSION-RECONCILE-ERROR] intent_id=%s ticker=%s error=%s",
+                    intent.intent_id, intent.ticker, _rec_err,
+                )
+
+            if _reconciled_result is not None:
+                return _reconciled_result
+
             return OrderResult(
                 status="submission_unknown",
                 mode=mode,
@@ -14206,7 +14493,8 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
                 # market_maker_15m is used for two-sided liquidity provision (2026-07-31 fix - enables NO-side trading)
                 # CRITICAL FIX (2026-08-01): Add bracket order sources for TP/SL protection
                 # resting_bracket_take_profit and resting_bracket_stop_loss are critical for risk management
-                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools", "offset_hedging", "position_monitor_exit", "execution_subscriber", "arbitrage", "market_maker_15m", "resting_bracket_take_profit", "resting_bracket_stop_loss"]
+                # stop_candidate is the active protective-stop path triggered by PositionMonitor / exit policy engine
+                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools", "offset_hedging", "position_monitor_exit", "execution_subscriber", "arbitrage", "market_maker_15m", "resting_bracket_take_profit", "resting_bracket_stop_loss", "stop_candidate"]
                 if intent.source and not any(allowed in intent.source for allowed in allowed_sources):
                     latency = (_time.monotonic() - t0) * 1000
                     logger.error(
@@ -14289,28 +14577,41 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     # Based on Markaicode research: multi-tier fallback for liquidity crisis detection
     # Automatically adjusts execution strategy based on liquidity conditions
     if LIQUIDITY_FALLBACK_AVAILABLE:
+        fallback_executor = None
         try:
             from merid.risk.liquidity_fallback import get_liquidity_fallback_executor
             fallback_executor = get_liquidity_fallback_executor()
-            
-            if fallback_executor:
-                # Get orderbook snapshot for liquidity scoring
-                from merid.event_venues.kalshi.unified_market_state import get_market_state_store
-                state_store = get_market_state_store()
-                ob = state_store.get_orderbook_snapshot(intent.ticker)
-                
-                if ob:
+        except ImportError:
+            logger.debug("[LIQUIDITY-FALLBACK] Liquidity fallback module not available - skipping check")
+
+        if fallback_executor:
+            # P0: Use the real KalshiMarketStateStore, not a non-existent helper.
+            # This import is intentionally outside the optional-fallback try so that
+            # a missing or broken store is a visible failure, not a silent skip.
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+
+            store = get_kalshi_market_state_store()
+            unified = store.get_unified(intent.ticker) if store else None
+            ob = unified.book if unified else None
+
+            if not ob:
+                logger.warning(
+                    "[LIQUIDITY-FALLBACK] No orderbook snapshot for ticker=%s; cannot score liquidity",
+                    intent.ticker,
+                )
+            else:
+                try:
                     # Compute liquidity score
                     score = fallback_executor.compute_liquidity_score(ob, side=intent.side)
-                    
+
                     # Check if execution should proceed
                     model_confidence = getattr(intent, 'model_confidence', 0.6)  # Default confidence
                     order_size_usd = intent.count * (intent.price_cents / 100.0)
-                    
+
                     should_execute, reason = fallback_executor.should_execute(
                         score, model_confidence, order_size_usd
                     )
-                    
+
                     if not should_execute:
                         latency = (_time.monotonic() - t0) * 1000
                         logger.warning(
@@ -14343,10 +14644,8 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
                             )
                             # Update intent count based on adjusted size
                             intent.count = int(adjusted_size / (intent.price_cents / 100.0))
-        except ImportError:
-            logger.debug("[LIQUIDITY-FALLBACK] Liquidity fallback not available - skipping check")
-        except Exception as exc:
-            logger.warning("[LIQUIDITY-FALLBACK] Liquidity fallback error: %s - proceeding with caution", exc)
+                except Exception as exc:
+                    logger.warning("[LIQUIDITY-FALLBACK] Liquidity fallback error: %s - proceeding with caution", exc)
     
     # ALERT THRESHOLDS MONITORING: Track order submission
     try:
@@ -15074,6 +15373,41 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         _post_route_canonical_idempotency_cleanup(intent, None)
         raise
     _post_route_canonical_idempotency_cleanup(intent, result)
+
+    # 2026-08-25: Immutable terminal lifecycle record.
+    _filled_count = 0
+    _remaining_count = 0
+    if result.fill:
+        _filled_count = int(
+            result.fill.get("filled_count")
+            or result.fill.get("count")
+            or 0
+        )
+        _remaining_count = int(result.fill.get("remaining_count") or 0)
+    logger.info(
+        "ORDER-LIFECYCLE-TERMINAL "
+        "attempt_id=%s intent_id=%s client_order_id=%s client_tag=%s "
+        "ticker=%s side=%s action=%s price_cents=%s count=%s "
+        "state=%s exchange_order_id=%s exchange_status=%s "
+        "filled_count=%d remaining_count=%d reason=%s latency_ms=%.2f",
+        intent.intent_id,
+        intent.intent_id,
+        intent.client_order_id or "",
+        intent.client_tag or "",
+        intent.ticker,
+        intent.side,
+        intent.action,
+        getattr(intent, "price_cents", "") or "",
+        getattr(intent, "count", "") or "",
+        result.status,
+        result.order_id or "",
+        result.submission_certainty or "",
+        _filled_count,
+        _remaining_count,
+        (result.reason or result.error or "")[:80],
+        result.latency_ms,
+    )
+
     # Shadow telemetry for replay and lifecycle analysis (off by default).
     try:
         from merid.data.shadow_telemetry import persist_order_telemetry
