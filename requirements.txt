@@ -60,6 +60,8 @@ cachetools==5.5.0
 
 # ── System Monitoring ───────────────────────────────────────────
 psutil==7.2.2
+# ── Additional Observability ───────────────────────────────────
+prometheus-fastapi-instrumentator==7.0.0
 
 # ── CLI ─────────────────────────────────────────────────────────
 click==8.3.1
@@ -90,11 +92,14 @@ black==24.10.0
 flake8==7.1.1
 mypy==1.19.1
 
-# ── Optional: Observability (install if using Jaeger tracing) ───
-# opentelemetry-api==1.24.0
-# opentelemetry-sdk==1.24.0
-# opentelemetry-exporter-jaeger==1.21.0
-# opentelemetry-instrumentation-fastapi==0.42b0
+# ── Observability (OpenTelemetry for distributed tracing) ───
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+opentelemetry-exporter-jaeger==1.21.0
+opentelemetry-instrumentation-fastapi==0.45b0
+opentelemetry-instrumentation-httpx==0.45b0
+opentelemetry-instrumentation-asyncio==0.45b0
+opentelemetry-semantic-conventions==0.45b0
 
 # ── Optional: Graph DB (install if using Neo4j) ────────────────
 # neo4j==6.1.0

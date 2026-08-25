@@ -234,7 +234,6 @@ def check_imports(res: CheckResult) -> None:
     """2. IMPORTS — critical modules importable."""
     critical = [
         ("merid.formulas",                         "generate_correlation_id"),
-        ("merid.trading.kalshi_continuous_trader",  "KalshiContinuousTrader"),
         ("merid.event_venues.kalshi.market_filter", "select_near_spot_best_edge"),
         ("merid.event_venues.kalshi.market_catalog","get_market_catalog"),
         ("merid.event_venues.kalshi.client",        "KalshiVenueClient"),
@@ -309,38 +308,45 @@ def check_execution_gate(res: CheckResult) -> None:
 
 
 def check_risk_caps(res: CheckResult) -> None:
-    """5. RISK_CAPS — TraderConfig values sane."""
+    """5. RISK_CAPS — active 15m profile risk parameters sane."""
     try:
-        from merid.trading.kalshi_continuous_trader import TraderConfig
-        cfg = TraderConfig()
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
 
+        adapter = get_active_profile()
+        if adapter is None or not hasattr(adapter, "_profile"):
+            res.warn("RISK_CAPS", "no active profile — skipping cap checks")
+            return
+
+        p = adapter._profile
         issues: List[str] = []
 
-        # min_edge sanity
-        min_edge_floor = Decimal("0.03")
-        if cfg.min_edge < min_edge_floor:
-            issues.append(f"min_edge={cfg.min_edge} below floor {min_edge_floor}")
+        # strategy_policy.min_edge sanity (profile stores as fraction, e.g. 0.05 = 5%)
+        # kalshi_crypto_15m_v2 uses 1.5% as the global minimum edge, so allow >=1%.
+        min_edge_floor = Decimal("0.01")
+        min_edge = Decimal(str(getattr(p, "strategy_policy_min_edge", 0.0)))
+        if min_edge < min_edge_floor:
+            issues.append(f"strategy_policy_min_edge={min_edge} below floor {min_edge_floor}")
 
-        # kelly_fraction
-        if cfg.kelly_fraction <= 0 or cfg.kelly_fraction > 1:
-            issues.append(f"kelly_fraction={cfg.kelly_fraction} out of (0,1]")
+        # Kelly hard cap (fraction, e.g. 0.02 = 2%)
+        kelly_hard_cap = float(getattr(p, "kelly_hard_cap", 0.0))
+        if kelly_hard_cap <= 0 or kelly_hard_cap > 1.0:
+            issues.append(f"kelly_hard_cap={kelly_hard_cap} out of (0,1]")
 
-        # max_risk_per_trade_pct
-        if cfg.max_risk_per_trade_pct <= 0 or cfg.max_risk_per_trade_pct > 0.10:
-            issues.append(
-                f"max_risk_per_trade_pct={cfg.max_risk_per_trade_pct:.1%} — should be in (0, 10%]"
-            )
+        # Global notional cap (fraction of bankroll)
+        global_cap = float(getattr(p, "kelly_global_notional_cap_pct", 0.0))
+        if global_cap <= 0 or global_cap > 0.10:
+            issues.append(f"kelly_global_notional_cap_pct={global_cap:.1%} — should be in (0, 10%]")
 
         if issues:
             res.warn("RISK_CAPS", "; ".join(issues))
         else:
             res.ok(
                 "RISK_CAPS",
-                f"min_edge={cfg.min_edge} kelly={cfg.kelly_fraction} "
-                f"max_risk={cfg.max_risk_per_trade_pct:.1%}",
+                f"min_edge={min_edge} kelly_hard_cap={kelly_hard_cap} "
+                f"global_notional_cap={global_cap:.1%}",
             )
     except Exception as exc:
-        res.warn("RISK_CAPS", f"could not inspect TraderConfig: {type(exc).__name__}: {exc}")
+        res.warn("RISK_CAPS", f"could not inspect active profile: {type(exc).__name__}: {exc}")
 
 
 def check_catalog(res: CheckResult) -> None:
@@ -436,6 +442,12 @@ def main() -> int:
     project_root = Path(__file__).parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
+
+    # Load .env / merid.settings so os.getenv sees the same environment as the server.
+    try:
+        import merid.settings  # noqa: F401
+    except Exception:
+        pass
 
     res = CheckResult()
 
