@@ -13,11 +13,25 @@ Maker-taker awareness is tested through integration tests in the production stac
 import pytest
 from decimal import Decimal
 
-
-
 from merid.event_venues.kalshi.order_router import OrderIntent, _price_for_side
 from merid.event_venues.kalshi.maker_taker_integration import apply_maker_taker_policy
 from merid.prediction.unified_sizing import compute_order_size
+
+
+@pytest.fixture(autouse=True)
+def _reset_slot_allocator(monkeypatch):
+    """Ensure fee-aware sizing tests see a clean exposure state."""
+    from merid.risk.global_slot_allocator import (
+        get_global_slot_allocator,
+        reset_global_slot_allocator,
+    )
+    reset_global_slot_allocator()
+    # Some earlier tests leave positions in the position cache; the slot allocator
+    # will otherwise re-create slots from them during sync.  Suppress sync for
+    # these pure unit tests so sizing is deterministic and exposure starts at 0.
+    slot_allocator = get_global_slot_allocator()
+    monkeypatch.setattr(slot_allocator, "sync_with_position_cache", lambda: 0)
+    yield
 
 
 class TestOrderIntentFeeFields:

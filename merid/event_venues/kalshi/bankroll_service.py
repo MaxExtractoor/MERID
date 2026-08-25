@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Unified Kalshi Bankroll Service — Single source of truth for live bankroll.
 
 DEPRECATION NOTICE:
@@ -25,8 +27,6 @@ if is_kalshi_crypto_15m_v2():
         "Use BankrollServiceV2 instead: "
         "from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service_v2"
     )
-
-from __future__ import annotations
 
 import asyncio
 import os

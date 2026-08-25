@@ -59,16 +59,22 @@ class KalshiRiskPolicy:
         self,
         fresh_risk_multiplier: Decimal = Decimal("1.0"),      # 100% of configured risk
         stale_risk_multiplier: Decimal = Decimal("0.5"),     # 50% when stale
+        degraded_risk_multiplier: Decimal = Decimal("0.5"),  # 50% when using cached/degraded bankroll
         allow_trading_when_stale: bool = True,                # Or block entirely?
+        allow_trading_when_degraded: bool = False,            # Default blocks on cached bankroll; set True to trade reduced
         block_on_error: bool = True,
         stale_warning_threshold: int = 3,                     # Warn after N stale periods
+        degraded_warning_threshold: int = 3,                  # Warn after N degraded periods
     ):
         self._fresh_mult = fresh_risk_multiplier
         self._stale_mult = stale_risk_multiplier
+        self._degraded_mult = degraded_risk_multiplier
         self._allow_stale_trading = allow_trading_when_stale
+        self._allow_degraded_trading = allow_trading_when_degraded
         self._block_on_error = block_on_error
         self._stale_warning_threshold = stale_warning_threshold
-        
+        self._degraded_warning_threshold = degraded_warning_threshold
+
         self._consecutive_stale_periods = 0
     
     def evaluate(self, summary) -> RiskAllowance:
@@ -93,7 +99,49 @@ class KalshiRiskPolicy:
                 log_level="info",
                 alert=False,
             )
-        
+
+        elif state == BalanceState.DEGRADED:
+            self._consecutive_stale_periods += 1
+            equity = summary.equity_usd
+
+            if equity is None:
+                return RiskAllowance(
+                    allow_new_positions=False,
+                    max_position_usd=Decimal("0"),
+                    allow_increases=False,
+                    risk_fraction_multiplier=Decimal("0"),
+                    reason="Bankroll DEGRADED with no known equity - BLOCKING",
+                    log_level="error",
+                    alert=True,
+                )
+
+            if not self._allow_degraded_trading:
+                return RiskAllowance(
+                    allow_new_positions=False,
+                    max_position_usd=Decimal("0"),
+                    allow_increases=False,
+                    risk_fraction_multiplier=Decimal("0"),
+                    reason=f"Bankroll DEGRADED: using cached equity (consecutive_timeouts={summary.consecutive_timeout_count}); "
+                           f"trading disabled by policy",
+                    log_level="warning",
+                    alert=False,
+                )
+
+            max_pos = equity * self._degraded_mult
+            alert = self._consecutive_stale_periods >= self._degraded_warning_threshold
+
+            return RiskAllowance(
+                allow_new_positions=True,
+                max_position_usd=max_pos,
+                allow_increases=True,
+                risk_fraction_multiplier=self._degraded_mult,
+                reason=f"Bankroll DEGRADED (periods={self._consecutive_stale_periods}, "
+                       f"consecutive_timeouts={summary.consecutive_timeout_count}): "
+                       f"equity=${equity:,.2f}, reduced risk to {self._degraded_mult*100:.0f}%",
+                log_level="warning",
+                alert=alert,
+            )
+
         elif state == BalanceState.STALE:
             self._consecutive_stale_periods += 1
             equity = summary.equity_usd

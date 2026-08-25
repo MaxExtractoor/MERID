@@ -31,6 +31,10 @@ import pytest
 
 from merid.event_venues.base import VenueOrder, VenuePosition
 from merid.event_venues.kalshi.client import get_kalshi_client
+from merid.event_venues.kalshi.port import (
+    set_kalshi_execution_port,
+    reset_kalshi_execution_port_for_testing,
+)
 from merid.resilience.result import OperationResult
 
 from tests.event_venues.kalshi.deterministic_kalshi_client import (
@@ -46,11 +50,16 @@ TICKER = "KXBTC15M-TEST-50000"
 
 @pytest.fixture
 def client() -> DeterministicKalshiClient:
-    """Fresh, deterministic simulator."""
+    """Fresh, deterministic simulator; also isolate the global execution port."""
+    reset_kalshi_execution_port_for_testing()
     c = DeterministicKalshiClient()
     c.set_time(1_700_000_000)
     c.set_balance(Decimal("10000"), locked=Decimal("0"))
-    return c
+    # Inject the simulator as the process-wide port so reconcile/unified-risk
+    # paths use it instead of a live-client port created by an earlier test.
+    set_kalshi_execution_port(c)
+    yield c
+    reset_kalshi_execution_port_for_testing()
 
 
 # ---------------------------------------------------------------------------

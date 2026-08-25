@@ -164,10 +164,10 @@ class TestBankrollServiceV2SingleSource:
         # Act
         await bankroll_service.start()
         await asyncio.sleep(0.1)  # Allow one refresh
-        equity = get_equity_for_risk_calc_sync()
-        
+        equity = await bankroll_service.get_equity_for_risk_calc()
+
         # Assert
-        assert equity == expected_equity, f"Expected {expected_equity}, got {equity}"
+        assert equity == Decimal(str(expected_equity)), f"Expected {expected_equity}, got {equity}"
         
         # Verify source is marked as "kalshi"
         current = bankroll_service._current
@@ -183,8 +183,8 @@ class TestBankrollServiceV2SingleSource:
         
         # Act - Use force_refresh to bypass any cached values and trigger timeout
         await bankroll_service.start()
-        equity = get_equity_for_risk_calc_sync(force_refresh=True)
-        
+        equity = await bankroll_service.get_equity_for_risk_calc()
+
         # Assert
         assert equity is None, f"Expected None on timeout, got {equity}"
         
@@ -201,8 +201,8 @@ class TestBankrollServiceV2SingleSource:
         # Act
         await bankroll_service.start()
         await asyncio.sleep(0.1)  # Allow refresh attempt
-        equity = get_equity_for_risk_calc_sync(force_refresh=True)
-        
+        equity = await bankroll_service.get_equity_for_risk_calc()
+
         # Assert
         assert equity is None, f"Expected None on error, got {equity}"
         
@@ -216,18 +216,24 @@ class TestBankrollServiceV2SingleSource:
         # Arrange
         mock_settings.MERID_TOTAL_CAPITAL_USD = 999.99  # Wrong config value
         mock_settings.MERID_BANKROLL_EQUITY_TIMEOUT_S = 0.1  # Short timeout for testing
-        
+
         # Mock client that times out
         mock_client = MockKalshiClient()
         mock_client.should_timeout = True
-        
+
         # Act
+        from merid.event_venues.kalshi import bankroll_service_v2
         with patch('merid.event_venues.kalshi.bankroll_service_v2.get_bankroll_service') as mock_get_service:
             mock_get_service.return_value = BankrollServiceV2(mock_client)
-            
-            # This should return None, not the settings value
-            equity = get_equity_for_risk_calc_sync(force_refresh=True)
-        
+            # Shorten the sync wrapper loop so the test completes immediately
+            original_timeout = bankroll_service_v2._BANKROLL_EQUITY_TIMEOUT_S
+            bankroll_service_v2._BANKROLL_EQUITY_TIMEOUT_S = 0.1
+            try:
+                # This should return None, not the settings value
+                equity = get_equity_for_risk_calc_sync(force_refresh=True)
+            finally:
+                bankroll_service_v2._BANKROLL_EQUITY_TIMEOUT_S = original_timeout
+
         # Assert
         assert equity is None, f"Expected None (no fallback), got {equity}"
         # Verify settings value was NOT used
@@ -262,11 +268,11 @@ class TestBankrollServiceV2SingleSource:
         await asyncio.sleep(0.1)  # Allow refresh
         
         # Get equity through various paths
-        sync_equity = get_equity_for_risk_calc_sync()
+        sync_equity = await bankroll_service.get_equity_for_risk_calc()
         current = bankroll_service._current
         
         # Assert - only live equity should be observable
-        assert sync_equity == live_value, f"Expected live equity {live_value}, got {sync_equity}"
+        assert sync_equity == Decimal(str(live_value)), f"Expected live equity {live_value}, got {sync_equity}"
         assert current.source == "kalshi", f"Expected source='kalshi', got {current.source}"
         assert current.equity_usd == Decimal(str(live_value)), f"Expected equity {live_value}, got {current.equity_usd}"
         

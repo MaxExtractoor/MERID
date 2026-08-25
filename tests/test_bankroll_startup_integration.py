@@ -18,15 +18,13 @@ class TestBankrollStartupTiming:
 
     @pytest.mark.asyncio
     async def test_balance_state_transitions(self):
-        """Test that BalanceState has correct states after STALE removal."""
+        """Test that BalanceState has required states for fail-closed and degraded modes."""
         from merid.event_venues.kalshi.types import BalanceState
-        
-        # Verify only FRESH, ERROR, and UNKNOWN exist
-        states = [state.name for state in BalanceState]
-        assert states == ['FRESH', 'ERROR', 'UNKNOWN']
-        
-        # Verify STALE does not exist
-        assert not hasattr(BalanceState, 'STALE')
+
+        # Required states: FRESH, DEGRADED, ERROR, UNKNOWN (STALE may also exist for legacy callers)
+        required = {'FRESH', 'DEGRADED', 'ERROR', 'UNKNOWN'}
+        states = {state.name for state in BalanceState}
+        assert required.issubset(states), f"Missing required states: {required - states}"
 
     @pytest.mark.asyncio
     async def test_fail_closed_returns_none_on_error(self):

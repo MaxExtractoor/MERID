@@ -75,6 +75,11 @@ class BankrollSummary:
     # Error details if applicable
     last_error_reason: Optional[str] = None
     last_error_time: Optional[datetime] = None
+
+    # Degradation / circuit-breaker telemetry
+    consecutive_timeout_count: int = 0
+    consecutive_error_count: int = 0
+    using_cached: bool = False
     
     @property
     def is_tradable(self) -> bool:
@@ -165,6 +170,27 @@ class BankrollServiceV2:
         self._last_error_time: Optional[datetime] = None
         self._fetch_count = 0
         self._error_count = 0
+
+        # Consecutive timeout / circuit-breaker tracking
+        self._consecutive_timeout_count = 0
+        self._consecutive_error_count = 0
+        self._cached_usage_count = 0
+        self._last_fetch_latency_ms: float = 0.0
+        self._last_fetch_attempt_time: Optional[float] = None
+        self._circuit_open_until: Optional[float] = None
+        self._circuit_open_count = 0
+
+        # Circuit-breaker thresholds (env-tunable)
+        import os
+        self._circuit_breaker_timeout_threshold = int(
+            os.getenv("MERID_BANKROLL_CIRCUIT_TIMEOUT_THRESHOLD", "3")
+        )
+        self._circuit_breaker_duration_seconds = float(
+            os.getenv("MERID_BANKROLL_CIRCUIT_DURATION_S", "60.0")
+        )
+        self._circuit_breaker_window_seconds = float(
+            os.getenv("MERID_BANKROLL_CIRCUIT_WINDOW_S", "120.0")
+        )
         
         # Thread safety - lazy initialize lock to avoid event loop binding issues
         # Lock is created on first use in the correct event loop
@@ -275,7 +301,7 @@ class BankrollServiceV2:
     
     async def _refresh_loop(self):
         """Background loop to keep bankroll fresh.
-        
+
         P1 FIX: Added exponential backoff retry logic with freshness tracking.
         If refresh fails repeatedly, bankroll remains in ERROR state and logs warnings.
         """
@@ -283,13 +309,22 @@ class BankrollServiceV2:
         max_retries = 5
         while not self._shutdown:
             try:
-                await self._fetch_and_update_with_retry()
-                retry_count = 0  # Reset on success
-                logger.info("[BANKROLL-REFRESH] Refresh successful, bankroll is fresh")
+                fetched = await self._fetch_and_update_with_retry()
+                if fetched:
+                    retry_count = 0  # Reset on success
+                    logger.info("[BANKROLL-REFRESH] Refresh successful, bankroll is fresh")
+                else:
+                    # Circuit breaker skipped the API call; cached bankroll is in use.
+                    logger.warning(
+                        "[BANKROLL-REFRESH] Refresh skipped due to open circuit; "
+                        "consecutive_timeouts=%d cached_usage_count=%d",
+                        self._consecutive_timeout_count,
+                        self._cached_usage_count,
+                    )
             except Exception as e:
                 retry_count += 1
                 if retry_count >= max_retries:
-                    logger.error(f"[BANKROLL-REFRESH] Failed after {max_retries} retries, bankroll remains ERROR")
+                    logger.error(f"[BANKROLL-REFRESH] Failed after {max_retries} retries, bankroll remains degraded/error")
                 else:
                     backoff = min(self._refresh_interval * (2 ** retry_count), 300.0)
                     logger.warning(f"[BANKROLL-REFRESH] Retry {retry_count}/{max_retries} in {backoff:.1f}s: {e}")
@@ -297,20 +332,57 @@ class BankrollServiceV2:
                     continue
             await asyncio.sleep(self._refresh_interval)
     
-    async def _fetch_and_update_with_retry(self, max_retries: int = 3):
-        """Fetch from Kalshi with retry logic for transient failures."""
+    async def _fetch_and_update_with_retry(self, max_retries: int = 3) -> bool:
+        """Fetch from Kalshi with retry logic and circuit-breaker.
+
+        Returns:
+            True if a fresh balance was fetched and stored.
+            False if the circuit breaker skipped the API call (cached bankroll in use).
+        """
+        now = time.time()
+        if self._circuit_open_until is not None and now < self._circuit_open_until:
+            # Circuit is open - skip the blocking API call and rely on cached data.
+            async with self._get_lock():
+                self._cached_usage_count += 1
+                if self._current and self._current.state != BalanceState.DEGRADED:
+                    self._current = self._current.with_state(BalanceState.DEGRADED)
+            remaining = self._circuit_open_until - now
+            logger.warning(
+                "[BANKROLL-CIRCUIT-SKIP] API call skipped; circuit open for %.1fs more. "
+                "using_cached=true consecutive_timeouts=%d",
+                remaining, self._consecutive_timeout_count,
+            )
+            return False
+
+        # Circuit is closed; attempt the fetch with exponential backoff.
+        last_error: Optional[Exception] = None
         for attempt in range(max_retries):
             try:
                 await self._fetch_and_update()
-                return  # Success
-            except Exception as e:
+                return True
+            except asyncio.TimeoutError:
+                # _fetch_and_update already updates counters and may open the circuit.
+                last_error = asyncio.TimeoutError("Kalshi get_balance() timed out")
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    logger.warning(f"[fetch_retry] Attempt {attempt + 1} timed out, retrying in {wait_time}s")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"[fetch_retry] All {max_retries} attempts timed out")
+                    break
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
                     logger.warning(f"[fetch_retry] Attempt {attempt + 1} failed, retrying in {wait_time}s: {e}")
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"[fetch_retry] All {max_retries} attempts failed: {e}")
-                    raise
+                    break
+
+        if last_error is not None:
+            raise last_error
+        return False
 
     async def _fetch_and_update(self):
         """Fetch from Kalshi and update internal state."""
@@ -330,6 +402,8 @@ class BankrollServiceV2:
         logger.info(f"[BANKROLL-DIVERGENCE] 15m server path detected - {client_info}")
         logger.info("[BANKROLL-API] Attempting get_balance() call to Kalshi API...")
         start_time = time.time()
+        self._last_fetch_attempt_time = start_time
+        result: Optional[Any] = None
         try:
             # Serialize fetches so a slow response cannot create overlapping calls,
             # and bound the API call so it cannot starve the strategy cadence.
@@ -339,8 +413,9 @@ class BankrollServiceV2:
                     timeout=_BANKROLL_BALANCE_API_TIMEOUT_S,
                 )
             elapsed_ms = (time.time() - start_time) * 1000
+            self._last_fetch_latency_ms = elapsed_ms
             logger.info("[BANKROLL-API] get_balance() completed in %.1fms, result_type=%s", elapsed_ms, type(result).__name__)
-            
+
             # CRITICAL FIX: Properly access nested equity structure
             # result is BalanceSuccess with .bankroll attribute containing .equity_usd
             equity_value = "unknown"
@@ -350,20 +425,68 @@ class BankrollServiceV2:
                 equity_value = f"${result.equity}"
             else:
                 equity_value = "unknown (structure mismatch)"
-            
+
             logger.info(f"[BANKROLL-DIVERGENCE] get_balance() SUCCESS - equity={equity_value}")
         except asyncio.TimeoutError:
             elapsed_ms = (time.time() - start_time) * 1000
+            self._last_fetch_latency_ms = elapsed_ms
             logger.error(
-                "[BANKROLL-API] get_balance() timed out after %.1fms (timeout=%.1fs). "
+                "[BANKROLL-API] get_balance() timed out after %.1fms (timeout=%.1fs, consecutive_timeouts=%d). "
                 "Using cached bankroll until the next refresh cycle.",
-                elapsed_ms, _BANKROLL_BALANCE_API_TIMEOUT_S,
+                elapsed_ms, _BANKROLL_BALANCE_API_TIMEOUT_S, self._consecutive_timeout_count + 1,
             )
+
+            # Track consecutive timeouts under lock. If we have a previously successful
+            # balance, degrade (not error) so cached bankroll remains visible.
+            async with self._get_lock():
+                self._consecutive_timeout_count += 1
+                self._consecutive_error_count = 0
+                self._last_error = f"get_balance() timeout after {elapsed_ms:.1f}ms"
+                self._last_error_time = datetime.now(timezone.utc)
+
+                if self._current is not None:
+                    # Degrade to cached data. Keep equity; only the freshness state changes.
+                    self._current = self._current.with_state(BalanceState.DEGRADED)
+                    self._cached_usage_count += 1
+                    logger.warning(
+                        "[BANKROLL-DEGRADED] Using cached bankroll: equity=%s consecutive_timeouts=%d "
+                        "state=%s as_of=%s",
+                        self._current.equity_usd,
+                        self._consecutive_timeout_count,
+                        self._current.state.name,
+                        self._current.as_of.isoformat() if self._current.as_of else "None",
+                    )
+
+                # Open the circuit if we have crossed the threshold.
+                if self._consecutive_timeout_count >= self._circuit_breaker_timeout_threshold:
+                    self._circuit_open_until = time.time() + self._circuit_breaker_duration_seconds
+                    self._circuit_open_count += 1
+                    logger.critical(
+                        "[BANKROLL-CIRCUIT-OPEN] %d consecutive timeouts within window; "
+                        "skipping API calls until %.1fs. circuit_open_count=%d",
+                        self._consecutive_timeout_count,
+                        self._circuit_open_until,
+                        self._circuit_open_count,
+                    )
+
             raise
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
+            self._last_fetch_latency_ms = elapsed_ms
             logger.error("[BANKROLL-API] get_balance() failed after %.1fms: %s", elapsed_ms, str(e), exc_info=True)
             logger.error(f"[BANKROLL-DIVERGENCE] get_balance() FAILED - {type(e).__name__}: {str(e)}")
+
+            async with self._get_lock():
+                self._consecutive_error_count += 1
+                self._consecutive_timeout_count = 0
+                self._last_error = f"{type(e).__name__}: {str(e)}"
+                self._last_error_time = datetime.now(timezone.utc)
+                if self._current is not None:
+                    # Treat non-timeout failures as ERROR (fail-closed) because the
+                    # balance is no longer trustworthy, but preserve the cached equity
+                    # for diagnostics.
+                    self._current = self._current.with_state(BalanceState.ERROR)
+
             raise
         
         async with self._get_lock():
@@ -400,6 +523,14 @@ class BankrollServiceV2:
                 self._last_success = datetime.now(timezone.utc)
                 self._last_error = None
                 self._last_error_time = None
+
+                # Success resets the consecutive-failure / circuit-breaker counters.
+                was_open = self._circuit_open_until is not None and time.time() < self._circuit_open_until
+                self._consecutive_timeout_count = 0
+                self._consecutive_error_count = 0
+                self._circuit_open_until = None
+                if was_open:
+                    logger.info("[BANKROLL-CIRCUIT-CLOSE] API recovered; circuit closed, bankroll FRESH")
                 
                 # ELIMINATED: Fallback state tracking removed to prevent fake bankroll values
                 
@@ -550,6 +681,12 @@ class BankrollServiceV2:
         # Check invariant: equity ≈ cash + portfolio_value
         self._check_equity_invariant_locked()
         
+        using_cached = self._current.state in (
+            BalanceState.DEGRADED,
+            BalanceState.STALE,
+            BalanceState.ERROR,
+        )
+
         return BankrollSummary(
             equity_usd=self._current.equity_usd,
             available_cash_usd=self._current.available_cash_usd,
@@ -559,6 +696,9 @@ class BankrollServiceV2:
             source=self._current.source,
             last_error_reason=self._last_error,
             last_error_time=self._last_error_time,
+            consecutive_timeout_count=self._consecutive_timeout_count,
+            consecutive_error_count=self._consecutive_error_count,
+            using_cached=using_cached,
         )
     
     def _check_equity_invariant_locked(self) -> None:
@@ -650,19 +790,25 @@ class BankrollServiceV2:
             # PRODUCTION AUDIT (Step 2): Log whether using fresh (FRESH) data
             if summary.state == BalanceState.FRESH:
                 data_source = "FRESH"
+            elif summary.state == BalanceState.DEGRADED:
+                data_source = "DEGRADED_CACHED"
             elif summary.state == BalanceState.ERROR:
                 data_source = "ERROR_BLOCKED"
             else:
                 data_source = "UNKNOWN"
-            
+
             logger.info(
-                "[BANKROLL-SNAPSHOT] module=%s state=%s data_source=%s equity=%.2f cash=%.2f as_of=%s",
+                "[BANKROLL-SNAPSHOT] module=%s state=%s data_source=%s equity=%.2f cash=%.2f "
+                "as_of=%s using_cached=%s consecutive_timeouts=%d consecutive_errors=%d",
                 caller_module,
                 summary.state.name if summary else "UNKNOWN",
                 data_source,
                 summary.equity_usd if summary and summary.equity_usd else 0.0,
                 summary.available_cash_usd if summary and summary.available_cash_usd else 0.0,
-                summary.as_of.isoformat() if summary and summary.as_of else "None"
+                summary.as_of.isoformat() if summary and summary.as_of else "None",
+                summary.using_cached,
+                summary.consecutive_timeout_count,
+                summary.consecutive_error_count,
             )
             return summary
     
@@ -869,9 +1015,18 @@ class BankrollServiceV2:
     async def get_stats(self) -> Dict[str, Any]:
         """Get service stats for health checks."""
         async with self._get_lock():
+            now = time.time()
+            circuit_open = self._circuit_open_until is not None and now < self._circuit_open_until
             return {
                 "fetches_total": self._fetch_count,
                 "errors_total": self._error_count,
+                "consecutive_timeouts": self._consecutive_timeout_count,
+                "consecutive_errors": self._consecutive_error_count,
+                "cached_usage_count": self._cached_usage_count,
+                "circuit_open": circuit_open,
+                "circuit_open_until": self._circuit_open_until,
+                "circuit_open_count": self._circuit_open_count,
+                "last_fetch_latency_ms": self._last_fetch_latency_ms,
                 "last_success": self._last_success.isoformat() if self._last_success else None,
                 "last_error": self._last_error,
                 "last_error_time": self._last_error_time.isoformat() if self._last_error_time else None,
@@ -893,9 +1048,17 @@ class BankrollServiceV2:
             cash = float(self._current.available_cash_usd) if self._current.available_cash_usd else 0.0
             state = self._current.state.name
             
+            now = time.time()
+            circuit_open = self._circuit_open_until is not None and now < self._circuit_open_until
             logger.info(
-                "[BANKROLL-HEALTH] equity=%.2f cash=%.2f source=kalshi state=%s",
-                equity, cash, state
+                "[BANKROLL-HEALTH] equity=%.2f cash=%.2f source=kalshi state=%s "
+                "consecutive_timeouts=%d consecutive_errors=%d cached_usage_count=%d "
+                "circuit_open=%s",
+                equity, cash, state,
+                self._consecutive_timeout_count,
+                self._consecutive_error_count,
+                self._cached_usage_count,
+                circuit_open,
             )
             
             # Check divergence from settings.MERID_TOTAL_CAPITAL_USD
