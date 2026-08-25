@@ -312,11 +312,11 @@ class TestETWindowParameterized(unittest.TestCase):
         # Minutes to expiry should be ~0.5 minutes
         self.assertAlmostEqual(window.minutes_to_expiry, 0.5, delta=0.1)
         
-        # Suffix should be 26JUN131000-00 (based on UTC start time)
+        # Suffix is based on ET window END time (10:00 ET -> 26JUN131000-00)
         # 9:45 AM ET = 13:45 UTC
         self.assertEqual(window.start_utc.hour, 13)
         self.assertEqual(window.start_utc.minute, 45)
-        self.assertIn("131045", window.suffix)
+        self.assertIn("131000", window.suffix)
     
     def test_et_window_at_10_00_01_et(self):
         """Test ET window at 10:00:01 ET - should select 10:15 expiry."""
@@ -341,11 +341,11 @@ class TestETWindowParameterized(unittest.TestCase):
         # Minutes to expiry should be ~14.98 minutes
         self.assertAlmostEqual(window.minutes_to_expiry, 14.98, delta=0.1)
         
-        # Suffix should be 26JUN131015-15 (based on UTC start time)
+        # Suffix is based on ET window END time (10:15 ET -> 26JUN131015-15)
         # 10:00 AM ET = 14:00 UTC
         self.assertEqual(window.start_utc.hour, 14)
         self.assertEqual(window.start_utc.minute, 0)
-        self.assertIn("131000", window.suffix)
+        self.assertIn("131015", window.suffix)
     
     def test_et_window_at_14_29_30_et(self):
         """Test ET window at 14:29:30 ET - should select 14:30 expiry."""
@@ -370,11 +370,11 @@ class TestETWindowParameterized(unittest.TestCase):
         # Minutes to expiry should be ~0.5 minutes
         self.assertAlmostEqual(window.minutes_to_expiry, 0.5, delta=0.1)
         
-        # Suffix should be 26JUN131430-30 (based on UTC start time)
+        # Suffix is based on ET window END time (14:30 ET -> 26JUN131430-30)
         # 2:15 PM ET = 18:15 UTC
         self.assertEqual(window.start_utc.hour, 18)
         self.assertEqual(window.start_utc.minute, 15)
-        self.assertIn("131415", window.suffix)
+        self.assertIn("131430", window.suffix)
 
 
 class TestSelectMarketsWindow(unittest.TestCase):
@@ -408,11 +408,11 @@ class TestSelectMarketsWindow(unittest.TestCase):
         # Minutes to expiry should be 15 minutes
         self.assertEqual(window.minutes_to_expiry, 15.0)
         
-        # Suffix should be 26JUN131000-00 (based on UTC start time)
+        # Suffix is based on ET window END time (10:15 ET -> 26JUN131015-15)
         # 10:00 AM ET = 14:00 UTC
         self.assertEqual(window.start_utc.hour, 14)
         self.assertEqual(window.start_utc.minute, 0)
-        self.assertIn("131000", window.suffix)
+        self.assertIn("131015", window.suffix)
         
         # Verify trading window (2-12 minutes) would select a different market
         # At 10:00am ET, the 10:00-10:15 window has 15 minutes to expiry

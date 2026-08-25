@@ -137,11 +137,11 @@ class TestDynamicThresholdManager:
                     {"BTC": {"bid_depth": 100, "ask_depth": 100}}
                 )
                 
-                # Crisis regime: applies multiplier to canonical range (10-75c)
+                # Crisis regime: applies multiplier to the crisis price range (5-95c)
                 # Multiplier: 1.9x price range, 3.3x spread
-                # Implementation applies multipliers to canonical config values
-                assert thresholds.min_price_cents == 19  # 10 * 1.9
-                assert thresholds.max_price_cents == 142  # 75 * 1.9
+                # Implementation applies multipliers to the active regime's base config.
+                assert thresholds.min_price_cents == 9  # 5 * 1.9 = 9.5 -> 9
+                assert thresholds.max_price_cents == 180  # 95 * 1.9 = 180.5 -> 180
                 assert thresholds.max_spread_cents == 330  # 100 * 3.3
                 assert thresholds.regime == "CRISIS"
     
@@ -192,6 +192,7 @@ class TestDynamicThresholds:
             max_price_cents=50,
             max_spread_cents=30,
             min_spread_gate_cents=30,
+            max_spread_to_edge_ratio=0.8,
             min_volume=500,
             min_depth=100,
             regime="MEAN_REVERSION",
@@ -201,7 +202,7 @@ class TestDynamicThresholds:
                 "position_size_multiplier": 1.0
             }
         )
-        
+
         assert thresholds.min_price_cents == 10
         assert thresholds.max_price_cents == 50
         assert thresholds.max_spread_cents == 30
@@ -214,6 +215,7 @@ class TestDynamicThresholds:
             max_price_cents=50,
             max_spread_cents=30,
             min_spread_gate_cents=30,
+            max_spread_to_edge_ratio=0.8,
             min_volume=500,
             min_depth=100,
             regime="MEAN_REVERSION",
@@ -223,7 +225,7 @@ class TestDynamicThresholds:
                 "position_size_multiplier": 1.0
             }
         )
-        
+
         threshold_dict = thresholds.to_dict()
         
         assert threshold_dict["min_price_cents"] == 10
