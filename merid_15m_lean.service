@@ -1,0 +1,55 @@
+# MERID 15m Lean Trading System - Systemd Service Configuration
+# For Linux/Unix systems with systemd
+# CRITICAL FIX (2026-07-17): Process management for 24/7 uptime with auto-restart
+
+[Unit]
+Description=MERID 15m Lean Kalshi Crypto Trading System
+Documentation=https://github.com/your-org/MERID
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=merid
+Group=merid
+WorkingDirectory=/opt/merid
+Environment="PATH=/opt/merid/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="MERID_PROFILE=kalshi_crypto_15m_v2"
+Environment="TRADING_ENABLED=true"
+Environment="MERID_PM_TRADING_MODE=live"
+Environment="MERID_KALSHI_NET_EDGE_FILTER_ENABLED=false"
+Environment="MERID_DISABLE_SHARED_RISK_GUARD=true"
+Environment="MERID_FIXED_EXPOSURE_CAP_USD=2.00"
+
+# Start the server using the production startup script
+ExecStart=/opt/merid/venv/bin/python -m uvicorn web.main_15m_lean:app --host 0.0.0.0 --port 8011
+
+# Auto-restart configuration
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/merid/logs /opt/merid/data
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=append:/opt/merid/logs/systemd_stdout.log
+StandardError=append:/opt/merid/logs/systemd_stderr.log
+SyslogIdentifier=merid-15m-lean
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

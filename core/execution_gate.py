@@ -90,6 +90,10 @@ class BlockReason:
     hint: Optional[str] = None
 
 
+# Backward-compatible alias used by older tests
+ExecutionBlockingReason = BlockReason
+
+
 @dataclass
 class ExecutionGateStatus:
     """Snapshot of the execution gate state."""
@@ -100,6 +104,11 @@ class ExecutionGateStatus:
     timestamp: float = field(default_factory=time.time)
     # EVENT-LOOP-FIX: Diagnostic metrics (advisory only, never blocking)
     diagnostics: dict = field(default_factory=dict)
+
+    @property
+    def can_trade(self) -> bool:
+        """Backward-compatible alias for safe_to_trade."""
+        return self.safe_to_trade
 
     @property
     def is_limited(self) -> bool:

@@ -33,12 +33,13 @@ Production usage:
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 import requests
 import hmac
 import base64
-from typing import Optional, Dict, Any, Union, Literal
+from typing import Optional, Dict, Any, Union, Literal, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import random
@@ -264,9 +265,12 @@ class UnifiedSpotService:
         self._running = False
         self._refresh_task: Optional[asyncio.Task] = None
         self._refresh_interval_s = 1.0  # CRITICAL FIX: Reduced from 3s to 1s for faster price updates. Prediction markets move fast and stale data is costly. 1s polling is within rate limits while providing fresher data.
-        
+
+        # Per-asset last successful fetch timestamp (legacy tests/health compatibility)
+        self._asset_success_ts: Dict[str, float] = {}
+
         logger.info("[UNIFIED-SPOT] UnifiedSpotService initialized with SQS and recovery states (2026 best practices)")
-        
+
         logger.info("[UNIFIED-SPOT] UnifiedSpotService initialized with WebSocket streaming support")
         # Price history for volatility regime detection (2026 best practice)
         self._price_history: Dict[str, list] = {}  # asset -> list of (timestamp, price) tuples
@@ -662,15 +666,32 @@ class UnifiedSpotService:
             source: Data source identifier
         """
         now_ms = int(time.time() * 1000)
-        
+
+        # Enforce the OHLC invariant: high >= max(open, close) and low <= min(open, close).
+        # This is critical because we combine a live ticker close with open/high/low from a
+        # public 1m candle; the current ticker can trade outside that candle's range.
+        open_p = ohlc_data.get('open') or ohlc_data['close']
+        high_p = ohlc_data.get('high') or ohlc_data['close']
+        low_p = ohlc_data.get('low') or ohlc_data['close']
+        close_p = ohlc_data['close']
+
+        ohlc_high = max(high_p, open_p, close_p)
+        ohlc_low = min(low_p, open_p, close_p)
+
+        if ohlc_high != high_p or ohlc_low != low_p:
+            logger.info(
+                f"[UNIFIED-SPOT-OHLC-INVARIANT] {asset}: expanded public OHLC to include close "
+                f"(public H={high_p} L={low_p}) -> (effective H={ohlc_high} L={ohlc_low}) close={close_p}"
+            )
+
         with self._cache_lock:
             self._cache[asset] = {
-                'price': ohlc_data['close'],
+                'price': close_p,
                 'timestamp': now_ms,
                 'source': source,
-                'open': ohlc_data['open'],
-                'high': ohlc_data['high'],
-                'low': ohlc_data['low'],
+                'open': open_p,
+                'high': ohlc_high,
+                'low': ohlc_low,
                 'volume': ohlc_data.get('volume')  # Volume for volume confirmation filter
             }
             # Add to price history for volatility regime detection
@@ -883,7 +904,7 @@ class UnifiedSpotService:
             return SpotError(reason="no_data", asset=asset, state=DataState.DEAD, 
                            message="No cached data available", sqs=sqs)
         
-        # Get single hard threshold from centralized config (60s for all assets)
+        # Get single hard threshold from centralized config (default 120s for all assets)
         max_age_s = get_spot_max_age()
         
         # Calculate age in seconds
@@ -1172,6 +1193,7 @@ class UnifiedSpotService:
                     "state": state.value,
                     "stale": state in [DataState.STALE, DataState.DEAD],
                     "fallback_activations": self._fallback_activations.get(asset, 0),
+                    "sla_degrade_s": get_spot_max_age(),
                 }
                 sqs_scores[asset] = {
                     "composite": sqs.composite,
@@ -1199,6 +1221,7 @@ class UnifiedSpotService:
             "sqs_scores": sqs_scores,
             "cache_status": cache_status,
             "stale_count": stale_count,
+            "degraded_count": stale_count,
         }
     
     def get_degradation_level(self) -> Literal["normal", "yellow", "orange", "red"]:
@@ -1262,3 +1285,34 @@ def reset_unified_spot_service():
         if _unified_spot_instance is not None:
             logger.info("[UNIFIED-SPOT] Resetting singleton instance")
             _unified_spot_instance = None
+
+
+def get_settlement_input_price(asset: str, spot_price: Optional[float] = None) -> Tuple[Optional[float], Optional[float]]:
+    """Return the settlement reference price and the public-spot-to-CF-RTI basis.
+
+    Production path: ingest the matching CME CF-RTI benchmark.  Until that feed is
+    wired in, this applies an empirically modeled basis (default 0 bps) to the
+    public spot price from the UnifiedSpotService.  The returned basis is the
+    fractional adjustment (e.g. 0.0005 for 5 bps) so callers can log/audit it.
+    """
+    if spot_price is None:
+        spot_price = get_unified_spot_service().get_spot_price(asset)
+    if spot_price is None:
+        logger.warning("[SETTLEMENT-INPUT] No spot price available for asset=%s", asset)
+        return None, None
+
+    per_asset_key = f"MERID_CF_RTI_BASIS_BPS_{asset.upper()}"
+    raw = os.getenv(per_asset_key, os.getenv("MERID_CF_RTI_BASIS_BPS", "0.0"))
+    try:
+        basis_bps = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("[SETTLEMENT-INPUT] Invalid basis bps for asset=%s: %s", asset, raw)
+        basis_bps = 0.0
+
+    basis = basis_bps / 10000.0
+    settlement = spot_price * (1.0 + basis)
+    logger.debug(
+        "[SETTLEMENT-INPUT] asset=%s spot=%.4f basis_bps=%.4f settlement=%.4f",
+        asset, spot_price, basis_bps, settlement
+    )
+    return settlement, basis

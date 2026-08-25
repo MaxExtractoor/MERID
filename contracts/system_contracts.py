@@ -35,9 +35,15 @@ T = TypeVar("T")
 
 
 class SystemID(Enum):
-    """The four sovereign systems."""
+    """The four sovereign systems.
+
+    ``ANALYTICS`` and ``EXECUTION`` are compatibility aliases used by the
+    intent/audit test suites and legacy internal naming.
+    """
     INTELLIGENCE = "intelligence"
+    ANALYTICS = "intelligence"  # alias
     TRADING = "trading"
+    EXECUTION = "trading"  # alias
     TREASURY = "treasury"
     GOVERNANCE = "governance"
 

@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Kalshi Crypto 15m Profile Schema",
+  "description": "Single Source of Truth (SSOT) schema for Kalshi 15-minute crypto trading profile. This schema enforces configuration invariants to prevent drift.",
+  "type": "object",
+  "required": [
+    "profile_version",
+    "profile_name"
+  ],
+  "properties": {
+    "profile_version": {
+      "type": "string",
+      "description": "Profile version identifier (e.g., '2.4.0'). Used for runtime gating and compatibility checks.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "profile_name": {
+      "type": "string",
+      "description": "Profile name (e.g., 'kalshi_crypto_15m_v2'). Must match filename.",
+      "pattern": "^kalshi_crypto_15m_v\\d+$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Profile description."
+    },
+    "signal_mode": {
+      "type": "string",
+      "description": "Authoritative signal mode. This is the SSOT field - no other config may override this.",
+      "enum": ["momentum_fvg", "hybrid", "volatility_reversion", "trend", "mean_reversion", "price_based"]
+    },
+    "enabled_features": {
+      "type": "array",
+      "description": "List of enabled features. Features not in this list are considered disabled.",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "disabled_features": {
+      "type": "array",
+      "description": "List of explicitly disabled features. These must not be enabled in any other config.",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "guardrails": {
+      "type": "object",
+      "description": "Risk guardrails and safety limits.",
+      "properties": {
+        "min_contract_price_cents": {
+          "type": "integer",
+          "description": "Minimum contract price for order execution."
+        },
+        "max_contract_price_cents": {
+          "type": "integer",
+          "description": "Maximum contract price for order execution."
+        },
+        "strict_mode": {
+          "type": "boolean",
+          "description": "Enable strict mode enforcement."
+        }
+      }
+    },
+    "change_log": {
+      "type": "array",
+      "description": "Profile changelog entries.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Profile metadata for tracking and documentation.",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "updated_by": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

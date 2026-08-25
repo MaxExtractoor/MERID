@@ -113,32 +113,46 @@ KALSHI_INCLUDED_SERIES_PREFIXES: List[str] = [
 # Keys are in format "ASSET_TIMEFRAME" (e.g., "BTC_15M", "ETH_1H")
 # NOTE: 15m timeframe always uses 15M series tickers (KXBTC15M, KXETH15M, etc.) from canonical config
 # No fallback to base tickers - this prevents silent misalignment
+# KALSHI_CRYPTO_PRODUCTS is kept in lock-step with
+# config.kalshi_crypto_series_meta.build_kalshi_crypto_products().
+# Keys are ``{ASSET}_{TIMEFRAME}`` where timeframe is one of:
+# 15M, 1H, DAILY, WEEKLY, MONTHLY, ANNUAL.
 KALSHI_CRYPTO_PRODUCTS: Dict[str, List[str]] = {
     # BTC
     "BTC_15M": [KALSHI_15M_SERIES_TICKERS["BTC"]],
     "BTC_1H": ["KXBTC"],
-    "BTC_D": ["KXBTC-D"],
-    "BTC_W": ["KXBTC-W"],
+    "BTC_DAILY": ["KXBTCD1"],
+    "BTC_WEEKLY": ["KXBTCW1"],
+    "BTC_MONTHLY": ["KXBTC1M"],
+    "BTC_ANNUAL": ["KXBTCY"],
     # ETH
     "ETH_15M": [KALSHI_15M_SERIES_TICKERS["ETH"]],
     "ETH_1H": ["KXETH"],
-    "ETH_D": ["KXETH-D"],
-    "ETH_W": ["KXETH-W"],
+    "ETH_DAILY": ["KXETHD1"],
+    "ETH_WEEKLY": ["KXETHW1"],
+    "ETH_MONTHLY": ["KXETH1M"],
+    "ETH_ANNUAL": ["KXETHY"],
     # SOL
     "SOL_15M": [KALSHI_15M_SERIES_TICKERS["SOL"]],
     "SOL_1H": ["KXSOL"],
-    "SOL_D": ["KXSOL-D"],
-    "SOL_W": ["KXSOL-W"],
+    "SOL_DAILY": ["KXSOLD1"],
+    "SOL_WEEKLY": ["KXSOLW1"],
+    "SOL_MONTHLY": ["KXSOL1M"],
+    "SOL_ANNUAL": ["KXSOLY"],
     # XRP
     "XRP_15M": [KALSHI_15M_SERIES_TICKERS["XRP"]],
     "XRP_1H": ["KXXRP"],
-    "XRP_D": ["KXXRP-D"],
-    "XRP_W": ["KXXRP-W"],
+    "XRP_DAILY": ["KXXRPD1"],
+    "XRP_WEEKLY": ["KXXRPW1"],
+    "XRP_MONTHLY": ["KXXRP1M"],
+    "XRP_ANNUAL": ["KXXRPY"],
     # DOGE
     "DOGE_15M": [KALSHI_15M_SERIES_TICKERS["DOGE"]],
     "DOGE_1H": ["KXDOGE"],
-    "DOGE_D": ["KXDOGE-D"],
-    "DOGE_W": ["KXDOGE-W"],
+    "DOGE_DAILY": ["KXDOGED1"],
+    "DOGE_WEEKLY": ["KXDOGEW1"],
+    "DOGE_MONTHLY": ["KXDOGE1M"],
+    "DOGE_ANNUAL": ["KXDOGEY"],
 }
 
 
