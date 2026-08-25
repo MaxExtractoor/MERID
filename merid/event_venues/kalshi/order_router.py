@@ -8994,6 +8994,21 @@ def _post_route_canonical_idempotency_cleanup(
         # path is still safe to terminalize because no HTTP request reached the
         # exchange (``result.submission_attempted`` is False for pre-submit
         # rejections and True with an ack for live rejections).
+        #
+        # CRITICAL FIX (2026-08-25): Any terminal no-execution status with
+        # ``exchange_request_sent=True`` and ``exchange_ack_received=False`` is
+        # ambiguous: the request may have reached the exchange.  Treat it as
+        # reconciliation-required, not terminal.
+        if (
+            result.submission_attempted
+            and result.exchange_request_sent
+            and not result.exchange_ack_received
+        ):
+            _mark_canonical_entry_reconciliation_required(
+                intent, reason=result.reason or "post_route_uncertain_terminal"
+            )
+            return
+
         if result.has_execution or result.requires_recovery:
             _mark_canonical_entry_reconciliation_required(
                 intent, reason=result.reason or "post_route_uncertain_terminal"
