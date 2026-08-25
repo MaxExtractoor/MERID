@@ -75,7 +75,14 @@ class ExecutionRouter:
         self._executor_factory = executor_factory
         self._listeners: List[Callable[[str, Any], Awaitable[None] | None]] = []
         self._runtime_config = runtime_config or get_runtime_config()
-        self._trading_guard = trading_guard or get_trading_guard()
+        if trading_guard is not None:
+            self._trading_guard = trading_guard
+        else:
+            try:
+                self._trading_guard = get_trading_guard()
+            except RuntimeError:
+                from trading.guards.trading_guard import get_env_trading_guard
+                self._trading_guard = get_env_trading_guard()
         self._solana_guard = get_solana_anti_rug_guard()
         self._explainability = explainability_service or get_explainability_service()
         self._spectator = spectator_logger or get_spectator_log()
