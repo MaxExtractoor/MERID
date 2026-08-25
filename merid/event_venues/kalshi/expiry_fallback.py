@@ -77,7 +77,14 @@ def parse_kalshi_15m_window_end_utc(ticker: str) -> Optional[datetime]:
     """
     if not ticker:
         return None
-    m = _RE_15M_SEARCH.search(ticker.strip())
+    ticker = ticker.strip()
+    # Try the anchored canonical regex first.  It requires the exact
+    # YYMONDDHHMM-STRIKE body and prevents a 2-digit strike price from being
+    # swallowed as seconds (e.g. 26AUG232330-30 must parse as HHMM=2330).
+    m = _RE_15M_BODY.match(ticker)
+    if m is None:
+        # Fallback for search contexts / non-canonical test fixtures.
+        m = _RE_15M_SEARCH.search(ticker)
     if not m:
         return None
     yy_s, mon_s, dd_s, hhmm_s = m.groups()
@@ -178,25 +185,18 @@ def parse_kalshi_15m_ticker_expiry(ticker: str) -> Tuple[Optional[datetime], boo
     if canonical_dt is None and legacy_match and legacy_dt is None:
         return None, True
 
-    now = datetime.now(timezone.utc)
-
-    candidates: List[Tuple[datetime, str]] = []
+    # CRITICAL FIX (2026-08-24): Prefer the canonical year-first ET parse.
+    # The legacy day-first regex matches the same body, so disambiguating by
+    # "closest to now" incorrectly flips to legacy for live day-24/31 tickers.
+    # Legacy is only a fallback for old test fixtures that the canonical parser
+    # cannot parse.
     if canonical_dt is not None:
-        candidates.append((canonical_dt, "canonical"))
+        return canonical_dt, True
+
     if legacy_dt is not None:
-        candidates.append((legacy_dt, "legacy"))
+        return legacy_dt, True
 
-    if not candidates:
-        return None, is_15m_pattern
-
-    if len(candidates) == 1:
-        return candidates[0][0], True
-
-    # Both parsed; prefer the candidate closest to now.  This keeps canonical
-    # correct for live 15m tickers (YYMONDDHHMM-ET) while still handling the
-    # day-first UTC test fixtures (DDMONHHMMSS).
-    best = min(candidates, key=lambda c: abs((c[0] - now).total_seconds()))
-    return best[0], True
+    return None, is_15m_pattern
 
 
 def expiry_fallback_enabled() -> bool:

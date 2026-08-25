@@ -16,6 +16,8 @@ from typing import Any, Dict, Optional, Union
 class BalanceState(Enum):
     """Bankroll freshness state - explicit, no lying with zeros."""
     FRESH = auto()      # Recently confirmed from Kalshi
+    DEGRADED = auto()   # Using cached/stale bankroll; API degraded but last known equity retained
+    STALE = auto()      # Deprecated/legacy transitional state; kept for callers that reference it
     ERROR = auto()      # Permanent error, trading blocked
     UNKNOWN = auto()    # Never successfully fetched
 

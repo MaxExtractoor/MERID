@@ -18,8 +18,9 @@ import os
 async def cleanup_pending_tasks():
     """Cleanup pending async tasks after each test to prevent RuntimeWarnings."""
     yield
-    # Cancel all pending tasks after test
-    tasks = [t for t in asyncio.all_tasks() if not t.done()]
+    # Cancel all pending tasks after test, excluding the fixture's own task.
+    current = asyncio.current_task()
+    tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
     for task in tasks:
         task.cancel()
     # Wait for cancelled tasks to complete
@@ -138,24 +139,18 @@ class TestIsLiveProfile:
 class TestBalanceStateEnum:
     """Test BalanceState enum changes."""
 
-    def test_stale_state_removed(self):
-        """Test that STALE state is removed from BalanceState."""
+    def test_degraded_state_added(self):
+        """Test that DEGRADED state exists for cached-bankroll usage."""
         from merid.event_venues.kalshi.types import BalanceState
-        
-        # STALE should not exist
-        assert not hasattr(BalanceState, 'STALE')
-        
-        # Valid states should exist
-        assert hasattr(BalanceState, 'FRESH')
-        assert hasattr(BalanceState, 'ERROR')
-        assert hasattr(BalanceState, 'UNKNOWN')
 
-    def test_only_three_states_exist(self):
-        """Test that only FRESH, ERROR, and UNKNOWN states exist."""
+        assert hasattr(BalanceState, 'DEGRADED')
+
+    def test_required_states_exist(self):
+        """Test that all required bankroll states exist."""
         from merid.event_venues.kalshi.types import BalanceState
-        
-        states = [state.name for state in BalanceState]
-        assert states == ['FRESH', 'ERROR', 'UNKNOWN']
+
+        states = {state.name for state in BalanceState}
+        assert {'FRESH', 'DEGRADED', 'ERROR', 'UNKNOWN'}.issubset(states)
 
 
 if __name__ == "__main__":

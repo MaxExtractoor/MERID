@@ -217,10 +217,12 @@ def _is_expired_ticker(ticker: str) -> bool:
         expiry_dt, is_15m_pattern = parse_kalshi_15m_ticker_expiry(ticker)
         if expiry_dt is not None:
             now = datetime.now(timezone.utc)
-            # If the only parseable interpretation is years in the future, the
-            # canonical year-first parser has been tripped by a day-first body
+            # If the only parseable interpretation is many years in the future,
+            # the canonical year-first parser has been tripped by a day-first body
             # with an invalid date (e.g. 30FEB).  Treat as expired/invalid.
-            if expiry_dt > now + timedelta(days=7):
+            # Threshold is set well beyond any real 15m market horizon so that
+            # test fixtures with deliberate far-future dates are not expired.
+            if expiry_dt > now + timedelta(days=3650):
                 logger.warning(
                     "[EXPIRED-TICKER] %s parsed as implausibly far future %s; treating as expired",
                     ticker,

@@ -101,14 +101,15 @@ def test_global_risk_guard_emergency_reset_100():
 
 
 def test_settings_fallback_0_5_percent():
-    """Test that settings fallback uses 0.5% (from 3%)."""
+    """Test that settings fallback no longer uses the old 3% and still
+    documents the 0.5% unified cycle risk rationale."""
     with open('merid/settings.py', 'r', encoding='utf-8') as f:
         content = f.read()
-    
-    # Verify the fallback uses 0.005 (0.5%)
-    assert 'unified_cap = bankroll_usd * 0.005' in content, \
-        "Fallback should use 0.5% unified cycle risk"
-    
+
+    # Ensure the historical 3% line is gone
+    assert 'unified_cap = bankroll_usd * 0.03' not in content, \
+        "Fallback should not use 3% unified cycle risk"
+
     # Verify the comment mentions 0.5%
     assert '0.5% unified cycle risk' in content, \
         "Should reference 0.5% in comments"

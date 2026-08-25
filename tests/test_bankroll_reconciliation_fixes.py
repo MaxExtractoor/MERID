@@ -15,13 +15,27 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
-# DislocationScanner tests
-from merid.signals.arbitrage import (
-    DislocationScanner,
-    VenuePrice,
-    DislocationSignal,
-    DislocationStatus,
-)
+# DislocationScanner tests — the arbitrage module was archived, so skip those
+# tests when it is not present instead of failing collection.
+HAS_ARBITRAGE = True
+try:
+    from merid.signals.arbitrage import (
+        DislocationScanner,
+        VenuePrice,
+        DislocationSignal,
+        DislocationStatus,
+    )
+except ModuleNotFoundError:
+    HAS_ARBITRAGE = False
+    # Provide dummy bindings so the class body can be parsed; the class is
+    # skipped at runtime when the real module is unavailable.
+    class _ArbitrageNotAvailable:
+        value = ""
+
+    DislocationScanner = _ArbitrageNotAvailable
+    VenuePrice = _ArbitrageNotAvailable
+    DislocationSignal = _ArbitrageNotAvailable
+    DislocationStatus = _ArbitrageNotAvailable
 
 # FillsLedger tests
 from merid.event_venues.kalshi.fills_ledger import (
@@ -31,6 +45,7 @@ from merid.event_venues.kalshi.fills_ledger import (
 )
 
 
+@pytest.mark.skipif(not HAS_ARBITRAGE, reason="merid.signals.arbitrage is not available (archived)")
 class TestDislocationScannerSync:
     """BUG-FIX: scan() was async but called without await in thread pool.
 
@@ -142,7 +157,9 @@ class TestFillsLedgerReconciliation:
         ledger._fills.clear()
         ledger._fills_by_market.clear()
 
-        # Add test fills that create a position
+        # Add test fills that create a position. In the V3 ledger schema these
+        # must carry trusted canonical exposure fields to be replayed into a live
+        # position (raw fills are quarantined).
         fills = [
             KalshiFill(
                 fill_id="fill-001",
@@ -150,10 +167,16 @@ class TestFillsLedgerReconciliation:
                 side="yes",
                 action="buy",
                 count_fp=10,
+                quantity_cc=1000,
                 yes_price_dollars=Decimal("0.50"),
                 fee_cost=Decimal("0.02"),
                 created_time=datetime.now(timezone.utc),
                 confirmed_by_rest=True,
+                canonicalization_state="TRUSTED_LIVE_V1",
+                canonical_position_side="yes",
+                canonical_position_action="buy",
+                canonical_leg_price_cents=50,
+                canonical_yes_delta_cc=1000,
             ),
             KalshiFill(
                 fill_id="fill-002",
@@ -161,10 +184,16 @@ class TestFillsLedgerReconciliation:
                 side="yes",
                 action="buy",
                 count_fp=5,
+                quantity_cc=500,
                 yes_price_dollars=Decimal("0.60"),
                 fee_cost=Decimal("0.02"),
                 created_time=datetime.now(timezone.utc),
                 confirmed_by_rest=True,
+                canonicalization_state="TRUSTED_LIVE_V1",
+                canonical_position_side="yes",
+                canonical_position_action="buy",
+                canonical_leg_price_cents=60,
+                canonical_yes_delta_cc=500,
             ),
         ]
 
@@ -392,6 +421,11 @@ class TestLiveTradeTracking:
         assert "paper_realized_pnl_usd" in summary
 
 
+@pytest.mark.skip(
+    reason="Archived modules (kalshi_continuous_trader, dynamic_sizing) and stale "
+           "KalshiRiskConfig fields (initial_bankroll_cents, max_risk_per_trade_pct) "
+           "are no longer part of the 15m production stack."
+)
 class TestBankrollCalibration:
     """BUG-FIX: Bankroll showing incorrect values ($43.60 hardcoded fallback).
 
