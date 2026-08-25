@@ -32,7 +32,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -345,10 +345,17 @@ def _safe_int_cents(value: Any) -> Optional[int]:
 
 
 def _kalshi_taker_fee_cents(qty_cc: int, price_cents: int, fee_rate_bps: float = 10.0) -> int:
-    """Estimate taker fee in cents.  Default 0.1% (10 bps) of notional."""
-    notional_cents = qty_cc * price_cents / 100.0
-    fee = notional_cents * fee_rate_bps / 10_000.0
-    return max(1, int(round(fee))) if fee > 0 else 0
+    """Estimate taker fee in cents.  Default 0.1% (10 bps) of notional.
+
+    ``qty_cc`` is the canonical integer number of centi-contracts.
+    """
+    qty_cc = int(qty_cc)
+    price_cents = int(price_cents)
+    notional_cents = Decimal(qty_cc * price_cents) / Decimal(100)
+    fee = notional_cents * Decimal(str(fee_rate_bps)) / Decimal(10_000)
+    if fee > 0:
+        return max(1, int(fee.to_integral_value(rounding=ROUND_HALF_UP)))
+    return 0
 
 
 # ── Edge stop evaluation ──────────────────────────────────────────────────────
@@ -658,7 +665,10 @@ def build_stop_candidate(
     hard_stop_cents: Optional[int] = None,
 ) -> StopCandidate:
     """Build a `StopCandidate` from live market and position state."""
+    # Canonical exposure is always an integer number of centi-contracts.
+    exchange_position_cc = int(exchange_position_cc)
     side, qty = from_signed_yes_exposure(exchange_position_cc)
+    qty = int(qty)
 
     # Fair value comes from the unified/model state if available; executable
     # exit comes from the venue order book (kalshi_state) if available.
@@ -677,9 +687,13 @@ def build_stop_candidate(
 
     predicted_pnl = None
     if entry_price_cents is not None and executable is not None and qty > 0:
-        # PnL in the held contract's price space.
+        # PnL in the held contract's price space, in cents.
         pnl_per = executable - entry_price_cents
-        predicted_pnl = (qty * pnl_per) - _kalshi_taker_fee_cents(qty * 100, executable)
+        gross_cents = Decimal(qty) * Decimal(pnl_per) / Decimal(100)
+        fee_cents = _kalshi_taker_fee_cents(qty, executable)
+        predicted_pnl = int(
+            (gross_cents - Decimal(fee_cents)).to_integral_value(rounding=ROUND_HALF_UP)
+        )
 
     if total_exit_cost_cents is None:
         total_exit_cost_cents = STOP_EDGE_TOTAL_EXIT_COST_CENTS
