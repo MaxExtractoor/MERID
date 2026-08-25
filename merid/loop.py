@@ -449,7 +449,6 @@ class MeridLoop:
             # Venue caps
             signature['max_single_order_notional_usd'] = round(envelope.max_single_order_notional_usd, 2)
             signature['max_total_notional_usd'] = round(envelope.max_total_notional_usd, 2)
-            signature['max_concurrent_trades'] = envelope.max_concurrent_trades
             signature['max_daily_loss_usd'] = round(envelope.max_daily_loss_usd, 2)
             signature['drawdown_halt_pct'] = round(envelope.drawdown_halt_pct, 4)
             signature['drawdown_unwind_pct'] = round(envelope.drawdown_unwind_pct, 4)
@@ -626,7 +625,6 @@ class MeridLoop:
             logger.info("[ENVELOPE] live_bankroll_usd=$%.2f", envelope.live_bankroll_usd)
             logger.info("[ENVELOPE] max_single_order_notional_usd=$%.2f", envelope.max_single_order_notional_usd)
             logger.info("[ENVELOPE] max_total_notional_usd=$%.2f", envelope.max_total_notional_usd)
-            logger.info("[ENVELOPE] max_concurrent_trades=%d", envelope.max_concurrent_trades)
             logger.info("[ENVELOPE] agent_max_notional_usd=$%.2f", envelope.agent_max_notional_usd)
             logger.info("[ENVELOPE] max_daily_loss_usd=$%.2f", envelope.max_daily_loss_usd)
             logger.info("[ENVELOPE] drawdown_halt_pct=%.2f%%", envelope.drawdown_halt_pct * 100)

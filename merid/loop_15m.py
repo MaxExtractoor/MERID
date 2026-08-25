@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 
@@ -91,6 +92,32 @@ _MERID_EXIT_EMERGENCY_REASONS = frozenset({"expiry_liquidation"})
 # construction) but are not unrestricted emergency exits.
 _MERID_EXIT_STOP_REASONS = frozenset({"stop_loss", "trailing_stop", "loss_cut_40pct"})
 
+# CRITICAL FIX (2026-08-23): Statuses that prove the exchange terminally processed
+# the order and either accepted it or executed it.  ``request_completed`` alone is
+# not enough because it also includes rejected/canceled/expired statuses.
+_ACCEPTED_ORDER_STATUSES = frozenset({
+    "filled_mock",
+    "filled_paper",
+    "filled_live",
+    "partial_live",
+    "partial_fill",
+    "accepted_live",
+    "submitted_live",
+    "resting",
+    "unfilled_ioc",
+})
+
+
+def _confirmed_submission(response) -> bool:
+    """Return True only when the router response proves the order was accepted."""
+    if not response:
+        return False
+    return bool(
+        response.order_id
+        or response.has_execution
+        or (response.request_completed and getattr(response, "status", "") in _ACCEPTED_ORDER_STATUSES)
+    )
+
 
 def _exit_quote_age_limit_ms(seconds_to_expiry: Optional[float]) -> int:
     """
@@ -109,25 +136,48 @@ def _exit_quote_age_limit_ms(seconds_to_expiry: Optional[float]) -> int:
     return MERID_EXIT_MAX_QUOTE_AGE_MS
 
 
-def assert_exit_delta(pre_position_size: int, count: int, market_id: str, position_id: str) -> int:
+async def _get_canonical_post_position_cc(
+    market_id: str,
+    fallback_cc: Optional[int] = None,
+) -> Optional[int]:
     """
-    Validate exit order position-delta invariants and return post_size.
-    
-    This helper function enforces the close-only invariant for exit orders:
-    Exit orders can only reduce or close existing positions, never create exposure.
-    
-    Args:
-        pre_position_size: Current position size before exit
-        count: Number of contracts to close
-        market_id: Market identifier for logging
-        position_id: Position identifier for logging
-        
-    Returns:
-        expected_post_position_size: Expected position size after exit
-        
-    Raises:
-        RuntimeError: If any invariant is violated
-        
+    Return the exchange-reconciled position quantity in centi-contracts.
+
+    First tries a fresh REST snapshot, then falls back to the in-memory
+    position cache.  Returns ``None`` only when both fail and no fallback
+    is supplied.
+    """
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            fetch_fresh_signed_yes_exposure,
+        )
+
+        signed, _, _ = await fetch_fresh_signed_yes_exposure(
+            market_id, timeout=1.0, fallback_to_cache=True
+        )
+        if signed is not None:
+            return abs(signed)
+    except Exception as exc:
+        logger.warning(
+            "[EXIT-RECONCILE] Fresh position fetch failed for %s: %s",
+            market_id,
+            exc,
+        )
+
+    if fallback_cc is not None:
+        return fallback_cc
+    return None
+
+
+def assert_exit_delta(pre_position_size_cc: int, count_cc: int, market_id: str, position_id: str) -> int:
+    """
+    Validate exit order position-delta invariants and return post_size in
+    centi-contracts.
+
+    All inputs and outputs are integer centi-contracts (1 centi-contract =
+    0.01 contracts).  This allows exact handling of fractional exits such as
+    0.25 -> 0.75 without rounding.
+
     Invariants checked:
     1. Position must have positive size (cannot exit from zero)
     2. Exit count must be positive
@@ -135,101 +185,87 @@ def assert_exit_delta(pre_position_size: int, count: int, market_id: str, positi
     4. Expected post-size must be non-negative (cannot flip to negative)
     5. Expected post-size must be strictly less than pre-size (must decrease)
     """
-    pre_position_size = int(pre_position_size) if pre_position_size is not None else 0
-    count = int(count) if count is not None else 0
+    pre_position_size_cc = int(pre_position_size_cc) if pre_position_size_cc is not None else 0
+    count_cc = int(count_cc) if count_cc is not None else 0
 
-    # INVARIANT-1: Position must have positive size (cannot exit from zero)
-    if pre_position_size <= 0:
+    if pre_position_size_cc <= 0:
         logger.critical(
-            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_position_size=%d - "
-            "EXIT orders require pre_position_size>0 (existing position). "
-            "This exit order has no position to close. Rejecting as critical bug.",
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_position_size_cc=%d - "
+            "EXIT orders require pre_position_size_cc>0. Rejecting as critical bug.",
             market_id,
             position_id[:8] if position_id else "unknown",
-            pre_position_size
+            pre_position_size_cc,
         )
         raise RuntimeError(
-            f"EXIT-INVARIANT-VIOLATION: Cannot exit position with size={pre_position_size} for {market_id}. "
-            f"Exit orders can only close existing positions with positive size."
+            f"EXIT-INVARIANT-VIOLATION: Cannot exit position with size_cc={pre_position_size_cc} for {market_id}."
         )
-    
-    # INVARIANT-2: Exit count must be positive
-    if count <= 0:
+
+    if count_cc <= 0:
         logger.critical(
-            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s count=%d - "
-            "EXIT orders require count>0. Zero or negative count is invalid. Rejecting as critical bug.",
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s count_cc=%d - "
+            "EXIT orders require count_cc>0. Rejecting as critical bug.",
             market_id,
             position_id[:8] if position_id else "unknown",
-            count
+            count_cc,
         )
         raise RuntimeError(
-            f"EXIT-INVARIANT-VIOLATION: Invalid exit count={count} for {market_id}. "
-            f"Exit orders must close positive number of contracts."
+            f"EXIT-INVARIANT-VIOLATION: Invalid exit count_cc={count_cc} for {market_id}."
         )
-    
-    # INVARIANT-3: Exit count cannot exceed position size (cannot over-close)
-    if count > pre_position_size:
+
+    if count_cc > pre_position_size_cc:
         logger.critical(
-            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size=%d count=%d - "
-            "EXIT orders cannot close more contracts than exist in position. "
-            "This would over-close the position. Rejecting as critical bug.",
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size_cc=%d count_cc=%d - "
+            "EXIT orders cannot close more contracts than exist. Rejecting as critical bug.",
             market_id,
             position_id[:8] if position_id else "unknown",
-            pre_position_size,
-            count
+            pre_position_size_cc,
+            count_cc,
         )
         raise RuntimeError(
-            f"EXIT-INVARIANT-VIOLATION: Exit count={count} exceeds position size={pre_position_size} for {market_id}. "
-            f"Exit orders cannot close more than the current position size."
+            f"EXIT-INVARIANT-VIOLATION: Exit count_cc={count_cc} exceeds position size_cc={pre_position_size_cc} for {market_id}."
         )
-    
-    # Calculate expected post-size
-    expected_post_position_size = pre_position_size - count
-    
-    # INVARIANT-4: Expected post-size must be non-negative (cannot flip to negative)
-    if expected_post_position_size < 0:
+
+    expected_post_position_size_cc = pre_position_size_cc - count_cc
+
+    if expected_post_position_size_cc < 0:
         logger.critical(
-            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size=%d count=%d post_size=%d - "
-            "EXIT orders cannot result in negative position size. "
-            "This would flip position sign and create exposure on opposite leg. Rejecting as critical bug.",
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size_cc=%d count_cc=%d post_size_cc=%d - "
+            "EXIT orders cannot result in negative position size.",
             market_id,
             position_id[:8] if position_id else "unknown",
-            pre_position_size,
-            count,
-            expected_post_position_size
+            pre_position_size_cc,
+            count_cc,
+            expected_post_position_size_cc,
         )
         raise RuntimeError(
-            f"EXIT-INVARIANT-VIOLATION: Exit would result in negative size={expected_post_position_size} for {market_id}. "
+            f"EXIT-INVARIANT-VIOLATION: Exit would result in negative size_cc={expected_post_position_size_cc} for {market_id}. "
             f"Exit orders cannot flip position sign."
         )
-    
-    # INVARIANT-5: Expected post-size must be strictly less than pre-size (must decrease)
-    if expected_post_position_size >= pre_position_size:
+
+    if expected_post_position_size_cc >= pre_position_size_cc:
         logger.critical(
-            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size=%d post_size=%d - "
-            "EXIT orders must strictly decrease position size. "
-            "This order would not decrease or would increase position. Rejecting as critical bug.",
+            "[EXIT-INVARIANT-VIOLATION] ticker=%s position_id=%s pre_size_cc=%d post_size_cc=%d - "
+            "EXIT orders must strictly decrease position size. Rejecting as critical bug.",
             market_id,
             position_id[:8] if position_id else "unknown",
-            pre_position_size,
-            expected_post_position_size
+            pre_position_size_cc,
+            expected_post_position_size_cc,
         )
         raise RuntimeError(
-            f"EXIT-INVARIANT-VIOLATION: Exit would not decrease position (pre={pre_position_size}, post={expected_post_position_size}) for {market_id}. "
-            f"Exit orders must strictly reduce position size."
+            f"EXIT-INVARIANT-VIOLATION: Exit would not decrease position (pre_cc={pre_position_size_cc}, post_cc={expected_post_position_size_cc}) for {market_id}."
         )
-    
+
     logger.info(
-        "[EXIT-INVARIANT-PASS] ticker=%s position_id=%s pre_size=%d count=%d post_size=%d - "
+        "[EXIT-INVARIANT-PASS] ticker=%s position_id=%s pre_size_cc=%d count_cc=%d post_size_cc=%d - "
         "Exit order passes all position-delta invariants (close-only validation)",
         market_id,
         position_id[:8] if position_id else "unknown",
-        pre_position_size,
-        count,
-        expected_post_position_size
+        pre_position_size_cc,
+        count_cc,
+        expected_post_position_size_cc,
     )
-    
-    return expected_post_position_size
+
+    return expected_post_position_size_cc
 
 # Forbidden imports:
 # - PM runtime controllers
@@ -341,10 +377,59 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
+from collections import Counter
 from enum import Enum
 from dataclasses import dataclass
 
 from utils.logger import get_logger
+
+
+@dataclass(frozen=True)
+class EntryReadiness:
+    """Per-contract readiness diagnosis for the 15m entry gate.
+
+    This is a structured audit object, not a policy decision.  It exposes every
+    individual gate so an operator can see whether a new window is failing
+    because of catalog, market-data, quote coherence, portfolio authority, or
+    pending-intent state.
+    """
+    ticker: str
+    catalog_ready: bool
+    selected: bool
+    ws_subscribed: bool
+    ws_snapshot_complete: bool
+    quote_fresh: bool
+    quote_coherent: bool
+    market_state_applied: bool
+    portfolio_authoritative: bool
+    intent_state_clean: bool
+    queue_healthy: bool
+    queue_lock_wait_ms: float
+    queue_batch_duration_ms: float
+    queue_lock_contention_count: int
+    entries_allowed: bool
+    blocker: Optional[str]
+
+    def to_log_message(self) -> str:
+        return (
+            "ENTRY-READINESS "
+            f"ticker={self.ticker} "
+            f"catalog_ready={self.catalog_ready} "
+            f"selected={self.selected} "
+            f"ws_subscribed={self.ws_subscribed} "
+            f"ws_snapshot_complete={self.ws_snapshot_complete} "
+            f"quote_fresh={self.quote_fresh} "
+            f"quote_coherent={self.quote_coherent} "
+            f"market_state_applied={self.market_state_applied} "
+            f"portfolio_authoritative={self.portfolio_authoritative} "
+            f"intent_state_clean={self.intent_state_clean} "
+            f"queue_healthy={self.queue_healthy} "
+            f"queue_lock_wait_ms={self.queue_lock_wait_ms:.2f} "
+            f"queue_batch_duration_ms={self.queue_batch_duration_ms:.2f} "
+            f"queue_lock_contention_count={self.queue_lock_contention_count} "
+            f"entries_allowed={self.entries_allowed} "
+            f"blocker={self.blocker or 'none'}"
+        )
 
 # Canonical asset extraction from Kalshi tickers (single source of truth)
 from merid.utils.kalshi_identity import extract_asset
@@ -953,8 +1038,8 @@ class Kalshi15mLoop:
                 logger.warning("[15M-LOOP] Failed to initialize Coinbase WebSocket client: %s", e)
         
         # Active trade tracking for concurrent trade limit enforcement
-        # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $1 exposure cap is the limit
-        # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_POSITIONS_PER_ASSET=1
+        # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $2 exposure cap is the limit
+        # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=2.00, MAX_POSITIONS_PER_ASSET=1
         self._active_trades: Dict[str, int] = {}  # ticker -> order count (for tracking only, not limiting)
         
         # REMOVED: position_cache.clear_sync() call
@@ -1382,8 +1467,8 @@ class Kalshi15mLoop:
         # This fixes the hardcoded $50 correlation stack cap bug
         logger.info("[15M-LOOP-WRAPPER] BALANCE-CALIBRATOR-ENTER: About to fetch bankroll")
         try:
-            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-            cycle_bankroll = get_equity_for_risk_calc_sync()
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_async
+            cycle_bankroll = await get_equity_for_risk_calc_async()
             logger.info("[15M-LOOP-WRAPPER] BALANCE-CALIBRATOR: Fetched bankroll=%s", cycle_bankroll)
             if cycle_bankroll is not None and cycle_bankroll > 0:
                 # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
@@ -1716,36 +1801,6 @@ class Kalshi15mLoop:
                         except Exception as expiry_err:
                             logger.debug("[POSITION-MONITOR-CALLBACK] Could not check market expiry: %s", expiry_err)
 
-                        # CRITICAL FIX (2026-07-17): Set cooldown for problematic exits
-                        # This prevents re-entries after exits due to stale data, risk limits, low liquidity, or regime halts
-                        try:
-                            from merid.prediction.strip_order_state import get_strip_order_state, ExitReason as StripExitReason
-                            strip_state = get_strip_order_state()
-                            
-                            # Map position exit reasons to strip cooldown reasons
-                            cooldown_reason = None
-                            if exit_reason == ExitReason.STALE_DATA:
-                                cooldown_reason = StripExitReason.STALEDATA
-                            elif exit_reason == ExitReason.RISK_LIMIT:
-                                cooldown_reason = StripExitReason.RISK_LIMIT
-                            elif exit_reason == ExitReason.LOW_LIQUIDITY:
-                                cooldown_reason = StripExitReason.LOW_LIQUIDITY
-                            elif exit_reason == ExitReason.REGIME_HALTED:
-                                cooldown_reason = StripExitReason.REGIME_HALTED
-                            
-                            if cooldown_reason:
-                                strip_state.set_cooldown(
-                                    ticker=position.market_id,
-                                    exit_reason=cooldown_reason,
-                                    duration_seconds=300  # 5 minutes cooldown
-                                )
-                                logger.info(
-                                    "[STRIP-COOLDOWN-TRIGGER] ticker=%s reason=%s duration=300s",
-                                    position.market_id, cooldown_reason.value
-                                )
-                        except Exception as cooldown_err:
-                            logger.warning("[STRIP-COOLDOWN] Failed to set cooldown: %s", cooldown_err)
-                        
                         # CRITICAL FIX (2026-08-22): The in-flight flag in PositionMonitor
                         # (and the loop-side position_exit_lock) prevents duplicate callbacks;
                         # do NOT set exit_triggered here.  Setting it before route_order_async
@@ -2295,16 +2350,24 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         position_lock.release()
     
     # CRITICAL INVARIANT: Exit orders can only reduce or close existing positions
-    # Exit orders must never create exposure or increase position size
-    # Use assert_exit_delta helper for reusable invariant validation
-    pre_position_size = position.size
-    count = contracts_to_close if contracts_to_close is not None else pre_position_size
-    
-    expected_post_position_size = assert_exit_delta(
-        pre_position_size=pre_position_size,
-        count=count,
+    # All sizing is in integer centi-contracts so fractional partial exits are exact.
+    pre_position_size_cc = int(Decimal(str(position.size)) * Decimal("100"))
+    requested_exit_cc = (
+        int(Decimal(str(contracts_to_close)) * Decimal("100"))
+        if contracts_to_close is not None
+        else pre_position_size_cc
+    )
+    requested_exit_contracts = (
+        Decimal(str(contracts_to_close))
+        if contracts_to_close is not None
+        else Decimal(str(position.size))
+    )
+
+    expected_post_position_size_cc = assert_exit_delta(
+        pre_position_size_cc=pre_position_size_cc,
+        count_cc=requested_exit_cc,
         market_id=position.market_id,
-        position_id=position.position_id
+        position_id=position.position_id,
     )
 
     # EXIT PRICE GUARDRAIL (2026-08-19): fail-closed unless the exit is
@@ -2314,7 +2377,7 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         position=position,
         exit_reason=exit_reason,
         exit_price_cents=exit_price_cents,
-        count=count,
+        count=int(requested_exit_contracts),
     )
     if not guard_approved:
         logger.critical(
@@ -2483,6 +2546,12 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
             )
         
         from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+        from merid.event_venues.kalshi.exit_finalizer import (
+            ExitOrderAttempt,
+            can_finalize_full_exit,
+        )
+        from merid.event_venues.kalshi.canonical_portfolio import get_canonical_portfolio_store
+        from merid.event_venues.kalshi.canonical_portfolio_reconciler import get_canonical_portfolio_reconciler
         
         # CRITICAL FIX (2026-07-23): Verify exit orders bypass window limits
         # Exit orders are routed directly via route_order_async and do NOT go through
@@ -2549,7 +2618,9 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
             )
 
             try:
-                exit_order = build_exit_order(temp_position, count, exit_price_cents)
+                # CRITICAL FIX (2026-08-23): build_exit_order accepts fractional whole-contract
+                # Decimal qty. requested_exit_contracts is the canonical whole-contract amount.
+                exit_order = build_exit_order(temp_position, requested_exit_contracts, exit_price_cents)
                 kalshi_side = exit_order["kalshi_side"]
                 outcome_side = exit_order["outcome_side"]
                 action = exit_order["action"]
@@ -2557,13 +2628,13 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                 # VERIFICATION: Exit order logging (ticker, confirmed_outcome, exit_outcome_side, action, size_fp)
                 logger.info(
                     "[EXIT-ORDER-GENERATION] ticker=%s confirmed_outcome=%s exit_outcome_side=%s action=%s kalshi_side=%s size_fp=%d price_cents=%d",
-                    position.market_id, confirmed_outcome, outcome_side, action, kalshi_side, count, exit_price_cents
+                    position.market_id, confirmed_outcome, outcome_side, action, kalshi_side, requested_exit_cc, exit_price_cents
                 )
 
                 logger.info(
                     "[EXIT-ORDER-PURE-FUNCTION] Built exit order using pure function: "
-                    "confirmed=%s -> kalshi_side=%s count=%d price=%dc",
-                    confirmed_outcome, kalshi_side, count, exit_price_cents
+                    "confirmed=%s -> kalshi_side=%s count_fp=%d price=%dc",
+                    confirmed_outcome, kalshi_side, requested_exit_cc, exit_price_cents
                 )
             except ValueError as e:
                 logger.error(
@@ -2588,14 +2659,14 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         # AUDIT: Venue-side semantics - log Kalshi order semantics for exit
         logger.info(
             "[VENUE-SEMANTICS-AUDIT] position=%s market=%s exit_reason=%s "
-            "kalshi_side=%s order_type=limit time_in_force=ioc aggressiveness=1.0 price=%dc count=%d "
+            "kalshi_side=%s order_type=limit time_in_force=ioc aggressiveness=1.0 price=%dc count_fp=%d "
             "thesis_conversion=%s->%s executable=YES",
             position.position_id[:8],
             position.market_id,
             exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
             kalshi_side,
             exit_price_cents,
-            count,
+            requested_exit_cc,
             thesis_side,
             kalshi_side
         )
@@ -2832,13 +2903,13 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         # AUDIT: Timing correctness - track latency from trigger to intent creation
         intent_creation_ts = __import__('time').monotonic()
         logger.info(
-            "[EXIT-INTENT-CONTRACT] position=%s market=%s direction=%s pre_size=%d post_size=%d "
+            "[EXIT-INTENT-CONTRACT] position=%s market=%s direction=%s pre_size_fp=%d post_size_fp=%d "
             "exit_reason=%s exit_price=%dc type=%s intent_ts=%.3f",
             position.position_id[:8],
             position.market_id,
             "exit",
-            pre_position_size,
-            expected_post_position_size,
+            pre_position_size_cc,
+            expected_post_position_size_cc,
             intent_exit_reason.value,
             exit_price_cents,
             "FULL_EXIT" if contracts_to_close is None else f"PARTIAL_EXIT({contracts_to_close})",
@@ -2850,12 +2921,52 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         # the per-reason max-loss / slippage bound, and persisted a decision
         # record.  Do not double-reprice with the older bounded-liquidation block.
 
+        # CRITICAL FIX (2026-08-22): Preserve exact fractional contract count.
+        # ``OrderIntent.count`` is a display/integer field; the canonical size is
+        # ``count_fp``.  ``pre_position_fp`` and ``expected_post_position_fp`` are
+        # integer centi-contracts and carry exact fractional position sizes.
+        _count_fp = Decimal(requested_exit_cc) / Decimal("100")
+        _pre_position_fp = pre_position_size_cc
+        _expected_post_position_fp = expected_post_position_size_cc
+        # Display values are whole-contract floors; canonical invariants use the FP fields.
+        _pre_position_size = pre_position_size_cc // 100
+        _expected_post_position_size = expected_post_position_size_cc // 100
+        _count = requested_exit_cc // 100
+
+        # CRITICAL FIX (2026-08-22): Separate parentage identifiers.  Never
+        # promote a signal_id into a fill_id; that falsifies the identity chain.
+        _entry_fill_id = getattr(position, "entry_fill_id", None)
+        _entry_order_id = (
+            getattr(position, "client_order_id", None)
+            or getattr(position, "entry_order_id", None)
+            or getattr(position, "entry_intent_id", None)
+        )
+        _entry_signal_id = getattr(position, "entry_signal_id", None)
+
+        if _entry_fill_id and isinstance(_entry_fill_id, str) and _entry_fill_id.strip():
+            _parentage_status = "CANONICAL_FILL"
+        elif _entry_order_id and isinstance(_entry_order_id, str) and _entry_order_id.strip():
+            _parentage_status = "ORDER_LINKED"
+        elif _entry_signal_id and isinstance(_entry_signal_id, str) and _entry_signal_id.strip():
+            _parentage_status = "SIGNAL_ONLY"
+        else:
+            _parentage_status = "UNKNOWN"
+
+        # 2026-08-24: REST-synced and replayed positions often lack a real
+        # ``entry_fill_id``.  Use the strongest available durable parent id
+        # (order/intent) as the parent fill linkage for exit parentage checks,
+        # while keeping parentage_status honest about the chain quality.
+        _parent_entry_fill_id = _entry_fill_id
+        if not (_parent_entry_fill_id and _parent_entry_fill_id.strip()):
+            _parent_entry_fill_id = _entry_order_id
+
         intent = OrderIntent(
             ticker=position.market_id,
             side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES/SELL_YES/BUY_NO/SELL_NO)
             action=action,  # Keep as lowercase "buy"/"sell" for early validation
             price_cents=int(round(exit_price_cents)),
-            count=count,
+            count=_count,
+            count_fp=_count_fp,  # CRITICAL FIX (2026-08-22): preserve exact fractional count
             order_type="limit",  # Limit order with marketable aggressiveness = marketable-limit
             time_in_force="ioc",  # CRITICAL FIX (2026-08-07): Exits are IOC, never GTC
             source="position_monitor_exit",
@@ -2867,44 +2978,65 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
             # ENTRY/EXIT DIRECTION CONTRACT FIELDS
             entry_or_exit="exit",  # Formal direction classification
             exit_reason=intent_exit_reason.value,  # Mapped exit reason for invariants
-            pre_position_size=pre_position_size,  # Position size before order
-            expected_post_position_size=expected_post_position_size,  # Expected position after order
+            pre_position_size=_pre_position_size,  # Display whole-contract size before order
+            expected_post_position_size=_expected_post_position_size,  # Display whole-contract size after order
+            pre_position_fp=_pre_position_fp,  # Exact centi-contract size before order
+            expected_post_position_fp=_expected_post_position_fp,  # Exact centi-contract size after order
             # EXIT GUARD (2026-08-19): carry the guard decision and parent fill for audit.
             decision_id=guard_decision_id,
             reason=f"exit:{exit_reason_str}",
-            # 2026-08-20: Fallback through immutable linkage so exits are not blocked
-            # when the canonical fill_id was not propagated to the Position object.
-            parent_entry_fill_id=(
-                getattr(position, "entry_fill_id", None)
-                or getattr(position, "client_order_id", None)
-                or getattr(position, "entry_order_id", None)
-                or getattr(position, "entry_intent_id", None)
-                or None
-            ),
+            # CRITICAL FIX (2026-08-22): Separate durable parentage identifiers.  A
+            # signal_id proves a strategy signal existed, not that a fill created
+            # the position, so it is kept in its own field.
+            parent_entry_fill_id=_parent_entry_fill_id,
+            parent_entry_order_id=_entry_order_id,
+            parent_entry_signal_id=_entry_signal_id,
+            parentage_status=_parentage_status,
         )
 
+        # CRITICAL FIX (2026-08-24): Finalize the durable order identity before the
+        # order is marked in-flight and before route_order_async.  Each exit attempt
+        # gets a fresh, persisted (client_order_id, order_attempt_id) pair, so retries
+        # cannot collide with a previous attempt's identity record and the in-flight
+        # tracker always carries the canonical wire id.
+        try:
+            from merid.event_venues.kalshi.order_identity import finalize_order_identity
+
+            intent.run_id = os.environ.get("MERID_RUN_ID") or f"live_exit_{int(time.time())}"
+            intent.process_id = str(os.getpid())
+            finalize_order_identity(intent)
+        except Exception as identity_err:
+            logger.error(
+                "[EXIT-ORDER-IDENTITY-REJECT] position=%s market=%s error=%s",
+                position.position_id[:8],
+                position.market_id,
+                identity_err,
+            )
+            _clear_in_flight()
+            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
+            return
+
         # LIFECYCLE-EXIT CANONICAL LOG SCHEMA (machine-parseable, single line)
-        # Contract: thesis_side in {yes,no}; kalshi_side == SELL_YES iff thesis_side==yes,
-        # SELL_NO iff thesis_side==no; size_before > 0; size_after == size_before - count (>= 0).
         logger.info(
             "[LIFECYCLE-EXIT] asset=%s ticker=%s agent_id=%s thesis_side=%s action=%s kalshi_side=%s "
-            "size_before=%d size_after=%d count=%d price_cents=%d exit_reason=%s entry_or_exit=exit",
+            "size_before_fp=%d size_after_fp=%d count_fp=%d price_cents=%d exit_reason=%s entry_or_exit=exit client_order_id=%s",
             lifecycle_asset,
             position.market_id,
             agent_id,
             side_str.lower(),
             action.lower(),
             kalshi_side,
-            pre_position_size,
-            expected_post_position_size,
-            count,
+            _pre_position_fp,
+            _expected_post_position_fp,
+            requested_exit_cc,
             exit_price_cents,
             exit_reason_str,
+            intent.client_order_id,
         )
 
         logger.info(
-            "[EXIT-ORDER] Routing exit order: ticker=%s side=%s action=%s count=%d price=%dc reason=%s",
-            position.market_id, side_str, action, count, exit_price_cents, exit_reason
+            "[EXIT-ORDER] Routing exit order: ticker=%s side=%s action=%s count=%d count_fp=%s price=%dc reason=%s client_order_id=%s order_attempt_id=%s",
+            position.market_id, side_str, action, _count, str(_count_fp), exit_price_cents, exit_reason, intent.client_order_id, intent.order_attempt_id
         )
 
         # CRITICAL FIX (2026-08-20): Update in-flight intent with the real client
@@ -2918,37 +3050,217 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         self._position_monitor._register_exit_submission(
             intent.client_order_id, position_id=position.position_id
         )
-        
+
+        # CRITICAL FIX (2026-08-22): Persist a durable order-attempt record before
+        # any network I/O. This is the source of truth for in-flight reconciliation;
+        # the in-flight lock must not be cleared without an attempt record on disk.
+        try:
+            from merid.event_venues.kalshi.order_intent_contract import persist_order_decision
+
+            # Generate a durable attempt id.  The tuple (position_id, intent_id,
+            # attempt_id) must be unique across retries and restarts.
+            if not intent.order_attempt_id:
+                intent.order_attempt_id = f"exit_attempt_{__import__('uuid').uuid4().hex}"
+
+            persist_order_decision(
+                {
+                    "type": "exit_order_attempt",
+                    "status": "submitted",
+                    "position_id": position.position_id,
+                    "market_id": position.market_id,
+                    "client_order_id": intent.client_order_id,
+                    "intent_id": intent.intent_id,
+                    "order_attempt_id": intent.order_attempt_id,
+                    "parent_entry_fill_id": intent.parent_entry_fill_id,
+                    "parent_entry_order_id": intent.parent_entry_order_id,
+                    "parent_entry_signal_id": intent.parent_entry_signal_id,
+                    "parentage_status": intent.parentage_status,
+                    "guard_decision_id": guard_decision_id,
+                    "exit_reason": (
+                        exit_reason.value
+                        if hasattr(exit_reason, "value")
+                        else str(exit_reason)
+                    ),
+                    "price_cents": exit_price_cents,
+                    "count": _count,
+                    "count_fp": str(_count_fp),
+                    "pre_position_size": _pre_position_size,
+                    "expected_post_position_size": _expected_post_position_size,
+                    "pre_position_fp": _pre_position_fp,
+                    "expected_post_position_fp": _expected_post_position_fp,
+                }
+            )
+        except Exception as attempt_err:
+            logger.warning(
+                "[EXIT-ORDER-ATTEMPT-PERSIST] failed (non-critical): %s", attempt_err
+            )
+
+        # Capture the authoritative portfolio snapshot in effect when the order
+        # is submitted.  The exit can only be finalized against a snapshot that
+        # is strictly newer and after the submission timestamp.
+        pre_submit_snapshot = get_canonical_portfolio_store().current()
+        pre_submit_version = (
+            pre_submit_snapshot.version if pre_submit_snapshot is not None else 0
+        )
+        submit_started_at_ns = time.time_ns()
+        exit_attempt = ExitOrderAttempt(
+            pre_submit_snapshot_version=pre_submit_version,
+            submit_started_at_ns=submit_started_at_ns,
+            submitted_count_fp=_count_fp,
+        )
+
         # Route the exit order
         result = await route_order_async(intent)
 
-        # Only treat the exit as successful if contracts were actually filled.
-        # unfilled_ioc / submitted_live / resting must not clear the position.
-        if result and result.has_execution:
-            logger.info(
-                "[EXIT-ORDER] Exit order executed successfully: order_id=%s status=%s",
-                result.order_id, result.status
+        # CRITICAL FIX (2026-08-23): Validate that route_order_async produced a
+        # semantically confirmed submission before treating the order as SUBMITTED.
+        # ``request_completed`` alone is not enough; the status must prove acceptance.
+        route_ok = _confirmed_submission(result)
+        if not route_ok:
+            logger.error(
+                "[EXIT-ORDER] route_order_async returned no confirmed order: "
+                "position=%s market=%s result=%s",
+                position.position_id[:8], position.market_id, result
             )
-            
+            if self._position_monitor:
+                self._position_monitor._mark_exit_intent_retryable(
+                    position.position_id,
+                    "RouteNoOrder",
+                    "route_order_async returned without order_id/execution/request_completed",
+                )
+            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
+            return
+
+        # CRITICAL FIX (2026-08-23): Only mark the exit intent as SUBMITTED after a
+        # successful router/exchange call. Prior to this point it is EXECUTION_PENDING.
+        if self._position_monitor:
+            self._position_monitor._mark_exit_intent_submitted(
+                position.position_id,
+                exchange_order_id=getattr(result, "order_id", None),
+                client_order_id=intent.client_order_id,
+                reason=exit_reason.value if hasattr(exit_reason, "value") else str(exit_reason),
+            )
+
+        # CRITICAL FIX (2026-08-23): Cooldown is a side effect, not an execution
+        # prerequisite. Update it only after the order is confirmed SUBMITTED.
+        try:
+            from merid.prediction.strip_order_state import get_strip_order_state, ExitReason as StripExitReason
+
+            strip_state = get_strip_order_state()
+            cooldown_reason = None
+            reason_str = exit_reason.value if hasattr(exit_reason, "value") else str(exit_reason)
+            if reason_str == "stale_data":
+                cooldown_reason = StripExitReason.STALEDATA
+            elif reason_str == "risk":
+                cooldown_reason = StripExitReason.RISK_LIMIT
+            elif reason_str == "low_liquidity":
+                cooldown_reason = StripExitReason.LOW_LIQUIDITY
+            elif reason_str == "regime_halted":
+                cooldown_reason = StripExitReason.REGIME_HALTED
+            if cooldown_reason:
+                strip_state.set_cooldown(
+                    ticker=position.market_id,
+                    exit_reason=cooldown_reason,
+                    duration_seconds=300,
+                )
+                logger.info(
+                    "[COOLDOWN-UPDATED] position_key=%s reason=%s duration=300s",
+                    position.position_key, cooldown_reason.value
+                )
+        except Exception as cooldown_err:
+            logger.info(
+                "[COOLDOWN-UPDATE-FAILED-NONBLOCKING] position_key=%s exit_order_allowed=True "
+                "cooldown_update=FAILED_NONBLOCKING error=%s",
+                position.position_key, cooldown_err
+            )
+
+        # CRITICAL FIX (2026-08-22): Do not use ``result.remaining_quantity_cc``
+        # as a proxy for account position size.  For an IOC, Kalshi's
+        # ``remaining_count`` is the unexecuted portion of THIS order, not the
+        # remaining account position.  A full close is only proven by an
+        # exchange/cache-reconciled position quantity of zero.
+        exchange_position_confirmed = False
+        post_position_cc: Optional[int] = None
+        if result and (result.is_terminal or result.has_execution):
+            post_position_cc = await _get_canonical_post_position_cc(
+                position.market_id, fallback_cc=None
+            )
+            if post_position_cc is not None:
+                exchange_position_confirmed = True
+
+        if post_position_cc is None:
+            # No live exchange/cache source.  Derive a conservative fallback from
+            # the order result only.  This is a degraded path and must never mark
+            # a position terminal without at least a fully-filled exit order that
+            # matches or exceeds the pre-position size.
+            if result and result.has_execution:
+                filled_cc = result.executed_quantity_cc
+                post_position_cc = max(0, pre_position_size_cc - filled_cc)
+                logger.warning(
+                    "[EXIT-RECONCILE-FALLBACK] position=%s market=%s "
+                    "filled_cc=%d pre_cc=%d post_cc=%d - no exchange/cache confirmation",
+                    position.position_id[:8],
+                    position.market_id,
+                    filled_cc,
+                    pre_position_size_cc,
+                    post_position_cc,
+                )
+            else:
+                post_position_cc = pre_position_size_cc
+
+        # CRITICAL FIX (2026-08-22): Full exit finalization now requires an
+        # authoritative post-order portfolio snapshot.  The snapshot must be
+        # strictly newer than the submission snapshot, MATCHED, and prove zero
+        # exchange position and no working exit order for this market.
+        can_finalize = False
+        finalizer_reason = "NO_RESULT"
+        fresh_snapshot = None
+        if result:
+            try:
+                fresh_snapshot = await get_canonical_portfolio_reconciler().build_snapshot()
+                get_canonical_portfolio_store().publish(fresh_snapshot)
+            except Exception as snap_err:
+                logger.warning(
+                    "[EXIT-FINALIZER] position=%s market=%s - failed to build fresh snapshot: %s",
+                    position.position_id[:8],
+                    position.market_id,
+                    snap_err,
+                )
+
+            if fresh_snapshot is not None:
+                can_finalize, finalizer_reason = can_finalize_full_exit(
+                    snapshot=fresh_snapshot,
+                    attempt=exit_attempt,
+                    order_result=result,
+                    position_key=position.market_id,
+                    now_ns=time.time_ns(),
+                )
+
+        if can_finalize:
+            logger.info(
+                "[EXIT-ORDER] Position flat confirmed: order_id=%s status=%s reason=%s",
+                result.order_id, result.status, finalizer_reason
+            )
+
             # CRITICAL FIX (2026-07-29): Wire hedge auto-exit to alpha exit events
             # When an alpha position exits, trigger hedge auto-exit to close associated hedge positions
             # This prevents orphaned hedge positions that outlive their alpha positions
             try:
                 from merid.hedging.pnl_tracker import get_hedge_pnl_tracker
                 from merid.hedging.config import get_hedge_config
-                
+
                 # Get alpha fill ID from position (used to link to hedge positions)
                 alpha_fill_id = getattr(position, 'fill_id', None)
                 if alpha_fill_id:
                     hedge_tracker = get_hedge_pnl_tracker()
                     hedge_config = get_hedge_config()
-                    
+
                     # Trigger hedge auto-exit for this alpha position
                     hedge_exit_orders = hedge_tracker.auto_exit_hedges(
                         hedge_config,
                         closed_alpha_fills=[alpha_fill_id]
                     )
-                    
+
                     if hedge_exit_orders:
                         logger.info(
                             "[HEDGE-AUTO-EXIT] Triggered hedge exit for alpha fill=%s: %d hedge exit orders generated",
@@ -2966,16 +3278,15 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
                     hedge_exit_err,
                     exc_info=True
                 )
-            
+
             # CRITICAL FIX (2026-07-23): Register exit order in first-class registry
             # This is the source of truth for exit orders, reducing reliance on exchange data
             # Pass the exit quantity for quantity-aware coverage invariant
-            if result.order_id:
-                self._position_monitor._register_exit_order(position.position_id, result.order_id, count)
+            if result and result.order_id:
+                self._position_monitor._register_exit_order(position.position_id, result.order_id, _count)
 
-            # 2026-08-11 CRITICAL FIX: the position is only terminal after a confirmed
-            # execution (or REST position reconciliation to zero). Mark exited and remove
-            # from monitoring/capacity only here — never before the router has responded.
+            # 2026-08-22 CRITICAL FIX: the position is only terminal after the
+            # canonical portfolio snapshot proves it is flat.
             position.mark_exited(
                 exit_reason.value if hasattr(exit_reason, 'value') else str(exit_reason),
                 exit_price_cents,
@@ -2983,26 +3294,70 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
             self._position_monitor.remove_position(position.position_id)
             logger.critical(
                 "[EXIT-ORDER-CONFIRMED] position=%s market=%s status=%s order_id=%s "
-                "- position removed after confirmed execution",
+                "- position removed after confirmed full execution",
                 position.position_id[:8],
                 position.market_id,
-                result.status,
-                result.order_id,
+                getattr(result, "status", "no_result"),
+                getattr(result, "order_id", None),
             )
+        elif result and result.has_execution:
+            # The order executed but the finalizer is not satisfied (partial fill,
+            # working order remains, portfolio not authoritative, etc.).  Update
+            # the monitor's copy to the reconciled quantity and re-arm.
+            if fresh_snapshot is not None:
+                new_size = max(Decimal("0"), fresh_snapshot.exchange_position_fp(position.market_id))
+            elif post_position_cc is not None:
+                new_size = Decimal(post_position_cc) / Decimal("100")
+            else:
+                filled_cc = result.executed_quantity_cc
+                new_size = max(Decimal("0"), Decimal(pre_position_size_cc - filled_cc) / Decimal("100"))
+
+            logger.warning(
+                "[EXIT-ORDER-PARTIAL] position=%s market=%s order_id=%s "
+                "reason=%s new_size=%s - re-arming for remaining close",
+                position.position_id[:8],
+                position.market_id,
+                result.order_id,
+                finalizer_reason,
+                new_size,
+            )
+            position.size = new_size
+            position.mark_reconciling(finalizer_reason)
+            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close=None)
         else:
             logger.error(
-                "[EXIT-ORDER] Exit order failed: status=%s error=%s reason=%s",
-                result.status, result.error, result.reason
+                "[EXIT-ORDER] Exit order did not execute: status=%s error=%s reason=%s finalizer=%s",
+                getattr(result, "status", "no_result"),
+                getattr(result, "error", None),
+                getattr(result, "reason", None),
+                finalizer_reason,
             )
             # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
+            position.mark_reconciling(finalizer_reason)
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
 
     except Exception as e:
         logger.error("[EXIT-ORDER] Failed to execute exit order: %s", e, exc_info=True)
-        # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
-        self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
+        error_type = type(e).__name__
+        is_code_failure = isinstance(e, (ImportError, ModuleNotFoundError, SyntaxError, NameError, AttributeError))
+        if is_code_failure:
+            # CRITICAL FIX (2026-08-23): Deployment/code failures must NOT be treated as
+            # market rejections or retry attempts. Record reconciliation required and
+            # re-arm without incrementing the retry counter.
+            if self._position_monitor:
+                self._position_monitor._mark_exit_intent_reconciliation_required(
+                    position.position_id, error_type, str(e)
+                )
+            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close, is_code_failure=True)
+        else:
+            if self._position_monitor:
+                self._position_monitor._mark_exit_intent_retryable(
+                    position.position_id, error_type, str(e)
+                )
+            # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
+            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
 
-def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_close=None) -> None:
+def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_close=None, is_code_failure=False) -> None:
     # Re-arm a position in the PositionMonitor after a failed exit order.
 
     # CRITICAL FIX (2026-07-16): Previously a failed/rejected exit order left the
@@ -3019,10 +3374,19 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
         if self._position_monitor:
             self._position_monitor._clear_exit_intent_in_flight(position.position_id)
 
-        retry_count = getattr(position, "exit_retry_count", 0) + 1
-        
-        # AUDIT: Idempotency - log retry attempt with dedupe context
-        retry_dedupe_key = f"{position.position_id[:8]}:retry:{retry_count}:{exit_reason.value if hasattr(exit_reason, 'value') else exit_reason}"
+        retry_count = getattr(position, "exit_retry_count", 0)
+        if not is_code_failure:
+            retry_count += 1
+        position.exit_retry_count = retry_count
+
+        # AUDIT: Idempotency - log retry attempt with dedupe context.
+        # CRITICAL FIX (2026-08-23): The dedupe key must be stable across retries;
+        # do not embed a per-attempt retry counter or a mutable string in the identity.
+        retry_dedupe_key = (
+            f"{position.position_id}:"
+            f"{exit_reason.value if hasattr(exit_reason, 'value') else exit_reason}:"
+            f"{'FULL_EXIT' if contracts_to_close is None else 'PARTIAL_EXIT'}"
+        )
         logger.info(
             "[IDEMPOTENCY-AUDIT] position=%s market=%s reason=%s retry_count=%d dedupe_key=%s rearming_for_retry",
             position.position_id[:8],
@@ -3163,6 +3527,9 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     md_fresh_count = 0
     spot_fresh_count = 0
 
+    # 2026-08-24: Collect per-ticker readiness for the ENTRY-READINESS audit log.
+    per_ticker_readiness: List[Dict[str, Any]] = []
+
     try:
         catalog = get_market_catalog()
 
@@ -3188,15 +3555,19 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             if state is None:
                 continue
 
-            # CRITICAL FIX (2026-08-22): Use the authoritative execution-readiness gate
+            # CRITICAL FIX (2026-08-22): Use the authoritative *entry* readiness gate
             # for per-asset MD freshness.  This guarantees that the loop's allow-new-entry
-            # decision agrees with the order-router stale-data gate under one clock domain.
+            # decision agrees with the order-router stale-data gate under one clock domain
+            # and prevents new signals from pricing off unconfirmed WS bootstrap snapshots.
             asset_md_fresh = False
             if self.market_state_store is not None:
-                asset_md_fresh, md_reason = self.market_state_store.is_market_execution_ready(market_id)
+                if hasattr(self.market_state_store, "is_market_entry_ready"):
+                    asset_md_fresh, md_reason = self.market_state_store.is_market_entry_ready(market_id)
+                else:
+                    asset_md_fresh, md_reason = self.market_state_store.is_market_execution_ready(market_id)
                 if not asset_md_fresh:
                     logger.info(
-                        "[15M-LOOP-MD-READY] asset=%s ticker=%s not ready: %s",
+                        "[15M-LOOP-MD-READY] asset=%s ticker=%s not entry-ready: %s",
                         asset, market_id, md_reason,
                     )
 
@@ -3237,6 +3608,18 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             ):
                 ready_assets_count += 1
 
+            per_ticker_readiness.append({
+                "asset": asset,
+                "ticker": market_id,
+                "catalog_ready": current_market is not None,
+                "selected": True,
+                "md_fresh": asset_md_fresh,
+                "md_reason": md_reason if not asset_md_fresh else "",
+                "spot_fresh": asset_spot_fresh,
+                "depth_ok": liquidity_result.decision in (LiquidityDecision.FULL, LiquidityDecision.REDUCED),
+                "market_state": state,
+            })
+
     except Exception as e:
         logger.warning("[15m-LOOP] Failed to compute allow_new_entries: %s", e)
 
@@ -3248,10 +3631,285 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         md_fresh_count=md_fresh_count,
         spot_fresh_count=spot_fresh_count,
     )
+
+    # P0 FIX: hard entry gate on WS bridge pipeline backpressure.
+    # A market cannot be considered fresh for new entries while its public
+    # data pipeline is backlogged, stalled, or the forwarder has stopped
+    # processing events. This keeps the loop and router gates aligned.
+    ws_queue_size = 0
+    ws_time_since_last_event = float("inf")
+    ws_healthy = True
+    ws_first_event_ts = 0.0
+    ws_queue_threshold = int(os.getenv("MERID_KALSHI_WS_QUEUE_ALLOW_THRESHOLD", "30000"))
+    ws_queue_age_s = 0.0
+    ws_queue_max_age_s = float(os.getenv("MERID_WS_QUEUE_MAX_AGE_S", "3.0"))
+    if allow_new_entries:
+        try:
+            bridge = getattr(self, "_ws_bridge", None)
+            if bridge is not None:
+                bridge_health = bridge.get_forward_loop_health() or {}
+                ws_queue_size = int(bridge_health.get("queue_size", 0) or 0)
+                ws_time_since_last_event = float(bridge_health.get("time_since_last_event", float("inf")) or float("inf"))
+                ws_healthy = bool(bridge_health.get("healthy", True))
+                ws_first_event_ts = float(bridge_health.get("first_event_ts", 0.0) or 0.0)
+                ws_last_event_ts = float(bridge_health.get("last_event_ts", 0.0) or 0.0)
+
+                # CRITICAL FIX: compute_ws_health returns time_since_last_event=None (which
+                # becomes inf here) when event_count_total==0, even if last_event_ts is
+                # already set. This creates a transient "stalled for infs" false positive
+                # at startup. Fall back to a direct last_event_ts-based age to avoid it.
+                if not math.isfinite(ws_time_since_last_event) and ws_last_event_ts > 0.0:
+                    ws_time_since_last_event = time.monotonic() - ws_last_event_ts
+
+                # HARDEN (2026-08-23): Use queue *age* as the real freshness signal,
+                # not an arbitrary backlog count.  A 60k backlog that drains in 500ms
+                # is healthy; a 1k backlog that drains in 5s is stale.  If the
+                # forwarder reports events_per_sec, estimate the backlog drain time.
+                ws_queue_threshold = int(os.getenv("MERID_KALSHI_WS_QUEUE_ALLOW_THRESHOLD", "30000"))
+                events_per_sec = float(bridge_health.get("events_per_sec", 0) or 0)
+                ws_queue_age_s = (
+                    ws_queue_size / events_per_sec
+                    if events_per_sec and events_per_sec > 0.0
+                    else 0.0
+                )
+                ws_queue_max_age_s = float(
+                    os.getenv("MERID_WS_QUEUE_MAX_AGE_S", "3.0")
+                )
+
+                if ws_queue_size > ws_queue_threshold and ws_queue_age_s > ws_queue_max_age_s:
+                    logger.warning(
+                        "[15m-LOOP] ENTRY_BLOCKED: WS bridge queue stale backlog=%d drain_age=%.2fs > %.2fs",
+                        ws_queue_size, ws_queue_age_s, ws_queue_max_age_s,
+                    )
+                    allow_new_entries = False
+                elif ws_first_event_ts > 0.0 and ws_time_since_last_event > 5.0:
+                    # Only declare the forwarder stalled after the first event
+                    # has been seen; during startup the last_event clock may
+                    # legitimately exceed 1s before the first message arrives.
+                    logger.warning(
+                        "[15m-LOOP] ENTRY_BLOCKED: WS forwarder stalled for %.1fs",
+                        ws_time_since_last_event,
+                    )
+                    allow_new_entries = False
+                elif not ws_healthy and ws_first_event_ts > 0.0:
+                    logger.warning(
+                        "[15m-LOOP] ENTRY_BLOCKED: WS forwarder not healthy",
+                    )
+                    allow_new_entries = False
+        except Exception as e:
+            logger.warning("[15m-LOOP] WS bridge health check failed: %s", e)
+
+    # P0 FIX: portfolio authority gate. New entries require an authoritative,
+    # non-stale canonical portfolio snapshot. Exits remain enabled.
+    portfolio_age_ms = 0
+    portfolio_authoritative = True
+    if allow_new_entries:
+        try:
+            from merid.event_venues.kalshi.canonical_portfolio import get_canonical_portfolio_store
+            portfolio = get_canonical_portfolio_store().current()
+            if portfolio is not None:
+                portfolio_authoritative = bool(portfolio.is_authoritative)
+                portfolio_age_ms = int(portfolio.age_ms)
+                if not portfolio_authoritative:
+                    logger.warning(
+                        "[15m-LOOP] ENTRY_BLOCKED: portfolio not authoritative status=%s reason=%s age_ms=%d",
+                        portfolio.reconciliation_status,
+                        portfolio.reconciliation_reason,
+                        portfolio_age_ms,
+                    )
+                    allow_new_entries = False
+                elif portfolio_age_ms > 300000:
+                    # P0 FIX: The canonical portfolio reconciler runs every 60s. A 10s
+                    # threshold caused constant false-positive entry blocks. 300s gives
+                    # the reconciler several cycles plus long REST/build processing slack.
+                    logger.warning(
+                        "[15m-LOOP] ENTRY_BLOCKED: portfolio stale age_ms=%d > 300000",
+                        portfolio_age_ms,
+                    )
+                    allow_new_entries = False
+        except Exception as e:
+            logger.warning("[15m-LOOP] Portfolio authority check failed: %s", e)
+
     logger.info(
-        "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s ready_assets=%d md_fresh=%d spot_fresh=%d",
-        allow_new_entries, infra_ready, markets_expected, markets_present, ready_assets_count, md_fresh_count, spot_fresh_count
+        "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s "
+        "ready_assets=%d md_fresh=%d spot_fresh=%d ws_queue=%d ws_lag=%.3fs ws_first=%.3f portfolio_authoritative=%s portfolio_age_ms=%d",
+        allow_new_entries, infra_ready, markets_expected, markets_present, ready_assets_count, md_fresh_count, spot_fresh_count,
+        ws_queue_size, ws_time_since_last_event, ws_first_event_ts, portfolio_authoritative, portfolio_age_ms,
     )
+
+    # 2026-08-24: Per-ticker ENTRY-READINESS structured log.  This is the primary
+    # diagnostic for rollover failures: it shows, for every active contract, which
+    # gate is preventing entry (catalog, MD, quote, portfolio, intent, queue).
+    #
+    # 2026-08-24 (P0): `allow_new_entries` is now derived from per-ticker
+    # `all_ready` eligibility.  The previous global-only gate could be True while
+    # every individual market was blocked (e.g. by ws_snapshot_complete), which
+    # produced misleading "allow_new_entries=true" audit logs and masked the
+    # actual failure.  We collect per-ticker blockers, then recompute the global
+    # gate so it is only True when at least one selected market can actually
+    # enter.
+    ws_queue_healthy = not (
+        ws_queue_size > ws_queue_threshold and ws_queue_age_s > ws_queue_max_age_s
+    ) and not (ws_first_event_ts > 0.0 and ws_time_since_last_event > 5.0) and ws_healthy
+    readiness_records: List[Dict[str, Any]] = []
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            ticker_has_stale_pending_entry_intent,
+        )
+
+        for r in per_ticker_readiness:
+            state = r["market_state"]
+            ticker = r["ticker"]
+
+            ws_subscribed = state is not None
+            ws_snapshot_complete = state is not None and getattr(state, "snapshot_complete", False)
+            quote_fresh = r["md_fresh"]
+            md_reason = (r.get("md_reason") or "").lower()
+            if self.market_state_store is not None:
+                quote_coherent, quote_coherence_reason = self.market_state_store.is_quote_coherent(ticker)
+                qm = self.market_state_store.get_queue_lock_metrics(ticker)
+            else:
+                quote_coherent = quote_fresh and "divergence" not in md_reason
+                quote_coherence_reason = None
+                qm = {"lock_contention_count": 0, "total_lock_wait_ms": 0.0, "last_batch_duration_ms": 0.0, "queue_depth": 0}
+            market_state_applied = state is not None
+            intent_state_clean = not ticker_has_stale_pending_entry_intent(ticker)
+
+            # 2026-08-24: incorporate per-ticker queue/lock metrics into queue health.
+            queue_lock_wait_ms = qm.get("total_lock_wait_ms", 0.0)
+            queue_batch_duration_ms = qm.get("last_batch_duration_ms", 0.0)
+            queue_lock_contention_count = qm.get("lock_contention_count", 0)
+            queue_healthy = (
+                ws_queue_healthy
+                and queue_lock_wait_ms < 500.0
+                and queue_batch_duration_ms < 250.0
+                and queue_lock_contention_count < 5
+            )
+
+            checks = [
+                ("catalog_ready", r["catalog_ready"]),
+                ("selected", r["selected"]),
+                ("ws_subscribed", ws_subscribed),
+                ("ws_snapshot_complete", ws_snapshot_complete),
+                ("quote_fresh", quote_fresh),
+                ("quote_coherent", quote_coherent),
+                ("market_state_applied", market_state_applied),
+                ("portfolio_authoritative", portfolio_authoritative),
+                ("intent_state_clean", intent_state_clean),
+                ("queue_healthy", queue_healthy),
+            ]
+            blocker_name = next((name for name, ok in checks if not ok), None)
+            if blocker_name == "quote_coherent" and quote_coherence_reason:
+                blocker = f"{blocker_name}:{quote_coherence_reason}"
+            else:
+                blocker = blocker_name
+            all_ready = all(ok for _, ok in checks)
+
+            readiness_records.append({
+                "r": r,
+                "ticker": ticker,
+                "ws_subscribed": ws_subscribed,
+                "ws_snapshot_complete": ws_snapshot_complete,
+                "quote_fresh": quote_fresh,
+                "quote_coherent": quote_coherent,
+                "market_state_applied": market_state_applied,
+                "portfolio_authoritative": portfolio_authoritative,
+                "intent_state_clean": intent_state_clean,
+                "queue_healthy": queue_healthy,
+                "queue_lock_wait_ms": queue_lock_wait_ms,
+                "queue_batch_duration_ms": queue_batch_duration_ms,
+                "queue_lock_contention_count": queue_lock_contention_count,
+                "blocker_name": blocker_name,
+                "blocker": blocker,
+                "all_ready": all_ready,
+            })
+
+        # Recompute the global allow_new_entries from per-ticker eligibility.
+        # Global blockers (bridge backpressure, portfolio authority) are already
+        # applied in `allow_new_entries`; this step additionally requires that at
+        # least one selected market passes every per-ticker gate.
+        any_ready = any(rec["all_ready"] for rec in readiness_records)
+        original_allow_new_entries = allow_new_entries
+        allow_new_entries = allow_new_entries and any_ready
+
+        if original_allow_new_entries and not any_ready and readiness_records:
+            unready = [rec for rec in readiness_records if not rec["all_ready"]]
+            blocker_counts = Counter(rec["blocker"] for rec in unready if rec["blocker"])
+            # Map the canonical blocker to a count; None (all ready) is impossible here.
+            blocker_summary = " ".join(
+                f"{blocker}={count}" for blocker, count in blocker_counts.most_common()
+            )
+            logger.warning(
+                "[15m-LOOP] ENTRY_DISABLED_ALL_MARKETS "
+                "aggregate_blockers=%s total_unready=%d",
+                blocker_summary,
+                len(unready),
+            )
+        elif not original_allow_new_entries and any_ready:
+            # Global gate is down (e.g. bridge backpressure) but some markets
+            # are individually healthy.  Keep the aggregate reason concise.
+            logger.warning(
+                "[15m-LOOP] ENTRY_DISABLED_GLOBAL_GATE "
+                "markets_ready=%d global_allow=%s",
+                sum(1 for rec in readiness_records if rec["all_ready"]),
+                original_allow_new_entries,
+            )
+
+        # Log the final per-ticker readiness using the recomputed global gate.
+        for rec in readiness_records:
+            ticker_entries_allowed = allow_new_entries and rec["all_ready"]
+            readiness = EntryReadiness(
+                ticker=rec["ticker"],
+                catalog_ready=rec["r"]["catalog_ready"],
+                selected=rec["r"]["selected"],
+                ws_subscribed=rec["ws_subscribed"],
+                ws_snapshot_complete=rec["ws_snapshot_complete"],
+                quote_fresh=rec["quote_fresh"],
+                quote_coherent=rec["quote_coherent"],
+                market_state_applied=rec["market_state_applied"],
+                portfolio_authoritative=rec["portfolio_authoritative"],
+                intent_state_clean=rec["intent_state_clean"],
+                queue_healthy=rec["queue_healthy"],
+                queue_lock_wait_ms=rec["queue_lock_wait_ms"],
+                queue_batch_duration_ms=rec["queue_batch_duration_ms"],
+                queue_lock_contention_count=rec["queue_lock_contention_count"],
+                entries_allowed=ticker_entries_allowed,
+                blocker=rec["blocker"],
+            )
+            logger.info(readiness.to_log_message(), extra=readiness.__dict__)
+    except Exception as e:
+        logger.debug("[15M-LOOP] ENTRY-READINESS log failed: %s", e)
+
+    # 2026-08-24: Re-log the final, per-ticker-derived allow_new_entries.  This
+    # guarantees the audit line matches the actual return value used to decide
+    # whether the trading cycle is allowed to place new orders.
+    logger.info(
+        "[15m-LOOP] allow_new_entries_final=%s derived_from_per_ticker=%s "
+        "markets_ready=%d markets_total=%d ws_queue=%d ws_lag=%.3fs portfolio_authoritative=%s",
+        allow_new_entries,
+        any(rec["all_ready"] for rec in readiness_records) if readiness_records else None,
+        sum(1 for rec in readiness_records if rec["all_ready"]),
+        len(readiness_records),
+        ws_queue_size,
+        ws_time_since_last_event,
+        portfolio_authoritative,
+    )
+
+    # EXIT_DECOUPLING: update the PositionMonitor with the current entry-gate state.
+    # Exit evaluation must remain independent of allow_new_entries; this is only for
+    # the structured EXIT_EVAL audit log so both gate dimensions are visible together.
+    try:
+        monitor = getattr(self, "_position_monitor", None)
+        if monitor is not None and hasattr(monitor, "set_entry_gate_context"):
+            ws_lag_ms = ws_time_since_last_event * 1000.0 if math.isfinite(ws_time_since_last_event) else -1.0
+            monitor.set_entry_gate_context({
+                "allow_new_entries": bool(allow_new_entries),
+                "ws_queue_size": int(ws_queue_size),
+                "ws_lag_ms": float(ws_lag_ms),
+            })
+    except Exception as e:
+        logger.debug("[15m-LOOP] Failed to update PositionMonitor entry gate context: %s", e)
+
     return allow_new_entries
 
 async def _run_loop(self) -> None:
@@ -3357,8 +4015,8 @@ async def _run_loop(self) -> None:
                 logger.info("[15m-LOOP] BALANCE-CALIBRATOR-ENTER: About to fetch bankroll")
                 cycle_bankroll = None
                 try:
-                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                    cycle_bankroll = get_equity_for_risk_calc_sync()
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_async
+                    cycle_bankroll = await get_equity_for_risk_calc_async()
                     logger.info("[15m-LOOP] BALANCE-CALIBRATOR: Fetched bankroll=%s", cycle_bankroll)
                     if cycle_bankroll is not None and cycle_bankroll > 0:
                         # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
@@ -3994,11 +4652,11 @@ async def _run_loop(self) -> None:
                             # Use dynamic position sizing if enabled
                             try:
                                 from merid.prediction.unified_sizing import compute_order_size
-                                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_async
                                 from decimal import Decimal
                                 
-                                # Use sync version to avoid coroutine error in async context
-                                bankroll_usd = get_equity_for_risk_calc_sync()
+                                # Async cache-only read; never blocks the event loop on a balance fetch.
+                                bankroll_usd = await get_equity_for_risk_calc_async()
                                 if bankroll_usd is None:
                                     bankroll_usd = 100.0
                                 
@@ -4509,15 +5167,14 @@ async def _run_one_cycle(self, tick: int) -> None:
                         # Initial WS subscription setup on first catalog ready
                         
                         
-                        if self._ws_bridge and catalog_snapshot.markets:
-                            # Extract current market tickers from catalog
+                        if self._ws_bridge and catalog_snapshot:
+                            # Extract current 15m market tickers from catalog (one per asset)
                             initial_tickers = []
-                            for market in catalog_snapshot.markets:
-                                market_id = market.market.market_id if hasattr(market, 'market') else market.market_id
-                                initial_tickers.append(market_id)
-                            
-                            
-                            
+                            for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                                current = catalog_snapshot.get_current_15m_market(asset)
+                                if current:
+                                    initial_tickers.append(current.market.market_id)
+
                             if initial_tickers:
                                 self._ws_bridge.set_markets(initial_tickers)
                                 logger.info(
@@ -4542,13 +5199,14 @@ async def _run_one_cycle(self, tick: int) -> None:
                     logger.info("[CATALOG-READY] Catalog now ready; enabling 15m trading (markets=%d)", catalog_snapshot.market_count)
                     
                     # Initial WS subscription setup on first catalog ready
-                    if self._ws_bridge and catalog_snapshot.markets:
-                        # Extract current market tickers from catalog
+                    if self._ws_bridge and catalog_snapshot:
+                        # Extract current 15m market tickers from catalog (one per asset)
                         initial_tickers = []
-                        for market in catalog_snapshot.markets:
-                            market_id = market.market.market_id if hasattr(market, 'market') else market.market_id
-                            initial_tickers.append(market_id)
-                        
+                        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                            current = catalog_snapshot.get_current_15m_market(asset)
+                            if current:
+                                initial_tickers.append(current.market.market_id)
+
                         if initial_tickers:
                             self._ws_bridge.set_markets(initial_tickers)
                             logger.info(
@@ -4617,10 +5275,11 @@ async def _run_one_cycle(self, tick: int) -> None:
                 # Detect catalog roll (market IDs changed) for WS warmup grace period
                 current_market_ids = set()
                 if catalog_snapshot:
-                    for market in catalog_snapshot.markets:
-                        market_id = market.market.market_id if hasattr(market, 'market') else market.market_id
-                        current_market_ids.add(market_id)
-                    
+                    for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                        current = catalog_snapshot.get_current_15m_market(asset)
+                        if current:
+                            current_market_ids.add(current.market.market_id)
+
                     if current_market_ids != self._last_catalog_market_ids:
                         # Catalog rolled - new markets
                         old_market_ids = self._last_catalog_market_ids
@@ -4631,7 +5290,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                             len(old_market_ids) if old_market_ids else 0,
                             len(current_market_ids)
                         )
-                        
+
                         # Request WS bridge to resubscribe to new tickers
                         if self._ws_bridge:
                             # Extract current market tickers from catalog
@@ -4665,8 +5324,11 @@ async def _run_one_cycle(self, tick: int) -> None:
             if hasattr(self, '_catalog') and self._catalog and not in_warmup:
                 catalog_snapshot = self._catalog.snapshot()
                 if catalog_snapshot:
-                    for market in catalog_snapshot.markets:
-                        market_id = market.market.market_id if hasattr(market, 'market') else market.market_id
+                    for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                        current = catalog_snapshot.get_current_15m_market(asset)
+                        if not current:
+                            continue
+                        market_id = current.market.market_id
                         state = store.get(market_id)
                         if state:
                             health = state.check_health()
@@ -5156,17 +5818,15 @@ async def _run_one_cycle(self, tick: int) -> None:
         # Check bankroll and risk profile status
         live_bankroll_source = "unknown"
         try:
-            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync, get_bankroll_service
-            live_bankroll = get_equity_for_risk_calc_sync()
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_async, get_bankroll_service
+            live_bankroll = await get_equity_for_risk_calc_async()
             live_bankroll_valid = live_bankroll is not None and live_bankroll > 0.0
-            
+
             # Get bankroll source for fake bankroll detection
             if live_bankroll is not None:
                 try:
-                    import asyncio
-                    loop = asyncio.get_running_loop()
-                    service = loop.run_until_complete(get_bankroll_service())
-                    if service._current and hasattr(service._current, 'source'):
+                    service = await get_bankroll_service()
+                    if service and service._current and hasattr(service._current, 'source'):
                         live_bankroll_source = service._current.source
                     else:
                         live_bankroll_source = "kalshi"  # Default to kalshi if we have a real value
@@ -7340,6 +8000,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         intent = OrderIntent(
             ticker=ticker,
+            exchange_index=candidate.get("exchange_index"),
             side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
             action=action_raw,  # Keep as lowercase "buy"/"sell" for early validation
             price_cents=price_cents,  # BUG #2 FIX: Add required price_cents field
@@ -7452,6 +8113,20 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # CRITICAL FIX 2026-08-20: order identity contract requires process_id and reason.
         intent.process_id = str(os.getpid())
         intent.reason = candidate.get("rationale") or "candidate_entry"
+
+        logger.info(
+            "[ORDER-INTENT-CREATED] trace_id=%s candidate_id=%s ticker=%s side=%s action=%s "
+            "price_cents=%d count=%d edge_pct=%.6f source=%s",
+            trace_id,
+            candidate.get("candidate_id"),
+            ticker,
+            kalshi_side,
+            action_raw,
+            price_cents,
+            count,
+            float(edge_pct) if edge_pct is not None else 0.0,
+            agent_id,
+        )
 
         # CRITICAL DIAGNOSTIC: Log exit_policy_id being set
         logger.info("[15M-LOOP] Setting exit_policy_id=%s for ticker=%s (exit_policy=%s)",
@@ -7868,8 +8543,17 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         if result and result.status == "rejected":
             self._rejection_counters["router_rejected"] += 1
-            logger.warning("[15M-LOOP-SIDE-AWARE] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s latency_ms=%s",
-                           ticker, kalshi_side, count, result.reason, result.latency_ms)
+            logger.warning(
+                "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%d "
+                "reason=%s latency_ms=%s",
+                trace_id,
+                candidate.get("candidate_id"),
+                ticker,
+                kalshi_side,
+                count,
+                result.reason,
+                result.latency_ms,
+            )
             return False
 
         if result and result.status == "unfilled_ioc":

@@ -92,9 +92,14 @@ class ModeResolver:
                 )
         elif trade_mode == TradeMode.PAPER:
             if kalshi_env == KalshiEnvironment.LIVE:
-                raise RuntimeError(
-                    f"MODE_MISMATCH: TradeMode=PAPER but Kalshi environment={kalshi_env.value} (live host). "
-                    f"Set KALSHI_ENV=demo or KALSHI_USE_DEMO=true for paper trading."
+                if os.environ.get("MERID_ALLOW_LIVE_TRADES", "").lower() in ("1", "true", "yes"):
+                    raise RuntimeError(
+                        f"MODE_MISMATCH: TradeMode=PAPER but Kalshi environment={kalshi_env.value} "
+                        f"and MERID_ALLOW_LIVE_TRADES=true. Paper cannot place live orders."
+                    )
+                logger.warning(
+                    "TradeMode=PAPER but Kalshi environment=LIVE. "
+                    "Live market data with no real orders is safe for canary/shadow soak."
                 )
         elif trade_mode == TradeMode.MOCK:
             # Mock mode can use either environment, but warn if using live
