@@ -11,6 +11,7 @@ import copy
 import time
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Optional, Dict, Any, List
 from enum import Enum
 
@@ -408,7 +409,11 @@ class UnifiedExitPolicyEngine:
                 avg = getattr(position, "avg_entry_price_cents", None)
                 side_str = side.value if side and hasattr(side, "value") else str(side)
                 if market_id and size:
-                    position_cc = to_signed_yes_exposure(side_str, size) * 100
+                    # ``size`` is in contracts (Decimal or int); canonical exposure is centi-contracts.
+                    position_cc = to_signed_yes_exposure(
+                        side_str,
+                        int(Decimal(str(size)) * Decimal("100")),
+                    )
                     candidate = build_stop_candidate(
                         market_ticker=market_id,
                         exchange_position_cc=position_cc,
