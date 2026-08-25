@@ -18,8 +18,11 @@ def detect_construction_artifacts() -> dict[str, bool]:
     """
     flags = {}
 
-    # CI/test detection
-    flags["RUNNING_UNDER_PYTEST"] = "PYTEST_CURRENT_TEST" in os.environ
+    # CI/test detection (explicit environment model; no test-runner artifacts)
+    flags["TEST_ENVIRONMENT"] = os.getenv("MERID_ENV", "").strip().lower() in (
+        "testing",
+        "test",
+    )
     flags["CI_ENVIRONMENT"] = bool(os.environ.get("CI"))
 
     # Debug / dry-run modes
