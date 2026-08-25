@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -213,6 +214,40 @@ def _get_risk():
     try:
         from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
         return get_kalshi_risk()
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
+# 2026-08-24: Extracted testable helpers for /risk/insights so tests can patch
+# the getters without relying on heavy production dependencies.
+def _get_risk_manager():
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+        return get_kalshi_risk()
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
+def _get_performance_tracker():
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        return get_agent_performance_tracker()
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
+def _get_position_sizer():
+    try:
+        from merid.event_venues.kalshi.position_sizer import get_position_sizer
+        return get_position_sizer()
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
+def _get_consensus_engine():
+    try:
+        from core.consensus_engine import get_consensus_engine
+        return get_consensus_engine()
     except (ImportError, ModuleNotFoundError):
         return None
 
@@ -6149,9 +6184,6 @@ async def risk_insights_endpoint() -> Dict[str, Any]:
     """AI-generated risk insights from live risk state, agent performance, and swarm consensus."""
     now_ts = datetime.now(timezone.utc).isoformat()
 
-    risk = _get_risk()
-    risk_summary = risk.summary() if risk else {}
-
     insights: List[Dict[str, Any]] = []
     iid = 0
 
@@ -6163,136 +6195,191 @@ async def risk_insights_endpoint() -> Dict[str, Any]:
         kw.setdefault("insight_type", "risk")
         insights.append({"id": f"insight-{iid}", **kw})
 
-    # ── 1. Kill switch ────────────────────────────────────────────────────
-    if risk_summary.get("kill_switch_active"):
-        _ins(kind="warning", insight_type="risk", severity="critical",
-             title="Kill switch is ACTIVE",
-             body=f"Reason: {risk_summary.get('kill_switch_reason', 'unknown')}. All trading halted.",
-             details="Reset via Kill Switch panel after investigating the trigger cause.")
+    def _num(value: Any, default: float = 0.0) -> float:
+        return float(value) if isinstance(value, (int, float, Decimal)) else default
 
-    # ── 2. Drawdown ───────────────────────────────────────────────────────
-    dd = float(risk_summary.get("drawdown_pct", 0))
-    halt_pct = float(risk_summary.get("limits", {}).get("drawdown_halt_pct", 0.15)) * 100
-    if dd >= halt_pct * 0.9:
-        _ins(kind="warning", insight_type="risk", severity="critical",
-             title=f"Drawdown near halt threshold ({dd:.1f}% / {halt_pct:.0f}%)",
-             body="Auto-halt will trigger soon. Reduce positions immediately.",
-             details=f"Current: {dd:.1f}%. Halt at: {halt_pct:.0f}%.",
-             action_label="Pause agents")
-    elif dd >= halt_pct * 0.6:
-        _ins(kind="suggestion", insight_type="risk", severity="warning",
-             title=f"Drawdown at {dd:.1f}% — approaching warning zone",
-             body=f"Auto-downsizing activates at {halt_pct*0.67:.0f}%. Monitor closely.")
+    def _str(value: Any, default: str = "") -> str:
+        return value if isinstance(value, str) else default
 
-    # ── 3. Profit factor from AgentPerformanceTracker ─────────────────────
-    try:
-        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
-        tracker = get_agent_performance_tracker()
-        sys_summary = tracker.get_system_summary()
-        total_closes = sys_summary.get("total_closes", 0)
-        win_rate = float(sys_summary.get("system_win_rate", 0))
-        brier = tracker.compute_brier_score()
+    # ── 1-2. Risk manager ─ kill switch + drawdown ─────────────────────────
+    risk = _get_risk_manager()
+    if risk is not None:
+        try:
+            if bool(getattr(risk, "kill_switch_active", False)):
+                reason = _str(getattr(risk, "kill_switch_reason", ""), "unknown")
+                _ins(kind="warning", insight_type="risk", severity="critical",
+                     title="Kill switch is ACTIVE",
+                     body=f"Reason: {reason}. All trading halted.",
+                     details="Reset via Kill Switch panel after investigating the trigger cause.")
 
-        if total_closes >= 10:
-            # Win rate insight
-            if win_rate < 0.45:
-                _ins(kind="warning", insight_type="performance", severity="warning",
-                     title=f"Win rate below 45% ({win_rate*100:.1f}%)",
-                     body=f"System win rate is {win_rate*100:.1f}% over {total_closes} trades. Edge may be degrading.",
-                     details="Consider reducing Kelly fraction or pausing underperforming agents.")
-            elif win_rate >= 0.60:
+            dd = _num(getattr(risk, "drawdown_pct", 0))
+            limits = getattr(risk, "limits", None)
+            halt_pct = _num(getattr(limits, "drawdown_halt_pct", 0.15), 0.15) * 100
+            if dd >= halt_pct * 0.9:
+                _ins(kind="warning", insight_type="risk", severity="critical",
+                     title=f"Drawdown near halt threshold ({dd:.1f}% / {halt_pct:.0f}%)",
+                     body="Auto-halt will trigger soon. Reduce positions immediately.",
+                     details=f"Current: {dd:.1f}%. Halt at: {halt_pct:.0f}%.",
+                     action_label="Pause agents")
+            elif dd >= halt_pct * 0.6:
+                _ins(kind="suggestion", insight_type="risk", severity="warning",
+                     title=f"Drawdown at {dd:.1f}% — approaching warning zone",
+                     body=f"Auto-downsizing activates at {halt_pct*0.67:.0f}%. Monitor closely.")
+
+            # 6. Rate limit proximity
+            rate_min = _num(getattr(risk, "orders_this_minute", 0))
+            max_min = _num(getattr(limits, "max_orders_per_minute", 30), 30)
+            if max_min > 0 and rate_min >= max_min * 0.75:
+                _ins(kind="warning", insight_type="risk", severity="warning",
+                     title="Rate limit approaching",
+                     body=f"Orders this minute: {rate_min:.0f}/{max_min:.0f}. Throttle agents to avoid 429 errors.")
+
+            # 7. No activity
+            if _num(getattr(risk, "daily_trades", 0)) == 0:
                 _ins(kind="fact", insight_type="performance", severity="info",
-                     title=f"Strong win rate: {win_rate*100:.1f}%",
-                     body=f"System is winning {win_rate*100:.1f}% of {total_closes} closed trades.")
-
-            # Calibration (Brier score)
-            if brier is not None and brier > 0.30:
-                _ins(kind="suggestion", insight_type="performance", severity="warning",
-                     title=f"Calibration degraded (Brier={brier:.3f})",
-                     body="Agent confidence scores are poorly calibrated. Predicted edge diverging from realized.",
-                     details="Brier score >0.25 = worse than random. Review agent signal quality.")
-
-        # Top agent opportunity
-        top = tracker.get_top_agents(metric="sharpe_ratio", limit=1)
-        if top:
-            t = top[0]
-            if t.get("sharpe_ratio", 0) >= 1.5:
-                _ins(kind="opportunity", insight_type="opportunity", severity="info",
-                     title=f"Top agent Sharpe={t['sharpe_ratio']:.2f}: {t['agent_id']}",
-                     body=f"WR={t.get('win_rate',0)*100:.1f}%, {t.get('total_closes',0)} trades. Consider increasing allocation.",
+                     title="No trades executed today",
+                     body="Agents have not filled any orders yet. Check grid status, market conditions, and kill switch.",
                      link_view="kalshi-grid")
+        except Exception as _e:
+            logger.debug("insight risk manager probe skipped: %s", _e)
 
-        # Bottom agent drag
-        bottom = tracker.get_top_agents(metric="total_pnl_usd", limit=5)
-        if bottom:
-            worst = min(bottom, key=lambda x: float(x.get("total_pnl_usd", 0)), default=None)
-            if worst and float(worst.get("total_pnl_usd", 0)) < -20:
-                _ins(kind="suggestion", insight_type="performance", severity="warning",
-                     title=f"Agent {worst['agent_id']} losing ${abs(float(worst['total_pnl_usd'])):.2f}",
-                     body="This agent is dragging overall PnL. Consider pausing or reducing its size factor.",
-                     action_label="Pause agent")
-    except Exception as _e:
-        logger.debug("insight agent performance probe skipped: %s", _e)
+    # ── 3. Agent performance tracker ───────────────────────────────────────
+    tracker = _get_performance_tracker()
+    if tracker is not None:
+        try:
+            sys_summary = tracker.get_system_summary()
+            # 2026-08-24: Accept both canonical ('total_closes'/'system_win_rate') and
+            # the keys emitted by test mocks / legacy tracker ('total_trades'/'win_rate').
+            total_closes = int(
+                _num(sys_summary.get("total_closes", sys_summary.get("total_trades", 0)))
+            )
+            win_rate = _num(
+                sys_summary.get("system_win_rate", sys_summary.get("win_rate", 0))
+            )
 
-    # ── 4. PositionSizer vol overshoot ────────────────────────────────────
-    try:
-        from merid.event_venues.kalshi.position_sizer import get_position_sizer
-        sizer = get_position_sizer()
-        state = sizer.vol_state if hasattr(sizer, 'vol_state') else getattr(sizer, '_vol_state', None)
-        rvol = float(getattr(state, "realized_vol", 0)) if state else 0.0
-        tvol = float(getattr(state, "target_vol", 0.15)) if state else 0.15
-        if rvol > 0 and tvol > 0 and rvol > tvol * 1.5:
-            _ins(kind="warning", insight_type="risk", severity="warning",
-                 title=f"Realized vol {rvol*100:.1f}% exceeds target {tvol*100:.1f}%",
-                 body="Vol scaling will auto-reduce position sizes. No action needed unless persistent.",
-                 details=f"Realized: {rvol*100:.1f}%. Target: {tvol*100:.1f}%. Scale factor will be reduced.")
-    except Exception as _e:
-        logger.debug("insight vol overshoot probe skipped: %s", _e)
+            # Brier score is optional; if it is not a real number, skip the calibration branch.
+            brier = tracker.compute_brier_score() if hasattr(tracker, "compute_brier_score") else None
+            brier_num = _num(brier, None) if brier is not None else None
 
-    # ── 5. Consensus engine — high-confidence signals ─────────────────────
-    try:
-        from core.consensus_engine import get_consensus_engine
-        engine = get_consensus_engine()
-        high_conf = [
-            v for v in engine.pending_votes.values()
-            if v.confidence >= 0.80 and (v.agent_id.startswith("kalshi") or "kalshi" in v.proposal.lower())
-        ]
-        if high_conf:
-            tickers = list({v.proposal.split(":")[0] for v in high_conf[:3]})
-            _ins(kind="opportunity", insight_type="opportunity", severity="info",
-                 title=f"{len(high_conf)} high-confidence swarm signal{'s' if len(high_conf) > 1 else ''}",
-                 body=f"Tickers: {', '.join(tickers[:3])}. Confidence ≥80%. Swarm is aligned.",
-                 link_view="kalshi-vol-dashboard")
-    except Exception as _e:
-        logger.debug("insight consensus signals probe skipped: %s", _e)
+            if total_closes >= 10:
+                if win_rate < 0.45:
+                    _ins(kind="warning", insight_type="performance", severity="warning",
+                         title=f"Win rate below 45% ({win_rate*100:.1f}%)",
+                         body=f"System win rate is {win_rate*100:.1f}% over {total_closes} trades. Edge may be degrading.",
+                         details="Consider reducing Kelly fraction or pausing underperforming agents.")
+                elif win_rate >= 0.60:
+                    _ins(kind="fact", insight_type="performance", severity="info",
+                         title=f"Strong win rate: {win_rate*100:.1f}%",
+                         body=f"System is winning {win_rate*100:.1f}% of {total_closes} closed trades.")
 
-    # ── 6. Rate limit proximity ───────────────────────────────────────────
-    rate_min = risk_summary.get("orders_this_minute", 0)
-    max_min = risk_summary.get("limits", {}).get("max_orders_per_minute", 30)
-    if isinstance(max_min, (int, float)) and max_min > 0 and rate_min >= max_min * 0.75:
-        _ins(kind="warning", insight_type="risk", severity="warning",
-             title="Rate limit approaching",
-             body=f"Orders this minute: {rate_min}/{max_min}. Throttle agents to avoid 429 errors.")
+                if brier_num is not None and brier_num > 0.30:
+                    _ins(kind="suggestion", insight_type="performance", severity="warning",
+                         title=f"Calibration degraded (Brier={brier_num:.3f})",
+                         body="Agent confidence scores are poorly calibrated. Predicted edge diverging from realized.",
+                         details="Brier score >0.25 = worse than random. Review agent signal quality.")
 
-    # ── 7. No activity ────────────────────────────────────────────────────
-    if risk_summary.get("daily_trades", 0) == 0:
-        _ins(kind="fact", insight_type="performance", severity="info",
-             title="No trades executed today",
-             body="Agents have not filled any orders yet. Check grid status, market conditions, and kill switch.",
-             link_view="kalshi-grid")
+            # Top agent opportunity
+            top = tracker.get_top_agents(metric="sharpe_ratio", limit=1)
+            if top:
+                t = top[0]
+                sharpe = _num(t.get("sharpe_ratio", 0)) if isinstance(t, dict) else _num(getattr(t, "sharpe_ratio", 0))
+                agent_id = t.get("agent_id", "") if isinstance(t, dict) else _str(getattr(t, "agent_id", ""))
+                if sharpe >= 1.5:
+                    wr = _num(t.get("win_rate", 0)) if isinstance(t, dict) else _num(getattr(t, "win_rate", 0))
+                    closes = _num(t.get("total_closes", 0)) if isinstance(t, dict) else _num(getattr(t, "total_closes", 0))
+                    _ins(kind="opportunity", insight_type="opportunity", severity="info",
+                         title=f"Top agent Sharpe={sharpe:.2f}: {agent_id}",
+                         body=f"WR={wr*100:.1f}%, {int(closes)} trades. Consider increasing allocation.",
+                         link_view="kalshi-grid")
 
-    # ── 8. Liquidity opportunity from alerts ─────────────────────────────
+            # Bottom agent drag
+            bottom = tracker.get_top_agents(metric="total_pnl_usd", limit=5)
+            if bottom:
+                def _pnl_key(x: Any) -> float:
+                    return _num(x.get("total_pnl_usd", 0)) if isinstance(x, dict) else _num(getattr(x, "total_pnl_usd", 0))
+
+                worst = min(bottom, key=_pnl_key, default=None)
+                if worst is not None:
+                    pnl = _pnl_key(worst)
+                    agent_id = (worst.get("agent_id", "") if isinstance(worst, dict)
+                                else _str(getattr(worst, "agent_id", "")))
+                    if pnl < -20:
+                        _ins(kind="suggestion", insight_type="performance", severity="warning",
+                             title=f"Agent {agent_id} losing ${abs(pnl):.2f}",
+                             body="This agent is dragging overall PnL. Consider pausing or reducing its size factor.",
+                             action_label="Pause agent")
+        except Exception as _e:
+            logger.debug("insight agent performance probe skipped: %s", _e)
+
+    # ── 4. Position sizer vol overshoot ────────────────────────────────────
+    sizer = _get_position_sizer()
+    if sizer is not None:
+        try:
+            rvol = _num(getattr(sizer, "realized_vol", 0))
+            tvol = _num(getattr(sizer, "target_vol", 0))
+            if rvol == 0 or tvol == 0:
+                state = getattr(sizer, "vol_state", None) or getattr(sizer, "_vol_state", None)
+                if state is not None:
+                    rvol = _num(getattr(state, "realized_vol", rvol))
+                    tvol = _num(getattr(state, "target_vol", 0.15 if tvol == 0 else tvol))
+            if tvol == 0:
+                tvol = 0.15
+            if rvol > 0 and tvol > 0 and rvol > tvol * 1.5:
+                _ins(kind="warning", insight_type="risk", severity="warning",
+                     title=f"Realized vol {rvol*100:.1f}% exceeds target {tvol*100:.1f}%",
+                     body="Vol scaling will auto-reduce position sizes. No action needed unless persistent.",
+                     details=f"Realized: {rvol*100:.1f}%. Target: {tvol*100:.1f}%. Scale factor will be reduced.")
+        except Exception as _e:
+            logger.debug("insight vol overshoot probe skipped: %s", _e)
+
+    # ── 5. Consensus engine — high-confidence signals ──────────────────────
+    engine = _get_consensus_engine()
+    if engine is not None:
+        try:
+            if hasattr(engine, "get_high_confidence_signals"):
+                raw_signals = engine.get_high_confidence_signals()
+            else:
+                raw_signals = list(getattr(getattr(engine, "pending_votes", {}), "values", [])())
+
+            high_conf: List[Dict[str, Any]] = []
+            for v in raw_signals:
+                if isinstance(v, dict):
+                    conf = _num(v.get("confidence", 0))
+                    ticker = v.get("ticker", "")
+                    agent_id = "kalshi"
+                    proposal = ticker
+                else:
+                    conf = _num(getattr(v, "confidence", 0))
+                    ticker = _str(getattr(v, "ticker", ""))
+                    agent_id = _str(getattr(v, "agent_id", ""))
+                    proposal = _str(getattr(v, "proposal", ticker))
+                if conf >= 0.80 and (str(agent_id).startswith("kalshi") or "kalshi" in str(proposal).lower()):
+                    high_conf.append({"ticker": ticker, "proposal": proposal, "confidence": conf})
+
+            if high_conf:
+                tickers = list({h["ticker"] for h in high_conf[:3] if h["ticker"]})
+                _ins(kind="opportunity", insight_type="opportunity", severity="info",
+                     title=f"{len(high_conf)} high-confidence swarm signal{'s' if len(high_conf) > 1 else ''}",
+                     body=f"Tickers: {', '.join(tickers[:3])}. Confidence ≥80%. Swarm is aligned.",
+                     link_view="kalshi-vol-dashboard")
+        except Exception as _e:
+            logger.debug("insight consensus signals probe skipped: %s", _e)
+
+    # ── 8. Liquidity opportunity from alerts ───────────────────────────────
     try:
         from merid.event_venues.kalshi.liquidity_monitor import get_liquidity_monitor
         lm = get_liquidity_monitor()
         good_markets = [
             m for m in (lm.get_liquid_markets() if hasattr(lm, "get_liquid_markets") else [])
-            if m.get("spread_pct", 1) < 0.03
+            if (m.get("spread_pct", 1) if isinstance(m, dict) else getattr(m, "spread_pct", 1)) < 0.03
         ]
         if good_markets:
+            top = good_markets[0]
+            ticker = top.get("ticker", "") if isinstance(top, dict) else _str(getattr(top, "ticker", ""))
+            spread = _num(top.get("spread_pct", 0)) if isinstance(top, dict) else _num(getattr(top, "spread_pct", 0))
             _ins(kind="opportunity", insight_type="liquidity", severity="info",
                  title=f"{len(good_markets)} tight-spread markets available",
-                 body=f"Top: {good_markets[0].get('ticker', '')} spread={good_markets[0].get('spread_pct', 0)*100:.1f}%",
+                 body=f"Top: {ticker} spread={spread*100:.1f}%",
                  link_view="kalshi-terminal")
     except Exception as _e:
         logger.debug("insight liquidity probe skipped: %s", _e)
@@ -8404,6 +8491,9 @@ async def get_category_caps() -> Dict[str, Any]:
             "corr_notional": snap.corr_notional,
             "category_caps": snap.category_caps,
             "corr_cap": snap.corr_cap,
+            # 2026-08-24: Mirror corr_cap as corr_cap_usd so the contract test
+            # and the React risk-insights panel both receive the USD field they expect.
+            "corr_cap_usd": snap.corr_cap,
             "asset_caps": snap.asset_caps,
         }
     except Exception as exc:
@@ -8413,6 +8503,7 @@ async def get_category_caps() -> Dict[str, Any]:
             "corr_notional": {},
             "category_caps": {},
             "corr_cap": 0.0,
+            "corr_cap_usd": 0.0,
             "asset_caps": {},
             "error": str(exc),
         }

@@ -18,24 +18,66 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict
+from pydantic import BaseModel, Field, field_validator
 
-from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Query, Request, HTTPException
 from utils.logger import get_logger
 
 
 async def _with_timeout(fn, timeout: float = 5.0, fallback=None):
-    """Run a sync function in a thread with a timeout guard."""
+    """Run a sync function in a thread with a timeout guard.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling instead of broad Exception.
+    - asyncio.TimeoutError: Function took too long to execute
+    - RuntimeError: Thread execution errors
+    - AttributeError: Function not callable or missing attributes
+    """
     try:
         return await asyncio.wait_for(asyncio.to_thread(fn), timeout=timeout)
     except asyncio.TimeoutError:
+        logger.debug(f"_with_timeout: Function timed out after {timeout}s")
         return fallback
-    except Exception:
+    except RuntimeError as e:
+        logger.warning(f"_with_timeout: Runtime error in thread execution: {e}")
+        return fallback
+    except (AttributeError, TypeError) as e:
+        logger.warning(f"_with_timeout: Invalid function or parameters: {e}")
         return fallback
 
 logger = get_logger("web.api.loop_api")
 
 loop_api_router = APIRouter(prefix="/loop", tags=["loop"])
+
+
+# ERROR STANDARDIZATION: Helper function for consistent error responses
+def _standard_error_response(
+    error_type: str,
+    message: str,
+    status_code: int = 500,
+    details: str = None
+) -> Dict[str, Any]:
+    """Generate a standardized error response.
+
+    This helper ensures consistent error response format across all endpoints.
+    Used for backward compatibility with endpoints that return error dicts instead of HTTPException.
+
+    Args:
+        error_type: Category of error (e.g., "import_error", "runtime_error")
+        message: Human-readable error message
+        status_code: HTTP status code (for logging purposes)
+        details: Additional error details (optional)
+
+    Returns:
+        Standardized error dictionary
+    """
+    response = {
+        "error": message,
+        "error_type": error_type,
+        "status_code": status_code
+    }
+    if details:
+        response["details"] = details
+    return response
 
 
 # ── Lazy imports ──────────────────────────────────────────────────────
@@ -90,35 +132,69 @@ async def get_loop_status() -> Dict[str, Any]:
 def get_tick_log_recent(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> Dict[str, Any]:
-    """Get recent tick records from the in-memory buffer."""
+    """Get recent tick records from the in-memory buffer.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling with HTTPException.
+    - ImportError: Tick log module not available (503 Service Unavailable)
+    - AttributeError: Tick log instance missing required methods (500 Internal Server Error)
+    - RuntimeError: Tick log internal error (500 Internal Server Error)
+    """
     try:
         log = _tick_log()
         return {"ticks": log.recent(limit), "count": len(log.recent(limit))}
-    except Exception as e:
-        logger.warning(f"tick_log_error: {e}")
-        return {"ticks": [], "count": 0, "error": str(e)}
+    except ImportError as e:
+        logger.warning(f"tick_log_import_error: {e}")
+        raise HTTPException(status_code=503, detail="Tick log module not available")
+    except AttributeError as e:
+        logger.warning(f"tick_log_attribute_error: {e}")
+        raise HTTPException(status_code=500, detail="Tick log missing required methods")
+    except RuntimeError as e:
+        logger.warning(f"tick_log_runtime_error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @loop_api_router.get("/tick-log/summary")
 def get_tick_log_summary() -> Dict[str, Any]:
-    """Get aggregate tick stats (error rate, avg duration, plan counts)."""
+    """Get aggregate tick stats (error rate, avg duration, plan counts).
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Tick log or session module not available
+    - AttributeError: Missing required methods
+    - RuntimeError: Internal error in tick log or session
+    """
     try:
         log = _tick_log()
         result = log.summary()
         # Include operator session data
         try:
             result["session"] = _session().summary()
-        except Exception as exc:
-            logger.debug("operation_suppressed", error=str(exc))
+        except ImportError as exc:
+            logger.debug("operation_session_import_suppressed", error=str(exc))
+        except AttributeError as exc:
+            logger.debug("operation_session_attribute_suppressed", error=str(exc))
+        except RuntimeError as exc:
+            logger.debug("operation_session_runtime_suppressed", error=str(exc))
         return result
-    except Exception as e:
-        logger.warning(f"tick_log_summary_error: {e}")
+    except ImportError as e:
+        logger.warning(f"tick_log_summary_import_error: {e}")
+        return {"ticks": 0, "error": "Tick log module not available"}
+    except AttributeError as e:
+        logger.warning(f"tick_log_summary_attribute_error: {e}")
+        return {"ticks": 0, "error": "Tick log missing required methods"}
+    except RuntimeError as e:
+        logger.warning(f"tick_log_summary_runtime_error: {e}")
         return {"ticks": 0, "error": str(e)}
 
 
 @loop_api_router.get("/execution/status")
 def get_execution_status() -> Dict[str, Any]:
-    """Execution loop status — running state, last tick, error count."""
+    """Execution loop status — running state, last tick, error count.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Loop or guard module not available
+    - RuntimeError: Internal error in loop or guard
+    - AttributeError: Missing required methods
+    """
     try:
         loop = _loop()
         s = loop.status()
@@ -132,18 +208,36 @@ def get_execution_status() -> Dict[str, Any]:
             "kill_switch_active": gs.get("kill_switch_active", False),
             "paused": s.get("paused", False),
         }
-    except Exception as e:
-        logger.warning(f"execution_status_error: {e}")
+    except ImportError as e:
+        logger.warning(f"execution_status_import_error: {e}")
+        return {"running": False, "error": "Loop or guard module not available"}
+    except RuntimeError as e:
+        logger.warning(f"execution_status_runtime_error: {e}")
         return {"running": False, "error": str(e)}
+    except AttributeError as e:
+        logger.warning(f"execution_status_attribute_error: {e}")
+        return {"running": False, "error": "Loop or guard missing required methods"}
 
 
 @loop_api_router.get("/session")
 def get_operator_session_data() -> Dict[str, Any]:
-    """Get operator session summary: domain execs, blocks, CQI history."""
+    """Get operator session summary: domain execs, blocks, CQI history.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Session module not available
+    - AttributeError: Session missing required methods
+    - RuntimeError: Session internal error
+    """
     try:
         return _session().summary()
-    except Exception as e:
-        logger.warning(f"session_error: {e}")
+    except ImportError as e:
+        logger.warning(f"session_import_error: {e}")
+        return {"error": "Session module not available"}
+    except AttributeError as e:
+        logger.warning(f"session_attribute_error: {e}")
+        return {"error": "Session missing required methods"}
+    except RuntimeError as e:
+        logger.warning(f"session_runtime_error: {e}")
         return {"error": str(e)}
 
 
@@ -152,12 +246,24 @@ def get_cqi_series(
     domain: str = Query(default=None),
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> Dict[str, Any]:
-    """Get CQI time series, optionally filtered by domain."""
+    """Get CQI time series, optionally filtered by domain.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Session module not available
+    - AttributeError: Session missing cqi_series method
+    - RuntimeError: Session internal error
+    """
     try:
         series = _session().cqi_series(domain=domain, limit=limit)
         return {"domain": domain, "points": series, "count": len(series)}
-    except Exception as e:
-        logger.warning(f"cqi_series_error: {e}")
+    except ImportError as e:
+        logger.warning(f"cqi_series_import_error: {e}")
+        return {"points": [], "count": 0, "error": "Session module not available"}
+    except AttributeError as e:
+        logger.warning(f"cqi_series_attribute_error: {e}")
+        return {"points": [], "count": 0, "error": "Session missing cqi_series method"}
+    except RuntimeError as e:
+        logger.warning(f"cqi_series_runtime_error: {e}")
         return {"points": [], "count": 0, "error": str(e)}
 
 
@@ -165,12 +271,24 @@ def get_cqi_series(
 
 @loop_api_router.get("/guard/status")
 def get_guard_status() -> Dict[str, Any]:
-    """Get execution guard state: kill switch, CQI scores, domain caps."""
+    """Get execution guard state: kill switch, CQI scores, domain caps.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Guard module not available
+    - AttributeError: Guard missing required methods
+    - RuntimeError: Guard internal error
+    """
     try:
         guard = _guard()
         return guard.summary()
-    except Exception as e:
-        logger.warning(f"guard_status_error: {e}")
+    except ImportError as e:
+        logger.warning(f"guard_status_import_error: {e}")
+        return {"error": "Guard module not available"}
+    except AttributeError as e:
+        logger.warning(f"guard_status_attribute_error: {e}")
+        return {"error": "Guard missing required methods"}
+    except RuntimeError as e:
+        logger.warning(f"guard_status_runtime_error: {e}")
         return {"error": str(e)}
 
 
@@ -178,14 +296,24 @@ def get_guard_status() -> Dict[str, Any]:
 def get_guard_verdicts(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> Dict[str, Any]:
-    """Get recent trade verdicts (allowed/blocked decisions)."""
+    """Get recent trade verdicts (allowed/blocked decisions).
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Guard or agent grid module not available
+    - AttributeError: Missing required methods
+    - RuntimeError: Internal error in guard or agent grid
+    """
     try:
         guard = _guard()
         verdicts = guard.recent_verdicts(limit)
         if verdicts:
             return {"verdicts": verdicts, "count": len(verdicts)}
-    except Exception as e:
-        logger.debug(f"guard_verdicts guard unavailable: {e}")
+    except ImportError as e:
+        logger.debug(f"guard_verdicts_import_error: {e}")
+    except AttributeError as e:
+        logger.debug(f"guard_verdicts_attribute_error: {e}")
+    except RuntimeError as e:
+        logger.debug(f"guard_verdicts_runtime_error: {e}")
 
     # Fallback: derive verdicts from consensus blocks
     # LEGACY REMOVAL: Consensus module deleted - consensus fallback disabled
@@ -206,7 +334,7 @@ def get_guard_verdicts(
         #         "source": "consensus_opinion",
         #     })
         logger.debug("guard_verdicts consensus fallback disabled - consensus module deleted")
-    except Exception as exc2:
+    except ImportError as exc2:
         logger.debug(f"guard_verdicts consensus fallback disabled - consensus module deleted: {exc2}")
 
     # Also include agent cycle scan verdicts
@@ -225,84 +353,204 @@ def get_guard_verdicts(
                     "reason": f"{agent.config.name}: {agent.state.cycles_run} cycles, {agent.state.orders_placed} orders",
                     "source": "agent_grid",
                 })
-    except Exception as e:
-        logger.debug(f"Silent error: {e}")
+    except ImportError as e:
+        logger.debug(f"guard_verdicts_agent_grid_import_error: {e}")
+    except AttributeError as e:
+        logger.debug(f"guard_verdicts_agent_grid_attribute_error: {e}")
+    except RuntimeError as e:
+        logger.debug(f"guard_verdicts_agent_grid_runtime_error: {e}")
 
     verdicts.sort(key=lambda v: v.get("ts", ""), reverse=True)
     return {"verdicts": verdicts[:limit], "count": len(verdicts[:limit])}
 
 
 class KillSwitchRequest(BaseModel):
-    reason: str = "operator"
+    """Request to activate the global kill switch.
+
+    INPUT VALIDATION: Reason field is validated to prevent empty or overly long reasons.
+    """
+    reason: str = Field(
+        default="operator",
+        min_length=1,
+        max_length=500,
+        description="Reason for activating kill switch"
+    )
+
+    @field_validator('reason')
+    def reason_must_not_be_whitespace(cls, v):
+        if v.strip() == "":
+            raise ValueError("Reason cannot be empty or whitespace")
+        return v.strip()
 
 
 @loop_api_router.post("/guard/kill")
 def activate_kill_switch(req: KillSwitchRequest) -> Dict[str, Any]:
-    """Activate the global kill switch — blocks ALL trade execution."""
+    """Activate the global kill switch — blocks ALL trade execution.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling with HTTPException.
+    - ImportError: Guard module not available (503 Service Unavailable)
+    - RuntimeError: Guard internal error (500 Internal Server Error)
+    - ValueError: Invalid kill switch state (400 Bad Request)
+    """
     try:
         guard = _guard()
         guard.activate_kill_switch(req.reason)
         return {"success": True, "kill_switch_active": True, "reason": req.reason}
-    except Exception as e:
-        logger.error(f"kill_switch_activate_error: {e}")
-        return {"success": False, "error": str(e)}
+    except ImportError as e:
+        logger.error(f"kill_switch_activate_import_error: {e}")
+        raise HTTPException(status_code=503, detail="Guard module not available")
+    except RuntimeError as e:
+        logger.error(f"kill_switch_activate_runtime_error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        logger.error(f"kill_switch_activate_value_error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @loop_api_router.post("/guard/unkill")
 def deactivate_kill_switch() -> Dict[str, Any]:
-    """Deactivate the global kill switch — re-enables execution."""
+    """Deactivate the global kill switch — re-enables execution.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling with HTTPException.
+    - ImportError: Guard module not available (503 Service Unavailable)
+    - RuntimeError: Guard internal error (500 Internal Server Error)
+    - ValueError: Invalid kill switch state (400 Bad Request)
+    """
     try:
         guard = _guard()
         guard.deactivate_kill_switch()
         return {"success": True, "kill_switch_active": False}
-    except Exception as e:
-        logger.error(f"kill_switch_deactivate_error: {e}")
-        return {"success": False, "error": str(e)}
+    except ImportError as e:
+        logger.error(f"kill_switch_deactivate_import_error: {e}")
+        raise HTTPException(status_code=503, detail="Guard module not available")
+    except RuntimeError as e:
+        logger.error(f"kill_switch_deactivate_runtime_error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        logger.error(f"kill_switch_deactivate_value_error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 class DomainKillRequest(BaseModel):
-    domain: str
-    reason: str = "operator"
+    """Request to activate kill switch for a single domain.
+
+    INPUT VALIDATION: Domain and reason fields are validated.
+    """
+    domain: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Domain to kill (e.g., 'kalshi_crypto_15m')"
+    )
+    reason: str = Field(
+        default="operator",
+        min_length=1,
+        max_length=500,
+        description="Reason for activating domain kill switch"
+    )
+
+    @field_validator('domain')
+    def domain_must_not_be_whitespace(cls, v):
+        if v.strip() == "":
+            raise ValueError("Domain cannot be empty or whitespace")
+        return v.strip()
+
+    @field_validator('reason')
+    def reason_must_not_be_whitespace(cls, v):
+        if v.strip() == "":
+            raise ValueError("Reason cannot be empty or whitespace")
+        return v.strip()
 
 
 @loop_api_router.post("/guard/domain-kill")
 def activate_domain_kill(req: DomainKillRequest) -> Dict[str, Any]:
-    """Activate kill switch for a single domain."""
+    """Activate kill switch for a single domain.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling with HTTPException.
+    - ImportError: Guard module not available (503 Service Unavailable)
+    - RuntimeError: Guard internal error (500 Internal Server Error)
+    - ValueError: Invalid domain or kill switch state (400 Bad Request)
+    """
     try:
         guard = _guard()
         guard.activate_domain_kill_switch(req.domain, req.reason)
         return {"success": True, "domain": req.domain, "kill_switch_active": True}
-    except Exception as e:
-        logger.error(f"domain_kill_activate_error: {e}")
-        return {"success": False, "error": str(e)}
+    except ImportError as e:
+        logger.error(f"domain_kill_activate_import_error: {e}")
+        raise HTTPException(status_code=503, detail="Guard module not available")
+    except RuntimeError as e:
+        logger.error(f"domain_kill_activate_runtime_error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        logger.error(f"domain_kill_activate_value_error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 class DomainUnkillRequest(BaseModel):
-    domain: str
+    """Request to deactivate kill switch for a single domain.
+
+    INPUT VALIDATION: Domain field is validated.
+    """
+    domain: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Domain to unkill (e.g., 'kalshi_crypto_15m')"
+    )
+
+    @field_validator('domain')
+    def domain_must_not_be_whitespace(cls, v):
+        if v.strip() == "":
+            raise ValueError("Domain cannot be empty or whitespace")
+        return v.strip()
 
 
 @loop_api_router.post("/guard/domain-unkill")
 def deactivate_domain_kill(req: DomainUnkillRequest) -> Dict[str, Any]:
-    """Deactivate kill switch for a single domain."""
+    """Deactivate kill switch for a single domain.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling with HTTPException.
+    - ImportError: Guard module not available (503 Service Unavailable)
+    - RuntimeError: Guard internal error (500 Internal Server Error)
+    - ValueError: Invalid domain or kill switch state (400 Bad Request)
+    """
     try:
         guard = _guard()
         guard.deactivate_domain_kill_switch(req.domain)
         return {"success": True, "domain": req.domain, "kill_switch_active": False}
-    except Exception as e:
-        logger.error(f"domain_kill_deactivate_error: {e}")
-        return {"success": False, "error": str(e)}
+    except ImportError as e:
+        logger.error(f"domain_kill_deactivate_import_error: {e}")
+        raise HTTPException(status_code=503, detail="Guard module not available")
+    except RuntimeError as e:
+        logger.error(f"domain_kill_deactivate_runtime_error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        logger.error(f"domain_kill_deactivate_value_error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── WS price feed ────────────────────────────────────────────────────
 
 @loop_api_router.get("/ws-feed/status")
 def get_ws_feed_status() -> Dict[str, Any]:
-    """Get WebSocket price feed connection status and latest prices."""
+    """Get WebSocket price feed connection status and latest prices.
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: WS feed module not available
+    - AttributeError: WS feed missing status method
+    - RuntimeError: WS feed internal error
+    """
     try:
         mgr = _ws_feed()
         return mgr.status()
-    except Exception as e:
-        logger.warning(f"ws_feed_status_error: {e}")
+    except ImportError as e:
+        logger.warning(f"ws_feed_status_import_error: {e}")
+        return {"active": False, "error": "WS feed module not available"}
+    except AttributeError as e:
+        logger.warning(f"ws_feed_status_attribute_error: {e}")
+        return {"active": False, "error": "WS feed missing status method"}
+    except RuntimeError as e:
+        logger.warning(f"ws_feed_status_runtime_error: {e}")
         return {"active": False, "error": str(e)}
 
 
@@ -310,7 +558,13 @@ def get_ws_feed_status() -> Dict[str, Any]:
 
 @loop_api_router.get("/execution/toggle")
 async def get_execution_toggle() -> Dict[str, Any]:
-    """Get current execution toggle state (enabled/disabled)."""
+    """Get current execution toggle state (enabled/disabled).
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Guard module not available
+    - AttributeError: Guard missing required attributes
+    - RuntimeError: Guard internal error
+    """
     try:
         g = _guard()
         killed = getattr(g, "_global_kill_switch", False)
@@ -320,19 +574,29 @@ async def get_execution_toggle() -> Dict[str, Any]:
             "kill_switch_active": killed,
             "kill_reason": getattr(g, "_global_kill_reason", ""),
         }
-    except Exception as e:
-        logger.debug(f"execution_toggle_error: {e}")
+    except ImportError as e:
+        logger.debug(f"execution_toggle_import_error: {e}")
+        return {"enabled": False, "can_trade": False, "error": "Guard module not available"}
+    except AttributeError as e:
+        logger.debug(f"execution_toggle_attribute_error: {e}")
+        return {"enabled": False, "can_trade": False, "error": "Guard missing required attributes"}
+    except RuntimeError as e:
+        logger.debug(f"execution_toggle_runtime_error: {e}")
         return {"enabled": False, "can_trade": False, "error": str(e)}
 
 
 @loop_api_router.get("/live-readiness")
-async def get_live_readiness() -> Dict[str, Any]:
+async def get_live_readiness(request: Request) -> Dict[str, Any]:
     """Check if the system is ready for live trading."""
     checks = {}
     ready = True
 
-    # Check loop running (may block on singleton init)
+    # Check loop running (prefer the actual Kalshi15mLoop from app.state;
+    # fall back to the legacy singleton accessor)
     def _check_loop():
+        loop = getattr(request.app.state, "kalshi_15m_loop", None)
+        if loop is not None:
+            return bool(getattr(loop, "is_running", getattr(loop, "running", False)))
         loop = _loop()
         return loop.running if hasattr(loop, "running") else True
     loop_running = await _with_timeout(_check_loop, timeout=3.0, fallback=None)
@@ -349,7 +613,13 @@ async def get_live_readiness() -> Dict[str, Any]:
         checks["guard_active"] = not killed
         if killed:
             ready = False
-    except Exception:
+    except ImportError:
+        checks["guard_active"] = False
+        ready = False
+    except AttributeError:
+        checks["guard_active"] = False
+        ready = False
+    except RuntimeError:
         checks["guard_active"] = False
         ready = False
 
@@ -358,7 +628,11 @@ async def get_live_readiness() -> Dict[str, Any]:
         ws = _ws_feed()
         ws_st = ws.status() if hasattr(ws, "status") else {}
         checks["ws_feed_connected"] = ws_st.get("active", False)
-    except Exception:
+    except ImportError:
+        checks["ws_feed_connected"] = False
+    except AttributeError:
+        checks["ws_feed_connected"] = False
+    except RuntimeError:
         checks["ws_feed_connected"] = False
 
     # Check trade mode
@@ -367,7 +641,13 @@ async def get_live_readiness() -> Dict[str, Any]:
         mode = get_trade_mode()
         checks["trade_mode"] = mode.value
         checks["is_live"] = mode.value == "live"
-    except Exception:
+    except ImportError:
+        checks["trade_mode"] = "unknown"
+        checks["is_live"] = False
+    except AttributeError:
+        checks["trade_mode"] = "unknown"
+        checks["is_live"] = False
+    except RuntimeError:
         checks["trade_mode"] = "unknown"
         checks["is_live"] = False
 
@@ -376,10 +656,22 @@ async def get_live_readiness() -> Dict[str, Any]:
 
 @loop_api_router.get("/live-feeds/status")
 def get_live_feeds_status() -> Dict[str, Any]:
-    """Get live feed manager status (Finnhub, FRED, CoinGecko, Polygon)."""
+    """Get live feed manager status (Finnhub, FRED, CoinGecko, Polygon).
+
+    ERROR HANDLING IMPROVEMENT: Specific exception handling.
+    - ImportError: Live feeds module not available
+    - AttributeError: Live feeds missing status method
+    - RuntimeError: Live feeds internal error
+    """
     try:
         mgr = _live_feeds()
         return mgr.status()
-    except Exception as e:
-        logger.warning(f"live_feeds_status_error: {e}")
+    except ImportError as e:
+        logger.warning(f"live_feeds_status_import_error: {e}")
+        return {"error": "Live feeds module not available"}
+    except AttributeError as e:
+        logger.warning(f"live_feeds_status_attribute_error: {e}")
+        return {"error": "Live feeds missing status method"}
+    except RuntimeError as e:
+        logger.warning(f"live_feeds_status_runtime_error: {e}")
         return {"error": str(e)}

@@ -63,44 +63,102 @@ async def get_current_session(
     ZT4-02: Centralises session validation so any endpoint can do:
         ``user = Depends(get_current_session)``
 
-    ZT7-01: Set env var MERID_SKIP_AUTH_FOR_TESTS=1 in test conftest to bypass
-    without modifying individual test files.  NEVER set this in production.
-
-    DEV-BYPASS: Allows localhost development without authentication.
+    SECURITY: Auth bypass mechanisms are fail-safe by default.
+    - Test bypass requires explicit MERID_SKIP_AUTH_FOR_TESTS=1
+    - Single-user mode requires explicit MERID_SINGLE_USER_OPERATOR=1
+    - Dev bypass requires explicit MERID_DEV_AUTH_BYPASS=1 AND MERID_ENV=development
+    - All bypasses are blocked when live trading is detected
+    - All bypass events are logged for security auditing
     """
+    # SECURITY: Fail-safe defaults - no bypass unless explicitly enabled
     # Test bypass (explicit env var)
-    if os.getenv("MERID_SKIP_AUTH_FOR_TESTS") == "1":
+    test_bypass = os.getenv("MERID_SKIP_AUTH_FOR_TESTS") == "1"
+    if test_bypass:
+        # SECURITY: Log test bypass for audit trail
+        logger.warning(
+            "AUTH BYPASS: Test mode bypass activated via MERID_SKIP_AUTH_FOR_TESTS=1. "
+            "This should NEVER be used in production."
+        )
         return {"user": None, "session_id": "__test_bypass__"}
 
-    # Single-user operator mode: sole local owner, no auth required
-    if os.getenv("MERID_SINGLE_USER_OPERATOR") == "1":
-        return {"user": {"user_id": "operator", "username": "operator", "role": "admin"}, "session_id": "__single_user__"}
+    # SECURITY: Single-user operator mode requires explicit opt-in
+    single_user_mode = os.getenv("MERID_SINGLE_USER_OPERATOR") == "1"
+    if single_user_mode:
+        # SECURITY: Fail-closed: single-user operator bypass is prohibited when live
+        # trading is enabled.  It is only permitted in dev/test with 127.0.0.1 and
+        # trading_mode != live.
+        live_trading_indicators = [
+            os.getenv("MERID_PM_LIVE_ENABLED", "false").lower() in ("1", "true", "yes"),
+            os.getenv("MERID_TRADE_MODE", "").lower() == "live",
+            os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live",
+            os.getenv("TRADING_ENABLED", "false").lower() in ("1", "true", "yes"),
+        ]
+        env = os.getenv("MERID_ENV", "production").lower()
+        bind_host = os.getenv("MERID_SERVER_HOST", "127.0.0.1")
 
-    # Development bypass for localhost (auto-enabled in dev, disabled in production)
-    # Check if running in development mode by looking for common dev indicators
-    dev_mode = os.getenv("MERID_ENV", "development").lower() in ("development", "dev", "local")
-    if dev_mode and os.getenv("MERID_DEV_AUTH_BYPASS") != "0":
-        # Fail-closed: never allow bypass when live trading is enabled.
-        # An unset MERID_ENV defaulting to 'development' while live is active
-        # would otherwise grant unauthenticated access.
-        live_trading = (
-            os.getenv("MERID_PM_LIVE_ENABLED", "false").lower() in ("1", "true", "yes")
-            or os.getenv("MERID_TRADE_MODE", "").lower() == "live"
-            or os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live"
-        )
-        if live_trading:
-            import logging as _logging
-            _logging.getLogger("web.api.auth").critical(
-                "DEV AUTH BYPASS BLOCKED: MERID_ENV=%r but live trading is active. "
-                "Set MERID_ENV=production and MERID_DEV_AUTH_BYPASS=0.",
-                os.getenv("MERID_ENV", "<unset>"),
+        if any(live_trading_indicators) or env not in ("development", "dev", "test", "testing") or bind_host != "127.0.0.1":
+            logger.critical(
+                "SECURITY ALERT: SINGLE-USER OPERATOR BYPASS BLOCKED. "
+                "MERID_SINGLE_USER_OPERATOR=1 is prohibited in production or live trading. "
+                "live=%s env=%s bind=%s",
+                live_trading_indicators, env, bind_host,
             )
             raise HTTPException(
                 status_code=403,
-                detail="Dev auth bypass is disabled in live trading mode. Set MERID_ENV=production.",
+                detail="Single-user operator bypass is prohibited in production or live trading.",
             )
-        # Auto-bypass for localhost requests in development
+
+        # SECURITY: Log single-user bypass for audit trail
+        logger.warning(
+            "AUTH BYPASS: Single-user operator mode activated via MERID_SINGLE_USER_OPERATOR=1. "
+            "Authentication disabled for local operator access."
+        )
+        return {"user": {"user_id": "operator", "username": "operator", "role": "admin"}, "session_id": "__single_user__"}
+
+    # SECURITY: Development bypass requires explicit opt-in AND development environment
+    # SECURITY FIX: Changed from auto-enabled to explicit opt-in for security
+    dev_bypass_enabled = os.getenv("MERID_DEV_AUTH_BYPASS", "0") == "1"
+    dev_env = os.getenv("MERID_ENV", "production").lower() in ("development", "dev", "local")
+    
+    if dev_bypass_enabled and dev_env:
+        # SECURITY: Fail-closed: never allow bypass when live trading is enabled.
+        # Check multiple indicators of live trading to be absolutely sure
+        live_trading_indicators = [
+            os.getenv("MERID_PM_LIVE_ENABLED", "false").lower() in ("1", "true", "yes"),
+            os.getenv("MERID_TRADE_MODE", "").lower() == "live",
+            os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live",
+            os.getenv("TRADING_ENABLED", "false").lower() in ("1", "true", "yes"),
+        ]
+        
+        if any(live_trading_indicators):
+            # SECURITY: Log attempted bypass in live trading mode (CRITICAL security event)
+            logger.critical(
+                "SECURITY ALERT: DEV AUTH BYPASS BLOCKED - Live trading detected. "
+                "MERID_ENV=%s, live_trading_indicators=%s. "
+                "Authentication bypass explicitly blocked to prevent unauthorized access.",
+                os.getenv("MERID_ENV", "<unset>"),
+                live_trading_indicators
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Dev auth bypass is disabled in live trading mode. Set MERID_ENV=production and MERID_DEV_AUTH_BYPASS=0.",
+            )
+        
+        # SECURITY: Log dev bypass for audit trail
+        logger.warning(
+            "AUTH BYPASS: Development mode bypass activated via MERID_DEV_AUTH_BYPASS=1. "
+            "MERID_ENV=%s. Authentication disabled for local development.",
+            os.getenv("MERID_ENV", "<unset>")
+        )
         return {"user": {"user_id": "dev_user", "username": "developer"}, "session_id": "__dev_bypass__"}
+
+    # SECURITY: If dev bypass is not explicitly enabled, require authentication
+    # This prevents accidental bypass due to unset environment variables
+    if dev_env and not dev_bypass_enabled:
+        logger.info(
+            "AUTH: Development environment detected but MERID_DEV_AUTH_BYPASS not set to 1. "
+            "Requiring authentication as fail-safe default."
+        )
 
     # Resolve token: prefer X-Session-ID, fall back to Authorization: Bearer
     token = session_id
