@@ -335,7 +335,10 @@ logs/
 tmp/
 
 # Ad-hoc diagnostic / runtime artifacts (added 2026-08-25)
+.tmp_*.py
 tmp_*.py
+.venv-clean/
+2026-08-14/
 tmp_*.txt
 tmp_*.json
 query_*.py
