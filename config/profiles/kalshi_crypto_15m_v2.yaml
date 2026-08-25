@@ -142,16 +142,20 @@ catalog_staleness_enforced: false
 # System was consistently betting NO for 100+ trades, losing $184.32 on $1.6k volume
 # Panic fade was fading the wrong way - buying high expecting reversion down, selling low expecting reversion up
 # Turbine research showed mean reversion failed completely (0 for 432 variants) on 15-minute markets
-signal_mode: momentum_fvg  # Options: mean_reversion, momentum_fvg, volatility_reversion, hybrid, price_based, trend - 2026-07-19: Switched to momentum_fvg to enable trading within 10-75c price range
+signal_mode: hybrid  # Options: mean_reversion, momentum_fvg, volatility_reversion, hybrid, price_based, trend - 2026-08-19: Use hybrid to enable price-based probability signals while keeping momentum_fvg fallback
 
 # ── Phase 1 Profitability Enhancements ─────────────────────────────────────────
 # YES/NO Sum Arbitrage, Market Making, and Correlation Tracking
+
+# Global model-uncertainty reserve for the trade_decision engine.
+# Lower values make the edge gate less conservative.
+model_uncertainty: 0.02
 
 # YES/NO Sum Arbitrage Configuration
 # Gabagool strategy: execute when avg_YES + avg_NO < $0.95 (pair-cost model)
 # This is the proven arbitrage edge from research (150/150 profitable variants)
 yes_no_arbitrage:
-  enabled: true  # Set to true to enable arbitrage execution
+  enabled: false  # Disabled by default; set to true only after canary validation
   pair_cost_threshold_cents: 95  # Execute when YES + NO < 95c (Gabagool strategy)
   max_size_contracts: 10  # Max contracts per arbitrage trade
   execution_timeout_ms: 500  # Max time to execute both sides (milliseconds)
@@ -163,7 +167,7 @@ yes_no_arbitrage:
 # Phase 1 (0-720s): Two-sided quoting at $0.50 ± 3¢, refresh every 15s
 # Phase 2 (720-900s): Directional GTC on winning side at $0.52
 market_making:
-  enabled: true  # Set to true to enable market making
+  enabled: false  # Disabled by default; set to true only after canary validation
   quoting_mode: "two_phase"  # Options: one_sided, two_sided, two_phase
   spread_cents: 2  # Target spread in cents
   inventory_limit_contracts: 50  # Max inventory per asset
@@ -270,12 +274,10 @@ staged_time_exit:
   description: "Staged time exits: partial liquidation at time intervals (enabled in PositionMonitor)"
 
 # Dynamic Take Profit Zones Configuration
-# Laddered exit targets based on entry price for consistent profit taking
-# This strategy ensures frequent small wins and reduces all-or-nothing risk
-# 2026-08-01: Aligned to 60-70% rule per industry research (exit at 60-70% of theoretical max gain)
-# Rationale: Last 20-30% of convergence takes disproportionately longer with tail risk
+# 2026-08-12: DISABLED. Edge-based take-profit in resolve_exit_policy is the primary exit.
+# The fixed-price zones overrode the model-derived TP and caused inconsistent exits.
 dynamic_take_profit:
-  enabled: true  # Enable dynamic take profit zones
+  enabled: false  # Disable dynamic take profit zones
   # Zones: [entry_min, entry_max, exit_target, exit_type]
   # exit_type: "limit" (resting order) or "market" (immediate execution)
   # Targets aligned to 60-70% of theoretical max gain (100 - entry_price)
@@ -299,7 +301,10 @@ dynamic_take_profit:
       exit_type: "limit"
     - entry_min: 70
       entry_max: 85
-      exit_target: 72  # 60% of 30¢ max gain (entry 70-85¢, max gain 15-30¢)
+      exit_target: 90  # CRITICAL FIX (2026-08-03): was 72¢ - BELOW entry range, triggered
+                       # DYNAMIC_TAKE_PROFIT instantly at breakeven (observed live: entry=81¢
+                       # exit=81¢ pnl=0). Must be > entry_max. 90¢ ≈ 60% of max gain for
+                       # midpoint entry (77¢ → 90¢ is 13¢ of 23¢ max gain).
       exit_type: "limit"
   # Edge quality adjustment: Higher edge = higher exit target
   edge_adjustment_enabled: true
@@ -321,15 +326,15 @@ scale_out:
 
 # Dynamic Position Sizing Configuration
 # Scale position size based on edge and confidence (slot-model compatible)
-# 2026-07-15: Re-enabled with slot-model compatibility - scales within $1 fixed exposure cap
+# 2026-08-22: Per-asset max raised to 2 contracts while keeping total $2 exposure cap.
 dynamic_sizing:
-  enabled: true  # ENABLED: Slot-model compatible - scales contracts within $1 cap based on edge quality
-  base_contracts: 1  # Base size
+  enabled: true  # ENABLED: Slot-model compatible - size up to 2 contracts within $2 cap
+  base_contracts: 2  # Base target (1 contract at prices >50c, 2 contracts at prices ≤50c)
   edge_multiplier: 2.0  # Amplify edge impact for small velocity-based edges (Turbine research)
   confidence_multiplier: 1.0  # Amplify confidence impact (Turbine research)
-  max_contracts: 1  # HARD RULE: 1 contract per order to respect $1 fixed exposure cap
+  max_contracts: 2  # HARD RULE: 2 contracts per order, bounded by $2 fixed exposure cap
   min_contracts: 1  # Min contracts per trade
-  description: "Dynamic sizing: scale position based on edge and confidence within $1 cap (slot-model compatible)"
+  description: "Dynamic sizing: size up to 2 contracts based on edge and confidence within $2 cap (slot-model compatible)"
 
 # Order Scaling Configuration
 # Institutional-grade scaling strategies (TWAP, iceberg, adaptive)
@@ -337,7 +342,7 @@ dynamic_sizing:
 # 2026-07-09: DISABLED - conflicts with 1-contract-per-order slot-based model
 # Order scaling requires orders >= 3 contracts, but slot model enforces 1 contract max
 order_scaling:
-  enabled: false  # DISABLED: Conflicts with 1-contract-per-order slot-based model
+  enabled: false  # DISABLED: Conflicts with slot-based model (up to 2 contracts per order under $2 cap)
   strategy: "adaptive"  # Strategy: "twap", "iceberg", "adaptive"
   min_child_orders: 2  # Minimum number of child orders
   max_child_orders: 5  # Maximum number of child orders
@@ -458,14 +463,15 @@ momentum_fvg:
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
 
 # ── Price-Based Strategy Parameters (2026 Optimized for Swing Trading) ───────────
-# CRITICAL FIX (2026-07-22): Fixed inverted thresholds causing YES-side bias
-# Previous: buy_threshold=0.70, sell_threshold=0.95 created 25c dead zone and bought YES at expensive prices
-# Correct: buy_threshold=0.30 (buy YES when cheap), sell_threshold=0.70 (buy NO when expensive)
-# This creates symmetric trading around 0.50 and eliminates the YES bias
-# Economic rationale: Buy YES when probability is low (cheap YES), buy NO when probability is high (cheap NO)
+# 2026-08-19: Enforced complement symmetry (p_yes + p_no = 1) by pairing
+# buy_threshold with sell_threshold = 1 - buy_threshold.  The prior 0.50/0.70
+# pair set the NO fair probability to 0.30 while the YES fair was 0.50, which
+# structurally overweighted YES candidates and violated the parity invariant.
+# With 0.50/0.50 the agent buys the cheaper of YES/NO (<= 50c) with equal edge
+# on both legs, while the net-of-cost gate still rejects fee-negative edges.
 price_based:
-  buy_threshold: 0.30  # Buy YES when price <= 30c (cheap YES contracts)
-  sell_threshold: 0.70  # Buy NO when price >= 70c (cheap NO contracts)
+  buy_threshold: 0.50  # Buy YES when price <= 50c (cheap YES contracts)
+  sell_threshold: 0.50  # Buy NO when price >= 50c (cheap NO contracts)
 
 # ── Hybrid Mode Price Caps (2026 Optimized) ───────────────────────────────
 # Hybrid mode combines momentum signals with price discipline
@@ -529,32 +535,32 @@ allow_fallback_trades: false  # DISABLED: Require live market data
 max_fallback_notional_usd: 0.35  # If fallback allowed, cap at min_notional (unused when disabled)
 max_fallback_cycles: 0  # DISABLED: No fallback cycles allowed
 
-# 2026-07-08 UPDATE: Percentage-based cycle risk limits DISABLED in favor of fixed $1 exposure model
-# max_cycle_risk_pct DISABLED - using fixed $1 exposure cap instead
-# guardrails_per_window_risk_pct DISABLED - using fixed $1 exposure cap instead
-# guardrails_total_venue_risk_pct DISABLED - using fixed $1 exposure cap instead
-# max_total_risk_pct DISABLED - using fixed $1 exposure cap instead
-# max_cycle_risk_usd DISABLED - using fixed $1 exposure cap instead
-max_cycle_risk_pct: 0.0  # DISABLED - set to 0.0 to satisfy profile validation (not used in fixed $1 model)
+# 2026-07-08 UPDATE: Percentage-based cycle risk limits DISABLED in favor of fixed $2 exposure model
+# max_cycle_risk_pct DISABLED - using fixed $2 exposure cap instead
+# guardrails_per_window_risk_pct DISABLED - using fixed $2 exposure cap instead
+# guardrails_total_venue_risk_pct DISABLED - using fixed $2 exposure cap instead
+# max_total_risk_pct DISABLED - using fixed $2 exposure cap instead
+# max_cycle_risk_usd DISABLED - using fixed $2 exposure cap instead
+max_cycle_risk_pct: 0.0  # DISABLED - set to 0.0 to satisfy profile validation (not used in fixed $2 model)
 
-# Fixed $1 exposure cap is enforced via:
-# - risk_policy.fixed_exposure_cap_usd: 1.00
+# Fixed $2 exposure cap is enforced via:
+# - risk_policy.fixed_exposure_cap_usd: 2.00
 # - Sequential trading (blocks new entries until positions exit)
-# - Slot-based position management (sum of contract prices ≤ $1)
+# - Slot-based position management (sum of contract prices ≤ $2)
 
 # ── Venue-Level Caps (Kalshi) ──────────────────────────────────────────────
-# 2026-07-08 UPDATE: Percentage-based venue caps DISABLED in favor of fixed $1 exposure model
-# max_total_notional_pct DISABLED - using fixed $1 exposure cap instead
-# max_category_notional_pct DISABLED - using fixed $1 exposure cap instead
-# max_single_order_pct DISABLED - using fixed $1 exposure cap instead
-# bankroll_cap_pct DISABLED - using fixed $1 exposure cap instead
+# 2026-07-08 UPDATE: Percentage-based venue caps DISABLED in favor of fixed $2 exposure model
+# max_total_notional_pct DISABLED - using fixed $2 exposure cap instead
+# max_category_notional_pct DISABLED - using fixed $2 exposure cap instead
+# max_single_order_pct DISABLED - using fixed $2 exposure cap instead
+# bankroll_cap_pct DISABLED - using fixed $2 exposure cap instead
 venue:
   name: kalshi
-  # All percentage-based venue caps replaced with fixed $1 exposure model
+  # All percentage-based venue caps replaced with fixed $2 exposure model
   # Risk is now enforced via:
-  # - risk_policy.fixed_exposure_cap_usd: 1.00
+  # - risk_policy.fixed_exposure_cap_usd: 2.00
   # - Sequential trading (blocks new entries until positions exit)
-  # - Slot-based position management (sum of contract prices ≤ $1)
+  # - Slot-based position management (sum of contract prices ≤ $2)
   
   # REMOVED: Conflicting rate limits - now handled by throttling section (single source of truth)
   # - max_orders_per_minute: replaced by throttling.global_orders_limit (5/min)
@@ -577,7 +583,7 @@ universe:
 throttling:
   global_orders_window_sec: 60  # Rolling window for global order limit (seconds)
   global_orders_limit: 5  # CRITICAL FIX (2026-07-17): 5 orders per minute (behavioral throttle, not exposure limit)
-  # With $1 cap, realistic max is 0.2-0.3 orders per minute (1-2 positions total, 1-2 entries/exits per 15m cycle)
+  # With $2 cap, realistic max is 0.2-0.3 orders per minute (1-2 positions total, 1-2 entries/exits per 15m cycle)
   # 5/min is generous ceiling (20x realistic usage) to prevent spam while allowing legitimate re-submissions
   per_asset_cooldown_sec: 3  # 3s cooldown per asset (behavioral throttle, not exposure limit)
   per_strip_notional_usd: 0.0  # Max notional per strip (0.0 = disabled, set if needed)
@@ -590,7 +596,7 @@ throttling:
 # Emergency brake when market data is degraded (catalog stuck but MD fresh).
 # This is separate from normal strip limits and should be clearly logged when active.
 failsafe:
-  max_contracts_per_order: 1  # Max contracts per order when in failsafe mode (emergency brake)
+  max_contracts_per_order: 2  # Max contracts per order when in failsafe mode (emergency brake); same cap as normal mode
 
 # ── Toxicity Detection Configuration (Bot Counter-Trading Prevention) ───────
 # Detects predatory trading behaviors and market manipulation using:
@@ -640,11 +646,11 @@ toxicity_detection:
 # - High prices (>85c) = low profit potential, thin markets, poor scaling effectiveness
 # - Scaling requires sufficient liquidity to avoid excessive slippage on child orders
 # - For momentum-based trading, conviction comes from velocity magnitude, not price level
-# - CRITICAL FIX (2026-08-01): Expanded to 5c-85c for 15m crypto volatility (was 10c-75c)
+# - CRITICAL FIX (2026-08-01): Canonical 10c-75c execution range (prevents low-profit traps and late-window extremes)
 price_range:
-  min_price_cents: 5  # CRITICAL FIX (2026-08-01): Lowered from 10c to 5c for 15m crypto volatility
-  max_price_cents: 85  # CRITICAL FIX (2026-08-01): Expanded from 75c to 85c for 15m crypto volatility
-  description: "Valid price range in cents for order execution (5-85c - aligned with dynamic_take_profit zones and actual market conditions)"
+  min_price_cents: 10  # CRITICAL FIX (2026-08-01): Low-profit trap prevention (10c minimum)
+  max_price_cents: 75  # CRITICAL FIX (2026-08-01): Upper bound for 15m crypto volatility (75c)
+  description: "Valid price range in cents for order execution (10-75c - aligned with dynamic_take_profit zones and actual market conditions)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -699,13 +705,13 @@ portfolio_heat:
   description: "Portfolio heat tracking: correlation-adjusted exposure monitoring"
 
 # 2026 OPTIMIZATION: Time-of-Day Risk Scaling
-# DISABLED: Time-of-day scaling interferes with fixed $1 slot allocation model
+# DISABLED: Time-of-day scaling interferes with fixed $2 slot allocation model
 # Industry standard: Adjust risk based on session liquidity
 # US market hours: 100% risk, Asian: 80%, European: 90%, Weekend: 50%
 time_of_day_risk_scaling:
-  enabled: false  # DISABLED: interferes with fixed $1 slot allocation model
+  enabled: false  # DISABLED: interferes with fixed $2 slot allocation model
   # RE-ENABLE RISKS: If re-enabled, must update risk envelope to account for time-based scaling
-  # and ensure fixed $1 exposure cap is still respected after multiplier
+  # and ensure fixed $2 exposure cap is still respected after multiplier
   # RE-ENABLE REQUIREMENTS: Update kalshi_crypto_15m_risk_envelope.py to apply time_of_day_multiplier
   # to risk limits, not just order sizes
   us_market_hours: "09:30-16:00 ET"  # US market hours
@@ -716,7 +722,7 @@ time_of_day_risk_scaling:
   asian_multiplier: 0.8  # 80% risk during Asian session (lower liquidity)
   european_multiplier: 0.9  # 90% risk during European session
   weekend_multiplier: 0.8  # 80% risk during weekend (relaxed from 0.5 - use volatility regime instead)
-  description: "Time-of-day risk scaling: DISABLED - interferes with fixed $1 slot allocation"
+  description: "Time-of-day risk scaling: DISABLED - interferes with fixed $2 slot allocation"
 
 # 2026 OPTIMIZATION: Per-Asset Rolling PnL Limits
 # Industry standard: Asset-specific rolling PnL limits based on volatility
@@ -805,12 +811,12 @@ news_event_avoidance:
 fractional_contract_override_threshold: 0.5  # Allow 1 contract if max_notional >= 50% of contract cost
 assets:
   BTC:
-    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
-    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $2 total exposure model
+    # max_notional_pct DISABLED - using fixed $2 exposure cap instead
     max_contracts:
-      value: 1  # 1 contract per order (slot-based exposure management)
+      value: 2  # Up to 2 contracts per order (slot-based exposure management, capped by $2)
       static: profile
-      description: "Maximum contracts per order for BTC (1 contract per slot)"
+      description: "Maximum contracts per order for BTC (up to 2 contracts per slot within $2 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -824,18 +830,18 @@ assets:
     # NEW: Asset tier configuration
     asset_tier: 1  # Tier 1 (core assets: BTC, ETH)
     # Depth thresholds (contracts at best price) - single source of truth for 15m stack
-    # CRITICAL FIX: Set to 1 contract since we only trade 1 contract per 15m window per asset
-    # The gating condition is "can I fill 1 contract within slippage budget?" not "does book have 2-3 contracts"
-    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - aligned with 1 contract per order
-    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
+    # CRITICAL FIX: Set to 1 contract (minimum displayed liquidity). Sizing may request up to 2
+    # contracts when price fits in the $2 cap; depth-based sizer will reduce if book is thinner.
+    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - at least 1 contract of fillable liquidity
+    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - at least 1 contract of fillable liquidity
     
   ETH:
-    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
-    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $2 total exposure model
+    # max_notional_pct DISABLED - using fixed $2 exposure cap instead
     max_contracts:
-      value: 1  # 1 contract per order (slot-based exposure management)
+      value: 2  # Up to 2 contracts per order (slot-based exposure management, capped by $2)
       static: profile
-      description: "Maximum contracts per order for ETH (1 contract per slot)"
+      description: "Maximum contracts per order for ETH (up to 2 contracts per slot within $2 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -849,18 +855,18 @@ assets:
     # NEW: Asset tier configuration
     asset_tier: 1  # Tier 1 (core assets: BTC, ETH)
     # Depth thresholds (contracts at best price) - single source of truth for 15m stack
-    # CRITICAL FIX: Set to 1 contract since we only trade 1 contract per 15m window per asset
-    # The gating condition is "can I fill 1 contract within slippage budget?" not "does book have 2-3 contracts"
-    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - aligned with 1 contract per order
-    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
+    # CRITICAL FIX: Set to 1 contract (minimum displayed liquidity). Sizing may request up to 2
+    # contracts when price fits in the $2 cap; depth-based sizer will reduce if book is thinner.
+    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - at least 1 contract of fillable liquidity
+    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - at least 1 contract of fillable liquidity
     
   SOL:
-    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
-    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $2 total exposure model
+    # max_notional_pct DISABLED - using fixed $2 exposure cap instead
     max_contracts:
-      value: 1  # 1 contract per order (slot-based exposure management)
+      value: 2  # Up to 2 contracts per order (slot-based exposure management, capped by $2)
       static: profile
-      description: "Maximum contracts per order for SOL (1 contract per slot)"
+      description: "Maximum contracts per order for SOL (up to 2 contracts per slot within $2 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -874,18 +880,18 @@ assets:
     # NEW: Asset tier configuration
     asset_tier: 2  # Tier 2 (alt assets: SOL, XRP, DOGE)
     # Depth thresholds (contracts at best price) - single source of truth for 15m stack
-    # CRITICAL FIX: Set to 1 contract since we only trade 1 contract per 15m window per asset
-    # The gating condition is "can I fill 1 contract within slippage budget?" not "does book have 2-3 contracts"
-    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - aligned with 1 contract per order
-    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
+    # CRITICAL FIX: Set to 1 contract (minimum displayed liquidity). Sizing may request up to 2
+    # contracts when price fits in the $2 cap; depth-based sizer will reduce if book is thinner.
+    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - at least 1 contract of fillable liquidity
+    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - at least 1 contract of fillable liquidity
     
   XRP:
-    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
-    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $2 total exposure model
+    # max_notional_pct DISABLED - using fixed $2 exposure cap instead
     max_contracts:
-      value: 1  # 1 contract per order (slot-based exposure management)
+      value: 2  # Up to 2 contracts per order (slot-based exposure management, capped by $2)
       static: profile
-      description: "Maximum contracts per order for XRP (1 contract per slot)"
+      description: "Maximum contracts per order for XRP (up to 2 contracts per slot within $2 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -899,18 +905,18 @@ assets:
     # NEW: Asset tier configuration
     asset_tier: 2  # Tier 2 (alt assets: SOL, XRP, DOGE)
     # Depth thresholds (contracts at best price) - single source of truth for 15m stack
-    # CRITICAL FIX: Set to 1 contract since we only trade 1 contract per 15m window per asset
-    # The gating condition is "can I fill 1 contract within slippage budget?" not "does book have 2-3 contracts"
-    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - aligned with 1 contract per order
-    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
+    # CRITICAL FIX: Set to 1 contract (minimum displayed liquidity). Sizing may request up to 2
+    # contracts when price fits in the $2 cap; depth-based sizer will reduce if book is thinner.
+    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - at least 1 contract of fillable liquidity
+    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - at least 1 contract of fillable liquidity
     
   DOGE:
-    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
-    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $2 total exposure model
+    # max_notional_pct DISABLED - using fixed $2 exposure cap instead
     max_contracts:
-      value: 1  # 1 contract per order (slot-based exposure management)
+      value: 2  # Up to 2 contracts per order (slot-based exposure management, capped by $2)
       static: profile
-      description: "Maximum contracts per order for DOGE (1 contract per slot)"
+      description: "Maximum contracts per order for DOGE (up to 2 contracts per slot within $2 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -924,20 +930,20 @@ assets:
     # NEW: Asset tier configuration
     asset_tier: 2  # Tier 2 (alt assets: SOL, XRP, DOGE)
     # Depth thresholds (contracts at best price) - single source of truth for 15m stack
-    # CRITICAL FIX: Set to 1 contract since we only trade 1 contract per 15m window per asset
-    # The gating condition is "can I fill 1 contract within slippage budget?" not "does book have 2-3 contracts"
-    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - aligned with 1 contract per order
-    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
+    # CRITICAL FIX: Set to 1 contract (minimum displayed liquidity). Sizing may request up to 2
+    # contracts when price fits in the $2 cap; depth-based sizer will reduce if book is thinner.
+    min_depth_yes: 1  # Minimum YES depth at best bid (contracts) - at least 1 contract of fillable liquidity
+    min_depth_no: 1  # Minimum NO depth at best ask (contracts) - at least 1 contract of fillable liquidity
 
 # ── Per-Agent Caps ─────────────────────────────────────────────────────────
-# 2026-07-08 UPDATE: Percentage-based agent caps DISABLED in favor of fixed $1 exposure model
-# max_notional_pct DISABLED - using fixed $1 exposure cap instead
+# 2026-07-08 UPDATE: Percentage-based agent caps DISABLED in favor of fixed $2 exposure model
+# max_notional_pct DISABLED - using fixed $2 exposure cap instead
 agent_defaults:
-  # CRITICAL FIX (2026-07-17): All order flow limits removed - $1 global exposure cap is single source of truth
-  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+  # CRITICAL FIX (2026-07-17): All order flow limits removed - $2 global exposure cap is single source of truth
+  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=2.00, MAX_CONTRACTS_PER_ORDER=2, MAX_POSITIONS_PER_ASSET=1
   # These limits make order flow limits redundant or impossible
-  max_yes_position: 1  # Aligned with MAX_POSITIONS_PER_ASSET=1 in GlobalSlotAllocator
-  max_no_position: 1  # Aligned with MAX_POSITIONS_PER_ASSET=1 in GlobalSlotAllocator
+  max_yes_position: 2  # Aligned with MAX_CONTRACTS_PER_ORDER=2 in GlobalSlotAllocator
+  max_no_position: 2  # Aligned with MAX_CONTRACTS_PER_ORDER=2 in GlobalSlotAllocator
   
   # Entry window (time before expiry to start trading)
   # Kalshi 15m markets only exist ~15 minutes before expiry
@@ -1155,9 +1161,9 @@ guardrails:
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
   min_contract_price_cents: 5  # CRITICAL FIX (2026-08-01): Lowered from 10c to 5c for 15m crypto volatility
-  max_contract_price_cents: 85  # CRITICAL FIX (2026-08-01): Expanded from 75c to 85c for 15m crypto volatility
+  max_contract_price_cents: 75  # ALIGNED with canonical 10-75c entry range
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
-  # CRITICAL FIX (2026-07-17): Removed max_orders_per_cycle - $1 exposure cap is the single source of truth
+  # CRITICAL FIX (2026-07-17): Removed max_orders_per_cycle - $2 exposure cap is the single source of truth
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)
   # Time trap prevention (entry window narrowing)
   # Aligned with TTE regimes from risk.tte_regime:
@@ -1219,10 +1225,10 @@ guardrails:
   # Set to 0 to disable (rely on per-asset and cycle limits instead)
   max_position_value_usd: 100000.0  # $100k total position limit (relaxed for 15m crypto)
 
-  # 2026-07-08 UPDATE: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $1 exposure model
-  # per_trade_risk_pct DISABLED - using fixed $1 exposure cap instead
+  # 2026-07-08 UPDATE: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $2 exposure model
+  # per_trade_risk_pct DISABLED - using fixed $2 exposure cap instead
   # Sizing is now enforced via:
-  # - risk_policy.fixed_exposure_cap_usd: 1.00
+  # - risk_policy.fixed_exposure_cap_usd: 2.00
 
   # ── Adaptive Risk Scaling ───────────────────────────────────────────────────
   # Risk scaling bands based on drawdown percentage.
@@ -1304,43 +1310,45 @@ kelly:
 # ── Contract Caps ─────────────────────────────────────────────────────────
 # Hard caps on total contracts across all positions (not bankroll-scaled)
 # These are venue-level limits to prevent excessive position concentration
-# 2026-07-09: Reduced all caps to align with slot-based model and $1 exposure cap
+# 2026-07-09: Reduced all caps to align with slot-based model and $2 exposure cap
 contract_caps:
-  # CRITICAL FIX (2026-07-17): All contract limits removed - $1 global exposure cap is single source of truth
-  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
-  # These limits make contract limits redundant or impossible
-  max_single_order_contracts: 1  # Aligned with MAX_CONTRACTS_PER_ORDER=1 in GlobalSlotAllocator
+  # CRITICAL FIX (2026-08-22): Allow up to 2 contracts per order within $2 global exposure cap.
+  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=2.00, MAX_CONTRACTS_PER_ORDER=2, MAX_POSITIONS_PER_ASSET=1
+  # The $2 cap remains the single source of truth for total exposure.
+  max_single_order_contracts: 2  # Aligned with MAX_CONTRACTS_PER_ORDER=2 in GlobalSlotAllocator
 
 # ── Risk Policy ───────────────────────────────────────────────────────────
 # Risk limits that affect order acceptance and sizing
-# 2026-07-08 UPDATE: Fixed $1 exposure model for small bankroll optimization
-# Replaces percentage-based sizing with fixed dollar cap to ensure $1+ profit per 15m window
+# 2026-07-08 UPDATE: Fixed $2 exposure model for small bankroll optimization
+# Replaces percentage-based sizing with fixed dollar cap to ensure $2+ profit per 15m window
 risk_policy:
   # FIXED DOLLAR EXPOSURE MODEL (2026-07-08)
-  # Ensures never more than $1 exposure at any time
+  # Ensures never more than $2 exposure at any time
   # Forces entries in sweet spot (10-75c) and enables mandatory profit exits
-  fixed_exposure_cap_usd: 1.00  # CRITICAL: $1 max total exposure across all assets
+  fixed_exposure_cap_usd: 2.00  # CRITICAL: $2 max total exposure across all assets
   sequential_trading: true  # No new entries until all positions exit
   # MANDATORY PROFIT EXIT (2026-07-08)
   # Automatic profit-taking based on entry price to ensure quick wins
   mandatory_profit_exit:
-    enabled: true  # Enable automatic profit exits
-    # Profit targets based on entry price (tiered for optimal risk/reward)
-    # Entry 10-30c: 30% profit target (quick flips)
-    # Entry 30-50c: 25% profit target
-    # Entry 50-75c: 20% profit target
-    profit_target_pct_low: 0.30  # 30% for entries 10-30c
-    profit_target_pct_mid: 0.25  # 25% for entries 30-50c
-    profit_target_pct_high: 0.20  # 20% for entries 50-75c
+    # 2026-08-12: Disabled so the edge-based take-profit from resolve_exit_policy is respected.
+    # The mandatory percent-of-price targets overrode the model-derived TP and caused premature exits.
+    enabled: false  # Disable automatic profit exit override
+    # Profit targets as a % of MAX GAIN (kept for reference if re-enabled).
+    # Entry 10-30c: 50% of max gain (e.g., 30c -> 65c)
+    # Entry 30-50c: 40% of max gain (e.g., 40c -> 64c)
+    # Entry 50-75c: 30% of max gain (e.g., 60c -> 72c)
+    profit_target_pct_low: 0.50  # 50% of max gain for entries 10-30c
+    profit_target_pct_mid: 0.40  # 40% of max gain for entries 30-50c
+    profit_target_pct_high: 0.30  # 30% of max gain for entries 50-75c
     price_threshold_low_cents: 30  # Threshold for low band
     price_threshold_high_cents: 50  # Threshold for high band
-  # Legacy percentage-based cap (DISABLED in favor of fixed $1 model)
-  group_notional_cap_pct: 0.05  # 5% of bankroll per group (DISABLED - using fixed $1 instead)
-  group_notional_cap_min_usd: 5.00  # Minimum $5 cap (DISABLED - using fixed $1 instead)
-  group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap (DISABLED - using fixed $1 instead)
-  # CRITICAL FIX (2026-08-01): Aligned with 5-85c canonical range (guardrails.max_contract_price_cents
+  # Legacy percentage-based cap (DISABLED in favor of fixed $2 model)
+  group_notional_cap_pct: 0.05  # 5% of bankroll per group (DISABLED - using fixed $2 instead)
+  group_notional_cap_min_usd: 5.00  # Minimum $5 cap (DISABLED - using fixed $2 instead)
+  group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap (DISABLED - using fixed $2 instead)
+  # ALIGNED with 10-75c canonical range (guardrails.max_contract_price_cents
   # and GlobalSlotAllocator.MAX_ENTRY_CENTS are the enforced limits; this key is informational)
-  max_entry_price_cents: 85  # CRITICAL FIX (2026-08-01): Max entry price for new orders (canonical 5-85c band)
+  max_entry_price_cents: 75  # Max entry price for new orders (canonical 10-75c band)
   max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
   # 2026 STANDARD: Per-asset cluster stop-loss limits instead of aggregate
   # Each asset (BTC/ETH/SOL/XRP/DOGE) has calibrated limits based on volatility and liquidity
@@ -1486,9 +1494,10 @@ strategy_policy:
 # P3-FIX7 through P3-FIX9: Exit logic configuration (R:R, trailing, time cutoff)
 exit_policy:
   # P3-FIX7: Per-asset risk-reward configuration
-  # CRITICAL FIX 2026-07-16: Updated to achieve positive risk/reward ratio (2:1 in favor)
-  # Previous values (TP 10-15%, SL 6.7-8%) resulted in 1.6:1 against trader, requiring 61.5% win rate
-  # New values (TP 80%, SL 40%) achieve 2:1 in favor, requiring only 33% win rate
+  # CRITICAL FIX 2026-08-12: TP distance is now a % of MAX GAIN (100 - entry),
+  # with an edge-based override in resolve_exit_policy when model probability is known.
+  # tp_distance_pct is only the fallback when the model edge is not available.
+  # Value 0.65 captures ~65% of theoretical max gain, aligned with 60-70% rule.
   risk_reward:
     # Minimum R:R ratio required for trade entry
     min_rr:
@@ -1496,14 +1505,15 @@ exit_policy:
       ETH: 2.0  # ETH: 2:1 reward-risk minimum
       SOL: 2.0  # SOL: 2:1 reward-risk minimum (raised from 1.5)
       XRP: 2.0  # XRP: 2:1 reward-risk minimum (raised from 1.5)
-      DOGE: 2.0  # DOGE: 2:1 reward-risk minimum (raised from 1.5)
-    # Take profit distance as percentage of entry price
+      DOGE: 2.0  # DOGE: 2:1 risk-reward minimum (raised from 1.5)
+    # Take profit distance as percentage of MAX GAIN (100 - entry_price_cents).
+    # Edge-based TP in resolve_exit_policy overrides this with 75% of model edge.
     tp_distance_pct:
-      BTC: 0.80  # BTC: 80% TP distance (raised from 15%)
-      ETH: 0.80  # ETH: 80% TP distance (raised from 15%)
-      SOL: 0.80  # SOL: 80% TP distance (raised from 12%)
-      XRP: 0.80  # XRP: 80% TP distance (raised from 12%)
-      DOGE: 0.80  # DOGE: 80% TP distance (raised from 10%)
+      BTC: 0.65  # BTC: 65% of max gain as fallback
+      ETH: 0.65  # ETH: 65% of max gain as fallback
+      SOL: 0.65  # SOL: 65% of max gain as fallback
+      XRP: 0.65  # XRP: 65% of max gain as fallback
+      DOGE: 0.65  # DOGE: 65% of max gain as fallback
     # Stop loss distance as percentage of entry price
     sl_distance_pct:
       BTC: 0.40  # BTC: 40% SL distance (raised from 7.5%)
@@ -1511,6 +1521,9 @@ exit_policy:
       SOL: 0.40  # SOL: 40% SL distance (raised from 8%)
       XRP: 0.40  # XRP: 40% SL distance (raised from 8%)
       DOGE: 0.40  # DOGE: 40% SL distance (raised from 6.7%)
+    # CRITICAL FIX (2026-08-10): upstream/midstream/downstream stop-loss kill switch.
+    # Disable the stop-loss so trades run until take-profit, trailing stop, ratchet, or time exit.
+    stop_loss_enabled: false
   
   # P3-FIX8: Trailing stop configuration
   trailing:

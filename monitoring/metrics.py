@@ -1,5 +1,5 @@
 """
-Metrics - Prometheus-compatible metrics per MASTER_SPEC v1.0
+Metrics - Prometheus-compatible metrics with latency tracking and business metrics.
 
 This module implements the observability layer for MERID:
 - Prometheus-compatible metric collection
@@ -7,20 +7,27 @@ This module implements the observability layer for MERID:
 - Consensus metrics
 - Stream metrics
 - Execution metrics
+- Latency tracking with P50, P95, P99 percentiles
+- Business metrics (orders, P&L, slippage, fill rate)
+- System resource monitoring
 
+Version: 2.0.0
 Reference: MASTER_SPEC.md Section 7.1 (Scalability Layer)
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional
+import statistics
 
 from utils.logger import get_logger
+from config.monitoring_config import get_monitoring_config, MetricsConfig
 
 logger = get_logger("monitoring.metrics")
 
@@ -235,17 +242,244 @@ class Histogram:
         return tuple(labels.get(name, "") for name in self.label_names)
 
 
+class Summary:
+    """
+    Prometheus-style summary metric with percentile tracking.
+    
+    Tracks value distributions and calculates P50, P95, P99 percentiles.
+    Used for latency tracking and SLA monitoring.
+    """
+    
+    def __init__(
+        self,
+        name: str,
+        help_text: str = "",
+        labels: Optional[List[str]] = None,
+        percentiles: Optional[List[float]] = None,
+        max_age_seconds: float = 600.0,  # 10 minutes
+        age_buckets: int = 5,
+    ) -> None:
+        self.name = name
+        self.help_text = help_text
+        self.label_names = labels or []
+        self.percentiles = percentiles or [0.5, 0.95, 0.99]
+        self.max_age_seconds = max_age_seconds
+        self.age_buckets = age_buckets
+        
+        # Store samples per label key with timestamps
+        self._samples: Dict[tuple, List[tuple[float, float]]] = defaultdict(list)  # (value, timestamp)
+        self._sums: Dict[tuple, float] = defaultdict(float)
+        self._counts: Dict[tuple, int] = defaultdict(int)
+    
+    def observe(self, value: float, labels: Optional[Dict[str, str]] = None) -> None:
+        """Observe a value."""
+        label_key = self._make_label_key(labels)
+        now = time.time()
+        
+        self._samples[label_key].append((value, now))
+        self._sums[label_key] += value
+        self._counts[label_key] += 1
+        
+        # Clean old samples
+        self._cleanup_old_samples(label_key, now)
+    
+    def _cleanup_old_samples(self, label_key: tuple, now: float) -> None:
+        """Remove samples older than max_age_seconds."""
+        cutoff = now - self.max_age_seconds
+        self._samples[label_key] = [
+            (v, t) for v, t in self._samples[label_key] if t > cutoff
+        ]
+    
+    def _calculate_percentiles(self, label_key: tuple) -> Dict[float, float]:
+        """Calculate percentiles for a label key."""
+        samples = [v for v, t in self._samples[label_key]]
+        if not samples:
+            return {p: 0.0 for p in self.percentiles}
+        
+        sorted_samples = sorted(samples)
+        n = len(sorted_samples)
+        
+        percentiles = {}
+        for p in self.percentiles:
+            index = int(n * p)
+            if index >= n:
+                index = n - 1
+            percentiles[p] = sorted_samples[index]
+        
+        return percentiles
+    
+    def collect(self) -> List[MetricValue]:
+        """Collect all metric values."""
+        results = []
+        now = time.time()
+        
+        for label_key in self._counts.keys():
+            labels = dict(zip(self.label_names, label_key)) if label_key else {}
+            
+            # Clean old samples before collecting
+            self._cleanup_old_samples(label_key, now)
+            
+            # Calculate percentiles
+            percentiles = self._calculate_percentiles(label_key)
+            
+            # Emit percentile metrics
+            for p, value in percentiles.items():
+                percentile_labels = {**labels, "quantile": str(p)}
+                results.append(MetricValue(
+                    name=f"{self.name}",
+                    metric_type=MetricType.SUMMARY,
+                    value=value,
+                    labels=percentile_labels,
+                    help_text=self.help_text,
+                ))
+            
+            # Emit sum and count
+            results.append(MetricValue(
+                name=f"{self.name}_sum",
+                metric_type=MetricType.SUMMARY,
+                value=self._sums[label_key],
+                labels=labels,
+                help_text=self.help_text,
+            ))
+            
+            results.append(MetricValue(
+                name=f"{self.name}_count",
+                metric_type=MetricType.SUMMARY,
+                value=self._counts[label_key],
+                labels=labels,
+                help_text=self.help_text,
+            ))
+        
+        return results
+    
+    def _make_label_key(self, labels: Optional[Dict[str, str]]) -> tuple:
+        if not labels:
+            return ()
+        return tuple(labels.get(name, "") for name in self.label_names)
+
+
 class MetricsRegistry:
     """
-    Central registry for all metrics.
+    Central registry for all metrics with business metrics and system monitoring.
     
-    Provides Prometheus-compatible metric collection and export.
+    Provides Prometheus-compatible metric collection and export with:
+    - Standard Prometheus metrics (counter, gauge, histogram, summary)
+    - Business metrics (orders, P&L, slippage, fill rate)
+    - System resource monitoring (CPU, memory, disk, network)
+    - Latency tracking with percentiles
     """
     
-    def __init__(self) -> None:
+    def __init__(self, config: Optional[MetricsConfig] = None) -> None:
+        self._config = config or get_monitoring_config().metrics
         self._metrics: Dict[str, object] = {}
         self._collectors: List[Callable[[], List[MetricValue]]] = []
         self._logger = get_logger("monitoring.metrics.registry")
+        
+        # Initialize business metrics
+        self._init_business_metrics()
+        
+        # Initialize system resource metrics
+        self._init_system_metrics()
+    
+    def _init_business_metrics(self) -> None:
+        """Initialize business metrics for trading operations."""
+        if self._config.track_orders:
+            self.counter(
+                "trading_orders_total",
+                "Total number of trading orders",
+                labels=["venue", "side", "status"]
+            )
+            self.counter(
+                "trading_orders_submitted",
+                "Number of orders submitted",
+                labels=["venue", "side"]
+            )
+            self.counter(
+                "trading_orders_filled",
+                "Number of orders filled",
+                labels=["venue", "side"]
+            )
+            self.counter(
+                "trading_orders_rejected",
+                "Number of orders rejected",
+                labels=["venue", "reason"]
+            )
+        
+        if self._config.track_pnl:
+            self.gauge(
+                "trading_pnl_total",
+                "Total profit and loss",
+                labels=["venue", "asset"]
+            )
+            self.gauge(
+                "trading_pnl_daily",
+                "Daily profit and loss",
+                labels=["venue", "asset"]
+            )
+        
+        if self._config.track_slippage:
+            self.summary(
+                "trading_slippage_bps",
+                "Trading slippage in basis points",
+                labels=["venue", "side"],
+                percentiles=self._config.percentiles
+            )
+        
+        if self._config.track_fill_rate:
+            self.gauge(
+                "trading_fill_rate",
+                "Order fill rate (0-1)",
+                labels=["venue"]
+            )
+        
+        # Latency metrics for trading operations
+        self.summary(
+            "trading_order_latency_seconds",
+            "Order submission latency in seconds",
+            labels=["venue"],
+            percentiles=self._config.percentiles
+        )
+        
+        self.summary(
+            "trading_fill_latency_seconds",
+            "Order fill latency in seconds",
+            labels=["venue"],
+            percentiles=self._config.percentiles
+        )
+    
+    def _init_system_metrics(self) -> None:
+        """Initialize system resource monitoring metrics."""
+        if self._config.track_cpu:
+            self.gauge(
+                "system_cpu_percent",
+                "CPU usage percentage",
+                labels=["core"]
+            )
+        
+        if self._config.track_memory:
+            self.gauge(
+                "system_memory_bytes",
+                "Memory usage in bytes",
+                labels=["type"]  # type: used, available, total
+            )
+            self.gauge(
+                "system_memory_percent",
+                "Memory usage percentage",
+            )
+        
+        if self._config.track_disk:
+            self.gauge(
+                "system_disk_bytes",
+                "Disk usage in bytes",
+                labels=["mount", "type"]  # type: used, free, total
+            )
+        
+        if self._config.track_network:
+            self.counter(
+                "system_network_bytes",
+                "Network traffic in bytes",
+                labels=["direction", "interface"]  # direction: sent, received
+            )
     
     def counter(
         self,
@@ -289,6 +523,21 @@ class MetricsRegistry:
         histogram = Histogram(name, help_text, labels, buckets)
         self._metrics[name] = histogram
         return histogram
+    
+    def summary(
+        self,
+        name: str,
+        help_text: str = "",
+        labels: Optional[List[str]] = None,
+        percentiles: Optional[List[float]] = None,
+    ) -> Summary:
+        """Create or get a summary metric with percentile tracking."""
+        if name in self._metrics:
+            return self._metrics[name]  # type: ignore
+        
+        summary = Summary(name, help_text, labels, percentiles)
+        self._metrics[name] = summary
+        return summary
     
     def register_collector(
         self,
@@ -344,15 +593,121 @@ _metrics_registry: Optional[MetricsRegistry] = None
 _metrics_registry_lock = threading.Lock()
 
 
-def get_metrics_registry() -> MetricsRegistry:
-    """Get or create global metrics registry."""
+def get_metrics_registry(config: Optional[MetricsConfig] = None) -> MetricsRegistry:
+    """Get or create global metrics registry with optional config."""
     global _metrics_registry
     if _metrics_registry is None:
         with _metrics_registry_lock:
             if _metrics_registry is None:
-                _metrics_registry = MetricsRegistry()
+                _metrics_registry = MetricsRegistry(config)
                 _initialize_default_metrics(_metrics_registry)
     return _metrics_registry
+
+
+def _initialize_default_metrics(registry: MetricsRegistry) -> None:
+    """Initialize default MERID metrics."""
+    
+    registry.counter(
+        "merid_agent_observations_total",
+        "Total agent observations",
+        ["agent_id"],
+    )
+    
+    registry.counter(
+        "merid_agent_votes_total",
+        "Total agent votes",
+        ["agent_id", "decision"],
+    )
+
+
+class SystemMetricsCollector:
+    """
+    Collects system resource metrics (CPU, memory, disk, network).
+    
+    Updates metrics at regular intervals with minimal performance impact.
+    """
+    
+    def __init__(self, registry: MetricsRegistry, config: Optional[MetricsConfig] = None):
+        self._registry = registry
+        self._config = config or get_monitoring_config().metrics
+        self._logger = get_logger("monitoring.metrics.system")
+        self._running = False
+        self._task = None
+    
+    async def start(self) -> None:
+        """Start system metrics collection."""
+        if self._running:
+            return
+        
+        self._running = True
+        self._task = asyncio.create_task(self._collect_loop())
+        self._logger.info("System metrics collector started")
+    
+    async def stop(self) -> None:
+        """Stop system metrics collection."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._logger.info("System metrics collector stopped")
+    
+    async def _collect_loop(self) -> None:
+        """Main collection loop."""
+        import psutil
+        
+        while self._running:
+            try:
+                self._collect_system_metrics(psutil)
+                await asyncio.sleep(self._config.system_metrics_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(f"System metrics collection error: {e}")
+                await asyncio.sleep(self._config.system_metrics_interval)
+    
+    def _collect_system_metrics(self, psutil) -> None:
+        """Collect system resource metrics."""
+        try:
+            # CPU metrics
+            if self._config.track_cpu:
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                self._registry.gauge("system_cpu_percent").set(cpu_percent, labels={"core": "all"})
+                
+                # Per-core CPU
+                for i, percent in enumerate(psutil.cpu_percent(interval=0.1, percpu=True)):
+                    self._registry.gauge("system_cpu_percent").set(percent, labels={"core": str(i)})
+            
+            # Memory metrics
+            if self._config.track_memory:
+                mem = psutil.virtual_memory()
+                self._registry.gauge("system_memory_bytes").set(mem.total, labels={"type": "total"})
+                self._registry.gauge("system_memory_bytes").set(mem.available, labels={"type": "available"})
+                self._registry.gauge("system_memory_bytes").set(mem.used, labels={"type": "used"})
+                self._registry.gauge("system_memory_percent").set(mem.percent)
+            
+            # Disk metrics
+            if self._config.track_disk:
+                for partition in psutil.disk_partitions():
+                    try:
+                        usage = psutil.disk_usage(partition.mountpoint)
+                        mount = partition.mountpoint.replace("\\", "").replace("/", "")
+                        self._registry.gauge("system_disk_bytes").set(usage.total, labels={"mount": mount, "type": "total"})
+                        self._registry.gauge("system_disk_bytes").set(usage.free, labels={"mount": mount, "type": "free"})
+                        self._registry.gauge("system_disk_bytes").set(usage.used, labels={"mount": mount, "type": "used"})
+                    except Exception as e:
+                        self._logger.warning(f"Failed to collect disk metrics for {partition.mountpoint}: {e}")
+            
+            # Network metrics
+            if self._config.track_network:
+                net_io = psutil.net_io_counters()
+                self._registry.counter("system_network_bytes").inc(net_io.bytes_sent, labels={"direction": "sent", "interface": "all"})
+                self._registry.counter("system_network_bytes").inc(net_io.bytes_recv, labels={"direction": "received", "interface": "all"})
+        
+        except Exception as e:
+            self._logger.error(f"Failed to collect system metrics: {e}")
 
 
 def _initialize_default_metrics(registry: MetricsRegistry) -> None:

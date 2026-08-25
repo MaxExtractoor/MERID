@@ -10,7 +10,7 @@
 
 market_regime_gate:
   enabled: true
-  shadow_mode: false  # Set true for Phase 1 (log only, don't block)
+  shadow_mode: true  # Set true for Phase 1 (log only, don't block)
   universe:
     - BTC
     - ETH

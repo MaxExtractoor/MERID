@@ -1,0 +1,40 @@
+{
+  "spread_replay": {
+    "collection": {
+      "default_duration_seconds": 300,
+      "default_sample_interval_seconds": 1.0,
+      "max_samples_per_ticker": 1000,
+      "save_interval_seconds": 30.0,
+      "assets": ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    },
+    "analysis": {
+      "time_buckets": {
+        "OPEN_0_3MIN": {"min_seconds": 0, "max_seconds": 180},
+        "EARLY_3_6MIN": {"min_seconds": 180, "max_seconds": 360},
+        "MID_6_10MIN": {"min_seconds": 360, "max_seconds": 600},
+        "LATE_10_13MIN": {"min_seconds": 600, "max_seconds": 780},
+        "EXPIRY_13_15MIN": {"min_seconds": 780, "max_seconds": 900}
+      },
+      "cap_test_levels": [0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+      "percentiles": [50, 75, 90, 95],
+      "false_reject_assumption_rate": 0.2
+    },
+    "output": {
+      "directory": "spread_analysis_output",
+      "format": ["json", "txt"],
+      "include_intermediate_saves": true
+    },
+    "current_caps": {
+      "BTC": 10,
+      "ETH": 12,
+      "SOL": 20,
+      "XRP": 20,
+      "DOGE": 30
+    },
+    "recommendations": {
+      "strict_threshold_percentile": 90,
+      "warning_threshold_percentile": 75,
+      "warning_cap_ratio": 0.8
+    }
+  }
+}

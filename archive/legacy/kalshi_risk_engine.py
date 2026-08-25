@@ -57,7 +57,6 @@ from __future__ import annotations
 import collections
 import math
 import os
-import warnings
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -65,15 +64,6 @@ from typing import Dict, List, Optional, Tuple
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-# Issue deprecation warning on module import
-warnings.warn(
-    "kalshi_risk_engine is deprecated. Use kalshi_risk.py instead: "
-    "from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig, get_kalshi_risk",
-    DeprecationWarning,
-    stacklevel=2
-)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Settings helpers (bankroll-driven configuration)
@@ -286,12 +276,6 @@ class KalshiRiskEngine:
         name: str = "",
         quiet_bankroll_log: bool = False,
     ) -> None:
-        warnings.warn(
-            "KalshiRiskEngine is deprecated. Use KalshiRiskManager instead: "
-            "from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk",
-            DeprecationWarning,
-            stacklevel=2
-        )
         self.config = config
         self._name = name  # agent name for logging
         self._quiet_bankroll_log = quiet_bankroll_log
