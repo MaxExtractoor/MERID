@@ -449,7 +449,8 @@ class CachedPosition:
     def __post_init__(self):
         """Initialize canonical quantity_cc from contracts if not already set."""
         if self.quantity_cc == 0 and self.contracts:
-            self.quantity_cc = self.contracts * 100
+            self.quantity_cc = int(self.contracts * 100)
+            self.contracts = int(self.contracts)
 
     @property
     def notional_usd(self) -> Decimal:
@@ -482,8 +483,8 @@ class CachedPosition:
         """Return signed YES exposure in centi-contracts (positive=long YES, negative=long NO)."""
         qty = self.quantity_cc if self.quantity_cc else self.contracts * 100
         if BINARY_PRICE_SPACE_AVAILABLE:
-            return to_signed_yes_exposure(self.side, qty)
-        return qty if self.side.lower() == "yes" else -qty
+            return int(to_signed_yes_exposure(self.side, qty))
+        return int(qty if self.side.lower() == "yes" else -qty)
 
     def apply_fill(
         self,
@@ -536,6 +537,8 @@ class CachedPosition:
                 quantity_cc = int(Decimal(str(contracts)) * Decimal("100"))
             except Exception:
                 quantity_cc = int(contracts) * 100
+        else:
+            quantity_cc = int(quantity_cc)
 
         # Canonical signed YES delta for this fill.
         if BINARY_PRICE_SPACE_AVAILABLE:
@@ -687,8 +690,8 @@ class CachedPosition:
                     self.side = new_side
                     self.thesis_side = new_side
 
-            self.quantity_cc = new_quantity_cc
-            self.contracts = int(new_quantity_cc / 100)
+            self.quantity_cc = int(new_quantity_cc)
+            self.contracts = int(new_quantity_cc) // 100
             self.entry_price_state = "known"
 
             if self.quantity_cc < pre_quantity_cc:
@@ -739,15 +742,15 @@ class CachedPosition:
                     "[PNL-CALCULATION-SKIPPED] ticker=%s avg_price_cents=None - cannot calculate PnL for exit fill. entry_price_state=%s",
                     self.market_id, self.entry_price_state,
                 )
-                self.quantity_cc = new_quantity_cc
-                self.contracts = int(new_quantity_cc / 100)
+                self.quantity_cc = int(new_quantity_cc)
+                self.contracts = int(new_quantity_cc) // 100
             else:
                 # Long position PnL: exit price - entry price in own-side cents.
                 pnl_per = adjusted_price_cents - self.avg_price_cents
                 pnl_cents = Decimal(closed_quantity_cc * pnl_per) / Decimal("100")
                 self.realized_pnl_usd += Decimal(pnl_cents) / Decimal("100") - Decimal(fee_cents) / Decimal("100")
-                self.quantity_cc = new_quantity_cc
-                self.contracts = int(new_quantity_cc / 100)
+                self.quantity_cc = int(new_quantity_cc)
+                self.contracts = int(new_quantity_cc) // 100
 
         # Update side/thesis when the position is fully closed (keep for logging).
         if self.quantity_cc == 0:
@@ -2834,8 +2837,11 @@ class KalshiPositionCache:
                                         intent_count = int(payload.get('count', payload.get('count_fp', contracts)))
                                     except Exception:
                                         intent_count = contracts
-                                    fill_yes = yes_delta(intent_action, intent_side, intent_count)
-                                    position_yes = to_signed_yes_exposure(position.side, position.contracts)
+                                    fill_qty_cc = fill_record.quantity_cc or (intent_count * 100)
+                                    fill_action = fill_record.canonical_position_action or intent_action
+                                    fill_side = fill_record.canonical_position_side or intent_side
+                                    fill_yes = fill_record.canonical_yes_delta_cc or yes_delta(fill_action, fill_side, fill_qty_cc)
+                                    position_yes = position._yes_exposure()
 
                                     if position_yes * fill_yes < 0:
                                         # Opposite sign: this is a close or a reversal
@@ -3144,14 +3150,14 @@ class KalshiPositionCache:
                 from merid.prediction.intent_contract import emit_order_lifecycle_event
                 current_position = self._positions.get(market_id)
                 if current_position:
-                    post_position_yes_actual = to_signed_yes_exposure(current_position.side, current_position.contracts)
+                    post_position_yes_actual = current_position._yes_exposure()
                 elif position is not None:
                     # Position was closed and deleted during this fill; actual is zero.
                     post_position_yes_actual = 0
                 else:
                     # New position creation path: use the canonicalized position we just stored.
                     current_position = self._positions.get(market_id)
-                    post_position_yes_actual = to_signed_yes_exposure(current_position.side, current_position.contracts) if current_position else 0
+                    post_position_yes_actual = current_position._yes_exposure() if current_position else 0
 
                 emit_order_lifecycle_event(
                     client_order_id=client_order_id or fill_id or "unknown",
@@ -3160,7 +3166,7 @@ class KalshiPositionCache:
                     action=raw_action,
                     side=raw_side,
                     price_cents=price_cents,
-                    quantity=raw_contracts,
+                    quantity=raw_quantity_cc,
                     pre_position_yes=pre_position_yes,
                     post_position_yes_expected=expected_post_yes,
                     post_position_yes_actual=post_position_yes_actual,

@@ -906,6 +906,12 @@ def emit_order_lifecycle_event(
 
     Computes the canonical signed YES delta from the raw action/side.
     """
+    quantity = int(quantity)
+    pre_position_yes = int(pre_position_yes)
+    post_position_yes_expected = int(post_position_yes_expected)
+    if post_position_yes_actual is not None:
+        post_position_yes_actual = int(post_position_yes_actual)
+
     if BINARY_PRICE_SPACE_AVAILABLE:
         normalized_yes_delta = yes_delta(action, side, quantity)
     else:
@@ -925,7 +931,7 @@ def emit_order_lifecycle_event(
         strategy_intent=strategy_intent,
         action=action,
         side=side,
-        price_cents=price_cents,
+        price_cents=int(price_cents),
         quantity=quantity,
         normalized_yes_delta=normalized_yes_delta,
         pre_position_yes=pre_position_yes,

@@ -701,9 +701,9 @@ def yes_delta(action: str, side: str, qty: int) -> int:
     side = side.lower()
 
     if (action, side) in {("buy", "yes"), ("sell", "no")}:
-        return +qty
+        return +int(qty)
     if (action, side) in {("sell", "yes"), ("buy", "no")}:
-        return -qty
+        return -int(qty)
 
     raise ValueError(f"Unsupported order: action={action} side={side}")
 
@@ -724,9 +724,9 @@ def to_signed_yes_exposure(side: str, contracts: int) -> int:
     """
     side = side.lower()
     if side == "yes":
-        return +contracts
+        return +int(contracts)
     if side == "no":
-        return -contracts
+        return -int(contracts)
     raise ValueError(f"Unsupported side: {side}")
 
 

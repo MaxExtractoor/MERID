@@ -412,14 +412,17 @@ class FillsPoller:
                     
                     # Get REST position
                     rest_contracts = rest_pos.get("contracts", 0)
-                    
+                    rest_qcc = rest_pos.get("quantity_cc", 0)
+
                     # Get derived position from ledger
                     derived_pos = await ledger.compute_position_from_fills_async(market_id)
                     ledger_contracts = derived_pos.get("contracts", 0) if derived_pos else 0
-                    
+                    ledger_qcc = derived_pos.get("quantity_cc", 0) if derived_pos else 0
+
                     # Get live cache position
                     cache_pos = cache.get_position(market_id)
                     cache_contracts = cache_pos.contracts if cache_pos else 0
+                    cache_qcc = cache_pos.quantity_cc if cache_pos else 0
                     
                     # Check drift
                     # Extract agent_id from position if available, otherwise use market ticker
@@ -442,9 +445,9 @@ class FillsPoller:
                     drift_event = await drift_detector.check_drift(
                         market_id=market_id,
                         agent_id=agent_id,
-                        rest_position={"contracts": rest_contracts, "side": rest_side} if rest_side else None,
-                        ledger_position={"contracts": ledger_contracts} if derived_pos else None,
-                        cache_position={"contracts": cache_contracts} if cache_pos else None
+                        rest_position={"contracts": rest_contracts, "quantity_cc": rest_qcc, "side": rest_side} if rest_side else None,
+                        ledger_position={"contracts": ledger_contracts, "quantity_cc": ledger_qcc} if derived_pos else None,
+                        cache_position={"contracts": cache_contracts, "quantity_cc": cache_qcc} if cache_pos else None
                     )
                     
                     if drift_event and drift_event.severity.value in ("error", "critical"):
