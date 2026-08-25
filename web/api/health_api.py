@@ -56,8 +56,22 @@ async def signals_daemon_health():
             }
         }
         
-    except Exception as e:
-        logger.error(f"Signals daemon health check failed: {e}")
+    except ImportError as e:
+        logger.error(f"Signals daemon health check import failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Signals orchestrator module not available"
+        }
+    except AttributeError as e:
+        logger.error(f"Signals daemon health check attribute failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Orchestrator missing required attributes"
+        }
+    except RuntimeError as e:
+        logger.error(f"Signals daemon health check runtime failed: {e}")
         return {
             "status": "unhealthy",
             "timestamp": time.time(),
@@ -100,8 +114,22 @@ async def execution_daemon_health():
             }
         }
         
-    except Exception as e:
-        logger.error(f"Execution daemon health check failed: {e}")
+    except ImportError as e:
+        logger.error(f"Execution daemon health check import failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Execution bridge module not available"
+        }
+    except AttributeError as e:
+        logger.error(f"Execution daemon health check attribute failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Bridge missing required attributes"
+        }
+    except RuntimeError as e:
+        logger.error(f"Execution daemon health check runtime failed: {e}")
         return {
             "status": "unhealthy",
             "timestamp": time.time(),
@@ -136,8 +164,22 @@ async def kalshi_config_health():
         
         return result
         
-    except Exception as e:
-        logger.error(f"Kalshi config health check failed: {e}")
+    except ImportError as e:
+        logger.error(f"Kalshi config health check import failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Kalshi config module not available"
+        }
+    except AttributeError as e:
+        logger.error(f"Kalshi config health check attribute failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Config missing required attributes"
+        }
+    except RuntimeError as e:
+        logger.error(f"Kalshi config health check runtime failed: {e}")
         return {
             "status": "unhealthy",
             "timestamp": time.time(),
@@ -163,13 +205,37 @@ async def kalshi_readiness():
         )
         return snapshot.to_dict()
         
-    except Exception as e:
-        logger.error(f"Kalshi readiness check failed: {e}")
+    except ImportError as e:
+        logger.error(f"Kalshi readiness check import failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Kalshi health snapshot module not available",
+            "reasons": [f"import_failed: {e}"]
+        }
+    except asyncio.TimeoutError as e:
+        logger.error(f"Kalshi readiness check timeout: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Health snapshot timeout",
+            "reasons": [f"timeout: {e}"]
+        }
+    except AttributeError as e:
+        logger.error(f"Kalshi readiness check attribute failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Health snapshot missing required attributes",
+            "reasons": [f"attribute_failed: {e}"]
+        }
+    except RuntimeError as e:
+        logger.error(f"Kalshi readiness check runtime failed: {e}")
         return {
             "status": "unhealthy",
             "timestamp": time.time(),
             "error": str(e),
-            "reasons": [f"snapshot_build_failed: {e}"]
+            "reasons": [f"runtime_failed: {e}"]
         }
 
 
@@ -199,8 +265,22 @@ async def thesis_side_monitor_metrics():
             }
         }
         
-    except Exception as e:
-        logger.error(f"Thesis side monitor metrics failed: {e}")
+    except ImportError as e:
+        logger.error(f"Thesis side monitor metrics import failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Thesis side monitor module not available"
+        }
+    except AttributeError as e:
+        logger.error(f"Thesis side monitor metrics attribute failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": "Monitor missing required attributes"
+        }
+    except RuntimeError as e:
+        logger.error(f"Thesis side monitor metrics runtime failed: {e}")
         return {
             "status": "unhealthy",
             "timestamp": time.time(),
@@ -235,8 +315,8 @@ async def system_health():
             }
         }
         
-    except Exception as e:
-        logger.error(f"System health check failed: {e}")
+    except RuntimeError as e:
+        logger.error(f"System health check runtime failed: {e}")
         return {
             "status": "unhealthy",
             "timestamp": time.time(),

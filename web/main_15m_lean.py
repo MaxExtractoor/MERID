@@ -9,6 +9,7 @@ import os
 import logging
 import asyncio
 from pathlib import Path
+from typing import Optional
 
 # CRITICAL (2026-08-07): Kalshi deprecated the legacy V1 /portfolio/orders endpoint
 # on ~2026-06-18 and now returns 410 "Please switch to the V2 endpoints". V2's
@@ -589,63 +590,79 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("[LIFESPAN] Step 5: Failed to log profile configuration: %s", e)
         
-        # Wire arbitrage execution callback
-        logger.info("[LIFESPAN] Step 5b: Wiring YES/NO arbitrage execution callback")
-        try:
-            from merid.event_venues.kalshi.duality_validator import get_duality_validator
-            from merid.event_venues.kalshi.order_router import execute_arbitrage_async
-            
-            validator = get_duality_validator()
-            
-            async def arbitrage_execution_callback(opportunity):
-                """Execute arbitrage opportunity via order router."""
-                try:
-                    # Use tickers from opportunity if provided, otherwise derive from market_id
-                    if opportunity.yes_ticker and opportunity.no_ticker:
-                        yes_ticker = opportunity.yes_ticker
-                        no_ticker = opportunity.no_ticker
-                    elif opportunity.market_id:
-                        # Fallback: derive tickers from market_id
-                        # Kalshi market IDs follow pattern: KX{ASSET}15M-{DATE}-{STRIKE}
-                        # YES ticker: KX{ASSET}15M-{DATE}-{STRIKE}-YES
-                        # NO ticker: KX{ASSET}15M-{DATE}-{STRIKE}-NO
-                        base_ticker = opportunity.market_id
-                        yes_ticker = f"{base_ticker}-YES"
-                        no_ticker = f"{base_ticker}-NO"
-                    else:
-                        logger.warning("[ARBITRAGE-CALLBACK] No ticker information in opportunity, skipping execution")
-                        return
-                    
-                    logger.info(
-                        "[ARBITRAGE-CALLBACK] Executing: yes_ticker=%s no_ticker=%s "
-                        "yes_ask=%dc no_bid=%dc size=%d edge=%dc",
-                        yes_ticker, no_ticker, opportunity.yes_ask, opportunity.no_bid,
-                        opportunity.recommended_size, opportunity.edge_cents
-                    )
-                    
-                    # Execute arbitrage
-                    results = await execute_arbitrage_async(
-                        yes_ticker=yes_ticker,
-                        no_ticker=no_ticker,
-                        yes_ask_cents=opportunity.yes_ask,
-                        no_bid_cents=opportunity.no_bid,
-                        size=opportunity.recommended_size,
-                        market_id=opportunity.market_id
-                    )
-                    
-                    logger.info(
-                        "[ARBITRAGE-CALLBACK] Execution complete: yes_status=%s no_status=%s",
-                        results.get('yes', {}).get('status', 'unknown'),
-                        results.get('no', {}).get('status', 'unknown')
-                    )
-                except Exception as e:
-                    logger.error(f"[ARBITRAGE-CALLBACK] Execution failed: {e}")
-            
-            # Register the callback
-            validator.set_arbitrage_callback(arbitrage_execution_callback)
-            logger.info("[LIFESPAN] Step 5b: Arbitrage execution callback registered successfully")
-        except Exception as e:
-            logger.warning(f"[LIFESPAN] Step 5b: Failed to wire arbitrage callback: {e}")
+        # Wire arbitrage execution callback (gated off by default until provenance is wired)
+        arb_env = os.environ.get("MERID_ENABLE_ARBITRAGE", "").lower()
+        if arb_env in ("1", "true"):
+            arb_enabled = True
+        elif arb_env in ("0", "false"):
+            arb_enabled = False
+        else:
+            # Fall back to the active profile (single source of truth).
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+                profile = get_crypto_15m_profile()
+                arb_enabled = bool(getattr(profile, "yes_no_arbitrage", {}).get("enabled", False))
+            except Exception:
+                arb_enabled = False
+        if arb_enabled:
+            logger.info("[LIFESPAN] Step 5b: Wiring YES/NO arbitrage execution callback")
+            try:
+                from merid.event_venues.kalshi.duality_validator import get_duality_validator
+                from merid.event_venues.kalshi.order_router import execute_arbitrage_async
+
+                validator = get_duality_validator()
+
+                async def arbitrage_execution_callback(opportunity):
+                    """Execute arbitrage opportunity via order router."""
+                    try:
+                        # Use tickers from opportunity if provided, otherwise derive from market_id
+                        if opportunity.yes_ticker and opportunity.no_ticker:
+                            yes_ticker = opportunity.yes_ticker
+                            no_ticker = opportunity.no_ticker
+                        elif opportunity.market_id:
+                            # Fallback: derive tickers from market_id
+                            # Kalshi market IDs follow pattern: KX{ASSET}15M-{DATE}-{STRIKE}
+                            # YES ticker: KX{ASSET}15M-{DATE}-{STRIKE}-YES
+                            # NO ticker: KX{ASSET}15M-{DATE}-{STRIKE}-NO
+                            base_ticker = opportunity.market_id
+                            yes_ticker = f"{base_ticker}-YES"
+                            no_ticker = f"{base_ticker}-NO"
+                        else:
+                            logger.warning("[ARBITRAGE-CALLBACK] No ticker information in opportunity, skipping execution")
+                            return
+
+                        logger.info(
+                            "[ARBITRAGE-CALLBACK] Executing: yes_ticker=%s no_ticker=%s "
+                            "yes_ask=%dc no_bid=%dc size=%d edge=%dc",
+                            yes_ticker, no_ticker, opportunity.yes_ask, opportunity.no_bid,
+                            opportunity.recommended_size, opportunity.edge_cents
+                        )
+
+                        # Execute arbitrage
+                        results = await execute_arbitrage_async(
+                            yes_ticker=yes_ticker,
+                            no_ticker=no_ticker,
+                            yes_ask_cents=opportunity.yes_ask,
+                            no_bid_cents=opportunity.no_bid,
+                            size=opportunity.recommended_size,
+                            market_id=opportunity.market_id
+                        )
+
+                        logger.info(
+                            "[ARBITRAGE-CALLBACK] Execution complete: yes_status=%s no_status=%s",
+                            results.get('yes', {}).get('status', 'unknown'),
+                            results.get('no', {}).get('status', 'unknown')
+                        )
+                    except Exception as e:
+                        logger.error(f"[ARBITRAGE-CALLBACK] Execution failed: {e}")
+
+                # Register the callback
+                validator.set_arbitrage_callback(arbitrage_execution_callback)
+                logger.info("[LIFESPAN] Step 5b: Arbitrage execution callback registered successfully")
+            except Exception as e:
+                logger.warning(f"[LIFESPAN] Step 5b: Failed to wire arbitrage callback: {e}")
+        else:
+            logger.info("[LIFESPAN] Step 5b: Arbitrage execution disabled (set MERID_ENABLE_ARBITRAGE=1 to enable)")
         
         # Initialize thesis_side_monitor for production monitoring
         logger.info("[LIFESPAN] Step 5c: Initializing thesis_side_monitor")
@@ -1245,7 +1262,18 @@ async def unified_health_check():
             overall_status = "degraded"
         else:
             summary = ws_bridge.summary()
-            ws_running = summary.get("running", False)
+            # CRITICAL FIX (2026-08-24): The canonical bridge summary reports the
+            # WebSocket client state under "ws_client" and REST fallback state
+            # under "rest_polling_active". A bridge is healthy if it is actively
+            # receiving market data by either transport, not only if the legacy
+            # "running" key is True.
+            ws_client = summary.get("ws_client", {})
+            ws_running = (
+                summary.get("running", False)
+                or ws_client.get("connected", False)
+                or summary.get("connected", False)
+                or summary.get("rest_polling_active", False)
+            )
             services["ws_bridge"] = {
                 "status": "running" if ws_running else "stopped",
                 "ready": ws_running,
@@ -1822,8 +1850,12 @@ async def _agents_status_impl():
     for agent in grid._agents:
         # P1 HARDENING: Catch AttributeError and convert to health failure for that asset only
         try:
-            name = getattr(agent, "name", getattr(agent, "agent_id", "unknown"))
-            enabled = getattr(agent, "enabled", True)
+            # CRITICAL FIX (2026-08-24): LeanAgent15m stores identity in config.name,
+            # not a top-level name/agent_id attribute. Resolve the canonical name first.
+            config = getattr(agent, "config", None)
+            name = getattr(config, "name", None) if config else None
+            name = name or getattr(agent, "agent_id", None) or "unknown"
+            enabled = getattr(agent, "enabled", getattr(config, "enabled", True) if config else True)
             last_signal_ts = getattr(agent, "last_signal_ts", None)
             open_positions = getattr(agent, "position_count", 0)
             risk_budget_used = getattr(agent, "risk_budget_used", 0.0)
@@ -1896,10 +1928,12 @@ async def _agents_status_impl():
             # Extract asset name from agent if possible, otherwise use unknown
             asset_name = "unknown"
             try:
-                if hasattr(agent, "name"):
-                    asset_name = agent.name.split("_")[0] if "_" in agent.name else agent.name
-                elif hasattr(agent, "agent_id"):
-                    asset_name = agent.agent_id.split("_")[0] if "_" in agent.agent_id else agent.agent_id
+                _config = getattr(agent, "config", None)
+                _name = getattr(_config, "name", None) if _config else None
+                if not _name:
+                    _name = getattr(agent, "agent_id", None)
+                if _name:
+                    asset_name = _name.split("_")[0] if "_" in _name else _name
             except Exception:
                 pass
             
@@ -2192,11 +2226,17 @@ async def internal_spot_prices(assets: str = None):
                     recv_ts = getattr(data, 'recv_ts', timestamp)
 
                 if price is not None:
+                    # `recv_ts` may be epoch milliseconds; `time.time()` is seconds.
+                    if recv_ts is not None:
+                        recv_ts_s = recv_ts / 1000.0 if recv_ts > 1_000_000_000_000 else recv_ts
+                        age_s = time.time() - recv_ts_s
+                    else:
+                        age_s = None
                     prices_data[asset] = {
                         "price": price,
                         "ts": timestamp,
                         "source": source,
-                        "age_seconds": (time.time() - recv_ts) if recv_ts else None
+                        "age_seconds": age_s
                     }
         
         return {
@@ -2245,8 +2285,15 @@ async def internal_place_order(order_data: dict):
             source=order_data.get('source', 'internal_api'),
             client_tag=order_data.get('client_tag'),
             confidence=order_data.get('confidence'),
+            confidence_valid=order_data.get('confidence_valid', True),
+            confidence_source=order_data.get('confidence_source', 'uncertainty_engine'),
             model_prob=order_data.get('model_prob'),  # Required for signal validation
             edge_pct=order_data.get('edge_pct'),  # Required for signal validation
+            decision_id=order_data.get('decision_id'),
+            run_id=order_data.get('run_id', 'manual_run'),
+            settlement_reference=order_data.get('settlement_reference', 'cfb_rti_live'),
+            data_state=order_data.get('data_state', 'healthy'),
+            regime_label=order_data.get('regime_label', 'both_sides'),
             rationale=order_data.get('rationale'),
             take_profit_price_cents=order_data.get('take_profit_price_cents'),
             take_profit_r_multiple=order_data.get('take_profit_r_multiple'),
@@ -2647,16 +2694,28 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
     skipped_fresh = 0
     for ticker in active_tickers:
         try:
-            # Age short-circuit: skip REST if WS (or a recent poll) keeps this fresh.
-            # CRITICAL FIX: Also verify orderbook has actual depth, not just a recent timestamp.
-            # The initial WS subscription snapshot may have a recent timestamp but empty yes/no levels.
+            # Age short-circuit: skip REST if the *orderbook* has been updated recently.
+            # CRITICAL FIX: Use the wall-clock book-update timestamp, which is only
+            # bumped when the book is actually synced. last_update_ts was being updated
+            # by enqueued/pending deltas and quote events even when the top-of-book was
+            # stale, so it caused us to skip the REST refresh that would have fixed it.
             state = store.get(ticker)
             age_s = None
-            last_update_ts = getattr(state, "last_update_ts", None) if state is not None else None
+            if state is not None:
+                last_update_ts = (
+                    getattr(state, "last_book_update_wall_ts", None)
+                    or getattr(state, "last_update_ts", None)
+                )
+            else:
+                last_update_ts = None
             if last_update_ts:
                 if isinstance(last_update_ts, (int, float)):
-                    # Use time.monotonic() since last_update_ts is set with time.monotonic()
-                    age_s = _time.monotonic() - float(last_update_ts)
+                    if last_update_ts > 1_000_000_000:
+                        # Wall-clock epoch timestamp (e.g. from time.time())
+                        age_s = _time.time() - float(last_update_ts)
+                    else:
+                        # Monotonic timestamp (fallback legacy)
+                        age_s = _time.monotonic() - float(last_update_ts)
                 else:
                     try:
                         age_s = (datetime.now(timezone.utc) - last_update_ts).total_seconds()
@@ -2665,15 +2724,15 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
             
             # Check if orderbook has actual depth (yes_bids or no_bids)
             # KalshiMarketState stores levels in yes_bids/no_bids, not yes_levels/no_levels
+            # CRITICAL FIX (2026-08-24): A quote-only BBO is not a full orderbook.
+            # best_bid/ask from a ticker quote must not count as depth, or the REST
+            # refresh that would bring a full, authoritative snapshot is skipped and
+            # the order router keeps repricing off a stale WS quote.
             has_depth = False
             if state is not None:
                 yes_bids = getattr(state, "yes_bids", None)
                 no_bids = getattr(state, "no_bids", None)
-                # Also check best_bid_cents and best_ask_cents as fallback
-                best_bid = getattr(state, "best_bid_cents", None)
-                best_ask = getattr(state, "best_ask_cents", None)
-                if ((yes_bids and len(yes_bids) > 0) or (no_bids and len(no_bids) > 0) or
-                    (best_bid is not None and best_ask is not None)):
+                if ((yes_bids and len(yes_bids) > 0) or (no_bids and len(no_bids) > 0)):
                     has_depth = True
             
             # Skip REST only if fresh AND has depth
@@ -2769,7 +2828,10 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                     "via": "rest_refresh",  # P0 FIX: Tag REST fallback path for tracking
                 }
                 try:
-                    store.apply_orderbook_message(msg)
+                    # CRITICAL FIX: Pass the REST provenance tag so the market-state
+                    # store marks the snapshot as REST_FULL_ORDERBOOK and can attest
+                    # live-sequence recovery for entry readiness.
+                    store.apply_orderbook_message(msg, via="rest_polling")
                 except Exception as e:
                     import traceback
                     logger.error(
@@ -3904,6 +3966,8 @@ async def _run_startup_phases_v20260530(app):
             def _on_ws_refresh_done(task: asyncio.Task):
                 try:
                     task.result()
+                except asyncio.CancelledError:
+                    logger.info("[WS-REFRESH-DONE-CALLBACK] WS refresh supervisor task cancelled (expected during shutdown)")
                 except Exception as e:
                     logger.exception("[WS-REFRESH-DONE-CALLBACK] WS refresh supervisor task crashed", exc_info=e)
                     
@@ -4016,27 +4080,37 @@ async def _run_startup_phases_v20260530(app):
     from merid.risk.unified_risk_manager import get_unified_risk_manager
     logger.info("[STARTUP] P1.7.3: Loading profile bankroll_cap_pct for bankroll service")
     
-    # CRITICAL FIX: Load bankroll_cap_pct from profile to pass to BankrollServiceV2
-    # This ensures max_position_usd uses the profile's 3% instead of default 2%
+    # CRITICAL FIX: Load the fixed absolute exposure cap from the active profile.
+    # The 15m crypto stack uses a fixed $2 exposure cap, not a percentage of equity.
     from decimal import Decimal
     max_riskable_frac = None
+    max_position_cap_usd: Optional[Decimal] = None
     try:
         from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
         if is_profile_active():
             adapter = get_active_profile()
             if adapter:
                 profile = adapter.profile
-                max_riskable_frac = Decimal(str(profile.venue_bankroll_cap_pct))
-                logger.info(f"[STARTUP] P1.7.3: Loaded bankroll_cap_pct from profile: {max_riskable_frac}")
-            else:
-                logger.warning("[STARTUP] P1.7.3: Profile adapter not available, using default 2%")
-        else:
-            logger.warning("[STARTUP] P1.7.3: Profile not active, using default 2%")
+                max_position_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
+                logger.info(f"[STARTUP] P1.7.3: Loaded fixed exposure cap from profile: ${max_position_cap_usd}")
     except Exception as e:
-        logger.warning(f"[STARTUP] P1.7.3: Failed to load bankroll_cap_pct from profile: {e}, using default 2%")
-    
-    logger.info("[STARTUP] P1.7.4: Creating BankrollServiceV2 instance with max_riskable_frac=%s", max_riskable_frac)
-    bankroll = BankrollServiceV2(max_riskable_frac=max_riskable_frac)
+        logger.warning(f"[STARTUP] P1.7.3: Failed to load fixed exposure cap from profile: {e}")
+
+    # Fail closed to the canonical $2 cap if the profile did not provide one.
+    if max_position_cap_usd is None:
+        _env_cap = os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "2.00")
+        try:
+            max_position_cap_usd = Decimal(_env_cap)
+            logger.info(f"[STARTUP] P1.7.3: Using fixed exposure cap from env/default: ${max_position_cap_usd}")
+        except Exception as e:
+            logger.warning(f"[STARTUP] P1.7.3: Invalid MERID_FIXED_EXPOSURE_CAP_USD '{_env_cap}', using $2.00: {e}")
+            max_position_cap_usd = Decimal("2.00")
+
+    logger.info("[STARTUP] P1.7.4: Creating BankrollServiceV2 instance with max_position_cap_usd=%s", max_position_cap_usd)
+    bankroll = BankrollServiceV2(
+        max_riskable_frac=max_riskable_frac,
+        max_position_cap_usd=max_position_cap_usd,
+    )
     
     # Phase 2: Trace bankroll service origin
     from merid.origin_tracer import log_object_origin
@@ -4302,6 +4376,9 @@ async def _run_startup_phases_v20260530(app):
         order_router_healthy = not _missing
         if order_router_healthy:
             logger.info("[STARTUP] P1.13: Order router module healthy (instance lazy-loads on first use)")
+            # CRITICAL FIX (2026-08-24): Expose the module on app.state so infra health
+            # endpoints report truthfully without blocking lazy instantiation.
+            app.state.order_router = _order_router_mod
         else:
             logger.error("[STARTUP] P1.13: Order router module missing entrypoints: %s", _missing)
     except Exception as e:

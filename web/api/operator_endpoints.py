@@ -171,7 +171,21 @@ def _require_operator_auth(request: Request) -> None:
     - Single-user operator mode (MERID_SINGLE_USER_OPERATOR=1) bypasses token check.
     """
     # Single-user operator mode: bypass token check for local solo operation
+    # SECURITY FIX (2026-08-11): single-user bypass is not permitted in live trading.
     if os.getenv("MERID_SINGLE_USER_OPERATOR") == "1":
+        live_mode = (
+            os.getenv("MERID_PM_LIVE_ENABLED", "false").lower() in ("1", "true", "yes")
+            or os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live"
+            or os.getenv("TRADING_ENABLED", "false").lower() in ("1", "true", "yes")
+        )
+        if live_mode:
+            logger.critical(
+                "SECURITY ALERT: operator endpoint single-user bypass blocked in live mode"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Single-user operator bypass is prohibited in live trading.",
+            )
         return
     
     expected = os.getenv("MERID_OPERATOR_TOKEN", "")
