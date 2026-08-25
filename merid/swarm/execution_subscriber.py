@@ -412,10 +412,10 @@ class ExecutionSubscriber:
             
             result = await route_order_async(intent)
             
-            if result and result.status == "rejected":
+            if result and not (result.has_execution or (result.request_completed and not result.is_terminal)):
                 logger.warning(
                     "[EXECUTION-SUBSCRIBER] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s",
-                    market_id, side, size, result.reason
+                    market_id, side, size, result.reason or "unknown"
                 )
             else:
                 logger.info(

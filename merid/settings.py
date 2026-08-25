@@ -4,9 +4,17 @@ MERID Centralized Settings Module
 Single source of truth for all environment configuration.
 Uses Pydantic Settings for type safety and validation.
 
+SECURITY WARNING:
+    NEVER hardcode passwords, API keys, tokens, or any sensitive credentials in this file.
+    All sensitive values MUST be loaded from environment variables or a .env file.
+    The secrets_manager module provides automatic masking for logging sensitive data.
+
 Usage:
     from merid.settings import settings
     logger.info(settings.MERID_ENV)
+    
+    # For safe logging with sensitive data masked:
+    logger.info(settings.to_dict_safe())
 
 15m Mode Guard:
     This module contains both 15m and legacy settings. When running in 15m mode
@@ -17,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 from utils.logger import get_logger
+from utils.secrets_manager import is_sensitive_field, mask_sensitive_string, sanitize_dict_for_logging
 import os
 from pathlib import Path
 from typing import Optional, Dict
@@ -34,10 +43,12 @@ if _IS_15M_MODE:
 # Resolve .env absolute path so it loads correctly regardless of CWD
 _ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env")
 
-# Load .env file if python-dotenv is available
+# Load .env file if python-dotenv is available. Do NOT override variables that
+# are already present in the process environment: explicit test/production
+# environment separation requires that `os.environ` wins over the repo `.env`.
 try:
     from dotenv import load_dotenv
-    load_dotenv(_ENV_FILE, override=True)
+    load_dotenv(_ENV_FILE, override=False)
 except ImportError:
     pass  # dotenv not installed, rely on system env vars
 
@@ -79,6 +90,34 @@ class Settings(BaseSettings):
             return v.lower() in ('true', '1', 'yes', 'on')
         return bool(v)
     
+    def __str__(self) -> str:
+        """String representation with sensitive values masked."""
+        # Get all field names and values
+        field_dict = {}
+        for field_name in self.model_fields:
+            value = getattr(self, field_name, None)
+            if is_sensitive_field(field_name):
+                field_dict[field_name] = mask_sensitive_string(str(value) if value else "")
+            else:
+                field_dict[field_name] = str(value)
+        
+        # Format as readable string
+        lines = ["Settings("]
+        for key, val in sorted(field_dict.items()):
+            lines.append(f"  {key}={val}")
+        lines.append(")")
+        return "\n".join(lines)
+    
+    def to_dict_safe(self) -> Dict[str, str]:
+        """Convert settings to dictionary with sensitive values masked.
+        
+        Returns:
+            Dictionary with sensitive values masked for logging/display
+        """
+        return sanitize_dict_for_logging(
+            {field: getattr(self, field) for field in self.model_fields}
+        )
+    
     # ============================================================================= 
     # PROFILE DETECTION FOR FAKE BANKROLL PROTECTION
     # =============================================================================
@@ -87,6 +126,9 @@ class Settings(BaseSettings):
     # =============================================================================
     # DATABASE SETTINGS
     # =============================================================================
+    # SECURITY: All credentials must be loaded from environment variables.
+    # Never hardcode passwords, API keys, or secrets in this file.
+    # Use .env file for local development and environment variables in production.
     # PostgreSQL for fills ledger and position tracking (replaces SQLite)
     POSTGRES_HOST: str = Field(default=os.getenv("POSTGRES_HOST", "localhost"), description="PostgreSQL host")
     POSTGRES_PORT: int = Field(default=int(os.getenv("POSTGRES_PORT", "5432")), description="PostgreSQL port")
@@ -97,6 +139,7 @@ class Settings(BaseSettings):
     # =============================================================================
     # SUPABASE SETTINGS
     # =============================================================================
+    # SECURITY: Load from environment variables only
     SUPABASE_URL: Optional[str] = Field(default=None, description="Supabase project URL")
     SUPABASE_ANON_KEY: Optional[str] = Field(default=None, description="Supabase anonymous key")
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = Field(default=None, description="Supabase service role key")
@@ -104,6 +147,7 @@ class Settings(BaseSettings):
     # =============================================================================
     # EMAIL NOTIFICATIONS
     # =============================================================================
+    # SECURITY: Load from environment variables only
     MY_EMAIL: Optional[str] = Field(default=None, description="Email address for notifications")
     APP_PASSWORD: Optional[str] = Field(default=None, description="Email app password")
     RECEIVER_EMAIL: Optional[str] = Field(default=None, description="Email receiver for notifications")
@@ -111,12 +155,14 @@ class Settings(BaseSettings):
     # =============================================================================
     # TELEGRAM ALERTS
     # =============================================================================
+    # SECURITY: Load from environment variables only
     TELEGRAM_TOKEN: Optional[str] = Field(default=None, description="Telegram bot token")
     TELEGRAM_CHAT_ID: Optional[str] = Field(default=None, description="Telegram chat ID")
     
     # =============================================================================
     # MARKET DATA APIS
     # =============================================================================
+    # SECURITY: All API keys must be loaded from environment variables
     MESSARI_API_KEY: Optional[str] = Field(default=None, description="Messari API key")
     ALPHA_VANTAGE_API_KEY: Optional[str] = Field(default=None, description="Alpha Vantage API key")
     POLYGON_API_KEY: Optional[str] = Field(default=None, description="Polygon API key")
@@ -136,6 +182,7 @@ class Settings(BaseSettings):
     # COINBASE_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Coinbase Advanced Trade API key")
     # COINBASE_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Coinbase Advanced Trade API secret")
     
+    # SECURITY: All API keys must be loaded from environment variables
     FINNHUB_API_KEY: Optional[str] = Field(default=None, description="Finnhub API key")
     FINNHUB_SECRET_KEY: Optional[str] = Field(default=None, description="Finnhub secret key")
     THE_GRAPH_API_KEY: Optional[str] = Field(default=None, description="The Graph API key")
@@ -144,11 +191,13 @@ class Settings(BaseSettings):
     # =============================================================================
     # BLOCKCHAIN & SOLANA
     # =============================================================================
+    # SECURITY: Load from environment variables only
     HELIUS_RPC_URL: Optional[str] = Field(default=None, description="Helius Solana RPC URL")
     
     # =============================================================================
     # AI & MACHINE LEARNING
     # =============================================================================
+    # SECURITY: All API keys must be loaded from environment variables
     HUGGINGFACE_API_KEY: Optional[str] = Field(default=None, description="HuggingFace API key")
     CLAUDE_SONNET_4: Optional[str] = Field(default=None, description="Anthropic Claude API key")
     DEEPSEEK_API_KEY: Optional[str] = Field(default=None, description="DeepSeek API key")
@@ -475,8 +524,8 @@ class Settings(BaseSettings):
     # System uses fixed $1 global exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
     # via GlobalSlotAllocator. These settings are DEPRECATED for 15m crypto.
     MERID_MAX_RISK_FRACTION_PER_CYCLE: float = Field(
-        default=0.0,  # DISABLED - using fixed $1 exposure cap
-        description="DEPRECATED: Maximum risk fraction per cycle (DISABLED - using fixed $1 exposure cap)"
+        default=0.0,  # DISABLED - using fixed $2 exposure cap
+        description="DEPRECATED: Maximum risk fraction per cycle (DISABLED - using fixed $2 exposure cap)"
     )
     MERID_PM_RISK_PER_EDGE_PCT: float = Field(
         default=0.0,  # 0 = compute from MERID_MAX_RISK_FRACTION_PER_CYCLE / 3
@@ -1281,10 +1330,24 @@ class Settings(BaseSettings):
             if os.getenv(env_var):
                 issues.append(f"{env_var} is set but {api_name} is a legacy exchange not used in 15m Kalshi production")
         
-        # Check for KALSHI_ENV (should use MERID_KALSHI_ENV only)
-        if os.getenv("KALSHI_ENV") and not os.getenv("MERID_KALSHI_ENV"):
-            issues.append("KALSHI_ENV is set but should use MERID_KALSHI_ENV for consistency")
-        
+        # Check for KALSHI_ENV (should use MERID_KALSHI_ENV only, and must agree)
+        merid_kalshi_env = os.getenv("MERID_KALSHI_ENV", "").strip().lower()
+        kalshi_env = os.getenv("KALSHI_ENV", "").strip().lower()
+        if kalshi_env:
+            if not merid_kalshi_env:
+                issues.append("KALSHI_ENV is set but should use MERID_KALSHI_ENV for consistency")
+            else:
+                expected = "live" if merid_kalshi_env in ("prod", "live") else merid_kalshi_env
+                if kalshi_env != expected:
+                    issues.append(
+                        f"KALSHI_ENV={kalshi_env} conflicts with MERID_KALSHI_ENV={merid_kalshi_env} "
+                        f"(expected KALSHI_ENV={expected})"
+                    )
+
+        # The canonical application environment for 15m live is prod.
+        if os.getenv("MERID_ENV", "").strip().lower() not in ("prod", "production"):
+            issues.append("MERID_ENV must be 'prod' or 'production' for 15m live trading")
+
         return issues
     
     def get_dynamic_asset_caps(self) -> Dict[str, AssetCapConfig]:
@@ -1318,14 +1381,14 @@ class Settings(BaseSettings):
                     return caps
                 except Exception:
                     pass
-            # Fallback to fixed $1 exposure cap if static mode but no override (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $1 exposure cap
+            # Fallback to fixed $2 exposure cap if static mode but no override (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $2 exposure cap
             logger.warning(
-                "[STATIC_FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED)"
+                "[STATIC_FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED)"
             )
-            # Use fixed $1 exposure cap from environment variable
+            # Use fixed $2 exposure cap from environment variable
             import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1370,14 +1433,14 @@ class Settings(BaseSettings):
                 )
             
             # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # FIX: Changed to fixed $1 exposure cap (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $1 exposure cap
+            # FIX: Changed to fixed $2 exposure cap (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $2 exposure cap
             logger.warning(
-                "[FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
             )
-            # Use fixed $1 exposure cap from environment variable
+            # Use fixed $2 exposure cap from environment variable
             import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1464,14 +1527,14 @@ class Settings(BaseSettings):
                     return caps
                 except Exception:
                     pass
-            # Fallback to fixed $1 exposure cap if static mode but no override (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $1 exposure cap
+            # Fallback to fixed $2 exposure cap if static mode but no override (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $2 exposure cap
             logger.warning(
-                "[STATIC_FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED)"
+                "[STATIC_FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED)"
             )
-            # Use fixed $1 exposure cap from environment variable
+            # Use fixed $2 exposure cap from environment variable
             import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1516,14 +1579,14 @@ class Settings(BaseSettings):
                 )
             
             # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # FIX: Changed to fixed $1 exposure cap (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $1 exposure cap
+            # FIX: Changed to fixed $2 exposure cap (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $2 exposure cap
             logger.warning(
-                "[FALLBACK] Using fixed $1 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
             )
-            # Use fixed $1 exposure cap from environment variable
+            # Use fixed $2 exposure cap from environment variable
             import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1634,6 +1697,11 @@ class Settings(BaseSettings):
 # pydantic_settings BaseSettings automatically loads from environment variables
 # and .env file specified in model_config when instantiated
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Return the global MERID settings singleton."""
+    return settings
 
 # PROFILE VALIDATION FOR LEAN 15M STACK
 # If this module is imported by main_15m_lean, enforce profile constraint

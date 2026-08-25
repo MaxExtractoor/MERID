@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 
 from utils.logger import get_logger
+from merid.event_venues.kalshi.binary_price_space import require_outcome_side, SideValidationError
 
 logger = get_logger("merid.kalshi.paper_portfolio")
 
@@ -199,7 +200,18 @@ class KalshiPaperPortfolio:
                 await asyncio.sleep(lag_ms / 1000.0)
             
             market_id = order.get("market_id", "")
-            side = order.get("side", "yes")
+
+            # Fail-closed: a paper order without a valid side is not executable.
+            try:
+                side = require_outcome_side(
+                    order,
+                    context=f"paper_portfolio market_id={market_id}",
+                    fields=("side", "outcome_side", "kalshi_side", "thesis_side"),
+                )
+            except SideValidationError as side_err:
+                logger.error("[PAPER-PORTFOLIO-SIDE-INVALID] %s", side_err)
+                return {"success": False, "error": str(side_err), "market_id": market_id}
+
             size = order.get("size", 0.0)
             
             # Convert size to contracts (assuming $1 per contract for simplicity)

@@ -15,14 +15,30 @@ Usage:
 
 from __future__ import annotations
 
+from pathlib import Path
 import os
 import sys
+
+# Ensure project root is on sys.path when this file is run as a script.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from typing import Dict, Any
+
+# Load .env / settings first so standalone runs see MERID_PROFILE and other env vars.
+try:
+    from merid import settings as merid_settings
+except Exception:
+    merid_settings = None
 
 
 def check_profile_and_env() -> tuple[bool, str]:
     """Verify correct profile and Kalshi base URL configuration."""
-    profile = os.getenv("MERID_PROFILE", "")
+    if merid_settings is not None:
+        profile = merid_settings.settings.MERID_PROFILE
+    else:
+        profile = os.getenv("MERID_PROFILE", "")
     if profile != "kalshi_crypto_15m_v2":
         return False, f"Invalid profile '{profile}'. Expected 'kalshi_crypto_15m_v2'"
     
@@ -64,65 +80,68 @@ def check_no_legacy_subsystems() -> tuple[bool, str]:
 
 
 def check_startup_state() -> tuple[bool, str]:
-    """Verify startup state is healthy."""
+    """Verify startup state is healthy (only when called from the running server)."""
+    if "web.startup_state" not in sys.modules:
+        return True, "Startup state check skipped (standalone run)"
+
     try:
         from web.startup_state import startup_state
-        
+
         if not startup_state.started:
             return False, "Startup not started"
-        
+
         if startup_state.failed:
             return False, f"Startup failed: {startup_state.error}"
-        
+
         if not startup_state.completed:
             return False, "Startup not completed"
-        
+
         return True, "Startup state healthy"
     except Exception as e:
         return False, f"Failed to check startup state: {e}"
 
 
 def check_app_state_components() -> tuple[bool, str]:
-    """Verify required app.state components are initialized."""
+    """Verify required app.state components are initialized (only when called from the running server)."""
+    if "web.main_15m_lean" not in sys.modules:
+        return True, "App state check skipped (standalone run)"
+
     try:
-        # Try to get the current FastAPI app
-        # This is called from within the running application context
-        try:
-            from web.main_15m_lean import app
-        except ImportError:
-            # If main_15m_lean is not imported, skip this check
-            return True, "App state check skipped (main_15m_lean not imported)"
-        
+        from web.main_15m_lean import app
+
         grid = getattr(app.state, "agent_grid_15m", None)
         loop = getattr(app.state, "loop_15m", None)
-        
+
         if grid is None:
             return False, "agent_grid_15m not initialized"
-        
+
         if loop is None:
             return False, "loop_15m not initialized"
-        
+
         # Check loop status
         is_running = getattr(loop, "is_running", False)
         if not is_running:
             return False, "loop_15m not running"
-        
+
         return True, f"App state OK: grid={type(grid).__name__}, loop_running={is_running}"
     except Exception as e:
         return False, f"Failed to check app state: {e}"
 
 
 def check_unified_edge_config() -> tuple[bool, str]:
-    """Verify unified edge configuration is valid."""
+    """Verify unified edge configuration is valid (only when called from the running server)."""
+    if "web.main_15m_lean" not in sys.modules:
+        return True, "Unified edge config check skipped (standalone run)"
+
     try:
         from web.main_15m_lean import UnifiedEdgeConfig
-        
+
         config = UnifiedEdgeConfig.from_env()
         is_valid, error_msg = config.validate()
-        
+
         if not is_valid:
             return False, f"Unified edge config invalid: {error_msg}"
-        
+
         return True, f"Unified edge config OK: enabled={config.enabled}, calibration_version={config.calibration_version}, shadow_mode={config.shadow_mode}"
     except Exception as e:
         return False, f"Failed to check unified edge config: {e}"

@@ -86,7 +86,7 @@ class AgentModeRouter:
                     else:
                         result = asyncio.run(execute_live_order())
                     
-                    if result and result.success:
+                    if result and result.has_execution:
                         logger.info(f"Live mode: executed order from {agent_id} for {market_id}")
                         return True
                     else:

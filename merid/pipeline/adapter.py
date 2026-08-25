@@ -3,6 +3,11 @@
 Every venue (Kalshi, Binance, Coinbase, Kraken, OKX, Alpaca, IBKR)
 implements this interface.  The TradeRouter looks up adapters by venue
 name and dispatches proposals.
+
+NOTE (2026-08-18): Kalshi submissions are routed through the canonical
+order router (``merid.event_venues.kalshi.order_router.route_order_async``)
+so that all orders pass identity, circuit-breaker, canonical-intent, and
+ExecutionRiskFirewall gates before any venue client is invoked.
 """
 
 from __future__ import annotations
@@ -13,8 +18,8 @@ from typing import Dict, List, Optional, Any
 import threading
 import os
 
-from merid.pipeline.proposal import ExecutionResult, TradeProposal, OrderSide
-from merid.event_venues.kalshi.client import KalshiVenueClient
+from merid.pipeline.proposal import ExecutionResult, TradeProposal, OrderSide, OrderType
+from merid.event_venues.kalshi.client import KalshiVenueClient, get_kalshi_client
 from merid.event_venues.kalshi.models import KalshiConfig
 from merid.event_venues.base import VenueOrder, MarketFilter
 # SEV-1 FIX: Removed deprecated GlobalExecutionGuard import
@@ -104,27 +109,9 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
     """
     
     def __init__(self, paper: bool = True):
-        try:
-            from merid.settings import settings as _s
-            _api_key = _s.KALSHI_API_KEY_ID
-            _key_path = _s.KALSHI_PRIVATE_KEY_PATH
-            _key_pem = _s.KALSHI_PRIVATE_KEY_PEM
-            _use_demo = _s.KALSHI_USE_DEMO
-            _rate_tier = os.getenv("KALSHI_RATE_TIER", "basic")
-        except Exception as _se:
-            logger.debug("KalshiPipelineAdapter: settings unavailable, falling back to env: %s", _se)
-            _api_key = os.getenv("KALSHI_API_KEY_ID")
-            _key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
-            _key_pem = None
-            _use_demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
-            _rate_tier = os.getenv("KALSHI_RATE_TIER", "basic")
-        config = KalshiConfig(
-            api_key=_api_key,
-            private_key_path=_key_path,
-            private_key_pem=_key_pem,
-            use_demo=_use_demo,
-        )
-        self._client = KalshiVenueClient(config, rate_tier=_rate_tier)
+        # Use the singleton KalshiVenueClient so that the canonical order router
+        # and the adapter share one connection and one identity space.
+        self._client = get_kalshi_client()
         self._paper = paper
         self._connected = False
 
@@ -185,6 +172,18 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
         }
 
     async def submit_order(self, proposal: TradeProposal) -> ExecutionResult:
+        """Submit a proposal to Kalshi through the canonical order router.
+
+        The adapter does NOT call the venue client directly. It builds a canonical
+        OrderIntent so that identity, circuit-breaker, canonical-intent, and
+        ExecutionRiskFirewall gates run before any outbound API call.
+        """
+        from merid.event_venues.kalshi.order_router import (
+            OrderIntent,
+            OrderResult,
+            route_order_async,
+        )
+
         # ── HARD GATE: Kill switch (mirrors ExecutionRouter gate) ────────
         try:
             from merid.risk.kill_switches import risk_controller
@@ -226,34 +225,89 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
                 error=f"Global guard blocked: {_reason}",
             )
 
-        # Convert TradeProposal to VenueOrder
-        v_order = VenueOrder(
-            market_id=proposal.native_symbol or proposal.instrument_id,
-            side="buy" if proposal.side == OrderSide.BUY else "sell",
-            size=proposal.qty,
-            price=proposal.price,
-            order_type=proposal.order_type.value.lower() if hasattr(proposal.order_type, 'value') else str(proposal.order_type).lower(),
-            outcome_id=proposal.metadata.get("outcome_id", "yes"),
-        )
-
-        res = await self._client.place_order_result(v_order)
-        if not res.success or not res.data:
+        # Canonical order-intent construction.
+        count = int(proposal.qty)
+        if count <= 0:
+            logger.error(
+                "[PIPELINE_ADAPTER_BLOCKED] Non-positive order size for proposal=%s qty=%s",
+                proposal.proposal_id, proposal.qty,
+            )
             return ExecutionResult(
                 proposal_id=proposal.proposal_id,
                 venue=self.venue_name,
                 status="error",
-                error=str(res.error),
+                error=f"Non-positive order size: {proposal.qty}",
             )
 
-        o = res.data
+        if proposal.order_type == OrderType.MARKET:
+            _order_type = "market"
+            _time_in_force = "ioc"
+        elif proposal.order_type == OrderType.IOC:
+            _order_type = "limit"
+            _time_in_force = "ioc"
+        elif proposal.order_type == OrderType.FOK:
+            _order_type = "limit"
+            _time_in_force = "fok"
+        else:
+            _order_type = "limit"
+            _time_in_force = "gtc"
+
+        intent = OrderIntent(
+            ticker=proposal.native_symbol or proposal.instrument_id,
+            side=proposal.metadata.get("outcome_id", "yes"),
+            action="buy" if proposal.side == OrderSide.BUY else "sell",
+            price_cents=_price_cents,
+            count=count,
+            count_fp=proposal.qty,
+            order_type=_order_type,
+            time_in_force=_time_in_force,
+            source="pipeline_adapter",
+            agent_id=proposal.agent_id,
+            rationale=(proposal.rationale or f"pipeline proposal {proposal.proposal_id}")[:200],
+            client_tag=proposal.proposal_id,
+            parent_entry_fill_id=proposal.metadata.get("parent_entry_fill_id"),
+            metadata=dict(proposal.metadata),
+        )
+
+        result: OrderResult = await route_order_async(intent)
+
+        if not result:
+            return ExecutionResult(
+                proposal_id=proposal.proposal_id,
+                venue=self.venue_name,
+                status="error",
+                error="route_order_async returned no result",
+            )
+
+        if result.request_completed:
+            if result.has_execution:
+                status = "filled"
+            elif not result.is_terminal:
+                status = "submitted"
+            else:
+                status = "rejected"
+        else:
+            status = "error"
+
+        filled_qty = Decimal(result.executed_quantity_cc) / Decimal("100")
+        avg_price = proposal.price or Decimal("0")
+        fee = Decimal(0)
+        if result.has_execution and result.fill:
+            _fill_price_cents = result.fill.get("price_cents")
+            if _fill_price_cents is not None:
+                avg_price = Decimal(_fill_price_cents) / Decimal(100)
+            _fee_cents = result.fill.get("fee_cents") or 0
+            fee = Decimal(_fee_cents) / Decimal(100)
+
         return ExecutionResult(
             proposal_id=proposal.proposal_id,
             venue=self.venue_name,
-            venue_order_id=o.order_id,
-            status="filled" if o.status == "executed" else "submitted",
-            filled_qty=o.filled_size,
-            avg_price=o.price or Decimal("0"),
-            fee=Decimal("0"),
+            venue_order_id=result.order_id,
+            status=status,
+            error=result.reason or result.error,
+            filled_qty=filled_qty,
+            avg_price=avg_price,
+            fee=fee,
         )
 
     async def cancel_order(self, venue_order_id: str, native_symbol: str = "") -> bool:
