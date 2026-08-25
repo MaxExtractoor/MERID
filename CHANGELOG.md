@@ -4,6 +4,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ---
 
+## [Unreleased]
+
+### Identity, recovery, and fail-closed market-data hardening
+
+- Added durable `OrderAttemptStore` (SQLite WAL) for canonical
+  `(order_attempt_id, client_order_id)` lifecycle tracking.
+- Added `merid/event_venues/kalshi/order_identity.py` to allocate, recover, and
+  deduplicate order identity before routing.
+- Wired canonical `client_order_id` and `order_attempt_id` through
+  `OrderIntent`, `CanonicalOrderIntent`, fills ledger, and position cache.
+- Fixed `count_fp` authority in `KalshiVenueClient` so fractional contracts use
+  the exact fixed-point `count_fp` wire field.
+- Hardened `_adjust_order_price_for_fill_rate` against uninitialized, stale,
+  locked, crossed, or absent books.
+
+### Test failure classification and remediation (2026-08-18)
+
+| Failure | Classification | Resolution |
+|---|---|---|
+| `test_yes_no_price_adjustment_fix` `book_not_initialized` failures | **invalid fixture** | `MockMarketState` did not set `book_initialized` or a valid spread; fixtures updated and new `TestBookInitializationSafety` added. |
+| `TestCooldownTimestampInitialization::test_last_trade_time_initialization_source_code` | **stale test** | Source-string assertion replaced with a behavioral test that instantiates `LeanAgent15m` and asserts `_last_trade_time` is initialized to current time. Production `LeanAgent15m.__init__` now initializes the cooldown map. |
+| `TestAssertionConsistency::test_risk_envelope_input_assertions` | **stale test / contract drift** | `KalshiCrypto15mRiskEnvelope` dataclass re-added deprecated `max_concurrent_trades`, `guardrails_per_window_risk_pct`, and `guardrails_total_venue_risk_pct` fields for constructor compatibility. Additional constructor contract tests in progress. |
+
+---
+
 ## [4.0.0] - 2026-03-15
 
 ### Debate Protocol + Incentive Alignment + Production Hardening
