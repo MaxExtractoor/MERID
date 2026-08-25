@@ -66,11 +66,12 @@ class KalshiExecutor:
                     if stop_loss_price_cents is None:
                         stop_loss_price_cents = max(1, price_cents - 5)
                     
-                    # Compute dynamic TP with default confidence
+                    # CRITICAL FIX (2026-08-04): A position is always long its own side.
+                    # Profit for both YES and NO means own-side price rising -> LONG.
                     tp_plan = engine.compute_tp(
                         entry_price=price_cents / 100.0,
                         stop_price=stop_loss_price_cents / 100.0,
-                        direction="LONG" if side == "yes" else "SHORT",
+                        direction="LONG",
                         confidence=0.5,  # Default medium confidence
                     )
                     
