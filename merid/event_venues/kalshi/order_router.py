@@ -1505,9 +1505,11 @@ def resolve_exit_policy(
         profile = get_active_profile().profile
         
         # Load from YAML exit_policy.risk_reward section
+        mean_reversion_config = {}
         if hasattr(profile, 'exit_policy_risk_reward'):
             rr_config = profile.exit_policy_risk_reward
-            
+            mean_reversion_config = rr_config.get('mean_reversion', {})
+
             # Get asset-specific TP distance percentage (fallback when edge is unavailable)
             tp_distance_pct = rr_config.get('tp_distance_pct', {}).get(asset, 0.65)
             # CRITICAL FIX (2026-08-12): tp_distance_pct is now a fraction of MAX GAIN,
@@ -1626,7 +1628,26 @@ def resolve_exit_policy(
         tp_r_multiple = 0.0
         tp_price_cents = None
         tp_min_cents = 0
-    
+
+    # CRITICAL FIX (2026-08-25): Symmetric mean-reversion take-profit at 50¢.
+    # When the position is a fade away from the 50¢ fair value (price-based / mean
+    # reversion), target the fair value itself.  Only override the edge-based TP
+    # when the entry is on the cheap side of 50¢ (own-side price < target - min
+    # profit) so momentum entries above fair value are not forced into a loss.
+    if mean_reversion_config.get('enabled', False) and entry_price_cents is not None and 0 < entry_price_cents < 100:
+        mr_target_cents = int(mean_reversion_config.get('tp_target_cents', 50))
+        mr_min_profit_cents = int(mean_reversion_config.get('tp_min_profit_cents', 5))
+        if entry_price_cents < (mr_target_cents - mr_min_profit_cents):
+            take_profit_enabled = True
+            tp_price_cents = mr_target_cents
+            max_gain = 100 - entry_price_cents
+            tp_r_multiple = (mr_target_cents - entry_price_cents) / max_gain if max_gain > 0 else 0.0
+            tp_min_cents = 0
+            logger.info(
+                "[ORDER-ROUTER] Mean-reversion TP: entry=%dc target=%dc min_profit=%dc tp_r=%.4f",
+                entry_price_cents, mr_target_cents, mr_min_profit_cents, tp_r_multiple,
+            )
+
     # Default TP configuration (time-based dynamic R-multiple)
     tp_time_based_r = {
         "over_7_min": tp_r_multiple,  # Use configured TP R-multiple
