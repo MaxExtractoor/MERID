@@ -7,14 +7,16 @@ Tracks open positions, computes PnL, and enforces TP/SL exits.
 import asyncio
 import json
 import logging
+import math
 import re
+import statistics
 import threading
 import time
 import traceback
 import uuid
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, List, Any, Union
+from typing import Dict, Optional, List, Any, Union, Tuple
 from merid.position_management.position import Position, PositionSide, TrailingType, TrailingState, RiskParamsState, TAKE_PROFIT_MIN_PROFIT_CENTS, canonical_position_key
 from merid.position_management.exit_policy import ExitAction, ExitReason, is_position_quarantined, is_exit_reason_allowed_for_quarantine
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver
@@ -132,6 +134,63 @@ def _get_continuation_stop_config(asset: str) -> Dict[str, Any]:
         }
     except Exception:
         return default
+
+
+def _compute_5m_continuation_stop(
+    position: Position,
+    asset: str,
+    cfg: Dict[str, Any],
+) -> Tuple[bool, float, float]:
+    """
+    Compute whether the underlying spot has continued moving against the fade
+    over the configured lookback window.
+
+    Returns (triggered, adverse_return_pct, effective_threshold_pct).
+    """
+    from data.unified_spot_service import get_unified_spot_service
+
+    spot_service = get_unified_spot_service()
+    lookback_seconds = max(60, int(cfg.get("lookback_minutes", 5)) * 60)
+    history = spot_service.get_spot_history(asset, lookback_seconds)
+
+    if len(history) < 2:
+        logger.debug(
+            "[POSITION-MONITOR] CONTINUATION-STOP insufficient spot history for %s: %d samples",
+            asset, len(history)
+        )
+        return False, 0.0, 0.0
+
+    old_price = float(history[0]["price"])
+    new_price = float(history[-1]["price"])
+    if old_price <= 0 or new_price <= 0 or not math.isfinite(old_price) or not math.isfinite(new_price):
+        return False, 0.0, 0.0
+
+    spot_return_pct = (new_price - old_price) / old_price
+
+    # Adverse direction: for long YES, spot down is bad; for long NO, spot up is bad.
+    if position.side == PositionSide.YES:
+        adverse_return_pct = max(0.0, -spot_return_pct)
+    else:
+        adverse_return_pct = max(0.0, spot_return_pct)
+
+    threshold_pct = float(cfg.get("threshold_pct", 0.003))
+
+    # Optional vol-normalization using 5m log-return std over the ATR window.
+    if cfg.get("vol_normalization") and cfg.get("atr_window_minutes", 0) > 0:
+        atr_seconds = int(cfg.get("atr_window_minutes")) * 60
+        atr_history = spot_service.get_spot_history(asset, atr_seconds)
+        if len(atr_history) >= 3:
+            prices = [float(p["price"]) for p in atr_history if p["price"] > 0 and math.isfinite(float(p["price"]))]
+            if len(prices) >= 3:
+                log_returns = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices))]
+                std = statistics.pstdev(log_returns)
+                # Reference: 0.5% (0.005) log-return std as neutral multiplier.
+                multiplier = std / 0.005
+                # Clamp to 0.5x-3.0x to avoid extreme values from tiny sample std.
+                multiplier = max(0.5, min(3.0, multiplier))
+                threshold_pct = threshold_pct * multiplier
+
+    return adverse_return_pct > threshold_pct, adverse_return_pct, threshold_pct
 
 
 # Position monitor constants
@@ -1239,21 +1298,27 @@ class PositionMonitor:
             task: Optional asyncio Task so it can be cancelled on timeout/retry
         """
         with self._lock:
-            self._exit_intent_in_flight[position_id] = {
+            existing = self._exit_intent_in_flight.get(position_id, {})
+            updated = {
                 "state": "EXECUTION_PENDING",
                 "timestamp": time.time(),
-                "client_order_id": client_order_id,
-                "reason": reason,
-                "task": task,
+                "client_order_id": client_order_id if client_order_id is not None else existing.get("client_order_id"),
+                "reason": reason if reason is not None else existing.get("reason"),
+                "task": task if task is not None else existing.get("task"),
             }
+            # Carry forward any other diagnostic keys (exchange_order_id, etc.)
+            for key, value in existing.items():
+                if key not in updated:
+                    updated[key] = value
+            self._exit_intent_in_flight[position_id] = updated
             if client_order_id:
                 self._position_to_client_order[position_id] = client_order_id
                 self._recent_exit_submissions[client_order_id] = time.time()
             logger.info(
                 "[EXIT-INTENT-IN-FLIGHT] Marked exit intent EXECUTION_PENDING: position_id=%s client_order_id=%s reason=%s",
                 position_id[:8],
-                client_order_id,
-                reason or "unknown",
+                client_order_id or updated.get("client_order_id"),
+                reason or updated.get("reason") or "unknown",
             )
 
     def _mark_exit_intent_submitted(
@@ -1765,17 +1830,28 @@ class PositionMonitor:
         # against the fade over the configured lookback window.
         _cont_cfg = _get_continuation_stop_config(self._asset_from_ticker(position.market_id))
         if _cont_cfg.get("enabled"):
-            logger.debug(
-                "[POSITION-MONITOR] CONTINUATION-STOP configured but not yet active for %s "
-                "(threshold_pct=%.4f lookback_min=%d) - pending 5m spot feed / backtest calibration",
-                position.position_id[:8],
-                _cont_cfg.get("threshold_pct", 0.0),
-                _cont_cfg.get("lookback_minutes", 5),
+            cont_triggered, cont_adverse_pct, cont_threshold_pct = _compute_5m_continuation_stop(
+                position, self._asset_from_ticker(position.market_id), _cont_cfg
             )
-            # TODO: wire 5m spot-return calculation once the backtest sweep determines
-            # per-asset, vol-normalized thresholds.  The guard below is deliberately
-            # a no-op so an uncalibrated stop cannot fire live.
-            pass
+            if cont_triggered:
+                logger.warning(
+                    "[POSITION-MONITOR] CONTINUATION-STOP triggered: position=%s adverse_return=%.4f "
+                    "threshold=%.4f lookback_min=%d - exiting",
+                    position.position_id[:8],
+                    cont_adverse_pct,
+                    cont_threshold_pct,
+                    _cont_cfg.get("lookback_minutes", 5),
+                )
+                self._emit_exit_intent(position, ExitReason.CONTINUATION_STOP, current_price_cents, snapshot=snapshot)
+                return
+            else:
+                logger.debug(
+                    "[POSITION-MONITOR] CONTINUATION-STOP not triggered: position=%s "
+                    "adverse_return=%.4f threshold=%.4f",
+                    position.position_id[:8],
+                    cont_adverse_pct,
+                    cont_threshold_pct,
+                )
 
         # CRITICAL FIX (2026-08-24): A take-profit can be set from a trusted
         # exchange-reported entry fill price plus a fee-aware margin (fallback),

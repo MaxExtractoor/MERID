@@ -3043,8 +3043,9 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
 
         # CRITICAL FIX (2026-08-20): Update in-flight intent with the real client
         # order id so the monitor can reconcile a timeout by looking up the order.
+        # 2026-08-25: carry the trigger reason so in-flight diagnostics are not reset to "unknown".
         self._position_monitor._mark_exit_intent_in_flight(
-            position.position_id, client_order_id=intent.client_order_id
+            position.position_id, client_order_id=intent.client_order_id, reason=exit_reason_str
         )
 
         # CRITICAL FIX (2026-07-23): Register exit submission in cache before routing
