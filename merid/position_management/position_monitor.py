@@ -79,8 +79,60 @@ def _seconds_to_expiry_from_ticker(ticker: str) -> Optional[float]:
         return None
 
 
-# Settlement guard: force exit this many seconds before market settlement
-SETTLEMENT_GUARD_SECONDS = 30
+# Settlement guard: force exit this many seconds before market settlement.
+# CRITICAL FIX (2026-08-25): Moved from 30s to T-2min (120s) so no 15m crypto
+# position rides into settlement.  Loaded from profile YAML; this constant is
+# the safe fallback when the profile is not yet available.
+DEFAULT_SETTLEMENT_GUARD_SECONDS = 120
+
+
+def _get_settlement_guard_seconds() -> float:
+    """Load settlement guard seconds from active profile (config-driven)."""
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        te_config = getattr(get_active_profile().profile, "exit_policy_time_exit", {})
+        return float(te_config.get("settlement_guard_seconds", DEFAULT_SETTLEMENT_GUARD_SECONDS))
+    except Exception:
+        return float(DEFAULT_SETTLEMENT_GUARD_SECONDS)
+
+
+def _get_hard_loss_cap_cents() -> int:
+    """Load per-position hard unrealized loss cap from active profile (cents)."""
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        rr_config = getattr(get_active_profile().profile, "exit_policy_risk_reward", {})
+        # Allow either exit_policy.risk_reward.hard_unrealized_loss_cap_usd or
+        # risk_policy.hard_unrealized_loss_cap_usd (fallback dict lookup).
+        usd = rr_config.get("hard_unrealized_loss_cap_usd")
+        if usd is None:
+            risk_config = getattr(get_active_profile().profile, "risk_policy", {})
+            usd = risk_config.get("hard_unrealized_loss_cap_usd", 5.0)
+        return int(round(float(usd) * 100))
+    except Exception:
+        return 500  # $5.00 default
+
+
+def _get_continuation_stop_config(asset: str) -> Dict[str, Any]:
+    """Load continuation-stop parameters for an asset (config-driven)."""
+    default = {"enabled": False}
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        rr_config = getattr(get_active_profile().profile, "exit_policy_risk_reward", {})
+        cfg = rr_config.get("continuation_stop", {})
+        if not cfg.get("enabled", False):
+            return default
+        asset_cfg = cfg.get("per_asset", {}).get(asset, {})
+        return {
+            "enabled": True,
+            "lookback_minutes": int(cfg.get("lookback_minutes", 5)),
+            "base_threshold_pct": float(cfg.get("base_threshold_pct", 0.003)),
+            "vol_normalization": bool(cfg.get("vol_normalization", True)),
+            "atr_window_minutes": int(cfg.get("atr_window_minutes", 15)),
+            "threshold_pct": float(asset_cfg.get("threshold_pct", cfg.get("base_threshold_pct", 0.003))),
+        }
+    except Exception:
+        return default
+
 
 # Position monitor constants
 POLL_INTERVAL_SECONDS = 5.0  # Default polling interval in seconds
@@ -1656,21 +1708,22 @@ class PositionMonitor:
         # Update runtime state using the executable liquidation bid
         position.update_runtime_state(current_price_cents)
 
-        # CRITICAL FIX (2026-08-03): Settlement guard - forced exit at T-30s.
+        # CRITICAL FIX (2026-08-25): Settlement guard - forced exit at T-2min (120s).
         # Previously positions rode into settlement unmanaged (the "settlement trap"):
         # expired markets were simply dropped from monitoring with no exit enforcement.
         # Force a market exit while there is still a live order book.
+        _settlement_guard_seconds = _get_settlement_guard_seconds()
         try:
             _secs_to_expiry = _seconds_to_expiry_from_ticker(position.market_id)
-            if _secs_to_expiry is not None and 0 < _secs_to_expiry <= SETTLEMENT_GUARD_SECONDS:
+            if _secs_to_expiry is not None and 0 < _secs_to_expiry <= _settlement_guard_seconds:
                 logger.warning(
                     "[POSITION-MONITOR] SETTLEMENT-GUARD forced exit: position=%s market=%s side=%s "
-                    "tte=%.1fs <= %ds - exiting before settlement",
+                    "tte=%.1fs <= %.0fs - exiting before settlement",
                     position.position_id[:8],
                     position.market_id,
                     position.side.value,
                     _secs_to_expiry,
-                    SETTLEMENT_GUARD_SECONDS,
+                    _settlement_guard_seconds,
                 )
                 self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)
                 return
@@ -1690,6 +1743,39 @@ class PositionMonitor:
             position.exited_at = datetime.utcnow()
             self.remove_position(position.position_id)
             return
+
+        # CRITICAL FIX (2026-08-25): Hard per-position unrealized loss cap.
+        # Configurable backstop (default $5/position).  At current 1-2 contract
+        # sizing this is inert; it protects the book if position size scales up.
+        _hard_loss_cap_cents = _get_hard_loss_cap_cents()
+        if _hard_loss_cap_cents > 0 and position.unrealized_pnl_cents <= -_hard_loss_cap_cents:
+            logger.warning(
+                "[POSITION-MONITOR] HARD-LOSS-CAP triggered: position=%s pnl=%dc cap=%dc - exiting",
+                position.position_id[:8],
+                position.unrealized_pnl_cents,
+                _hard_loss_cap_cents,
+            )
+            self._emit_exit_intent(position, ExitReason.LOSS_CAP, current_price_cents, snapshot=snapshot)
+            return
+
+        # CRITICAL FIX (2026-08-25): Continuation stop (per-asset, vol-normalized).
+        # Wired as a config-driven parameter but DISABLED by default.  The 24h fill
+        # set should be used to backtest-calibrate threshold_pct before enabling.
+        # When enabled, this will exit if the underlying spot continues moving
+        # against the fade over the configured lookback window.
+        _cont_cfg = _get_continuation_stop_config(self._asset_from_ticker(position.market_id))
+        if _cont_cfg.get("enabled"):
+            logger.debug(
+                "[POSITION-MONITOR] CONTINUATION-STOP configured but not yet active for %s "
+                "(threshold_pct=%.4f lookback_min=%d) - pending 5m spot feed / backtest calibration",
+                position.position_id[:8],
+                _cont_cfg.get("threshold_pct", 0.0),
+                _cont_cfg.get("lookback_minutes", 5),
+            )
+            # TODO: wire 5m spot-return calculation once the backtest sweep determines
+            # per-asset, vol-normalized thresholds.  The guard below is deliberately
+            # a no-op so an uncalibrated stop cannot fire live.
+            pass
 
         # CRITICAL FIX (2026-08-24): A take-profit can be set from a trusted
         # exchange-reported entry fill price plus a fee-aware margin (fallback),
@@ -2434,26 +2520,19 @@ class PositionMonitor:
         except Exception as e:
             logger.warning("[POSITION-MONITOR] Could not get time to expiry for emergency flatten: %s", e)
 
-        # Emergency flatten: force exit in last 60 seconds ONLY if profitable
-        # CRITICAL FIX (2026-07-31): Prevent forced loss exits near expiry
-        # Only force exit if position has positive PnL to lock in gains
+        # CRITICAL FIX (2026-08-25): Emergency flatten in last 60 seconds ALWAYS.
+        # The settlement guard at T-2min (120s) is the primary defence; this is a
+        # fail-safe backstop.  Holding an underwater position to expiry was the
+        # dominant P&L leak, so we now force-close unconditionally.
         if time_to_expiry_seconds <= 60.0:
-            if position.unrealized_pnl_cents > 0:
-                logger.warning(
-                    "[POSITION-MONITOR] EMERGENCY FLATTEN: position=%s time_to_expiry=%.1fs pnl=%dc - forcing full exit to lock in profit",
-                    position.position_id[:8],
-                    time_to_expiry_seconds,
-                    position.unrealized_pnl_cents
-                )
-                self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, snapshot=snapshot)  # Full exit
-                return  # Exit immediately, don't check other conditions
-            else:
-                logger.info(
-                    "[POSITION-MONITOR] EMERGENCY FLATTEN SKIPPED: position=%s time_to_expiry=%.1fs pnl=%dc - holding underwater position to expiry",
-                    position.position_id[:8],
-                    time_to_expiry_seconds,
-                    position.unrealized_pnl_cents
-                )
+            logger.warning(
+                "[POSITION-MONITOR] EMERGENCY FLATTEN: position=%s time_to_expiry=%.1fs pnl=%dc - forcing full exit before expiry",
+                position.position_id[:8],
+                time_to_expiry_seconds,
+                position.unrealized_pnl_cents
+            )
+            self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)  # Full exit
+            return  # Exit immediately, don't check other conditions
 
         # CRITICAL FIX: 2026-07-15 - Load staged exit stages from YAML config
         # Previously hardcoded to 5/10/13 minutes with 25/25/50% - now configurable

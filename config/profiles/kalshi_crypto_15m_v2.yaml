@@ -1524,7 +1524,38 @@ exit_policy:
     # CRITICAL FIX (2026-08-10): upstream/midstream/downstream stop-loss kill switch.
     # Disable the stop-loss so trades run until take-profit, trailing stop, ratchet, or time exit.
     stop_loss_enabled: false
-  
+
+    # ── Mean-Reversion Take-Profit (2026-08-25) ──────────────────────────────
+    # Symmetric 50¢ TP for the price-based fade.  Positions are always long their
+    # own side; the target is the 50¢ fair value.  Only fires when the entry is
+    # at least tp_min_profit_cents below 50¢ on the position's own side.
+    mean_reversion:
+      enabled: true
+      tp_target_cents: 50
+      tp_min_profit_cents: 5
+
+    # ── Per-Position Hard Loss Cap (2026-08-25) ──────────────────────────────
+    # Backstop only: $5/position unrealized loss cap.  At 1-2 contract sizing this
+    # does not fire; it protects the book if sizing scales.
+    hard_unrealized_loss_cap_usd: 5.00
+
+    # ── Continuation Stop (2026-08-25) ───────────────────────────────────────
+    # DISABLED until backtest-calibrated.  Per-asset, vol-normalized parameters
+    # for exiting when the underlying spot continues moving against the fade.
+    # Use the 24h fill set to grid-search threshold_pct and lookback_minutes.
+    continuation_stop:
+      enabled: false
+      lookback_minutes: 5
+      base_threshold_pct: 0.003  # 0.3% placeholder - to be calibrated
+      vol_normalization: true
+      atr_window_minutes: 15
+      per_asset:
+        BTC: { threshold_pct: 0.003 }
+        ETH: { threshold_pct: 0.003 }
+        SOL: { threshold_pct: 0.004 }
+        XRP: { threshold_pct: 0.004 }
+        DOGE: { threshold_pct: 0.005 }
+
   # P3-FIX8: Trailing stop configuration
   trailing:
     enabled: true  # Enable trailing stops
@@ -1543,6 +1574,8 @@ exit_policy:
     cutoff_minutes_before_expiry: 0  # Trade full 15m window (no cutoff)
     # Maximum holding time in minutes (absolute time limit)
     max_hold_minutes: 15  # Max 15 minute hold for 15m contracts
+    # Forced market exit this many seconds before settlement (T-2min for 15m)
+    settlement_guard_seconds: 120
 
 # ── Legacy Path Control ───────────────────────────────────────────────────
 # Explicitly disable balance-derived behavior for this profile
