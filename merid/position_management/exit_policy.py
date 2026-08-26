@@ -83,6 +83,7 @@ class ExitReason(str, Enum):
     MARKET_EXPIRED = "market_expired"  # 2026-08-08: market closed/expired, route to settlement
     LOSS_CAP = "loss_cap"  # 2026-08-12: Break-even loss-cap (alias for loss_cut)
     MODEL_INVALIDATION_LOSS_EXIT = "model_invalidation_loss_exit"  # 2026-08-12: edge collapse below entry with loss
+    CONTINUATION_STOP = "continuation_stop"  # 2026-08-25: 5m underlying continuation stop (per-asset, vol-normalized)
 
 
 # Exit policy constants
