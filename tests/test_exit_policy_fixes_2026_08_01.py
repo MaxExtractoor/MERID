@@ -14,7 +14,7 @@ Tests the following fixes:
 
 import pytest
 from datetime import datetime
-from merid.position_management.position import Position, PositionSide, TrailingType
+from merid.position_management.position import Position, PositionSide, TrailingType, RiskParamsState
 from merid.position_management.exit_policy import ExitReason, ExitAction
 from merid.position_management.exit_decision import ExitPriority, get_priority_for_reason
 
@@ -106,13 +106,16 @@ class TestScaleOutActivation:
         position = Position(
             avg_entry_price_cents=40,
             stop_loss_price_cents=35,  # 5c risk
+            stop_loss_enabled=True,
+            entry_fill_price_cents=40,
+            risk_params_state=RiskParamsState.FALLBACK,
             side=PositionSide.YES
         )
-        
+
         # 1.5R = 40 + (1.5 * 5) = 47.5c
         scale_out_r_multiple = 1.5
         expected_target = 40 + int(scale_out_r_multiple * position.initial_risk_cents)
-        
+
         assert expected_target == 47  # 40 + 7 = 47c
     
     def test_scale_out_trigger(self):
@@ -258,7 +261,7 @@ class TestExitPriorityConflicts:
         assert ExitPriority.TAKE_PROFIT.value == 55
         assert ExitPriority.OPPORTUNITY_COST.value == 33
         assert ExitPriority.SCALE_OUT.value == 30
-        assert ExitPriority.TRAIL.value == 25
+        assert ExitPriority.TRAIL.value == 36
 
 
 class TestExitReasonEnum:

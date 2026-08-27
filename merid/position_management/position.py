@@ -6,7 +6,7 @@ Tracks open positions with TP/SL, trailing stops, and exit policy references.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, List, Optional
 import logging
@@ -978,13 +978,20 @@ class Position:
 
     def trigger_scale_out(self) -> int:
         """
-        Trigger partial scale-out: close 50% of position.
+        Trigger partial scale-out: close ~50% of position.
 
         Returns:
-            Number of contracts to close (50% of current size)
+            Number of whole contracts to close (rounded half-up, at least 1 if
+            the position is at least one contract, and never more than size).
         """
         self.scale_out_triggered = True
-        contracts_to_close = int(self.size // 2)  # Close 50%
+        if self.size < Decimal("1"):
+            contracts_to_close = 0
+        else:
+            half = (self.size / Decimal("2")).to_integral_value(rounding=ROUND_HALF_UP)
+            if half < Decimal("1"):
+                half = Decimal("1")
+            contracts_to_close = int(min(self.size, half))
         self.scale_out_remaining_size = self.size - contracts_to_close
         return contracts_to_close
 

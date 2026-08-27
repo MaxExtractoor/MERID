@@ -13215,20 +13215,22 @@ async def _route_live(
         except Exception as alloc_err:
             logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator: %s", alloc_err)
 
-        # PRODUCTION FIX: Update order_id -> client_tag mapping with actual Kalshi order_id
-        # This updates the pre-registered mapping (client_tag -> client_tag) with the actual
-        # Kalshi order_id after successful submission, ensuring HTTP fills can recover client_order_id.
-        if _venue_oid and _venue_oid != "unknown" and intent.client_tag:
+        # PRODUCTION FIX: Update order_id -> client_order_id mapping with actual Kalshi order_id.
+        # This updates the pre-registered mapping with the canonical wire client_order_id so
+        # HTTP/WS fills that omit client_order_id can still recover the same key used by
+        # register_tp_targets and position_cache._pending_tp_targets.
+        _canonical_coid = intent.client_order_id or intent.client_tag or intent.intent_id
+        if _venue_oid and _venue_oid != "unknown" and _canonical_coid:
             try:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
                 cache = get_position_cache()
-                # Update the mapping: kalshi_order_id -> client_tag
-                cache.register_order_id_mapping(_venue_oid, intent.client_tag)
+                # Update the mapping: kalshi_order_id -> canonical client_order_id
+                cache.register_order_id_mapping(_venue_oid, _canonical_coid)
                 # Remove the temporary client_tag -> client_tag mapping
                 cache._order_id_to_client_tag.pop(intent.client_tag, None)
                 logger.debug(
-                    "[ORDER-ID-MAPPING-UPDATE] Updated mapping: kalshi_order_id=%s -> client_tag=%s (removed temp mapping)",
-                    _venue_oid, intent.client_tag
+                    "[ORDER-ID-MAPPING-UPDATE] Updated mapping: kalshi_order_id=%s -> client_order_id=%s (removed temp mapping)",
+                    _venue_oid, _canonical_coid
                 )
             except Exception as _map_err:
                 logger.debug("[order-router] Order ID mapping update failed (non-fatal): %s", _map_err)

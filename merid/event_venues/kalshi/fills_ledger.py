@@ -4354,7 +4354,8 @@ class KalshiFillsLedger:
         existing.no_price_dollars = fill.no_price_dollars or existing.no_price_dollars
         existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or existing.canonical_leg_price_cents
         existing.execution_price_cents = fill.execution_price_cents or existing.execution_price_cents
-        existing.price_cents = fill.price_cents or existing.price_cents
+        # price_cents is a read-only display property; canonical leg price is already
+        # preserved above. Do not assign to the property to avoid AttributeError.
         existing.fee_cost = fill.fee_cost or existing.fee_cost
         existing.fee_cents = fill.fee_cents or existing.fee_cents
         existing.proceeds_dollars = fill.proceeds_dollars or existing.proceeds_dollars

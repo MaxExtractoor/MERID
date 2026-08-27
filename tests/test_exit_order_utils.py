@@ -106,6 +106,8 @@ class TestExitOrderFromSource:
             "hedge",  # SEV-0 FIX: Hedge orders reduce net exposure
             "hedge_engine",  # SEV-0 FIX: HEDGE_ENGINE source marker
             "offset_hedging",  # SEV-0 FIX: offset_hedging source marker
+            "position_monitor_exit",  # CRITICAL FIX (2026-07-20): PositionMonitor exit orders
+            "resting_bracket",  # CRITICAL FIX (2026-08-01): Bracket orders are exit orders
         ]
         assert set(EXIT_ORDER_MARKERS) == set(expected_markers)
 
