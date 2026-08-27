@@ -32,14 +32,14 @@ from trading.config.runtime_config import (
 
 def _required(name: str) -> float:
     """Fail-fast helper to enforce required parameters in production.
-    
+
     Used as default_factory for TradingGuardConfig fields that must be
     provided by profile config. This prevents silent defaults and ensures
     explicit configuration for core risk parameters.
-    
+
     Args:
         name: Name of the required field for error message
-        
+
     Raises:
         RuntimeError: If the field is not provided explicitly
     """
@@ -48,6 +48,17 @@ def _required(name: str) -> float:
         f"Use TradingGuardConfig.from_profile() for Kalshi 15m or "
         f"TradingGuardConfig.from_env() for non-prod adapters only."
     )
+
+
+def _testing_default(name: str, value: float) -> float:
+    """Return a permissive default only in the test environment.
+
+    Production and dev paths must explicitly configure TradingGuardConfig.
+    Tests set MERID_ENV=testing and rely on safe defaults.
+    """
+    if os.environ.get("MERID_ENV") == "testing":
+        return value
+    return _required(name)
 
 try:  # Optional import when memecoin engine is available
     from sniping.memecoin_engine import TokenRisk
@@ -115,9 +126,9 @@ class TradingGuardConfig:
     enable_trading_suite: bool = True
     allow_live_trades: bool = False
     vpn_only: bool = True
-    max_notional_usd: float = field(default_factory=lambda: _required("max_notional_usd"))
+    max_notional_usd: float = field(default_factory=lambda: _testing_default("max_notional_usd", 25_000.0))
     max_memecoin_notional_usd: float = 2_500.0
-    max_daily_loss_usd: float = field(default_factory=lambda: _required("max_daily_loss_usd"))
+    max_daily_loss_usd: float = field(default_factory=lambda: _testing_default("max_daily_loss_usd", 25_000.0))
     max_per_symbol_exposure_usd: float = 10_000.0
     max_open_orders: int = 100
     allowed_venues: Optional[frozenset[str]] = None
@@ -602,24 +613,36 @@ def init_trading_guard_from_profile(
         )
 
 
+def init_trading_guard_from_env() -> None:
+    """Initialize the global TradingGuard singleton from environment variables.
+
+    For non-production adapters and tests only. Idempotent.
+    """
+    global _trading_guard
+    if _trading_guard is None:
+        _trading_guard = TradingGuard.from_env()
+        logger.info("[TRADING-GUARD] Initialized from env for non-production use.")
+
+
 def get_trading_guard() -> TradingGuard:
     """Get the global TradingGuard instance.
-    
-    For Kalshi 15m production, this requires init_trading_guard_from_profile()
-    to have been called first. For non-prod adapters, use get_env_trading_guard().
-    
+
+    For Kalshi 15m production, this requires ``init_trading_guard_from_profile()``
+    to have been called first. For non-prod adapters and tests, call
+    ``init_trading_guard_from_env()`` before using this getter.
+
     Returns:
         TradingGuard instance
-        
+
     Raises:
-        RuntimeError: If guard not initialized via init_trading_guard_from_profile()
+        RuntimeError: If guard not initialized
     """
     global _trading_guard
     if _trading_guard is None:
         raise RuntimeError(
             "TradingGuard not initialized. "
             "Call init_trading_guard_from_profile() for Kalshi 15m production, "
-            "or use get_env_trading_guard() for non-prod adapters."
+            "or init_trading_guard_from_env() for non-prod adapters/tests."
         )
     return _trading_guard
 

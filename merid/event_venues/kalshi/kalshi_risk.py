@@ -2866,6 +2866,10 @@ class KalshiRiskManager:
         balance_usd = balance_cents / 100.0
         cfg = self._config
 
+        # 2026 STANDARD: Per-asset stop-loss policy only available when a profile is active.
+        # The active-profile path returns early above; default to empty policy here.
+        profile_data: Dict[str, Any] = {}
+
         # Load bankroll from bankroll_service_v2 for dynamic daily loss computation
         # CRITICAL FIX: Skip bankroll access during import time to prevent bankroll service initialization
         # This method is called during module import, before bankroll service is ready

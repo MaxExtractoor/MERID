@@ -14,11 +14,13 @@ venue data so operators see both caps in one place.
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from merid.data.ingress_replay import replay_time
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.responsible_trading")
@@ -77,7 +79,7 @@ class KalshiResponsibleTradingClient:
 
     async def get_snapshot(self, force: bool = False) -> ResponsibleTradingSnapshot:
         """Return a fresh (or cached) ResponsibleTradingSnapshot."""
-        now = _time.time()
+        now = replay_time()
         if not force and self._cache and (now - self._cache_ts) < _CACHE_TTL:
             return self._cache
 
@@ -137,7 +139,7 @@ class KalshiResponsibleTradingClient:
         except Exception as exc:
             logger.debug("responsible_trading: risk controller read failed: %s", exc)
 
-        snap.fetched_at = _time.time()
+        snap.fetched_at = replay_time()
         return snap
 
 

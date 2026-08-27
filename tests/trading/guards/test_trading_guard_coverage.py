@@ -8,7 +8,7 @@ from trading.guards.trading_guard import (
     GuardDecisionStatus, CircuitBreakerState, GuardDecision,
     TradingGuardConfig, TradingGuard, SolanaAntiRugConfig,
     SolanaAntiRugGuard, get_trading_guard, get_solana_anti_rug_guard,
-    _safe_global_mode
+    init_trading_guard_from_env, _safe_global_mode
 )
 from trading.adapters.base import TradeRequest, TradeSide
 from trading.config.runtime_config import GlobalTradingMode, VenueMode
@@ -368,10 +368,11 @@ class TestSingletons:
     def test_get_trading_guard(self):
         import trading.guards.trading_guard as module
         module._trading_guard = None
-        
+
         with patch("trading.guards.trading_guard.get_runtime_config"):
+            init_trading_guard_from_env()
             guard = get_trading_guard()
-        
+
         assert isinstance(guard, TradingGuard)
 
     def test_get_solana_anti_rug_guard(self):

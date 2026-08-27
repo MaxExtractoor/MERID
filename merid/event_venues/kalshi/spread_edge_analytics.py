@@ -20,7 +20,10 @@ Reference: https://docs.kalshi.com/getting_started/orderbook_responses
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict
+from typing import TYPE_CHECKING, Optional, Tuple, List, Dict
+
+if TYPE_CHECKING:
+    from merid.event_venues.kalshi.unified_market_state import OrderbookSnapshot
 from utils.logger import get_logger
 
 # Import canonical YES/NO price space model for consistent price transformations

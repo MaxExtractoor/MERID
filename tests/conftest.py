@@ -1048,6 +1048,20 @@ def _reset_cfb_rti_env(monkeypatch):
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _init_trading_guard_singleton():
+    """Initialize the global TradingGuard singleton once for tests.
+
+    ``get_trading_guard()`` is strict in production: it refuses to run unless
+    ``init_trading_guard_from_profile()`` has been called. In tests we bind the
+    singleton from environment variables via ``init_trading_guard_from_env()``
+    so the getter can be exercised without opening a silent auto-init path in
+    production code.
+    """
+    from trading.guards.trading_guard import init_trading_guard_from_env
+    init_trading_guard_from_env()
+
+
 # ---------------------------------------------------------------------------
 # Pytest markers for test categorization
 # ---------------------------------------------------------------------------

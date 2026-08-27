@@ -107,11 +107,15 @@ class TestCircuitBreaker:
         
         # Wait for recovery
         await asyncio.sleep(0.15)
-        
-        # Next call should be allowed (half-open)
+
+        # Two successful half-open calls are required to close the circuit
         async with breaker:
             pass
-        
+        assert breaker.state == CircuitState.HALF_OPEN
+
+        async with breaker:
+            pass
+
         # Should be closed now
         assert breaker.state == CircuitState.CLOSED
 

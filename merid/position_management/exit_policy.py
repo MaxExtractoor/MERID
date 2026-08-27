@@ -17,7 +17,10 @@ EXIT PRECEDENCE ORDER (highest to lowest):
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Optional, List, Dict
+from typing import TYPE_CHECKING, Optional, List, Dict
+
+if TYPE_CHECKING:
+    from merid.position_management.exit_decision import ExitDecision
 from merid.position_management.position import Position, RiskParamsState
 from utils.logger import get_logger
 

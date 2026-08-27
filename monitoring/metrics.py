@@ -460,7 +460,7 @@ class MetricsRegistry:
             self.gauge(
                 "system_memory_bytes",
                 "Memory usage in bytes",
-                labels=["type"]  # type: used, available, total
+                labels=["type"]  # values: used, available, total
             )
             self.gauge(
                 "system_memory_percent",
@@ -471,7 +471,7 @@ class MetricsRegistry:
             self.gauge(
                 "system_disk_bytes",
                 "Disk usage in bytes",
-                labels=["mount", "type"]  # type: used, free, total
+                labels=["mount", "type"]  # values: used, free, total
             )
         
         if self._config.track_network:
