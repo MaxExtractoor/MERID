@@ -14,21 +14,23 @@ import re
 from typing import Optional, Set, Dict, Any
 from functools import lru_cache
 
-# Patterns that indicate sensitive data
+# Patterns that indicate sensitive data.
+# CRITICAL FIX (2026-08-27): word-bounded patterns to stop over-redacting
+# non-secret fields that happen to contain substrings like "key" or "token"
+# (e.g. fill_id, order_id, market_key, tokenized).
 SENSITIVE_PATTERNS = [
-    r'password',
-    r'secret',
-    r'key',
-    r'token',
-    r'credential',
-    r'auth',
-    r'api[_-]?key',
-    r'access[_-]?key',
-    r'secret[_-]?key',
-    r'private[_-]?key',
-    r'session[_-]?id',
-    r'csrf',
-    r'bearer',
+    r'\bpassword\b',
+    r'\bsecret\b',
+    r'\bapi[_-]?key\b',
+    r'\baccess[_-]?key\b',
+    r'\bsecret[_-]?key\b',
+    r'\bprivate[_-]?key\b',
+    r'\bsession[_-]?id\b',
+    r'\bcsrf\b',
+    r'\bbearer\b',
+    r'\btoken\b',
+    r'\bcredential\b',
+    r'\bauth\b',
 ]
 
 SENSITIVE_FIELDS: Set[str] = {
@@ -95,14 +97,12 @@ def mask_value(value: Any, field_name: str = "") -> str:
     if len(str_value) <= 4:
         return str_value
     
-    # If field name indicates sensitivity, mask it
+    # CRITICAL FIX (2026-08-27): Only mask based on field-name context.
+    # Blanket value-pattern redaction (long hex/base64) over-reaches and destroys
+    # telemetry for fill_id, order_id, client_order_id, and other non-secret IDs.
     if field_name and is_sensitive_field(field_name):
         return mask_sensitive_string(str_value)
-    
-    # Check if value looks like a sensitive pattern (e.g., long hex strings)
-    if _looks_like_secret(str_value):
-        return mask_sensitive_string(str_value)
-    
+
     return str_value
 
 

@@ -525,18 +525,18 @@ class SensitiveDataFilter(logging.Filter):
         sensitive_fields: List of field names to consider sensitive
     """
     
-    # Patterns to detect and mask (class variable)
-    SENSITIVE_PATTERNS = [
-        # API keys/tokens (hex strings 20+ chars)
-        (r'\b[a-fA-F0-9]{20,}\b', '[REDACTED_KEY]'),
-        # Base64-like strings (20+ chars)
-        (r'\b[A-Za-z0-9+/=]{20,}\b', '[REDACTED_BASE64]'),
-        # Common patterns
-        (r'password["\s]*[:=]["\s]*[^\s,}]+', 'password=[REDACTED]'),
-        (r'token["\s]*[:=]["\s]*[^\s,}]+', 'token=[REDACTED]'),
-        (r'api[_-]?key["\s]*[:=]["\s]*[^\s,}]+', 'api_key=[REDACTED]'),
-        (r'secret["\s]*[:=]["\s]*[^\s,}]+', 'secret=[REDACTED]'),
-    ]
+    # CRITICAL FIX (2026-08-27): Removed blanket hex/base64 regexes that
+    # over-redacted fill_id, order_id, client_order_id and other correlation
+    # identifiers. Redaction is now keyed on explicit field/value prefixes.
+    #
+    # The compiled pattern includes the caller-supplied ``sensitive_fields``
+    # (e.g. custom_secret, custom_token) plus the canonical secret prefixes.
+    # This preserves the field name as a queryable token while replacing the
+    # secret payload with [REDACTED].
+    _BASE_SECRET_PREFIXES = (
+        "password", "secret", "token", "bearer", "api_key", "private_key",
+        "access_key", "secret_key", "session_id", "credential", "auth",
+    )
 
     def __init__(self, enabled: bool = True, sensitive_fields: Optional[List[str]] = None):
         super().__init__()
@@ -545,10 +545,22 @@ class SensitiveDataFilter(logging.Filter):
             "api_key", "secret", "password", "token", "private_key",
             "credential", "auth", "bearer", "session_id"
         ])
-        
+
         import re
-        self._compiled_patterns = [(re.compile(pattern), replacement) 
-                                  for pattern, replacement in self.SENSITIVE_PATTERNS]
+        terms = sorted(
+            set(self.sensitive_fields) | set(self._BASE_SECRET_PREFIXES),
+            key=len,
+            reverse=True,
+        )
+        field_pattern = "|".join(re.escape(term) for term in terms)
+        # Match ``field_name = value`` or ``field_name: value`` with word
+        # boundaries so ``custom_secret`` matches but ``secret`` inside
+        # ``tokenized_secret_handling`` does not.
+        pattern = re.compile(
+            rf'\b({field_pattern})\b["\s]*[:=]["\s]*[^\s,}}]+',
+            re.IGNORECASE,
+        )
+        self._compiled_patterns = [(pattern, r'\1=[REDACTED]')]
     
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter and sanitize log record.
