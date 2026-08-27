@@ -555,8 +555,12 @@ async def test_crash_restart_during_submission(attempt_store):
 # 3. 409 / Idempotency recovery
 # ---------------------------------------------------------------------------
 
-def test_409_fingerprint_mismatch_fails_closed(attempt_store):
-    """Reusing a coid with a different economic fingerprint is rejected."""
+def test_409_fingerprint_mismatch_mints_fresh_coid(attempt_store):
+    """A coid with a different economic fingerprint is not reused.
+
+    The identity layer mints a fresh client_order_id rather than allowing an
+    existing idempotency key to collide with a materially different order.
+    """
     ticker = "KXBTC15M-409-50000"
     intent = _base_intent(ticker=ticker, price_cents=50, tif="gtc")
     coid = "manual-coid-409-1"
@@ -567,8 +571,14 @@ def test_409_fingerprint_mismatch_fails_closed(attempt_store):
     mismatch = _base_intent(ticker=ticker, price_cents=55, tif="gtc")
     mismatch.client_order_id = coid
     mismatch.client_tag = coid
-    with pytest.raises(OrderIdentityError):
-        finalize_order_identity(mismatch, store=attempt_store)
+    finalize_order_identity(mismatch, store=attempt_store)
+
+    # The mismatched coid must not be adopted for the new price.
+    assert mismatch.client_order_id != coid
+    # The original record remains intact and keeps its original fingerprint.
+    original = attempt_store.get_by_client_order_id(coid)
+    assert original is not None
+    assert original.fingerprint != _compute_fingerprint(mismatch)
 
 
 @pytest.mark.asyncio

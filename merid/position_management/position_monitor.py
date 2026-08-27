@@ -126,6 +126,21 @@ _FORCE_RECONCILE_EXIT_REASONS = {
 }
 
 
+# Entry book qualities that are trusted for spread-only / adverse-move stop guards.
+# AT_FILL is the gold standard.  AT_FILL_OR_NEAREST_PRE_FILL is a bounded fallback
+# that uses the most recent pre-fill book when a perfectly contemporaneous book
+# cannot be captured (e.g., a WS/RTI fill race).
+_TRUSTED_ENTRY_BOOK_QUALITIES = {"AT_FILL", "AT_FILL_OR_NEAREST_PRE_FILL"}
+
+
+# Extra buffer (cents) to apply to the spread-only stop guard when the entry book
+# was captured near-but-not-at fill, because the stale bid/ask may slightly
+# misstate the true spread.
+_NEAR_PRE_FILL_SPREAD_BUFFER_CENTS = int(
+    os.environ.get("MERID_NEAR_PRE_FILL_SPREAD_BUFFER_CENTS", "2")
+)
+
+
 def _is_forced_exit_reason(exit_reason: ExitReason) -> bool:
     """Return True if the exit reason is safety/forced and may override a stale in-flight lock."""
     if exit_reason is None:
@@ -3359,7 +3374,7 @@ class PositionMonitor:
             and has_trusted_entry_price
             and unknown_or_missing_quality
         )
-        if position.entry_book_capture_quality != "AT_FILL" and not can_stop_without_at_fill:
+        if position.entry_book_capture_quality not in _TRUSTED_ENTRY_BOOK_QUALITIES and not can_stop_without_at_fill:
             _bump_stop_counter(
                 "stop_disabled_unknown_provenance",
                 f"position={position.position_id[:8]} quality={position.entry_book_capture_quality}",
@@ -3584,13 +3599,18 @@ class PositionMonitor:
                     )
                     return False, "hard_stop_pending_confirmation"
                 if (
-                    position.entry_book_capture_quality == "AT_FILL"
+                    position.entry_book_capture_quality in _TRUSTED_ENTRY_BOOK_QUALITIES
                     and position.entry_executable_bid_cents is not None
                     and position.entry_executable_ask_cents is not None
                 ):
                     entry_spread = position.entry_executable_ask_cents - position.entry_executable_bid_cents
                     adverse_move = position.avg_entry_price_cents - current_price_cents
-                    if adverse_move < entry_spread + HARD_STOP_EXTRA_BUFFER_CENTS:
+                    # Allow slightly more buffer for a near-pre-fill book because the
+                    # captured spread may be stale by a few seconds.
+                    extra_buffer = HARD_STOP_EXTRA_BUFFER_CENTS
+                    if position.entry_book_capture_quality == "AT_FILL_OR_NEAREST_PRE_FILL":
+                        extra_buffer += _NEAR_PRE_FILL_SPREAD_BUFFER_CENTS
+                    if adverse_move < entry_spread + extra_buffer:
                         _bump_stop_counter(
                             "exit_stop_rejected_spread_only",
                             f"position={position.position_id[:8]} hard adverse={adverse_move} entry_spread={entry_spread}",
@@ -3696,6 +3716,7 @@ class PositionMonitor:
         from merid.event_venues.kalshi.order_identity import (
             derive_exit_client_order_id,
             derive_exit_intent_id,
+            resolve_exit_parent_id,
         )
 
         now = datetime.utcnow().isoformat()
@@ -3792,11 +3813,11 @@ class PositionMonitor:
             eligible_exit_reasons=eligible_reasons,
             suppressed_exit_reasons=suppressed_reasons,
             order_intent_id=derive_exit_intent_id(
-                position.entry_fill_id or position.position_id,
+                resolve_exit_parent_id(position),
                 exit_reason.value,
             ),
             order_client_order_id=derive_exit_client_order_id(
-                position.entry_fill_id or position.position_id,
+                resolve_exit_parent_id(position),
                 exit_reason.value,
             ),
             order_exchange_id=None,
@@ -4088,7 +4109,7 @@ class PositionMonitor:
                     position.position_id[:8], position.risk_params_schema_version,
                 )
                 return
-            if position.entry_book_capture_quality != "AT_FILL":
+            if position.entry_book_capture_quality not in _TRUSTED_ENTRY_BOOK_QUALITIES:
                 _bump_stop_counter(
                     "stop_disabled_unknown_provenance",
                     f"position={position.position_id[:8]} emit_book_quality={position.entry_book_capture_quality}",
@@ -4116,7 +4137,7 @@ class PositionMonitor:
         if (
             exit_reason == ExitReason.STOP_LOSS
             and position.time_since_entry_seconds < MIN_STOP_ARM_SECONDS
-            and position.entry_book_capture_quality == "AT_FILL"
+            and position.entry_book_capture_quality in _TRUSTED_ENTRY_BOOK_QUALITIES
             and position.entry_executable_bid_cents is not None
             and exit_price_cents <= position.entry_executable_bid_cents
         ):
