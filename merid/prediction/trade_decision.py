@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
+from merid.data.ingress_replay import replay_time
+from merid.audit.replay_state_diff import record_state_checksum
 
 
 # Minimum posterior for a regime classification to be usable.
@@ -508,7 +510,7 @@ def compute_trade_decision(
       4. Its net edge exceeds ``min_required_edge``.
       5. Confidence is valid (produced by the uncertainty engine, not a default).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
     _data_state = _resolve_data_state(data_state=data_state, data_quality=data_quality)
     _regime_label = _resolve_regime_label(regime_label=regime_label, regime=regime)
     _regime_probability = _resolve_regime_probability(
@@ -516,7 +518,7 @@ def compute_trade_decision(
     )
 
     def _no_trade(reason: str) -> TradeDecision:
-        return TradeDecision(
+        decision = TradeDecision(
             run_id=run_id,
             decision_id=decision_id,
             ticker=ticker,
@@ -546,6 +548,8 @@ def compute_trade_decision(
             selection_reason=selection_reason,
             policy_version=policy_version,
         )
+        record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
+        return decision
 
     # Layer-1: market / time gates.
     # Missing, non-finite, or non-positive TTE is a fail-closed no-trade for
@@ -771,7 +775,7 @@ def compute_trade_decision(
         edge_breakdown = None
         no_trade_reason = "invalid_confidence"
 
-    return TradeDecision(
+    decision = TradeDecision(
         run_id=run_id,
         decision_id=decision_id,
         ticker=ticker,
@@ -849,3 +853,5 @@ def compute_trade_decision(
         approved_size_cc=approved_size_cc,
         policy_version=policy_version,
     )
+    record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
+    return decision

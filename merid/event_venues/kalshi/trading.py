@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from decimal import Decimal
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from merid.event_venues.base import (
     EventMarket,

@@ -32,7 +32,10 @@ import threading
 import time as _time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from merid.prediction.unified_edge import EdgeResult
 
 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_per_contract_cents
 from merid.event_venues.kalshi.risk_parameters import (

@@ -35,6 +35,7 @@ from merid.event_venues.base import (
 )
 from merid.event_venues.kalshi.models import (
     KalshiBalance,
+    KalshiConfig,
     KalshiMarket,
     KalshiOrder,
     KalshiOrderBook,
@@ -43,6 +44,14 @@ from merid.event_venues.kalshi.models import (
     KalshiTrade,
 )
 from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
+from merid.data.ingress_recorder import record_ingress, SOURCE_KALSHI_REST
+from merid.data.ingress_replay import (
+    is_replay_active,
+    get_replay_dispatcher,
+    build_httpx_response,
+    replay_random,
+    replay_time,
+)
 from merid.event_venues.kalshi.api_metrics import emit_api_metrics
 from merid.event_venues.kalshi.binary_price_space import legacy_to_v2, require_consistent_outcome_side, SideValidationError
 from merid.event_venues.kalshi.canonical_portfolio import PaginationIncomplete
@@ -842,7 +851,7 @@ class KalshiVenueClient(EventVenueClient):
             raise RuntimeError("RSA private key not loaded. Check credentials and private_key_path.")
 
         # Timestamp in milliseconds (Kalshi requires this)
-        ts_ms = str(int(_time.time() * 1000))
+        ts_ms = str(int(replay_time() * 1000))
         message = ts_ms + method.upper() + path
         signature = self._private_key.sign(
             message.encode(),
@@ -961,9 +970,9 @@ class KalshiVenueClient(EventVenueClient):
         # Support both legacy base_url and unified rest_base_url
         base_url = getattr(self.config, 'rest_base_url', None) or getattr(self.config, 'base_url', None)
         url = f"{base_url}{path}"
-        start_time = _time.time()
+        start_time = replay_time()
         last_error: Optional[Exception] = None
-        total_retry_start_time = _time.time()  # Track total retry duration
+        total_retry_start_time = replay_time()  # Track total retry duration
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             try:
@@ -1021,21 +1030,42 @@ class KalshiVenueClient(EventVenueClient):
                         if headers:
                             merged_headers.update(headers)
                         
-                        response = await client.request(
-                            method=method,
-                            url=url,
-                            params=params,
-                            json=json_data,
-                            headers=merged_headers if merged_headers else None,
-                        )
+                        if is_replay_active():
+                            record = await get_replay_dispatcher().aget(SOURCE_KALSHI_REST)
+                            request = httpx.Request(
+                                method=method,
+                                url=url,
+                                params=params,
+                                headers=merged_headers if merged_headers else None,
+                            )
+                            response = build_httpx_response(record, request)
+                        else:
+                            response = await client.request(
+                                method=method,
+                                url=url,
+                                params=params,
+                                json=json_data,
+                                headers=merged_headers if merged_headers else None,
+                            )
+                            # Capture raw response bytes at the boundary for replay.
+                            record_ingress(
+                                SOURCE_KALSHI_REST,
+                                response.content,
+                                metadata={
+                                    "method": method,
+                                    "path": path,
+                                    "url": str(response.request.url) if response.request else url,
+                                    "status_code": response.status_code,
+                                },
+                            )
                     
-                    latency_ms = (_time.time() - start_time) * 1000
+                    latency_ms = (replay_time() - start_time) * 1000
                     
                     # Check for retryable status codes
                     if response.status_code in KALSHI_RETRY_STATUSES:
                         if attempt < KALSHI_MAX_RETRIES:
                             # Check total retry duration to prevent indefinite retries
-                            total_retry_duration = _time.time() - total_retry_start_time
+                            total_retry_duration = replay_time() - total_retry_start_time
                             if total_retry_duration >= KALSHI_MAX_TOTAL_RETRY_DURATION_S:
                                 logger.error(
                                     f"[kalshi] {operation_name} exceeded max total retry duration "
@@ -1065,7 +1095,7 @@ class KalshiVenueClient(EventVenueClient):
                             # Jittered exponential backoff: base^attempt * [1.0, 2.0)
                             # Prevents thundering herd when services recover
                             base_wait = KALSHI_BACKOFF_BASE ** attempt
-                            jitter = 1.0 + random.random()  # Uniform [1.0, 2.0)
+                            jitter = 1.0 + replay_random()  # Uniform [1.0, 2.0)
                             
                             # For 429, honour Retry-After header if present and larger
                             if response.status_code == 429:
@@ -1242,13 +1272,13 @@ class KalshiVenueClient(EventVenueClient):
                     
             except CircuitOpenError as e:
                 # Circuit is open - fail fast
-                latency_ms = (_time.time() - start_time) * 1000
+                latency_ms = (replay_time() - start_time) * 1000
                 self._circuit_open_log_count += 1
                 if self._circuit_open_log_count == 1:
-                    self._circuit_open_first_ts = _time.time()
+                    self._circuit_open_first_ts = replay_time()
                     logger.warning(f"[kalshi] Circuit OPEN — blocking {operation_name} (retry in {e.time_until_retry:.1f}s)")
                 elif self._circuit_open_log_count == 10:
-                    elapsed = _time.time() - self._circuit_open_first_ts
+                    elapsed = replay_time() - self._circuit_open_first_ts
                     logger.warning(
                         f"[kalshi] Circuit still OPEN — suppressed {self._circuit_open_log_count} blocked calls in {elapsed:.1f}s"
                     )
@@ -1276,7 +1306,7 @@ class KalshiVenueClient(EventVenueClient):
                 last_error = e
                 if attempt < KALSHI_MAX_RETRIES:
                     # Jittered exponential backoff
-                    wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + random.random())
+                    wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + replay_random())
                     logger.warning(
                         f"[kalshi] {operation_name} timeout, retrying in {wait_time:.2f}s "
                         f"(attempt {attempt + 1})"
@@ -1288,7 +1318,7 @@ class KalshiVenueClient(EventVenueClient):
                 last_error = e
                 if attempt < KALSHI_MAX_RETRIES:
                     # Jittered exponential backoff
-                    wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + random.random())
+                    wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + replay_random())
                     logger.warning(
                         f"[kalshi] {operation_name} connection error, retrying in {wait_time:.2f}s "
                         f"(attempt {attempt + 1}): {e}"
@@ -1325,7 +1355,7 @@ class KalshiVenueClient(EventVenueClient):
                         )
                         await asyncio.sleep(0.05)
                         continue
-                latency_ms = (_time.time() - start_time) * 1000
+                latency_ms = (replay_time() - start_time) * 1000
                 logger.warning(f"[kalshi] {operation_name} RuntimeError after retries: {e}")
                 return OperationResult.fail(
                     e,
@@ -1358,7 +1388,7 @@ class KalshiVenueClient(EventVenueClient):
 
                 if is_recoverable and attempt < KALSHI_MAX_RETRIES:
                     # Use longer backoff for Windows errors - they may need more time
-                    wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + random.random()) * 2.0
+                    wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + replay_random()) * 2.0
                     logger.warning(
                         "[kalshi] %s Windows/async I/O error, retrying in %.2fs "
                         "(attempt %s/%s): %s",
@@ -1374,7 +1404,7 @@ class KalshiVenueClient(EventVenueClient):
                     continue
 
                 # Not recoverable or max retries exhausted
-                latency_ms = (_time.time() - start_time) * 1000
+                latency_ms = (replay_time() - start_time) * 1000
                 logger.error(
                     "[kalshi] %s Windows/async I/O error not recoverable: %s",
                     operation_name,
@@ -1389,7 +1419,7 @@ class KalshiVenueClient(EventVenueClient):
 
             except Exception as e:
                 # Unexpected error - don't retry
-                latency_ms = (_time.time() - start_time) * 1000
+                latency_ms = (replay_time() - start_time) * 1000
                 # Include exception type and first 100 chars of repr for debugging
                 error_type = type(e).__name__
                 error_detail = repr(e)[:200]
@@ -1414,7 +1444,7 @@ class KalshiVenueClient(EventVenueClient):
                 )
         
         # Max retries exhausted
-        latency_ms = (_time.time() - start_time) * 1000
+        latency_ms = (replay_time() - start_time) * 1000
         
         # Emit API metrics for max retries exhausted
         emit_api_metrics(
@@ -1424,7 +1454,7 @@ class KalshiVenueClient(EventVenueClient):
             status_code=503,  # Service Unavailable
             success=False,
         )
-        latency_ms = (_time.time() - start_time) * 1000
+        latency_ms = (replay_time() - start_time) * 1000
         error = last_error or RuntimeError(f"Max retries exceeded for {operation_name}")
         return OperationResult.fail(
             error,

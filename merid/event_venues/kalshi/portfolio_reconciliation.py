@@ -109,7 +109,7 @@ class PortfolioReconciler:
         
         self._local_lock = threading.Lock()
         self._engine = get_portfolio_engine()
-        self._bankroll_service = get_bankroll_service()
+        self._bankroll_service = _get_bankroll_service()()
         self._kalshi_client = KalshiClient()
         
         # Reconciliation state

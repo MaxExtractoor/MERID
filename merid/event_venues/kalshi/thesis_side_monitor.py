@@ -6,7 +6,7 @@ It tracks side inversion incidents and provides metrics for production dashboard
 """
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from collections import defaultdict
 from utils.logger import get_logger

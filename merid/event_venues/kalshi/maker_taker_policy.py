@@ -365,6 +365,7 @@ class MakerTakerPolicyEngine:
             RoleDecision with TAKER role if PnL >= threshold, else standard logic
         """
         # Calculate fees
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
         notional_cents = price_cents * contracts
         taker_fee_cents = kalshi_taker_fee_cents_parabolic(price_cents, contracts)
         taker_fee_pct = (taker_fee_cents / notional_cents) * 100 if notional_cents > 0 else 0

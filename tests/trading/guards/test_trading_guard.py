@@ -41,10 +41,11 @@ from trading.adapters.base import TradeRequest, TradeSide, OrderType
 
 @pytest.fixture(autouse=True)
 def reset_singletons():
-    """Reset global singletons before each test."""
+    """Reset global singletons before each test and re-bind TradingGuard from env."""
     import trading.guards.trading_guard as tg
     tg._trading_guard = None
     tg._solana_guard = None
+    tg.init_trading_guard_from_env()
     yield
 
 

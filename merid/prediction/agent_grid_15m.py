@@ -358,7 +358,7 @@ def _get_settlement_input_price(
                         "[CF-RTI-PRECISION] asset=%s raw=%s retained_digits=%s required=%s rejecting settlement reference",
                         asset, _canonical_format_price(asset, raw_price), retained, settlement_digits
                     )
-                    return spot_price, 0.0, f"public_spot_fallback:{reason}", obs
+                    return spot_price, 0.0, f"cf_rti_unavailable:{reason}", obs
 
                 # Quantize exactly once to the market's settlement quantum.
                 try:
@@ -372,13 +372,13 @@ def _get_settlement_input_price(
                 cf_rti_basis = float(basis_decimal)
                 return settlement_price, cf_rti_basis, "cfb_rti_live", obs
 
-    # No authoritative RTI: honest public-spot fallback, which downstream gates
-    # will reject for entry because the reference is not ``cfb_rti_live``.
+    # No authoritative RTI: report the precise rejection reason.  Downstream
+    # gates will reject for entry because the reference is not ``cfb_rti_live``.
     from merid.data.cf_rti_adapter import get_last_rejection_reason
     reason = get_last_rejection_reason(asset) or "cf_rti_unavailable"
     if obs is not None and not obs.execution_eligible:
         reason = f"cf_rti_not_execution_eligible:{obs.timestamp_quality}"
-    return spot_price, 0.0, f"public_spot_fallback:{reason}", obs
+    return spot_price, 0.0, f"cf_rti_unavailable:{reason}", obs
 
 
 # Import unified signal terminology for consistent side selection
@@ -15188,7 +15188,7 @@ class LeanAgent15m:
                 # CRITICAL FIX 2026-08-20: order identity/provenance fields required by order_router
                 "run_id": f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}",
                 "decision_id": f"decision_{uuid.uuid4().hex[:16]}",
-                "data_state": "healthy" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "public_spot_fallback",
+                "data_state": "healthy" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "cf_rti_unavailable",
                 "regime_label": signal.get("regime") or "normal",
                 "regime_probability": signal.get("hmm_regime_confidence", 1.0) or 1.0,
                 "p_yes": (signal.get("model_prob", 0.5) if signal.get("side") == "yes" else 1.0 - signal.get("model_prob", 0.5)),
@@ -15197,9 +15197,9 @@ class LeanAgent15m:
                 "gross_edge": signal.get("edge_pct", 0.0),
                 "net_edge": (signal.get("ev_net_cents") / 100.0) if signal.get("ev_net_cents") is not None else signal.get("edge_pct", 0.0),
                 "selected_outcome_price": int(signal.get("price_cents", 0)),
-                "settlement_reference": signal.get("settlement_reference") or "public_spot_fallback:unknown",
+                "settlement_reference": signal.get("settlement_reference") or "cf_rti_unavailable:unknown",
                 "confidence_valid": "cfb_rti_live" in (signal.get("settlement_reference") or ""),
-                "confidence_source": "uncertainty_engine" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "public_spot",
+                "confidence_source": "uncertainty_engine" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "cf_rti_unavailable",
                 "confidence_reasons": [],
                 "cf_rti_basis": signal.get("cf_rti_basis", 0.0),
                 "settlement_input_price": signal.get("settlement_input_price", 0.0),

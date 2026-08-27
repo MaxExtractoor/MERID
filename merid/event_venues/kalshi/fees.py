@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal, ROUND_CEILING
-from typing import Dict, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 from utils.logger import get_logger
 

@@ -14,6 +14,8 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass, field
+
+from merid.data.ingress_replay import replay_random
 from enum import Enum
 from typing import List, Optional, Tuple
 from decimal import Decimal
@@ -231,7 +233,7 @@ class OrderScaler:
             count = max(1, count)
             
             # Add timing jitter (±10%)
-            jitter = interval * self.config.time_jitter_pct * (random.random() * 2 - 1)
+            jitter = interval * self.config.time_jitter_pct * (replay_random() * 2 - 1)
             delay = (i * interval) + jitter
             
             # PRODUCTION SAFETY: Apply size jitter but ensure total matches
@@ -303,7 +305,7 @@ class OrderScaler:
                 delay = 0.0
             else:
                 interval = self.config.time_window_seconds / n_refreshes
-                jitter = interval * self.config.time_jitter_pct * (random.random() * 2 - 1)
+                jitter = interval * self.config.time_jitter_pct * (replay_random() * 2 - 1)
                 delay = (i * interval) + jitter
             
             child_orders.append(ChildOrder(
@@ -383,7 +385,7 @@ class OrderScaler:
             allocated_contracts += final_count
             
             # Add timing jitter
-            jitter = interval * self.config.time_jitter_pct * (random.random() * 2 - 1)
+            jitter = interval * self.config.time_jitter_pct * (replay_random() * 2 - 1)
             delay = (i * interval) + jitter
             
             child_orders.append(ChildOrder(

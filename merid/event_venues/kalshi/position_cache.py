@@ -15,8 +15,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
+from merid.data.ingress_replay import replay_start_time, replay_time
 from utils.logger import get_logger
 
 try:
@@ -58,6 +59,7 @@ try:
         normalize_rest_position,
         require_canonical_outcome_side,
         PositionDataError,
+        SideValidationError,
     )
     BINARY_PRICE_SPACE_AVAILABLE = True
 except ImportError:
@@ -867,7 +869,7 @@ class KalshiPositionCache:
         # record was created before this cache started are durable state from a
         # previous process and must not be re-applied (they will be rebuilt by
         # the reconciler from the fills_ledger/exchange REST snapshot).
-        self._started_at = _time.time()
+        self._started_at = replay_start_time()
         # PRODUCTION FIX: Map Kalshi order_id -> client_tag for fill-to-intent linkage
         # This is needed because HTTP fills don't include client_order_id from Kalshi API
         self._order_id_to_client_tag: Dict[str, str] = {}
@@ -1486,7 +1488,7 @@ class KalshiPositionCache:
             "entry_book_timestamp": None,
             "entry_book_sequence": None,
             "entry_book_source": None,
-            "registered_at": _time.time(),
+            "registered_at": replay_time(),
         }
 
         # CRITICAL FIX (2026-08-23): Persist a durable edge-decay policy snapshot
@@ -1654,7 +1656,7 @@ class KalshiPositionCache:
         Returns the number of entries removed. Called opportunistically from
         register_tp_targets and on demand from operators / tests.
         """
-        cutoff = _time.time() - max_age_seconds
+        cutoff = replay_time() - max_age_seconds
         stale_ids = [
             coid
             for coid, target in self._pending_tp_targets.items()
@@ -1756,7 +1758,7 @@ class KalshiPositionCache:
                                     "predates this process (started %.3f) - skipping re-application",
                                     fill_id, _fill_ts, self._started_at
                                 )
-                                self._applied_fill_ids[fill_id] = _time.time()
+                                self._applied_fill_ids[fill_id] = replay_time()
                                 self._save_applied_fill_ids()
                                 return
                     except Exception as _ledger_guard_err:
@@ -2818,7 +2820,7 @@ class KalshiPositionCache:
 
                 # Mark this fill as applied now that the new position is committed.
                 if fill_id:
-                    self._applied_fill_ids[fill_id] = _time.time()
+                    self._applied_fill_ids[fill_id] = replay_time()
                     if len(self._applied_fill_ids) > self._applied_fill_ids_max:
                         evict_count = len(self._applied_fill_ids) // 2
                         for _ in range(evict_count):
@@ -2884,7 +2886,7 @@ class KalshiPositionCache:
 
                 # Mark this fill as applied in the in-memory idempotency set.
                 if fill_id:
-                    self._applied_fill_ids[fill_id] = _time.time()
+                    self._applied_fill_ids[fill_id] = replay_time()
                     if len(self._applied_fill_ids) > self._applied_fill_ids_max:
                         evict_count = len(self._applied_fill_ids) // 2
                         for _ in range(evict_count):
@@ -3204,7 +3206,7 @@ class KalshiPositionCache:
                     ledger_signed_yes=ledger_signed_yes,
                     cache_signed_yes=cache_signed_yes,
                     open_order_reserved_yes=0,
-                    source_timestamp=_time.time(),
+                    source_timestamp=replay_time(),
                     status=status,
                 )
             except Exception as rec_err:
@@ -4004,7 +4006,7 @@ class KalshiPositionCache:
         """
         # Use current time if no timestamp provided
         if rest_timestamp is None:
-            rest_timestamp = _time.time()
+            rest_timestamp = replay_time()
 
         # CRITICAL FIX (2026-08-11): Per-source idempotency guard.  Multiple
         # reconcilers (fills_poller, agent_grid, continuous_reconciliation,
@@ -5847,7 +5849,7 @@ class KalshiPositionCache:
         Same (market_id, kind, price) within a 60s window produces the same tag.
         Prefix with BRACKET_ for visibility in logs / DLQ.
         """
-        bucket = int(_time.time() // 60)
+        bucket = int(replay_time() // 60)
         preimage = f"{market_id}|{kind}|{price_cents}|{bucket}".encode("utf-8")
         digest = hashlib.sha256(preimage).hexdigest()[:16]
         return f"BRACKET_{kind.upper()}_{digest}"

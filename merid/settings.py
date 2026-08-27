@@ -872,6 +872,69 @@ class Settings(BaseSettings):
         description="Linear scaling: add this many contracts per $100 bankroll"
     )
     
+    # =============================================================================
+    # INGRESS RECORDING (deterministic replay boundary capture)
+    # =============================================================================
+    # Off by default.  When enabled, raw WebSocket/REST/RTI bytes are written to
+    # a JSON-line tape before parsing so the same input can be fed to the
+    # production binary during replay.  No capture is performed when disabled.
+    MERID_INGRESS_RECORDING_ENABLED: bool = Field(
+        default=False,
+        description="Record raw inbound WebSocket/REST/RTI bytes to a JSON-line tape for deterministic replay",
+    )
+    MERID_INGRESS_RECORDING_DIR: Optional[str] = Field(
+        default="data/ingress",
+        description="Directory for ingress JSON-line tape files",
+    )
+    MERID_INGRESS_QUEUE_SIZE: int = Field(
+        default=100_000,
+        description="In-memory queue size for the ingress recorder; newest records are dropped when full",
+    )
+    MERID_INGRESS_ROTATION_MINUTES: int = Field(
+        default=60,
+        description="Rotate ingress tape files every N minutes",
+    )
+    MERID_INGRESS_ROTATION_BYTES: int = Field(
+        default=1_000_000_000,
+        description="Rotate ingress tape files when they exceed N bytes",
+    )
+    MERID_INGRESS_FLUSH_INTERVAL_S: float = Field(
+        default=1.0,
+        description="Flush ingress tape to disk at most every N seconds",
+    )
+    MERID_INGRESS_WRITE_SHA256: bool = Field(
+        default=False,
+        description="Write per-record SHA-256 checksums in the ingress tape",
+    )
+    
+    # =============================================================================
+    # INGRESS REPLAY (deterministic replay runtime mode)
+    # =============================================================================
+    # When MERID_REPLAY_TAPE is set, all four ingress points read from the JSON-line
+    # tape instead of the live network.  This is a runtime mode of the production
+    # binary, not a separate simulator.
+    MERID_REPLAY_TAPE: Optional[str] = Field(
+        default=None,
+        description="Directory of an ingress JSON-line tape to replay (runtime mode)",
+    )
+    MERID_REPLAY_SEED: Optional[int] = Field(
+        default=None,
+        description="Optional fixed seed for replay randomness (default: derived from tape hash)",
+    )
+    MERID_REPLAY_ACTIVE_SOURCES: Optional[str] = Field(
+        default=None,
+        description="Comma-separated list of source IDs to replay; default is all sources in the tape",
+    )
+    
+    MERID_WS_BRIDGE_SINGLE_WRITER: bool = Field(
+        default=False,
+        description="Use the new single-writer, sequence-ordered WebSocket drain",
+    )
+    MERID_WS_BRIDGE_MAX_BUFFERED: int = Field(
+        default=4096,
+        description="Maximum out-of-order WebSocket events buffered per channel",
+    )
+    
     # Computed properties for derived USD limits (bankroll * percentage)
     @property
     def kalshi_portfolio_max_notional_cents(self) -> int:
@@ -1063,8 +1126,18 @@ class Settings(BaseSettings):
         # `settings`.  FAIL CLOSED with 0 - bankroll_service_v2 will provide live data.
         # NO hardcoded fallbacks permitted - bankroll must come from live Kalshi API.
         if self.MERID_TOTAL_CAPITAL_USD <= 0:
+            # In replay, balance is pinned by the tape config snapshot; do not
+            # re-fetch from the network at settings import time.
             try:
-                kalshi_balance = self._fetch_kalshi_balance()
+                from merid.data.ingress_replay import is_replay_active
+                if is_replay_active():
+                    logger.info(
+                        "[RISK-CONFIG] Replay mode: skipping live Kalshi balance fetch; "
+                        "balance must be provided by the tape config snapshot or settings."
+                    )
+                    kalshi_balance = 0.0
+                else:
+                    kalshi_balance = self._fetch_kalshi_balance()
                 if kalshi_balance > 0:
                     self.MERID_TOTAL_CAPITAL_USD = kalshi_balance
                     logger.info(
@@ -1098,10 +1171,15 @@ class Settings(BaseSettings):
     def _fetch_kalshi_balance(self) -> float:
         """
         Fetch actual account balance from Kalshi API.
-        
+
         Returns:
             Balance in USD as float. Returns 0 if unable to fetch.
         """
+        from merid.data.ingress_replay import is_replay_active
+        if is_replay_active():
+            logger.info("[KALSHI_BALANCE_FETCH] Replay mode: skipping live balance fetch")
+            return 0.0
+
         import requests
         from pathlib import Path
         

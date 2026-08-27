@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
+from merid.data.ingress_replay import replay_time
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -151,7 +152,7 @@ class KalshiVenueAdapter:
         Returns:
             List of InstrumentConfig for Kalshi markets
         """
-        now = _time.time()
+        now = replay_time()
         if not force_refresh and (now - self._cache_ts) < self._cache_ttl:
             instruments = self._instruments_cache
         else:
