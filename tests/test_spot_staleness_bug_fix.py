@@ -15,9 +15,9 @@ from merid.event_venues.kalshi.health_snapshot import get_kalshi_health_snapshot
 class TestSpotStalenessBugFix:
     """Test suite for spot staleness bug fix."""
     
-    @patch('merid.event_venues.kalshi.health_snapshot.get_unified_spot_service')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_market_catalog')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_bridge')
+    @patch('data.unified_spot_service.get_unified_spot_service')
+    @patch('merid.event_venues.kalshi.market_catalog.get_market_catalog')
+    @patch('merid.event_venues.kalshi.ws_bridge.get_bridge')
     def test_all_fresh_spot_is_healthy(self, mock_bridge, mock_catalog, mock_spot_service):
         """Test that all fresh spot data results in healthy status."""
         # Setup: All 5 assets have fresh spot data
@@ -35,13 +35,13 @@ class TestSpotStalenessBugFix:
         mock_bridge.return_value = None
         
         # Test: Should be healthy
-        snapshot = get_kalshi_health_snapshot(loop_tick=10)
+        snapshot = get_kalshi_health_snapshot(loop_tick=10, use_cache=False)
         assert snapshot.status == OverallStatus.HEALTHY
         assert all(state == SpotState.FRESH for state in snapshot.spot_status.values())
     
-    @patch('merid.event_venues.kalshi.health_snapshot.get_unified_spot_service')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_market_catalog')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_bridge')
+    @patch('data.unified_spot_service.get_unified_spot_service')
+    @patch('merid.event_venues.kalshi.market_catalog.get_market_catalog')
+    @patch('merid.event_venues.kalshi.ws_bridge.get_bridge')
     def test_single_stale_asset_is_degraded(self, mock_bridge, mock_catalog, mock_spot_service):
         """Test that single stale asset results in degraded status, not unhealthy."""
         # Setup: DOGE is stale, others are fresh
@@ -67,7 +67,7 @@ class TestSpotStalenessBugFix:
         mock_bridge.return_value = None
         
         # Test: Should be degraded, not unhealthy
-        snapshot = get_kalshi_health_snapshot(loop_tick=10)
+        snapshot = get_kalshi_health_snapshot(loop_tick=10, use_cache=False)
         assert snapshot.status == OverallStatus.DEGRADED
         assert snapshot.spot_status["DOGE"] == SpotState.UNAVAILABLE
         assert snapshot.spot_status["BTC"] == SpotState.FRESH
@@ -76,9 +76,9 @@ class TestSpotStalenessBugFix:
         assert snapshot.spot_status["XRP"] == SpotState.FRESH
         assert "spot_partial_degraded" in ";".join(snapshot.reasons)
     
-    @patch('merid.event_venues.kalshi.health_snapshot.get_unified_spot_service')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_market_catalog')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_bridge')
+    @patch('data.unified_spot_service.get_unified_spot_service')
+    @patch('merid.event_venues.kalshi.market_catalog.get_market_catalog')
+    @patch('merid.event_venues.kalshi.ws_bridge.get_bridge')
     def test_all_unavailable_is_unhealthy(self, mock_bridge, mock_catalog, mock_spot_service):
         """Test that all unavailable assets results in unhealthy status."""
         # Setup: All assets are unavailable
@@ -94,14 +94,14 @@ class TestSpotStalenessBugFix:
         mock_bridge.return_value = None
         
         # Test: Should be unhealthy
-        snapshot = get_kalshi_health_snapshot(loop_tick=10)
+        snapshot = get_kalshi_health_snapshot(loop_tick=10, use_cache=False)
         assert snapshot.status == OverallStatus.UNHEALTHY
         assert all(state == SpotState.UNAVAILABLE for state in snapshot.spot_status.values())
         assert "spot_all_unavailable" in snapshot.reasons
     
-    @patch('merid.event_venues.kalshi.health_snapshot.get_unified_spot_service')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_market_catalog')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_bridge')
+    @patch('data.unified_spot_service.get_unified_spot_service')
+    @patch('merid.event_venues.kalshi.market_catalog.get_market_catalog')
+    @patch('merid.event_venues.kalshi.ws_bridge.get_bridge')
     def test_multiple_stale_assets_is_degraded(self, mock_bridge, mock_catalog, mock_spot_service):
         """Test that multiple stale assets results in degraded status."""
         # Setup: DOGE and XRP are stale, others are fresh
@@ -125,7 +125,7 @@ class TestSpotStalenessBugFix:
         mock_bridge.return_value = None
         
         # Test: Should be degraded
-        snapshot = get_kalshi_health_snapshot(loop_tick=10)
+        snapshot = get_kalshi_health_snapshot(loop_tick=10, use_cache=False)
         assert snapshot.status == OverallStatus.DEGRADED
         assert snapshot.spot_status["DOGE"] == SpotState.UNAVAILABLE
         assert snapshot.spot_status["XRP"] == SpotState.UNAVAILABLE
@@ -134,9 +134,9 @@ class TestSpotStalenessBugFix:
         assert snapshot.spot_status["SOL"] == SpotState.FRESH
         assert "spot_partial_degraded" in ";".join(snapshot.reasons)
     
-    @patch('merid.event_venues.kalshi.health_snapshot.get_unified_spot_service')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_market_catalog')
-    @patch('merid.event_venues.kalshi.health_snapshot.get_bridge')
+    @patch('data.unified_spot_service.get_unified_spot_service')
+    @patch('merid.event_venues.kalshi.market_catalog.get_market_catalog')
+    @patch('merid.event_venues.kalshi.ws_bridge.get_bridge')
     def test_mostly_fresh_with_one_unavailable_is_degraded(self, mock_bridge, mock_catalog, mock_spot_service):
         """Test that 4 fresh + 1 unavailable results in degraded status."""
         # Setup: Only DOGE is unavailable, others are fresh
@@ -160,7 +160,7 @@ class TestSpotStalenessBugFix:
         mock_bridge.return_value = None
         
         # Test: Should be degraded (not unhealthy)
-        snapshot = get_kalshi_health_snapshot(loop_tick=10)
+        snapshot = get_kalshi_health_snapshot(loop_tick=10, use_cache=False)
         assert snapshot.status == OverallStatus.DEGRADED
         assert snapshot.spot_status["DOGE"] == SpotState.UNAVAILABLE
         assert snapshot.spot_status["BTC"] == SpotState.FRESH

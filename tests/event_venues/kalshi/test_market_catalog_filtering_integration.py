@@ -13,6 +13,8 @@ This test simulates the "5000 raw markets, 5 allowed" scenario to verify that:
 import pytest
 from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
+from freezegun import freeze_time
 from merid.event_venues.kalshi.allowed_market_policy import (
     filter_allowed_markets,
     get_allowed_assets,
@@ -604,8 +606,13 @@ class TestMarketCatalogTimeWindowFiltering:
             pytest.skip("market_catalog not available")
 
 
+@freeze_time("2024-06-15T10:00:00Z")
 class TestKalshiMarketCatalogGetCurrent15mMarket:
-    """Tests for KalshiMarketCatalog.get_current_15m_market() helper method."""
+    """Tests for KalshiMarketCatalog.get_current_15m_market() helper method.
+
+    Freezing the clock keeps the hardcoded 2024-06-15 test windows valid
+    regardless of the real system time.
+    """
 
     def test_get_current_15m_market_exact_window_match(self):
         """get_current_15m_market() matches market by exact ET window end time."""

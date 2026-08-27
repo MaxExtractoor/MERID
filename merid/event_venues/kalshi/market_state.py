@@ -84,7 +84,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from merid.event_venues.kalshi.models import KalshiMarketState
 from merid.event_venues.kalshi.orderbook import LocalOrderbook, MultiMarketOrderbook
@@ -648,10 +648,15 @@ class KalshiMarketStateStore:
         logger.debug("[BOOT-TRACE] KalshiMarketStateStore.__init__: per-ticker locks initialized")
 
         # CRITICAL FIX: Store reference to main event loop for use by batch worker thread
-        # This allows run_coroutine_threadsafe to work from the batch worker thread
+        # This allows run_coroutine_threadsafe to work from the batch worker thread.
+        # Use get_running_loop() first to avoid creating a stray loop; fall back to
+        # get_event_loop() only when a loop has been explicitly set for this thread.
         try:
             import asyncio
-            self._main_event_loop = asyncio.get_event_loop()
+            try:
+                self._main_event_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._main_event_loop = asyncio.get_event_loop()
             logger.debug("[MD-STORE-INIT] Captured main event loop: %s", self._main_event_loop)
         except Exception as e:
             logger.warning("[MD-STORE-INIT] Failed to capture main event loop: %s", e)
@@ -796,6 +801,32 @@ class KalshiMarketStateStore:
         ):
             self._main_event_loop = loop
             logger.info("[MD-STORE-LOOP] Registered main event loop: %s", loop)
+
+    def _schedule_on_main_loop(self, coro_factory: Callable[[], Awaitable[None]], log_label: str, ticker: Optional[str] = None) -> None:
+        """Schedule a coroutine on the captured main event loop from any thread.
+
+        Safe to call from worker/forwarder threads that do not have their own event loop.
+        ``coro_factory`` is called only when a running loop is available so that no
+        coroutine object is created (and then garbage collected unawaited) otherwise.
+        """
+        import asyncio
+
+        loop = self._main_event_loop
+        if loop is None or not loop.is_running():
+            logger.warning(
+                "[%s] Event loop not available for %s (loop=%s)",
+                log_label, ticker or "unknown", loop
+            )
+            return
+
+        try:
+            coro = coro_factory()
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        except Exception as e:
+            logger.error(
+                "[%s] Failed to schedule %s on main loop: %s",
+                log_label, ticker or "unknown", e, exc_info=True
+            )
 
     def _get_ticker_lock(self, ticker: str) -> threading.Lock:
         """Get or create a lock for a specific ticker.
@@ -1009,13 +1040,11 @@ class KalshiMarketStateStore:
                                     state.book_consistency = "SUSPECT"
                                     self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow")
                                     self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow")
-                                    try:
-                                        import asyncio
-                                        loop = asyncio.get_event_loop()
-                                        if loop.is_running():
-                                            asyncio.create_task(self._sync_invariant_violation_with_rest(ticker))
-                                    except Exception as e:
-                                        logger.error("[BATCH-WORKER] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
+                                    self._schedule_on_main_loop(
+                                        lambda: self._sync_invariant_violation_with_rest(ticker),
+                                        "BATCH-WORKER",
+                                        ticker,
+                                    )
                                 queue.clear()
                                 continue
 
@@ -1541,25 +1570,50 @@ class KalshiMarketStateStore:
     async def _trigger_snapshot_recovery(self, ticker: str) -> None:
         """P1 FIX: Trigger immediate snapshot recovery via WebSocket.
 
-        This method requests a fresh snapshot via the WebSocket client's
-        request_orderbook_snapshot method, maintaining single ingestion path.
+        This method requests a fresh snapshot via the WebSocket bridge's
+        underlying KalshiWebSocket client. The request is scheduled on the
+        WebSocket's own event loop so that protocol I/O happens on the correct
+        thread, maintaining the single ingestion path through the bridge queue.
         """
         try:
             logger.info("[SNAPSHOT-RECOVERY] Triggering WebSocket snapshot recovery for %s", ticker)
 
-            # Get the WebSocket client
-            from merid.event_venues.kalshi.ws import get_kalshi_websocket
-            ws_client = get_kalshi_websocket()
+            # Get the WebSocket bridge singleton (do not create a new bridge).
+            from merid.event_venues.kalshi import ws_bridge
 
-            if ws_client and ws_client._ws:
-                # Request snapshot via WebSocket API
-                await ws_client.request_orderbook_snapshot(ticker)
-                logger.info("[SNAPSHOT-RECOVERY] Snapshot request sent for %s", ticker)
-            else:
-                logger.warning("[SNAPSHOT-RECOVERY] WebSocket client not available for %s - skipping", ticker)
+            bridge = getattr(ws_bridge, "_bridge", None)
+            if bridge is None:
+                logger.warning("[SNAPSHOT-RECOVERY] WebSocket bridge not initialized for %s - skipping", ticker)
+                return
+
+            ws_client = getattr(bridge, "_ws", None)
+            ws_loop = getattr(bridge, "_ws_loop", None)
+            if not (ws_client and ws_loop and ws_loop.is_running()):
+                logger.warning(
+                    "[SNAPSHOT-RECOVERY] WebSocket not running for %s (client=%s loop=%s) - skipping",
+                    ticker, ws_client, ws_loop
+                )
+                return
+
+            # Schedule the snapshot request on the WebSocket's own event loop.
+            future = asyncio.run_coroutine_threadsafe(
+                ws_client.request_orderbook_snapshot(ticker), ws_loop
+            )
+
+            def _log_snapshot_result(fut):
+                try:
+                    fut.result()
+                    logger.info("[SNAPSHOT-RECOVERY] Snapshot request sent for %s", ticker)
+                except Exception as send_err:
+                    logger.error(
+                        "[SNAPSHOT-RECOVERY] Failed to send snapshot request for %s: %s",
+                        ticker, send_err, exc_info=True
+                    )
+
+            future.add_done_callback(_log_snapshot_result)
 
         except Exception as e:
-            logger.error("[SNAPSHOT-RECOVERY] Failed to trigger snapshot recovery for %s: %s", ticker, e)
+            logger.error("[SNAPSHOT-RECOVERY] Failed to trigger snapshot recovery for %s: %s", ticker, e, exc_info=True)
 
     def _get_exponential_backoff(self, attempt: int) -> float:
         """Calculate exponential backoff with jitter for recovery attempts."""
@@ -2585,13 +2639,11 @@ class KalshiMarketStateStore:
                         "[BOOK-CONSISTENCY] ticker=%s marked as SUSPECT due to queue overflow - will trigger REST bootstrap",
                         ticker
                     )
-                    try:
-                        import asyncio
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.create_task(self._sync_invariant_violation_with_rest(ticker))
-                    except Exception as e:
-                        logger.error("[market-state] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
+                    self._schedule_on_main_loop(
+                        lambda: self._sync_invariant_violation_with_rest(ticker),
+                        "market-state",
+                        ticker,
+                    )
             else:
                 # DIAGNOSTIC: Log successful enqueue
                 queue = self._delta_queues.get(ticker)

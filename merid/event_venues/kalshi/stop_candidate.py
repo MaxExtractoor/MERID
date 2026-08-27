@@ -31,7 +31,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -524,7 +524,7 @@ def validate_stop_order_invariants(
     if market_close_time is not None:
         if market_close_time.tzinfo is None:
             market_close_time = market_close_time.replace(tzinfo=timezone.utc)
-        if now >= market_close_time - cutoff_seconds:
+        if now >= market_close_time - timedelta(seconds=cutoff_seconds):
             raise StopOrderInvariantError(
                 f"stop_order_inside_close_cutoff:ticker={market_ticker}:"
                 f"time_to_close={(market_close_time - now).total_seconds():.1f}s"

@@ -2682,19 +2682,9 @@ class PositionMonitor:
 
                 # Check if this stage has already been executed
                 if not getattr(position, stage_executed_attr, False):
-                    # CRITICAL FIX (2026-07-31): Only execute staged exit if position is profitable
-                    # Prevent systematic loss exits by requiring positive PnL before staged time exits
-                    if position.unrealized_pnl_cents <= 0:
-                        logger.info(
-                            "[POSITION-MONITOR] STAGED-EXIT SKIPPED: position=%s stage=%d pnl=%dc - skipping staged exit for underwater position",
-                            position.position_id[:8],
-                            stage_idx,
-                            position.unrealized_pnl_cents
-                        )
-                        # Mark stage as executed to prevent re-checking
-                        setattr(position, stage_executed_attr, True)
-                        setattr(position, f"staged_exit_{stage_key}_timestamp", datetime.utcnow())
-                        continue
+                    # Time-based staged exits must be able to close underwater positions,
+                    # otherwise the system holds losers to expiry.  The allocator's sizing
+                    # and the exit guard's worst-case check handle the loss bound.
 
                     # Calculate contracts to close for this stage
                     # CRITICAL FIX: Decimal position.size must not be multiplied by a float.
@@ -4387,17 +4377,19 @@ class PositionMonitor:
                         state = store.get(position.market_id)
 
                         # CRITICAL FIX (2026-07-16): Check if market has expired
-                        # If state is None, the market may have expired. Force exit the position.
-                        # CRITICAL FIX (2026-07-29): Bypass in-flight check for expired markets to prevent stuck positions
+                        # If state is None, the market has likely expired. Do NOT force an order
+                        # (there is no executable book and the exchange will settle). Remove the
+                        # position from the monitor so the fills/settlement poller can record it.
                         if state is None:
                             logger.warning(
-                                "[POSITION-MONITOR] Market state not found for %s - market may have expired, forcing exit",
+                                "[POSITION-MONITOR] Market state not found for %s - market has likely expired, removing from monitor",
                                 position.market_id
                             )
-                            # Force exit with last known price or entry price
-                            exit_price = position.current_price_cents if position.current_price_cents else position.avg_entry_price_cents
-                            if exit_price > 0:
-                                self._emit_exit_intent(position, ExitReason.TIME_STOP, exit_price, bypass_in_flight_check=True, snapshot=None)
+                            with self._lock:
+                                if position_id in self._open_positions:
+                                    del self._open_positions[position_id]
+                                if position.market_id in self._market_to_position:
+                                    del self._market_to_position[position.market_id]
                             continue
 
                         # CRITICAL FIX (2026-08-09): Use an executable same-side bid/ask snapshot.

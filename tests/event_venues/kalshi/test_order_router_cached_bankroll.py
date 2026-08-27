@@ -28,7 +28,8 @@ def test_apply_risk_based_order_sizing_uses_provided_bankroll():
     
     # Should use provided bankroll and return adjusted count
     assert count is not None
-    assert isinstance(count, int)
+    assert isinstance(count, (int, Decimal))
+    assert count == 2
 
 
 def test_apply_risk_based_order_sizing_handles_none_bankroll():

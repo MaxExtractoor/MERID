@@ -313,16 +313,18 @@ async def test_exit_order_timeout_after_submit_recovery(
 
     result = await _route(intent)
 
-    # The ack was lost in flight: router must report submission_unknown and
-    # must NOT release exposure.
-    assert result.status == "submission_unknown", (result.status, result.reason)
+    # The create-order ack was lost, but the broker query resolves the order
+    # to filled without resubmitting.  Exposure is applied by the fills poller,
+    # not the router, so no double-counting occurs.
+    assert result.status == "filled_live", (result.status, result.reason)
+    assert result.has_execution
+    assert result.order_id is not None
 
     rec = _gate_record(coid)
     assert rec is not None
-    assert rec.status == OrderStatus.SUBMISSION_UNKNOWN
+    assert rec.status == OrderStatus.FILLED
 
-    # Recovery: the order was actually accepted by the exchange; a lookup by
-    # client_order_id reconciles it to the real state.
+    # The broker lookup is idempotent: the same order is still reachable.
     recovered = await client.get_order(client_order_id=coid)
     assert recovered is not None
     assert recovered.status == "filled"

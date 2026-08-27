@@ -33,19 +33,22 @@ Production usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import threading
 import time
 import requests
 import hmac
 import base64
-from typing import Optional, Dict, Any, Union, Literal, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
+from typing import Optional, Dict, Any, Union, Literal, Tuple
 import random
 
 from utils.logger import get_logger
 from data.spot_sla_config import get_spot_max_age
+from merid.data.price_precision import format_price as _format_price, parse_price
 
 logger = get_logger("data.unified_spot_service")
 
@@ -106,17 +109,9 @@ async def _retry_with_backoff(
 # Price Formatting Helper
 # =============================================================================
 
-def format_price(asset: str, price: float) -> str:
+def format_price(asset: str, price: Any) -> str:
     """Format price with appropriate decimal places based on asset."""
-    asset_precision = {
-        "BTC": 2,
-        "ETH": 2,
-        "SOL": 4,
-        "XRP": 4,
-        "DOGE": 7
-    }
-    precision = asset_precision.get(asset.upper(), 4)
-    return f"{price:.{precision}f}"
+    return _format_price(asset, price, fallback_digits=4)
 
 # =============================================================================
 # Coinbase Exchange API Authentication Helpers
@@ -228,6 +223,11 @@ class SpotPrice:
     open: Optional[float] = None
     high: Optional[float] = None
     low: Optional[float] = None
+    # Settlement-grade Decimal copies (canonical source precision)
+    price_decimal: Optional[Decimal] = None
+    open_decimal: Optional[Decimal] = None
+    high_decimal: Optional[Decimal] = None
+    low_decimal: Optional[Decimal] = None
     # Volume data for volume confirmation filter (2026 best practice)
     volume: Optional[float] = None
     # Metadata for source labeling (2026 best practice)
@@ -462,7 +462,7 @@ class UnifiedSpotService:
                     source = 'coinbase_ticker_ohlc_proxy'
                 else:
                     # No price history available - add small spread to avoid high=low
-                    spread = ticker_price * 0.0001  # 0.01% spread
+                    spread = ticker_price * Decimal("0.0001")  # 0.01% spread
                     final_data = {
                         'open': ticker_price,
                         'high': ticker_price + spread,
@@ -532,18 +532,18 @@ class UnifiedSpotService:
             response = requests.get(url, params=params, headers=headers, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
-            data = response.json()
+            data = _load_json_decimal(response)
             if not data or not isinstance(data, list) or len(data) == 0:
                 raise Exception("No candles data returned")
-            
+
             # Candle format: [timestamp, low, high, open, close, volume]
             candle = data[0]
             return {
-                'open': float(candle[3]),
-                'high': float(candle[2]),
-                'low': float(candle[1]),
-                'close': float(candle[4]),
-                'volume': float(candle[5]) if len(candle) > 5 else None  # Volume for volume confirmation filter
+                'open': parse_price(candle[3]),
+                'high': parse_price(candle[2]),
+                'low': parse_price(candle[1]),
+                'close': parse_price(candle[4]),
+                'volume': float(parse_price(candle[5])) if len(candle) > 5 and parse_price(candle[5]) is not None else None  # Volume for volume confirmation filter
             }
         
         async def fetch_with_retry():
@@ -578,19 +578,19 @@ class UnifiedSpotService:
             response = requests.get(url, params=params, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
-            data = response.json()
+            data = _load_json_decimal(response)
             if not data or not isinstance(data, list) or len(data) == 0:
                 raise Exception("No candles data returned")
-            
+
             # Candle format: [timestamp, low, high, open, close, volume]
             # API returns candles in reverse chronological order (newest first)
             candle = data[0]  # Most recent candle
             return {
-                'open': float(candle[3]),
-                'high': float(candle[2]),
-                'low': float(candle[1]),
-                'close': float(candle[4]),
-                'volume': float(candle[5]) if len(candle) > 5 else None,
+                'open': parse_price(candle[3]),
+                'high': parse_price(candle[2]),
+                'low': parse_price(candle[1]),
+                'close': parse_price(candle[4]),
+                'volume': float(parse_price(candle[5])) if len(candle) > 5 and parse_price(candle[5]) is not None else None,
                 'candles': data  # Return full list for multi-candle access
             }
         
@@ -617,8 +617,10 @@ class UnifiedSpotService:
             response = requests.get(ticker_url, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
-            data = response.json()
-            price = float(data['price'])
+            data = _load_json_decimal(response)
+            price = parse_price(data['price'])
+            if price is None:
+                raise Exception("ticker price missing or unparsable")
             return {'price': price}
         
         async def fetch_with_retry():
@@ -643,8 +645,10 @@ class UnifiedSpotService:
             response = requests.get(url, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}")
-            data = response.json()
-            close_price = float(data['data']['amount'])
+            data = _load_json_decimal(response)
+            close_price = parse_price(data['data']['amount'])
+            if close_price is None:
+                raise Exception("spot fallback amount missing or unparsable")
             return {
                 'open': close_price,
                 'high': close_price,
@@ -843,9 +847,14 @@ class UnifiedSpotService:
         # Component 4: Signal agreement (15% weight) - based on price history consistency
         agreement_score = 100.0  # Default if insufficient history
         if asset in self._price_history and len(self._price_history[asset]) >= 10:
-            recent_prices = [p[1] for p in self._price_history[asset][-10:]]
-            price_std = (max(recent_prices) - min(recent_prices)) / (sum(recent_prices) / len(recent_prices))
-            agreement_score = max(0.0, 100.0 * (1.0 - min(price_std * 10, 1.0)))  # Penalize high volatility
+            recent_prices = [float(p[1]) for p in self._price_history[asset][-10:] if p[1] is not None]
+            if recent_prices:
+                price_mean = sum(recent_prices) / len(recent_prices)
+                if price_mean == 0.0:
+                    agreement_score = 0.0
+                else:
+                    price_std = (max(recent_prices) - min(recent_prices)) / price_mean
+                    agreement_score = max(0.0, 100.0 * (1.0 - min(price_std * 10, 1.0)))  # Penalize high volatility
         agreement_component = ComponentScore(
             name="signal_agreement",
             score=agreement_score,
@@ -925,17 +934,25 @@ class UnifiedSpotService:
         # 2026 BEST PRACTICE: Adjust confidence based on state and SQS
         confidence = sqs.composite / 100.0
         
-        logger.info(f"[UNIFIED-SPOT] Returning spot price for {asset}: price={data['price']}, age={age_s:.1f}s, state={state.value}, sqs={sqs.composite:.1f}")
+        price_decimal = data['price']
+        open_decimal = data.get('open')
+        high_decimal = data.get('high')
+        low_decimal = data.get('low')
+        logger.info(f"[UNIFIED-SPOT] Returning spot price for {asset}: price={format_price(asset, price_decimal)} age={age_s:.1f}s state={state.value} sqs={sqs.composite:.1f}")
         return SpotPrice(
-            price=data['price'],
+            price=float(price_decimal) if price_decimal is not None else None,
+            price_decimal=price_decimal,
             timestamp=data['timestamp'],
             source=data['source'],
             state=state,
             confidence=confidence,
             sqs=sqs,
-            open=data.get('open'),
-            high=data.get('high'),
-            low=data.get('low'),
+            open=float(open_decimal) if open_decimal is not None else None,
+            high=float(high_decimal) if high_decimal is not None else None,
+            low=float(low_decimal) if low_decimal is not None else None,
+            open_decimal=open_decimal,
+            high_decimal=high_decimal,
+            low_decimal=low_decimal,
             volume=data.get('volume'),
             exchange_timestamp=data.get('timestamp'),  # Use cache timestamp as exchange timestamp
             received_timestamp=now_ms,
@@ -976,6 +993,7 @@ class UnifiedSpotService:
             low=result.low,
             volume=result.volume
         )
+
 
     def get_spot_data(self, asset: str) -> Optional[Any]:
         """Get cached spot price for asset (alias for get_spot for compatibility).
@@ -1114,7 +1132,7 @@ class UnifiedSpotService:
             response = requests.get(url, params=params, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
-            data = response.json()
+            data = _load_json_decimal(response)
             if not data or not isinstance(data, list) or len(data) < 2:
                 raise Exception("Insufficient candles data returned")
             
@@ -1316,3 +1334,16 @@ def get_settlement_input_price(asset: str, spot_price: Optional[float] = None) -
         asset, spot_price, basis_bps, settlement
     )
     return settlement, basis
+
+
+def _load_json_decimal(response) -> Any:
+    """Load a JSON response preserving full decimal precision.
+
+    Tests often mock ``response.json()`` instead of ``response.text``; this
+    helper supports both sources while using ``parse_float=Decimal``.
+    """
+    text = getattr(response, "text", None)
+    if isinstance(text, str):
+        return json.loads(text, parse_float=Decimal)
+    data = response.json()
+    return json.loads(json.dumps(data), parse_float=Decimal)

@@ -44,7 +44,15 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
+
+from merid.data.price_precision import (
+    format_price as _format_price,
+    get_asset_settlement_digits,
+    get_asset_settlement_quantum,
+    parse_price,
+)
 
 from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers
 from merid.event_venues.base import EventMarket, MarketFilter
@@ -412,6 +420,13 @@ class CatalogMarket:
     strike_price: Optional[float] = None
     floor_strike: Optional[float] = None
     cap_strike: Optional[float] = None
+    # Settlement-grade Decimal fields (canonical source precision)
+    strike_price_decimal: Optional[Decimal] = None
+    floor_strike_decimal: Optional[Decimal] = None
+    cap_strike_decimal: Optional[Decimal] = None
+    # Market-specific settlement precision from Kalshi custom_strike.round_digits
+    settlement_digits: Optional[int] = None
+    settlement_quantum: Optional[Decimal] = None
     expires_at: Optional[datetime] = None
     minutes_to_expiry: Optional[float] = None
     api_status: str = "unknown"  # Raw Kalshi API status
@@ -2103,16 +2118,19 @@ class KalshiMarketCatalog:
         if raw.get("floor_strike") is not None:
             try:
                 strikes.setdefault("floor", float(raw["floor_strike"]))
+                strikes.setdefault("floor_decimal", parse_price(raw["floor_strike"]))
             except (TypeError, ValueError):
                 pass
         if raw.get("cap_strike") is not None:
             try:
                 strikes.setdefault("cap", float(raw["cap_strike"]))
+                strikes.setdefault("cap_decimal", parse_price(raw["cap_strike"]))
             except (TypeError, ValueError):
                 pass
         if raw.get("strike_price") is not None:
             try:
                 strikes.setdefault("strike", float(raw["strike_price"]))
+                strikes.setdefault("strike_decimal", parse_price(raw["strike_price"]))
             except (TypeError, ValueError):
                 pass
 
@@ -2123,6 +2141,7 @@ class KalshiMarketCatalog:
                 if custom.get(key) is not None:
                     try:
                         strikes.setdefault(target, float(custom[key]))
+                        strikes.setdefault(f"{target}_decimal", parse_price(custom[key]))
                     except (TypeError, ValueError):
                         pass
         
@@ -2159,6 +2178,32 @@ class KalshiMarketCatalog:
             except (TypeError, ValueError):
                 pass
 
+        # Resolve the canonical asset early; settlement precision fallback below
+        # depends on it. Ticker-prefix detection is the primary signal, with
+        # text-based detection as the fallback.
+        asset = ticker_asset or text_asset
+
+        # Extract market-specific settlement precision from custom_strike metadata.
+        # Kalshi's ``custom_strike.round_digits`` is the authoritative source for
+        # how many decimals the market's official settlement will retain.
+        settlement_digits: Optional[int] = None
+        if isinstance(custom, dict) and custom.get("round_digits") is not None:
+            try:
+                settlement_digits = int(custom["round_digits"])
+            except (TypeError, ValueError):
+                pass
+        if settlement_digits is None and asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            settlement_digits = get_asset_settlement_digits(asset)
+            logger.debug(
+                "[CATALOG-PRECISION] market_id=%s asset=%s using fallback settlement_digits=%s",
+                mkt.market_id, asset, settlement_digits,
+            )
+        settlement_quantum = (
+            Decimal(1).scaleb(-settlement_digits)
+            if settlement_digits is not None
+            else get_asset_settlement_quantum(asset) if asset in ("BTC", "ETH", "SOL", "XRP", "DOGE") else None
+        )
+
         # Merge: ticker-prefix detection is the primary signal.
         # BUG-05 fix: only accept mkt.category if it is a recognised category
         # string. An unvalidated API value (e.g. "cryptocurrency", "weather")
@@ -2168,7 +2213,6 @@ class KalshiMarketCatalog:
         _api_cat = (mkt.category or "").strip().lower()
         _api_cat_valid = _api_cat if _api_cat in _KC else None
         category = ticker_category or _api_cat_valid
-        asset = ticker_asset or text_asset
 
         # STAGE 1 FIX: Use authoritative normalization function for 15m crypto contracts
         # This enforces symmetric treatment across BTC/ETH/SOL/XRP/DOGE
@@ -2383,6 +2427,11 @@ class KalshiMarketCatalog:
             strike_price=strikes.get("strike"),
             floor_strike=strikes.get("floor"),
             cap_strike=strikes.get("cap"),
+            strike_price_decimal=strikes.get("strike_decimal"),
+            floor_strike_decimal=strikes.get("floor_decimal"),
+            cap_strike_decimal=strikes.get("cap_decimal"),
+            settlement_digits=settlement_digits,
+            settlement_quantum=settlement_quantum,
             expires_at=final_expires_at,
             minutes_to_expiry=minutes_to_expiry,
             api_status=api_status,

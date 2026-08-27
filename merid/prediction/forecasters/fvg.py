@@ -31,6 +31,19 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.forecasters.fvg")
 
+
+def _format_price(asset: str, price: float) -> str:
+    """Format price with appropriate decimal places based on asset."""
+    asset_precision = {
+        "BTC": 2,
+        "ETH": 2,
+        "SOL": 4,
+        "XRP": 4,
+        "DOGE": 7,
+    }
+    precision = asset_precision.get(asset.upper(), 4)
+    return f"{price:.{precision}f}"
+
 # CRITICAL FIX: 2026-07-06 - Migrated from environment variables to profile YAML
 # Single source of truth: config/profiles/kalshi_crypto_15m_v2.yaml -> momentum_fvg.fvg_*
 # Environment variables (MERID_FVG_*) are DEPRECATED and no longer used
@@ -49,6 +62,7 @@ def _load_fvg_config_from_profile():
             'min_gap_cents': getattr(momentum_fvg_config, 'fvg_min_gap_cents', 2.0),
             'fill_threshold_cents': getattr(momentum_fvg_config, 'fvg_fill_threshold_cents', 5.0),
             'atr_period': getattr(momentum_fvg_config, 'fvg_atr_period', 14),
+            'min_gap_size_atr': getattr(momentum_fvg_config, 'fvg_min_gap_size_atr', 1.5),
         }
     except Exception as e:
         logger.warning("[FVG] Failed to load config from profile, using defaults: %s", e)
@@ -57,6 +71,7 @@ def _load_fvg_config_from_profile():
             'min_gap_cents': 2.0,
             'fill_threshold_cents': 5.0,
             'atr_period': 14,
+            'min_gap_size_atr': 1.5,
         }
 
 # Load configuration from profile YAML
@@ -65,6 +80,7 @@ _FVG_WINDOW_SIZE = _FVG_CONFIG['window_size']
 _FVG_MIN_GAP_CENTS = _FVG_CONFIG['min_gap_cents']
 _FVG_FILL_THRESHOLD_CENTS = _FVG_CONFIG['fill_threshold_cents']
 _FVG_ATR_PERIOD = _FVG_CONFIG['atr_period']
+_FVG_MIN_GAP_SIZE_ATR = _FVG_CONFIG['min_gap_size_atr']
 
 # Validate FVG parameters are reasonable
 if _FVG_WINDOW_SIZE < 1 or _FVG_WINDOW_SIZE > 1000:
@@ -91,6 +107,12 @@ if _FVG_ATR_PERIOD < 1 or _FVG_ATR_PERIOD > 100:
         _FVG_ATR_PERIOD
     )
     _FVG_ATR_PERIOD = 14
+if _FVG_MIN_GAP_SIZE_ATR <= 0 or _FVG_MIN_GAP_SIZE_ATR > 10:
+    logger.warning(
+        "[FVG] Invalid fvg_min_gap_size_atr=%s - using default 1.5",
+        _FVG_MIN_GAP_SIZE_ATR
+    )
+    _FVG_MIN_GAP_SIZE_ATR = 1.5
 
 
 @dataclass
@@ -111,23 +133,23 @@ class FVG:
         """Check if price is within threshold of this FVG (indicating potential fill)."""
         if self.filled:
             return False
-        
-        if self.direction == "bullish":
-            # Bullish FVG: price should be near or below the bottom to fill up
-            return abs(price_cents - self.bottom) <= threshold or price_cents < self.bottom
-        else:
-            # Bearish FVG: price should be near or above the top to fill down
-            return abs(price_cents - self.top) <= threshold or price_cents > self.top
+        return self.distance_to_fill(price_cents) <= threshold
     
     def distance_to_fill(self, price_cents: float) -> float:
-        """Calculate distance (cents) from price to FVG fill zone."""
+        """Calculate signed distance (cents) from price to FVG fill zone.
+
+        Positive = price has not yet reached the gap and must move toward it.
+        Zero/negative = price is at or inside the gap (filled or broken through).
+        """
         if self.filled:
             return float('inf')
-        
+
         if self.direction == "bullish":
-            return self.bottom - price_cents  # Negative if price below
+            # Bullish FVG: price is above the gap; it must drop to the top or below.
+            return price_cents - self.top
         else:
-            return price_cents - self.top  # Negative if price above
+            # Bearish FVG: price is below the gap; it must rise to the bottom or above.
+            return self.bottom - price_cents
     
     def midpoint(self) -> float:
         """Calculate midpoint of the FVG zone."""
@@ -149,44 +171,87 @@ class FVGStore:
     
     def _key(self, asset: str, timeframe: str) -> str:
         return f"{asset.upper()}:{timeframe.lower()}"
-    
+
+    def _compute_atr(self, key: str, period: int = _FVG_ATR_PERIOD) -> float:
+        """Compute Average True Range (cents) from the stored OHLC history."""
+        history = list(self._price_history.get(key, deque()))
+        if len(history) < 2:
+            return 0.0
+
+        trs = []
+        for i in range(1, len(history)):
+            prev_open, prev_high, prev_low, prev_close, _ = history[i - 1]
+            open_p, high, low, close, _ = history[i]
+
+            # True range is the largest of:
+            # - current high - current low
+            # - abs(current high - previous close)
+            # - abs(current low - previous close)
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
+            )
+            trs.append(tr)
+
+        if not trs:
+            return 0.0
+        if len(trs) < period:
+            return sum(trs) / len(trs)
+        return sum(trs[-period:]) / period
+
+    def _min_gap_cents(self, key: str, override: Optional[float] = None) -> float:
+        """Return the ATR-normalized minimum gap threshold for this asset.
+
+        ``fvg_min_gap_cents`` from the profile is the absolute floor; the
+        threshold is at least ``atr * fvg_min_gap_size_atr`` so high-vol assets
+        do not fire on noise and low-vol assets do not require impossibly large
+        gaps. The caller can pass an explicit override (e.g. from agent_grid).
+        """
+        if override is not None:
+            return override
+        atr = self._compute_atr(key)
+        return max(_FVG_MIN_GAP_CENTS, atr * _FVG_MIN_GAP_SIZE_ATR)
+
     def clear(self) -> None:
         """Clear all stored FVGs and price history. Useful for testing."""
         self._fvgs.clear()
         self._price_history.clear()
     
-    def add_candle(self, asset: str, timeframe: str, open_p: float, high: float, low: float, close: float, timestamp: float) -> None:
+    def add_candle(self, asset: str, timeframe: str, open_p: float, high: float, low: float, close: float, timestamp: float, min_gap_cents: Optional[float] = None) -> None:
         """Add a candle and detect new FVGs."""
         key = self._key(asset, timeframe)
-        
+
         if key not in self._price_history:
             self._price_history[key] = deque(maxlen=_FVG_WINDOW_SIZE)
-        
+
         self._price_history[key].append((open_p, high, low, close, timestamp))
-        
+
         # Detect FVGs when we have at least 3 candles
         if len(self._price_history[key]) >= 3:
-            self._detect_fvgs(key, asset, timeframe)
-    
-    def _detect_fvgs(self, key: str, asset: str, timeframe: str) -> None:
+            self._detect_fvgs(key, asset, timeframe, min_gap_cents=min_gap_cents)
+
+    def _detect_fvgs(self, key: str, asset: str, timeframe: str, min_gap_cents: Optional[float] = None) -> None:
         """Detect FVGs from price history."""
         history = list(self._price_history[key])
         if len(history) < 3:
             return
-        
+
         if key not in self._fvgs:
             self._fvgs[key] = deque(maxlen=self._max_size)
-        
+
+        min_gap = self._min_gap_cents(key, override=min_gap_cents)
+
         # Look at last 3 candles
         for i in range(len(history) - 2):
             c1 = history[i]      # First candle (idx 0=open, 1=high, 2=low, 3=close, 4=ts)
             c2 = history[i + 1]  # Middle candle (potential gap candle)
             c3 = history[i + 2]  # Third candle
-            
+
             # Bullish FVG: c1.high < c3.low (gap between candles 1 and 3)
             if c1[1] < c3[2]:  # high1 < low3
                 gap_size = c3[2] - c1[1]
-                if gap_size >= _FVG_MIN_GAP_CENTS:
+                if gap_size >= min_gap:
                     fvg = FVG(
                         direction="bullish",
                         top=c3[2],
@@ -197,13 +262,13 @@ class FVGStore:
                         timeframe=timeframe,
                     )
                     self._fvgs[key].append(fvg)
-                    from utils.logger import format_price
-                    logger.debug(f"Detected bullish FVG for {asset}/{timeframe}: {format_price(asset, c1[1])}-{format_price(asset, c3[2])} ({format_price(asset, gap_size)}c)")
-            
+                    
+                    logger.debug(f"Detected bullish FVG for {asset}/{timeframe}: {_format_price(asset, c1[1])}-{_format_price(asset, c3[2])} ({_format_price(asset, gap_size)}c)")
+
             # Bearish FVG: c1.low > c3.high (gap between candles 1 and 3)
             if c1[2] > c3[1]:  # low1 > high3
                 gap_size = c1[2] - c3[1]
-                if gap_size >= _FVG_MIN_GAP_CENTS:
+                if gap_size >= min_gap:
                     fvg = FVG(
                         direction="bearish",
                         top=c1[2],
@@ -214,28 +279,33 @@ class FVGStore:
                         timeframe=timeframe,
                     )
                     self._fvgs[key].append(fvg)
-                    from utils.logger import format_price
-                    logger.debug(f"Detected bearish FVG for {asset}/{timeframe}: {format_price(asset, c3[1])}-{format_price(asset, c1[2])} ({format_price(asset, gap_size)}c)")
+                    
+                    logger.debug(f"Detected bearish FVG for {asset}/{timeframe}: {_format_price(asset, c3[1])}-{_format_price(asset, c1[2])} ({_format_price(asset, gap_size)}c)")
     
     def check_fills(self, asset: str, timeframe: str, current_price: float, timestamp: float) -> List[FVG]:
-        """Check if any unfilled FVGs have been filled by current price."""
+        """Check if any unfilled FVGs have been filled by current price.
+
+        A bullish FVG (gap below current price) is filled when price drops
+        to the top of the gap or below. A bearish FVG (gap above current
+        price) is filled when price rises to the bottom of the gap or above.
+        """
         key = self._key(asset, timeframe)
         filled = []
-        
+
         if key in self._fvgs:
             for fvg in self._fvgs[key]:
                 if not fvg.filled:
-                    if fvg.direction == "bullish" and current_price >= fvg.top:
+                    if fvg.direction == "bullish" and current_price <= fvg.top:
                         fvg.fill(timestamp)
                         filled.append(fvg)
-                        from utils.logger import format_price
-                        logger.debug(f"Bullish FVG filled at {format_price(asset, current_price)}")
-                    elif fvg.direction == "bearish" and current_price <= fvg.bottom:
+                        
+                        logger.debug(f"Bullish FVG filled at {_format_price(asset, current_price)}")
+                    elif fvg.direction == "bearish" and current_price >= fvg.bottom:
                         fvg.fill(timestamp)
                         filled.append(fvg)
-                        from utils.logger import format_price
-                        logger.debug(f"Bearish FVG filled at {format_price(asset, current_price)}")
-        
+                        
+                        logger.debug(f"Bearish FVG filled at {_format_price(asset, current_price)}")
+
         return filled
     
     def get_active_fvgs(self, asset: str, timeframe: str) -> List[FVG]:
@@ -330,17 +400,27 @@ class FVGForecaster(Forecaster):
         **kwargs,
     ) -> Optional[ForecastResult]:
         """Generate FVG-based prediction for a Kalshi market.
-        
-        Uses the midpoint price (bid-ask average) to check FVG proximity.
+
+        ``spot_price`` (in dollars) is the canonical live price used for FVG
+        fill proximity. It is multiplied by 100 to match the FVG store, which
+        keeps spot in cent units. ``bid``/``ask`` are accepted only as a legacy
+        alias and are also treated as dollars if ``spot_price`` is absent.
+        ``implied_yes`` is used only as the probability baseline, never as a
+        price input, to avoid the contract-probability / spot-dollar unit error.
         """
         if not asset or not timeframe:
             return None
-        
-        # Calculate current price from bid/ask or implied prob
-        if bid is not None and ask is not None:
-            current_price = (bid + ask) / 2 * 100  # Convert to cents
+
+        # Canonical live price for FVG proximity: spot in dollars -> cents.
+        spot_price = kwargs.get("spot_price")
+        if spot_price is not None:
+            current_price = float(spot_price) * 100.0
+        elif bid is not None and ask is not None:
+            # Legacy alias; caller is responsible for passing dollar prices.
+            current_price = (bid + ask) / 2 * 100.0
         else:
-            current_price = implied_yes * 100  # Use implied as fallback
+            logger.warning("[FVG-PREDICT] asset=%s no spot_price provided; FVG proximity may be wrong", asset)
+            current_price = implied_yes * 100.0
         
         # Get active FVGs for this asset/timeframe
         active_fvgs = self._store.get_active_fvgs(asset, timeframe)
@@ -423,17 +503,18 @@ class FVGForecaster(Forecaster):
         low: float,
         close: float,
         timestamp: float,
+        min_gap_cents: Optional[float] = None,
     ) -> None:
         """Update FVG store with new candle data.
-        
+
         Call this when new price data arrives to detect fresh FVGs
         and check for fills.
         """
         import time
-        
+
         # Add candle and detect new FVGs
-        self._store.add_candle(asset, timeframe, open_p, high, low, close, timestamp)
-        
+        self._store.add_candle(asset, timeframe, open_p, high, low, close, timestamp, min_gap_cents=min_gap_cents)
+
         # Check if any FVGs were filled
         self._store.check_fills(asset, timeframe, close, timestamp)
     

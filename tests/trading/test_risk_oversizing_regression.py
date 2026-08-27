@@ -27,6 +27,12 @@ from decimal import Decimal
 from typing import List
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="P3-LEGACY: merid.trading.topn_allocator and merid.trading.kalshi_continuous_trader removed in 15m production stack refactor"
+)
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PRODUCTION-LIKE ENV SETUP
 # ═══════════════════════════════════════════════════════════════════════════
@@ -40,17 +46,52 @@ if 'core.settings' in sys.modules:
     del sys.modules['core.settings']
 
 from core.settings import USE_TOPN_ALLOCATOR, MAX_CYCLE_RISK_PCT, MAX_TOTAL_RISK_PCT
-from merid.trading.topn_allocator import (
-    EdgeCandidate,
-    TopNEdgeAllocator,
-    TopNAllocatorConfig,
-    AllocationCycle,
-)
-from merid.trading.kalshi_continuous_trader import (
-    GlobalRiskGuard,
-    PendingOrderRisk,
-    _USE_TOPN_ALLOCATOR,
-)
+
+try:
+    from merid.trading.topn_allocator import (
+        EdgeCandidate,
+        TopNEdgeAllocator,
+        TopNAllocatorConfig,
+        AllocationCycle,
+    )
+    from merid.trading.kalshi_continuous_trader import (
+        GlobalRiskGuard,
+        PendingOrderRisk,
+        _USE_TOPN_ALLOCATOR,
+    )
+except ModuleNotFoundError:
+    # The real modules were removed in the 15m production stack refactor.
+    # Stubs allow the file to parse while pytestmark skips the suite.
+    class EdgeCandidate:
+        def __init__(self, *args, **kwargs): pass
+
+    class TopNAllocatorConfig:
+        def __init__(self, *args, **kwargs): pass
+
+    class _Allocation:
+        target_contracts = 0
+
+    class _Cycle:
+        sum_risk_usd = 0.0
+        cycle_risk_usd = 0.0
+        num_edges_traded = 0
+        allocations = [_Allocation()]
+
+    class TopNEdgeAllocator:
+        def __init__(self, *args, **kwargs): pass
+        def compute_allocations(self, *args, **kwargs):
+            return _Cycle()
+
+    class GlobalRiskGuard:
+        def __init__(self, *args, **kwargs): pass
+        def check_order(self, *args, **kwargs):
+            return (False, "legacy")
+        def reset_cycle(self): pass
+
+    class PendingOrderRisk:
+        def __init__(self, *args, **kwargs): pass
+
+    _USE_TOPN_ALLOCATOR = False
 
 
 class TestRiskOversizingRegression(unittest.TestCase):

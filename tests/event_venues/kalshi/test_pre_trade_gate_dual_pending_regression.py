@@ -36,6 +36,7 @@ from __future__ import annotations
 import pytest
 import time
 from typing import List, Optional
+from unittest.mock import patch
 
 from merid.event_venues.kalshi.order_gate import (
     IdempotentOrderStore,
@@ -75,6 +76,21 @@ def _isolate_gate_and_lease_singletons():
     finally:
         reset_pre_trade_gate_for_testing()
         reset_contract_lease_registry_for_testing()
+
+
+@pytest.fixture(autouse=True)
+def _mock_fills_ledger_for_durable_gate():
+    """Unit tests run without a PostgreSQL pool; make the ledger appear healthy.
+
+    The pre-trade gate tests exercise ``_run_pre_trade_gate`` in ``LIVE`` mode,
+    which now gates on durable fill-ledger availability.  Without a real backing
+    store the gate would reject every order for ``durable_ledger_unavailable``.
+    We mock the ledger to a healthy in-memory state so the rest of the code path
+    can be verified.
+    """
+    mock_ledger = type("MockFillsLedger", (), {"is_durable_persistence_available": lambda self: True})()
+    with patch("merid.event_venues.kalshi.fills_ledger.get_fills_ledger", return_value=mock_ledger):
+        yield
 
 
 def _build_intent(

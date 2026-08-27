@@ -197,25 +197,11 @@ class IndicatorConfig:
     def __post_init__(self):
         """Apply asset-specific parameter overrides based on asset field."""
         asset = self.asset.upper()
-        
-        # Kalshi mode: use lenient thresholds for prediction markets
-        if self.kalshi_mode:
-            # Disable vol gate - prediction markets don't have spot-like volatility
-            self.vol_low_threshold = 0.0  # Always pass vol gate
-            self.vol_high_threshold = 999.0  # Never reject due to high vol
-            # Disable ATR move gate - prediction markets are binary contracts
-            self.atr_min_move_pct = 0.0  # Always pass ATR move gate
-            # Disable chop gate - allow trades without consecutive closes
-            self.consecutive_closes_required = 0  # No consecutive closes needed
-            self.macd_persistence_bars = 0  # No MACD persistence needed
-            self.macd_histogram_min_pct = 0.0  # No minimum histogram magnitude
-            logger.info(
-                "[INDICATOR-CONFIG] Kalshi mode enabled for %s: vol/ATR/chop gates disabled",
-                asset
-            )
-            return  # Skip asset-specific overrides when in Kalshi mode
-        
-        # Asset-specific EMA configurations (hybrid approach)
+
+        # Asset-specific EMA/RSI/ATR/chop configurations (hybrid approach).
+        # These must run before the Kalshi mode gate overrides so the intended
+        # per-asset EMA and RSI tuning is preserved while prediction-market-only
+        # volatility/chop gates are still disabled.
         if asset in ["BTC", "ETH"]:
             # Low vol assets: faster EMAs for responsiveness
             self.ema_trend_period = 21
@@ -248,7 +234,21 @@ class IndicatorConfig:
                 # RSI thresholds: relaxed for high-beta
                 self.rsi_oversold_asset = 35.0
                 self.rsi_overbought_asset = 65.0
-    
+
+        # Kalshi mode: keep asset-specific EMA/RSI tuning above, but disable the
+        # prediction-market volatility/chop gates that do not apply to binary contracts.
+        if self.kalshi_mode:
+            self.vol_low_threshold = 0.0  # Always pass vol gate
+            self.vol_high_threshold = 999.0  # Never reject due to high vol
+            self.atr_min_move_pct = 0.0  # Always pass ATR move gate
+            self.consecutive_closes_required = 0  # No consecutive closes needed
+            self.macd_persistence_bars = 0  # No MACD persistence needed
+            self.macd_histogram_min_pct = 0.0  # No minimum histogram magnitude
+            logger.info(
+                "[INDICATOR-CONFIG] Kalshi mode enabled for %s: vol/ATR/chop gates disabled",
+                asset
+            )
+
     def get_ema_params(self, asset: str = None) -> dict:
         """Get EMA parameters for a specific asset."""
         asset = (asset or self.asset).upper()

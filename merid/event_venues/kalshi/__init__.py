@@ -1,5 +1,7 @@
 """Kalshi venue package for MERID."""
 
+from typing import Any
+
 from merid.event_venues.kalshi.client import (
     KalshiVenueClient,
     KalshiSessionError,
@@ -40,60 +42,19 @@ from merid.event_venues.kalshi.kalshi_15m_time import (
     get_previous_utc_window,
     compute_minutes_to_expiry,
 )
-# CRITICAL FIX: Make kalshi_risk imports lazy to prevent import-time bankroll service initialization
-# kalshi_risk imports get_equity_for_risk_calc_sync at module level, which triggers bankroll service
-def _lazy_import_kalshi_risk():
-    """Lazy import wrapper for kalshi_risk to prevent import-time bankroll initialization."""
-    from merid.event_venues.kalshi.kalshi_risk import (
-        KalshiRiskManager,
-        KalshiRiskConfig,
-        kalshi_fee_cents,
-        kelly_size_kalshi,
-        dynamic_position_sizes,
-        multi_market_kelly_sizes,
-        get_kalshi_risk,
-        edge_from_prediction,
-        kelly_size_from_kalman,
-        get_live_bankroll,
-        get_live_bankroll_async,
-    )
-    return (KalshiRiskManager, KalshiRiskConfig, kalshi_fee_cents, kelly_size_kalshi, 
-            dynamic_position_sizes, multi_market_kelly_sizes, get_kalshi_risk,
-            edge_from_prediction, kelly_size_from_kalman, get_live_bankroll, get_live_bankroll_async)
-
-# Make these available at module level but lazily loaded
-def get_KalshiRiskManager():
-    return _lazy_import_kalshi_risk()[0]
-
-def get_KalshiRiskConfig():
-    return _lazy_import_kalshi_risk()[1]
-
-def get_kalshi_fee_cents():
-    return _lazy_import_kalshi_risk()[2]
-
-def get_kelly_size_kalshi():
-    return _lazy_import_kalshi_risk()[3]
-
-def get_dynamic_position_sizes():
-    return _lazy_import_kalshi_risk()[4]
-
-def get_multi_market_kelly_sizes():
-    return _lazy_import_kalshi_risk()[5]
-
-def get_kalshi_risk(*args, **kwargs):
-    return _lazy_import_kalshi_risk()[6](*args, **kwargs)
-
-def get_edge_from_prediction():
-    return _lazy_import_kalshi_risk()[7]
-
-def get_kelly_size_from_kalman():
-    return _lazy_import_kalshi_risk()[8]
-
-def get_live_bankroll(*args, **kwargs):
-    return _lazy_import_kalshi_risk()[9](*args, **kwargs)
-
-def get_live_bankroll_async(*args, **kwargs):
-    return _lazy_import_kalshi_risk()[10](*args, **kwargs)
+from merid.event_venues.kalshi.kalshi_risk import (
+    KalshiRiskManager,
+    KalshiRiskConfig,
+    kalshi_fee_cents,
+    kelly_size_kalshi,
+    dynamic_position_sizes,
+    multi_market_kelly_sizes,
+    get_kalshi_risk,
+    edge_from_prediction,
+    kelly_size_from_kalman,
+    get_live_bankroll,
+    get_live_bankroll_async,
+)
 
 # CRITICAL FIX (2026-07-17): Continuous position reconciliation
 from merid.event_venues.kalshi.continuous_reconciliation import (
@@ -326,3 +287,45 @@ __all__ = [
     "get_default_policy",
     "check_trade_allowed",
 ]
+
+
+# 2026-08-27: Map the names in __all__ that are lazily loaded to their import
+# tuples so `from merid.event_venues.kalshi import X` works for these exports.
+_KALSHI_RISK_LAZY_MAP = {
+    "KalshiRiskManager": 0,
+    "KalshiRiskConfig": 1,
+    "kalshi_fee_cents": 2,
+    "kelly_size_kalshi": 3,
+    "dynamic_position_sizes": 4,
+    "multi_market_kelly_sizes": 5,
+    "get_kalshi_risk": 6,
+    "edge_from_prediction": 7,
+    "kelly_size_from_kalman": 8,
+    "get_live_bankroll": 9,
+    "get_live_bankroll_async": 10,
+}
+
+_BANKROLL_LAZY_MAP = {
+    "BankrollServiceV2": 0,
+    "BankrollSummary": 1,
+    "get_bankroll_service": 2,
+    "get_equity_for_risk_calc_sync": 3,
+    "get_summary_sync": 4,
+}
+
+_RISK_POLICY_LAZY_MAP = {
+    "KalshiRiskPolicy": 0,
+    "RiskAllowance": 1,
+    "get_default_policy": 2,
+    "check_trade_allowed": 3,
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _KALSHI_RISK_LAZY_MAP:
+        return _lazy_import_kalshi_risk()[_KALSHI_RISK_LAZY_MAP[name]]
+    if name in _BANKROLL_LAZY_MAP:
+        return _lazy_import_bankroll_service_v2()[_BANKROLL_LAZY_MAP[name]]
+    if name in _RISK_POLICY_LAZY_MAP:
+        return _lazy_import_risk_policy()[_RISK_POLICY_LAZY_MAP[name]]
+    raise AttributeError(f"module 'merid.event_venues.kalshi' has no attribute {name!r}")

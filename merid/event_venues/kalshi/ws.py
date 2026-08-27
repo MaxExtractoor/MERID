@@ -1027,25 +1027,21 @@ class KalshiWebSocket(EventVenueStream):
         logger.info("[WS-LIST-SUBS] list_subscriptions command sent")
 
     async def request_orderbook_snapshot(self, market_ticker: str) -> None:
-        """Request orderbook snapshot via WebSocket update_subscription get_snapshot.
+        """Request a fresh orderbook snapshot.
 
-        This uses Kalshi's WebSocket API to fetch a fresh snapshot without modifying
-        the subscription, maintaining single ingestion path through the bridge queue.
-
-        Args:
-            market_ticker: Market ticker to request snapshot for
+        Prefer the WebSocket ``get_snapshot`` path when the orderbook_delta
+        subscription id is known; otherwise fall back to a REST fetch so a
+        sequence gap never recurses into itself.
         """
         if not self._ws:
             logger.warning("[WS-GET-SNAPSHOT] WebSocket not connected - skipping")
             return
 
-        # Get the subscription ID for orderbook_delta channel
         sid = self._subscription_ids.get("orderbook_delta")
-        
+
         if sid is None:
             logger.warning("[WS-GET-SNAPSHOT] No subscription ID tracked for orderbook_delta - falling back to REST")
-            # Fallback to REST if we don't have the sid tracked
-            await self._sync_sequence_gap_with_rest(market_ticker, 0, 0)
+            await self._fetch_rest_orderbook_snapshot(market_ticker)
             return
 
         message = {
@@ -1061,6 +1057,54 @@ class KalshiWebSocket(EventVenueStream):
         logger.info("[WS-GET-SNAPSHOT] Requesting snapshot for %s via WebSocket (sid=%s)", market_ticker, sid)
         await self._ws.send(json.dumps(message))
         logger.info("[WS-GET-SNAPSHOT] Snapshot request sent for %s", market_ticker)
+
+    async def _fetch_rest_orderbook_snapshot(self, market_ticker: str, via: str = "ws_rest_fallback") -> None:
+        """Fetch a fresh orderbook snapshot from REST and apply it to the state store."""
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            from merid.event_venues.kalshi.client import get_kalshi_client
+
+            store = get_kalshi_market_state_store()
+            client = get_kalshi_client()
+            orderbook = await asyncio.wait_for(client.get_orderbook(market_ticker), timeout=5.0)
+        except Exception as e:
+            logger.error("[WS-REST-SNAPSHOT] Failed to fetch REST orderbook for %s: %s", market_ticker, e)
+            return
+
+        if not orderbook:
+            logger.warning("[WS-REST-SNAPSHOT] No orderbook returned for %s", market_ticker)
+            return
+
+        yes_levels = []
+        for bid in orderbook.bids:
+            if isinstance(bid, tuple) and len(bid) == 2:
+                yes_levels.append([float(bid[0]), float(bid[1])])
+            elif hasattr(bid, 'price') and hasattr(bid, 'size'):
+                yes_levels.append([float(bid.price), float(bid.size)])
+
+        no_levels = []
+        for ask in orderbook.asks:
+            if isinstance(ask, tuple) and len(ask) == 2:
+                no_levels.append([float(ask[0]), float(ask[1])])
+            elif hasattr(ask, 'price') and hasattr(ask, 'size'):
+                no_levels.append([float(ask.price), float(ask.size)])
+
+        msg = {
+            "type": "orderbook_snapshot",
+            "ticker": market_ticker,
+            "sequence": 0,
+            "yes": yes_levels,
+            "no": no_levels,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        logger.info("[WS-REST-SNAPSHOT] Fetched REST orderbook for %s: %d yes, %d no", market_ticker, len(msg["yes"]), len(msg["no"]))
+
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, store.apply_orderbook_message, msg, via)
+        except Exception as e:
+            logger.error("[WS-REST-SNAPSHOT] Failed to apply REST orderbook for %s: %s", market_ticker, e)
 
     def get_diagnostic_counters(self) -> Dict[str, int]:
         """Get diagnostic counters for health monitoring.
@@ -2169,27 +2213,23 @@ class KalshiWebSocket(EventVenueStream):
         return True
 
     async def _sync_sequence_gap_with_rest(self, market_id: str, expected_seq: int, actual_seq: int) -> None:
-        """SEV-0 FIX: Sync sequence gaps with WebSocket snapshot recovery.
-        
-        When a sequence gap is detected, request a fresh snapshot via WebSocket
-        update_subscription get_snapshot to restore data consistency.
-        
-        This maintains single ingestion path through the bridge queue, avoiding
-        the previous REST bypass that violated the invariant.
+        """Recover from a sequence gap by requesting a fresh orderbook snapshot.
+
+        Uses the WebSocket ``get_snapshot`` path when the subscription id is
+        known; otherwise the request falls back to REST.  The REST path is
+        intentionally used only as a fallback because deltas still flow through
+        the WebSocket queue.
         """
         try:
-            logger.info(f"[WS-SYNC] Starting WebSocket snapshot sync for {market_id} gap {expected_seq}->{actual_seq}")
-            
-            # Mark ticker as rebuilding to prevent trading during sync
+            logger.info(f"[WS-SYNC] Starting snapshot recovery for {market_id} gap {expected_seq}->{actual_seq}")
+
             self._ob_initialised.discard(market_id)
-            
-            # Request snapshot via WebSocket API (single ingestion path)
             await self.request_orderbook_snapshot(market_id)
-            
-            logger.info(f"[WS-SYNC] WebSocket snapshot request sent for {market_id}")
-                
+
+            logger.info(f"[WS-SYNC] Snapshot recovery completed for {market_id}")
+
         except Exception as e:
-            logger.error(f"[WS-SYNC] Exception during WebSocket snapshot sync for {market_id}: {type(e).__name__}: {e}")
+            logger.error(f"[WS-SYNC] Exception during snapshot recovery for {market_id}: {type(e).__name__}: {e}")
     
     def _get_event_loop_lag_ms(self) -> float:
         """Get current event-loop lag from the lag monitor.

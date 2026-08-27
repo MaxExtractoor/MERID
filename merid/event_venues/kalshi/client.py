@@ -2610,6 +2610,7 @@ class KalshiVenueClient(EventVenueClient):
                     )
 
             _price_dollars = _price_cents / 100.0
+            # Kalshi V1 limit payload uses the {outcome}_price field (yes_price / no_price).
             if outcome == "yes":
                 kalshi_order["yes_price_dollars"] = f"{_price_dollars:.4f}"
             else:
@@ -3787,38 +3788,47 @@ class KalshiVenueClient(EventVenueClient):
         self, client_order_id: str, market_id: Optional[str] = None
     ) -> OperationResult[Optional[PlacedOrder]]:
         """Get order by client_order_id with explicit result.
-        
+
         Used for idempotency: when we receive a duplicate error, we can look up
         the order to confirm it was accepted and get its current state.
-        
-        Kalshi API supports filtering by client_order_id via query parameter.
+
+        Query shape: ``GET /portfolio/orders?client_order_id=<id>&ticker=<market>&limit=10``.
+        ``client_order_id`` is the Kalshi idempotency key.  If the server ignores
+        the parameter or returns a broader list, we filter locally by matching
+        ``client_order_id`` in the response.
         """
         params: Dict[str, Any] = {"client_order_id": client_order_id, "limit": 10}
         if market_id:
             params["ticker"] = market_id
-        
+
         result = await self._request_with_resilience(
-            "GET", "/portfolio/orders", 
-            params=params, 
+            "GET", "/portfolio/orders",
+            params=params,
             operation_name=f"get_order_by_client_id({client_order_id[:16]}...)"
         )
-        
+
         if not result.success:
             return OperationResult.fail(
                 result.error,
                 latency_ms=result.latency_ms,
                 retries=result.retries,
             )
-        
+
         orders = result.data.get("orders", [])
-        if orders:
-            # Return the first matching order
+        match = next(
+            (
+                o for o in orders
+                if o.get("client_order_id") == client_order_id
+            ),
+            None,
+        )
+        if match is not None:
             return OperationResult.ok(
-                self._to_placed_order(orders[0]),
+                self._to_placed_order(match),
                 latency_ms=result.latency_ms,
                 retries=result.retries,
             )
-        
+
         # Order not found - might be old/canceled, return None but success
         return OperationResult.ok(
             None,
@@ -4328,12 +4338,16 @@ class KalshiVenueClient(EventVenueClient):
         self,
         limit: int = 200,
         since_ts: Optional[int] = None,
+        ticker: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> OperationResult[List[Dict[str, Any]]]:
-        """Get paginated fills with optional time filter.
+        """Get paginated fills with optional time, ticker and order filters.
 
         Args:
             limit: Maximum fills per page
             since_ts: Optional minimum timestamp filter
+            ticker: Optional market ticker filter
+            order_id: Optional order ID filter
 
         Returns:
             OperationResult containing list of fill dicts
@@ -4351,6 +4365,10 @@ class KalshiVenueClient(EventVenueClient):
                 params["cursor"] = cursor
             if since_ts:
                 params["min_ts"] = since_ts
+            if ticker:
+                params["ticker"] = ticker
+            if order_id:
+                params["order_id"] = order_id
 
             result = await self._request_with_resilience(
                 "GET", "/portfolio/fills", params=params, operation_name="get_fills"
@@ -5260,6 +5278,12 @@ class KalshiVenueClient(EventVenueClient):
             return None
         if pos.count <= 0:
             return None
+        _raw_exchange_index = raw_data.get("exchange_index") if raw_data else None
+        if _raw_exchange_index is not None:
+            try:
+                _raw_exchange_index = int(_raw_exchange_index)
+            except Exception:
+                _raw_exchange_index = None
         return VenuePosition(
             market_id=pos.ticker,
             outcome_id=pos.side,
@@ -5270,6 +5294,7 @@ class KalshiVenueClient(EventVenueClient):
             venue="kalshi",
             created_at=pos.created_at,
             raw_data=raw_data,
+            exchange_index=_raw_exchange_index,
         )
     
     def _parse_trade(self, data: Dict[str, Any]) -> Optional[KalshiTrade]:

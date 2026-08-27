@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -141,10 +142,14 @@ def _healthy_rti_observation(asset: str) -> CfbRtiObservation:
     # Test helper: valid source timestamp, very fresh wall and monotonic times.
     now_wall_ms = int(time.time() * 1000)
     now_mono_ns = time.monotonic_ns()
+    # Preserve full settlement precision (e.g. 2 decimals for BTC) in raw_value.
+    raw = f"{_HEALTHY_RTI_VALUE:.2f}"
     return CfbRtiObservation(
         asset=asset,
         cfb_symbol="BRTI",
         value=_HEALTHY_RTI_VALUE,
+        value_decimal=Decimal(raw),
+        raw_value=raw,
         source_ts_ms=now_wall_ms,
         observed_ts_ms=now_wall_ms,
         observed_ts_mono_ns=now_mono_ns,

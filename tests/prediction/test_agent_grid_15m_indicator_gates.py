@@ -21,6 +21,20 @@ def _test_trading_mode(monkeypatch):
     monkeypatch.setenv("MERID_PM_TRADING_MODE", "testing")
 
 
+@pytest.fixture(autouse=True)
+def _set_15m_profile(monkeypatch):
+    """Ensure the kalshi_crypto_15m_v2 profile is loaded for profile-dependent tests.
+
+    conftest.py deletes MERID_PROFILE for non-15m tests, but this module tests
+    the 15m agent and needs access to Crypto15mProfile.momentum_fvg.
+    """
+    monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+    # Reset the singleton adapter so a stale profile from a prior test is not reused.
+    import merid.risk.profiles.crypto_15m_profile as _cpp
+
+    _cpp._active_adapter = None
+
+
 class TestSignalModeConfig:
     """Test signal_mode configuration."""
     

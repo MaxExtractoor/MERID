@@ -19,6 +19,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -350,9 +351,14 @@ class KalshiCfRtiStream:
             return
 
         # The raw CF Benchmarks frame arrives as a JSON string inside ``msg.data``.
+        # Parse with parse_float=Decimal so the full source precision (e.g. 7
+        # decimals for DOGE) is preserved end-to-end.
         raw_data_str = msg.get("data")
         try:
-            raw_data = json.loads(raw_data_str) if isinstance(raw_data_str, str) else (raw_data_str or {})
+            if isinstance(raw_data_str, str):
+                raw_data = json.loads(raw_data_str, parse_float=Decimal)
+            else:
+                raw_data = raw_data_str or {}
         except json.JSONDecodeError:
             raw_data = {}
 

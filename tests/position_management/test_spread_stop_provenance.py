@@ -27,6 +27,19 @@ from merid.position_management.position_monitor import (
 from merid.position_management.exit_audit import ExitPriceSnapshot
 
 
+@pytest.fixture(autouse=True)
+def _patch_stop_submission_sync(monkeypatch):
+    """Stop-candidate submission is not under test here; suppress the
+    fire-and-forget async task so the event loop does not leave pending
+    ``KalshiVenueClient.get_positions`` / ``maybe_submit_stop_candidate``
+    tasks to be destroyed at teardown.
+    """
+    monkeypatch.setattr(
+        "merid.position_management.position_monitor.maybe_submit_stop_candidate_sync",
+        Mock(),
+    )
+
+
 def _untrusted_position(**kwargs) -> Position:
     """Legacy / unknown-provenance position used for laundering tests."""
     return Position(

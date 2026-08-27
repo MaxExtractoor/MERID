@@ -89,15 +89,14 @@ class TestRequestOrderbookSnapshot:
         """Test snapshot request without subscription ID falls back to REST."""
         ws_client._subscription_ids = {}  # No subscription ID tracked
         ws_client._ws = AsyncMock()
-        
-        # Mock the _sync_sequence_gap_with_rest method
-        ws_client._sync_sequence_gap_with_rest = AsyncMock()
-        
+
+        # Mock the REST fallback helper
+        ws_client._fetch_rest_orderbook_snapshot = AsyncMock()
+
         await ws_client.request_orderbook_snapshot("KXBTCD-25JUN-T100000")
-        
-        # Should fall back to REST sync
-        ws_client._sync_sequence_gap_with_rest.assert_called_once_with("KXBTCD-25JUN-T100000", 0, 0)
-        # WebSocket send should not be called
+
+        # Should fall back to REST, not recurse into _sync_sequence_gap_with_rest
+        ws_client._fetch_rest_orderbook_snapshot.assert_called_once_with("KXBTCD-25JUN-T100000")
         ws_client._ws.send.assert_not_called()
     
     @pytest.mark.asyncio

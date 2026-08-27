@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -70,6 +71,7 @@ def _mock_response(status_code: int, json_data: dict | None = None):
     resp = MagicMock()
     resp.status_code = status_code
     if json_data is not None:
+        resp.text = json.dumps(json_data)
         resp.json.return_value = json_data
     return resp
 

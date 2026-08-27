@@ -12,6 +12,13 @@ _os.environ["ALLOW_DIRECT_EXECUTION"] = "false"
 _os.environ["MERID_ALLOW_CT_SCRIPT_BYPASS"] = "false"
 _os.environ["DEBUG_ALLOW_MANUAL_ORDERS"] = "false"
 _os.environ["MERID_CFB_RTI_SHADOW_TELEMETRY"] = "0"
+# 2026-08-24: Force unit tests to run in mock/preview mode so legacy live-mode
+# transitions in setUp/tearDown do not throw, and decision-provenance/shared-risk
+# guards that require full production stack are not enforced.
+_os.environ["MERID_PM_TRADING_MODE"] = "mock"
+_os.environ["MERID_ALLOW_LIVE_TRADES"] = "false"
+_os.environ["MERID_CFB_RTI_ADAPTER"] = "false"
+_os.environ["MERID_DISABLE_SHARED_RISK_GUARD"] = "true"
 # 2026-08-22: Force direct CF Benchmarks REST source for unit tests that mock
 # httpx, otherwise repo .env (MERID_CFB_RTI_SOURCE=kalshi_ws) causes the tests
 # to start the live Kalshi WebSocket stream and fail.
@@ -891,6 +898,32 @@ def _reset_trading_circuit_breaker_between_tests():
     try:
         from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
         get_trading_circuit_breaker().reset()
+    except (ImportError, AttributeError):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_slot_allocator_between_tests():
+    """Reset the global slot allocator and position cache before/after each test.
+
+    The slot allocator tracks live exposure slots and syncs with the canonical
+    position cache.  Tests that allocate slots or populate the cache must not
+    leave exposure behind for subsequent tests, or sizing/cap tests will see a
+    non-zero existing exposure and reject orders.
+    """
+    try:
+        from merid.risk.global_slot_allocator import reset_global_slot_allocator
+        reset_global_slot_allocator()
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        get_position_cache().clear_sync()
+    except (ImportError, AttributeError):
+        pass
+    yield
+    try:
+        from merid.risk.global_slot_allocator import reset_global_slot_allocator
+        reset_global_slot_allocator()
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        get_position_cache().clear_sync()
     except (ImportError, AttributeError):
         pass
 

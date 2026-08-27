@@ -83,6 +83,9 @@ class TestWSForwarderImpossibleOK:
             "ws_raw_messages_seen": 0,
             "ws_events_enqueued": 0,
             "ws_forwarder_events_processed": 0,
+            "markets": ["KXBTC15M-001"],
+            "time_since_last_event": 60.0,
+            "events_per_sec": 0.0,
         }
         states = {"KXBTC15M-001": mock_state}
         
@@ -103,6 +106,9 @@ class TestWSForwarderImpossibleOK:
             "ws_raw_messages_seen": 100,
             "ws_events_enqueued": 95,
             "ws_forwarder_events_processed": 90,
+            "markets": ["KXBTC15M-001"],
+            "time_since_last_event": 60.0,
+            "events_per_sec": 0.0,
         }
         states = {"KXBTC15M-001": mock_state}
         
@@ -302,7 +308,23 @@ class TestSpotMDParity:
     
     @patch('data.unified_spot_service.get_unified_spot_service')
     def test_unavailable_spot_fails(self, mock_spot_service):
-        """Any asset with unavailable spot should fail."""
+        """All assets unavailable should fail."""
+        from merid.event_venues.kalshi.health_snapshot import check_spot_md_parity
+        from data.unified_spot_service import SpotError
+        
+        mock_service = Mock()
+        
+        def get_spot(asset):
+            return SpotError(reason="timeout", asset=asset, message="Request timeout", age_s=60)
+        
+        mock_service.get = get_spot
+        mock_spot_service.return_value = mock_service
+        
+        assert check_spot_md_parity(10) is False
+    
+    @patch('data.unified_spot_service.get_unified_spot_service')
+    def test_partial_unavailable_spot_passes(self, mock_spot_service):
+        """A single unavailable asset should not fail the parity invariant."""
         from merid.event_venues.kalshi.health_snapshot import check_spot_md_parity
         from data.unified_spot_service import SpotError, SpotPrice
         import time
@@ -318,7 +340,7 @@ class TestSpotMDParity:
         mock_service.get = get_spot
         mock_spot_service.return_value = mock_service
         
-        assert check_spot_md_parity(10) is False
+        assert check_spot_md_parity(10) is True
     
     @patch('data.unified_spot_service.get_unified_spot_service')
     def test_stale_spot_degrades(self, mock_spot_service):
