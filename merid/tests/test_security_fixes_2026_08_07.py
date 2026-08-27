@@ -759,5 +759,52 @@ def test_end_to_end_secret_handling():
     print("✓ End-to-end secret handling works correctly")
 
 
+def test_redacted_key_no_overreach_on_correlation_ids():
+    """
+    CRITICAL FIX (2026-08-27): Blanket hex/base64 redaction must not destroy
+    telemetry for non-secret identifiers such as fill_id, order_id and
+    client_order_id. Only explicitly secret field names should be masked.
+    """
+    from utils.logger import SensitiveDataFilter, JsonFormatter
+    from utils.secrets_manager import is_sensitive_field, mask_value
+    import logging
+
+    # Field names containing "id" must not be flagged as sensitive.
+    assert not is_sensitive_field("fill_id")
+    assert not is_sensitive_field("client_order_id")
+    assert not is_sensitive_field("order_id")
+    assert not is_sensitive_field("intent_id")
+    assert not is_sensitive_field("market_key")  # "key" sub-pattern overreach
+    assert not is_sensitive_field("tokenized_value")
+
+    # A 32-char hex fill_id must not be masked when passed as a non-secret key.
+    fill_id = "abcd1234efgh5678ijkl9012mnop3456"
+    assert mask_value(fill_id, field_name="fill_id") == fill_id
+
+    # The message filter must leave fill_id/order_id messages intact.
+    filter_instance = SensitiveDataFilter(enabled=True)
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=1,
+        msg="fill_id=%s order_id=%s client_order_id=%s",
+        args=(fill_id, "ord-12345-abcde", "cl-99999-zzzzz"),
+        exc_info=None,
+    )
+    filter_instance.filter(record)
+    formatted = record.getMessage()
+    assert fill_id in formatted, "fill_id must survive log sanitization"
+    assert "ord-12345-abcde" in formatted, "order_id must survive log sanitization"
+    assert "cl-99999-zzzzz" in formatted, "client_order_id in formatted args must survive"
+
+    # JSON formatter must not sanitize fill_id either.
+    formatter = JsonFormatter()
+    assert formatter._sanitize_value("fill_id", fill_id) == fill_id
+    assert formatter._sanitize_value("client_order_id", "cl-123") == "cl-123"
+
+    print("✓ REDACTED_KEY overreach fixed: correlation IDs preserved")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
