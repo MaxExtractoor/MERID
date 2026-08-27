@@ -1208,7 +1208,47 @@ class KalshiPositionCache:
             except Exception:
                 pass
 
-            tp_r = tp_targets.get("tp_r", 1.0) if tp_targets.get("tp_r") is not None else 1.0
+            tp_r = tp_targets.get("tp_r") if tp_targets.get("tp_r") is not None else 1.0
+            tp_price = tp_targets.get("tp_price") or cached_position.take_profit_price_cents
+
+            # Fee-aware TP fallback: if no take-profit was propagated from the entry
+            # intent, derive a conservative target that clears round-trip fees and the
+            # minimum profit margin. A fallback TP below the fee buffer would be
+            # rejected by the exit guard and leave the position unmonitored.
+            if tp_price is None and price_cents and 0 < price_cents < 100:
+                try:
+                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                    from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
+                    entry_ref = int(price_cents)
+                    fee_entry = calculate_kalshi_fee_cents(1, entry_ref)
+                    target_cents = entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS
+                    fee_exit = calculate_kalshi_fee_cents(1, target_cents)
+                    required_margin = max(
+                        TAKE_PROFIT_MIN_PROFIT_CENTS,
+                        fee_entry + fee_exit + 1,
+                    )
+                    if side.lower() == "yes":
+                        tp_price = int(min(99, entry_ref + required_margin))
+                    else:
+                        tp_price = int(max(1, entry_ref - required_margin))
+                    tp_r = tp_r or 1.5
+                    logger.warning(
+                        "[POSITION-CACHE-TP-FALLBACK] market=%s side=%s entry=%dc - "
+                        "tp price missing, using fallback TP=%dc R=%.2f (SL=None)",
+                        market_id, side, entry_ref, tp_price, tp_r,
+                    )
+                except Exception:
+                    if side.lower() == "yes":
+                        tp_price = min(99, price_cents + 5)
+                    else:
+                        tp_price = max(1, price_cents - 5)
+                    tp_r = tp_r or 1.5
+
+            final_tp_price = (
+                mandatory_tp_price
+                or tp_price
+            )
+
             sl_original = tp_targets.get("sl_price")
             if sl_original is not None:
                 sl_enabled = bool(tp_targets.get("sl_enabled", True))
@@ -1219,22 +1259,32 @@ class KalshiPositionCache:
                 sl_enabled = bool(tp_targets.get("sl_enabled", True))
             final_sl_price = sl_original if (sl_enabled and sl_original is not None) else None
 
-            final_tp_price = (
-                mandatory_tp_price
-                or tp_targets.get("tp_price")
-                or cached_position.take_profit_price_cents
-            )
-
-            # Scale-out target
+            # Scale-out target. Use 75% of the TP distance (matching the original
+            # heuristic) but enforce a minimum gross profit that covers round-trip
+            # taker fees and the configured minimum profit margin.
             risk_cents = abs(price_cents - final_sl_price) if final_sl_price is not None else 0
             if final_sl_price is not None and risk_cents > 0:
                 scale_out_price = price_cents + int(risk_cents * 1.5)
-            elif final_tp_price and final_tp_price > price_cents:
-                scale_out_price = price_cents + int((final_tp_price - price_cents) * 0.5)
+            elif final_tp_price and final_tp_price > price_cents and side.lower() == "yes":
+                scale_out_price = price_cents + int((final_tp_price - price_cents) * 0.75)
             else:
-                scale_out_price = price_cents + 3
-            if tp_targets.get("tp_price"):
-                scale_out_price = price_cents + int((tp_targets.get("tp_price") - price_cents) * 0.75)
+                scale_out_price = None
+
+            if side.lower() == "yes" and price_cents and scale_out_price is not None:
+                try:
+                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                    _fee_entry = calculate_kalshi_fee_cents(1, price_cents)
+                    _exit_estimate = min(99, max(price_cents + 1, scale_out_price))
+                    _fee_exit = calculate_kalshi_fee_cents(1, _exit_estimate)
+                    _min_profit = int(os.environ.get("MERID_EXIT_MIN_PROFIT_CENTS", "2"))
+                    _min_scale_out = price_cents + _fee_entry + _fee_exit + _min_profit + 1
+                    _max_scale_out = final_tp_price - 1 if final_tp_price else 99
+                    if _min_scale_out > _max_scale_out:
+                        scale_out_price = None
+                    else:
+                        scale_out_price = max(_min_scale_out, min(scale_out_price, _max_scale_out, 99))
+                except Exception:
+                    pass
 
             # 2026-08-23: Trust the CachedPosition's provenance if it is already
             # known.  A residual position after a partial exit, or an add-to
@@ -2142,6 +2192,11 @@ class KalshiPositionCache:
 
             position = self._positions.get(market_id)
 
+            # Seed tp_price/tp_r from the registry and any existing cached position.
+            # The fee-aware fallback is applied just before the CachedPosition is built.
+            tp_r = tp_targets.get("tp_r") if tp_targets.get("tp_r") is not None else 1.0
+            tp_price = tp_targets.get("tp_price") or (position.take_profit_price_cents if position else None)
+
             # V16: External trade classification - check if fill agent_id differs from position agent_id
             fill_agent_id = None
             if fill_id and self._fills_ledger:
@@ -2365,10 +2420,15 @@ class KalshiPositionCache:
                 # a fallback stop inside the entry spread causes an immediate
                 # round-trip loss.  TP may still fall back because it is a profit
                 # target, not a loss exit.
-                tp_price = tp_targets.get("tp_price")
+                # tp_price/tp_r were already resolved earlier with a fee-aware fallback,
+                # but prefer the original tp_targets if they exist (e.g. a late HTTP
+                # recovery). Do not overwrite an already-resolved value.
+                if not tp_price:
+                    tp_price = tp_targets.get("tp_price") or (position.take_profit_price_cents if position else None)
+                if tp_r is None:
+                    tp_r = tp_targets.get("tp_r")
                 sl_original = tp_targets.get("sl_price")
                 sl_enabled = bool(tp_targets.get("sl_enabled", True))
-                tp_r = tp_targets.get("tp_r")
 
                 # SL is only valid if it came from the original entry intent and
                 # is not disabled upstream.
@@ -2478,14 +2538,34 @@ class KalshiPositionCache:
 
                 # A missing TP can be replaced with a default profit target.
                 if tp_price is None:
-                    entry_price = price_cents if price_cents > 0 else tp_targets.get("entry_price", 50)
-                    tp_price = min(99, int(entry_price * 1.15))  # 15% TP above entry
-                    tp_r = tp_r or 1.5  # Default 1.5R
-                    logger.warning(
-                        "[POSITION-CACHE-TP-FALLBACK] market=%s side=%s entry=%dc - "
-                        "tp price missing, using fallback TP=%dc R=%.2f (SL=None)",
-                        market_id, side, entry_price, tp_price, tp_r,
-                    )
+                    try:
+                        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                        from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
+                        entry_ref = price_cents if price_cents > 0 else tp_targets.get("entry_price", 50)
+                        fee_entry = calculate_kalshi_fee_cents(1, entry_ref)
+                        target_cents = entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS
+                        fee_exit = calculate_kalshi_fee_cents(1, target_cents)
+                        required_margin = max(
+                            TAKE_PROFIT_MIN_PROFIT_CENTS,
+                            fee_entry + fee_exit + 1,
+                        )
+                        if side.lower() == "yes":
+                            tp_price = int(min(99, entry_ref + required_margin))
+                        else:
+                            tp_price = int(max(1, entry_ref - required_margin))
+                        tp_r = tp_r or 1.5
+                        logger.warning(
+                            "[POSITION-CACHE-TP-FALLBACK] market=%s side=%s entry=%dc - "
+                            "tp price missing, using fallback TP=%dc R=%.2f (SL=None)",
+                            market_id, side, entry_ref, tp_price, tp_r,
+                        )
+                    except Exception:
+                        entry_ref = price_cents if price_cents > 0 else tp_targets.get("entry_price", 50)
+                        if side.lower() == "yes":
+                            tp_price = min(99, entry_ref + 5)
+                        else:
+                            tp_price = max(1, entry_ref - 5)
+                        tp_r = tp_r or 1.5
 
                 # CRITICAL FIX (2026-08-13): Mark risk parameter provenance.
                 # A trusted live entry has a client_order_id, fill_id, and a captured
@@ -3196,9 +3276,20 @@ class KalshiPositionCache:
                 ledger_signed_yes = 0
                 ledger = self._get_fills_ledger()
                 if ledger:
-                    ledger_pos = ledger.compute_position_from_fills(market_id)
-                    if ledger_pos:
-                        ledger_signed_yes = ledger_pos.get("signed_yes_exposure", 0)
+                    try:
+                        ledger_pos = ledger.compute_position_from_fills(market_id)
+                        if ledger_pos and hasattr(ledger_pos, "get"):
+                            _raw_ledger_yes = ledger_pos.get("signed_yes_exposure", 0)
+                            try:
+                                ledger_signed_yes = int(_raw_ledger_yes)
+                            except (TypeError, ValueError):
+                                logger.debug(
+                                    "[POSITION-CACHE] Could not coerce ledger signed_yes exposure: %s",
+                                    _raw_ledger_yes,
+                                )
+                                ledger_signed_yes = 0
+                    except Exception:
+                        logger.debug("[POSITION-CACHE] Could not compute ledger position for reconciliation")
                 status = "matched" if cache_signed_yes == ledger_signed_yes else "mismatch"
                 self._emit_exposure_reconciliation(
                     ticker=market_id,

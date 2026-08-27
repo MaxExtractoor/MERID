@@ -2413,21 +2413,33 @@ class PositionMonitor:
                 adapter = get_active_profile()
                 profile = adapter.profile
                 if profile.scale_out_enabled:
-                    # Set scale-out target from profile if not already set
-                    if position.scale_out_price_cents is None and position.initial_risk_cents > 0:
-                        scale_out_r_multiple = profile.scale_out_trigger_r_multiple
-                        position.scale_out_r_multiple = scale_out_r_multiple
-                        # Calculate scale-out price: entry + (R * initial_risk)
-                        # CRITICAL FIX (2026-07-16): Side-space — target above entry for BOTH sides
-                        if position.side == PositionSide.YES:
-                            position.scale_out_price_cents = position.avg_entry_price_cents + int(scale_out_r_multiple * position.initial_risk_cents)
+                    # Set scale-out target from profile if not already set.
+                    # For SL-based positions, use the configured R-multiple of initial risk.
+                    # For TP-only positions, use 75% of the distance to take-profit.
+                    if position.scale_out_price_cents is None and (
+                        position.initial_risk_cents > 0
+                        or (position.take_profit_price_cents and position.side == PositionSide.YES)
+                    ):
+                        if position.initial_risk_cents > 0:
+                            scale_out_r_multiple = profile.scale_out_trigger_r_multiple
+                            position.scale_out_r_multiple = scale_out_r_multiple
+                            # Calculate scale-out price: entry + (R * initial_risk)
+                            # CRITICAL FIX (2026-07-16): Side-space — target above entry for BOTH sides
+                            if position.side == PositionSide.YES:
+                                position.scale_out_price_cents = position.avg_entry_price_cents + int(scale_out_r_multiple * position.initial_risk_cents)
+                            else:
+                                position.scale_out_price_cents = max(1, position.avg_entry_price_cents - int(scale_out_r_multiple * position.initial_risk_cents))
                         else:
-                            position.scale_out_price_cents = max(1, position.avg_entry_price_cents - int(scale_out_r_multiple * position.initial_risk_cents))
+                            # TP-only: scale out three-quarters of the way to TP.
+                            tp_distance = position.take_profit_price_cents - position.avg_entry_price_cents
+                            if tp_distance > 0:
+                                position.scale_out_price_cents = position.avg_entry_price_cents + int(tp_distance * 0.75)
+                                position.scale_out_r_multiple = 0.75
                         logger.info(
-                            "[POSITION-MONITOR] SCALE-OUT target set: position=%s entry=%dc scale_out_r=%.1f target=%dc",
+                            "[POSITION-MONITOR] SCALE-OUT target set: position=%s entry=%dc scale_out_r=%.2f target=%dc",
                             position.position_id[:8],
                             position.avg_entry_price_cents,
-                            scale_out_r_multiple,
+                            position.scale_out_r_multiple or 0.0,
                             position.scale_out_price_cents,
                         )
 
