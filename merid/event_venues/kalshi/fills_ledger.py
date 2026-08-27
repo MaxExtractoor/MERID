@@ -20,6 +20,7 @@ import hashlib
 import json
 import numbers
 import os
+import sqlite3
 import threading
 import time
 import types
@@ -83,6 +84,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from enum import Enum
 
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from merid.event_venues.kalshi.portfolio_models import EODSnapshot
 
 try:
     from merid.event_venues.kalshi.binary_price_space import (
@@ -1208,7 +1212,7 @@ class KalshiFillsLedger:
 
         # EOD snapshot storage for daily unrealized PnL change calculation
         # Key: account_id -> EODSnapshot
-        self._eod_snapshots: Dict[str, "EODSnapshot"] = {}
+        self._eod_snapshots: Dict[str, EODSnapshot] = {}
         self._last_eod_snapshot_date: Optional[str] = None  # Track last EOD snapshot date
 
         # Session-based PnL tracking
@@ -4343,8 +4347,8 @@ class KalshiFillsLedger:
         # the live-router fill_id as the immutable idempotency key.
         existing.trade_id = fill.trade_id or fill.fill_id or existing.trade_id
         existing.order_id = fill.order_id or existing.order_id
-        existing.client_order_id = fill.client_order_id or existing.client_order_id
-        existing.client_tag = fill.client_tag or existing.client_tag
+        existing.client_order_id = getattr(fill, "client_order_id", None) or existing.client_order_id
+        existing.client_tag = getattr(fill, "client_tag", None) or existing.client_tag
         existing.liquidity_role = fill.liquidity_role or existing.liquidity_role
         existing.yes_price_dollars = fill.yes_price_dollars or existing.yes_price_dollars
         existing.no_price_dollars = fill.no_price_dollars or existing.no_price_dollars
@@ -4382,7 +4386,7 @@ class KalshiFillsLedger:
         fill.trade_id = existing.trade_id
         fill.order_id = existing.order_id
         fill.client_order_id = existing.client_order_id
-        fill.client_tag = existing.client_tag
+        fill.client_tag = getattr(existing, "client_tag", None)
         fill.liquidity_role = existing.liquidity_role
         fill.canonicalization_state = existing.canonicalization_state
         fill.confirmed_by_rest = True

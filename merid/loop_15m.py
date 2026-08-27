@@ -2271,7 +2271,15 @@ def _run_exit_price_guard(
     return True, limit_cents, record, decision_id
 
 
-async def _execute_exit_order(self, position, exit_reason, exit_price_cents, contracts_to_close=None) -> None:
+async def _execute_exit_order(
+    self,
+    position,
+    exit_reason,
+    exit_price_cents,
+    contracts_to_close=None,
+    client_order_id: Optional[str] = None,
+    resubmit_count: int = 0,
+) -> None:
     # Execute exit order when PositionMonitor triggers exit condition.
     # Args:
     #     position: Position to exit
@@ -3008,8 +3016,26 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
         # gets a fresh, persisted (client_order_id, order_attempt_id) pair, so retries
         # cannot collide with a previous attempt's identity record and the in-flight
         # tracker always carries the canonical wire id.
+        #
+        # CRITICAL FIX (2026-08-25): If a previous exit attempt for this position
+        # is still unresolved, reuse its client_order_id. Kalshi idempotency makes
+        # same-ClOrdID resubmission safe and prevents double-exits.
         try:
             from merid.event_venues.kalshi.order_identity import finalize_order_identity
+
+            if not client_order_id and self._position_monitor:
+                client_order_id = self._position_monitor._get_unresolved_exit_client_order_id(
+                    position.position_id
+                )
+            if client_order_id:
+                intent.client_order_id = client_order_id
+                intent.client_tag = client_order_id
+                logger.info(
+                    "[EXIT-ORDER] Reusing unresolved client_order_id=%s for position=%s resubmit=%d",
+                    client_order_id[:8] if client_order_id else "",
+                    position.position_id[:8],
+                    resubmit_count,
+                )
 
             intent.run_id = os.environ.get("MERID_RUN_ID") or f"live_exit_{int(time.time())}"
             intent.process_id = str(os.getpid())
@@ -3119,24 +3145,80 @@ async def _execute_exit_order(self, position, exit_reason, exit_price_cents, con
             submitted_count_fp=_count_fp,
         )
 
-        # Route the exit order
-        result = await route_order_async(intent)
+        # Route the exit order. For a lost POST ack, the in-router reconcile may
+        # return not_submitted (authoritative empty) -> resubmit with the same
+        # client_order_id. For submission_unknown / duplicate_unknown, keep the
+        # in-flight lock and return; do NOT re-arm or clear it.
+        _max_resubmits = 2
+        _current_resubmit = resubmit_count
+        while True:
+            result = await route_order_async(intent)
+            route_ok = _confirmed_submission(result)
+            if route_ok:
+                break
 
-        # CRITICAL FIX (2026-08-23): Validate that route_order_async produced a
-        # semantically confirmed submission before treating the order as SUBMITTED.
-        # ``request_completed`` alone is not enough; the status must prove acceptance.
-        route_ok = _confirmed_submission(result)
-        if not route_ok:
+            _result_status = getattr(result, "status", "")
+            _result_reason = getattr(result, "reason", "") or _result_status
+
+            if _result_status == "not_submitted":
+                if _current_resubmit >= _max_resubmits:
+                    logger.error(
+                        "[EXIT-ORDER] not_submitted resubmit limit reached: "
+                        "position=%s market=%s client_order_id=%s attempts=%d",
+                        position.position_id[:8],
+                        position.market_id,
+                        intent.client_order_id,
+                        _current_resubmit + 1,
+                    )
+                    if self._position_monitor:
+                        self._position_monitor._mark_exit_intent_submission_unknown(
+                            position.position_id,
+                            "not_submitted_resubmit_limit_exhausted",
+                        )
+                    return
+                _current_resubmit += 1
+                logger.warning(
+                    "[EXIT-ORDER] Exit not_submitted; resubmitting with same client_order_id=%s "
+                    "attempt=%d/%d",
+                    intent.client_order_id,
+                    _current_resubmit,
+                    _max_resubmits + 1,
+                )
+                await asyncio.sleep(0.2)
+                continue
+
+            if getattr(result, "requires_recovery", False) or _result_status in (
+                "submission_unknown",
+                "duplicate_unknown",
+            ):
+                logger.warning(
+                    "[EXIT-ORDER] Exit in %s state; keeping in-flight for reconcile: "
+                    "position=%s market=%s client_order_id=%s",
+                    _result_status,
+                    position.position_id[:8],
+                    position.market_id,
+                    intent.client_order_id,
+                )
+                if self._position_monitor:
+                    self._position_monitor._mark_exit_intent_submission_unknown(
+                        position.position_id, _result_reason
+                    )
+                return
+
+            # Any other failure (risk, firewall, hard reject) is terminal for this attempt.
             logger.error(
                 "[EXIT-ORDER] route_order_async returned no confirmed order: "
-                "position=%s market=%s result=%s",
-                position.position_id[:8], position.market_id, result
+                "position=%s market=%s status=%s reason=%s",
+                position.position_id[:8],
+                position.market_id,
+                _result_status,
+                _result_reason,
             )
             if self._position_monitor:
                 self._position_monitor._mark_exit_intent_retryable(
                     position.position_id,
                     "RouteNoOrder",
-                    "route_order_async returned without order_id/execution/request_completed",
+                    f"status={_result_status} reason={_result_reason}",
                 )
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
             return

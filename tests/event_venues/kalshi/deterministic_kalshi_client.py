@@ -470,15 +470,18 @@ class DeterministicKalshiClient:
         since_ts: Optional[int] = None,
         limit: int = 200,
         ticker: Optional[str] = None,
+        market_id: Optional[str] = None,
         order_id: Optional[str] = None,
     ) -> OperationResult[List[Dict[str, Any]]]:
+        # Normalize to the KalshiExecutionPort interface (market_id == ticker).
+        _ticker = market_id if market_id is not None else ticker
         filtered: List[Dict[str, Any]] = []
         for f in self._fills:
             if since_ts is not None:
                 ts = self._parse_created_time(f.get("created_time"))
                 if ts is not None and ts < since_ts:
                     continue
-            if ticker and f.get("ticker") != ticker:
+            if _ticker and f.get("ticker") != _ticker:
                 continue
             if order_id and f.get("order_id") != order_id:
                 continue
