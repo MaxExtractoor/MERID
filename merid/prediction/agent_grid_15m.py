@@ -1776,6 +1776,28 @@ class HybridProbability:
         return self.p_yes
 
 
+class CycleResult(list):
+    """List-like return type for a single agent-grid cycle.
+
+    Backwards-compatible: it behaves exactly like a list of candidates, so all
+    existing ``len(candidates)``, ``candidates[0]``, and iteration usage keeps
+    working.  It additionally carries the canonical per-cycle rejection
+    breakdown and lifecycle events that produced the returned candidates.
+    """
+
+    def __init__(
+        self,
+        candidates: List[Dict[str, Any]],
+        total_generated: int,
+        rejection_breakdown: Optional[Dict[str, int]] = None,
+        lifecycle_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        super().__init__(candidates)
+        self.total_generated = total_generated
+        self.rejection_breakdown = rejection_breakdown or {}
+        self.lifecycle_events = lifecycle_events or []
+
+
 class LeanAgent15m:
 
     # Minimal agent for 15m crypto trading with velocity-based signals.
@@ -7604,6 +7626,14 @@ class LeanAgent15m:
             return None
 
         side = decision.selected_outcome
+
+        # CRITICAL FIX (2026-08-27): The consumed side must equal the dual-side
+        # evaluator's best side.  A mismatch here would route the wrong order.
+        assert side == decision.best_side, (
+            f"DUAL-SIDE-CONTRADICTION asset={asset} side={side} "
+            f"best_side={decision.best_side} decision_id={decision.decision_id}"
+        )
+
         action = "buy"
         price_cents = int(round(float(decision.selected_outcome_price) * 100.0))
         model_prob = float(decision.p_selected) if decision.p_selected is not None else 0.0
@@ -7676,6 +7706,29 @@ class LeanAgent15m:
             decision.confidence_valid,
             decision.confidence_source,
         )
+
+        # CRITICAL FIX (2026-08-27): Pre-allocation canonical range check.  The
+        # global allocator assumes candidates are already inside the 10c-75c
+        # entry range; this prevents an out-of-range price from leaking into
+        # the allocation phase.
+        if not is_price_in_canonical_range(price_cents, side):
+            logger.info(
+                "[TRADE-DECISION] asset=%s side=%s price=%dc outside canonical range -> NO TRADE",
+                asset, side, price_cents,
+            )
+            self._record_signal_rejection(
+                "price_out_of_canonical_range",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    settlement_input_price,
+                    settlement_reference,
+                    seconds_to_expiry,
+                    decision=decision,
+                    extra={"side": side, "price_cents": price_cents},
+                )
+            )
+            return None
 
         return {
             "ticker": getattr(market, "ticker", asset),
@@ -16501,7 +16554,14 @@ class LeanAgentGrid15m:
         candidates = self._select_best_edge_per_asset(candidates)
         logger.info("[BEST-EDGE-FILTER] tick=%d filtered_candidates=%d", tick, len(candidates))
 
-
+        # CRITICAL FIX (2026-08-27): Single source of truth for cycle rejection breakdown.
+        # ``pre_allocation_candidates`` is the canonical generated set; the return value may
+        # be a subset after the allocator/entries-disabled gate.  The breakdown and lifecycle
+        # events account for every generated candidate.
+        pre_allocation_candidates = list(candidates)
+        total_generated = len(pre_allocation_candidates)
+        rejection_breakdown: Dict[str, int] = {}
+        lifecycle_events: List[Dict[str, Any]] = []
 
         # Phase 2: Apply global allocator to select best edges under venue cap
 
@@ -16840,12 +16900,33 @@ class LeanAgentGrid15m:
                             "[CANDIDATE-ADMITTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=allocator_selected",
                             cid, oc.get("ticker"), oc.get("side"), float(oc.get("edge_pct", 0.0) or 0.0)
                         )
+                        lifecycle_events.append({
+                            "candidate_id": cid,
+                            "from_state": "RECEIVED",
+                            "to_state": "EXECUTED",
+                            "reason": "allocator_selected",
+                            "ticker": oc.get("ticker"),
+                            "asset": oc.get("asset"),
+                            "side": oc.get("side"),
+                        })
                     else:
                         concrete = _ad.constraint_reasons[0] if (_ad and _ad.constraint_reasons) else "allocator_loss"
+                        if _ad and _ad.terminal_reason and not concrete:
+                            concrete = _ad.terminal_reason
                         logger.info(
                             "[CANDIDATE-REJECTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=%s",
                             cid, oc.get("ticker"), oc.get("side"), float(oc.get("edge_pct", 0.0) or 0.0), concrete
                         )
+                        rejection_breakdown[concrete] = rejection_breakdown.get(concrete, 0) + 1
+                        lifecycle_events.append({
+                            "candidate_id": cid,
+                            "from_state": "RECEIVED",
+                            "to_state": "REJECTED",
+                            "reason": concrete,
+                            "ticker": oc.get("ticker"),
+                            "asset": oc.get("asset"),
+                            "side": oc.get("side"),
+                        })
 
             except Exception as e:
                 logger.error(
@@ -16855,14 +16936,25 @@ class LeanAgentGrid15m:
                 # FAIL-CLOSED: an unfiltered candidate list reaching loop_15m can
                 # execute extreme prices the allocator would have rejected.  Do not
                 # return raw candidates.
-                for oc in (original_candidates if 'original_candidates' in locals() else candidates):
+                err_candidates = original_candidates if 'original_candidates' in locals() else candidates
+                for oc in err_candidates:
                     logger.info(
                         "[CANDIDATE-REJECTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=allocator_phase_error",
                         oc.get("candidate_id"), oc.get("ticker"), oc.get("side"),
                         float(oc.get("edge_pct", 0.0) or 0.0)
                     )
+                    rejection_breakdown["allocator_phase_error"] = rejection_breakdown.get("allocator_phase_error", 0) + 1
+                    lifecycle_events.append({
+                        "candidate_id": oc.get("candidate_id"),
+                        "from_state": "RECEIVED",
+                        "to_state": "REJECTED",
+                        "reason": "allocator_phase_error",
+                        "ticker": oc.get("ticker"),
+                        "asset": oc.get("asset"),
+                        "side": oc.get("side"),
+                    })
                 _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="allocator_phase_error")
-                return []
+                return CycleResult([], total_generated, rejection_breakdown, lifecycle_events)
 
         if not telemetry_state["emitted"]:
             if not candidates:
@@ -16881,12 +16973,22 @@ class LeanAgentGrid15m:
                     c.get("candidate_id"), c.get("ticker"), c.get("side"),
                     float(c.get("edge_pct", 0.0) or 0.0)
                 )
+                rejection_breakdown["ENTRIES_DISABLED"] = rejection_breakdown.get("ENTRIES_DISABLED", 0) + 1
+                lifecycle_events.append({
+                    "candidate_id": c.get("candidate_id"),
+                    "from_state": "RECEIVED",
+                    "to_state": "REJECTED",
+                    "reason": "ENTRIES_DISABLED",
+                    "ticker": c.get("ticker"),
+                    "asset": c.get("asset"),
+                    "side": c.get("side"),
+                })
             logger.info("[AGENT-GRID] allow_new_entries=False; returning %d filtered candidates (not allocated)", len(candidates))
-            return candidates
+            return CycleResult(candidates, total_generated, rejection_breakdown, lifecycle_events)
 
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
-        return candidates
+        return CycleResult(candidates, total_generated, rejection_breakdown, lifecycle_events)
 
 
 def _extract_error_message(result) -> str:

@@ -4324,14 +4324,49 @@ class KalshiFillsLedger:
         b_price = b.canonical_leg_price_cents or b.price_cents or 0
         return abs(a_price - b_price) <= 1
 
+    def _reindex_fill_id(self, old_id: str, new_id: str, fill: KalshiFill) -> None:
+        """Move secondary indexes from ``old_id`` to ``new_id`` after promotion."""
+        if old_id == new_id:
+            return
+
+        # Primary fill store
+        if old_id in self._fills:
+            self._fills[new_id] = self._fills.pop(old_id)
+
+        # order_id -> [fill_id, ...]
+        order_id = fill.order_id
+        if order_id and order_id in self._fills_by_order:
+            order_list = self._fills_by_order[order_id]
+            if old_id in order_list:
+                order_list.remove(old_id)
+            if new_id not in order_list:
+                order_list.append(new_id)
+
+        # market_ticker -> [fill_id, ...]
+        market = fill.market_ticker
+        if market and market in self._fills_by_market:
+            market_list = self._fills_by_market[market]
+            if old_id in market_list:
+                market_list.remove(old_id)
+            if new_id not in market_list:
+                market_list.append(new_id)
+
+        # In-memory position tracking (fills list only; economics are unchanged)
+        instrument_key = self._get_instrument_key(fill)
+        pos = self._open_positions.get(instrument_key)
+        if pos:
+            pos_fills = pos.get("fills", [])
+            pos["fills"] = [new_id if fid == old_id else fid for fid in pos_fills]
+
     def _promote_live_router_fill(self, fill: KalshiFill) -> Optional[str]:
         """If ``fill`` matches a provisional live-router fill, promote it.
 
-        The authoritative HTTP/WS fill overlays the provisional record but
-        preserves the live-router ``fill_id`` so all downstream idempotency
-        gates (position_cache, risk, monitor) see a single key.
+        The authoritative HTTP/WS fill overlays the provisional record and REWRITES
+        the position's ``entry_fill_id`` to the authoritative ``fill_id``.  This is
+        the canonical, immutable idempotency key for all exit/apply paths and the
+        single source of truth for position parentage.
 
-        Returns the promoted (live-router) ``fill_id`` if a promotion happened,
+        Returns the promoted (authoritative) ``fill_id`` if a promotion happened,
         otherwise ``None``.
         """
         if not fill.order_id:
@@ -4343,8 +4378,11 @@ class KalshiFillsLedger:
         if not self._is_same_economic_fill(existing, fill):
             return None
 
-        # Overlay authoritative fields onto the provisional record, preserving
-        # the live-router fill_id as the immutable idempotency key.
+        new_id = fill.fill_id
+
+        # Overlay authoritative fields onto the provisional record.  The
+        # authoritative fill id becomes the immutable idempotency key, replacing
+        # the provisional live-router id.
         existing.trade_id = fill.trade_id or fill.fill_id or existing.trade_id
         existing.order_id = fill.order_id or existing.order_id
         existing.client_order_id = getattr(fill, "client_order_id", None) or existing.client_order_id
@@ -4376,14 +4414,47 @@ class KalshiFillsLedger:
         if fill.reduce_only is not None and existing.reduce_only is None:
             existing.reduce_only = fill.reduce_only
 
+        # Rewrite the ledger's primary id to the authoritative fill id and
+        # re-index all secondary maps.
+        old_id = existing.fill_id
+        if old_id != new_id:
+            existing.fill_id = new_id
+            self._reindex_fill_id(old_id, new_id, existing)
+            # The authoritative id is now the canonical key for this order.
+            self._live_router_fill_ids[fill.order_id] = new_id
+
+        # Both ids have been applied; idempotency must hold for either one.
+        self._processed_fill_ids.add(old_id)
+        self._processed_fill_ids.add(new_id)
+
+        # Rewrite the position-cache entry_fill_id to the authoritative id so
+        # exit parentage and all downstream idempotency gates use one key.
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            if cache:
+                cache.promote_entry_fill_id(
+                    market_id=fill.market_ticker,
+                    old_fill_id=old_id,
+                    new_fill_id=new_id,
+                    client_order_id=existing.client_order_id,
+                    order_id=existing.order_id,
+                    intent_id=existing.intent_id,
+                )
+        except Exception as cache_err:
+            logger.warning(
+                "[FILLS-LEDGER-LIVE-PROMOTE] position-cache promotion failed (non-fatal): %s",
+                cache_err,
+            )
+
         logger.info(
-            "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoted provisional %s to authoritative trade=%s",
-            fill.order_id, existing_id, existing.trade_id,
+            "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoted provisional %s to authoritative fill=%s trade=%s",
+            fill.order_id, old_id, new_id, existing.trade_id,
         )
 
-        # Mutate the caller's fill object so downstream consumers (including
-        # position_cache.on_fill) use the live-router fill_id and skip re-application.
-        fill.fill_id = existing_id
+        # Mutate the caller's fill object so downstream consumers see the
+        # authoritative fill id and treat it as the already-applied idempotency key.
+        fill.fill_id = new_id
         fill.trade_id = existing.trade_id
         fill.order_id = existing.order_id
         fill.client_order_id = existing.client_order_id
@@ -4391,7 +4462,7 @@ class KalshiFillsLedger:
         fill.liquidity_role = existing.liquidity_role
         fill.canonicalization_state = existing.canonicalization_state
         fill.confirmed_by_rest = True
-        return existing_id
+        return new_id
 
     def on_fill(self, fill: KalshiFill) -> None:
         """Handle fill event with position state machine.
