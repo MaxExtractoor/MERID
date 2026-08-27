@@ -14823,6 +14823,30 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     if identity_rejection:
         return identity_rejection
 
+    # CRITICAL FIX (2026-08-27): Bankroll drawdown breaker is a final hard gate
+    # on new entries. Exits are always allowed through this check.
+    if not _is_exit_order(intent):
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+            bankroll_service = await get_bankroll_service()
+            if bankroll_service and not bankroll_service.is_entry_allowed():
+                snapshot = bankroll_service.get_circuit_snapshot()
+                logger.critical(
+                    "[ORDER-ROUTER-REJECT] intent_id=%s bankroll drawdown breaker open "
+                    "state=%s drawdown=%.2f%% - rejecting entry",
+                    getattr(intent, "intent_id", None),
+                    snapshot.state.value,
+                    float(snapshot.drawdown_pct),
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason="bankroll_drawdown_halt",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+        except Exception as exc:
+            logger.warning("[ORDER-ROUTER] Bankroll breaker check failed: %s", exc)
+
     # ── DECISION PROVENANCE CONTRACT (2026-08-19) ──────────────────────────
     # Enforce for the 15m crypto lane after identity is confirmed but before
     # any stateful validation that might mutate position assumptions.

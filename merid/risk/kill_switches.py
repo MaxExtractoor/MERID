@@ -177,6 +177,7 @@ class KillSwitchReason(str, Enum):
     RTI_FEED_STALE = "rti_feed_stale"     # CF Benchmarks RTI feed stale / divergent
     LOOP_LAG_HALT = "loop_lag_halt"       # Event loop latency critical
     PORTFOLIO_INTEGRITY = "portfolio_integrity"  # Cross-system consistency failure
+    BANKROLL_DRAWDOWN = "bankroll_drawdown"  # Trailing bankroll watermark breached (Fix 5)
 
 
 @dataclass

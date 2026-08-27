@@ -3790,11 +3790,35 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         except Exception as e:
             logger.warning("[15m-LOOP] Portfolio authority check failed: %s", e)
 
+    # CRITICAL FIX (2026-08-27): Bankroll drawdown circuit breaker.
+    # Entries are blocked when the bankroll breaker is OPEN; exits remain enabled.
+    bankroll_circuit_state = None
+    bankroll_drawdown_pct = None
+    if allow_new_entries:
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import _BANKROLL_SERVICE_V2
+            if _BANKROLL_SERVICE_V2 is not None:
+                if not _BANKROLL_SERVICE_V2.is_entry_allowed():
+                    snapshot = _BANKROLL_SERVICE_V2.get_circuit_snapshot()
+                    bankroll_circuit_state = snapshot.state.value
+                    bankroll_drawdown_pct = float(snapshot.drawdown_pct)
+                    logger.warning(
+                        "[15m-LOOP] ENTRY_BLOCKED: bankroll drawdown breaker state=%s drawdown=%.2f%%",
+                        bankroll_circuit_state,
+                        bankroll_drawdown_pct,
+                    )
+                    allow_new_entries = False
+        except Exception as e:
+            logger.warning("[15m-LOOP] Bankroll breaker check failed: %s", e)
+
     logger.info(
         "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s "
-        "ready_assets=%d md_fresh=%d spot_fresh=%d ws_queue=%d ws_lag=%.3fs ws_first=%.3f portfolio_authoritative=%s portfolio_age_ms=%d",
+        "ready_assets=%d md_fresh=%d spot_fresh=%d ws_queue=%d ws_lag=%.3fs ws_first=%.3f "
+        "portfolio_authoritative=%s portfolio_age_ms=%d bankroll_state=%s bankroll_drawdown=%.2f%%",
         allow_new_entries, infra_ready, markets_expected, markets_present, ready_assets_count, md_fresh_count, spot_fresh_count,
         ws_queue_size, ws_time_since_last_event, ws_first_event_ts, portfolio_authoritative, portfolio_age_ms,
+        bankroll_circuit_state or "n/a",
+        bankroll_drawdown_pct or 0.0,
     )
 
     # 2026-08-24: Per-ticker ENTRY-READINESS structured log.  This is the primary
