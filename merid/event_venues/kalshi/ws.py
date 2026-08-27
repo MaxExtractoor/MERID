@@ -2400,6 +2400,21 @@ class KalshiWebSocket(EventVenueStream):
                 self._ob_snapshots.clear()
                 self._last_seq.clear()
 
+                # CRITICAL FIX (2026-08-27): A successful reconnect invalidates the
+                # market-state store's ``snapshot_complete`` flags for every ticker.
+                # Without this, ``loop_15m`` could allow entries on stale books while
+                # new WS deltas are still catching up to the fresh snapshot.
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    store = get_kalshi_market_state_store()
+                    if store is not None:
+                        store.invalidate_all_live_sequence()
+                        logger.info(
+                            "[WS-RECONNECT-STATE-SYNC] Invalidated live sequence / snapshot completion for all markets"
+                        )
+                except Exception as e:
+                    logger.warning("[WS-RECONNECT-STATE-SYNC] Market-state invalidation failed: %s", e)
+
                 # BUG-6: replay subscriptions using the correct call per subscription type
                 if self._ticker_subscriptions:
                     await self.subscribe_quotes(market_ids=list(self._ticker_subscriptions))
