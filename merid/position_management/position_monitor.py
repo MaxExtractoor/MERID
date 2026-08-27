@@ -98,6 +98,48 @@ def _get_settlement_guard_seconds() -> float:
         return float(DEFAULT_SETTLEMENT_GUARD_SECONDS)
 
 
+# CRITICAL FIX (2026-08-27): Targeted production override while the in-flight
+# reconciliation scheduler is being repaired. When set, a SETTLEMENT_GUARD
+# trigger is allowed to force-reconcile a stale in-flight exit instead of
+# dropping the forced exit.
+_FORCE_SETTLEMENT_BYPASS_ENV = os.environ.get("MERID_SETTLEMENT_BYPASS_IN_FLIGHT", "false").lower() in ("1", "true", "yes")
+
+
+def _settlement_bypass_env_enabled() -> bool:
+    """Live read of the env override so tests and hot-reloads can toggle it."""
+    return os.environ.get("MERID_SETTLEMENT_BYPASS_IN_FLIGHT", "false").lower() in ("1", "true", "yes")
+
+# Exit reasons that may force a stale in-flight order to be reconciled,
+# cancelled, and re-emitted. These are time-to-expiry, safety, or
+# operator-driven exits; profit-taking exits are NOT in this set.
+_FORCE_RECONCILE_EXIT_REASONS = {
+    ExitReason.SETTLEMENT_GUARD,
+    ExitReason.LOSS_CAP,
+    ExitReason.RISK,
+    ExitReason.MANUAL,
+    ExitReason.MODEL_INVALIDATION_LOSS_EXIT,
+    ExitReason.CONTINUATION_STOP,
+    ExitReason.TIME_STOP,
+    ExitReason.STOP_LOSS,
+    ExitReason.AUTO_EXIT_99C,
+    ExitReason.MARKET_EXPIRED,
+}
+
+
+def _is_forced_exit_reason(exit_reason: ExitReason) -> bool:
+    """Return True if the exit reason is safety/forced and may override a stale in-flight lock."""
+    if exit_reason is None:
+        return False
+    return exit_reason in _FORCE_RECONCILE_EXIT_REASONS
+
+
+def _is_settlement_guard_override(exit_reason: ExitReason) -> bool:
+    """Return True if the env override forces settlement guard to bypass the in-flight check."""
+    if exit_reason is None:
+        return False
+    return exit_reason == ExitReason.SETTLEMENT_GUARD and _settlement_bypass_env_enabled()
+
+
 def _get_hard_loss_cap_cents() -> int:
     """Load per-position hard unrealized loss cap from active profile (cents)."""
     try:
@@ -684,6 +726,80 @@ class PositionMonitor:
             )
         except Exception as e:
             self._record_cleanup_pending(position, "capacity_release_failed", e)
+
+    def _cancel_durable_order_attempt(self, client_order_id: Optional[str], reason: str) -> None:
+        """Mark a durable order attempt as terminal so it cannot be reused on restart."""
+        if not client_order_id:
+            return
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+            store = OrderAttemptStore()
+            record = store.get_by_client_order_id(client_order_id)
+            if record is None:
+                return
+            if record.status in ("SUBMISSION_UNKNOWN", "SUBMITTING", "PERSISTED"):
+                store.update_status(
+                    record.order_attempt_id,
+                    "CANCELLED",
+                    payload={"cancel_reason": reason, "cancelled_at": time.time()},
+                )
+                logger.warning(
+                    "[EXIT-INTENT-STARTUP-CLEANUP] Cancelled stale order attempt %s client_order_id=%s status=%s reason=%s",
+                    record.order_attempt_id[:16],
+                    client_order_id[:8],
+                    record.status,
+                    reason,
+                )
+        except Exception:
+            logger.exception(
+                "[EXIT-INTENT-STARTUP-CLEANUP] Failed to cancel durable order attempt for client_order_id=%s",
+                client_order_id[:8] if client_order_id else "",
+            )
+
+    def _cleanup_stale_exit_in_flight_on_startup(self) -> None:
+        """Drop in-flight/submission-unknown state for positions whose contract has expired.
+
+        On process restart the in-memory locks are empty, but the durable order-attempt
+        store may still hold SUBMISSION_UNKNOWN records for positions that have settled.
+        This routine ensures those records are terminalised and that any cached expired
+        position is not re-monitored.
+        """
+        with self._lock:
+            # Defensive: clear any in-memory locks that point to positions we did not load
+            # or that belong to expired markets.  This should be a no-op on a fresh process,
+            # but it is critical if the monitor is ever started without a full reset.
+            stale_inflight = []
+            for position_id, flight in self._exit_intent_in_flight.items():
+                position = self._open_positions.get(position_id)
+                if position is None:
+                    stale_inflight.append(position_id)
+                elif position.market_id and self._is_expired_market(position.market_id):
+                    stale_inflight.append(position_id)
+
+            for position_id in stale_inflight:
+                self._clear_exit_intent_in_flight(position_id)
+                if position_id in self._open_positions:
+                    self.remove_position(position_id)
+
+            for position_id in list(self._position_to_client_order.keys()):
+                if position_id not in self._open_positions:
+                    del self._position_to_client_order[position_id]
+                else:
+                    position = self._open_positions[position_id]
+                    if position.market_id and self._is_expired_market(position.market_id):
+                        del self._position_to_client_order[position_id]
+
+            for client_order_id in list(self._recent_exit_submissions.keys()):
+                # The client_order_id may be shared across positions; if no open
+                # position still references it, the submission cache is stale.
+                if client_order_id not in self._position_to_client_order.values():
+                    del self._recent_exit_submissions[client_order_id]
+
+        logger.info(
+            "[EXIT-INTENT-STARTUP-CLEANUP] Cleared %d stale in-flight lock(s), %d client-order mapping(s)",
+            len(stale_inflight),
+            len([pid for pid in list(self._position_to_client_order.keys()) if pid not in self._open_positions]),
+        )
 
     def retry_cleanup(self) -> int:
         """Retry any pending cleanup work items. Returns number of successfully processed items."""
@@ -1469,6 +1585,24 @@ class PositionMonitor:
                     "reconciliation required before re-arm",
                     position_id[:8], client_order_id
                 )
+                # CRITICAL FIX (2026-08-27): A single failed reconcile must not leave the
+                # lock stuck forever.  Re-attempt reconciliation every few seconds, with a
+                # cap, so network or pagination hiccups do not permanently block exits.
+                last_reconcile = flight.get("last_reconcile_at", 0.0)
+                reconcile_count = flight.get("reconcile_count", 0)
+                now = time.time()
+                if now - last_reconcile > 5.0 and reconcile_count < 5:
+                    flight["last_reconcile_at"] = now
+                    flight["reconcile_count"] = reconcile_count + 1
+                    logger.warning(
+                        "[EXIT-INTENT-IN-FLIGHT] Re-attempting reconcile %d/5 for position=%s client_order_id=%s",
+                        reconcile_count + 1, position_id[:8], client_order_id
+                    )
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self._reconcile_exit_intent(position_id, client_order_id))
+                    except RuntimeError:
+                        pass
                 return True
 
             # state == EXECUTION_PENDING or SUBMITTED
@@ -1502,9 +1636,20 @@ class PositionMonitor:
             return True
 
     async def _reconcile_exit_intent(
-        self, position_id: str, client_order_id: Optional[str]
+        self,
+        position_id: str,
+        client_order_id: Optional[str],
+        force: bool = False,
+        new_price_cents: Optional[int] = None,
     ) -> None:
-        """Reconcile an exit intent in SUBMISSION_UNKNOWN by order and exchange position lookup."""
+        """Reconcile an exit intent in SUBMISSION_UNKNOWN by order and exchange position lookup.
+
+        CRITICAL FIX (2026-08-27): ``force`` is used by safety/forced exits
+        (settlement guard, loss cap, etc.) to aggressively clear a stale
+        in-flight lock and allow resubmission.  When ``force`` is True and the
+        prior order is not live, the lock is released and a fresh exit attempt
+        can be made.
+        """
         try:
             # Best-effort: if position is already flat, terminalize.
             with self._lock:
@@ -1537,26 +1682,62 @@ class PositionMonitor:
                     order = getattr(lookup, "data", None) if lookup else None
                     if order:
                         status = (getattr(order, "status", "") or "").lower()
+                        order_price_cents: Optional[int] = None
+                        if order.price is not None:
+                            try:
+                                order_price_cents = int(round(Decimal(order.price) * Decimal("100")))
+                            except Exception:
+                                order_price_cents = None
+
                         if status in ("filled", "executed"):
                             logger.info(
                                 "[EXIT-INTENT-RECONCILE] Order %s is FILLED for position=%s; terminalizing exit intent",
                                 client_order_id[:8], position_id[:8]
                             )
-                            self._mark_exit_intent_reconciled(position_id, "order_filled")
+                            self._update_order_attempt_status(client_order_id, "FILLED", reason="reconcile_order_filled")
+                            self._release_stale_exit_flags(position_id, "order_filled")
                             return
-                        elif status in ("canceled", "rejected"):
+
+                        if status in ("canceled", "rejected"):
                             logger.info(
                                 "[EXIT-INTENT-RECONCILE] Order %s is %s for position=%s; terminalizing exit intent",
                                 client_order_id[:8], status, position_id[:8]
                             )
-                            self._mark_exit_intent_reconciled(position_id, f"order_{status}")
+                            self._update_order_attempt_status(client_order_id, status.upper(), reason=f"reconcile_order_{status}")
+                            self._release_stale_exit_flags(position_id, f"order_{status}")
                             return
-                        elif status in ("open", "resting"):
+
+                        if status in ("open", "resting", "active"):
+                            # For forced exits, a working order at a stale price must be
+                            # cancelled so the new exit price can be used.  If the price is
+                            # the same (or better) we keep the working order.
+                            if force and new_price_cents is not None and order_price_cents is not None:
+                                if order_price_cents != new_price_cents:
+                                    logger.warning(
+                                        "[EXIT-INTENT-RECONCILE] Force reconcile: existing order %s is %s at %dc "
+                                        "but new exit price is %dc; cancelling and resubmitting",
+                                        client_order_id[:8], status, order_price_cents, new_price_cents
+                                    )
+                                    try:
+                                        cancel_res = await client.cancel_order_result(order.order_id, market_id=position.market_id)
+                                        if cancel_res and getattr(cancel_res, "success", False):
+                                            self._update_order_attempt_status(client_order_id, "CANCELLED", reason="reconcile_force_cancel_stale_price")
+                                            self._release_stale_exit_flags(position_id, "order_cancelled_stale_price")
+                                            return
+                                        else:
+                                            logger.warning(
+                                                "[EXIT-INTENT-RECONCILE] Cancel failed for %s; leaving in-flight",
+                                                client_order_id[:8]
+                                            )
+                                    except Exception as cancel_err:
+                                        logger.warning(
+                                            "[EXIT-INTENT-RECONCILE] Cancel exception for %s: %s; leaving in-flight",
+                                            client_order_id[:8], cancel_err
+                                        )
                             logger.info(
                                 "[EXIT-INTENT-RECONCILE] Order %s is %s for position=%s; exit still live",
                                 client_order_id[:8], status, position_id[:8]
                             )
-                            # Leave in SUBMISSION_UNKNOWN; the order is still working.
                             return
                 except Exception as order_exc:
                     logger.debug(
@@ -1568,7 +1749,7 @@ class PositionMonitor:
             # that came from REST sync / replay.  Without a lookup key the monitor was
             # leaving these in SUBMISSION_UNKNOWN forever, blocking protective exits
             # and leaking risk.  Fall back to an exchange open-order/position snapshot.
-            if not client_order_id and position.market_id:
+            if position.market_id:
                 try:
                     from merid.event_venues.kalshi.client import get_kalshi_client
                     client = get_kalshi_client()
@@ -1616,20 +1797,14 @@ class PositionMonitor:
                     #    is not immediately dropped by the loop-side idempotency guard.
                     logger.warning(
                         "[EXIT-INTENT-RECONCILE] position_id=%s market=%s still open on exchange "
-                        "but no open order and no client_order_id; releasing in-flight lock to retry",
-                        position_id[:8], position.market_id
+                        "but no open order; force=%s client_order_id=%s; releasing in-flight lock to retry",
+                        position_id[:8], position.market_id, force, client_order_id[:8] if client_order_id else ""
                     )
-                    with self._lock:
-                        stale_position = self._open_positions.get(position_id)
-                        if stale_position and stale_position.exited_at is None:
-                            stale_position.exit_triggered = False
-                            stale_position.exit_reason = None
-                            stale_position.exit_price_cents = None
-                            logger.info(
-                                "[EXIT-INTENT-RECONCILE] Cleared stale exit_triggered for position=%s",
-                                position_id[:8]
-                            )
-                    self._mark_exit_intent_reconciled(position_id, "retry_unknown_submission")
+                    # Do NOT update the order attempt store to terminal here: the order
+                    # was never confirmed accepted, so reusing the same client_order_id
+                    # is the safest idempotent resubmit.  We only clear the in-flight
+                    # guard and stale position flags.
+                    self._release_stale_exit_flags(position_id, "retry_unknown_submission")
                     return
                 except Exception as fallback_exc:
                     logger.debug(
@@ -1639,15 +1814,67 @@ class PositionMonitor:
 
             # Fallback: leave in SUBMISSION_UNKNOWN and alert; a later fill callback should reconcile.
             logger.warning(
-                "[EXIT-INTENT-RECONCILE] position_id=%s client_order_id=%s requires external "
+                "[EXIT-INTENT-RECONCILE] position_id=%s client_order_id=%s force=%s requires external "
                 "reconciliation; leaving in SUBMISSION_UNKNOWN",
-                position_id[:8], client_order_id
+                position_id[:8], client_order_id, force
             )
         except Exception as e:
             logger.exception(
                 "[EXIT-INTENT-RECONCILE] Error reconciling position_id=%s: %s",
                 position_id[:8], e
             )
+
+    @staticmethod
+    def _update_order_attempt_status(client_order_id: Optional[str], status: str, reason: Optional[str] = None) -> None:
+        """Mark a durable order attempt as terminal so it is not reused.
+
+        Without this, ``finalize_order_identity`` will keep matching the same
+        client_order_id and the resubmission will collide with a cancelled/
+        rejected/filled order on the exchange.
+        """
+        if not client_order_id:
+            return
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+            store = OrderAttemptStore()
+            record = store.get_by_client_order_id(client_order_id)
+            if record is None:
+                return
+            payload: Dict[str, Any] = {}
+            if reason:
+                payload["reconcile_reason"] = reason
+            store.update_status(record.order_attempt_id, status, payload=payload or None)
+            logger.info(
+                "[EXIT-INTENT-RECONCILE] Updated order_attempt_id=%s client_order_id=%s status=%s reason=%s",
+                record.order_attempt_id[:16] if record.order_attempt_id else "",
+                client_order_id[:8],
+                status,
+                reason or "",
+            )
+        except Exception:
+            logger.exception(
+                "[EXIT-INTENT-RECONCILE] Failed to update order_attempt status for client_order_id=%s",
+                client_order_id[:8] if client_order_id else "",
+            )
+
+    def _release_stale_exit_flags(self, position_id: str, reason: str) -> None:
+        """Clear the in-flight lock and any stale terminal flags on the Position.
+
+        This is the safe release path used when an exit order is proven terminal
+        or not-submitted and the monitor needs to re-emit the exit.
+        """
+        self._mark_exit_intent_reconciled(position_id, reason)
+        self._clear_exit_intent_in_flight(position_id)
+        with self._lock:
+            stale_position = self._open_positions.get(position_id)
+            if stale_position and stale_position.exited_at is None:
+                stale_position.exit_triggered = False
+                stale_position.exit_reason = None
+                stale_position.exit_price_cents = None
+                logger.info(
+                    "[EXIT-INTENT-RECONCILE] Cleared stale terminal flags for position=%s reason=%s",
+                    position_id[:8], reason
+                )
 
     def _clear_exit_intent_in_flight(self, position_id: str) -> None:
         """
@@ -1824,7 +2051,7 @@ class PositionMonitor:
                     _secs_to_expiry,
                     _settlement_guard_seconds,
                 )
-                self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)
+                await self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)
                 return
         except Exception as e:
             logger.warning("[POSITION-MONITOR] Settlement guard check failed: %s", e)
@@ -1854,7 +2081,7 @@ class PositionMonitor:
                 position.unrealized_pnl_cents,
                 _hard_loss_cap_cents,
             )
-            self._emit_exit_intent(position, ExitReason.LOSS_CAP, current_price_cents, snapshot=snapshot)
+            await self._emit_exit_intent(position, ExitReason.LOSS_CAP, current_price_cents, snapshot=snapshot)
             return
 
         # CRITICAL FIX (2026-08-25): Continuation stop (per-asset, vol-normalized).
@@ -1876,7 +2103,7 @@ class PositionMonitor:
                     cont_threshold_pct,
                     _cont_cfg.get("lookback_minutes", 5),
                 )
-                self._emit_exit_intent(position, ExitReason.CONTINUATION_STOP, current_price_cents, snapshot=snapshot)
+                await self._emit_exit_intent(position, ExitReason.CONTINUATION_STOP, current_price_cents, snapshot=snapshot)
                 return
             else:
                 logger.debug(
@@ -2054,7 +2281,7 @@ class PositionMonitor:
                 current_price_cents,
                 position.side.value,
             )
-            self._emit_exit_intent(position, ExitReason.AUTO_EXIT_99C, current_price_cents, snapshot=snapshot)
+            await self._emit_exit_intent(position, ExitReason.AUTO_EXIT_99C, current_price_cents, snapshot=snapshot)
             return
 
         # DYNAMIC TAKE PROFIT: Laddered exits based on entry price for consistent profits
@@ -2196,7 +2423,7 @@ class PositionMonitor:
                                 current_price_cents,
                                 position.dynamic_tp_target_cents,
                             )
-                            self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents, snapshot=snapshot)
+                            await self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents, snapshot=snapshot)
                             return
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Dynamic take profit check failed: %s", e)
@@ -2256,7 +2483,7 @@ class PositionMonitor:
                                     trim_to_contracts,
                                     contracts_to_close,
                                 )
-                                self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close, snapshot=snapshot)
+                                await self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close, snapshot=snapshot)
                                 # CRITICAL FIX: Do NOT update position.size here - wait for fill callback
                                 # Previous code updated position.size prematurely, creating desync with PositionCache.contracts
                                 # Position.size should only be updated via fill callback to ensure consistency
@@ -2303,7 +2530,7 @@ class PositionMonitor:
                                         current_price_cents,
                                         floor_price,
                                     )
-                                    self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
+                                    await self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
                                     return
                                 elif thesis_validation_enabled:
                                     # Soft exit: only exit if thesis is broken
@@ -2318,7 +2545,7 @@ class PositionMonitor:
                                             current_price_cents,
                                             floor_price,
                                         )
-                                        self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
+                                        await self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
                                         return
                                     else:
                                         logger.info(
@@ -2367,7 +2594,7 @@ class PositionMonitor:
                 sl_kind,
                 position.r_multiple,
             )
-            self._emit_exit_intent(position, ExitReason.STOP_LOSS, current_price_cents, snapshot=snapshot)
+            await self._emit_exit_intent(position, ExitReason.STOP_LOSS, current_price_cents, snapshot=snapshot)
             return
 
         if position.should_trigger_take_profit(current_price_cents):
@@ -2391,7 +2618,7 @@ class PositionMonitor:
                 position.take_profit_price_cents,
                 position.r_multiple,
             )
-            self._emit_exit_intent(position, ExitReason.TAKE_PROFIT, current_price_cents, snapshot=snapshot)
+            await self._emit_exit_intent(position, ExitReason.TAKE_PROFIT, current_price_cents, snapshot=snapshot)
             return
 
         # Research: Check break-even trigger at 1R (capital preservation)
@@ -2626,7 +2853,7 @@ class PositionMonitor:
                 position.max_favorable_price_cents,
                 position.r_multiple,
             )
-            self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents, snapshot=snapshot)
+            await self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents, snapshot=snapshot)
             return
 
         # CRITICAL FIX (2026-07-11): Emergency flatten in last 60 seconds
@@ -2653,7 +2880,7 @@ class PositionMonitor:
                 time_to_expiry_seconds,
                 position.unrealized_pnl_cents
             )
-            self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)  # Full exit
+            await self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)  # Full exit
             return  # Exit immediately, don't check other conditions
 
         # CRITICAL FIX: 2026-07-15 - Load staged exit stages from YAML config
@@ -2756,7 +2983,7 @@ class PositionMonitor:
                         setattr(position, f"staged_exit_{stage_key}_timestamp", datetime.utcnow())
 
                         # Emit partial exit intent
-                        self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, contracts_to_close, snapshot=snapshot)
+                        await self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, contracts_to_close, snapshot=snapshot)
 
                         # CRITICAL FIX: Do NOT update position.size here - wait for fill callback
                         # Previous code updated position.size prematurely, creating desync with PositionCache.contracts
@@ -3015,7 +3242,7 @@ class PositionMonitor:
                 policy.reason.value if policy.reason else "unknown",
                 position.r_multiple,
             )
-            self._emit_exit_intent(
+            await self._emit_exit_intent(
                 position,
                 policy.reason or ExitReason.MANUAL,
                 current_price_cents,
@@ -3664,7 +3891,7 @@ class PositionMonitor:
                 return asset
         return "unknown"
 
-    def _emit_exit_intent(
+    async def _emit_exit_intent(
         self,
         position: Position,
         exit_reason: ExitReason,
@@ -3991,15 +4218,52 @@ class PositionMonitor:
                     existing_reason = (
                         flight.get("reason") if flight else None
                     ) or "unknown"
-                logger.warning(
-                    "[EXIT-INTENT-IN-FLIGHT] Exit intent already in-flight for position=%s, skipping duplicate trigger. "
-                    "Existing trigger reason=%s, new reason=%s",
-                    position.position_id[:8],
-                    existing_reason,
-                    exit_reason.value
-                )
-                # Skip this trigger - the in-flight intent will handle the exit
-                return
+                    existing_client_order_id = (
+                        flight.get("client_order_id") if flight else None
+                    ) or self._position_to_client_order.get(position.position_id)
+
+                # CRITICAL FIX (2026-08-27): Forced/safety exits must not be blocked by a
+                # stale in-flight lock.  Reconcile the existing order first; if it cannot
+                # be proven live, release the lock and re-emit with a fresh idempotency key.
+                if _is_forced_exit_reason(exit_reason) or _is_settlement_guard_override(exit_reason):
+                    logger.warning(
+                        "[EXIT-INTENT-FORCED-RECONCILE] position=%s existing_reason=%s new_reason=%s; "
+                        "attempting forced reconciliation of client_order_id=%s",
+                        position.position_id[:8],
+                        existing_reason,
+                        exit_reason.value,
+                        existing_client_order_id[:8] if existing_client_order_id else "",
+                    )
+                    await self._reconcile_exit_intent(
+                        position.position_id,
+                        existing_client_order_id,
+                        force=True,
+                        new_price_cents=exit_price_cents,
+                    )
+                    if not self._is_exit_intent_in_flight(position.position_id):
+                        logger.warning(
+                            "[EXIT-INTENT-FORCED-RECONCILE] position=%s stale in-flight for %s cleared; "
+                            "proceeding with forced %s",
+                            position.position_id[:8], existing_reason, exit_reason.value
+                        )
+                        # fall through to mark in-flight and call callback
+                    else:
+                        logger.warning(
+                            "[EXIT-INTENT-FORCED-RECONCILE] position=%s existing %s still in-flight after "
+                            "reconcile; dropping forced %s",
+                            position.position_id[:8], existing_reason, exit_reason.value
+                        )
+                        return
+                else:
+                    logger.warning(
+                        "[EXIT-INTENT-IN-FLIGHT] Exit intent already in-flight for position=%s, skipping duplicate trigger. "
+                        "Existing trigger reason=%s, new reason=%s",
+                        position.position_id[:8],
+                        existing_reason,
+                        exit_reason.value
+                    )
+                    # Skip this trigger - the in-flight intent will handle the exit
+                    return
 
             # Mark intent as in-flight before calling callback
             self._mark_exit_intent_in_flight(position.position_id, reason=exit_reason.value)
@@ -4414,6 +4678,7 @@ class PositionMonitor:
                             # Remove position from monitor without attempting exit
                             # The position should have been settled by the exchange
                             with self._lock:
+                                self._clear_exit_intent_in_flight(position_id)
                                 if position_id in self._open_positions:
                                     del self._open_positions[position_id]
                                 if position.market_id in self._market_to_position:
@@ -4432,6 +4697,7 @@ class PositionMonitor:
                                 position.market_id
                             )
                             with self._lock:
+                                self._clear_exit_intent_in_flight(position_id)
                                 if position_id in self._open_positions:
                                     del self._open_positions[position_id]
                                 if position.market_id in self._market_to_position:
@@ -4683,6 +4949,21 @@ class PositionMonitor:
                         known_aliases=cached_pos.known_aliases,
                     )
 
+                    # CRITICAL FIX (2026-08-27): Expired/closed markets can leave a stale
+                    # durable order attempt in SUBMISSION_UNKNOWN.  Do not monitor them and
+                    # terminalise any such attempt so it is not reused on restart.
+                    if self._is_expired_market(position.market_id):
+                        logger.warning(
+                            "[POSITION-MONITOR-STARTUP] Skipping expired/closed market %s on startup; "
+                            "cancelling durable order attempt if present",
+                            position.market_id,
+                        )
+                        self._cancel_durable_order_attempt(
+                            position.client_order_id,
+                            "startup_expired_market_not_monitored",
+                        )
+                        continue
+
                     # Add or update monitor using canonical upsert.
                     # Startup positions may be replaced by a more trusted live fill later.
                     self.upsert_position(position, caller="startup")
@@ -4708,6 +4989,10 @@ class PositionMonitor:
                 exc_info=True
             )
             # Continue startup even if load fails - positions will be added on fill
+
+        # CRITICAL FIX (2026-08-27): Clear any in-flight/submission-unknown state for
+        # positions whose contract has expired or that were not loaded from cache.
+        self._cleanup_stale_exit_in_flight_on_startup()
 
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())

@@ -109,21 +109,27 @@ class TestPartialExitExitTriggeredFix:
     
     def test_exit_triggered_only_for_full_exits_in_loop_15m(self):
         """Test that exit_triggered is only set for full exits in loop_15m.py.
-        
-        CRITICAL FIX (2026-07-16): exit_triggered should only be set when
-        contracts_to_close is None (full exit), not for partial exits.
+
+        CRITICAL FIX (2026-08-22): _execute_exit_order must not set exit_triggered
+        before route_order_async confirms a fill.  For a full-exit failure
+        (contracts_to_close is None) the terminal flags are cleared so the monitor
+        can re-evaluate.  For a partial exit the existing terminal flags are left
+        alone so the remaining position can still take a stop-loss.
         """
         import inspect
         from merid.loop_15m import Kalshi15mLoop
-        
-        # Get the source code of the exit_intent_callback
-        source = inspect.getsource(Kalshi15mLoop.start)
-        
-        # Verify the conditional logic for setting exit_triggered
+
+        # Get the source code of the actual order executor (exit_intent_callback is
+        # the fire-and-forget dispatcher; it no longer sets terminal state).
+        source = inspect.getsource(Kalshi15mLoop._execute_exit_order)
+
+        # A rejected full exit clears exit_triggered; a rejected partial exit does not.
         assert "if contracts_to_close is None:" in source
-        assert "position.exit_triggered = True" in source
-        # Verify the comment explaining the fix
-        assert "Set exit_triggered BEFORE async task ONLY for full exits" in source
+        assert "position.exit_triggered = False" in source
+        # No premature "exit_triggered = True" inside the executor.
+        assert "position.exit_triggered = True" not in source
+        # The canonical comment explaining that the position is still open.
+        assert "exit_triggered is only set after a confirmed fill" in source
         assert "partial exits" in source.lower()
 
 
