@@ -79,6 +79,7 @@ _EXIT_REASON_CANONICAL_MAP = {
     "opportunity_cost": "signal_reversal",
     "auto_exit_99c": "expiry_liquidation",
     "settlement_guard": "expiry_liquidation",
+    "ratchet_floor": "take_profit",
     "loss_cut_40pct": "stop_loss",
     "manual": "manual",
     "scale_out": "take_profit",
@@ -2076,12 +2077,25 @@ def _run_exit_price_guard(
         and seconds_to_expiry is not None
         and seconds_to_expiry <= MERID_EXIT_EMERGENCY_CUTOFF_SECONDS
     )
+    # Forced exits are time/market-driven and must be allowed to realize a loss;
+    # otherwise the system holds losing positions into settlement.
+    is_forced = canonical in ("expiry_liquidation", "time_exit")
     record["is_emergency"] = is_emergency
+    record["is_forced"] = is_forced
 
     # Quote-freshness gate (tiered by time-to-expiry).
     max_quote_age_ms = _exit_quote_age_limit_ms(seconds_to_expiry)
     if quote_age_ms is None or quote_age_ms > max_quote_age_ms:
-        if not is_emergency:
+        if is_emergency or is_forced:
+            logger.warning(
+                "[EXIT-GUARD-FORCED] position=%s market=%s - "
+                "Quote is stale (age_ms=%s) but reason=%s is forced, proceeding with extra scrutiny",
+                (getattr(position, "position_id", "") or "")[:8],
+                getattr(position, "market_id", None),
+                quote_age_ms,
+                canonical,
+            )
+        else:
             record.update({"status": "rejected", "reject_reason": "stale_quote"})
             persist_order_decision(record)
             logger.critical(
@@ -2094,14 +2108,6 @@ def _run_exit_price_guard(
                 max_quote_age_ms,
             )
             return False, exit_price_cents, record, decision_id
-        else:
-            logger.warning(
-                "[EXIT-GUARD-EMERGENCY] position=%s market=%s - "
-                "Quote is stale (age_ms=%s) but within emergency cutoff, proceeding with extra scrutiny",
-                (getattr(position, "position_id", "") or "")[:8],
-                getattr(position, "market_id", None),
-                quote_age_ms,
-            )
 
     if best_bid is None:
         record.update({"status": "rejected", "reject_reason": "no_executable_bid"})
@@ -2201,10 +2207,10 @@ def _run_exit_price_guard(
 
     record["max_loss_cents"] = max_loss
 
-    # Discretionary (non-stop, non-emergency) exits must be profitable after
-    # fees and must clear a minimum profit floor.  This prevents exiting too
-    # early for tiny/negative PnL on edge_decay / signal_reversal / time_exit.
-    is_stop_or_emergency = canonical in _MERID_EXIT_STOP_REASONS or is_emergency
+    # Discretionary (non-stop, non-emergency, non-forced) exits must be profitable after
+    # fees and must clear a minimum profit floor.  Forced exits (expiry_liquidation, time_exit)
+    # are allowed to realize a loss to prevent holding losers to settlement.
+    is_stop_or_emergency = canonical in _MERID_EXIT_STOP_REASONS or is_emergency or is_forced
     if not is_stop_or_emergency:
         if net_expected < MERID_EXIT_MIN_PROFIT_CENTS or net_worst < 0:
             record.update({"status": "rejected", "reject_reason": "profit_exit_not_profitable"})
@@ -2223,8 +2229,9 @@ def _run_exit_price_guard(
             )
             return False, exit_price_cents, record, decision_id
 
-    # Net loss bound.
-    if net_worst < -max_loss:
+    # Net loss bound.  Forced exits must bypass this, otherwise an expiry or time
+    # stop with a large unavoidable loss can never be approved.
+    if not is_forced and net_worst < -max_loss:
         record.update({"status": "rejected", "reject_reason": "max_loss_exceeded"})
         persist_order_decision(record)
         logger.critical(
@@ -4174,6 +4181,10 @@ async def _run_loop(self) -> None:
                 # CRITICAL: Handle zero candidates case explicitly
                 if len(candidates) == 0:
                     logger.info("[15m-LOOP] No candidates this cycle, skipping execution")
+                elif not allow_new_entries:
+                    # agent_grid_15m returns filtered candidates for telemetry even when
+                    # entries are disabled; the loop must not execute them.
+                    logger.info("[15m-LOOP] %d candidates generated but new entries are disabled; skipping execution", len(candidates))
                 else:
                     # Execute candidates (already filtered by agent_grid_15m to 1 per asset)
                     logger.info("[15m-LOOP] Starting execution loop for %d candidates (pre-filtered by agent_grid_15m)", len(candidates))
@@ -4734,6 +4745,18 @@ async def _run_loop(self) -> None:
                                 )
                                 
                                 candidate["count"] = count
+
+                                # FVG-influenced trades are scaled by MERID_FVG_SIZE_SCALE (default 0.5)
+                                # to reduce live exposure while the placebo matrix is being collected.
+                                fvg_size_scale = float(candidate.get("fvg_size_scale", 1.0) or 1.0)
+                                if fvg_size_scale < 1.0 and fvg_size_scale > 0.0 and count > 0:
+                                    scaled_count = max(1, int(count * fvg_size_scale))
+                                    if scaled_count != count:
+                                        logger.info(
+                                            "[15M-LOOP-FVG-SIZE] ticker=%s original_count=%d scaled_count=%d fvg_size_scale=%.2f",
+                                            ticker, count, scaled_count, fvg_size_scale,
+                                        )
+                                        candidate["count"] = scaled_count
                                 
                                 # CRITICAL FIX: Skip execution if sizing returned count=0
                                 # This prevents invalid orders from being submitted
@@ -7052,12 +7075,54 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                     tick, reason,
                 )
                 # Keep exchange reconciliation alive outside run_cycle.
+                sync_result = {
+                    "success": False,
+                    "positions_count": 0,
+                    "open_orders_count": 0,
+                }
                 if hasattr(self.agent_grid, 'sync_from_rest'):
                     try:
-                        await self.agent_grid.sync_from_rest(tick)
+                        sync_result = await self.agent_grid.sync_from_rest(tick)
                         logger.info("[15M-LOOP] Halt gate: sync_from_rest completed for tick=%d", tick)
                     except Exception as sync_err:
                         logger.warning("[15M-LOOP] Halt gate: sync_from_rest failed: %s", sync_err)
+
+                # CRITICAL FIX (2026-08-26): Auto-resume from an
+                # unmatched_live_exchange_fill halt when the offending fill has been
+                # classified and the exchange is provably flat (zero positions and
+                # zero open orders).  This is the automated counterpart to
+                # admin_release for stale WS→HTTP identity-race halts.
+                #
+                # Only proceed when the REST sync this cycle succeeded, so we do not
+                # assume zero exposure from a skipped or failed sync.
+                if (
+                    breaker.reason == "unmatched_live_exchange_fill"
+                    and sync_result.get("success") is True
+                ):
+                    try:
+                        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                        ledger = get_fills_ledger()
+                        since = datetime.now(timezone.utc) - timedelta(minutes=30)
+
+                        # Resolve the triggering fill first.  This may reclassify the
+                        # fill from unmatched to matched, reducing the count of
+                        # remaining unmatched fills we check below.
+                        fill_id = (breaker.halt_info or {}).get("metadata", {}).get("fill_id")
+                        fill_state: Optional[Dict[str, Any]] = None
+                        if fill_id:
+                            fill_state = await ledger.get_fill_resolution_state(fill_id)
+
+                        recent_unmatched = ledger.count_unmatched_fills(since=since)
+
+                        breaker.maybe_auto_resume_unmatched(
+                            exchange_positions_count=sync_result.get("positions_count", 0),
+                            open_orders_count=sync_result.get("open_orders_count", 0),
+                            fill_state=fill_state,
+                            recent_unmatched_count=recent_unmatched,
+                        )
+                    except Exception as auto_resume_err:
+                        logger.warning("[15M-LOOP] Halt gate: auto-resume check failed: %s", auto_resume_err)
+
                 return []
 
             logger.info("[15M-LOOP] About to call agent_grid.run_cycle tick=%d", tick)
@@ -8017,6 +8082,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             netedgecents=edge_cents if edge_cents is not None else 0.0,  # gross model edge in cents
             # CRITICAL FIX (2026-08-19): propagate decision provenance into OrderIntent.
             decision_id=candidate.get("decision_id"),
+            decision_trace_id=candidate.get("decision_id"),
             run_id=candidate.get("run_id"),
             confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
             confidence_valid=confidence_valid,
@@ -8228,14 +8294,16 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 get_parity_metrics,
             )
             from merid.prediction.canonical_edge import (
+                CENTS_EDGE_GATE_ENABLED,
                 compute_canonical_edges,
+                required_edge_cents,
                 select_winner_side,
                 validate_price_parity,
             )
-            
-            # Extract asset from ticker
-            asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "UNKNOWN"
-            
+
+            # The canonical asset was already resolved at the top of _execute_candidate;
+            # re-use it here so fee/liquidity buffers are applied to the right asset.
+
             # Get orderbook data for market snapshot
             yes_bid = None
             yes_ask = None
@@ -8302,56 +8370,95 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 else:
                     edge_no = candidate.get("edge_no", (1.0 - model_prob) - (1.0 - price_cents / 100.0) if model_prob else 0.0)
             
-            # CRITICAL FIX: 2026-07-20 - Select winner side based on edge comparison
-            # This fixes the bug where chosen_side was derived from kalshi_side instead of edge
-            # Get min_edge from profile (default 1.5% = 0.015 to match YAML)
-            # CRITICAL FIX: 2026-07-24 - YAML value is already decimal (0.015 = 1.5%), do NOT divide by 100
-            base_min_edge = 0.015  # Default to YAML value (1.5%) instead of 2%
-            try:
-                from merid.risk.profiles.crypto_15m_profile import get_active_profile
-                profile_adapter = get_active_profile()
-                if profile_adapter and hasattr(profile_adapter, 'profile'):
-                    profile = profile_adapter.profile
-                    if hasattr(profile, 'guardrails'):
-                        base_min_edge = profile.guardrails.get('min_post_fee_edge', 0.015)
-            except Exception as edge_err:
-                logger.debug("[15M-LOOP] Failed to get min_edge from profile: %s", edge_err)
-            
-            # CRITICAL FIX: Lowered dynamic edge thresholds to enable trading
-            # Previous thresholds (2.0%, 1.2%, 0.8%) were blocking all trades
-            # 15-minute markets have lower liquidity and smaller edges
-            # 2026-07-29: Emergency fix to restore trading functionality
-            time_to_expiry_sec = candidate.get("time_to_expiry_sec", 900)
-            if time_to_expiry_sec > 600:  # Early window (>10 min remaining)
-                min_edge = max(base_min_edge, 0.005)  # 0.5% minimum (lowered from 2.0%)
-            elif time_to_expiry_sec > 300:  # Mid window (5-10 min remaining)
-                min_edge = max(base_min_edge, 0.005)  # 0.5% minimum (lowered from 1.2%)
-            else:  # Late window (<5 min remaining)
-                min_edge = max(base_min_edge, 0.005)  # 0.5% minimum (lowered from 0.8%)
-            
-            logger.debug(
-                "[15M-LOOP] Dynamic edge threshold: time_to_expiry=%ds base_min_edge=%.4f -> dynamic_min_edge=%.4f",
-                time_to_expiry_sec, base_min_edge, min_edge
-            )
-            
-            chosen_side = select_winner_side(edge_yes, edge_no, min_edge=min_edge)
-            
+            # CRITICAL FIX: 2026-08-26 - Cents-based, fee-aware edge threshold.
+            # A flat fractional threshold is the wrong instrument for Kalshi contracts:
+            # 1% = 1 cent and the taker fee is price-dependent.  The threshold depends
+            # on the actual side price, role, observable spread, fee and asset.
+            #
+            # Set MERID_ENABLE_CENTS_EDGE_GATE=0 to fall back to the legacy flat-fraction
+            # threshold in an emergency.
+            if CENTS_EDGE_GATE_ENABLED:
+                yes_price_cents = int((yes_bid + yes_ask) / 2.0) if yes_bid is not None and yes_ask is not None else 50
+                no_price_cents = int((no_bid + no_ask) / 2.0) if no_bid is not None and no_ask is not None else 50
+                yes_spread = max(0, yes_ask - yes_bid) if yes_bid is not None and yes_ask is not None else None
+                no_spread = max(0, no_ask - no_bid) if no_bid is not None and no_ask is not None else None
+
+                min_edge_yes_cents = required_edge_cents(
+                    price_cents=yes_price_cents,
+                    liquidity_role=resolved_liquidity_role,
+                    asset=asset,
+                    spread_cents=yes_spread,
+                )
+                min_edge_no_cents = required_edge_cents(
+                    price_cents=no_price_cents,
+                    liquidity_role=resolved_liquidity_role,
+                    asset=asset,
+                    spread_cents=no_spread,
+                )
+                min_edge_yes = min_edge_yes_cents / 100.0
+                min_edge_no = min_edge_no_cents / 100.0
+
+                logger.debug(
+                    "[15M-LOOP] Fee-aware edge threshold: ticker=%s role=%s asset=%s "
+                    "yes_price=%dc yes_required=%dc yes_frac=%.4f "
+                    "no_price=%dc no_required=%dc no_frac=%.4f",
+                    ticker, resolved_liquidity_role, asset,
+                    yes_price_cents, min_edge_yes_cents, min_edge_yes,
+                    no_price_cents, min_edge_no_cents, min_edge_no,
+                )
+
+                chosen_side = select_winner_side(
+                    edge_yes, edge_no, min_edge_yes=min_edge_yes, min_edge_no=min_edge_no
+                )
+            else:
+                # Legacy flat-fraction fallback (emergency revert)
+                base_min_edge = 0.015  # Default to YAML value (1.5%) instead of 2%
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                    profile_adapter = get_active_profile()
+                    if profile_adapter and hasattr(profile_adapter, 'profile'):
+                        profile = profile_adapter.profile
+                        if hasattr(profile, 'guardrails'):
+                            base_min_edge = profile.guardrails.get('min_post_fee_edge', 0.015)
+                except Exception as edge_err:
+                    logger.debug("[15M-LOOP] Failed to get min_edge from profile: %s", edge_err)
+
+                time_to_expiry_sec = candidate.get("time_to_expiry_sec", 900)
+                min_edge = max(base_min_edge, 0.005)
+                logger.debug(
+                    "[15M-LOOP] Dynamic edge threshold (legacy): time_to_expiry=%ds base_min_edge=%.4f -> dynamic_min_edge=%.4f",
+                    time_to_expiry_sec, base_min_edge, min_edge
+                )
+                chosen_side = select_winner_side(edge_yes, edge_no, min_edge=min_edge)
+                min_edge_yes = min_edge
+                min_edge_no = min_edge
+
+            # A single display threshold for the rest of the pipeline logs.
+            if chosen_side == "yes":
+                min_edge = min_edge_yes
+            elif chosen_side == "no":
+                min_edge = min_edge_no
+            else:
+                min_edge = (min_edge_yes + min_edge_no) / 2.0
+
             # CRITICAL FIX: 2026-08-02 - Separate edge threshold check from parity validation
             # Edge threshold: Is the opportunity strong enough?
             # If chosen_side == "none", this is an edge threshold failure, NOT a parity failure
             if chosen_side == "none":
                 edge_threshold_passed = False
                 logger.warning(
-                    "[15M-LOOP] EDGE THRESHOLD FAILED: ticker=%s edge_yes=%.4f edge_no=%.4f both below min_edge=%.4f - NO TRADE",
-                    ticker, edge_yes, edge_no, min_edge
+                    "[15M-LOOP] EDGE THRESHOLD FAILED: ticker=%s edge_yes=%.4f edge_no=%.4f "
+                    "yes_required=%.4f no_required=%.4f - NO TRADE",
+                    ticker, edge_yes, edge_no, min_edge_yes, min_edge_no
                 )
                 # Skip parity validation if edge threshold failed (no point checking parity)
                 # This is handled by the edge_threshold_passed flag below
             else:
                 edge_threshold_passed = True
                 logger.debug(
-                    "[15M-LOOP] EDGE THRESHOLD PASSED: ticker=%s chosen_side=%s edge_yes=%.4f edge_no=%.4f min_edge=%.4f",
-                    ticker, chosen_side, edge_yes, edge_no, min_edge
+                    "[15M-LOOP] EDGE THRESHOLD PASSED: ticker=%s chosen_side=%s edge_yes=%.4f "
+                    "edge_no=%.4f chosen_required=%.4f (yes=%.4f no=%.4f)",
+                    ticker, chosen_side, edge_yes, edge_no, min_edge, min_edge_yes, min_edge_no
                 )
             
             # Derive exposure intent from chosen_side (edge-based, not order-based)
@@ -8555,6 +8662,22 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 kalshi_side,
                 count,
                 result.reason,
+                result.latency_ms,
+            )
+            return False
+
+        if result and result.requires_recovery:
+            self._rejection_counters["router_rejected"] += 1
+            logger.warning(
+                "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%d "
+                "reason=%s status=%s latency_ms=%s",
+                trace_id,
+                candidate.get("candidate_id"),
+                ticker,
+                kalshi_side,
+                count,
+                result.reason,
+                result.status,
                 result.latency_ms,
             )
             return False

@@ -92,6 +92,9 @@ try:
         normalize_rest_position,
         parse_kalshi_side,
         require_consistent_outcome_side,
+        held_outcome_from_legacy,
+        traded_side_from_held,
+        to_signed_yes_exposure,
         SideValidationError,
     )
     BINARY_PRICE_SPACE_AVAILABLE = True
@@ -164,6 +167,9 @@ def _intent_to_durable(intent: "OrderIntent") -> Dict[str, Any]:
         "original_action": getattr(intent, "original_action", None),
         "created_at": getattr(intent, "created_at", datetime.now(timezone.utc)).isoformat(),
         "status": getattr(intent, "status", "pending"),
+        # 2026-08-26: Preserve decision provenance after full-intent pruning.
+        "decision_id": getattr(intent, "decision_id", None),
+        "decision_trace_id": getattr(intent, "decision_trace_id", None) or getattr(intent, "decision_id", None),
     }
 
 
@@ -351,15 +357,31 @@ UNTRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"UNTRUSTED_LEGACY", "U
 
 
 def _safe_price_to_cents(p) -> Optional[int]:
-    """Convert a price (int cents / dollars / Decimal) into integer cents."""
+    """Convert a price (int cents / dollars / Decimal / string) into integer cents.
+
+    Rounding policy (2026-08-28): ROUND_HALF_UP to the nearest cent.  This
+    preserves sub-cent precision in the canonical ``*_dollars`` Decimal fields
+    while keeping the integer-cent legacy fields as close as possible.
+    """
     if p is None:
         return None
     if isinstance(p, int):
         return p
     if isinstance(p, float):
-        return int(p * 100)
+        try:
+            return int((Decimal(str(p)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        except Exception:
+            return None
     if isinstance(p, Decimal):
-        return int(p * 100)
+        try:
+            return int((p * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        except Exception:
+            return None
+    if isinstance(p, str):
+        try:
+            return int((Decimal(p) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        except Exception:
+            return None
     return None
 
 
@@ -370,36 +392,43 @@ def derive_position_effect(
     yes_price_cents: Optional[int] = None,
     no_price_cents: Optional[int] = None,
     quantity_cc: Optional[int] = None,
+    is_exit: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Derive the MERID canonical position effect from Kalshi execution facts only.
 
-    The canonical position effect is the signed-YES exposure this fill represents.
-    It is computed from the exchange's reported ``outcome_side`` (the side traded)
-    and ``action`` (buy/sell on that side), never from the agent's intent.
+    ``execution_outcome_side`` is the exchange-reported ``outcome_side`` (the
+    contract side that was bought or sold).  ``execution_action`` is the
+    exchange-reported ``action`` ("buy"/"sell").  The canonical fields preserve
+    these raw execution labels:
 
-    Mapping:
-      - BUY YES  (side=yes, action=buy) -> long YES  (+ signed YES)
-      - SELL YES (side=yes, action=sell)-> long NO   (- signed YES)
-      - BUY NO   (side=no,  action=buy) -> long NO   (- signed YES)
-      - SELL NO  (side=no,  action=sell)-> long YES  (+ signed YES)
+      - BUY YES  -> side=yes, action=buy
+      - SELL NO  -> side=no,  action=sell
+      - BUY NO   -> side=no,  action=buy
+      - SELL YES -> side=yes, action=sell
+
+    The canonical leg price is the price on that same execution side.  The
+    signed-YES exposure is derived from ``yes_delta(action, side, qty)``:
+    positive for long YES, negative for long NO.  ``is_exit`` is *not* used to
+    mutate the canonical action; it is returned unchanged for the caller.
 
     Args:
-        execution_outcome_side: Exchange-reported ``outcome_side`` ("yes"/"no").
+        execution_outcome_side: Exchange-reported ``outcome_side`` (traded side).
         execution_action: Exchange-reported order action ("buy"/"sell").
         execution_price_cents: Price in cents on the execution side, if known.
         yes_price_cents: YES-side price in cents, if known.
         no_price_cents: NO-side price in cents, if known.
         quantity_cc: Fill quantity in centi-contracts.
+        is_exit: Whether this fill closes an existing position (passed through).
 
     Returns:
         Dict with canonical_position_side, canonical_position_action,
         canonical_leg_price_cents, canonical_yes_delta_cc, and
         canonicalization_state ("TRUSTED_LIVE_V1" or "UNTRUSTED_RAW").
     """
-    outcome = (execution_outcome_side or "").lower()
+    side = (execution_outcome_side or "").lower()
     action = (execution_action or "").lower()
 
-    if outcome not in ("yes", "no") or action not in ("buy", "sell"):
+    if side not in ("yes", "no") or action not in ("buy", "sell"):
         return {
             "canonical_position_side": None,
             "canonical_position_action": None,
@@ -412,25 +441,28 @@ def derive_position_effect(
     _yes = yes_price_cents
     _no = no_price_cents
     if _yes is None and _no is None and execution_price_cents is not None:
-        if outcome == "yes":
+        if side == "yes":
             _yes = execution_price_cents
-        elif outcome == "no":
+        elif side == "no":
             _no = execution_price_cents
     if _yes is not None and _no is None:
         _no = 100 - _yes
     elif _no is not None and _yes is None:
         _yes = 100 - _no
 
-    canonical_leg_price_cents = _yes if outcome == "yes" else _no
+    # The canonical leg price is the price on the executed contract side.
+    canonical_leg_price_cents = _yes if side == "yes" else _no
+
+    # Signed YES exposure: positive for long YES, negative for long NO.
     canonical_yes_delta_cc: Optional[int] = None
     if quantity_cc:
         try:
-            canonical_yes_delta_cc = yes_delta(action, outcome, quantity_cc)
+            canonical_yes_delta_cc = yes_delta(action, side, int(quantity_cc))
         except Exception:
             canonical_yes_delta_cc = None
 
     return {
-        "canonical_position_side": outcome,
+        "canonical_position_side": side,
         "canonical_position_action": action,
         "canonical_leg_price_cents": canonical_leg_price_cents,
         "canonical_yes_delta_cc": canonical_yes_delta_cc,
@@ -451,6 +483,7 @@ class KalshiFill:
     order_id: Optional[str] = None  # Parent order ID
     market_id: str = ""  # Kalshi market ID (UUID) for position cache validation
     market_ticker: str = ""  # e.g., "KXBTC-25DEC-ABOVE-100000"
+    exchange_index: Optional[int] = None  # Kalshi exchange shard index (e.g. 2 for crypto 15m)
     # 2026-08-12: `side` and `action` are the EXCHANGE'S raw execution report.
     # Local accounting must use `canonical_position_side`,
     # `canonical_position_action`, and `canonical_yes_delta_cc` because the
@@ -564,6 +597,13 @@ class KalshiFill:
     # Note: is_live is determined at ingestion time based on process trade mode
     # In strict mode, live trades MUST have derived_id=False (real Kalshi fill ID)
 
+    # 2026-08-26: Authoritative intent/position-effect/economic-side provenance.
+    # These are derived from the canonical side/action and absolute position
+    # change so audit joins can distinguish entry, exit, and partial reduce.
+    intent: Optional[str] = None  # OPEN, CLOSE, REDUCE, CANCEL_REPLACE
+    position_effect: Optional[str] = None  # OPEN or CLOSE
+    economic_side: Optional[str] = None  # YES or NO
+
     def __post_init__(self) -> None:
         """Fail-closed defaults for trust and canonical quantity.
 
@@ -589,6 +629,30 @@ class KalshiFill:
         # Explicit version for newly generated fills; preserve 0 for legacy rows.
         if self.canonicalization_version == 0 and self.canonicalization_state != "UNTRUSTED_LEGACY":
             self.canonicalization_version = CANONICALIZATION_VERSION
+
+        # Derive immutable intent/position-effect/economic-side provenance for
+        # downstream audit joins.  is_exit is authoritative when set by the
+        # originating OrderIntent; economic_side is the held outcome side derived
+        # from the signed-YES delta.
+        if self.economic_side is None:
+            if self.canonical_yes_delta_cc is not None:
+                try:
+                    _held, _ = from_signed_yes_exposure(self.canonical_yes_delta_cc)
+                    self.economic_side = _held.upper() if _held in ("yes", "no") else "NO"
+                except Exception:
+                    self.economic_side = "NO"
+            elif self.canonical_position_side in ("yes", "no"):
+                self.economic_side = self.canonical_position_side.upper()
+            else:
+                self.economic_side = "NO"
+        if self.is_exit is False:
+            self.position_effect = "OPEN"
+            self.intent = "OPEN"
+        elif self.is_exit is True:
+            self.position_effect = "CLOSE"
+            # We do not have the remaining open quantity here; default to CLOSE
+            # and let partial-exit attribution refine via position tracking.
+            self.intent = "CLOSE"
 
     def resolved_asset(self) -> Optional[str]:
         """Crypto asset code (BTC, ETH, …) from market ticker via canonical prefix map."""
@@ -635,39 +699,22 @@ class KalshiFill:
         if self.canonical_leg_price_cents is not None:
             return self.canonical_leg_price_cents
 
-        # Defensive: Handle cases where API returns dict instead of Decimal
-        def safe_to_cents(price_val) -> Optional[int]:
-            if price_val is None:
-                return None
-            if isinstance(price_val, int):
-                return price_val
-            if isinstance(price_val, float):
-                return int(price_val * 100)
-            if isinstance(price_val, Decimal):
-                return int(price_val * 100)
-            # If it's a dict or other unexpected type, log and return None
-            logger.warning(
-                "[FILL-LEDGER] Unexpected price type for price_cents: type=%s value=%s",
-                type(price_val).__name__, str(price_val)[:100]
-            )
-            return None
-
         _side = self.canonical_position_side or self.side
         if _side == "yes" and self.yes_price_dollars is not None:
-            cents = safe_to_cents(self.yes_price_dollars)
+            cents = _safe_price_to_cents(self.yes_price_dollars)
             if cents is not None:
                 return cents
         if _side == "no" and self.no_price_dollars is not None:
-            cents = safe_to_cents(self.no_price_dollars)
+            cents = _safe_price_to_cents(self.no_price_dollars)
             if cents is not None:
                 return cents
         # Legacy / WS: side missing or mis-set — use whichever leg has a price
         if self.yes_price_dollars is not None:
-            cents = safe_to_cents(self.yes_price_dollars)
+            cents = _safe_price_to_cents(self.yes_price_dollars)
             if cents is not None:
                 return cents
         if self.no_price_dollars is not None:
-            cents = safe_to_cents(self.no_price_dollars)
+            cents = _safe_price_to_cents(self.no_price_dollars)
             if cents is not None:
                 return cents
         return 0
@@ -769,6 +816,51 @@ class OrderIntent:
     cf_rti_basis: Optional[float] = None
     is_counter_trend: bool = False
     thesis_side: Optional[str] = None
+
+    # 2026-08-26: Decision audit provenance (exact fill ↔ decision linkage)
+    decision_id: Optional[str] = None
+    decision_trace_id: Optional[str] = None
+
+    # 2026-08-26: Authoritative intent/position-effect/economic-side provenance.
+    # Stored on the intent before order submission so every fill inherits them.
+    intent: Optional[str] = None  # OPEN, CLOSE, REDUCE, CANCEL_REPLACE
+    position_effect: Optional[str] = None  # OPEN or CLOSE
+    economic_side: Optional[str] = None  # YES or NO
+
+    def __post_init__(self) -> None:
+        """Derive authoritative provenance fields from the canonical side/action
+        and the entry/exit metadata.  Callers may override explicitly."""
+        if self.original_side is None and self.side:
+            self.original_side = self.side
+
+        _can_side: Optional[str] = None
+        _can_action: Optional[str] = None
+        try:
+            _can_side, _can_action = parse_kalshi_side((self.original_side or "").upper())
+        except Exception:
+            _can_side = self.side.lower() if self.side else None
+            _can_action = self.action.lower() if self.action else None
+
+        if self.economic_side is None:
+            if _can_side in ("yes", "no") and _can_action in ("buy", "sell"):
+                self.economic_side = (
+                    "YES"
+                    if (_can_side == "yes" and _can_action == "buy")
+                    or (_can_side == "no" and _can_action == "sell")
+                    else "NO"
+                )
+            else:
+                self.economic_side = "NO"
+        if self.position_effect is None:
+            if self.entry_or_exit == "exit" or self.reduce_only:
+                self.position_effect = "CLOSE"
+            else:
+                self.position_effect = "OPEN"
+        if self.intent is None:
+            if self.position_effect == "CLOSE":
+                self.intent = "REDUCE" if self.reduce_only else "CLOSE"
+            else:
+                self.intent = "OPEN"
 
     def add_fill(self, fill_id: str, fill_count: Any) -> None:
         """Add a fill to this intent and update status.
@@ -968,6 +1060,11 @@ class KalshiFillsLedger:
 
         # Index by order_id for quick lookup
         self._fills_by_order: Dict[str, List[str]] = {}  # order_id -> [fill_id, ...]
+
+        # 2026-08-27: Track provisional live-router fills by exchange order_id so
+        # the authoritative HTTP/WS fill can promote them without double-applying
+        # state.  Key: order_id, value: provisional fill_id.
+        self._live_router_fill_ids: Dict[str, str] = {}
 
         # Index by market for position reconstruction
         self._fills_by_market: Dict[str, List[str]] = {}  # ticker -> [fill_id, ...]
@@ -1532,11 +1629,37 @@ class KalshiFillsLedger:
                     if not existing.confirmed_by_rest:
                         existing.confirmed_by_rest = True
                         logger.debug("[FILLS-LEDGER] HTTP confirms existing WS fill: %s", _pre_fill_id)
+
+                    # 2026-08-26: The HTTP record may carry the order_id or
+                    # client_order_id that the WebSocket payload omitted.  Merge it
+                    # and attempt reclassification so the fill is not stuck as
+                    # unmatched when the intent is now durable.
+                    _updated_id = False
+                    if raw.get("order_id") and not existing.order_id:
+                        existing.order_id = raw["order_id"]
+                        _updated_id = True
+                    if raw.get("client_order_id") and not existing.client_order_id:
+                        existing.client_order_id = raw["client_order_id"]
+                        _updated_id = True
+
+                    if _updated_id or existing.unmatched:
+                        self._maybe_reclassify_unmatched(existing)
+
                     merged_duplicate = True
                     continue
 
                 fill = self._parse_fill(raw, "http_poller")
                 if _is_test_fixture_fill(fill.fill_id):
+                    continue
+
+                # 2026-08-27: If this HTTP fill matches a provisional live-router fill,
+                # promote the existing record and skip creating a duplicate ledger row.
+                promoted_id = self._promote_live_router_fill(fill)
+                if promoted_id:
+                    logger.debug(
+                        "[FILLS-LEDGER-HTTP] Promoted provisional live-router fill %s for order_id=%s; skipping duplicate row",
+                        promoted_id, fill.order_id,
+                    )
                     continue
 
                 # 2026-08-16: Quarantined fills (side conflict, unknown, untrusted) are
@@ -1601,6 +1724,11 @@ class KalshiFillsLedger:
                     if not existing.confirmed_by_rest:
                         existing.confirmed_by_rest = True
                         logger.debug("Fill %s confirmed by REST API", fill.fill_id)
+                    # 2026-08-26: HTTP authoritative for audit provenance.
+                    if fill.decision_trace_id and not existing.decision_trace_id:
+                        existing.decision_trace_id = fill.decision_trace_id
+                    if fill.agent_id and not existing.agent_id:
+                        existing.agent_id = fill.agent_id
                     # Count: never replace positive with zero
                     if fill.count_fp > 0:
                         existing.count_fp = fill.count_fp
@@ -1649,6 +1777,14 @@ class KalshiFillsLedger:
                         existing.client_order_id = fill.client_order_id
                     if fill.side and not existing.side:
                         existing.side = fill.side
+
+                    # 2026-08-26: Reclassify an unmatched WebSocket fill once the HTTP
+                    # upsert provides the order_id/client_order_id and it resolves to a
+                    # known or recently-submitted intent. This prevents a WS→HTTP race
+                    # from leaving a fill quarantined indefinitely and tripping/sticking
+                    # the trading-circuit-breaker.
+                    self._maybe_reclassify_unmatched(existing)
+
                     merged_duplicate = True
                     self._duplicates_dropped += 1
                     continue
@@ -2493,6 +2629,146 @@ class KalshiFillsLedger:
         fills = [f for f in fills if f is not None]
         fills.sort(key=lambda f: f.created_time)
         return fills
+
+    def _resolve_intent_id_for_fill(self, fill: KalshiFill) -> Optional[str]:
+        """Resolve the originating intent_id for a fill using current indices.
+
+        Mirrors the durable/pending lookup used by ``lookup()``, but returns the
+        intent_id so the fill can be reclassified when its identity becomes known.
+        """
+        client_order_id = fill.client_order_id
+        order_id = fill.order_id
+
+        if client_order_id and client_order_id in self._intents:
+            return client_order_id
+        if client_order_id and client_order_id in self._intents_by_client_order_id:
+            return self._intents_by_client_order_id[client_order_id]
+        if order_id and order_id in self._intents_by_order_id:
+            return self._intents_by_order_id[order_id]
+
+        # Try to recover client_order_id from the position_cache mapping, then
+        # re-check the durable indices.
+        if order_id and not client_order_id:
+            client_order_id = self._recover_client_order_id_for_order_id(order_id)
+            if client_order_id:
+                if client_order_id in self._intents:
+                    return client_order_id
+                if client_order_id in self._intents_by_client_order_id:
+                    return self._intents_by_client_order_id[client_order_id]
+
+        # Final fallback: the pending-order registry (recent submissions) and the
+        # durable intent index.
+        for key in (client_order_id, order_id):
+            if not key:
+                continue
+            resolved_intent_id = self._resolve_intent_from_pending_order(key, lookback_seconds=30)
+            if resolved_intent_id and (
+                resolved_intent_id in self._intents
+                or resolved_intent_id in self._durable_intent_index
+            ):
+                return resolved_intent_id
+        return None
+
+    def _maybe_reclassify_unmatched(
+        self,
+        fill: KalshiFill,
+    ) -> bool:
+        """Reclassify an unmatched fill when its identity can now be resolved.
+
+        Returns True if the fill was reclassified. This is deliberately
+        synchronous: it updates only in-memory state. Persistence is the caller's
+        responsibility (HTTP ingest calls ``_persist()`` at the end of the batch).
+        """
+        if not fill.unmatched:
+            return False
+        resolved_intent_id = self._resolve_intent_id_for_fill(fill)
+        if not resolved_intent_id:
+            return False
+
+        fill.intent_id = resolved_intent_id
+        fill.unmatched = False
+        fill.unmatched_reason = None
+
+        # Backfill canonical side/action if the original payload left them untrusted.
+        _canonical_updated = False
+        intent = _intent_or_durable(self, resolved_intent_id)
+        if intent:
+            _original_side = (getattr(intent, "original_side", None) or "").strip()
+            if _original_side:
+                try:
+                    _intent_target_side, _intent_action = parse_kalshi_side(_original_side)
+                except Exception:
+                    _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
+                    _intent_action = (getattr(intent, "action", "") or "").lower()
+            else:
+                _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
+                _intent_action = (getattr(intent, "action", "") or "").lower()
+
+            if fill.canonical_position_action not in ("buy", "sell") and _intent_action in ("buy", "sell"):
+                fill.canonical_position_action = _intent_action
+                _canonical_updated = True
+            if fill.canonical_position_side not in ("yes", "no") and _intent_target_side in ("yes", "no"):
+                fill.canonical_position_side = _intent_target_side
+                _canonical_updated = True
+
+        logger.info(
+            "[FILLS-LEDGER-RECLASSIFY] fill_id=%s intent_id=%s "
+            "canonical_updated=%s; unmatched=False",
+            fill.fill_id, resolved_intent_id, _canonical_updated,
+        )
+        return True
+
+    async def get_fill_resolution_state(self, fill_id: str) -> Optional[Dict[str, Any]]:
+        """Return the resolution state of a fill for the trading-circuit-breaker.
+
+        If the fill is marked ``unmatched`` but its ``client_order_id`` or
+        ``order_id`` can now be resolved to a known or recently-submitted intent,
+        the ledger is updated and the fill is reclassified as matched.  The
+        canonical side/action/price are preserved; only the identity link and
+        quarantine flag are corrected.
+        """
+        fill = self._fills.get(fill_id)
+        if not fill:
+            return None
+
+        if not fill.unmatched:
+            return {
+                "found": True,
+                "resolved": True,
+                "unmatched": False,
+                "unmatched_reason": None,
+                "intent_id": fill.intent_id,
+            }
+
+        resolved = self._maybe_reclassify_unmatched(fill)
+        if not resolved:
+            return {
+                "found": True,
+                "resolved": False,
+                "unmatched": True,
+                "unmatched_reason": fill.unmatched_reason,
+                "intent_id": None,
+            }
+
+        await self._persist()
+        return {
+            "found": True,
+            "resolved": True,
+            "unmatched": False,
+            "unmatched_reason": None,
+            "intent_id": fill.intent_id,
+        }
+
+    def count_unmatched_fills(self, since: Optional[datetime] = None) -> int:
+        """Count unresolved unmatched fills, optionally since a timestamp."""
+        count = 0
+        for fill in self._fills.values():
+            if not fill.unmatched:
+                continue
+            if since is not None and fill.created_time < since:
+                continue
+            count += 1
+        return count
 
     def get_slippage_stats(self, asset: Optional[str] = None,
                           since: Optional[datetime] = None) -> Dict[str, Dict[str, float]]:
@@ -3957,12 +4233,102 @@ class KalshiFillsLedger:
         realized_pnl = total_proceeds - total_cost - total_fees
         return realized_pnl
 
+    def _is_same_economic_fill(self, a: KalshiFill, b: KalshiFill) -> bool:
+        """Return True if two fills represent the same economic execution.
+
+        Used to match a provisional live-router fill with the later authoritative
+        HTTP/WS fill so the two sources collapse to one state mutation.
+        """
+        if a.market_ticker != b.market_ticker:
+            return False
+        if a.canonical_position_side != b.canonical_position_side:
+            return False
+        if a.canonical_position_action != b.canonical_position_action:
+            return False
+        if (a.quantity_cc or 0) != (b.quantity_cc or 0):
+            return False
+        a_price = a.canonical_leg_price_cents or a.price_cents or 0
+        b_price = b.canonical_leg_price_cents or b.price_cents or 0
+        return abs(a_price - b_price) <= 1
+
+    def _promote_live_router_fill(self, fill: KalshiFill) -> Optional[str]:
+        """If ``fill`` matches a provisional live-router fill, promote it.
+
+        The authoritative HTTP/WS fill overlays the provisional record but
+        preserves the live-router ``fill_id`` so all downstream idempotency
+        gates (position_cache, risk, monitor) see a single key.
+
+        Returns the promoted (live-router) ``fill_id`` if a promotion happened,
+        otherwise ``None``.
+        """
+        if not fill.order_id:
+            return None
+        existing_id = self._live_router_fill_ids.get(fill.order_id)
+        if not existing_id or existing_id not in self._fills:
+            return None
+        existing = self._fills[existing_id]
+        if not self._is_same_economic_fill(existing, fill):
+            return None
+
+        # Overlay authoritative fields onto the provisional record, preserving
+        # the live-router fill_id as the immutable idempotency key.
+        existing.trade_id = fill.trade_id or fill.fill_id or existing.trade_id
+        existing.order_id = fill.order_id or existing.order_id
+        existing.client_order_id = fill.client_order_id or existing.client_order_id
+        existing.client_tag = fill.client_tag or existing.client_tag
+        existing.yes_price_dollars = fill.yes_price_dollars or existing.yes_price_dollars
+        existing.no_price_dollars = fill.no_price_dollars or existing.no_price_dollars
+        existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or existing.canonical_leg_price_cents
+        existing.execution_price_cents = fill.execution_price_cents or existing.execution_price_cents
+        existing.price_cents = fill.price_cents or existing.price_cents
+        existing.fee_cost = fill.fee_cost or existing.fee_cost
+        existing.fee_cents = fill.fee_cents or existing.fee_cents
+        existing.proceeds_dollars = fill.proceeds_dollars or existing.proceeds_dollars
+        existing.canonicalization_state = fill.canonicalization_state or existing.canonicalization_state
+        existing.confirmed_by_rest = True
+        existing.ingestion_source = fill.ingestion_source or existing.ingestion_source
+        existing.ingested_at = fill.ingested_at or existing.ingested_at
+        if fill.raw_payload:
+            existing.raw_payload = fill.raw_payload
+        if fill.intent_id and not existing.intent_id:
+            existing.intent_id = fill.intent_id
+        if fill.agent_id and not existing.agent_id:
+            existing.agent_id = fill.agent_id
+        if fill.is_exit is not None and existing.is_exit is None:
+            existing.is_exit = fill.is_exit
+        if fill.entry_or_exit and not existing.entry_or_exit:
+            existing.entry_or_exit = fill.entry_or_exit
+        if fill.reduce_only is not None and existing.reduce_only is None:
+            existing.reduce_only = fill.reduce_only
+
+        logger.info(
+            "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoted provisional %s to authoritative trade=%s",
+            fill.order_id, existing_id, existing.trade_id,
+        )
+
+        # Mutate the caller's fill object so downstream consumers (including
+        # position_cache.on_fill) use the live-router fill_id and skip re-application.
+        fill.fill_id = existing_id
+        fill.trade_id = existing.trade_id
+        fill.order_id = existing.order_id
+        fill.client_order_id = existing.client_order_id
+        fill.canonicalization_state = existing.canonicalization_state
+        fill.confirmed_by_rest = True
+        return existing_id
+
     def on_fill(self, fill: KalshiFill) -> None:
         """Handle fill event with position state machine.
 
         Args:
             fill: KalshiFill object
         """
+        # 2026-08-27: on_fill may be called directly from the order_router for
+        # live fills.  Ensure the fill is indexed in the durable ledger before any
+        # state-machine mutation so downstream consumers can look it up by id.
+        if fill.fill_id and fill.fill_id not in self._fills:
+            self._fills[fill.fill_id] = fill
+            self._index_fill(fill)
+
         # 2026-08-13: Fills without an explicit trusted canonicalization state are
         # quarantined.  A `None` state means an unpatched producer, partial
         # deployment, or stale persisted data and must not mutate live positions.
@@ -4010,6 +4376,21 @@ class KalshiFillsLedger:
             )
             self._processed_fill_ids.add(fill.fill_id)
             return
+
+        # 2026-08-27: Live-router provisional fills carry a synthetic id that must
+        # be promoted (not duplicated) when the authoritative HTTP/WS fill arrives.
+        # This keeps the one-fill-one-mutation invariant while still applying the
+        # live fill immediately, before the exchange's fill stream catches up.
+        if fill.fill_id and fill.fill_id.startswith("live_router_"):
+            if fill.order_id:
+                self._live_router_fill_ids[fill.order_id] = fill.fill_id
+        else:
+            promoted_id = self._promote_live_router_fill(fill)
+            if promoted_id:
+                # The authoritative fill has been merged into the existing live
+                # record.  Do not re-process position/PnL/risk; the live fill
+                # already applied it.  The caller now sees fill.fill_id == promoted_id.
+                return
 
         # Deduplicate fills
         if fill.fill_id in self._processed_fill_ids:
@@ -5118,21 +5499,29 @@ class KalshiFillsLedger:
             if p is None:
                 return None
             try:
-                p = float(p)
-                # NEW API FORMAT: yes_price_dollars and no_price_dollars are already in dollars (0.0-1.0)
-                # OLD API FORMAT: yes_price and no_price are in cents (0-99)
-                # Check if the value looks like dollars (< 1.0) or cents (> 1.0)
-                if p < 1.0:
-                    # Already in dollars (new API format)
-                    return Decimal(str(p))
-                elif p >= 1.0 and p <= 100:
-                    # In cents (old API format) - convert to dollars
-                    return Decimal(str(p / 100.0))
+                if isinstance(p, Decimal):
+                    d = p
+                elif isinstance(p, str):
+                    d = Decimal(p)
+                elif isinstance(p, (int, float)):
+                    d = Decimal(str(p))
                 else:
-                    # > 100, assume cents and convert
-                    return Decimal(str(p / 100.0))
+                    return None
             except Exception:
                 return None
+
+            # String inputs that include a decimal point are the new
+            # *_dollars fields and should be preserved exactly.
+            if isinstance(p, str) and "." in p:
+                return d
+
+            # Integer-like or whole-number values in [1, 100] are old-format
+            # cents.  Values above 100 or below 1 are dollars (or zero).
+            if d >= 1 and d <= 100:
+                return d / Decimal("100")
+            if d > 100:
+                return d / Decimal("100")
+            return d
 
         yes_price_dollars = normalize_price(yes_price) if yes_price else None
         no_price_dollars = normalize_price(no_price) if no_price else None
@@ -5191,25 +5580,55 @@ class KalshiFillsLedger:
             resolved_client_order_id = resolved_intent_id
 
         # ------------------------------------------------------------------
-        # CANONICAL SIDE / ACTION / PRICE DERIVATION (2026-08-12)
+        # CANONICAL SIDE / ACTION / PRICE DERIVATION (2026-08-27)
         # ------------------------------------------------------------------
-        # Kalshi's `outcome_side` is the canonical directional exposure.  The
-        # legacy `action`/`side` and the taker/counterparty `taker_action` are
-        # preserved for audit but do NOT override the exchange's reported side.
-        # When the agent's intent and the exchange execution disagree, we still
-        # apply the exchange side, derive a user-action consistent with the
-        # intent's signed-YES delta, and flag the conflict so it is visible.
+        # Kalshi V2+ reports the trade from the book's perspective: `outcome_side`
+        # is the contract on the book that was traded, `book_side` is bid/ask, and
+        # `action` is the taker's action on that contract.  The user's own contract
+        # is in `side` (or `purchased_side`).  When the two contract sides differ,
+        # the reported action is on the *other* leg, so we flip it to obtain the
+        # user's action on their own contract:
+        #
+        #   raw: outcome_side=yes, side=no, book_side=bid, action=sell
+        #   user: BUY_NO (side=no, action=buy)
+        #
+        # Legacy payloads may only have side+action; we use those directly.
 
-        # 1. Capture the exchange's canonical execution side.
-        # side=raw.get("side") is the canonical Kalshi API side field.
-        # It is recorded as-is from the venue; any normalization uses
-        # outcome_side, not the raw venue side.
-        _execution_outcome_side = (raw.get("outcome_side") or raw.get("intent_side") or "").lower()
-        if not _execution_outcome_side:
-            # Fallback to legacy `side` field (pre-V2 / some WS payloads).
-            _execution_outcome_side = str(raw.get("side", "")).lower()
-        if _execution_outcome_side not in ("yes", "no"):
-            _execution_outcome_side = None
+        # 1. Capture the user's traded side and the market's reported outcome side.
+        _raw_traded_side = (raw.get("side") or raw.get("purchased_side") or "").lower()
+        if _raw_traded_side not in ("yes", "no"):
+            _raw_traded_side = None
+
+        _raw_action = ""
+        if isinstance(raw.get("msg"), dict):
+            _raw_action = raw["msg"].get("action", "")
+        _raw_action = _raw_action or raw.get("action") or raw.get("taker_action") or ""
+        _raw_action = _raw_action.lower() if isinstance(_raw_action, str) else ""
+        _raw_action = _raw_action if _raw_action in ("buy", "sell") else None
+
+        _market_outcome_side = (raw.get("outcome_side") or raw.get("intent_side") or "").lower()
+        if _market_outcome_side not in ("yes", "no"):
+            _market_outcome_side = None
+
+        # 2. The user's contract side is the authoritative side; fall back to the
+        #    market's reported outcome side when it is the only field available.
+        _execution_outcome_side = _raw_traded_side if _raw_traded_side in ("yes", "no") else _market_outcome_side
+
+        # 3. If the market reported the trade on a different contract than the
+        #    user's contract, the action is on that other leg and must be flipped
+        #    to get the user's action on their own contract.
+        _execution_action: Optional[str] = None
+        if _raw_action in ("buy", "sell"):
+            if (
+                _market_outcome_side in ("yes", "no")
+                and _execution_outcome_side in ("yes", "no")
+                and _market_outcome_side != _execution_outcome_side
+            ):
+                _execution_action = "sell" if _raw_action == "buy" else "buy"
+            else:
+                _execution_action = _raw_action
+
+        _book_side = (raw.get("book_side") or "").lower()
 
         # 2. Resolve the agent's intent and keep its original target side/action.
         _intent_target_side: Optional[str] = None
@@ -5294,27 +5713,20 @@ class KalshiFillsLedger:
         _side_conflict_reason: Optional[str] = None
         _ticker_for_identity = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
 
-        # 5. Capture the exchange's raw action.  The raw `action` may reflect the
-        #    taker/counterparty or the opposite leg, so it is only a fallback.
-        _raw_act = ""
-        if isinstance(raw.get("msg"), dict):
-            _raw_act = raw["msg"].get("action", "")
-        _raw_act = _raw_act or raw.get("action") or raw.get("taker_action") or ""
-        _raw_act = _raw_act.lower() if isinstance(_raw_act, str) else ""
-        _execution_action = _raw_act if _raw_act in ("buy", "sell") else None
-
-        # Resolve the execution action from the correlated intent when the
-        # exchange payload omits it (common for HTTP/WS records).  The intent
-        # is only used to fill a missing value, never to override an explicit
-        # exchange report.
+        # 5. The user-side _execution_action was already derived above.  The
+        #    intent is only used to fill a missing value, never to override an
+        #    explicit exchange report.
         if _execution_action is None and _intent_action in ("buy", "sell"):
             _execution_action = _intent_action
 
-        # If we only have generic price, assign it to the execution side.
+        # If we only have a generic price, it is the traded leg's price.
+        # Prefer the raw traded side; fall back to the held side for legacy
+        # records where the traded side could not be recovered.
+        _price_side = _raw_traded_side or _execution_outcome_side
         if price and not yes_price_dollars and not no_price_dollars:
-            if _execution_outcome_side == "yes":
+            if _price_side == "yes":
                 yes_price_dollars = normalize_price(price)
-            elif _execution_outcome_side == "no":
+            elif _price_side == "no":
                 no_price_dollars = normalize_price(price)
 
         # Parse fee.  Kalshi V2 ``fee_cost`` / ``fee_paid`` are dollars and are
@@ -5376,14 +5788,15 @@ class KalshiFillsLedger:
                     pass
 
         # 7. Compute signed-YES deltas for intent and execution.
-        _intent_resulting_side: Optional[str] = None
-        if _intent_action and _intent_target_side and _quantity_cc:
+        # Both the intent and the execution are now canonicalized to the user's
+        # contract side and action, so the signed-YES delta is yes_delta(...).
+        if _intent_action in ("buy", "sell") and _intent_target_side in ("yes", "no") and _quantity_cc:
             try:
                 _intent_yes_delta_cc = yes_delta(_intent_action, _intent_target_side, _quantity_cc)
-                _intent_resulting_side, _ = from_signed_yes_exposure(_intent_yes_delta_cc)
             except Exception:
                 _intent_yes_delta_cc = None
-        if _execution_outcome_side and _execution_action and _quantity_cc:
+
+        if _execution_action in ("buy", "sell") and _execution_outcome_side in ("yes", "no") and _quantity_cc:
             try:
                 _execution_yes_delta_cc = yes_delta(_execution_action, _execution_outcome_side, _quantity_cc)
             except Exception:
@@ -5440,17 +5853,6 @@ class KalshiFillsLedger:
         #      The canonical side and action are the exchange's reported
         #      ``outcome_side`` and order ``action``; the intent is used only
         #      for the mismatch check recorded in ``side_conflict``.
-        def _safe_price_to_cents(p) -> Optional[int]:
-            if p is None:
-                return None
-            if isinstance(p, int):
-                return p
-            if isinstance(p, float):
-                return int(p * 100)
-            if isinstance(p, Decimal):
-                return int(p * 100)
-            return None
-
         _yes_cents = _safe_price_to_cents(yes_price_dollars)
         _no_cents = _safe_price_to_cents(no_price_dollars)
 
@@ -5466,6 +5868,7 @@ class KalshiFillsLedger:
             yes_price_cents=_yes_cents,
             no_price_cents=_no_cents,
             quantity_cc=_quantity_cc,
+            is_exit=fill_is_exit,
         )
 
         _action = _effect["canonical_position_action"]
@@ -5503,30 +5906,21 @@ class KalshiFillsLedger:
                 fill_id, _execution_outcome_side, _execution_action, _execution_price_cents, _quantity_cc
             )
 
-        # Calculate proceeds_dollars (net cash flow after fees) using the
-        # canonical side's price.  Buy: negative, Sell: positive.
+        # Calculate proceeds_dollars (net cash flow after fees) using the raw
+        # traded side and exchange action, not the canonical position.  A SELL
+        # YES fill is still a sale of YES at the YES price even though the
+        # resulting position is long NO.
         proceeds: Optional[Decimal] = None
         if _count_fp > 0 and _canonicalization_state in TRUSTED_CANONICALIZATION_STATES:
-            if _canonical_side == "yes" and yes_price_dollars is not None:
-                if _action == "buy":
-                    proceeds = -(yes_price_dollars * _count_fp) - fee_decimal
+            _proceeds_side = _raw_traded_side or _execution_outcome_side
+            _proceeds_price = (
+                yes_price_dollars if _proceeds_side == "yes" else no_price_dollars
+            )
+            if _proceeds_price is not None and _execution_action in ("buy", "sell"):
+                if _execution_action == "buy":
+                    proceeds = -(_proceeds_price * _count_fp) - fee_decimal
                 else:  # sell
-                    proceeds = (yes_price_dollars * _count_fp) - fee_decimal
-            elif _canonical_side == "no" and no_price_dollars is not None:
-                if _action == "buy":
-                    proceeds = -(no_price_dollars * _count_fp) - fee_decimal
-                else:  # sell
-                    proceeds = (no_price_dollars * _count_fp) - fee_decimal
-            elif yes_price_dollars is not None:
-                if _action == "buy":
-                    proceeds = -(yes_price_dollars * _count_fp) - fee_decimal
-                else:  # sell
-                    proceeds = (yes_price_dollars * _count_fp) - fee_decimal
-            elif no_price_dollars is not None:
-                if _action == "buy":
-                    proceeds = -(no_price_dollars * _count_fp) - fee_decimal
-                else:  # sell
-                    proceeds = (no_price_dollars * _count_fp) - fee_decimal
+                    proceeds = (_proceeds_price * _count_fp) - fee_decimal
 
         # Determine if this is a LIVE trade (real money)
         # This is critical for bankroll reconciliation
@@ -5595,6 +5989,18 @@ class KalshiFillsLedger:
                 source=source,
             )
 
+        # Resolve exchange shard index from intent or raw payload.
+        _fill_exchange_index = None
+        if intent is not None:
+            _fill_exchange_index = getattr(intent, "exchange_index", None)
+        if _fill_exchange_index is None:
+            _fill_exchange_index = raw.get("exchange_index")
+        if _fill_exchange_index is not None:
+            try:
+                _fill_exchange_index = int(_fill_exchange_index)
+            except Exception:
+                _fill_exchange_index = None
+
         # Extract asset from ticker (BTC, ETH, SOL, XRP, DOGE)
         asset = None
         if ticker:
@@ -5615,10 +6021,12 @@ class KalshiFillsLedger:
             order_id=raw.get("order_id"),
             market_id=raw.get("market_id", ""),  # CRITICAL FIX: Add market_id for position cache validation
             market_ticker=ticker,
+            exchange_index=_fill_exchange_index,
             # 2026-08-12: `side` and `action` are the raw exchange report.
-            # The canonical fields below are the single source of truth for
-            # position/exposure/PnL accounting.
-            side=_execution_outcome_side,
+            # `side` is the TRADED contract side; `execution_outcome_side` is the
+            # HELD (long) outcome side.  The canonical fields below are the
+            # single source of truth for position/exposure/PnL accounting.
+            side=_raw_traded_side,
             action=_execution_action,
             count_fp=_count_fp,
             quantity_cc=_quantity_cc,
@@ -5637,10 +6045,14 @@ class KalshiFillsLedger:
             ingested_at=datetime.now(timezone.utc),
             derived_id=derived_id_flag,  # Track if ID was synthesized
             confirmed_by_rest=(source == "http_poller"),  # HTTP fills are canonical
-            decision_trace_id=raw.get("decision_trace_id"),
+            decision_trace_id=(
+                getattr(intent, "decision_trace_id", None)
+                or getattr(intent, "decision_id", None)
+                or raw.get("decision_trace_id")
+            ),
             is_live=is_live_trade,  # CRITICAL: Track if this was a real money trade
             asset=asset,  # Per-coin slippage tracking
-            agent_id=raw.get("agent_id"),  # CRITICAL: Extract agent_id from raw payload
+            agent_id=(getattr(intent, "agent_id", None) if intent else raw.get("agent_id")),
             intent_id=resolved_intent_id or raw.get("intent_id"),  # Use durable correlation if available
             unmatched=is_unmatched,
             unmatched_reason=unmatched_reason,
@@ -6969,10 +7381,18 @@ class KalshiFillsLedger:
                     if _needs_derive and _raw_side in ("yes", "no") and _raw_action in ("buy", "sell"):
                         _yes_cents = _safe_price_to_cents(row["yes_price_dollars"]) if row["yes_price_dollars"] is not None else None
                         _no_cents = _safe_price_to_cents(row["no_price_dollars"]) if row["no_price_dollars"] is not None else None
+                        # The DB ``side`` column in legacy rows is the TRADED
+                        # contract side.  Convert it to the held outcome side
+                        # before canonicalizing.
+                        try:
+                            _held_side = held_outcome_from_legacy(_raw_side, _raw_action)
+                        except Exception:
+                            _held_side = _raw_side
+                        _exec_price_cents = _yes_cents if _held_side == "yes" else _no_cents
                         _derived = derive_position_effect(
-                            execution_outcome_side=_raw_side,
+                            execution_outcome_side=_held_side,
                             execution_action=_raw_action,
-                            execution_price_cents=_yes_cents if _raw_side == "yes" else _no_cents,
+                            execution_price_cents=_exec_price_cents,
                             yes_price_cents=_yes_cents,
                             no_price_cents=_no_cents,
                             quantity_cc=quantity_cc,
@@ -7071,6 +7491,13 @@ class KalshiFillsLedger:
                         skipped_test, ", ".join(_TEST_FILL_PREFIXES[:3]) + "..."
                     )
                 logger.info(f"Loaded {loaded} fills from database")
+
+                # 2026-08-27: Rebuild the live-router promotion index after a restart
+                # so authoritative HTTP/WS fills that arrive again can be deduplicated
+                # against the provisional live-router record persisted to the DB.
+                for _fill in self._fills.values():
+                    if _fill.order_id and _fill.fill_id.startswith("live_router_"):
+                        self._live_router_fill_ids[_fill.order_id] = _fill.fill_id
 
                 self._last_migration_summary = {
                     "legacy_rows_total": legacy_rows_total,

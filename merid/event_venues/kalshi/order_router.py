@@ -53,6 +53,21 @@ from merid.event_venues.kalshi.order_identity import (
     OrderIdentityError,
 )
 
+# Canonical Kalshi direction/primitives.  These are used by _build_create_order_request
+# to produce an unambiguous wire payload and by telemetry to log the expected
+# outcome_side and book_side before any network call.
+try:
+    from merid.event_venues.kalshi.binary_price_space import (
+        held_outcome_from_legacy,
+        traded_side_from_held,
+        parse_kalshi_side,
+        legacy_to_v2,
+        to_signed_yes_exposure,
+    )
+    KALSHI_PRICE_SPACE_AVAILABLE = True
+except Exception:
+    KALSHI_PRICE_SPACE_AVAILABLE = False
+
 # Import candidate tracing for end-to-end validation
 try:
     from merid.event_venues.kalshi.candidate_trace import (
@@ -187,13 +202,30 @@ def _dedup_cache():
 
 
 def _mark_attempt_status(intent: "OrderIntent", status: str) -> None:
-    """Update the durable order-attempt status, if one exists."""
+    """Update the durable order-attempt status, if one exists.
+
+    Idempotent: once an attempt reaches a terminal state (FILLED / REJECTED /
+    CANCELED) we never downgrade or flip it.  This protects the attempt store
+    when the in-route fast reconcile and the background full reconcile race.
+    """
+    _TERMINAL_ATTEMPT_STATUSES = {"FILLED", "REJECTED", "CANCELED"}
     try:
         from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
 
         store = OrderAttemptStore()
-        if getattr(intent, "order_attempt_id", None):
-            store.update_status(intent.order_attempt_id, status)
+        order_attempt_id = getattr(intent, "order_attempt_id", None)
+        if not order_attempt_id:
+            return
+
+        record = store.get_by_order_attempt_id(order_attempt_id)
+        if record is None:
+            return
+
+        # Never overwrite a terminal record, and avoid no-op updates.
+        if record.status in _TERMINAL_ATTEMPT_STATUSES or record.status == status:
+            return
+
+        store.update_status(order_attempt_id, status)
     except Exception as status_err:
         logger.warning("[ORDER-ATTEMPT-STATUS] Failed to mark %s: %s", status, status_err)
 
@@ -1827,6 +1859,10 @@ from merid.event_venues.kalshi.market_filter import (
 )
 from merid.event_venues.kalshi.ticker_utils import is_valid_kalshi_ticker
 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+from merid.prediction.canonical_edge import (
+    CENTS_EDGE_GATE_ENABLED,
+    required_edge_cents,
+)
 from merid.event_venues.kalshi.risk_parameters import (
     DEEP_OTM_THRESHOLD_CENTS,
     DEEP_ITM_THRESHOLD_CENTS,
@@ -1954,6 +1990,11 @@ except ImportError:
     SAFETY_METRICS_AVAILABLE = False
 
 logger = get_logger("merid.event_venues.kalshi.order_router")
+
+# In-flight order idempotency.  The same client_order_id must not be routed
+# concurrently; a second coroutine sees a duplicate and returns immediately.
+_IN_FLIGHT_COIDS: set[str] = set()
+_IN_FLIGHT_LOCK = asyncio.Lock()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Agent Wiring Audit — Caller Module Tracking (AGENT_WIRING_AUDIT.md)
@@ -2437,7 +2478,7 @@ class OrderIntent:
     exposure_change: Optional[ExposureChange] = None  # Leg/direction/magnitude of the exposure change
     strategy_intent: Optional[str] = None  # Higher-level intent label (e.g. "exit", "open")
     is_exit_order: bool = False  # Explicit exit flag for downstream routing
-    reduce_only: bool = False  # CRITICAL FIX (2026-08-08): Exit orders must reduce exposure only
+    reduce_only: Optional[bool] = None  # None = default to exit classification; True/False explicit
 
     # CANONICAL ORDER-INTENT CONTRACT (2026-08-10)
     allow_short: Optional[bool] = None  # Allow a sell to open/increase a negative YES position
@@ -2461,10 +2502,10 @@ class OrderIntent:
                 self.action = "sell"
 
         # EXIT/REDUCE-ONLY GUARD: set is_exit_order when an order is explicitly
-        # marked as an exit or reduce_only. This prevents entry-side logic from
-        # being applied to close orders.
+        # marked as an exit or reduce_only. None means "default to exit classification"
+        # later in _build_create_order_request.
         if not self.is_exit_order:
-            if self.reduce_only or self.entry_or_exit == "exit":
+            if self.reduce_only is True or self.entry_or_exit == "exit":
                 self.is_exit_order = True
 
         # Kalshi contracts trade in whole cents.  Normalize cent-denominated
@@ -2526,10 +2567,14 @@ _SAFETY_EXIT_REASONS: set[str] = {
     "manual",
     "risk",
     "stale_data",
+    "stale_position_snapshot",
     "stop_loss",
     "settlement_guard",
     "auto_exit_99c",
     "market_expired",
+    "expiry_liquidation",
+    "time_exit",
+    "time_stop",
     "hard_stop",
     "soft_stop",
     "trailing_stop",
@@ -2875,104 +2920,109 @@ def _side_aware_book_for_intent(book: Dict[str, Any], side: Optional[str]) -> Di
     }
 
 
-async def _reconcile_submission_unknown(
-    intent: OrderIntent, port: Any, mode: TradingMode, t0: float
+def _order_snapshot_to_reconciled_result(
+    order: Any,
+    intent: OrderIntent,
+    mode: TradingMode,
+    latency_ms: float,
 ) -> Optional[OrderResult]:
-    """Watchdog for a submission whose ack was lost in flight.
+    """Convert a normalized order snapshot from broker lookup into an OrderResult."""
+    if order is None:
+        return None
 
-    Called when ``port.create_order`` raises ``asyncio.TimeoutError``.  The
-    request may have reached Kalshi, so we look up the order by client tag,
-    check open orders for the ticker, and inspect recent fills.
+    _order_id = getattr(order, "order_id", None)
+    _client_order_id = getattr(order, "client_order_id", None)
+    _status_raw = (getattr(order, "status", "") or "").lower()
+    _size = getattr(order, "size", None) or Decimal("0")
+    _filled = getattr(order, "filled_size", None) or Decimal("0")
+    _remaining = getattr(order, "remaining_size", None)
+    if _remaining is None:
+        _remaining = _size - _filled
+    _price_cents = getattr(order, "price_cents", None) or 0
 
-    We deliberately keep the router result as ``submission_unknown`` and do
-    NOT transition the gate record to a terminal state here; that transition
-    is reserved for the duplicate-retry or fills-poller path so the order
-    lifecycle remains deterministic.  We do, however, bind any discovered
-    ``order_id`` to the fills ledger and position cache so a racing
-    WebSocket/HTTP fill can be matched immediately.
-    """
-
-    _client_tag = intent.client_tag or ""
-    _client_order_id = intent.client_order_id or _client_tag
-    _order_data = None
-    _open_orders: List[Any] = []
-    _recent_fills: List[Any] = []
-
-    try:
-        _order_data = await asyncio.wait_for(
-            port.get_order(client_order_id=_client_tag),
-            timeout=5.0,
-        )
-    except Exception as _e:
-        logger.debug("[SUBMISSION-RECONCILE] get_order failed for %s: %s", _client_tag, _e)
-
-    try:
-        _open_orders = await asyncio.wait_for(
-            port.get_open_orders(ticker=intent.ticker),
-            timeout=5.0,
-        ) or []
-    except Exception as _e:
-        logger.debug("[SUBMISSION-RECONCILE] get_open_orders failed for %s: %s", intent.ticker, _e)
-
-    try:
-        _since_ts = int((_time.time() - 300.0) * 1000)
-        _fills_resp = await asyncio.wait_for(
-            port.get_fills(since_ts=_since_ts, limit=50),
-            timeout=5.0,
-        )
-        if _fills_resp is not None:
-            _recent_fills = getattr(_fills_resp, "fills", []) or []
-    except Exception as _e:
-        logger.debug("[SUBMISSION-RECONCILE] get_fills failed for %s: %s", intent.ticker, _e)
-
-    # Match by client_order_id or client_tag.
-    _open_match = next(
-        (o for o in _open_orders
-         if getattr(o, "client_order_id", "") == _client_order_id
-         or getattr(o, "client_tag", "") == _client_tag),
-        None,
-    )
-    _fill_match = next(
-        (f for f in _recent_fills
-         if getattr(f, "client_order_id", "") == _client_order_id
-         or getattr(f, "client_tag", "") == _client_tag),
-        None,
-    )
-
-    _order_id = (
-        getattr(_order_data, "order_id", None)
-        or getattr(_open_match, "order_id", None)
-        or getattr(_fill_match, "order_id", None)
-    )
-    _filled = (
-        int(getattr(_order_data, "filled_size", 0) or 0)
-        or int(getattr(_fill_match, "filled_size", 0) or 0)
-    )
-    _remaining = int(getattr(_order_data, "remaining_size", 0) or 0)
-    _order_status = (
-        getattr(_order_data, "status", None)
-        or getattr(_open_match, "status", None)
+    _tif = (
+        getattr(order, "time_in_force", None)
+        or getattr(intent, "time_in_force", "")
         or ""
+    ).upper()
+    _is_ioc = _tif in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL")
+
+    # Map the broker status to the router's canonical status space.
+    if _filled > 0:
+        _router_status = "filled_live"
+    elif _status_raw in ("resting", "open"):
+        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "resting"
+    elif _status_raw in ("canceled", "cancelled"):
+        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "canceled"
+    elif _status_raw == "rejected":
+        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "rejected"
+    elif _status_raw == "expired":
+        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "expired"
+    elif _status_raw == "unfilled":
+        _router_status = "unfilled_ioc"
+    else:
+        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "submitted_live"
+
+    _requested_count = max(int(_size), int(_filled) + max(int(_remaining), 0))
+    _filled_count = int(_filled)
+    _remaining_count = max(int(_remaining), 0)
+    _filled_quantity_cc = _filled_count * 100
+    _remaining_quantity_cc = _remaining_count * 100
+
+    # Prefer the broker snapshot for side/action; fall back to the intent.
+    _side = getattr(order, "outcome", None) or intent.side
+    _action = getattr(order, "side", None) or intent.action
+
+    _fill = {
+        "ticker": intent.ticker,
+        "side": _side,
+        "action": _action,
+        "price_cents": int(_price_cents),
+        "count": _filled_count,
+        "count_fp": str(_filled),
+        "requested_count": _requested_count,
+        "remaining_count": _remaining_count,
+        "remaining_count_fp": str(_remaining),
+        "quantity_cc": _filled_quantity_cc,
+        "remaining_quantity_cc": _remaining_quantity_cc,
+        "order_id": _order_id,
+        "client_tag": _client_order_id or intent.client_tag,
+        "status": _status_raw,
+    }
+
+    return OrderResult(
+        status=_router_status,
+        mode=mode,
+        order_id=_order_id,
+        fill=_fill,
+        latency_ms=round(latency_ms, 2),
+        submission_attempted=True,
+        exchange_request_sent=True,
+        exchange_ack_received=True,
+        submission_certainty="ack_received",
     )
 
-    logger.info(
-        "[SUBMISSION-RECONCILE] intent_id=%s ticker=%s client_tag=%s "
-        "found=%s order_id=%s status=%s filled=%d remaining=%d open_matches=%d fill_matches=%d",
-        intent.intent_id,
-        intent.ticker,
-        _client_tag,
-        bool(_order_data or _open_match or _fill_match),
-        _order_id or "",
-        _order_status or "",
-        _filled,
-        _remaining,
-        1 if _open_match else 0,
-        1 if _fill_match else 0,
-    )
+
+def _apply_reconciled_order(
+    resolved_order: Any,
+    intent: OrderIntent,
+    mode: TradingMode,
+    latency_ms: float,
+) -> Optional[OrderResult]:
+    """Apply a resolved broker order snapshot to the canonical state.
+
+    Binds the ``order_id`` to the fills ledger and position cache, updates the
+    durable attempt record, and promotes the pre-trade gate record out of
+    ``SUBMISSION_UNKNOWN``.  All state changes are idempotent and respect the
+    gate's transition invariants.
+    """
+    _client_order_id = intent.client_order_id or intent.client_tag or ""
+    _client_tag = intent.client_tag or _client_order_id
+    _order_id = getattr(resolved_order, "order_id", None)
+    _status_raw = (getattr(resolved_order, "status", "") or "").lower()
+    _filled = getattr(resolved_order, "filled_size", 0) or 0
 
     if _order_id:
-        # Bind the discovered order_id so WebSocket/HTTP fills arriving after
-        # this point can be resolved without a circuit breaker trip.
         try:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
@@ -2995,7 +3045,250 @@ async def _reconcile_submission_unknown(
         except Exception as _cache_err:
             logger.debug("[SUBMISSION-RECONCILE] cache mapping failed: %s", _cache_err)
 
-    # Always return None so the caller keeps the submission_unknown result.
+    # Promote the durable attempt record out of SUBMISSION_UNKNOWN.
+    if _filled > 0:
+        _attempt_status = "FILLED"
+    elif _status_raw in ("resting", "open"):
+        _attempt_status = "ACKNOWLEDGED"
+    else:
+        _attempt_status = "REJECTED"
+    _mark_attempt_status(intent, _attempt_status)
+
+    # Promote the pre-trade gate record from SUBMISSION_UNKNOWN to the
+    # resolved state.  The gate methods are internally locked and transition
+    # safe, so in-route and background reconcile cannot flip each other.
+    try:
+        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+        _ptg = get_pre_trade_gate()
+        if _filled > 0:
+            _ptg.mark_filled(
+                _client_order_id,
+                int(_filled),
+                fill_id=None,
+                filled_qty_cc=int(_filled) * 100,
+            )
+        elif _status_raw in ("resting", "open"):
+            _ptg.store.mark_live(_client_order_id, _order_id)
+        elif _status_raw in ("canceled", "cancelled"):
+            _ptg.mark_canceled(_client_order_id)
+        else:
+            _ptg.mark_rejected(_client_order_id, _status_raw or "reconciled")
+    except Exception as _gate_err:
+        logger.debug("[SUBMISSION-RECONCILE] pre-trade gate update failed: %s", _gate_err)
+
+    return _order_snapshot_to_reconciled_result(
+        resolved_order, intent, mode, latency_ms
+    )
+
+
+def _resolve_from_broker_evidence(
+    _order_data: Any,
+    _open_orders: List[Any],
+    _recent_fills: List[Any],
+    _client_order_id: str,
+    _client_tag: str,
+) -> Optional[Any]:
+    """Pick the strongest order snapshot from the three broker queries."""
+    _order_id = getattr(_order_data, "order_id", None)
+
+    _open_match = next(
+        (o for o in _open_orders
+         if getattr(o, "client_order_id", "") == _client_order_id
+         or getattr(o, "client_tag", "") == _client_tag),
+        None,
+    )
+    _fill_match = next(
+        (f for f in _recent_fills
+         if getattr(f, "client_order_id", "") == _client_order_id
+         or getattr(f, "client_tag", "") == _client_tag
+         or getattr(f, "order_id", "") == (_order_id or "")),
+        None,
+    )
+
+    # Direct order lookup > open-order match > fill match.
+    _resolved_order = _order_data or _open_match
+    if _resolved_order is None and _fill_match is not None:
+        _synthetic_size = getattr(_fill_match, "size", None)
+        if _synthetic_size is None:
+            _synthetic_size = getattr(_fill_match, "count", Decimal("0")) or Decimal("0")
+        _resolved_order = SimpleNamespace(
+            order_id=getattr(_fill_match, "order_id", None),
+            client_order_id=_client_order_id,
+            status="filled",
+            size=_synthetic_size,
+            filled_size=_synthetic_size,
+            remaining_size=Decimal("0"),
+            price_cents=getattr(_fill_match, "price_cents", 0) or 0,
+            time_in_force="gtc",
+            side=getattr(_fill_match, "side", None),
+            outcome=getattr(_fill_match, "outcome", None),
+        )
+    return _resolved_order
+
+
+async def _reconcile_submission_unknown(
+    intent: OrderIntent, port: Any, mode: TradingMode, t0: float
+) -> Optional[OrderResult]:
+    """In-route fast reconcile: single ``get_order`` lookup, bounded by ~1.5s.
+
+    If the broker already knows the order, resolve it immediately and promote
+    the gate/attempt records.  If not, return ``None`` and let the background
+    poller run the full three-query reconcile without the route timeout
+    pressure.
+    """
+    _client_tag = intent.client_tag or ""
+    _client_order_id = intent.client_order_id or _client_tag
+    _latency = (_time.monotonic() - t0) * 1000
+
+    try:
+        _order_data = await asyncio.wait_for(
+            port.get_order(
+                client_order_id=_client_order_id,
+                market_id=intent.ticker,
+            ),
+            timeout=1.5,
+        )
+        if _order_data is not None:
+            logger.info(
+                "[SUBMISSION-RECONCILE-FAST] intent_id=%s ticker=%s client_tag=%s resolved",
+                intent.intent_id,
+                intent.ticker,
+                _client_tag,
+            )
+            return _apply_reconciled_order(_order_data, intent, mode, _latency)
+    except asyncio.TimeoutError:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FAST] get_order timed out for %s", _client_order_id
+        )
+    except Exception as _e:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FAST] get_order failed for %s: %s",
+            _client_order_id, _e,
+        )
+
+    return None
+
+
+async def reconcile_submission_unknown_client_order_id(
+    client: Any,
+    client_order_id: str,
+    ticker: str,
+    mode: TradingMode = TradingMode.LIVE,
+) -> Optional[OrderResult]:
+    """Full background reconcile for a single ``client_order_id``.
+
+    Runs the complete three-query broker reconcile (``get_order``,
+    ``get_open_orders``, ``get_fills``) without the route timeout, then applies
+    the resolved state to the fills ledger, position cache, attempt store, and
+    pre-trade gate.  This is the primary recovery path for
+    ``SUBMISSION_UNKNOWN`` orders.
+    """
+    t0 = _time.monotonic()
+
+    # Build a minimal OrderIntent carrying the durable identity.
+    intent = OrderIntent(
+        ticker=ticker,
+        price_cents=0,
+        count=0,
+        side="",
+        action="",
+        client_order_id=client_order_id,
+        client_tag=client_order_id,
+        intent_id=client_order_id,
+    )
+    try:
+        from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+
+        _attempt = OrderAttemptStore().get_by_client_order_id(client_order_id)
+        if _attempt is not None:
+            intent.order_attempt_id = _attempt.order_attempt_id
+            intent.intent_id = _attempt.intent_id or client_order_id
+    except Exception:
+        pass
+
+    _order_data: Optional[Any] = None
+    _open_orders: List[Any] = []
+    _recent_fills: List[Any] = []
+
+    _RECONCILE_QUERY_TIMEOUT = 10.0
+
+    try:
+        _order_data = await asyncio.wait_for(
+            client.get_order(
+                client_order_id=client_order_id,
+                market_id=ticker,
+            ),
+            timeout=_RECONCILE_QUERY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] get_order timed out for %s", client_order_id
+        )
+    except Exception as _e:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] get_order(client_order_id=%s, market_id=%s) failed: %s",
+            client_order_id, ticker, _e,
+        )
+
+    try:
+        _open_orders = await asyncio.wait_for(
+            client.get_open_orders(ticker=ticker),
+            timeout=_RECONCILE_QUERY_TIMEOUT,
+        ) or []
+    except asyncio.TimeoutError:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] get_open_orders timed out for %s", ticker
+        )
+    except Exception as _e:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] get_open_orders(ticker=%s) failed: %s",
+            ticker, _e,
+        )
+
+    _order_id = getattr(_order_data, "order_id", None)
+    _since_ts = int((_time.time() - 300.0) * 1000)
+    try:
+        _fills_kwargs: Dict[str, Any] = {
+            "since_ts": _since_ts,
+            "limit": 50,
+            "market_id": ticker,
+        }
+        if _order_id:
+            _fills_kwargs["order_id"] = _order_id
+
+        _fills_resp = await asyncio.wait_for(
+            client.get_fills(**_fills_kwargs),
+            timeout=_RECONCILE_QUERY_TIMEOUT,
+        )
+        if _fills_resp is not None:
+            _recent_fills = getattr(_fills_resp, "fills", []) or []
+    except asyncio.TimeoutError:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] get_fills timed out for %s", ticker
+        )
+    except Exception as _e:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] get_fills(market_id=%s, order_id=%s) failed: %s",
+            ticker, _order_id, _e,
+        )
+
+    _resolved_order = _resolve_from_broker_evidence(
+        _order_data,
+        _open_orders,
+        _recent_fills,
+        client_order_id,
+        client_order_id,
+    )
+
+    _latency = (_time.monotonic() - t0) * 1000
+    if _resolved_order is not None:
+        return _apply_reconciled_order(_resolved_order, intent, mode, _latency)
+
+    logger.debug(
+        "[SUBMISSION-RECONCILE-FULL] client_order_id=%s ticker=%s not found; will retry",
+        client_order_id,
+        ticker,
+    )
     return None
 
 
@@ -3323,33 +3616,69 @@ def _build_create_order_request(
     """
     from merid.event_venues.kalshi.port import CreateOrderRequest
 
-    # ── Normalize YES/NO action into side/outcome ────────────────────────
+    # ── Normalize YES/NO action into canonical side/outcome ──────────────
+    # The Kalshi V2 wire uses two independent fields:
+    #   * side/outcome here are the TRADED contract side and action.
+    #   * The held (long) outcome is derived from those and used for telemetry.
+    # intent.side may be either a Kalshi-form string (BUY_YES, SELL_NO, ...) or
+    # a plain contract side (yes/no) paired with intent.action.
     side_lower = (intent.side or "").lower()
     action_lower = (intent.action or "").lower()
 
-    if "buy" in side_lower:
-        side = "buy"
-    elif "sell" in side_lower:
-        side = "sell"
-    elif action_lower in ("buy", "sell"):
-        side = action_lower
-    else:
+    _parsed_traded_side: Optional[str] = None
+    _parsed_action: Optional[str] = None
+
+    # Case 1: full Kalshi-form side string like "BUY_YES" or "SELL_NO".
+    if KALSHI_PRICE_SPACE_AVAILABLE:
+        try:
+            _parsed_traded_side, _parsed_action = parse_kalshi_side(
+                (intent.side or "").upper()
+            )
+        except Exception:
+            _parsed_traded_side, _parsed_action = None, None
+
+    # Case 2: plain contract side + explicit action.
+    if _parsed_traded_side is None and side_lower in ("yes", "no") and action_lower in ("buy", "sell"):
+        _parsed_traded_side = side_lower
+        _parsed_action = action_lower
+
+    if _parsed_traded_side not in ("yes", "no") or _parsed_action not in ("buy", "sell"):
         raise OrderIdentityError(
             f"cannot resolve order side/action for intent_id={intent.intent_id}: "
             f"side={intent.side!r} action={intent.action!r}"
         )
 
-    if "yes" in side_lower:
-        outcome = "yes"
-    elif "no" in side_lower:
-        outcome = "no"
-    elif side_lower in ("yes", "no"):
-        outcome = side_lower
-    else:
-        raise OrderIdentityError(
-            f"cannot resolve order outcome for intent_id={intent.intent_id}: "
-            f"side={intent.side!r}"
-        )
+    side = _parsed_action
+    outcome = _parsed_traded_side
+
+    # Held (long) outcome for the fill.  This is what the portfolio is exposed
+    # to after the order executes, e.g. SELL_YES -> long NO.
+    _held_outcome = None
+    if KALSHI_PRICE_SPACE_AVAILABLE:
+        try:
+            _held_outcome = held_outcome_from_legacy(outcome, side)
+        except Exception:
+            _held_outcome = None
+
+    # Pre-compute the expected V2 wire fields for telemetry.  The client will
+    # recompute these from the same canonical primitives, but logging them here
+    # lets us compare intent against fill in one place.
+    _expected_book_side = None
+    _expected_yes_space_price_cents: Optional[int] = None
+    if KALSHI_PRICE_SPACE_AVAILABLE:
+        try:
+            _expected_book_side, _expected_yes_space_price_cents = legacy_to_v2(
+                side, outcome, int(final_price_cents)
+            )
+        except Exception:
+            _expected_book_side, _expected_yes_space_price_cents = None, None
+
+    logger.info(
+        "[KALSHI-WIRE-INTENT] intent_id=%s ticker=%s traded_action=%s traded_outcome=%s "
+        "held_outcome=%s expected_book_side=%s expected_yes_price_cents=%s price_cents=%s",
+        intent.intent_id, ticker, side, outcome, _held_outcome,
+        _expected_book_side, _expected_yes_space_price_cents, final_price_cents,
+    )
 
     # ── TIF / expiration invariants ──────────────────────────────────────
     tif = (effective_tif or "GTC").strip().upper()
@@ -3427,7 +3756,11 @@ def _build_create_order_request(
         client_order_id=canonical_coid,
         idempotency_key=intent.idempotency_key,
         post_only=bool(post_only),
-        reduce_only=bool(getattr(intent, "reduce_only", False)),
+        reduce_only=bool(
+            getattr(intent, "reduce_only", None)
+            if getattr(intent, "reduce_only", None) is not None
+            else _is_exit_order(intent)
+        ),
         order_group_id=intent.order_group_id,
         self_trade_prevention_type=intent.self_trade_prevention_type,
         source=intent.source or "agent_grid",
@@ -8517,10 +8850,12 @@ async def _apply_order_result_to_canonical_state(
 
     fill = result.fill
     status = result.status or ""
-    # CRITICAL: only apply paper/mock fills here.  Live fills are ingested
-    # through the authoritative WebSocket / HTTP poller path with real Kalshi
-    # fill IDs; applying them from the router would double-count.
-    if status not in {"filled_mock", "filled_paper"}:
+    # 2026-08-27: Apply live fills immediately so the position cache and risk
+    # state are current before the HTTP/WS poller confirms them.  The fill is
+    # tagged with a provisional ``live_router_{order_id}_0`` id; the ledger
+    # promotes this to the authoritative Kalshi fill_id when it arrives, so
+    # the two sources collapse to a single state mutation.
+    if status not in {"filled_mock", "filled_paper", "filled_live", "partial_live", "partial_fill"}:
         return
 
     fill_price = fill.get("price_cents")
@@ -8550,7 +8885,13 @@ async def _apply_order_result_to_canonical_state(
     quantity_cc = int(filled_count_fp * Decimal("100"))
     yes_delta_cc = yes_delta(canonical_action, canonical_side, quantity_cc)
 
-    fill_id = fill.get("fill_id") or f"paper_{intent.intent_id}_{int(_time.time()*1000)}"
+    if status in {"filled_mock", "filled_paper"}:
+        fill_id = fill.get("fill_id") or f"paper_{intent.intent_id}_{int(_time.time()*1000)}"
+        canonicalization_state = "TRUSTED_PAPER_V1"
+    else:
+        _venue_oid = result.order_id or fill.get("order_id") or intent.client_order_id or intent.intent_id
+        fill_id = f"live_router_{_venue_oid}_0"
+        canonicalization_state = "TRUSTED_LIVE_V1"
     client_order_id = intent.client_order_id or intent.client_tag or intent.intent_id
     is_exit = _is_exit_order(intent)
 
@@ -8575,6 +8916,7 @@ async def _apply_order_result_to_canonical_state(
             action=canonical_action,
             count_fp=filled_count_fp,
             quantity_cc=quantity_cc,
+            fill_source="alpha",
             yes_price_dollars=yes_price_dollars,
             no_price_dollars=no_price_dollars,
             fee_cost=Decimal(str(fill.get("fee_cents", 0))) / Decimal("100"),
@@ -8589,11 +8931,13 @@ async def _apply_order_result_to_canonical_state(
             canonical_position_action=canonical_action,
             canonical_leg_price_cents=int(fill_price),
             canonical_yes_delta_cc=yes_delta_cc,
-            canonicalization_state="TRUSTED_PAPER_V1",
+            canonicalization_state=canonicalization_state,
+            confirmed_by_rest=(status in {"filled_mock", "filled_paper"}),
+            ingestion_source="order_router",
             intent_target_side=canonical_side,
             intent_action=canonical_action,
             intent_yes_delta_cc=yes_delta_cc,
-            is_live=False,
+            is_live=(status not in {"filled_mock", "filled_paper"}),
             all_in_cost_cents=getattr(intent, "all_in_cost_cents", None),
             ev_net_cents=getattr(intent, "ev_net_cents", None),
             fee_cents=getattr(intent, "fee_cents", None),
@@ -11898,21 +12242,61 @@ async def _route_live(
                         latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                     )
 
-            # Validate canonical edge >= min_executable_edge_frac
-            # CRITICAL FIX 2026-07-31: Handle Kalshi format sides (BUY_YES/BUY_NO) not just yes/no
+            # 2026-08-26: Cents-based edge gate.  A flat 3% threshold is the wrong
+            # unit for tick-quantized Kalshi binaries; edge must clear the all-in
+            # cost (fee + spread + risk buffer) for this specific price and role.
             canonical_edge_side_frac = getattr(intent, 'edge_yes_frac', None) if is_yes_side else getattr(intent, 'edge_no_frac', None)
-            min_executable_edge_frac = 0.03  # 3% minimum (from profile)
-            if canonical_edge_side_frac is not None and canonical_edge_side_frac < min_executable_edge_frac:
-                logger.error(
-                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s canonical_edge_side_frac=%.4f < min_executable_edge_frac=%.4f - REJECTING ORDER",
-                    intent.ticker, intent.side, canonical_edge_side_frac, min_executable_edge_frac
+            if CENTS_EDGE_GATE_ENABLED:
+                yes_bid = getattr(state, 'best_bid_cents', None)
+                yes_ask = getattr(state, 'best_ask_cents', None)
+                if yes_bid is not None and yes_ask is not None:
+                    side_book = _side_aware_book_for_intent(
+                        {
+                            "yes_bid_cents": yes_bid,
+                            "yes_ask_cents": yes_ask,
+                            "no_bid_cents": 100 - yes_ask,
+                            "no_ask_cents": 100 - yes_bid,
+                        },
+                        "yes" if is_yes_side else "no",
+                    )
+                    spread_cents = max(0, side_book["ask_cents"] - side_book["bid_cents"])
+                else:
+                    spread_cents = None
+                side_price_cents = int(round(intent.price_cents))
+                min_executable_edge_cents = required_edge_cents(
+                    price_cents=side_price_cents,
+                    liquidity_role=intent.liquidity_role,
+                    asset=extract_asset_from_ticker(intent.ticker),
+                    spread_cents=spread_cents,
                 )
-                return OrderResult(
-                    status="rejected",
-                    mode=get_venue_gate().mode,
-                    reason=f"router_invariant_fail:edge_below_threshold_{canonical_edge_side_frac}",
-                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-                )
+                min_executable_edge_frac = min_executable_edge_cents / 100.0
+                edge_cents = (canonical_edge_side_frac or 0.0) * 100.0
+                if canonical_edge_side_frac is not None and edge_cents < min_executable_edge_cents:
+                    logger.error(
+                        "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s edge_cents=%.2f < min_executable_edge_cents=%d (role=%s spread=%d) - REJECTING ORDER",
+                        intent.ticker, intent.side, edge_cents, min_executable_edge_cents,
+                        intent.liquidity_role, spread_cents
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=get_venue_gate().mode,
+                        reason=f"router_invariant_fail:edge_below_threshold_{edge_cents:.2f}c",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
+            else:
+                # Legacy flat-fraction gate (emergency revert)
+                min_executable_edge_frac = 0.03  # 3% minimum (from profile)
+                if canonical_edge_side_frac is not None and canonical_edge_side_frac < min_executable_edge_frac:
+                    logger.error(
+                        "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s canonical_edge_side_frac=%.4f < min_executable_edge_frac=%.4f - REJECTING ORDER",
+                        intent.ticker, intent.side, canonical_edge_side_frac, min_executable_edge_frac
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=get_venue_gate().mode,
+                        reason=f"router_invariant_fail:edge_below_threshold_{canonical_edge_side_frac}",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
 
             # Validate spread/edge ratio if edge-aware gate is enabled
             if hasattr(intent, 'spread_to_edge_ratio') and intent.spread_to_edge_ratio is not None:
@@ -11923,10 +12307,18 @@ async def _route_live(
                         intent.ticker, intent.side, intent.spread_to_edge_ratio, max_spread_to_edge_ratio
                     )
 
-            logger.info(
-                "[ROUTER-INVARIANT-PASS] ticker=%s side=%s size=%d p_hat_side_cents=%.2f canonical_edge_side_frac=%.4f min_executable_edge_frac=%.4f",
-                intent.ticker, intent.side, intent.count, p_hat_side_cents, canonical_edge_side_frac or 0.0, min_executable_edge_frac
-            )
+            if CENTS_EDGE_GATE_ENABLED:
+                logger.info(
+                    "[ROUTER-INVARIANT-PASS] ticker=%s side=%s size=%d p_hat_side_cents=%.2f edge_cents=%.2f min_edge_cents=%d role=%s",
+                    intent.ticker, intent.side, intent.count, p_hat_side_cents,
+                    (canonical_edge_side_frac or 0.0) * 100.0, min_executable_edge_cents or 0,
+                    intent.liquidity_role or "unknown",
+                )
+            else:
+                logger.info(
+                    "[ROUTER-INVARIANT-PASS] ticker=%s side=%s size=%d p_hat_side_cents=%.2f canonical_edge_side_frac=%.4f min_executable_edge_frac=%.4f",
+                    intent.ticker, intent.side, intent.count, p_hat_side_cents, canonical_edge_side_frac or 0.0, min_executable_edge_frac
+                )
 
         # CRITICAL FIX (2026-07-26): WS-vs-REST divergence guard before order submission
         # Refactored into _ws_rest_divergence_guard for snapshot coherence, re-fetch,
@@ -12209,6 +12601,8 @@ async def _route_live(
                 reduce_only=getattr(intent, "reduce_only", False),
                 original_side=intent.kalshi_side or f"{intent.action.upper()}_{intent.side.upper()}",
                 original_action=intent.action,
+                decision_id=getattr(intent, "decision_id", None),
+                decision_trace_id=getattr(intent, "decision_trace_id", None) or getattr(intent, "decision_id", None),
             )
             _pre_submit_ledger.record_intent(_fills_intent)
         except Exception as _pend_err:
@@ -12224,6 +12618,18 @@ async def _route_live(
             _release_gate_record(intent, live_edge_rejection.reason)
             _release_allocated_slot(intent)
             return live_edge_rejection
+
+        # CHECKPOINT: About to perform the actual network call.  A hang here is
+        # either in port.create_order or in a blocking pre-submit registration.
+        logger.info(
+            "[ORDER-ROUTER-CHECKPOINT] ticker=%s intent_id=%s stage=pre_submit "
+            "client_order_id=%s price_cents=%d count=%d",
+            intent.ticker,
+            intent.intent_id,
+            intent.client_order_id or intent.client_tag or "",
+            intent.price_cents,
+            intent.count,
+        )
 
         # Submit through the normalized execution port.  A timeout here means
         # the ack was lost in flight: the order MAY be live on the exchange.
@@ -12406,6 +12812,8 @@ async def _route_live(
                 cf_rti_basis=intent.cf_rti_basis,
                 is_counter_trend=intent.is_counter_trend,
                 thesis_side=intent.thesis_side,
+                decision_id=getattr(intent, "decision_id", None),
+                decision_trace_id=getattr(intent, "decision_trace_id", None) or getattr(intent, "decision_id", None),
             )
             ledger.record_intent(fills_intent)
             # Once the intent is durably recorded, bind the exchange order_id so
@@ -15160,6 +15568,19 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             latency_ms=round(latency, 2),
         )
 
+    # CHECKPOINT: Passed deep-OTM gate.  This is the last observed state for the
+    # three XRP candidates that went silent in the 2026-08-26 20:00 window, so
+    # the next checkpoints narrow the hang location.
+    logger.info(
+        "[ORDER-ROUTER-CHECKPOINT] ticker=%s intent_id=%s stage=post_deep_otm "
+        "price_cents=%d count=%d edge_pct=%s",
+        intent.ticker,
+        intent.intent_id,
+        intent.price_cents,
+        intent.count,
+        intent.edge_pct,
+    )
+
     # 2026-06-29: REMOVED underlying plausibility validation (over-conservative)
     # Underlying plausibility validation was blocking valid trades with reasonable price moves
     # 2026 best practices recommend simpler validation pipelines (3-5 checks max)
@@ -15388,7 +15809,18 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
         if scaling_result is not None:
             # Scaling was applied, return the result
             return scaling_result
-    
+
+    # CHECKPOINT: About to enter the live routing path.  Any hang after this
+    # point is inside _route_live (or a synchronous/blocking call it makes).
+    logger.info(
+        "[ORDER-ROUTER-CHECKPOINT] ticker=%s intent_id=%s stage=pre_route_live "
+        "mode=%s plan_done=%s",
+        intent.ticker,
+        intent.intent_id,
+        _mode_value(mode),
+        True,
+    )
+
     if _is_live_mode(mode):
         return await _route_live(intent, mode, t0, prepared_state=state, plan_done=True)
 
@@ -15397,11 +15829,81 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
 
 async def route_order_async(intent: OrderIntent) -> OrderResult:
     """Async order-routing wrapper; cleans up idempotency on every outcome."""
+    # 2026-08-26: Bound the routing lifecycle so a hung router call cannot
+    # silently consume a candidate and stall the trading loop.  The inner
+    # implementation is wrapped in a timeout; a timeout is treated as a
+    # submission_unknown outcome so the canonical state is marked for
+    # reconciliation rather than blindly retried.
+    t0 = _time.monotonic()
+    mode = _resolve_mode(intent.mode)
+
+    # 2026-08-27: Concurrent duplicate emission guard.  The same client_order_id
+    # must never be in two in-flight routes at the same time.  This is a fast
+    # memory-only guard in addition to the durable OrderAttemptStore check.
+    coid = getattr(intent, "client_order_id", None) or getattr(
+        intent, "idempotency_key", None
+    )
+    if coid:
+        async with _IN_FLIGHT_LOCK:
+            if coid in _IN_FLIGHT_COIDS:
+                logger.warning(
+                    "[ORDER-CONCURRENT-DEDUP] client_order_id=%s is already in flight; "
+                    "returning duplicate",
+                    coid,
+                )
+                return OrderResult(
+                    status="duplicate",
+                    mode=mode,
+                    reason="duplicate:concurrent_in_flight",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+            _IN_FLIGHT_COIDS.add(coid)
+
+    route_timeout_s = float(os.environ.get("MERID_ROUTE_TIMEOUT_SECONDS", "5.0"))
     try:
-        result = await _route_order_async_impl(intent)
+        result = await asyncio.wait_for(
+            _route_order_async_impl(intent),
+            timeout=route_timeout_s,
+        )
+    except asyncio.TimeoutError:
+        latency_ms = (_time.monotonic() - t0) * 1000
+        logger.critical(
+            "[ROUTER-TIMEOUT] intent_id=%s ticker=%s exceeded %.2fs; "
+            "treating as submission_unknown and requiring reconciliation",
+            getattr(intent, "intent_id", None),
+            intent.ticker,
+            route_timeout_s,
+        )
+        result = OrderResult(
+            status="submission_unknown",
+            mode=mode,
+            reason=f"route_timeout:{route_timeout_s}s",
+            latency_ms=round(latency_ms, 2),
+            submission_attempted=True,
+            submission_certainty="unknown",
+        )
+        _post_route_canonical_idempotency_cleanup(intent, result)
+    except asyncio.CancelledError:
+        latency_ms = (_time.monotonic() - t0) * 1000
+        _post_route_canonical_idempotency_cleanup(
+            intent,
+            OrderResult(
+                status="submission_unknown",
+                mode=mode,
+                reason="route_cancelled",
+                latency_ms=round(latency_ms, 2),
+                submission_attempted=True,
+                submission_certainty="unknown",
+            ),
+        )
+        raise
     except Exception:
         _post_route_canonical_idempotency_cleanup(intent, None)
         raise
+    finally:
+        if coid:
+            async with _IN_FLIGHT_LOCK:
+                _IN_FLIGHT_COIDS.discard(coid)
     _post_route_canonical_idempotency_cleanup(intent, result)
 
     # 2026-08-25: Immutable terminal lifecycle record.
@@ -15804,7 +16306,8 @@ async def route_batch_orders_async(
             group_id=intent.group_id,
             parent_intent_id=intent.parent_intent_id,
             leg_index=intent.leg_index,
-            decision_trace_id=intent.decision_trace_id,
+            decision_id=intent.decision_id,
+            decision_trace_id=intent.decision_trace_id or intent.decision_id,
             sentiment_asset=intent.sentiment_asset,
             sentiment_timeframe=intent.sentiment_timeframe,
             sentiment_driven=intent.sentiment_driven,

@@ -447,6 +447,7 @@ class CachedPosition:
     # its close buffer and an alert is raised, but the position is not deleted.
     settlement_status: str = "open"
     known_aliases: List[str] = field(default_factory=list)
+    exchange_index: Optional[int] = None  # Kalshi exchange shard index (e.g. 2 for crypto 15m)
 
     def __post_init__(self):
         """Initialize canonical quantity_cc from contracts if not already set."""
@@ -1535,18 +1536,23 @@ class KalshiPositionCache:
             self._purge_stale_tp_targets()
         self._save_pending_tp_targets()
 
-    def register_order_id_mapping(self, kalshi_order_id: str, client_tag: str) -> None:
-        """Register Kalshi order_id -> client_tag mapping for fill-to-intent linkage.
+    def register_order_id_mapping(
+        self, kalshi_order_id: str, client_order_id: str, client_tag: Optional[str] = None
+    ) -> None:
+        """Register Kalshi order_id -> client_order_id mapping for fill-to-intent linkage.
 
         Called by order_router after successful order submission.
         This is needed because HTTP fills from Kalshi API don't include client_order_id,
-        only the Kalshi order_id. We use this mapping to recover the client_tag for TP lookup.
+        only the Kalshi order_id. We use this mapping to recover the client_order_id
+        (and optional client_tag alias) for TP-target and provenance lookup.
         """
-        self._order_id_to_client_tag[kalshi_order_id] = client_tag
+        self._order_id_to_client_tag[kalshi_order_id] = client_order_id
+        if client_tag and client_tag != client_order_id:
+            self._order_id_to_client_tag[client_tag] = client_order_id
         self._persist_order_id_to_client_tag()
 
     def get_client_tag_for_order_id(self, kalshi_order_id: str) -> Optional[str]:
-        """Recover the client_tag (client_order_id) that was sent with this order."""
+        """Recover the client_order_id that was sent with this order."""
         return self._order_id_to_client_tag.get(kalshi_order_id)
 
     def _persist_order_id_to_client_tag(self) -> None:
@@ -1760,6 +1766,7 @@ class KalshiPositionCache:
             # its canonical side/action/price/yes-delta.  This prevents a caller
             # that passes the raw exchange action from inverting the position.
             fill_record = None
+            _position_exchange_index = None
             if fill_id and self._fills_ledger:
                 try:
                     fill_record = self._fills_ledger.get_fill_by_id(fill_id)
@@ -1769,6 +1776,7 @@ class KalshiPositionCache:
                             action = fill_record.canonical_position_action
                         if fill_record.canonical_leg_price_cents is not None:
                             price_cents = fill_record.canonical_leg_price_cents
+                        _position_exchange_index = getattr(fill_record, 'exchange_index', None)
                 except Exception as ledger_err:
                     logger.debug("[POSITION-CACHE] Could not canonicalize from fill record: %s", ledger_err)
 
@@ -2526,6 +2534,7 @@ class KalshiPositionCache:
                 new_position = CachedPosition(
                     market_id=market_id,
                     agent_id=position_agent_id,  # Composite key component
+                    exchange_index=_position_exchange_index,
                     contracts=contracts,
                     quantity_cc=quantity_cc,
                     side=side,
@@ -3674,8 +3683,14 @@ class KalshiPositionCache:
             # HTTP fills sometimes lose client_order_id; recover via order_id mapping.
             if not client_order_id and getattr(first_fill, 'order_id', None):
                 client_order_id = self._order_id_to_client_tag.get(first_fill.order_id)
-            if client_order_id:
-                tp_targets = self._pending_tp_targets.get(client_order_id, {}) or {}
+            # Fallback to client_tag if the TP registry was keyed by it.
+            client_tag = getattr(first_fill, 'client_tag', None)
+            for key in (client_order_id, client_tag):
+                if key:
+                    tp_targets = self._pending_tp_targets.get(key, {}) or {}
+                    if tp_targets:
+                        client_order_id = client_order_id or key
+                        break
 
         # Determine whether we have a trusted AT_FILL book from the persisted registry.
         has_at_fill_book = (

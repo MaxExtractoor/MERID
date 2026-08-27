@@ -284,7 +284,7 @@ class ExecutionRiskFirewall:
 
         # 9. Loss / slippage policy.
         allowed, policy_reason = self._apply_loss_policy(
-            canonical, pos, book, expected_pnl
+            canonical, pos, book, expected_pnl, original_intent
         )
         if not allowed:
             return self._rejected(policy_reason, canonical)
@@ -616,10 +616,23 @@ class ExecutionRiskFirewall:
         pos: PositionSnapshot,
         book: BookDepth,
         expected_pnl: Optional[int],
+        original_intent: Optional[Any] = None,
     ) -> Tuple[bool, str]:
         max_adverse = self._max_adverse_pnl_cents()
-        if expected_pnl is not None and expected_pnl < -max_adverse:
-            return False, f"adverse_pnl:predicted={expected_pnl}:max=-{max_adverse}"
+        # Forced exits (safety, stop, expiry, manual) are allowed to close at an
+        # inherent loss; only discretionary profit exits are bound by the adverse
+        # PnL budget.
+        if not self._is_forced_exit(original_intent, canonical):
+            if expected_pnl is not None and expected_pnl < -max_adverse:
+                return False, f"adverse_pnl:predicted={expected_pnl}:max=-{max_adverse}"
+        elif expected_pnl is not None and expected_pnl < -max_adverse:
+            logger.info(
+                "[FIREWALL-FORCED-EXIT] ticker=%s reason=%s expected_pnl=%dc - "
+                "adverse-PnL bound bypassed for forced exit",
+                canonical.market_ticker,
+                canonical.reason,
+                expected_pnl,
+            )
 
         max_slippage = self._max_slippage_cents()
         # The VWAP is the actual executable price across the requested size. It
@@ -666,16 +679,57 @@ class ExecutionRiskFirewall:
             "manual",
             "risk",
             "stale_data",
+            "stale_position_snapshot",
             "stop_loss",
             "settlement_guard",
             "auto_exit_99c",
             "market_expired",
+            "expiry_liquidation",
+            "time_exit",
+            "time_stop",
             "hard_stop",
             "soft_stop",
             "trailing_stop",
             "kill_switch",
+            "loss_cap",
+            "model_invalidation_loss_exit",
         }
     )
+
+    def _is_forced_exit(
+        self,
+        original_intent: Optional[Any],
+        canonical: "CanonicalOrderIntent",
+    ) -> bool:
+        """Return True for exits that must bypass the adverse-PnL bound.
+
+        Forced exits include manual operator close, safety/stop reasons, expiry
+        liquidation, and time exits.  These are allowed to close at an inherent
+        loss (the position is already underwater or the market is closing), but
+        they are still subject to slippage and quantity invariants.
+        """
+        if original_intent is not None and getattr(
+            original_intent, "is_manual_emergency_close", False
+        ):
+            return True
+
+        # Prefer explicit exit_reason, fall back to canonical reason.
+        reason = ""
+        if original_intent is not None:
+            reason = (
+                getattr(original_intent, "exit_reason", None)
+                or getattr(original_intent, "reason", None)
+                or ""
+            ).lower().replace("exit_", "")
+        if not reason and canonical is not None:
+            reason = (canonical.reason or "").lower().replace("exit_", "")
+
+        if reason and reason in self._SAFETY_EXIT_REASONS:
+            return True
+        for safety in self._SAFETY_EXIT_REASONS:
+            if safety in reason:
+                return True
+        return False
 
     def _is_safety_or_manual_exit(
         self,
