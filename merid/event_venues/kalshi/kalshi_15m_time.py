@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger
 

@@ -43,6 +43,12 @@ logger = get_logger("merid.data.cf_rti_adapter")
 # Kalshi index ID -> asset map (used to validate WebSocket frames whose
 # authoritative symbol is the server-returned ID, e.g. ETHUSD_RTI).
 from merid.data.kalshi_cf_rti_ws import index_id_to_asset
+from merid.data.ingress_recorder import record_ingress, SOURCE_CFB_RTI_REST
+from merid.data.ingress_replay import (
+    is_replay_active,
+    get_replay_dispatcher,
+    replay_json_payload,
+)
 
 
 # CF Benchmarks API configuration
@@ -502,6 +508,10 @@ def _rti_source() -> str:
 
 def _fetch_raw(asset: str, cfb_symbol: str) -> Optional[Dict[str, Any]]:
     """Synchronous HTTP fetch from CF Benchmarks RTI endpoint."""
+    if is_replay_active():
+        record = get_replay_dispatcher().get(SOURCE_CFB_RTI_REST)
+        return replay_json_payload(record)
+
     if not _env_bool("MERID_CFB_RTI_ADAPTER", False):
         logger.debug(
             "[CF-RTI-ADAPTER] cfb_rti_adapter_not_live asset=%s (MERID_CFB_RTI_ADAPTER not live)",
@@ -520,6 +530,16 @@ def _fetch_raw(asset: str, cfb_symbol: str) -> Optional[Dict[str, Any]]:
     try:
         with httpx.Client(timeout=_REQUEST_TIMEOUT, headers=headers) as client:
             resp = client.get(url)
+            record_ingress(
+                SOURCE_CFB_RTI_REST,
+                resp.content,
+                metadata={
+                    "asset": asset,
+                    "cfb_symbol": cfb_symbol,
+                    "url": url,
+                    "status_code": resp.status_code,
+                },
+            )
     except httpx.TimeoutException:
         logger.warning(
             "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=timeout", asset, cfb_symbol

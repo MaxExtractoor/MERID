@@ -25,6 +25,7 @@ try:
 except ImportError:
     # Legacy wiring – classifier module removed or relocated.
     MarketClassifier = None
+from merid.data.ingress_replay import replay_time
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.universe_sync")
@@ -96,7 +97,7 @@ class KalshiUniverseSync:
     
     async def _fetch_series_list(self) -> Dict[str, Dict[str, Any]]:
         """Fetch and cache series list for classification"""
-        current_time = _time.time()
+        current_time = replay_time()
         
         # Check cache first
         if (current_time - self._series_cache_updated < self._series_cache_ttl 
@@ -237,7 +238,7 @@ class KalshiUniverseSync:
     
     async def sync_markets_async(self) -> int:
         """Fetch Kalshi markets, upsert KalshiMarketRecord rows, return count updated"""
-        start_time = _time.time()
+        start_time = replay_time()
         
         try:
             # Update series cache
@@ -285,7 +286,7 @@ class KalshiUniverseSync:
             logger.info(
                 f"Kalshi universe sync completed: "
                 f"total={len(all_markets)}, new={new_count}, updated={updated_count}, "
-                f"errors={error_count}, duration={_time.time() - start_time:.2f}s"
+                f"errors={error_count}, duration={replay_time() - start_time:.2f}s"
             )
             
             return len(all_markets)
@@ -302,7 +303,7 @@ class KalshiUniverseSync:
         while self._running:
             try:
                 # Check if it's time to sync
-                current_time = _time.time()
+                current_time = replay_time()
                 time_since_sync = current_time - self._last_sync_time
                 
                 if time_since_sync >= self._config.sync_interval_seconds:

@@ -86,6 +86,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from merid.data.ingress_replay import is_replay_active, replay_random
 from merid.event_venues.kalshi.models import KalshiMarketState
 from merid.event_venues.kalshi.orderbook import LocalOrderbook, MultiMarketOrderbook
 from merid.event_venues.kalshi.unified_market_state import (
@@ -1620,7 +1621,7 @@ class KalshiMarketStateStore:
         # Exponential backoff: base * 2^attempt, capped at max
         base_backoff = min(2.0 ** attempt, _CIRCUIT_BREAKER_MAX_BACKOFF_SECONDS)
         # Add jitter: +/- 25% of base backoff
-        jitter = base_backoff * 0.25 * (random.random() * 2 - 1)
+        jitter = base_backoff * 0.25 * (replay_random() * 2 - 1)
         return max(0, base_backoff + jitter)
 
     def log_book_health(self) -> None:
@@ -4514,6 +4515,13 @@ class KalshiMarketStateStore:
                 return None
             # Increment retry counter before attempting REST fallback
             self._quote_retry_count[ticker] = retry_count + 1
+
+        # In replay, all market data must come from the captured ingress tape.
+        # Synchronous REST fallback is not captured deterministically, so we
+        # must not hit the network; return None and let the tape drive the state.
+        if is_replay_active():
+            logger.warning("[market-state] No cached data for %s in replay; skipping REST fallback", ticker)
+            return None
 
         logger.warning("[market-state] No valid cached data for %s - attempting REST fallback (attempt %d/3)", ticker, retry_count + 1)
         # DIAGNOSTIC: Log cache status to debug why cache is empty (store-level only)
