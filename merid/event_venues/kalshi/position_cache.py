@@ -1217,20 +1217,22 @@ class KalshiPositionCache:
             # rejected by the exit guard and leave the position unmonitored.
             if tp_price is None and price_cents and 0 < price_cents < 100:
                 try:
-                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                    from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
                     from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
                     entry_ref = int(price_cents)
-                    fee_entry = calculate_kalshi_fee_cents(1, entry_ref)
-                    target_cents = entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS
-                    fee_exit = calculate_kalshi_fee_cents(1, target_cents)
-                    required_margin = max(
-                        TAKE_PROFIT_MIN_PROFIT_CENTS,
-                        fee_entry + fee_exit + 1,
+                    size_fp = Decimal(cached_position.quantity_cc) / Decimal("100") if cached_position.quantity_cc else Decimal("0")
+                    fee_aware_floor = min_profitable_exit_price_cents(
+                        entry_ref,
+                        size_fp,
+                        gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
                     )
+                    if fee_aware_floor is None:
+                        raise ValueError("fee_aware_floor is None")
+                    margin = fee_aware_floor - entry_ref
                     if side.lower() == "yes":
-                        tp_price = int(min(99, entry_ref + required_margin))
+                        tp_price = int(min(99, fee_aware_floor))
                     else:
-                        tp_price = int(max(1, entry_ref - required_margin))
+                        tp_price = int(max(1, entry_ref - margin))
                     tp_r = tp_r or 1.5
                     logger.warning(
                         "[POSITION-CACHE-TP-FALLBACK] market=%s side=%s entry=%dc - "
@@ -1239,9 +1241,9 @@ class KalshiPositionCache:
                     )
                 except Exception:
                     if side.lower() == "yes":
-                        tp_price = min(99, price_cents + 5)
+                        tp_price = min(99, price_cents + MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS)
                     else:
-                        tp_price = max(1, price_cents - 5)
+                        tp_price = max(1, price_cents - MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS)
                     tp_r = tp_r or 1.5
 
             final_tp_price = (
@@ -1272,17 +1274,25 @@ class KalshiPositionCache:
 
             if side.lower() == "yes" and price_cents and scale_out_price is not None:
                 try:
-                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
-                    _fee_entry = calculate_kalshi_fee_cents(1, price_cents)
-                    _exit_estimate = min(99, max(price_cents + 1, scale_out_price))
-                    _fee_exit = calculate_kalshi_fee_cents(1, _exit_estimate)
-                    _min_profit = int(os.environ.get("MERID_EXIT_MIN_PROFIT_CENTS", "2"))
-                    _min_scale_out = price_cents + _fee_entry + _fee_exit + _min_profit + 1
-                    _max_scale_out = final_tp_price - 1 if final_tp_price else 99
-                    if _min_scale_out > _max_scale_out:
+                    from merid.event_venues.kalshi.fees import (
+                        min_profitable_exit_price_cents,
+                        MERID_EXIT_MIN_PROFIT_CENTS,
+                    )
+                    size_fp = Decimal(cached_position.quantity_cc) / Decimal("100") if cached_position.quantity_cc else Decimal("0")
+                    _min_scale_out = min_profitable_exit_price_cents(
+                        price_cents,
+                        size_fp,
+                        gross_min_cents=0,
+                        net_min_cents=MERID_EXIT_MIN_PROFIT_CENTS,
+                    )
+                    if _min_scale_out is None:
                         scale_out_price = None
                     else:
-                        scale_out_price = max(_min_scale_out, min(scale_out_price, _max_scale_out, 99))
+                        _max_scale_out = final_tp_price - 1 if final_tp_price else 99
+                        if _min_scale_out > _max_scale_out:
+                            scale_out_price = None
+                        else:
+                            scale_out_price = max(_min_scale_out, min(scale_out_price, _max_scale_out, 99))
                 except Exception:
                     pass
 
@@ -2539,20 +2549,22 @@ class KalshiPositionCache:
                 # A missing TP can be replaced with a default profit target.
                 if tp_price is None:
                     try:
-                        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                        from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
                         from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
                         entry_ref = price_cents if price_cents > 0 else tp_targets.get("entry_price", 50)
-                        fee_entry = calculate_kalshi_fee_cents(1, entry_ref)
-                        target_cents = entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS
-                        fee_exit = calculate_kalshi_fee_cents(1, target_cents)
-                        required_margin = max(
-                            TAKE_PROFIT_MIN_PROFIT_CENTS,
-                            fee_entry + fee_exit + 1,
+                        size_fp = Decimal(self.quantity_cc) / Decimal("100") if self.quantity_cc else Decimal("0")
+                        fee_aware_floor = min_profitable_exit_price_cents(
+                            entry_ref,
+                            size_fp,
+                            gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
                         )
+                        if fee_aware_floor is None:
+                            raise ValueError("fee_aware_floor is None")
+                        margin = fee_aware_floor - entry_ref
                         if side.lower() == "yes":
-                            tp_price = int(min(99, entry_ref + required_margin))
+                            tp_price = int(min(99, fee_aware_floor))
                         else:
-                            tp_price = int(max(1, entry_ref - required_margin))
+                            tp_price = int(max(1, entry_ref - margin))
                         tp_r = tp_r or 1.5
                         logger.warning(
                             "[POSITION-CACHE-TP-FALLBACK] market=%s side=%s entry=%dc - "
@@ -2562,9 +2574,9 @@ class KalshiPositionCache:
                     except Exception:
                         entry_ref = price_cents if price_cents > 0 else tp_targets.get("entry_price", 50)
                         if side.lower() == "yes":
-                            tp_price = min(99, entry_ref + 5)
+                            tp_price = min(99, entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS)
                         else:
-                            tp_price = max(1, entry_ref - 5)
+                            tp_price = max(1, entry_ref - TAKE_PROFIT_MIN_PROFIT_CENTS)
                         tp_r = tp_r or 1.5
 
                 # CRITICAL FIX (2026-08-13): Mark risk parameter provenance.
@@ -3302,6 +3314,83 @@ class KalshiPositionCache:
                 )
             except Exception as rec_err:
                 logger.debug("[POSITION-CACHE] Failed to emit per-fill reconciliation: %s", rec_err)
+
+    def promote_entry_fill_id(
+        self,
+        market_id: str,
+        old_fill_id: str,
+        new_fill_id: str,
+        client_order_id: Optional[str] = None,
+        order_id: Optional[str] = None,
+        intent_id: Optional[str] = None,
+    ) -> bool:
+        """Rewrite a position's ``entry_fill_id`` from a provisional to an
+        authoritative id.
+
+        Called by ``fills_ledger`` when an HTTP/WS fill promotes a live-router
+        provisional record.  This makes the authoritative fill id the single
+        source of truth for exit parentage, order client order id derivation,
+        and all downstream idempotency gates.  It does NOT mutate exposure;
+        the live fill has already applied the position delta.
+        """
+        if not new_fill_id:
+            return False
+
+        # The authoritative id must be treated as already applied so the
+        # position_cache's own on_fill path does not double-apply it later.
+        if new_fill_id not in self._applied_fill_ids:
+            self._applied_fill_ids[new_fill_id] = replay_time()
+            self._save_applied_fill_ids()
+
+        if old_fill_id == new_fill_id:
+            return True
+
+        updated = False
+        # Most positions are keyed by market_id; live fills from other tickers
+        # should not share a provisional id, but fall back to a full scan.
+        candidates = [self._positions.get(market_id)] if market_id in self._positions else []
+        if not candidates:
+            candidates = list(self._positions.values())
+
+        for pos in candidates:
+            if pos and pos.entry_fill_id == old_fill_id:
+                pos.entry_fill_id = new_fill_id
+                old_client_order_id = pos.client_order_id
+                if client_order_id:
+                    pos.client_order_id = client_order_id
+                if order_id:
+                    pos.entry_order_id = order_id
+                if intent_id:
+                    pos.entry_intent_id = intent_id
+                updated = True
+                logger.info(
+                    "[POSITION-CACHE-PROMOTE] market=%s old_fill_id=%s new_fill_id=%s "
+                    "client_order_id=%s order_id=%s intent_id=%s",
+                    market_id,
+                    old_fill_id[:16] if old_fill_id else None,
+                    new_fill_id[:16] if new_fill_id else None,
+                    client_order_id,
+                    order_id,
+                    intent_id,
+                )
+                # If the TP-target registry still uses the old client_order_id,
+                # migrate it to the authoritative one so spread-stop and
+                # model-provenance still resolve at fill time.
+                if client_order_id and old_client_order_id and old_client_order_id != client_order_id:
+                    if old_client_order_id in self._pending_tp_targets:
+                        target = self._pending_tp_targets.pop(old_client_order_id)
+                        self._pending_tp_targets[client_order_id] = target
+                        self._save_pending_tp_targets()
+                break
+
+        if not updated:
+            logger.warning(
+                "[POSITION-CACHE-PROMOTE] No position found for old_fill_id=%s market=%s; "
+                "authoritative id still recorded in applied_fill_ids.",
+                old_fill_id, market_id,
+            )
+
+        return updated
 
     async def update_position_price(self, market_id: str, price_cents: int) -> None:
         """Update current price and unrealized PnL when market price changes.

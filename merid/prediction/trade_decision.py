@@ -191,6 +191,16 @@ class TradeDecision:
     approved_size_cc: Decimal = Decimal("0")
     policy_version: str = "trade_decision_v2"
 
+    @property
+    def side(self) -> Optional[Literal["yes", "no"]]:
+        """Alias for the selected (consumed) side used by downstream paths."""
+        return self.selected_outcome
+
+    @property
+    def evaluated_side(self) -> Optional[Literal["yes", "no"]]:
+        """Alias for the dual-side evaluator's unconstrained best side."""
+        return self.best_side
+
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.p_yes_raw <= Decimal("1")):
             raise ValueError(f"p_yes_raw out of [0,1]: {self.p_yes_raw}")
@@ -774,6 +784,16 @@ def compute_trade_decision(
         net_edge = None
         edge_breakdown = None
         no_trade_reason = "invalid_confidence"
+
+    # CRITICAL FIX (2026-08-27): Fail fast on dual-side contradiction.
+    # The consumed side must equal the dual-side evaluator's output whenever
+    # both are non-None.  A mismatch means the candidate generator would use the
+    # wrong side.
+    if selected_outcome is not None and best_side is not None:
+        assert selected_outcome == best_side, (
+            f"DUAL-SIDE-CONTRADICTION: selected_outcome={selected_outcome} "
+            f"best_side={best_side} decision_id={decision_id}"
+        )
 
     decision = TradeDecision(
         run_id=run_id,

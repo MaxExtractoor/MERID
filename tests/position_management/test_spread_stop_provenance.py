@@ -418,3 +418,100 @@ class TestFallbackRiskParamsState:
         )
         assert triggered is False
         assert "risk_params_not_original" in kind
+
+
+class TestFeeAwareTakeProfitAndDebounce:
+    """Fee-aware TP fallback and take-profit debounce invariants."""
+
+    def test_fee_aware_fallback_uses_canonical_schedule(self):
+        """A size=1 position at 50c gets a TP that clears round-trip taker fees + 2c net."""
+        position = Position(
+            market_id="KXBTC15M-TEST",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+            entry_fill_price_cents=50,
+            take_profit_price_cents=None,
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            client_order_id="test-client",
+            entry_fill_id="test-fill",
+            fill_source="ws",
+        )
+        assert position.take_profit_price_cents is not None
+        # The fallback must match the canonical fee-aware helper.
+        from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
+        from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
+        from decimal import Decimal
+        expected = min_profitable_exit_price_cents(
+            50, Decimal("1"), gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS
+        )
+        assert position.take_profit_price_cents == expected
+
+    def test_fee_aware_fallback_for_size_10(self):
+        """Larger size uses the same per-contract fee schedule."""
+        position = Position(
+            market_id="KXBTC15M-TEST",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            entry_fill_price_cents=50,
+            take_profit_price_cents=None,
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            client_order_id="test-client",
+            entry_fill_id="test-fill",
+            fill_source="ws",
+        )
+        assert position.take_profit_price_cents is not None
+        # The fallback must match the canonical fee-aware helper.
+        from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
+        from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
+        from decimal import Decimal
+        expected = min_profitable_exit_price_cents(
+            50, Decimal("10"), gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS
+        )
+        assert position.take_profit_price_cents == expected
+
+    def test_tp_debounce_blocks_immediate_trigger(self):
+        """With debounce enabled, the first tick at TP does not fire."""
+        with patch("merid.position_management.position.MERID_TP_DEBOUNCE_MS", 100):
+            position = Position(
+                market_id="KXBTC15M-TEST",
+                series_ticker="KXBTC15M",
+                side=PositionSide.YES,
+                size=10,
+                avg_entry_price_cents=50,
+                take_profit_price_cents=55,
+                risk_params_state="original_persisted",
+                risk_params_schema_version=2,
+                client_order_id="test-client",
+                entry_fill_id="test-fill",
+                fill_source="ws",
+            )
+            assert position.should_trigger_take_profit(55) is False
+            assert position.tp_debounce_first_seen_at is not None
+
+    def test_tp_debounce_resets_on_drop(self):
+        """If price falls below TP during the debounce window, it resets."""
+        with patch("merid.position_management.position.MERID_TP_DEBOUNCE_MS", 100):
+            position = Position(
+                market_id="KXBTC15M-TEST",
+                series_ticker="KXBTC15M",
+                side=PositionSide.YES,
+                size=10,
+                avg_entry_price_cents=50,
+                take_profit_price_cents=55,
+                risk_params_state="original_persisted",
+                risk_params_schema_version=2,
+                client_order_id="test-client",
+                entry_fill_id="test-fill",
+                fill_source="ws",
+            )
+            position.should_trigger_take_profit(55)
+            first_seen = position.tp_debounce_first_seen_at
+            assert first_seen is not None
+            assert position.should_trigger_take_profit(54) is False
+            assert position.tp_debounce_first_seen_at is None

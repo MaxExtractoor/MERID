@@ -39,6 +39,41 @@ def _resolve_tif(intent: "OrderIntent") -> str:
     return (getattr(intent, "time_in_force", None) or "gtc").lower()
 
 
+def derive_exit_client_order_id(
+    entry_fill_id: str, exit_reason: str, resubmit_count: int = 0
+) -> str:
+    """Return a stable, deterministic client order id for an exit.
+
+    The id is derived from the authoritative parent ``entry_fill_id`` and
+    ``exit_reason`` so it is stable across retries and restarts and does not
+    depend on an in-memory record.  The resubmit count is included in the
+    derivation so each resubmit attempts a distinct client order id when the
+    exchange requires a fresh idempotency key (the unresolved-in-flight path
+    takes precedence, so this only applies to explicit new attempts).
+    """
+    if not entry_fill_id or not exit_reason:
+        return f"exit_{uuid.uuid4().hex[:20]}"
+    payload = (
+        f"client_order_id:{entry_fill_id}:{str(exit_reason).lower()}:{resubmit_count}".encode("utf-8")
+    )
+    digest = hashlib.sha256(payload).hexdigest()[:20]
+    return f"exit_{digest}"
+
+
+def derive_exit_intent_id(entry_fill_id: str, exit_reason: str) -> str:
+    """Return a stable, deterministic intent id for an exit decision.
+
+    This is the public counterpart to the auto-generated UUID on ``OrderIntent``;
+    it lets the exit-decision audit record, the ``OrderIntent``, and downstream
+    ``fills_ledger`` resolve to the same durable identity.
+    """
+    if not entry_fill_id or not exit_reason:
+        return f"intent_exit_{uuid.uuid4().hex[:20]}"
+    payload = f"intent_id:{entry_fill_id}:{str(exit_reason).lower()}".encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:20]
+    return f"intent_exit_{digest}"
+
+
 def _compute_fingerprint(intent: "OrderIntent") -> str:
     """Compute a canonical, side-effect-free fingerprint of the order request.
 

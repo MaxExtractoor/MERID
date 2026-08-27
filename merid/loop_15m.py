@@ -434,6 +434,9 @@ class EntryReadiness:
 
 # Canonical asset extraction from Kalshi tickers (single source of truth)
 from merid.utils.kalshi_identity import extract_asset
+
+# Single source of truth for cycle rejection breakdown and lifecycle events
+from merid.prediction.agent_grid_15m import CycleResult
 from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 
 # Import candidate tracing for end-to-end validation
@@ -934,9 +937,10 @@ class Kalshi15mLoop:
         self._tick_executed_count = 0
         
         # RESEARCH-ALIGNED: Rejection reason aggregation counters
-        # Track why candidates are rejected to identify filtering bottlenecks
-        # CRITICAL FIX: 2026-08-02 - Added detailed parity rejection categories
-        self._rejection_counters = {
+        # Track why candidates are rejected to identify filtering bottlenecks.
+        # CRITICAL FIX (2026-08-27): Use a Counter so agent_grid can supply the
+        # canonical rejection_breakdown without a fixed, drifting key set.
+        self._rejection_counters = Counter({
             "parity_blocked": 0,
             "parity_edge_threshold": 0,
             "parity_winner_mismatch": 0,
@@ -951,8 +955,10 @@ class Kalshi15mLoop:
             "exit_policy_failed": 0,
             "router_rejected": 0,
             "router_exception": 0,
-            "other": 0
-        }
+            "other": 0,
+            "ENTRIES_DISABLED": 0,
+            "signal_rejected": 0,
+        })
         
         # Market making integration
         self._market_maker = None
@@ -2208,24 +2214,27 @@ def _run_exit_price_guard(
     record["max_loss_cents"] = max_loss
 
     # Discretionary (non-stop, non-emergency, non-forced) exits must be profitable after
-    # fees and must clear a minimum profit floor.  Forced exits (expiry_liquidation, time_exit)
+    # fees and must clear a per-contract minimum profit floor.  Forced exits (expiry_liquidation, time_exit)
     # are allowed to realize a loss to prevent holding losers to settlement.
     is_stop_or_emergency = canonical in _MERID_EXIT_STOP_REASONS or is_emergency or is_forced
     if not is_stop_or_emergency:
-        if net_expected < MERID_EXIT_MIN_PROFIT_CENTS or net_worst < 0:
+        min_profit_total = MERID_EXIT_MIN_PROFIT_CENTS * closed_count
+        if net_expected < min_profit_total or net_worst < 0:
             record.update({"status": "rejected", "reject_reason": "profit_exit_not_profitable"})
             persist_order_decision(record)
             logger.error(
                 "[EXIT-GUARD-REJECT] position=%s market=%s reason=%s - "
-                "Discretionary exit does not meet minimum profit floor "
-                "(expected_net=%dc, worst_net=%dc, min_profit=%dc, fees=%dc)",
+                "Discretionary exit does not meet per-contract minimum profit floor "
+                "(expected_net=%dc, worst_net=%dc, min_profit_per_contract=%dc, total_min=%dc, fees=%dc, closed_count=%d)",
                 (getattr(position, "position_id", "") or "")[:8],
                 getattr(position, "market_id", None),
                 canonical,
                 net_expected,
                 net_worst,
                 MERID_EXIT_MIN_PROFIT_CENTS,
+                min_profit_total,
                 fees,
+                closed_count,
             )
             return False, exit_price_cents, record, decision_id
 
@@ -2712,16 +2721,14 @@ async def _execute_exit_order(
         # Position sizes already calculated and validated in invariant checks above
         # pre_position_size and expected_post_position_size are available from invariant section
         
-        # ENHANCEMENT (2026-08-02): Validate exit price is profitable relative to entry price
-        # This prevents resting sell orders from executing below entry price, causing losses.
-        # Profitability is only required for profit-seeking exits. Risk-management exits
-        # (STOP_LOSS, SETTLEMENT_GUARD, TRAILING_STOP, TIME_STOP, RISK, EDGE_DECAY, etc.)
-        # MUST execute even when unprofitable to prevent runaway losses.
+        # CRITICAL FIX (2026-08-27): Pre-trade profitability check is now fee-aware.
+        # It uses the canonical taker fee schedule and the position size to compute
+        # the minimum exit price that produces a positive net profit per contract.
+        # Risk-management exits (STOP_LOSS, SETTLEMENT_GUARD, TRAILING_STOP, TIME_STOP,
+        # RISK, EDGE_DECAY, etc.) bypass this check to prevent runaway losses.
         entry_price = position.avg_entry_price_cents
 
         # Reasons that must always execute, regardless of exit price vs entry.
-        # Stop losses, settlement guards, 99c cashouts, time stops and risk exits are safety
-        # mechanisms, not profit-taking mechanisms.
         exit_reason_str = str(getattr(exit_reason, 'value', exit_reason)).lower()
         bypass_profit_check_reasons = {
             'stop_loss', 'settlement_guard', 'auto_exit_99c', 'trail', 'trailing_stop',
@@ -2729,181 +2736,123 @@ async def _execute_exit_order(
             'adaptive_timing', 'opportunity_cost', 'loss_cut_40pct', 'manual'
         }
         enforce_profit_check = exit_reason_str not in bypass_profit_check_reasons
-        
-        # ENHANCEMENT (2026-08-22): Minimum profit threshold now uses a 5c floor to
-        # align with TAKE_PROFIT_MIN_PROFIT_CENTS and cover round-trip taker fees at
-        # typical 15m crypto prices.  Risk-management exits in the bypass list skip this.
-        MIN_PROFIT_MARGIN_CENTS = 5  # Minimum 5 cents profit to cover fees and slippage
-        
-        # ENHANCEMENT (2026-08-02): Bid-ask spread validation
-        # Based on CuteMarkets research: exits should be validated against current market conditions
-        # to prevent unrealistic orders in illiquid markets. Maximum spread threshold before warning.
-        MAX_SPREAD_THRESHOLD_CENTS = 5  # Maximum 5 cent spread before warning
-        
+
+        # Bid-ask spread warning (illiquid markets).
+        MAX_SPREAD_THRESHOLD_CENTS = 5
+        current_bid_cents = 0
+        current_ask_cents = 0
+        current_spread_cents = -1
+
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            market_state = get_kalshi_market_state_store().get(position.market_id)
+            if market_state:
+                current_bid_cents = market_state.bid_cents
+                current_ask_cents = market_state.ask_cents
+                if current_bid_cents and current_ask_cents:
+                    current_spread_cents = current_ask_cents - current_bid_cents
+                    if current_spread_cents > MAX_SPREAD_THRESHOLD_CENTS:
+                        logger.warning(
+                            "[EXIT-SPREAD-WARNING] position=%s market=%s spread=%dc (threshold=%dc) "
+                            "Market is illiquid - exit may have significant slippage. "
+                            "exit_price=%dc bid=%dc ask=%dc",
+                            position.position_id[:8],
+                            position.market_id,
+                            current_spread_cents,
+                            MAX_SPREAD_THRESHOLD_CENTS,
+                            exit_price_cents,
+                            current_bid_cents,
+                            current_ask_cents
+                        )
+        except Exception as spread_err:
+            logger.debug(
+                "[EXIT-SPREAD-CHECK] Failed to get market state for spread check (non-critical): %s",
+                spread_err
+            )
+
         if entry_price > 0:
-            # ENHANCEMENT (2026-08-02): Check current market bid-ask spread
-            current_bid_cents = 0
-            current_ask_cents = 0
-            current_spread_cents = -1
-            
-            try:
-                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                market_state_store = get_kalshi_market_state_store()
-                market_state = market_state_store.get(position.market_id)
-                
-                if market_state:
-                    current_bid_cents = market_state.bid_cents
-                    current_ask_cents = market_state.ask_cents
-                    if current_bid_cents and current_ask_cents:
-                        current_spread_cents = current_ask_cents - current_bid_cents
-                        
-                        # Warn if spread is too wide (illiquid market)
-                        if current_spread_cents > MAX_SPREAD_THRESHOLD_CENTS:
-                            logger.warning(
-                                "[EXIT-SPREAD-WARNING] position=%s market=%s spread=%dc (threshold=%dc) "
-                                "Market is illiquid - exit may have significant slippage. "
-                                "exit_price=%dc bid=%dc ask=%dc",
-                                position.position_id[:8],
-                                position.market_id,
-                                current_spread_cents,
-                                MAX_SPREAD_THRESHOLD_CENTS,
-                                exit_price_cents,
-                                current_bid_cents,
-                                current_ask_cents
-                            )
-            except Exception as spread_err:
-                logger.debug(
-                    "[EXIT-SPREAD-CHECK] Failed to get market state for spread check (non-critical): %s",
-                    spread_err
+            profit_margin_cents = exit_price_cents - entry_price
+            if exit_price_cents < entry_price:
+                if enforce_profit_check:
+                    logger.error(
+                        "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s exit_price=%dc < entry_price=%dc "
+                        "REJECTING exit order - would sell below entry price causing loss. "
+                        "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
+                        position.position_id[:8],
+                        position.market_id,
+                        exit_price_cents,
+                        entry_price,
+                        exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                        position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
+                        profit_margin_cents,
+                        current_spread_cents
+                    )
+                    _clear_in_flight()
+                    return
+                else:
+                    logger.warning(
+                        "[EXIT-PRICE-VALIDATION-SKIP] position=%s market=%s exit_price=%dc < entry_price=%dc "
+                        "bypassing profitability check for risk exit. "
+                        "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
+                        position.position_id[:8],
+                        position.market_id,
+                        exit_price_cents,
+                        entry_price,
+                        exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                        position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
+                        profit_margin_cents,
+                        current_spread_cents
+                    )
+            elif enforce_profit_check:
+                from merid.event_venues.kalshi.fees import (
+                    min_profitable_exit_price_cents,
+                    TAKE_PROFIT_MIN_PROFIT_CENTS,
                 )
-            
-            # Determine outcome side for validation (confirmed exposure, not thesis)
-            if getattr(position, 'outcome_side', None):
-                thesis_side_str = position.outcome_side
-            elif hasattr(position, 'thesis_side') and position.thesis_side:
-                thesis_side_str = position.thesis_side
-            else:
-                thesis_side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
-            
-            thesis_upper = thesis_side_str.upper()
-            is_profitable_exit = False
-            profit_margin_cents = 0
-            
-            if thesis_upper == "YES":
-                # YES positions: profit when price rises (exit price >= entry price + margin)
-                profit_margin_cents = exit_price_cents - entry_price
-                if exit_price_cents >= (entry_price + MIN_PROFIT_MARGIN_CENTS):
-                    is_profitable_exit = True
-                elif exit_price_cents >= entry_price:
-                    # At break-even but below minimum margin - log warning but allow
-                    logger.warning(
-                        "[EXIT-PRICE-VALIDATION-WARNING] position=%s market=%s thesis=YES exit_price=%dc at break-even "
-                        "(below minimum margin of %dc). May result in net loss after fees. "
-                        "exit_reason=%s current_price=%dc spread=%dc",
+                min_profitable = min_profitable_exit_price_cents(
+                    entry_price,
+                    requested_exit_contracts,
+                    gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
+                )
+                if min_profitable is None:
+                    min_profitable = entry_price + TAKE_PROFIT_MIN_PROFIT_CENTS
+
+                if exit_price_cents < min_profitable:
+                    logger.error(
+                        "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s exit_price=%dc < min_profitable=%dc "
+                        "REJECTING exit order - would not be net profitable after round-trip taker fees. "
+                        "exit_reason=%s entry=%dc profit_margin=%dc spread=%dc",
                         position.position_id[:8],
                         position.market_id,
                         exit_price_cents,
-                        MIN_PROFIT_MARGIN_CENTS,
+                        min_profitable,
                         exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                        position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
+                        entry_price,
+                        profit_margin_cents,
                         current_spread_cents
                     )
-                    is_profitable_exit = True  # Allow break-even exits
-                else:
-                    if enforce_profit_check:
-                        logger.error(
-                            "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s thesis=YES exit_price=%dc < entry_price=%dc "
-                            "REJECTING exit order - would sell below entry price causing loss. "
-                            "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                            position.position_id[:8],
-                            position.market_id,
-                            exit_price_cents,
-                            entry_price,
-                            exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                            position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                            profit_margin_cents,
-                            current_spread_cents
-                        )
-                        _clear_in_flight()
-                        return  # Reject this exit order
-                    else:
-                        logger.warning(
-                            "[EXIT-PRICE-VALIDATION-SKIP] position=%s market=%s thesis=YES exit_price=%dc < entry_price=%dc "
-                            "bypassing profitability check for risk exit. "
-                            "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                            position.position_id[:8],
-                            position.market_id,
-                            exit_price_cents,
-                            entry_price,
-                            exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                            position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                            profit_margin_cents,
-                            current_spread_cents
-                        )
-            else:  # NO
-                # CRITICAL FIX (2026-08-04): NO positions are LONG their own side.
-                # Profit = own-side price rising (same as YES). TP/SL are in own-side cents.
-                # A profitable NO exit has exit_price >= entry_price + margin.
-                profit_margin_cents = exit_price_cents - entry_price
-                if exit_price_cents >= (entry_price + MIN_PROFIT_MARGIN_CENTS):
-                    is_profitable_exit = True
-                elif exit_price_cents >= entry_price:
-                    # At break-even but below minimum margin - log warning but allow
-                    logger.warning(
-                        "[EXIT-PRICE-VALIDATION-WARNING] position=%s market=%s thesis=NO exit_price=%dc at break-even "
-                        "(below minimum margin of %dc). May result in net loss after fees. "
-                        "exit_reason=%s current_price=%dc spread=%dc",
-                        position.position_id[:8],
-                        position.market_id,
-                        exit_price_cents,
-                        MIN_PROFIT_MARGIN_CENTS,
-                        exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                        position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                        current_spread_cents
-                    )
-                    is_profitable_exit = True  # Allow break-even exits
-                else:
-                    if enforce_profit_check:
-                        logger.error(
-                            "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s thesis=NO exit_price=%dc < entry_price=%dc "
-                                "REJECTING exit order - would sell below entry price causing loss. "
-                                "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                            position.position_id[:8],
-                            position.market_id,
-                            exit_price_cents,
-                            entry_price,
-                            exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                            position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                            profit_margin_cents,
-                            current_spread_cents
-                        )
-                        _clear_in_flight()
-                        return  # Reject this exit order
-                    else:
-                        logger.warning(
-                            "[EXIT-PRICE-VALIDATION-SKIP] position=%s market=%s thesis=NO exit_price=%dc < entry_price=%dc "
-                            "bypassing profitability check for risk exit. "
-                            "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                            position.position_id[:8],
-                            position.market_id,
-                            exit_price_cents,
-                            entry_price,
-                            exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                            position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                            profit_margin_cents,
-                            current_spread_cents
-                        )
-            
-            if is_profitable_exit:
+                    _clear_in_flight()
+                    return
+
                 logger.info(
-                    "[EXIT-PRICE-VALIDATION-PASS] position=%s market=%s thesis=%s exit_price=%dc entry_price=%dc "
-                    "profit_margin=%dc profitable_exit=true exit_reason=%s spread=%dc",
+                    "[EXIT-PRICE-VALIDATION-PASS] position=%s market=%s exit_price=%dc entry=%dc "
+                    "min_profitable=%dc profit_margin=%dc exit_reason=%s spread=%dc",
                     position.position_id[:8],
                     position.market_id,
-                    thesis_upper,
                     exit_price_cents,
                     entry_price,
+                    min_profitable,
                     profit_margin_cents,
+                    exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                    current_spread_cents
+                )
+            else:
+                logger.info(
+                    "[EXIT-PRICE-VALIDATION-PASS] position=%s market=%s exit_price=%dc entry=%dc "
+                    "risk_exit=true exit_reason=%s spread=%dc",
+                    position.position_id[:8],
+                    position.market_id,
+                    exit_price_cents,
+                    entry_price,
                     exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
                     current_spread_cents
                 )
@@ -2914,7 +2863,7 @@ async def _execute_exit_order(
                 position.market_id,
                 entry_price
             )
-        
+
         # TRADE-TRACE LOG: Exit decision to IntentContract conversion
         # Logs direction, pre_size, post_size, and exit_reason on a single line
         # AUDIT: Timing correctness - track latency from trigger to intent creation
@@ -3021,7 +2970,20 @@ async def _execute_exit_order(
         # is still unresolved, reuse its client_order_id. Kalshi idempotency makes
         # same-ClOrdID resubmission safe and prevents double-exits.
         try:
-            from merid.event_venues.kalshi.order_identity import finalize_order_identity
+            from merid.event_venues.kalshi.order_identity import (
+                finalize_order_identity,
+                derive_exit_client_order_id,
+                derive_exit_intent_id,
+            )
+
+            # CRITICAL FIX (2026-08-27): Derive a stable, authoritative exit identity
+            # from the entry fill id so exit parentage and audit logs share one key.
+            exit_parent_id = (
+                getattr(position, "entry_fill_id", None)
+                or getattr(position, "client_order_id", None)
+                or position.position_id
+            )
+            intent.intent_id = derive_exit_intent_id(exit_parent_id, exit_reason_str)
 
             if not client_order_id and self._position_monitor:
                 client_order_id = self._position_monitor._get_unresolved_exit_client_order_id(
@@ -3036,6 +2998,12 @@ async def _execute_exit_order(
                     position.position_id[:8],
                     resubmit_count,
                 )
+            else:
+                client_order_id = derive_exit_client_order_id(
+                    exit_parent_id, exit_reason_str, resubmit_count=resubmit_count
+                )
+                intent.client_order_id = client_order_id
+                intent.client_tag = client_order_id
 
             intent.run_id = os.environ.get("MERID_RUN_ID") or f"live_exit_{int(time.time())}"
             intent.process_id = str(os.getpid())
@@ -4246,7 +4214,34 @@ async def _run_loop(self) -> None:
                 logger.info("[15m-LOOP] About to call _run_agent_grid_with_timeout tick=%d allow_new_entries=%s", tick_id, allow_new_entries)
                 candidates = await self._run_agent_grid_with_timeout(tick_id, trading_ready=allow_new_entries, allow_new_entries=allow_new_entries)
                 logger.info("[15m-LOOP] Generated %d candidates in tick %d", len(candidates), tick_id)
-                
+
+                # CRITICAL FIX (2026-08-27): Ingest the canonical rejection breakdown and
+                # lifecycle events returned by agent_grid so loop_15m's per-tick counters
+                # are derived from a single source of truth, not a parallel drifting dict.
+                if isinstance(candidates, CycleResult):
+                    total_candidates = candidates.total_generated
+                    if candidates.rejection_breakdown:
+                        self._rejection_counters.update(candidates.rejection_breakdown)
+                        logger.info(
+                            "[REJECTION-BREAKDOWN-INGEST] tick=%d total_generated=%d breakdown=%s",
+                            tick_id, total_candidates, dict(candidates.rejection_breakdown),
+                        )
+                    for event in candidates.lifecycle_events:
+                        self._log_candidate_lifecycle_event(
+                            candidate_id=event.get("candidate_id", "unknown"),
+                            from_state=event.get("from_state", "RECEIVED"),
+                            to_state=event.get("to_state", "REJECTED"),
+                            reason=event.get("reason", "agent_grid"),
+                            context={
+                                "ticker": event.get("ticker"),
+                                "asset": event.get("asset"),
+                                "side": event.get("side"),
+                                "source": "agent_grid",
+                            },
+                        )
+                else:
+                    total_candidates = len(candidates)
+
                 # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m._select_best_edge_per_asset
                 # This ensures up to 2 contracts per asset per window (cheapest with best edge, capped by $1 exposure) is selected
                 # before candidates are passed to the global allocator. The loop_15m execution logic
@@ -4966,11 +4961,13 @@ async def _run_loop(self) -> None:
                             )
                 
                 # COUNTER SANITY CHECK: Verify candidate → order flow consistency
-                # Use per-tick counters to avoid cumulative mismatch
+                # Use per-tick counters to avoid cumulative mismatch.
+                # CRITICAL FIX (2026-08-27): total_candidates comes from the agent_grid
+                # CycleResult (total_generated) so pre-loop rejections (ENTRIES_DISABLED,
+                # allocator loss, allocator error) are included in the invariant.
                 tick_rejections = sum(self._rejection_counters.values())
                 tick_executed = self._tick_executed_count  # Use per-tick counter, not window-accumulated
-                total_candidates = len(candidates)
-                
+
                 # CRITICAL FIX: 2026-08-02 - Verify against lifecycle event log for single source of truth
                 # Count terminal states from event log for THIS TICK ONLY (tick-scoped reconciliation)
                 terminal_states = {"EXECUTED", "REJECTED", "BLOCKED_PARITY", "BLOCKED_EDGE_THRESHOLD", "BLOCKED_DUPLICATE", "BLOCKED_POSITION", "BLOCKED_RESTING_ORDER"}
@@ -4982,38 +4979,32 @@ async def _run_loop(self) -> None:
                         lifecycle_terminal_count += 1
                         state = event.get("to_state")
                         lifecycle_breakdown[state] = lifecycle_breakdown.get(state, 0) + 1
-                
+
                 logger.info(
                     "[COUNTER-SANITY-CHECK] tick=%d total_candidates=%d total_executed=%d total_rejections=%d "
                     "rejection_breakdown=%s lifecycle_terminal=%d lifecycle_breakdown=%s",
-                    tick_id, total_candidates, tick_executed, tick_rejections, self._rejection_counters,
+                    tick_id, total_candidates, tick_executed, tick_rejections, dict(self._rejection_counters),
                     lifecycle_terminal_count, lifecycle_breakdown
                 )
                 # LOG CONTRACT: Ensure no silent candidate loss (per-tick check)
                 # Note: All counters are now per-tick (reset each tick)
+                # 2026-08-27: Log as CRITICAL but do not raise. The invariant is a
+                # release-gate signal, not a process-killer; a mismatch must be
+                # visible and audited without aborting the tick (which would skip
+                # the per-tick counter reset and let counters drift).
                 if total_candidates != tick_executed + tick_rejections:
-                    logger.warning(
-                        "[COUNTER-SANITY-WARNING] tick=%d candidate count mismatch: %d candidates != %d executed + %d rejections (per-tick counters)",
-                        tick_id, total_candidates, tick_executed, tick_rejections
+                    logger.critical(
+                        "[COUNTER-INVARIANT-VIOLATION] tick=%d total_generated=%d != executed=%d + rejections=%d",
+                        tick_id, total_candidates, tick_executed, tick_rejections,
                     )
+                    self._error_count += 1
                 # CRITICAL FIX: 2026-08-02 - Verify lifecycle log consistency
                 if total_candidates != lifecycle_terminal_count:
-                    logger.warning(
-                        "[LIFECYCLE-SANITY-WARNING] tick=%d lifecycle mismatch: %d candidates != %d terminal lifecycle events (breakdown=%s)",
-                        tick_id, total_candidates, lifecycle_terminal_count, lifecycle_breakdown
+                    logger.critical(
+                        "[LIFECYCLE-INVARIANT-VIOLATION] tick=%d total_generated=%d != terminal_events=%d",
+                        tick_id, total_candidates, lifecycle_terminal_count,
                     )
-                    # CRITICAL: 2026-08-02 - Record lifecycle imbalance with invariants monitor
-                    try:
-                        from merid.monitoring.trading_invariants_monitor import get_invariants_monitor
-                        monitor = get_invariants_monitor()
-                        monitor.record_lifecycle_imbalance(
-                            tick_id=tick_id,
-                            candidates=total_candidates,
-                            terminal_events=lifecycle_terminal_count,
-                            breakdown=lifecycle_breakdown
-                        )
-                    except ImportError:
-                        logger.warning("[CANDIDATE-LIFECYCLE] Invariants monitor not available - lifecycle imbalance not recorded")
+                    self._error_count += 1
                 # Reset rejection counters for next tick to prevent accumulation
                 for key in self._rejection_counters:
                     self._rejection_counters[key] = 0

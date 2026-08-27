@@ -29,6 +29,7 @@ Usage::
 from __future__ import annotations
 
 import math
+import os
 from decimal import Decimal, ROUND_CEILING
 from typing import Dict, Optional, Tuple, Union
 
@@ -318,6 +319,145 @@ def get_tier_info(contracts: int) -> Dict[str, Union[int, str, Decimal]]:
         "rate": Decimal("0.03"),
         "rate_pct": 3.0,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fee-aware take-profit / exit economics (canonical taker schedule)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+MERID_EXIT_MIN_PROFIT_CENTS = int(os.getenv("MERID_EXIT_MIN_PROFIT_CENTS", "2"))
+MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS = int(
+    os.getenv("MERID_TAKE_PROFIT_MIN_PROFIT_CENTS", "5")
+)
+# Backwards-compatible alias used by position.py / loop_15m.
+TAKE_PROFIT_MIN_PROFIT_CENTS = MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS
+MERID_TAKE_PROFIT_FEE_BUFFER_CENTS = int(
+    os.getenv("MERID_TAKE_PROFIT_FEE_BUFFER_CENTS", "1")
+)
+MERID_TP_DEBOUNCE_MS = int(os.getenv("MERID_TP_DEBOUNCE_MS", "0"))
+
+
+def _quantity_cc_for_size(size: Union[Decimal, int, float, str]) -> Decimal:
+    """Convert whole-contract size to centi-contracts (quantity_cc)."""
+    if size is None:
+        return Decimal("0")
+    return Decimal(str(size)) * Decimal("100")
+
+
+def _taker_fee_cents_for_fill(price_cents: int, quantity_cc: Decimal) -> Decimal:
+    """Return total taker fee in Decimal cents using the canonical schedule."""
+    from merid.prediction.kalshi_maker_taker_contract import (
+        compute_fee_estimate,
+        LiquidityRole,
+        DEFAULT_FEE_SCHEDULE,
+    )
+
+    if quantity_cc <= 0 or not (0 < price_cents < 100):
+        return Decimal("0")
+    estimate = compute_fee_estimate(
+        LiquidityRole.TAKER,
+        int(price_cents),
+        quantity_cc,
+        DEFAULT_FEE_SCHEDULE,
+    )
+    return Decimal(estimate.fee_cents)
+
+
+def compute_taker_fee_per_contract_cents(
+    price_cents: int,
+    size: Union[Decimal, int, float, str],
+) -> Decimal:
+    """Per-contract taker fee for a single fill using the canonical schedule."""
+    quantity_cc = _quantity_cc_for_size(size)
+    if quantity_cc <= 0 or not (0 < price_cents < 100):
+        return Decimal("0")
+    fee = _taker_fee_cents_for_fill(price_cents, quantity_cc)
+    per_contract = fee / Decimal(str(size))
+    return per_contract.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+
+
+def compute_round_trip_taker_fee_per_contract_cents(
+    entry_price_cents: int,
+    exit_price_cents: int,
+    size: Union[Decimal, int, float, str],
+) -> Decimal:
+    """
+    Per-contract round-trip taker fee using the canonical fee schedule.
+
+    The estimate uses the taker coefficient from ``DEFAULT_FEE_SCHEDULE``,
+    which is the same schedule used by the order router.  Result is quantized
+    up to the nearest cent to stay conservative against sub-cent fee totals.
+    """
+    quantity_cc = _quantity_cc_for_size(size)
+    if quantity_cc <= 0 or not (0 < entry_price_cents < 100) or not (0 < exit_price_cents < 100):
+        return Decimal("0")
+    entry_fee = _taker_fee_cents_for_fill(entry_price_cents, quantity_cc)
+    exit_fee = _taker_fee_cents_for_fill(exit_price_cents, quantity_cc)
+    total = entry_fee + exit_fee
+    per_contract = total / Decimal(str(size))
+    return per_contract.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+
+
+def min_profitable_exit_price_cents(
+    entry_price_cents: int,
+    size: Union[Decimal, int, float, str],
+    gross_min_cents: int = MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS,
+    net_min_cents: int = MERID_EXIT_MIN_PROFIT_CENTS,
+    buffer_cents: int = MERID_TAKE_PROFIT_FEE_BUFFER_CENTS,
+    max_iterations: int = 5,
+) -> Optional[int]:
+    """
+    Minimum exit price that clears both the gross floor and the net floor.
+
+    Net profit = (exit - entry) * size - round_trip_fee.
+    Gross floor = entry + gross_min_cents.
+    Net floor = entry + round_trip_fee / size + net_min_cents + buffer.
+    The result is the smallest int >= max(gross, net).
+    """
+    if not (0 < entry_price_cents < 100) or size is None or Decimal(str(size)) <= 0:
+        return None
+    target = entry_price_cents + gross_min_cents
+    for _ in range(max_iterations):
+        fee_per_contract = compute_round_trip_taker_fee_per_contract_cents(
+            entry_price_cents, target, size
+        )
+        net_required = (
+            Decimal(entry_price_cents)
+            + Decimal(buffer_cents)
+            + fee_per_contract
+            + Decimal(net_min_cents)
+        )
+        gross_required = Decimal(entry_price_cents) + Decimal(gross_min_cents)
+        required = max(gross_required, net_required)
+        if target >= required:
+            break
+        target = int(required.to_integral_value(rounding=ROUND_CEILING))
+        if target > 99:
+            break
+    return int(min(99, target))
+
+
+def is_exit_net_profitable(
+    entry_price_cents: int,
+    exit_price_cents: int,
+    size: Union[Decimal, int, float, str],
+    min_net_profit_per_contract_cents: int = MERID_EXIT_MIN_PROFIT_CENTS,
+) -> Tuple[bool, Decimal]:
+    """Return (profitable, net_cents) for a proposed exit after round-trip taker fees."""
+    if (
+        not (0 < entry_price_cents < 100)
+        or not (0 < exit_price_cents < 100)
+        or size is None
+        or Decimal(str(size)) <= 0
+    ):
+        return False, Decimal("0")
+    quantity_cc = _quantity_cc_for_size(size)
+    entry_fee = _taker_fee_cents_for_fill(entry_price_cents, quantity_cc)
+    exit_fee = _taker_fee_cents_for_fill(exit_price_cents, quantity_cc)
+    gross = Decimal(str(size)) * Decimal(exit_price_cents - entry_price_cents)
+    net = gross - (entry_fee + exit_fee)
+    min_net = Decimal(min_net_profit_per_contract_cents) * Decimal(str(size))
+    return net >= min_net, net
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

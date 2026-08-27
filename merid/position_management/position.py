@@ -6,7 +6,7 @@ Tracks open positions with TP/SL, trailing stops, and exit policy references.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, List, Optional
 import logging
@@ -117,6 +117,9 @@ def migrate_legacy_key(
 # MERID_EXIT_MIN_PROFIT_CENTS, so the order is re-evaluated until it clears.
 # Override with MERID_TAKE_PROFIT_MIN_PROFIT_CENTS.
 TAKE_PROFIT_MIN_PROFIT_CENTS = int(os.getenv("MERID_TAKE_PROFIT_MIN_PROFIT_CENTS", "5"))
+
+# Take-profit debounce. 0 = disabled (one-tick cross fires). Override with MERID_TP_DEBOUNCE_MS.
+MERID_TP_DEBOUNCE_MS = int(os.getenv("MERID_TP_DEBOUNCE_MS", "0"))
 
 # CRITICAL FIX (2026-08-25): Fallback stop-loss buffer for positions that arrive
 # without an explicit SL (e.g., REST-synced or legacy records).  The exchange-
@@ -263,6 +266,12 @@ class Position:
 
     # Initial risk for R-multiple calculation
     initial_risk_cents: int = 0  # |entry_price - stop_loss_price| if stop_loss set
+
+    # Take-profit debounce state (CRITICAL FIX 2026-08-27).
+    # Prevents one-tick spikes from triggering TP; price must stay at/above TP
+    # for MERID_TP_DEBOUNCE_MS before the exit fires.
+    tp_debounce_first_seen_at: Optional[float] = None
+    tp_debounce_hysteresis_cents: int = 0  # Reset if price falls below TP by this much
 
     # CRITICAL FIX (2026-08-11): Risk parameter provenance.
     # Only automatically act on TP/SL that were persisted at fill time from the
@@ -431,7 +440,9 @@ class Position:
         # CRITICAL FIX (2026-08-12): Fallback take-profit is only derived when both a
         # trusted entry fill price AND a trusted entry model probability are present.
         # It is capped at the model's fair value minus estimated exit fee and a 1c
-        # buffer, and it never exceeds the model's own edge. No unconditional 5c TP.
+        # buffer, and it never exceeds the model's own edge. The final value is also
+        # floored by the fee-aware net profit target so it cannot be a loss-making
+        # take-profit. No unconditional 5c TP.
         if self.take_profit_price_cents is None and self.entry_fill_price_cents:
             entry_ref = self.entry_fill_price_cents
             if (
@@ -441,15 +452,32 @@ class Position:
                 and self.entry_model_probability > self.entry_market_probability
             ):
                 try:
-                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                    from merid.event_venues.kalshi.fees import (
+                        compute_taker_fee_per_contract_cents,
+                        min_profitable_exit_price_cents,
+                    )
                     fair_value_cents = max(1, min(99, round(self.entry_model_probability * 100.0)))
-                    estimated_exit_fee_cents = calculate_kalshi_fee_cents(1, fair_value_cents)
+                    estimated_exit_fee = compute_taker_fee_per_contract_cents(fair_value_cents, self.size)
                     safety_buffer_cents = 1
-                    max_executable_tp_cents = fair_value_cents - estimated_exit_fee_cents - safety_buffer_cents
+                    max_executable_tp_cents = fair_value_cents - int(
+                        estimated_exit_fee.to_integral_value(rounding=ROUND_CEILING)
+                    ) - safety_buffer_cents
                     edge_cents = (self.entry_model_probability - self.entry_market_probability) * 100.0
                     capture_distance = int(edge_cents * 0.75)
                     target_cents = entry_ref + capture_distance
-                    fallback_tp = int(min(99, max_executable_tp_cents, target_cents))
+                    fee_aware_floor = min_profitable_exit_price_cents(
+                        entry_ref,
+                        self.size,
+                        gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
+                    )
+                    fallback_tp = int(
+                        min(
+                            99,
+                            max_executable_tp_cents,
+                            target_cents,
+                            fee_aware_floor or 99,
+                        )
+                    )
                     if fallback_tp > entry_ref and max_executable_tp_cents > entry_ref:
                         self.take_profit_price_cents = fallback_tp
                         self.take_profit_r_multiple = (fallback_tp - entry_ref) / (100.0 - entry_ref) if (100 - entry_ref) > 0 else 0.0
@@ -465,18 +493,15 @@ class Position:
             # and it is gated by the same round-trip fee buffer used downstream.
             if self.take_profit_price_cents is None and self.entry_fill_price_cents:
                 try:
-                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                    from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
                     entry_ref = int(self.entry_fill_price_cents)
                     if 0 < entry_ref < 100:
-                        estimated_entry_fee = calculate_kalshi_fee_cents(1, entry_ref)
-                        target_cents = entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS
-                        estimated_exit_fee = calculate_kalshi_fee_cents(1, target_cents)
-                        required_margin = max(
-                            TAKE_PROFIT_MIN_PROFIT_CENTS,
-                            estimated_entry_fee + estimated_exit_fee + 1,
+                        fallback_tp = min_profitable_exit_price_cents(
+                            entry_ref,
+                            self.size,
+                            gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
                         )
-                        fallback_tp = int(min(99, entry_ref + required_margin))
-                        if fallback_tp > entry_ref:
+                        if fallback_tp is not None and fallback_tp > entry_ref:
                             self.take_profit_price_cents = fallback_tp
                             self.take_profit_r_multiple = (
                                 (fallback_tp - entry_ref) / (100.0 - entry_ref)
@@ -848,14 +873,66 @@ class Position:
             current_price_cents: Current market price in cents
 
         Returns:
-            True if price has crossed take-profit level
+            True if price has crossed take-profit level and debounce has elapsed
         """
         if self.take_profit_price_cents is None:
             return False
 
-        # CRITICAL FIX (2026-07-16): Side-space — TP sits ABOVE entry in own-side cents
-        # for BOTH sides; trigger when own-side price rises to or above it
-        return current_price_cents >= self.take_profit_price_cents
+        # CRITICAL FIX (2026-08-27): Debounce TP on price spikes.
+        # The price must stay at or above the TP target for MERID_TP_DEBOUNCE_MS
+        # before the exit fires.  If price falls below TP (minus hysteresis)
+        # the debounce resets.
+        if current_price_cents < self.take_profit_price_cents:
+            if (
+                self.tp_debounce_first_seen_at is not None
+                and current_price_cents < self.take_profit_price_cents - self.tp_debounce_hysteresis_cents
+            ):
+                logger.info(
+                    "[TP-DEBOUNCE-RESET] position=%s price=%dc tp=%dc - price fell below TP, reset debounce",
+                    self.position_id[:8],
+                    current_price_cents,
+                    self.take_profit_price_cents,
+                )
+                self.tp_debounce_first_seen_at = None
+            return False
+
+        if MERID_TP_DEBOUNCE_MS <= 0:
+            # CRITICAL FIX (2026-07-16): Side-space — TP sits ABOVE entry in own-side cents
+            # for BOTH sides; trigger when own-side price rises to or above it
+            return True
+
+        now = time.monotonic()
+        if self.tp_debounce_first_seen_at is None:
+            self.tp_debounce_first_seen_at = now
+            logger.info(
+                "[TP-DEBOUNCE-START] position=%s price=%dc tp=%dc - debounce started",
+                self.position_id[:8],
+                current_price_cents,
+                self.take_profit_price_cents,
+            )
+            return False
+
+        elapsed_ms = (now - self.tp_debounce_first_seen_at) * 1000.0
+        if elapsed_ms >= MERID_TP_DEBOUNCE_MS:
+            logger.info(
+                "[TP-DEBOUNCE-FIRE] position=%s price=%dc tp=%dc elapsed=%.0fms/%dms - triggering",
+                self.position_id[:8],
+                current_price_cents,
+                self.take_profit_price_cents,
+                elapsed_ms,
+                MERID_TP_DEBOUNCE_MS,
+            )
+            return True
+
+        logger.debug(
+            "[TP-DEBOUNCE-PENDING] position=%s price=%dc tp=%dc elapsed=%.0fms/%dms",
+            self.position_id[:8],
+            current_price_cents,
+            self.take_profit_price_cents,
+            elapsed_ms,
+            MERID_TP_DEBOUNCE_MS,
+        )
+        return False
 
     def should_trigger_extreme_profit(self, current_price_cents: int, bid_cents: Optional[int] = None, ask_cents: Optional[int] = None) -> bool:
         """

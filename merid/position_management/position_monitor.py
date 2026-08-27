@@ -521,6 +521,7 @@ class PositionMonitor:
             "max_favorable_price_cents", "trailing_activated", "trailing_profit_zone_activated",
             "trailing_state", "trail_armed_at", "trail_started_at",
             "high_watermark_updated_at", "low_watermark_updated_at", "soft_stop_observations",
+            "tp_debounce_first_seen_at", "tp_debounce_hysteresis_cents",
             "hard_stop_confirmed", "break_even_triggered", "break_even_price_cents",
             "scale_out_triggered", "scale_out_remaining_size", "scale_out_r_multiple",
             "ratchet_activated", "ratchet_hold_until", "ratchet_floor_price_cents",
@@ -2139,17 +2140,14 @@ class PositionMonitor:
                 # Fallback TP from a trusted entry fill price, even without a stop-loss.
                 # This covers REST-rehydrated positions where model provenance is missing.
                 try:
-                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                    from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
                     entry_ref = position.entry_fill_price_cents or position.avg_entry_price_cents
-                    estimated_entry_fee = calculate_kalshi_fee_cents(1, entry_ref)
-                    target_cents = entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS
-                    estimated_exit_fee = calculate_kalshi_fee_cents(1, target_cents)
-                    required_margin = max(
-                        TAKE_PROFIT_MIN_PROFIT_CENTS,
-                        estimated_entry_fee + estimated_exit_fee + 1,
+                    fallback_tp = min_profitable_exit_price_cents(
+                        entry_ref,
+                        position.size,
+                        gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
                     )
-                    fallback_tp = int(min(99, entry_ref + required_margin))
-                    if fallback_tp > entry_ref:
+                    if fallback_tp is not None and fallback_tp > entry_ref:
                         position.take_profit_price_cents = fallback_tp
                         position.take_profit_r_multiple = (
                             (fallback_tp - entry_ref) / (100.0 - entry_ref)
@@ -3695,6 +3693,10 @@ class PositionMonitor:
             evaluate_exit_conditions,
             choose_exit_condition,
         )
+        from merid.event_venues.kalshi.order_identity import (
+            derive_exit_client_order_id,
+            derive_exit_intent_id,
+        )
 
         now = datetime.utcnow().isoformat()
         now_ts = time.monotonic()
@@ -3789,8 +3791,14 @@ class PositionMonitor:
             chosen_exit_price_cents=exit_price_cents,
             eligible_exit_reasons=eligible_reasons,
             suppressed_exit_reasons=suppressed_reasons,
-            order_intent_id=None,
-            order_client_order_id=None,
+            order_intent_id=derive_exit_intent_id(
+                position.entry_fill_id or position.position_id,
+                exit_reason.value,
+            ),
+            order_client_order_id=derive_exit_client_order_id(
+                position.entry_fill_id or position.position_id,
+                exit_reason.value,
+            ),
             order_exchange_id=None,
             order_price_cents=None,
             fill_price_cents=None,
@@ -4160,17 +4168,24 @@ class PositionMonitor:
 
             # The exit must be profitable after round-trip fee buffer.
             entry_ref = position.entry_fill_price_cents or position.avg_entry_price_cents
-            if entry_ref and exit_price_cents < entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS:
-                _bump_stop_counter(
-                    "exit_stop_rejected_spread_only",
-                    f"position={position.position_id[:8]} reason={exit_reason.value} exit={exit_price_cents}c entry={entry_ref}c",
+            if entry_ref:
+                from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
+                min_exit = min_profitable_exit_price_cents(
+                    entry_ref,
+                    position.size,
+                    gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
                 )
-                logger.error(
-                    "[PROFIT-EXIT-INVARIANT] position=%s reason=%s exit=%dc < entry=%dc + buffer=%dc - profit exit below round-trip buffer, blocking",
-                    position.position_id[:8], exit_reason.value, exit_price_cents,
-                    entry_ref, TAKE_PROFIT_MIN_PROFIT_CENTS,
-                )
-                return
+                if min_exit is not None and exit_price_cents < min_exit:
+                    _bump_stop_counter(
+                        "exit_stop_rejected_spread_only",
+                        f"position={position.position_id[:8]} reason={exit_reason.value} exit={exit_price_cents}c entry={entry_ref}c min_exit={min_exit}c",
+                    )
+                    logger.error(
+                        "[PROFIT-EXIT-INVARIANT] position=%s reason=%s exit=%dc < entry=%dc + fee_buffer=%dc - profit exit below round-trip buffer, blocking",
+                        position.position_id[:8], exit_reason.value, exit_price_cents,
+                        entry_ref, min_exit - entry_ref,
+                    )
+                    return
 
         # CRITICAL FIX (2026-08-22): Quarantine inherited/unknown-provenance positions.
         # Only bounded-loss, time-to-expiry, safety, or operator-approved exits are
