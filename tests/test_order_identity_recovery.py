@@ -467,12 +467,14 @@ async def test_timeout_after_server_receipt(client, attempt_store, monkeypatch):
 
     client.set_timeout_after_submit("once")
     result1 = await _route(intent)
-    assert result1.status == "submission_unknown", result1
-    assert result1.requires_recovery
+    # The broker query resolves the timeout immediately because the order is
+    # already resting on the exchange (price 50c does not cross ask 55c).
+    assert result1.status == "resting", result1
+    assert not result1.requires_recovery
 
     record = attempt_store.get_by_client_order_id(coid)
     assert record is not None
-    assert record.status == "SUBMISSION_UNKNOWN"
+    assert record.status == "ACKNOWLEDGED"
     assert record.client_order_id == coid
 
     # Retry with the same fingerprint and a fresh intent object.
@@ -879,7 +881,10 @@ class _FillBeforeAckPort:
         raise asyncio.TimeoutError("HTTP ack lost in flight")
 
     async def get_order(
-        self, order_id: Optional[str] = None, client_order_id: Optional[str] = None
+        self,
+        order_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+        market_id: Optional[str] = None,
     ) -> Optional[Order]:
         if client_order_id == self.coid:
             size = self._size or self.fill_size
@@ -899,7 +904,12 @@ class _FillBeforeAckPort:
         return None
 
     async def get_fills(
-        self, cursor: Optional[str] = None, since_ts: Optional[int] = None, limit: int = 200
+        self,
+        cursor: Optional[str] = None,
+        since_ts: Optional[int] = None,
+        limit: int = 200,
+        market_id: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> FillsResponse:
         if not self._submitted:
             return FillsResponse(fills=[])
@@ -987,31 +997,23 @@ async def test_fill_before_acknowledgement(attempt_store):
     intent.decision_id = coid
     finalize_order_identity(intent, store=attempt_store)
 
-    # The initial route times out: ack lost.
+    # The initial route times out: the ack is lost, but the broker query
+    # resolves the order to filled without waiting for the WebSocket fill.
     result = await _route(intent)
-    assert result.status == "submission_unknown", result
-
-    # Before the ack is polled back, a WebSocket fill arrives carrying the
-    # canonical client_order_id.
-    fills = await port.get_fills()
-    assert len(fills.fills) == 1
-    fill = fills.fills[0]
-    assert fill.client_order_id == coid
+    assert result.status == "filled_live", result
+    assert result.has_execution
+    assert result.order_id == order_id
 
     record = attempt_store.get_by_client_order_id(coid)
     assert record is not None
     assert record.order_attempt_id == intent.order_attempt_id
+    assert record.status == "FILLED"
 
-    # Apply the fill once, updating the existing attempt to FILLED.
-    attempt_store.update_status(
-        record.order_attempt_id,
-        "FILLED",
-        payload={
-            "fill_id": fill.fill_id,
-            "filled_size": str(fill.size),
-            "price_cents": fill.price_cents,
-        },
-    )
+    # The WebSocket fill that arrives later is a duplicate of the same fill.
+    fills = await port.get_fills()
+    assert len(fills.fills) == 1
+    fill = fills.fills[0]
+    assert fill.client_order_id == coid
 
     updated = attempt_store.get_by_client_order_id(coid)
     assert updated.status == "FILLED"
@@ -1091,12 +1093,20 @@ class _CancelFillRacePort:
         return CancelResult(success=True, order_id=order_id, new_status="canceled")
 
     async def get_order(
-        self, order_id: Optional[str] = None, client_order_id: Optional[str] = None
+        self,
+        order_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+        market_id: Optional[str] = None,
     ) -> Optional[Order]:
         return self._order
 
     async def get_fills(
-        self, cursor: Optional[str] = None, since_ts: Optional[int] = None, limit: int = 200
+        self,
+        cursor: Optional[str] = None,
+        since_ts: Optional[int] = None,
+        limit: int = 200,
+        market_id: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> FillsResponse:
         if not self._canceled:
             return FillsResponse(fills=[])

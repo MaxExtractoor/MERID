@@ -651,3 +651,39 @@ Shadow-mode telemetry in `data/shadow/cfb_rti/` records every candidate's
 `p_yes`, `p_no`, `net_edge_yes`, `net_edge_no`, and `rejection_reason`, which
 is the canonical source for diagnosing why one asset trades and another does
 not.  A quick replay of those files is in `tmp/replay_shadow.py`.
+
+## Hybrid model audit and containment (2026-08-26)
+
+### Production-safe containment toggles
+
+- `MERID_HYBRID_BACHELIER_ONLY=1` or `MERID_HYBRID_DISABLE_ALL_DELTAS=1`
+  disables every indicator/velocity/MACD/RSI/OBI/regime/FVG delta.  The live
+  decision uses the Bachelier baseline probability, but the model-
+  decomposition log still records the deltas for diagnosis.
+- `MERID_SHADOW_BACHELIER_ONLY=1` computes a parallel Bachelier-only decision
+  alongside the live hybrid decision and writes it to the model-decomposition
+  ledger.  The shadow is fully logged but never executed.
+- `MERID_MODEL_DECOMPOSITION_TELEMETRY=0` disables the new ledger.  The
+  default path is `data/logs/hybrid_model_decomposition.jsonl`.
+- `MERID_MODEL_CONTAINMENT_SIZE_SCALE` (default `1.0`): scales every live
+  position down to a minimum of one contract (100 cc).  Set to `0.0` to force
+  one-contract sizing; `0.25` for quarter-size canary.
+- `MERID_BACHELIER_ONLY_SIZE_SCALE` (default `0.0` when
+  `MERID_HYBRID_BACHELIER_ONLY` is active, otherwise `1.0`): extra size
+  reduction when the live signal is the Bachelier baseline only.
+
+### Audit artifacts
+
+- `merid.prediction.hybrid_audit` generates the three canonical ledgers:
+  `expiry_alpha_entries.csv`, `intracontract_exit_trades.csv`, and
+  `decision_to_settlement_audit.csv`.
+- `data/logs/hybrid_model_decomposition.jsonl` joins the raw model inputs,
+  each delta, the pre-clip and final probability, the live decision, and the
+  Bachelier-only decision per evaluation.  Settlement jobs can join on
+  `decision_id` to compute each component's directional contribution.
+- `tests/test_hybrid_delta_sign_correlation.py` asserts that synthetic
+  component contributions are positive and reports the held-to-expiry win
+  rate from `reports/last_24h_fills_with_pairing_and_settlement_*.csv`.
+  Set `MERID_HELD_EXPIRY_MIN_WIN_RATE` to enforce a threshold; set
+  `MERID_HYBRID_SIGN_CORRELATION_ASSERT=1` for future out-of-sample
+  component validation.

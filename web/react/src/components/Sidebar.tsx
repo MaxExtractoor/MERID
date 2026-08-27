@@ -21,52 +21,35 @@ interface SidebarProps {
   onToggleCollapse?: () => void;
 }
 
-/* ── 8-View Architecture Navigation ───────────────────────────────────── */
+/* ── Canonical Sidebar Groups ─────────────────────────────────────────── */
 
-// New 8-View Architecture Navigation (Consolidated from 20+ views)
-const DASHBOARD_NAV = [
-  {
-    stage: 'DASH',
-    label: 'Dashboard',
-    color: 'blue',
-    accent: 'from-blue-500 to-blue-600',
-    items: [
-      { name: 'Dashboard', href: 'dashboard', icon: LayoutDashboard },
-    ],
-  },
-] as const;
+const tradingCore = [{ label: 'Trading', stage: 'TRADE', color: 'emerald', accent: 'from-emerald-500 to-emerald-600', items: [
+  { name: 'Dashboard', href: 'dashboard', icon: LayoutDashboard },
+  { name: 'Markets', href: 'kalshi-dashboard', icon: LayoutDashboard },
+  { name: 'Portfolio', href: 'kalshi-portfolio', icon: Briefcase },
+  { name: 'Trade', href: 'trade', icon: Monitor },
+]}] as const;
 
-const OPERATIONS_NAV = [
-  {
-    stage: 'OPS',
-    label: 'Operations',
-    color: 'orange',
-    accent: 'from-orange-500 to-orange-600',
-    items: [
-      { name: 'Trade', href: 'trade', icon: Monitor },
-      { name: 'Monitor', href: 'monitor', icon: Briefcase },
-      { name: 'Grid', href: 'grid', icon: Grid },
-    ],
-  },
-] as const;
+const swarmIntelligence = [{ label: 'Swarm Intelligence', stage: 'SWARM', color: 'cyan', accent: 'from-cyan-500 to-cyan-600', items: [
+  { name: 'Grid', href: 'grid', icon: Grid },
+  { name: 'Operations', href: 'execute', icon: Gauge },
+]}] as const;
 
-const ANALYTICS_NAV = [
-  {
-    stage: 'ANALYTICS',
-    label: 'Analytics',
-    color: 'purple',
-    accent: 'from-purple-500 to-purple-600',
-    items: [
-      { name: 'Risk', href: 'risk', icon: Gauge },
-      { name: 'Calibration', href: 'calibration', icon: Crosshair },
-    ],
-  },
-] as const;
+const analytics = [{ label: 'Analytics', stage: 'ANALYTICS', color: 'purple', accent: 'from-purple-500 to-purple-600', items: [
+  { name: 'Risk', href: 'risk', icon: Gauge },
+  { name: 'Calibration', href: 'calibration', icon: Crosshair },
+]}] as const;
 
-const SYSTEM_NAV = [
+const operatorSection = [{ label: 'Operator', stage: 'OPERATOR', color: 'orange', accent: 'from-orange-500 to-orange-600', items: [
+  { name: 'Monitor', href: 'monitor', icon: Briefcase },
+]}] as const;
+
+const system = [{ label: 'System', stage: 'SYSTEM', color: 'slate', accent: 'from-slate-500 to-slate-600', items: [
   { name: 'Logs', href: 'logs', icon: Terminal },
   { name: 'Settings', href: 'settings', icon: SettingsIcon },
-] as const;
+]}] as const;
+
+const SECTIONS = [tradingCore, swarmIntelligence, analytics, operatorSection, system];
 
 // Color mapping for stage accents
 const STAGE_COLORS: Record<string, { text: string; bg: string; border: string; hover: string }> = {
@@ -220,68 +203,20 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
 
       {/* Navigation */}
       <nav className="flex-1 p-3 space-y-4 overflow-y-auto">
-        {/* Dashboard */}
-        <div className="space-y-3">
-          {DASHBOARD_NAV.map((stage) => (
-            <StageSection
-              key={stage.stage}
-              stage={stage as StageSectionProps['stage']}
-              current={current}
-              onChange={onChange}
-              collapsed={collapsed}
-              isLive={modeData ? isLive : undefined}
-            />
-          ))}
-        </div>
-
-        {/* Operations */}
-        <div className="space-y-3">
-          {OPERATIONS_NAV.map((stage) => (
-            <StageSection
-              key={stage.stage}
-              stage={stage as StageSectionProps['stage']}
-              current={current}
-              onChange={onChange}
-              collapsed={collapsed}
-              isLive={modeData ? isLive : undefined}
-            />
-          ))}
-        </div>
-
-        {/* Analytics */}
-        <div className="space-y-3">
-          {ANALYTICS_NAV.map((stage) => (
-            <StageSection
-              key={stage.stage}
-              stage={stage as StageSectionProps['stage']}
-              current={current}
-              onChange={onChange}
-              collapsed={collapsed}
-              isLive={modeData ? isLive : undefined}
-            />
-          ))}
-        </div>
-
-        {/* Divider */}
-        <div className="border-t border-slate-800 pt-3">
-          {!collapsed && (
-            <span className="px-3 text-[10px] font-semibold text-slate-600 uppercase tracking-wider mb-2 block">
-              System
-            </span>
-          )}
-          <div className="space-y-0.5">
-            {SYSTEM_NAV.map((item) => (
-              <NavItem
-                key={item.href}
-                item={item}
+        {SECTIONS.map((section) => (
+          <div key={section[0].stage} className="space-y-3">
+            {section.map((stage) => (
+              <StageSection
+                key={stage.stage}
+                stage={stage as StageSectionProps['stage']}
                 current={current}
                 onChange={onChange}
                 collapsed={collapsed}
-                stageColor="slate"
+                isLive={modeData ? isLive : undefined}
               />
             ))}
           </div>
-        </div>
+        ))}
       </nav>
       
       {/* Bottom Status */}

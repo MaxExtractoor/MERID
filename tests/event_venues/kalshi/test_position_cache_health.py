@@ -12,6 +12,21 @@ import time
 import types
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _et_ticker_body(dt_utc: datetime) -> str:
+    """Convert a UTC time to canonical year-first ET ticker body.
+
+    Kalshi 15m crypto tickers encode window end as YYMONDDHHMM[SS] ET.
+    Test fixtures must use this format rather than the legacy UTC day-first
+    format so that ``_is_expired_ticker`` parses them consistently with
+    production tickers.
+    """
+    return dt_utc.astimezone(_ET).strftime("%y%b%d%H%M%S")
+
 
 from merid.event_venues.kalshi.position_cache import KalshiPositionCache, _is_expired_ticker
 
@@ -157,28 +172,28 @@ class TestExpiredTickerFiltering:
         """Ticker in the future should not be expired."""
         # Create a ticker for 30 minutes in the future
         future_time = datetime.now(timezone.utc) + timedelta(minutes=30)
-        ticker = f"KXBTC15M-{future_time.strftime('%d%b%H%M%S')}-50"
+        ticker = f"KXBTC15M-{_et_ticker_body(future_time)}-50"
         assert not _is_expired_ticker(ticker)
 
     def test_is_expired_ticker_expired_past(self):
         """Ticker in the past should be expired."""
         # Create a ticker for 30 minutes ago
         past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
-        ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+        ticker = f"KXBTC15M-{_et_ticker_body(past_time)}-50"
         assert _is_expired_ticker(ticker)
 
     def test_is_expired_ticker_buffer_window(self):
         """Ticker within 15-minute settlement buffer should not be expired."""
         # Create a ticker for 10 minutes ago (within 15-minute buffer)
         past_time = datetime.now(timezone.utc) - timedelta(minutes=10)
-        ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+        ticker = f"KXBTC15M-{_et_ticker_body(past_time)}-50"
         assert not _is_expired_ticker(ticker)
 
     def test_is_expired_ticker_exactly_buffer_boundary(self):
         """Ticker beyond the 15-minute settlement buffer should be expired."""
         # Create a ticker for 20 minutes ago (past the 15-minute buffer)
         past_time = datetime.now(timezone.utc) - timedelta(minutes=20)
-        ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+        ticker = f"KXBTC15M-{_et_ticker_body(past_time)}-50"
         assert _is_expired_ticker(ticker)
 
     def test_is_expired_ticker_invalid_format(self):
@@ -196,7 +211,7 @@ class TestExpiredTickerFiltering:
         """Ticker for window that just opened should not be expired."""
         # Create a ticker 10 minutes ago (within the 15-minute settlement buffer)
         window_start = datetime.now(timezone.utc) - timedelta(minutes=10)
-        ticker = f"KXBTC15M-{window_start.strftime('%d%b%H%M%S')}-50"
+        ticker = f"KXBTC15M-{_et_ticker_body(window_start)}-50"
         assert not _is_expired_ticker(ticker)
 
 
@@ -210,12 +225,12 @@ class TestClearExpiredPositions:
 
         # Add a closed-but-unsettled position and a settled position.
         past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
-        closed_ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+        closed_ticker = f"KXBTC15M-{_et_ticker_body(past_time)}-50"
         past_time2 = datetime.now(timezone.utc) - timedelta(minutes=35)
-        settled_ticker = f"KXETH15M-{past_time2.strftime('%d%b%H%M%S')}-50"
+        settled_ticker = f"KXETH15M-{_et_ticker_body(past_time2)}-50"
 
         future_time = datetime.now(timezone.utc) + timedelta(minutes=30)
-        valid_ticker = f"KXSOL15M-{future_time.strftime('%d%b%H%M%S')}-50"
+        valid_ticker = f"KXSOL15M-{_et_ticker_body(future_time)}-50"
 
         cache._positions[closed_ticker] = type('CachedPosition', (), {
             'contracts': 10,
@@ -267,7 +282,7 @@ class TestClearExpiredPositions:
 
         # Add only valid positions
         future_time = datetime.now(timezone.utc) + timedelta(minutes=30)
-        valid_ticker = f"KXETH15M-{future_time.strftime('%d%b%H%M%S')}-50"
+        valid_ticker = f"KXETH15M-{_et_ticker_body(future_time)}-50"
 
         cache._positions[valid_ticker] = type('CachedPosition', (), {
             'contracts': 5,
@@ -293,7 +308,7 @@ class TestClearExpiredPositions:
         cache = KalshiPositionCache()
 
         past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
-        zero_ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+        zero_ticker = f"KXBTC15M-{_et_ticker_body(past_time)}-50"
 
         cache._positions[zero_ticker] = type('CachedPosition', (), {
             'contracts': 0,
@@ -317,7 +332,7 @@ class TestClearExpiredPositions:
         cache = KalshiPositionCache()
 
         past_time = datetime.now(timezone.utc) - timedelta(minutes=30)
-        settled_ticker = f"KXBTC15M-{past_time.strftime('%d%b%H%M%S')}-50"
+        settled_ticker = f"KXBTC15M-{_et_ticker_body(past_time)}-50"
 
         cache._positions[settled_ticker] = type('CachedPosition', (), {
             'contracts': 1,

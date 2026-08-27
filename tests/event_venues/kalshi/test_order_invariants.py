@@ -370,7 +370,8 @@ class TestIdempotentOrderStore:
             store.mark_submitted(f"coid-{i}", f"venue-{i}")
             store.mark_filled(f"coid-{i}", 5)
         total = store.filled_count_for_contract("KXBTC", "yes", "btc_15m")
-        assert total == 15
+        # filled_count_for_contract returns canonical centi-contracts
+        assert total == 1500
 
     def test_has_live_order(self):
         store = IdempotentOrderStore()

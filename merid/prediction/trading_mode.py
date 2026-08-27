@@ -33,10 +33,12 @@ class TradingMode(str, Enum):
     - LIVE: Real money execution against Kalshi production API
     - PAPER: Simulated execution with real market data
     - MOCK: Fully synthetic execution for testing
+    - SIM: Legacy alias for synthetic/mock execution (treated as MOCK by the router)
     """
     LIVE = "live"
     PAPER = "paper"
     MOCK = "mock"
+    SIM = "sim"
 
     def is_live(self) -> bool:
         """True if this is live trading mode."""
@@ -105,6 +107,7 @@ def resolve_trading_mode(value: Optional[Union[str, TradingMode, Any]]) -> Tradi
         "paper": TradingMode.PAPER,
         "mock": TradingMode.MOCK,
         "test": TradingMode.MOCK,
+        "sim": TradingMode.SIM,
         "simulation": TradingMode.MOCK,
     }
 

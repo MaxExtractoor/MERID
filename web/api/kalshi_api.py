@@ -3255,7 +3255,7 @@ async def place_order(
             logger.error(
                 "[KALSHI-API] Missing stop_loss_price_cents for order %s - "
                 "cannot proceed without exit policy (invariant violation)",
-                client_order_id
+                ticker
             )
             raise HTTPException(
                 status_code=400,

@@ -117,11 +117,12 @@ class KalshiVenueClientExecutionPort:
         self,
         order_id: Optional[str] = None,
         client_order_id: Optional[str] = None,
+        market_id: Optional[str] = None,
     ) -> Optional[Order]:
         if client_order_id:
-            result = await self._client.get_order_by_client_id_result(client_order_id)
+            result = await self._client.get_order_by_client_id_result(client_order_id, market_id=market_id)
         elif order_id:
-            result = await self._client.get_order_result(order_id)
+            result = await self._client.get_order_result(order_id, market_id)
         else:
             return None
 
@@ -178,8 +179,12 @@ class KalshiVenueClientExecutionPort:
         cursor: Optional[str] = None,
         since_ts: Optional[int] = None,
         limit: int = 200,
+        market_id: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> FillsResponse:
-        result = await self._client.get_fills(limit=limit, since_ts=since_ts)
+        result = await self._client.get_fills(
+            limit=limit, since_ts=since_ts, ticker=market_id, order_id=order_id
+        )
         if not result.success or result.data is None:
             return FillsResponse(fills=[], cursor=None)
         raw_fills = _aggregate_v2_fills(result.data)
@@ -360,6 +365,12 @@ def _placed_order_to_order(placed: PlacedOrder) -> Order:
 def _venue_position_to_position(pos: VenuePosition) -> Position:
     # Preserve the source side exactly; fail-closed normalization happens at the
     # port -> ledger adapter, not here, so missing/empty outcomes remain detectable.
+    _exchange_index = pos.exchange_index
+    if _exchange_index is None and pos.raw_data:
+        try:
+            _exchange_index = int(pos.raw_data.get("exchange_index"))
+        except Exception:
+            _exchange_index = None
     return Position(
         ticker=pos.market_id,
         outcome=pos.outcome_id or "",
@@ -368,6 +379,7 @@ def _venue_position_to_position(pos: VenuePosition) -> Position:
         realized_pnl_usd=pos.realized_pnl,
         unrealized_pnl_usd=pos.unrealized_pnl,
         raw_data={"venue_position": pos.raw_data} if pos.raw_data else {},
+        exchange_index=_exchange_index,
     )
 
 

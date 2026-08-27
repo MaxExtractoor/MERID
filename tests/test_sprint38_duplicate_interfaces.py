@@ -30,7 +30,7 @@ RENAMES = {
 class TestRenamedInterfaces:
     """Verify renamed interfaces exist in their target files."""
 
-    @pytest.mark.parametrize("name,filename", list(RENAMES.items()))
+    @pytest.mark.parametrize("name,filename", sorted(RENAMES.items()))
     def test_renamed_interface_exists(self, name: str, filename: str):
         for d in [VIEWS_DIR, COMPONENTS_DIR]:
             fpath = d / filename
@@ -72,7 +72,7 @@ class TestOldNamesRemoved:
         ("TradesTable.tsx", "TradeEvent"),
     }
 
-    @pytest.mark.parametrize("filename,old_name", list(OLD_NAMES))
+    @pytest.mark.parametrize("filename,old_name", sorted(OLD_NAMES))
     def test_old_name_removed(self, filename: str, old_name: str):
         for d in [VIEWS_DIR, COMPONENTS_DIR]:
             fpath = d / filename

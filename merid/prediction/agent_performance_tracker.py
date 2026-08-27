@@ -270,7 +270,7 @@ class AgentPerformanceTracker:
                 from agents.reflection.core import DecisionOutcome as DO
                 if ref.outcome == DO.PENDING and market_id in ref.energy_id:
                     # price_change proxy: positive for win, negative for loss
-                    price_change = float(profit_usd) / max(record.contracts * record.entry_price_cents / 100.0, 0.01)
+                    price_change = float(profit_usd) / max(float(record.contracts) * record.entry_price_cents / 100.0, 0.01)
                     reflection_sys.validate_market_outcome(
                         reflection_id=ref.reflection_id,
                         actual_price_change=price_change,
@@ -328,7 +328,7 @@ class AgentPerformanceTracker:
             else:
                 pnl_cents = (entry_price_cents - settlement_price_cents) * contracts
 
-            profit_usd = Decimal(str(round(pnl_cents / 100.0, 4)))
+            profit_usd = Decimal(str(round(float(pnl_cents) / 100.0, 4)))
 
             logger.info(
                 "record_outcome: %s settled_yes=%s pnl=$%.2f agent=%s",

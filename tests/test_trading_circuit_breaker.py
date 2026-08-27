@@ -142,6 +142,91 @@ class TestLiveFillHalt:
         assert not breaker.halted
 
 
+class TestAutoResumeUnmatched:
+    def test_auto_resume_requires_unmatched_live_exchange_fill_reason(self):
+        breaker = get_trading_circuit_breaker()
+        breaker.halt("some_other_reason")
+        assert breaker.halted
+        assert not breaker.maybe_auto_resume_unmatched(
+            exchange_positions_count=0,
+            open_orders_count=0,
+            fill_state={"found": True, "resolved": True, "unmatched": False},
+            recent_unmatched_count=0,
+        )
+        assert breaker.halted
+
+    def test_auto_resume_blocked_with_live_positions(self):
+        breaker = get_trading_circuit_breaker()
+        breaker.halt(
+            "unmatched_live_exchange_fill",
+            metadata={"fill_id": "fid-123"},
+        )
+        assert not breaker.maybe_auto_resume_unmatched(
+            exchange_positions_count=1,
+            open_orders_count=0,
+            fill_state={"found": True, "resolved": True, "unmatched": False},
+            recent_unmatched_count=0,
+        )
+        assert breaker.halted
+
+    def test_auto_resume_blocked_with_open_orders(self):
+        breaker = get_trading_circuit_breaker()
+        breaker.halt(
+            "unmatched_live_exchange_fill",
+            metadata={"fill_id": "fid-123"},
+        )
+        assert not breaker.maybe_auto_resume_unmatched(
+            exchange_positions_count=0,
+            open_orders_count=1,
+            fill_state={"found": True, "resolved": True, "unmatched": False},
+            recent_unmatched_count=0,
+        )
+        assert breaker.halted
+
+    def test_auto_resume_blocked_with_other_unmatched_fills(self):
+        breaker = get_trading_circuit_breaker()
+        breaker.halt(
+            "unmatched_live_exchange_fill",
+            metadata={"fill_id": "fid-123"},
+        )
+        assert not breaker.maybe_auto_resume_unmatched(
+            exchange_positions_count=0,
+            open_orders_count=0,
+            fill_state={"found": True, "resolved": True, "unmatched": False},
+            recent_unmatched_count=1,
+        )
+        assert breaker.halted
+
+    def test_auto_resume_blocked_when_fill_unresolved(self):
+        breaker = get_trading_circuit_breaker()
+        breaker.halt(
+            "unmatched_live_exchange_fill",
+            metadata={"fill_id": "fid-123"},
+        )
+        assert not breaker.maybe_auto_resume_unmatched(
+            exchange_positions_count=0,
+            open_orders_count=0,
+            fill_state={"found": True, "resolved": False, "unmatched": True, "unmatched_reason": "no_matching_intent"},
+            recent_unmatched_count=0,
+        )
+        assert breaker.halted
+
+    def test_auto_resume_succeeds_when_all_safe(self):
+        breaker = get_trading_circuit_breaker()
+        breaker.halt(
+            "unmatched_live_exchange_fill",
+            metadata={"fill_id": "fid-123"},
+        )
+        assert breaker.halted
+        assert breaker.maybe_auto_resume_unmatched(
+            exchange_positions_count=0,
+            open_orders_count=0,
+            fill_state={"found": True, "resolved": True, "unmatched": False, "intent_id": "intent-1"},
+            recent_unmatched_count=0,
+        )
+        assert not breaker.halted
+
+
 class TestOrderIdentityValidation:
     def test_valid_intent_passes(self):
         intent = OrderIntent(
@@ -151,6 +236,7 @@ class TestOrderIdentityValidation:
             price_cents=50,
             count=1,
             client_order_id="client_abc",
+            order_attempt_id="attempt_1",
             intent_id="intent_abc",
             run_id="run_1",
             process_id="pid_1",
@@ -194,6 +280,7 @@ class TestOrderIdentityValidation:
             price_cents=50,
             count=1,
             client_order_id="client_abc",
+            order_attempt_id="attempt_1",
             intent_id="intent_abc",
             run_id="run_1",
             process_id="pid_1",
@@ -213,6 +300,7 @@ class TestOrderIdentityValidation:
             price_cents=50,
             count=1,
             client_order_id="client_abc",
+            order_attempt_id="attempt_1",
             intent_id="intent_abc",
             run_id="run_1",
             process_id="pid_1",

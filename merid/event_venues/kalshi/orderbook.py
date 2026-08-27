@@ -195,6 +195,10 @@ class LocalOrderbook:
         self._initialized = False
         self._last_seq: Optional[int] = None
         self._snapshot_ts: Optional[float] = None
+        # Kalshi's use_yes_price flag controls whether NO-side prices in the
+        # stream are quoted in YES-space (price of YES) or NO-space.  When True,
+        # NO prices must be converted to NO-space (100 - p) before storage.
+        self._use_yes_price: bool = False
 
     @property
     def initialized(self) -> bool:
@@ -232,6 +236,11 @@ class LocalOrderbook:
         self._yes_level_seq.clear()
         self._no_level_seq.clear()
 
+        # Kalshi's use_yes_price flag controls whether NO-side prices in the
+        # stream are YES-space.  Persist it across snapshots/deltas.
+        if "use_yes_price" in snapshot:
+            self._use_yes_price = bool(snapshot["use_yes_price"])
+
         # Parse yes side
         # CRITICAL FIX (2026-08-03): Unit-robust price normalization.
         # Callers now pass prices as either:
@@ -240,10 +249,14 @@ class LocalOrderbook:
         # Float inputs are always treated as dollars and converted to cents;
         # integer inputs are used as-is.  This removes the previous heuristic
         # that mis-classified sub-penny cent values as dollars.
-        def _to_cents(price) -> int:
+        def _to_cents(price, convert_from_yes_space: bool = False) -> int:
             if isinstance(price, float):
-                return int(round(price * 100))
-            return int(price)
+                price_cents = int(round(price * 100))
+            else:
+                price_cents = int(price)
+            if convert_from_yes_space:
+                price_cents = 100 - price_cents
+            return price_cents
 
         snap_seq = snapshot.get("seq") or snapshot.get("sequence") or 0
 
@@ -259,12 +272,13 @@ class LocalOrderbook:
                         self.yes_levels[price_cents] = int(size)
                         self._yes_level_seq[price_cents] = snap_seq
 
-        # Parse no side
+        # Parse no side.  When use_yes_price is set, NO-side prices arrive as
+        # YES-space (price of YES) and must be converted to NO-space.
         for level in snapshot.get("no", []):
             if isinstance(level, (list, tuple)) and len(level) >= 2:
                 price, size = level[0], level[1]
                 if size > 0:
-                    price_cents = _to_cents(price)
+                    price_cents = _to_cents(price, convert_from_yes_space=self._use_yes_price)
                     # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
                     # Clamp to valid range to handle rounding edge cases
                     price_cents = max(1, min(99, price_cents))
@@ -321,6 +335,11 @@ class LocalOrderbook:
             logger.error("[ORDERBOOK-SIDE-INVALID] Discarding delta: %s", side_err)
             return
         
+        # Kalshi's use_yes_price flag controls whether NO-side prices in the
+        # stream are YES-space.  Persist it across snapshots/deltas.
+        if "use_yes_price" in delta:
+            self._use_yes_price = bool(delta["use_yes_price"])
+
         # Normalize WS format (price_dollars, delta_fp) to internal format (price_cents, size_delta)
         # WS may send numbers as strings, so convert to float first
         if "price_dollars" in delta:
@@ -336,6 +355,10 @@ class LocalOrderbook:
 
         if price is None:
             return
+
+        # If NO-side prices are quoted in YES-space, convert to NO-space.
+        if side == "no" and self._use_yes_price:
+            price = 100 - price
 
         # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
         # Clamp to valid range to handle rounding edge cases

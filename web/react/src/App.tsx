@@ -15,6 +15,10 @@ const Calibration = lazy(() => import("./views/Calibration"));
 const Logs = lazy(() => import("./views/Logs"));
 const Settings = lazy(() => import("./views/Settings"));
 
+// Legacy Kalshi views retained for deep links
+const KalshiDashboardView = lazy(() => import("./views/KalshiDashboardView"));
+const KalshiPortfolioView = lazy(() => import("./views/KalshiPortfolioView"));
+
 // Optimized UI Components
 import ErrorBoundary from "./components/ErrorBoundary";
 import KalshiErrorBoundary from "./components/KalshiErrorBoundary";
@@ -41,6 +45,8 @@ const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentT
   calibration: Calibration,
   logs: Logs,
   settings: Settings,
+  "kalshi-dashboard": KalshiDashboardView,
+  "kalshi-portfolio": KalshiPortfolioView,
 };
 
 // Configure TanStack Query
@@ -61,8 +67,12 @@ function FillToastWatcher() {
 
 // Zero-lag view renderer with memoization
 const ViewRenderer = React.memo(({ view, onNavigate }: { view: View; onNavigate: (v: View) => void }) => {
+  // Legacy Kalshi deep-link views
+  if (view === "kalshi-dashboard") return <KalshiDashboardView />;
+  if (view === "kalshi-portfolio") return <KalshiPortfolioView />;
+
   const Component = VIEW_COMPONENTS[view];
-  
+
   if (!Component) {
     return (
       <div className="flex items-center justify-center h-full">

@@ -13,10 +13,97 @@ Canonical formulas:
 Reference: pillarlabai.com/blog/how-kalshi-contracts-work
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 import logging
+import math
+import os
 
 logger = logging.getLogger(__name__)
+
+
+# 2026-08-26: Cents-based, fee-aware edge threshold for Kalshi 15m crypto.
+# A flat fractional threshold is the wrong instrument for tick-quantized
+# contracts where 1% = 1 cent and the taker fee is price-dependent.
+#
+# Maker fee assumption: the 15m crypto markets currently carry no maker fee
+# (post-only), but this can change.  Set MERID_MAKER_FEE_CENTS to override.
+DEFAULT_MAKER_FEE_CENTS = float(os.environ.get("MERID_MAKER_FEE_CENTS", "0.0"))
+
+# Per-asset adverse-selection / liquidity buffer.  BTC is the only 15m crypto
+# with enough maker volume that resting orders can be hit without excessive
+# adverse selection; the smaller strips behave as taker-only, thin books.
+DEFAULT_ADVERSITY_BUFFER_CENTS = 1
+ASSET_ADVERSITY_BUFFER_CENTS = {
+    "BTC": 0,
+    "ETH": 1,
+    "SOL": 1,
+    "XRP": 1,
+    "DOGE": 1,
+}
+
+# Emergency revert: set MERID_ENABLE_CENTS_EDGE_GATE=0 to restore the legacy
+# flat-fraction gates.
+CENTS_EDGE_GATE_ENABLED = os.environ.get("MERID_ENABLE_CENTS_EDGE_GATE", "1").lower() in ("1", "true", "yes")
+
+
+def required_edge_cents(
+    price_cents: Union[int, float],
+    liquidity_role: Optional[str] = None,
+    asset: Optional[str] = None,
+    *,
+    spread_cents: Optional[int] = None,
+    fee_per_contract_cents: Optional[float] = None,
+) -> int:
+    """Minimum gross edge (in cents) an entry must clear.
+
+    The edge must cover the liquidity cost, the per-contract fee, and a one-cent
+    tick buffer plus an asset-specific adverse-selection allowance.
+
+    Args:
+        price_cents: Expected entry price for the selected outcome (1-99).
+        liquidity_role: "maker" or "taker".  Defaults to taker.
+        asset: Canonical asset (BTC, ETH, SOL, XRP, DOGE).
+        spread_cents: Observable bid-ask spread in cents for this outcome.
+            If None, a conservative default is used.
+        fee_per_contract_cents: Explicit per-contract fee in cents.  If None,
+            the Kalshi fee schedule is used for taker; maker uses
+            DEFAULT_MAKER_FEE_CENTS.
+
+    Returns:
+        Minimum edge in whole cents (>= 1).
+    """
+    price_cents = int(price_cents)
+    if price_cents <= 0 or price_cents >= 100:
+        return 1
+
+    role = (liquidity_role or "taker").lower()
+    if role not in ("maker", "taker"):
+        role = "taker"
+
+    resolved_asset = (asset or "UNKNOWN").upper()
+    adversity = ASSET_ADVERSITY_BUFFER_CENTS.get(resolved_asset, DEFAULT_ADVERSITY_BUFFER_CENTS)
+
+    # Fee per contract
+    if fee_per_contract_cents is not None:
+        fee = float(fee_per_contract_cents)
+    else:
+        if role == "maker":
+            fee = DEFAULT_MAKER_FEE_CENTS
+        else:
+            from merid.event_venues.kalshi.fees import calculate_kalshi_fee_per_contract_cents
+            fee = calculate_kalshi_fee_per_contract_cents(1, price_cents)
+
+    # Spread cost: full for taker, half (rounded up) for maker.
+    if spread_cents is None:
+        default_spread = 2 if role == "taker" else 1
+        raw_spread = default_spread
+    else:
+        raw_spread = int(spread_cents)
+    spread_cost = math.ceil(raw_spread / 2.0) if role == "maker" else raw_spread
+
+    # Buffers: at least one cent (the tick) plus adverse selection.
+    required = fee + spread_cost + 1 + adversity
+    return max(1, math.ceil(required))
 
 
 def compute_canonical_edges(
@@ -77,28 +164,39 @@ def select_winner_side(
     edge_yes: float,
     edge_no: float,
     min_edge: float = 0.0,
+    min_edge_yes: Optional[float] = None,
+    min_edge_no: Optional[float] = None,
     epsilon: float = 1e-6,
 ) -> str:
     """Select winning side based on edge comparison.
-    
+
     Args:
         edge_yes: Edge on YES contracts (fraction)
         edge_no: Edge on NO contracts (fraction)
         min_edge: Minimum positive edge threshold (fraction)
+        min_edge_yes: Optional per-side threshold for YES (fraction).
+            Falls back to ``min_edge`` if not supplied.
+        min_edge_no: Optional per-side threshold for NO (fraction).
+            Falls back to ``min_edge`` if not supplied.
         epsilon: Tolerance for edge comparison (fraction)
-        
+
     Returns:
         "yes", "no", or "none"
-        
+
     Rules:
         - If both edges < 0, return "none"
-        - If edge_yes > edge_no + epsilon and edge_yes >= min_edge - epsilon, return "yes"
-        - If edge_no > edge_yes + epsilon and edge_no >= min_edge - epsilon, return "no"
+        - If edge_yes > edge_no + epsilon and edge_yes >= min_yes - epsilon, return "yes"
+        - If edge_no > edge_yes + epsilon and edge_no >= min_no - epsilon, return "no"
         - If edges are within epsilon, return "none" (tie)
-        
+
     CRITICAL FIX: Use epsilon-based threshold comparison to avoid boundary-condition bugs.
     Changed from >= min_edge to >= min_edge - epsilon to handle floating-point precision.
     """
+    # Per-side thresholds allow fee-aware gates: YES and NO can have different
+    # costs because their market prices (and therefore fees and spreads) differ.
+    min_yes = min_edge if min_edge_yes is None else min_edge_yes
+    min_no = min_edge if min_edge_no is None else min_edge_no
+
     # Both edges negative (not just below threshold)
     if edge_yes < 0 and edge_no < 0:
         logger.debug(
@@ -106,23 +204,23 @@ def select_winner_side(
             edge_yes, edge_no
         )
         return "none"
-    
+
     # Check if YES wins
-    if edge_yes > edge_no + epsilon and edge_yes >= min_edge - epsilon:
+    if edge_yes > edge_no + epsilon and edge_yes >= min_yes - epsilon:
         logger.debug(
-            "[WINNER-SELECTION] YES wins: edge_yes=%.4f > edge_no=%.4f (diff=%.4f) >= min_edge-epsilon=%.4f",
-            edge_yes, edge_no, edge_yes - edge_no, min_edge - epsilon
+            "[WINNER-SELECTION] YES wins: edge_yes=%.4f > edge_no=%.4f (diff=%.4f) >= min_yes-epsilon=%.4f",
+            edge_yes, edge_no, edge_yes - edge_no, min_yes - epsilon
         )
         return "yes"
-    
+
     # Check if NO wins
-    if edge_no > edge_yes + epsilon and edge_no >= min_edge - epsilon:
+    if edge_no > edge_yes + epsilon and edge_no >= min_no - epsilon:
         logger.debug(
-            "[WINNER-SELECTION] NO wins: edge_no=%.4f > edge_yes=%.4f (diff=%.4f) >= min_edge-epsilon=%.4f",
-            edge_no, edge_yes, edge_no - edge_yes, min_edge - epsilon
+            "[WINNER-SELECTION] NO wins: edge_no=%.4f > edge_yes=%.4f (diff=%.4f) >= min_no-epsilon=%.4f",
+            edge_no, edge_yes, edge_no - edge_yes, min_no - epsilon
         )
         return "no"
-    
+
     # Tie or too close to call
     logger.debug(
         "[WINNER-SELECTION] Tie/too close: edge_yes=%.4f edge_no=%.4f diff=%.4f < epsilon=%.4f -> none",

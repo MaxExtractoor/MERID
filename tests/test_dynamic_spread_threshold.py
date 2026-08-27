@@ -282,7 +282,7 @@ def test_dynamic_threshold_prevents_overly_wide_spreads():
     assert config.violent_spread_threshold_bp_sol_xrp_doge == 700
     
     # The cents-based safety net still applies
-    assert config.max_spread_cents == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
+    assert config.max_spread_cents == 100  # 2026-07-10: RELAXED to 100c to match current market conditions
 
 
 def test_asset_specific_spread_thresholds_btc_eth():

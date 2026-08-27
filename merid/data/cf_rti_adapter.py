@@ -17,6 +17,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import threading
@@ -28,6 +29,13 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+from merid.data.price_precision import (
+    format_price as _format_price,
+    get_asset_settlement_digits,
+    parse_price,
+    retained_decimal_places,
+    settlement_round,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.data.cf_rti_adapter")
@@ -76,6 +84,10 @@ class CfbRtiObservation:
       - ``execution_eligible``: True only when the source timestamp is valid,
         the feed is fresh on both wall and monotonic clocks, ordering holds,
         and all other health gates pass.  Downstream trading code must check it.
+
+    The ``value`` / ``cfb_60s_average`` float fields are retained for backward
+    compatibility.  The canonical Decimal fields are ``value_decimal`` and
+    ``cfb_60s_average_decimal``.
     """
     asset: str
     cfb_symbol: str
@@ -90,6 +102,46 @@ class CfbRtiObservation:
     timestamp_quality: str = "source"
     execution_eligible: bool = True
     price_source_health: str = "healthy"
+    # Settlement-grade precision fields
+    value_decimal: Optional[Decimal] = None
+    cfb_60s_average_decimal: Optional[Decimal] = None
+    raw_value: Optional[str] = None
+    retained_digits: Optional[int] = None
+    market_settlement_digits: Optional[int] = None
+
+    def __post_init__(self):
+        # Derive Decimal values from float/string inputs for backward-compatible
+        # construction (e.g. tests passing value=65000.0).
+        if self.value_decimal is None:
+            if self.raw_value is not None:
+                object.__setattr__(self, "value_decimal", parse_price(self.raw_value))
+            elif self.value is not None:
+                object.__setattr__(self, "value_decimal", parse_price(self.value))
+        if self.value is None and self.value_decimal is not None:
+            object.__setattr__(self, "value", float(self.value_decimal))
+        if self.cfb_60s_average_decimal is None and self.cfb_60s_average is not None:
+            object.__setattr__(self, "cfb_60s_average_decimal", parse_price(self.cfb_60s_average))
+        if self.cfb_60s_average is None and self.cfb_60s_average_decimal is not None:
+            object.__setattr__(self, "cfb_60s_average", float(self.cfb_60s_average_decimal))
+        if self.raw_value is None and self.value_decimal is not None:
+            object.__setattr__(self, "raw_value", str(self.value_decimal))
+        if self.retained_digits is None and self.value_decimal is not None:
+            object.__setattr__(self, "retained_digits", retained_decimal_places(self.value_decimal))
+
+    def settlement_price(self) -> Optional[Decimal]:
+        """Return the 60s average when available, else the latest tick, as Decimal."""
+        if self.cfb_60s_average_decimal is not None and self.cfb_60s_average_decimal.is_finite() and self.cfb_60s_average_decimal > 0:
+            return self.cfb_60s_average_decimal
+        if self.value_decimal is not None and self.value_decimal.is_finite() and self.value_decimal > 0:
+            return self.value_decimal
+        return None
+
+    def quantized_settlement_price(self, digits: int) -> Optional[Decimal]:
+        """Return the settlement price quantized to ``digits`` decimal places."""
+        price = self.settlement_price()
+        if price is None:
+            return None
+        return settlement_round(price, digits)
 
     @property
     def age_ms(self) -> Optional[int]:
@@ -178,11 +230,13 @@ def _ensure_kalshi_stream() -> Optional[Any]:
                 reason = _state.last_failure_reason_by_asset.get(asset, "unknown")
                 logger.warning(
                     "[CF-RTI-ADAPTER] stream_observation_rejected "
-                    "asset=%s cfb_symbol=%s value=%.4f "
+                    "asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s "
                     "timestamp_quality=%s execution_eligible=%s reason=%s",
                     asset,
                     cfb_symbol,
-                    obs.value,
+                    _format_price(asset, obs.value_decimal),
+                    obs.retained_digits,
+                    obs.market_settlement_digits,
                     obs.timestamp_quality,
                     obs.execution_eligible,
                     reason,
@@ -195,11 +249,13 @@ def _ensure_kalshi_stream() -> Optional[Any]:
             _state.last_failure_reason_by_asset[asset] = ""
             logger.info(
                 "[CF-RTI-ADAPTER] stream_observation_accepted "
-                "asset=%s cfb_symbol=%s value=%.4f "
+                "asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s "
                 "source_ts_ms=%s observed_ts_ms=%s age_ms=%s timestamp_quality=%s execution_eligible=%s",
                 asset,
                 cfb_symbol,
-                validated.value,
+                _format_price(asset, validated.value_decimal),
+                validated.retained_digits,
+                validated.market_settlement_digits,
                 validated.source_ts_ms,
                 validated.observed_ts_ms,
                 validated.age_ms,
@@ -293,19 +349,21 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
 
     Accepts several documented and legacy field shapes without being lossy.
     """
-    value = None
+    value_decimal: Optional[Decimal] = None
+    raw_value: Optional[str] = None
     for field in ("value", "price", "last", "index_value", "rti"):
         if field in data and data[field] is not None:
-            try:
-                value = float(data[field])
+            candidate = data[field]
+            parsed = parse_price(candidate)
+            if parsed is not None and parsed.is_finite() and parsed > 0:
+                value_decimal = parsed
+                raw_value = str(candidate) if isinstance(candidate, (str, Decimal, int, float)) else str(parsed)
                 break
-            except (TypeError, ValueError):
-                pass
 
-    if value is None or not math.isfinite(value) or value <= 0:
+    if value_decimal is None:
         logger.warning(
             "[CF-RTI-ADAPTER] cfb_rti_invalid_value asset=%s cfb_symbol=%s value=%s",
-            asset, cfb_symbol, value
+            asset, cfb_symbol, data.get("value", data)
         )
         return None
 
@@ -339,31 +397,38 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
             except (TypeError, ValueError):
                 pass
 
-    cfb_60s_average = None
+    cfb_60s_average_decimal: Optional[Decimal] = None
+    cfb_60s_average_raw: Optional[str] = None
     for field in ("average_60s", "60s_average", "minute_average", "trailing_60s"):
         if field in data and data[field] is not None:
-            try:
-                cfb_60s_average = float(data[field])
-                if math.isfinite(cfb_60s_average) and cfb_60s_average > 0:
-                    break
-            except (TypeError, ValueError):
-                pass
+            candidate = data[field]
+            parsed = parse_price(candidate)
+            if parsed is not None and parsed.is_finite() and parsed > 0:
+                cfb_60s_average_decimal = parsed
+                cfb_60s_average_raw = str(candidate) if isinstance(candidate, (str, Decimal, int, float)) else str(parsed)
+                break
 
     observed_wall_ms = _now_ms()
     observed_mono_ns = _now_mono_ns()
     execution_eligible = source_ts_ms is not None
+    market_digits = get_asset_settlement_digits(asset)
 
     return CfbRtiObservation(
         asset=asset,
         cfb_symbol=cfb_symbol,
-        value=value,
+        value=float(value_decimal),
+        value_decimal=value_decimal,
+        raw_value=raw_value,
+        retained_digits=retained_decimal_places(value_decimal),
+        market_settlement_digits=market_digits,
         source_ts_ms=source_ts_ms,
         observed_ts_ms=observed_wall_ms,
         observed_ts_mono_ns=observed_mono_ns,
         sequence=sequence,
         source="cf_benchmarks",
         settlement_reference="cfb_rti_live",
-        cfb_60s_average=cfb_60s_average,
+        cfb_60s_average=float(cfb_60s_average_decimal) if cfb_60s_average_decimal is not None else None,
+        cfb_60s_average_decimal=cfb_60s_average_decimal,
         timestamp_quality=timestamp_quality,
         execution_eligible=execution_eligible,
         price_source_health="healthy" if execution_eligible else "suspect",
@@ -372,6 +437,13 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
 
 def _parse_timestamp(candidate: Any) -> Optional[int]:
     """Best-effort parse of a timestamp field into source epoch milliseconds."""
+    if isinstance(candidate, Decimal):
+        try:
+            if candidate > Decimal("1e12"):
+                return int(candidate)
+            return int(candidate * Decimal("1000"))
+        except Exception:
+            return None
     if isinstance(candidate, (int, float)):
         if not math.isfinite(candidate):
             return None
@@ -476,7 +548,9 @@ def _fetch_raw(asset: str, cfb_symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        data = resp.json()
+        # Preserve original decimal precision; do not let the HTTP library's
+        # default float parser silently round 7-decimal DOGE values.
+        data = json.loads(resp.text, parse_float=Decimal)
     except Exception as exc:
         logger.warning(
             "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=invalid_json exc=%s", asset, cfb_symbol, exc
@@ -530,8 +604,9 @@ def _validate_observation(
         )
         return None
 
-    # Value sanity
-    if not math.isfinite(obs.value) or obs.value <= 0:
+    # Value sanity (canonical Decimal; fallback to float for legacy consumers)
+    price = obs.value_decimal if obs.value_decimal is not None else parse_price(obs.value)
+    if price is None or not price.is_finite() or price <= 0:
         _state.last_failure_reason_by_asset[asset] = "cfb_rti_invalid_value"
         logger.error(
             "[CF-RTI-ADAPTER] cfb_rti_unavailable asset=%s cfb_symbol=%s reason=cfb_rti_invalid_value value=%s",
@@ -637,8 +712,10 @@ def get_live_rti(asset: str) -> Optional[CfbRtiObservation]:
                 _state.consecutive_failures_by_asset[asset] = 0
                 _state.last_failure_reason_by_asset[asset] = ""
                 logger.info(
-                    "[CF-RTI-ADAPTER] cfb_rti_live asset=%s cfb_symbol=%s value=%.4f source_ts_ms=%s age_ms=%s source=kalshi_ws",
-                    asset, obs.cfb_symbol, obs.value, obs.source_ts_ms, obs.age_ms
+                    "[CF-RTI-ADAPTER] cfb_rti_live asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s source_ts_ms=%s age_ms=%s source=kalshi_ws",
+                    asset, obs.cfb_symbol, _format_price(asset, obs.value_decimal),
+                    obs.retained_digits, obs.market_settlement_digits,
+                    obs.source_ts_ms, obs.age_ms
                 )
                 return obs
 
@@ -655,8 +732,10 @@ def get_live_rti(asset: str) -> Optional[CfbRtiObservation]:
                     _state.consecutive_failures_by_asset[asset] = 0
                     _state.last_failure_reason_by_asset[asset] = ""
                     logger.info(
-                        "[CF-RTI-ADAPTER] cfb_rti_live asset=%s cfb_symbol=%s value=%.4f source_ts_ms=%s age_ms=%s source=direct_cfb",
-                        asset, obs.cfb_symbol, obs.value, obs.source_ts_ms, obs.age_ms
+                        "[CF-RTI-ADAPTER] cfb_rti_live asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s source_ts_ms=%s age_ms=%s source=direct_cfb",
+                        asset, obs.cfb_symbol, _format_price(asset, obs.value_decimal),
+                        obs.retained_digits, obs.market_settlement_digits,
+                        obs.source_ts_ms, obs.age_ms
                     )
                     return obs
 

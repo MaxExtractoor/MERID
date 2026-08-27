@@ -1145,7 +1145,7 @@ class KalshiRiskManager:
                 self._state.peak_equity_usd = initial_equity
                 logger.info("[KalshiRiskManager] Initialized with equity=%.2f from bankroll service", initial_equity)
             else:
-                logger.warning("[KalshiRiskManager] Bankroll service returned invalid equity=%.2f, using default 0.0", initial_equity)
+                logger.warning("[KalshiRiskManager] Bankroll service returned invalid equity=%s, using default 0.0", initial_equity)
         except Exception as e:
             logger.warning("[KalshiRiskManager] Failed to initialize equity from bankroll service: %s", e)
 

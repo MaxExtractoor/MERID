@@ -134,7 +134,13 @@ class _FakeKalshiClient:
             return self._open_orders_result
         return OperationResult.ok(list(self._open_orders))
 
-    async def get_fills(self, limit: int = 200, since_ts: Optional[int] = None) -> OperationResult[List[Dict[str, Any]]]:
+    async def get_fills(
+        self,
+        limit: int = 200,
+        since_ts: Optional[int] = None,
+        ticker: Optional[str] = None,
+        order_id: Optional[str] = None,
+    ) -> OperationResult[List[Dict[str, Any]]]:
         if self._fills_result is not None:
             return self._fills_result
         return OperationResult.ok([])

@@ -25,7 +25,7 @@ import os
 
 from typing import Any, Optional, Dict, List, Tuple
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 
 
 
@@ -316,13 +316,21 @@ def validate_market_state_for_entry(
     return MarketValidationResult(ok=True, reason="OK")
 
 
-def _get_settlement_input_price(asset: str, spot_price: float) -> tuple:
+def _get_settlement_input_price(
+    asset: str,
+    spot_price: float,
+    settlement_digits: Optional[int] = None,
+) -> tuple:
     """Resolve the authoritative settlement reference price.
 
     ``get_live_rti`` is the only source that can emit ``cfb_rti_live``.  If it
     returns ``None`` the adapter has already logged the precise rejection reason
     and we must not fabricate a public-spot fallback as if it were a settlement
     reference.  The ``spot_price`` is retained only for basis telemetry.
+
+    The returned ``settlement_input_price`` is a ``float`` (for downstream
+    compatibility) but it is quantized to the market's ``settlement_digits``
+    exactly once from the canonical Decimal source.
     """
     obs = None
     if _CFB_RTI_AVAILABLE and get_live_rti is not None:
@@ -333,11 +341,36 @@ def _get_settlement_input_price(asset: str, spot_price: float) -> tuple:
             # current 60-second average to the strike (itself a 60-second average),
             # not a noisy per-second tick.  Fall back to the tick only when the
             # average is missing or invalid.
-            settlement_price = obs.cfb_60s_average
-            if settlement_price is None or not math.isfinite(settlement_price) or settlement_price <= 0:
-                settlement_price = obs.value
-            cf_rti_basis = spot_price - settlement_price
-            return settlement_price, cf_rti_basis, "cfb_rti_live", obs
+            raw_price: Optional[Decimal] = obs.settlement_price()
+            if raw_price is None or not raw_price.is_finite() or raw_price <= 0:
+                obs = None
+            else:
+                if settlement_digits is None:
+                    settlement_digits = get_asset_settlement_digits(asset)
+
+                # Fail-closed: if the feed does not retain enough precision for
+                # this market, do not treat it as a live settlement reference.
+                # DOGE at 4 decimals is the canonical example.
+                retained = retained_decimal_places(raw_price)
+                if retained < settlement_digits:
+                    reason = f"cf_rti_precision_insufficient:retained={retained}:required={settlement_digits}"
+                    logger.warning(
+                        "[CF-RTI-PRECISION] asset=%s raw=%s retained_digits=%s required=%s rejecting settlement reference",
+                        asset, _canonical_format_price(asset, raw_price), retained, settlement_digits
+                    )
+                    return spot_price, 0.0, f"public_spot_fallback:{reason}", obs
+
+                # Quantize exactly once to the market's settlement quantum.
+                try:
+                    settlement_decimal = settlement_round(raw_price, settlement_digits)
+                except Exception:
+                    settlement_decimal = raw_price
+                settlement_price = float(settlement_decimal)
+
+                spot_decimal = parse_price(spot_price) or Decimal("0")
+                basis_decimal = spot_decimal - settlement_decimal
+                cf_rti_basis = float(basis_decimal)
+                return settlement_price, cf_rti_basis, "cfb_rti_live", obs
 
     # No authoritative RTI: honest public-spot fallback, which downstream gates
     # will reject for entry because the reference is not ``cfb_rti_live``.
@@ -450,25 +483,20 @@ except ImportError:
 
 # Local price formatting function (replaces utils.logger.format_price to avoid import issues)
 
-def format_price(asset: str, price: float) -> str:
+from merid.data.price_precision import (
+    format_price as _canonical_format_price,
+    get_asset_settlement_digits,
+    get_asset_settlement_quantum,
+    parse_price,
+    retained_decimal_places,
+    settlement_round,
+)
+
+def format_price(asset: str, price: Any) -> str:
 
     """Format price with appropriate decimal places based on asset."""
 
-    if asset in ["BTC", "ETH"]:
-
-        return f"{price:.2f}"
-
-    elif asset in ["SOL", "XRP"]:
-
-        return f"{price:.4f}"
-
-    elif asset == "DOGE":
-
-        return f"{price:.6f}"
-
-    else:
-
-        return f"{price:.4f}"
+    return _canonical_format_price(asset, price, fallback_digits=4)
 
 
 
@@ -624,21 +652,29 @@ def _is_valid_strike_target(price, asset: str) -> bool:
     positive-only check (asset match is case-sensitive by design).
 
     Args:
-        price: Candidate price (float) - may be None
+        price: Candidate price (float or Decimal) - may be None
         asset: Asset symbol (e.g., "BTC")
 
     Returns:
         True if the price is usable as a strike target.
     """
-    if price is None or not isinstance(price, (int, float)) or isinstance(price, bool):
+    if price is None or isinstance(price, bool):
         return False
-    if math.isnan(price) or math.isinf(price) or price <= 0:
+    if isinstance(price, Decimal):
+        if not price.is_finite() or price <= 0:
+            return False
+        value = float(price)
+    elif isinstance(price, (int, float)):
+        if math.isnan(price) or math.isinf(price) or price <= 0:
+            return False
+        value = price
+    else:
         return False
     bounds = _STRIKE_TARGET_BOUNDS.get(asset)
     if bounds is None:
         return True  # Unknown asset: positive check only
     low, high = bounds
-    return low <= price <= high
+    return low <= value <= high
 
 
 def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, spot_price: float) -> Tuple[Optional[float], Optional[str], Dict[str, Any]]:
@@ -648,8 +684,22 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
     and finally the current public spot as a degraded fallback.  Returns the
     resolved strike, the source provenance, and a structured diagnostic payload
     for logging and rejection telemetry.
+
+    The returned strike is quantized to the market's ``settlement_digits`` (from
+    Kalshi ``custom_strike.round_digits``) exactly once before it is used for
+    boundary comparison.
     """
     diagnostic: Dict[str, Any] = {"asset": asset, "spot_price": spot_price}
+    settlement_digits = getattr(market, "settlement_digits", None) or get_asset_settlement_digits(asset)
+
+    def _quantize_strike(candidate: Any) -> Optional[Decimal]:
+        price = parse_price(candidate)
+        if price is None:
+            return None
+        try:
+            return settlement_round(price, settlement_digits)
+        except Exception:
+            return price
 
     # 1. Try market_state and the provided market object in priority order.
     for source_name, obj in (("market_state", market_state), ("market", market)):
@@ -657,9 +707,14 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
             continue
         for field in ("window_strike_price", "floor_strike", "strike_price"):
             candidate = getattr(obj, field, None)
-            diagnostic.setdefault(source_name, {})[field] = candidate
-            if _is_valid_strike_target(candidate, asset):
-                return float(candidate), f"{source_name}.{field}", diagnostic
+            decimal_field = f"{field}_decimal"
+            decimal_candidate = getattr(obj, decimal_field, None)
+            preferred = decimal_candidate if decimal_candidate is not None else candidate
+            diagnostic.setdefault(source_name, {})[field] = preferred
+            if _is_valid_strike_target(preferred, asset):
+                price = _quantize_strike(preferred)
+                if price is not None:
+                    return float(price), f"{source_name}.{field}", diagnostic
 
     # 2. Catalog fallback: the catalog is the authoritative source for 15m
     #    window metadata and is especially important right after a rollover when
@@ -671,10 +726,13 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
             current_market = catalog.get_current_15m_market(asset)
             if current_market:
                 for field in ("floor_strike", "strike_price", "cap_strike", "window_strike_price"):
-                    candidate = getattr(current_market, field, None)
-                    diagnostic.setdefault("catalog", {})[field] = candidate
-                    if _is_valid_strike_target(candidate, asset):
-                        return float(candidate), f"catalog.{field}", diagnostic
+                    decimal_field = f"{field}_decimal"
+                    preferred = getattr(current_market, decimal_field, None) or getattr(current_market, field, None)
+                    diagnostic.setdefault("catalog", {})[field] = preferred
+                    if _is_valid_strike_target(preferred, asset):
+                        price = _quantize_strike(preferred)
+                        if price is not None:
+                            return float(price), f"catalog.{field}", diagnostic
     except Exception as exc:
         logger.warning("[STRIKE-RESOLUTION] asset=%s catalog lookup failed: %s", asset, exc)
 
@@ -683,7 +741,9 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
     #    so downstream confidence/edge logic can treat it as degraded.
     if _is_valid_strike_target(spot_price, asset):
         diagnostic["spot_fallback"] = True
-        return float(spot_price), "spot_fallback", diagnostic
+        price = _quantize_strike(spot_price)
+        if price is not None:
+            return float(price), "spot_fallback", diagnostic
 
     return None, None, diagnostic
 
@@ -1673,6 +1733,49 @@ class LeanAgentConfig:
 
 # Lean agent for 15m crypto trading
 
+
+@dataclass(frozen=True)
+class HybridProbability:
+    """Decomposed hybrid probability for a single asset/cycle.
+
+    Carries the final p_yes plus the signed directional inputs so that
+    shadow telemetry and diagnosis can tell whether a wrong-side fingerprint
+    comes from inverted displacement, inverted velocity, or an inverted
+    indicator shift.
+    """
+    p_yes: float
+    p_yes_bachelier: float
+    log_moneyness: float
+    z_score: float
+    annualized_vol: float
+    t_years: float
+    velocity: float
+    velocity_threshold: float
+    velocity_edge: float
+    macd_delta: float
+    rsi_delta: float
+    obi: float
+    obi_delta: float
+    regime_delta: float
+    total_delta: float
+    max_shift: float
+    bars_available: int
+    # FVG provenance (empty when MERID_ENABLE_FVG is off)
+    fvg_active: int = 0
+    fvg_direction: float = 0.0
+    fvg_size: float = 0.0
+    fvg_distance_to_fill: float = 0.0
+    fvg_fill_signal: float = 0.0
+    fvg_delta: float = 0.0
+    fvg_weight: float = 0.0
+    fvg_confidence: float = 0.0
+    fvg_price_source: str = ""
+    fvg_price_staleness_ms: Optional[float] = None
+
+    def __float__(self) -> float:
+        return self.p_yes
+
+
 class LeanAgent15m:
 
     # Minimal agent for 15m crypto trading with velocity-based signals.
@@ -2232,12 +2335,12 @@ class LeanAgent15m:
 
 
 
-        # Cooldown tracking: last trade timestamp per asset (monotonic clock only).
+        # Cooldown tracking: last trade timestamp per asset.
 
-        # CRITICAL: Do not pre-populate. A missing entry means there is no prior
-        # trade for that asset, so cooldown is not applied and the first signal
-        # is eligible. update_cooldown_on_fill() writes monotonic timestamps here
-        # only after an actual fill. Wall-clock / epoch values must not be stored.
+        # Start empty. A missing entry means there is no prior trade, so the
+        # asset is eligible immediately. _cooldown_elapsed returns inf for a
+        # missing timestamp and for any wall-time/monotonic mismatch, so a
+        # fresh agent can never be blocked by stale or epoch-relative state.
 
         self._last_trade_time: Dict[str, float] = {}
 
@@ -2482,6 +2585,9 @@ class LeanAgent15m:
         self._spot_cache: Dict[str, Tuple[float, Any]] = {}
         self._spot_cache_ttl_sec = 1.0
 
+        # Most recent raw spot snapshot per asset, used for feed-alignment telemetry.
+        self._last_spot_data: Dict[str, Any] = {}
+
         logger.info("[AGENT-INIT] %s initialized with velocity-based signal strategy", config.name)
 
 
@@ -2514,6 +2620,7 @@ class LeanAgent15m:
             logger.warning("[SPOT-CACHE-ERROR] asset=%s spot_provider has no get() method", asset)
 
         self._spot_cache[asset] = (now, spot_price, spot_data)
+        self._last_spot_data[asset] = spot_data
         return spot_price, spot_data
 
 
@@ -2529,7 +2636,7 @@ class LeanAgent15m:
         # Compute volume proxy from the completed bar
         if high_price < low_price:
             logger.error(
-                f'[DATA-QUALITY] asset={asset} CORRUPTED OHLC data: high={high_price:.2f} < low={low_price:.2f}. '
+                f'[DATA-QUALITY] asset={asset} CORRUPTED OHLC data: high={format_price(asset, high_price)} < low={format_price(asset, low_price)}. '
                 f'This violates the fundamental OHLC invariant (high >= low). '
                 f'Using default volume=1.0 and flagging for data quality audit.'
             )
@@ -2537,7 +2644,7 @@ class LeanAgent15m:
             volume = 1.0
         elif high_price == low_price:
             logger.debug(
-                f'[DATA-QUALITY] asset={asset} STALE OHLC data: high={high_price:.2f} == low={low_price:.2f}. '
+                f'[DATA-QUALITY] asset={asset} STALE OHLC data: high={format_price(asset, high_price)} == low={format_price(asset, low_price)}. '
                 f'No price movement detected in this period. Using default volume=1.0.'
             )
             volume = 1.0
@@ -2546,7 +2653,7 @@ class LeanAgent15m:
             volume = max(1.0, min(100.0, volume_proxy * 100))
             logger.info(
                 f'[VOLUME-EXTRACTION] asset={asset} volume not available, using OHLC proxy={volume:.2f} '
-                f'(high={high_price:.2f} low={low_price:.2f} spot={close_price:.2f})'
+                f'(high={format_price(asset, high_price)} low={format_price(asset, low_price)} spot={format_price(asset, close_price)})'
             )
 
         logger.info(
@@ -6420,7 +6527,11 @@ class LeanAgent15m:
         # Side-lock: counter-trend trades are no longer allowed.
         is_counter_trend = False
 
-        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(asset, spot_price)
+        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(
+            asset,
+            spot_price,
+            settlement_digits=getattr(market, "settlement_digits", None),
+        )
 
         signal_dict = {
 
@@ -6657,16 +6768,37 @@ class LeanAgent15m:
         no_ask: float,
         seconds_to_expiry: float,
         market_state: Any = None,
-    ) -> float:
+        settlement_reference: str = "",
+        cfb_observation: Any = None,
+        bachelier_only: bool = False,
+    ) -> HybridProbability:
         """Compute a hybrid YES probability by fusing Bachelier fair value with
         the live indicator/velocity stack.
 
         The Bachelier probability is shifted by a signed directional delta that
         comes from multi-window velocity, MACD histogram, RSI, order-book
-        imbalance, and the macro regime. The shift is capped so the model can
-        never become degenerate (p <= 0 or p >= 1).
+        imbalance, FVG, and the macro regime. The shift is capped so the model
+        can never become degenerate (p <= 0 or p >= 1).
+
+        When ``bachelier_only`` is true (or the environment
+        ``MERID_HYBRID_BACHELIER_ONLY`` / ``MERID_HYBRID_DISABLE_ALL_DELTAS``
+        is set) the returned ``p_yes`` is the clipped Bachelier baseline and the
+        computed deltas are recorded in the HybridProbability for diagnosis but
+        are not applied to the final probability.
+
+        Returns a HybridProbability so callers can diagnose which signed input
+        is driving p_yes for an asset like SOL.
         """
         import math
+
+        # Production-safe containment: Bachelier-only mode disables all
+        # indicator/velocity/FVG deltas so the model can be audited against a
+        # clean baseline without sign-inverted components contaminating it.
+        if not bachelier_only:
+            bachelier_only = (
+                os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
+                or os.environ.get("MERID_HYBRID_DISABLE_ALL_DELTAS", "").strip().lower() in ("1", "true", "yes")
+            )
 
         # Bachelier baseline.
         t_years = max(seconds_to_expiry, 1.0) / (365.0 * 24.0 * 60.0 * 60.0)
@@ -6683,7 +6815,27 @@ class LeanAgent15m:
 
         # Indicator-independent fallback: no shift when the stack is missing.
         if not getattr(self, "_indicator_stacks", None):
-            return p_yes_bachelier
+            eps = MERID_MODEL_PROBABILITY_EPSILON
+            p_yes = max(eps, min(1.0 - eps, p_yes_bachelier))
+            return HybridProbability(
+                p_yes=p_yes,
+                p_yes_bachelier=p_yes_bachelier,
+                log_moneyness=log_moneyness,
+                z_score=z,
+                annualized_vol=annualized_vol,
+                t_years=t_years,
+                velocity=0.0,
+                velocity_threshold=1e-12,
+                velocity_edge=0.0,
+                macd_delta=0.0,
+                rsi_delta=0.0,
+                obi=0.0,
+                obi_delta=0.0,
+                regime_delta=0.0,
+                total_delta=0.0,
+                max_shift=0.0,
+                bars_available=0,
+            )
 
         try:
             velocity = self._calculate_multi_window_velocity(asset, spot_price)
@@ -6723,6 +6875,7 @@ class LeanAgent15m:
                 logger.debug("[HYBRID-P-YES] asset=%s indicator snapshot failed: %s", asset, exc)
 
         # MACD histogram shift, asset-invariant (normalized by spot).
+        macd_delta = 0.0
         if spot_price and math.isfinite(spot_price) and spot_price > 0 and math.isfinite(macd_histogram):
             macd_delta = (macd_histogram / spot_price) * MERID_MACD_EDGE_WEIGHT
             # Cap individual contribution at 5 percentage points.
@@ -6730,25 +6883,94 @@ class LeanAgent15m:
             delta += macd_delta
 
         # RSI shift: oversold lifts p_yes, overbought lowers p_yes.
+        rsi_delta = 0.0
         if rsi < 35.0:
-            delta += 0.02
+            rsi_delta = 0.02
         elif rsi > 65.0:
-            delta -= 0.02
+            rsi_delta = -0.02
+        delta += rsi_delta
 
         # Order-book imbalance shift: positive OBI lifts p_yes.
         obi = 0.0
+        obi_delta = 0.0
         if market_state is not None:
             depth_yes = float(getattr(market_state, "depth_10c_yes", 0) or 0)
             depth_no = float(getattr(market_state, "depth_10c_no", 0) or 0)
             if depth_yes + depth_no > 0:
                 obi = (depth_yes - depth_no) / (depth_yes + depth_no)
-                delta += max(-0.03, min(0.03, obi * 0.05))
+                obi_delta = max(-0.03, min(0.03, obi * 0.05))
+                delta += obi_delta
 
         # Macro-regime alignment: penalize contradicting the macro trend.
+        regime_delta = 0.0
         if macro_regime == "bull" and not price_above_ema_200:
-            delta -= 0.01
+            regime_delta = -0.01
         elif macro_regime == "bear" and price_above_ema_200:
-            delta += 0.01
+            regime_delta = 0.01
+        delta += regime_delta
+
+        # FVG (Fair Value Gap) contribution: on by default, gated by
+        # MERID_ENABLE_FVG and capped by MERID_FVG_DELTA_WEIGHT. Uses the same
+        # live settlement price the Bachelier baseline uses, with source and
+        # staleness provenance.
+        fvg_active = 0
+        fvg_direction = 0.0
+        fvg_size = 0.0
+        fvg_distance_to_fill = 0.0
+        fvg_fill_signal = 0.0
+        fvg_delta = 0.0
+        fvg_confidence = 0.0
+        fvg_weight = float(os.environ.get("MERID_FVG_DELTA_WEIGHT", "0.05"))
+        fvg_max_delta = float(os.environ.get("MERID_FVG_MAX_DELTA", "0.05"))
+
+        if os.environ.get("MERID_ENABLE_FVG", "1").strip().lower() in ("1", "true", "yes"):
+            try:
+                from merid.prediction.forecasters.fvg import get_fvg_forecaster
+                fvg_forecaster = get_fvg_forecaster()
+                fvg_result = fvg_forecaster.predict(
+                    market_id=f"{asset}_15M",
+                    implied_yes=p_yes_bachelier,
+                    implied_no=1.0 - p_yes_bachelier,
+                    volume=0.0,
+                    open_interest=0.0,
+                    minutes_to_expiry=seconds_to_expiry / 60.0 if seconds_to_expiry else 15.0,
+                    asset=asset,
+                    timeframe="15m",
+                    spot_price=settlement_input_price,
+                )
+                if fvg_result:
+                    fvg_active = int(fvg_result.components.get("fvg_active", 0) or 0)
+                    fvg_direction = float(fvg_result.components.get("fvg_nearest_direction", 0.0) or 0.0)
+                    fvg_size = float(fvg_result.components.get("fvg_nearest_size", 0.0) or 0.0)
+                    fvg_distance_to_fill = float(fvg_result.components.get("fvg_distance_to_fill", 0.0) or 0.0)
+                    fvg_fill_signal = float(fvg_result.components.get("fvg_fill_signal", 0.0) or 0.0)
+                    fvg_confidence = float(fvg_result.confidence or 0.0)
+                    fvg_delta = fvg_fill_signal * fvg_weight
+                    fvg_delta = math.copysign(min(abs(fvg_delta), fvg_max_delta), fvg_delta)
+
+                    # Global concurrent-position guard: do not add FVG delta if the
+                    # number of live/pending slots already equals or exceeds the
+                    # configured FVG concurrent cap. This limits FVG-exposure buildup
+                    # while the placebo matrix is being collected.
+                    fvg_max_concurrent = int(os.environ.get("MERID_FVG_MAX_CONCURRENT", "0") or 0)
+                    if fvg_max_concurrent > 0 and fvg_delta != 0.0:
+                        try:
+                            from merid.risk.global_slot_allocator import get_global_slot_allocator
+                            slot_allocator = get_global_slot_allocator()
+                            slot_count = slot_allocator.get_slot_count()
+                            if slot_count >= fvg_max_concurrent:
+                                logger.info(
+                                    "[HYBRID-P-YES-FVG-CAP] asset=%s slots=%d >= cap=%d - skipping FVG contribution",
+                                    asset, slot_count, fvg_max_concurrent,
+                                )
+                                fvg_delta = 0.0
+                                fvg_confidence = 0.0
+                        except Exception as cap_exc:
+                            logger.warning("[HYBRID-P-YES-FVG-CAP] asset=%s failed to check slot count: %s", asset, cap_exc)
+
+                    delta += fvg_delta
+            except Exception as fvg_exc:
+                logger.warning("[HYBRID-P-YES] asset=%s FVG contribution failed: %s", asset, fvg_exc)
 
         # Final cap to prevent degenerate probabilities.
         # Warmup gate is based only on the number of bars in the indicator stack.
@@ -6783,9 +7005,44 @@ class LeanAgent15m:
             )
         delta = math.copysign(min(abs(delta), max_shift), delta)
 
-        p_yes = p_yes_bachelier + delta
+        p_yes_pre_clip = p_yes_bachelier + delta
         eps = MERID_MODEL_PROBABILITY_EPSILON
-        return max(eps, min(1.0 - eps, p_yes))
+        if bachelier_only:
+            # Containment: return the Bachelier baseline as the active
+            # probability while preserving the computed deltas for audit.
+            p_yes = max(eps, min(1.0 - eps, p_yes_bachelier))
+        else:
+            p_yes = max(eps, min(1.0 - eps, p_yes_pre_clip))
+
+        return HybridProbability(
+            p_yes=p_yes,
+            p_yes_bachelier=p_yes_bachelier,
+            log_moneyness=log_moneyness,
+            z_score=z,
+            annualized_vol=annualized_vol,
+            t_years=t_years,
+            velocity=velocity,
+            velocity_threshold=velocity_threshold,
+            velocity_edge=velocity_edge,
+            macd_delta=macd_delta,
+            rsi_delta=rsi_delta,
+            obi=obi,
+            obi_delta=obi_delta,
+            regime_delta=regime_delta,
+            total_delta=delta,
+            max_shift=max_shift,
+            bars_available=bars_available,
+            fvg_active=fvg_active,
+            fvg_direction=fvg_direction,
+            fvg_size=fvg_size,
+            fvg_distance_to_fill=fvg_distance_to_fill,
+            fvg_fill_signal=fvg_fill_signal,
+            fvg_delta=fvg_delta,
+            fvg_weight=fvg_weight,
+            fvg_confidence=fvg_confidence,
+            fvg_price_source=settlement_reference,
+            fvg_price_staleness_ms=getattr(cfb_observation, "age_ms", None) if cfb_observation is not None else None,
+        )
 
     def _generate_trade_decision_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
         """Unified hybrid decision engine for 15-minute crypto binaries.
@@ -6799,6 +7056,29 @@ class LeanAgent15m:
             logger.warning("[TRADE-DECISION] asset=%s invalid spot_price=%s", asset, spot_price)
             self._record_signal_rejection(
                 "invalid_spot",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    None,
+                    None,
+                    (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
+                )
+            )
+            return None
+
+        # Interim asset pause: comma-separated list in MERID_PAUSED_ASSETS.
+        # Default empty (no pause). Exits remain enabled; this only blocks new
+        # signal generation. Intended for emergency asset-level halts while a
+        # calibration/edge issue is investigated.
+        paused_assets = {
+            a.strip().upper()
+            for a in os.environ.get("MERID_PAUSED_ASSETS", "").split(",")
+            if a.strip()
+        }
+        if paused_assets and asset and asset.upper() in paused_assets:
+            logger.warning("[INTERIM-PAUSE] asset=%s paused via MERID_PAUSED_ASSETS", asset)
+            self._record_signal_rejection(
+                "interim_asset_pause",
                 **self._build_trade_decision_rejection_context(
                     asset,
                     spot_price,
@@ -6989,15 +7269,20 @@ class LeanAgent15m:
         # only valid when the price is the official CF Benchmarks RTI, not a
         # public spot fallback.  get_live_rti returns None and logs the precise
         # rejection reason if the feed is unhealthy.
-        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(asset, spot_price)
+        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(
+            asset,
+            spot_price,
+            settlement_digits=getattr(market, "settlement_digits", None),
+        )
 
         run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
 
         # Hybrid probability: fuse Bachelier fair value with the live
         # indicator/velocity stack so the decision engine uses the research
         # signals instead of discarding them.
+        hybrid: Optional[HybridProbability] = None
         try:
-            p_yes_model = self._compute_hybrid_p_yes(
+            hybrid = self._compute_hybrid_p_yes(
                 asset=asset,
                 spot_price=spot_price,
                 settlement_input_price=settlement_input_price,
@@ -7006,10 +7291,14 @@ class LeanAgent15m:
                 no_ask=float(no_ask),
                 seconds_to_expiry=seconds_to_expiry,
                 market_state=market_state,
+                settlement_reference=settlement_reference,
+                cfb_observation=cfb_observation,
             )
+            p_yes_model = float(hybrid) if hybrid is not None else None
         except Exception as hybrid_exc:
             logger.warning("[HYBRID-P-YES] asset=%s failed to compute hybrid probability: %s", asset, hybrid_exc)
             p_yes_model = None
+            hybrid = None
 
         # Thresholds: profile is the single source of truth; env overrides
         # allow emergency calibration without a code change.
@@ -7069,6 +7358,113 @@ class LeanAgent15m:
             policy_version="trade_decision_v2",
         )
 
+        # Production-safe containment: compute a Bachelier-only shadow decision so
+        # we can compare the live hybrid side against the baseline side on the same
+        # market, fully logged but not executed.
+        decision_bachelier = decision
+        hybrid_bachelier: Optional[HybridProbability] = hybrid
+        p_yes_bachelier = p_yes_model
+        bachelier_only_live = os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes") \
+            or os.environ.get("MERID_HYBRID_DISABLE_ALL_DELTAS", "").strip().lower() in ("1", "true", "yes")
+        shadow_bachelier = os.environ.get("MERID_SHADOW_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
+        if shadow_bachelier and not bachelier_only_live and hybrid is not None:
+            try:
+                hybrid_bachelier = self._compute_hybrid_p_yes(
+                    asset=asset,
+                    spot_price=spot_price,
+                    settlement_input_price=settlement_input_price,
+                    strike=float(strike),
+                    yes_ask=float(yes_ask),
+                    no_ask=float(no_ask),
+                    seconds_to_expiry=seconds_to_expiry,
+                    market_state=market_state,
+                    settlement_reference=settlement_reference,
+                    cfb_observation=cfb_observation,
+                    bachelier_only=True,
+                )
+                p_yes_bachelier = float(hybrid_bachelier) if hybrid_bachelier is not None else None
+                if p_yes_bachelier is not None:
+                    decision_bachelier = compute_trade_decision(
+                        run_id=run_id,
+                        decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
+                        ticker=getattr(market, "ticker", asset),
+                        asset=asset,
+                        spot_price=settlement_input_price,
+                        strike_price=float(strike),
+                        seconds_to_expiry=seconds_to_expiry,
+                        yes_bid_cents=float(yes_bid),
+                        yes_ask_cents=float(yes_ask),
+                        no_bid_cents=float(no_bid),
+                        no_ask_cents=float(no_ask),
+                        yes_depth_cc=yes_depth_cc,
+                        no_depth_cc=no_depth_cc,
+                        fee_per_contract_cents=fee_cents,
+                        annualized_vol=annualized_vol,
+                        model_uncertainty=model_uncertainty,
+                        data_quality=data_quality,
+                        data_state=data_state,
+                        regime=regime,
+                        regime_label=regime_label,
+                        regime_probability=regime_probability,
+                        indicators={"p_yes_model": p_yes_bachelier, "shadow_bachelier_only": True},
+                        p_yes_model=p_yes_bachelier,
+                        min_required_edge=min_required_edge,
+                        settlement_reference=settlement_reference,
+                        policy_version="trade_decision_v2",
+                    )
+            except Exception as bachelier_exc:
+                logger.warning("[HYBRID-P-YES-BACHELIER-SHADOW] asset=%s failed: %s", asset, bachelier_exc)
+                decision_bachelier = decision
+                hybrid_bachelier = hybrid
+
+        # Reduced sizing for FVG-influenced trades: the FVG layer is untested,
+        # so live exposure is scaled by MERID_FVG_SIZE_SCALE (default 0.5).
+        fvg_influenced = (
+            hybrid is not None
+            and abs(float(getattr(hybrid, "fvg_delta", 0.0) or 0.0)) > 0.0
+        )
+        fvg_size_scale = 1.0
+        if fvg_influenced and decision.selected_outcome is not None and int(decision.approved_size_cc) > 0:
+            fvg_size_scale = float(os.environ.get("MERID_FVG_SIZE_SCALE", "0.5"))
+            fvg_size_scale = max(0.0, min(1.0, fvg_size_scale))
+            if fvg_size_scale < 1.0:
+                try:
+                    scaled_cc = max(100, int(Decimal(str(fvg_size_scale)) * decision.approved_size_cc))
+                    decision = replace(decision, approved_size_cc=Decimal(scaled_cc))
+                    logger.info(
+                        "[FVG-SIZE-SCALE] asset=%s scale=%.2f approved_size_cc=%d",
+                        asset, fvg_size_scale, scaled_cc,
+                    )
+                except Exception as sizing_exc:
+                    logger.warning("[FVG-SIZE-SCALE] asset=%s failed to scale: %s", asset, sizing_exc)
+
+        # Containment sizing: the hybrid deltas are under audit for sign inversion.
+        # Two independent levers reduce live exposure until out-of-sample component
+        # validation passes:
+        #   1. MERID_MODEL_CONTAINMENT_SIZE_SCALE (default 1.0) - applies to every
+        #      decision.  Set to 0.0 to force the minimum one-contract size, or 0.25
+        #      for quarter-size canary.
+        #   2. MERID_BACHELIER_ONLY_SIZE_SCALE (default 0.0) - extra reduction when
+        #      MERID_HYBRID_BACHELIER_ONLY disables all deltas and the live signal is
+        #      the Bachelier baseline.  0.0 means one-contract minimum.
+        for scale_env, scale_default, log_tag in (
+            ("MERID_MODEL_CONTAINMENT_SIZE_SCALE", "1.0", "CONTAINMENT-SIZE"),
+            ("MERID_BACHELIER_ONLY_SIZE_SCALE", "0.0" if bachelier_only_live else "1.0", "BACHELIER-ONLY-SIZE"),
+        ):
+            size_scale = float(os.environ.get(scale_env, scale_default))
+            size_scale = max(0.0, min(1.0, size_scale))
+            if size_scale < 1.0 and decision.selected_outcome is not None and int(decision.approved_size_cc) > 0:
+                try:
+                    scaled_cc = max(100, int(Decimal(str(size_scale)) * decision.approved_size_cc))
+                    if scaled_cc != int(decision.approved_size_cc):
+                        decision = replace(decision, approved_size_cc=Decimal(scaled_cc))
+                        logger.info(
+                            "[%s] asset=%s scale=%.2f approved_size_cc=%d",
+                            log_tag, asset, size_scale, scaled_cc,
+                        )
+                except Exception as sizing_exc:
+                    logger.warning("[%s] asset=%s failed to scale: %s", log_tag, asset, sizing_exc)
+
         _write_shadow_telemetry(
             run_id=run_id,
             decision_id=decision.decision_id,
@@ -7089,6 +7485,97 @@ class LeanAgent15m:
             fee_per_contract_cents=float(fee_cents),
             annualized_vol=float(annualized_vol),
             data_quality=data_quality,
+            regime=regime,
+        )
+
+        # Feed-alignment context: capture the source and staleness of every input
+        # that can disagree in time (CF RTI settlement vs Coinbase/spot velocity).
+        # This is the primary diagnostic for the dynamic inversion hypothesis.
+        spot_data = getattr(self, "_last_spot_data", {}).get(asset)
+        feed_context: Dict[str, Any] = {
+            "spot_source": getattr(spot_data, "source", None),
+            "spot_staleness_ms": getattr(spot_data, "staleness_ms", None),
+            "spot_timestamp_ms": getattr(spot_data, "timestamp_ms", None),
+            "spot_data_quality_score": getattr(spot_data, "data_quality_score", None),
+            "spot_num_exchanges": getattr(spot_data, "num_exchanges", None),
+            "velocity_source": getattr(self, "_last_velocity_source", None),
+            "velocity_age_ms": getattr(self, "_last_velocity_age_ms", None),
+            "velocity_signal_type": getattr(self, "_last_velocity_signal_type", None),
+            "velocity_threshold_used": getattr(self, "_last_velocity_threshold", None),
+            "cfb_settlement_reference": settlement_reference,
+            "cfb_execution_eligible": getattr(cfb_observation, "execution_eligible", None),
+            "cfb_source_ts_ms": getattr(cfb_observation, "source_ts_ms", None),
+            "cfb_observed_ts_ms": getattr(cfb_observation, "observed_ts_ms", None),
+            "cfb_observed_ts_mono_ns": getattr(cfb_observation, "observed_ts_mono_ns", None),
+            "cfb_age_ms": getattr(cfb_observation, "age_ms", None),
+            "cfb_timestamp_quality": getattr(cfb_observation, "timestamp_quality", None),
+            "cfb_price_source_health": getattr(cfb_observation, "price_source_health", None),
+        }
+
+        logger.info(
+            "[FEED-ALIGNMENT] asset=%s spot_source=%s spot_staleness_ms=%s "
+            "velocity_source=%s velocity_age_ms=%s velocity=%.6f "
+            "cfb_age_ms=%s cfb_exec_eligible=%s settlement_reference=%s",
+            asset,
+            feed_context["spot_source"],
+            feed_context["spot_staleness_ms"],
+            feed_context["velocity_source"],
+            feed_context["velocity_age_ms"],
+            getattr(self, "_last_velocity_value", 0.0),
+            feed_context["cfb_age_ms"],
+            feed_context["cfb_execution_eligible"],
+            settlement_reference,
+        )
+
+        # Shadow A/B telemetry: record the live selected side alongside the
+        # inverted side and a model-inverted side.  Settlement-time scripts can
+        # compare realized PnL and win rates without changing live behavior.
+        write_shadow_side_record(
+            run_id=run_id,
+            decision_id=decision.decision_id,
+            ticker=getattr(market, "ticker", asset),
+            asset=asset,
+            spot_price=float(settlement_input_price),
+            strike_price=float(strike),
+            seconds_to_expiry=seconds_to_expiry,
+            yes_bid_cents=float(yes_bid),
+            yes_ask_cents=float(yes_ask),
+            no_bid_cents=float(no_bid),
+            no_ask_cents=float(no_ask),
+            fee_per_contract_cents=float(fee_cents),
+            p_yes_model=p_yes_model,
+            selected_side=decision.selected_outcome,
+            selected_outcome_price_cents=int(round(float(decision.selected_outcome_price) * 100.0)) if decision.selected_outcome_price is not None else None,
+            selected_net_edge=float(decision.net_edge) if decision.net_edge is not None else None,
+            annualized_vol=float(annualized_vol),
+            velocity=getattr(self, "_last_velocity_value", None),
+            regime=regime,
+            data_state=data_state,
+            settlement_reference=settlement_reference,
+            selection_reason=decision.selection_reason,
+            hybrid_probability=asdict(hybrid) if hybrid is not None else None,
+            **feed_context,
+        )
+
+        # Model-decomposition ledger: record every evaluation so downstream
+        # settlement joins can compute each delta's signed contribution.
+        write_model_decomposition_record(
+            run_id=run_id,
+            decision_id=decision.decision_id,
+            ticker=getattr(market, "ticker", asset),
+            asset=asset,
+            spot_price=float(settlement_input_price),
+            strike_price=float(strike),
+            seconds_to_expiry=seconds_to_expiry,
+            yes_bid_cents=float(yes_bid),
+            yes_ask_cents=float(yes_ask),
+            no_bid_cents=float(no_bid),
+            no_ask_cents=float(no_ask),
+            hybrid_probability=asdict(hybrid) if hybrid is not None else None,
+            decision=decision,
+            decision_bachelier=decision_bachelier if (decision_bachelier is not None and decision_bachelier is not decision) else None,
+            settlement_reference=settlement_reference,
+            data_state=data_state,
             regime=regime,
         )
 
@@ -7234,6 +7721,21 @@ class LeanAgent15m:
             "vol_regime": regime,
             "seconds_to_expiry": seconds_to_expiry,
             "velocity": 0.0,
+            "fvg_active": int(getattr(hybrid, "fvg_active", 0) or 0) if hybrid is not None else 0,
+            "fvg_direction": (
+                "bullish" if getattr(hybrid, "fvg_direction", 0.0) > 0
+                else "bearish" if getattr(hybrid, "fvg_direction", 0.0) < 0
+                else "neutral"
+            ) if hybrid is not None else "neutral",
+            "fvg_confidence": float(getattr(hybrid, "fvg_confidence", 0.0) or 0.0) if hybrid is not None else 0.0,
+            "fvg_fill_signal": float(getattr(hybrid, "fvg_fill_signal", 0.0) or 0.0) if hybrid is not None else 0.0,
+            "fvg_size": float(getattr(hybrid, "fvg_size", 0.0) or 0.0) if hybrid is not None else 0.0,
+            "fvg_distance_to_fill": float(getattr(hybrid, "fvg_distance_to_fill", 0.0) or 0.0) if hybrid is not None else 0.0,
+            "fvg_delta": float(getattr(hybrid, "fvg_delta", 0.0) or 0.0) if hybrid is not None else 0.0,
+            "fvg_price_source": str(getattr(hybrid, "fvg_price_source", "") or "") if hybrid is not None else "",
+            "fvg_price_staleness_ms": getattr(hybrid, "fvg_price_staleness_ms", None) if hybrid is not None else None,
+            "fvg_influenced": bool(fvg_influenced) if hybrid is not None else False,
+            "fvg_size_scale": float(fvg_size_scale) if hybrid is not None else 1.0,
             "regime": regime,
             "hmm_regime": None,
             "hmm_regime_confidence": 0.0,
@@ -7953,7 +8455,11 @@ class LeanAgent15m:
         # CRITICAL FIX (2026-07-19): Include strategy_intent in signal for exposure validation
         selected_price_cents = int(round(clamped_price_cents))
 
-        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(asset, spot_price)
+        settlement_input_price, cf_rti_basis, settlement_reference, cfb_observation = _get_settlement_input_price(
+            asset,
+            spot_price,
+            settlement_digits=getattr(market, "settlement_digits", None),
+        )
         signal_dict = {
             "side": signal_side,
             "action": signal_action,
@@ -14938,6 +15444,9 @@ class LeanAgentGrid15m:
 
         self.position_cache = None  # Position cache for global allocator
 
+        # Authoritative per-cycle Coinbase velocity snapshot, owned by the grid.
+        self._coinbase_velocity_signals: Dict[str, Any] = {}
+
         # Initialize strip order tracking
 
         self._strip_order_counts: Dict[str, int] = {}
@@ -15162,7 +15671,7 @@ class LeanAgentGrid15m:
 
 
 
-    async def sync_from_rest(self, tick: int) -> None:
+    async def sync_from_rest(self, tick: int) -> Dict[str, Any]:
 
         # Sync catalog and market state from REST API.
 
@@ -15170,11 +15679,24 @@ class LeanAgentGrid15m:
 
         # WebSocket provides real-time position updates, REST is used for reconciliation.
 
+        # Returns a status dict with keys:
+        #   success (bool), positions_count (int), open_orders_count (int),
+        #   positions_fetched_ok (bool), open_orders_fetched_ok (bool),
+        #   rest_timestamp (float), error (Optional[str]).
+
         import time
 
         current_time = time.time()
 
-
+        result: Dict[str, Any] = {
+            "success": False,
+            "positions_count": 0,
+            "open_orders_count": 0,
+            "positions_fetched_ok": False,
+            "open_orders_fetched_ok": False,
+            "rest_timestamp": current_time,
+            "error": None,
+        }
 
         # Check if enough time has passed since last sync
 
@@ -15184,7 +15706,7 @@ class LeanAgentGrid15m:
 
                        current_time - self._last_rest_sync_time, self._rest_sync_interval)
 
-            return
+            return result
 
 
 
@@ -15218,6 +15740,8 @@ class LeanAgentGrid15m:
 
                 positions_result = await client.get_positions_result()
 
+                result["positions_fetched_ok"] = positions_result.success
+
                 if not positions_result.success:
 
                     logger.warning(
@@ -15225,9 +15749,13 @@ class LeanAgentGrid15m:
                         positions_result.error
                     )
 
-                    return
+                    result["error"] = f"positions_query_failed: {positions_result.error}"
+
+                    return result
 
                 kalshi_positions = positions_result.unwrap_or([])
+
+                result["positions_count"] = len(kalshi_positions)
 
                 # Convert VenuePosition list to format expected by sync_from_rest
 
@@ -15311,6 +15839,9 @@ class LeanAgentGrid15m:
 
                     logger.warning("[AGENT-GRID] Failed to snapshot open orders: %s", open_orders_err)
 
+                result["open_orders_fetched_ok"] = open_orders_fetched_ok
+                result["open_orders_count"] = len(open_order_list)
+
                 # Only run stale cleanup when both position and open-order snapshots were
                 # successfully fetched.  This prevents a transient API failure from being
                 # misinterpreted as an authoritative empty exchange state.
@@ -15334,15 +15865,21 @@ class LeanAgentGrid15m:
 
                 self._last_rest_sync_time = current_time
 
+                result["success"] = True
+
                 logger.info("[AGENT-GRID] Force synced position cache from Kalshi REST API (tick=%d, positions=%d)", tick, len(rest_positions))
 
         except Exception as e:
 
             logger.warning("[AGENT-GRID] Failed to force sync position cache: %s", e)
 
+            result["error"] = str(e)
+
 
 
         logger.info("[AGENT-GRID] AFTER sync_from_rest tick=%d", tick)
+
+        return result
 
     def _build_canonical_live_positions(
         self,
@@ -16333,9 +16870,10 @@ class LeanAgentGrid15m:
             elif not allow_new_entries:
                 _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="entries_disabled")
 
-        # CRITICAL FIX: When new entries are disabled, do not pass raw candidates
-        # back to loop_15m. The allocator has already been skipped, so the list
-        # would bypass the global risk budget and side/exposure checks.
+        # When new entries are disabled, the global allocator is intentionally
+        # skipped.  The filtered (best-edge) candidate list is still returned so
+        # the loop can monitor signals and telemetry, but loop_15m must not
+        # execute it when allow_new_entries is False.
         if not allow_new_entries:
             for c in candidates:
                 logger.info(
@@ -16343,8 +16881,8 @@ class LeanAgentGrid15m:
                     c.get("candidate_id"), c.get("ticker"), c.get("side"),
                     float(c.get("edge_pct", 0.0) or 0.0)
                 )
-            logger.info("[AGENT-GRID] allow_new_entries=False; returning empty candidate list")
-            return []
+            logger.info("[AGENT-GRID] allow_new_entries=False; returning %d filtered candidates (not allocated)", len(candidates))
+            return candidates
 
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
@@ -16376,6 +16914,7 @@ AgentGrid15M = LeanAgent15m
 # Tests expect a fee function with signature (contracts, price_cents) returning an int.
 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as canonical_calculate_kalshi_fee_cents
 from merid.prediction.trade_decision import compute_trade_decision
+from merid.prediction.shadow_side_telemetry import write_shadow_side_record, write_model_decomposition_record
 
 
 # ═════════════════════════════════════════════════════════════════════════════

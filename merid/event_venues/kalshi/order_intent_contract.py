@@ -520,6 +520,11 @@ class CanonicalOrderIntent:
     gross_edge: float | None = None
     net_edge_pretrade: float | None = None
     selected_outcome_price_cents: int | None = None
+    # 2026-08-26: Immutable intent/position-effect/economic-side provenance for
+    # clean entry/exit audit and model-sign attribution.
+    intent: Literal["OPEN", "CLOSE", "REDUCE", "CANCEL_REPLACE"] | None = None
+    position_effect: Literal["OPEN", "CLOSE"] | None = None
+    economic_side: Literal["YES", "NO"] | None = None
 
     def yes_delta(self) -> int:
         """Signed-YES centi-contract delta for this order."""
@@ -576,6 +581,9 @@ class CanonicalOrderIntent:
             "gross_edge": self.gross_edge,
             "net_edge_pretrade": self.net_edge_pretrade,
             "selected_outcome_price_cents": self.selected_outcome_price_cents,
+            "intent": self.intent,
+            "position_effect": self.position_effect,
+            "economic_side": self.economic_side,
         }
 
 
@@ -926,6 +934,32 @@ def normalize_order(
 
     kalshi_side = getattr(intent, "kalshi_side", None)
 
+    # Authoritative intent/position-effect/economic-side provenance.  These are
+    # derived from the canonical contract/action and the absolute position change,
+    # not from the caller's optional metadata, so downstream audit joins can trust
+    # them as the source of truth for entry vs. exit classification.
+    economic_side_val: Literal["YES", "NO"] = (
+        "YES"
+        if (contract == "yes" and action == "buy") or (contract == "no" and action == "sell")
+        else "NO"
+    )
+    if abs(expected_position_after) > abs(expected_position_before):
+        position_effect_val: Literal["OPEN", "CLOSE"] = "OPEN"
+    elif abs(expected_position_after) < abs(expected_position_before) or (
+        expected_position_before != 0 and expected_position_after == 0
+    ):
+        position_effect_val = "CLOSE"
+    else:
+        position_effect_val = (
+            "OPEN" if expected_position_before == 0 and expected_position_after != 0 else "CLOSE"
+        )
+    if position_effect_val == "OPEN":
+        intent_val: Literal["OPEN", "CLOSE", "REDUCE", "CANCEL_REPLACE"] = "OPEN"
+    else:
+        intent_val = "CLOSE" if expected_position_after == 0 else "REDUCE"
+    if getattr(intent, "intent", None) in ("OPEN", "CLOSE", "REDUCE", "CANCEL_REPLACE"):
+        intent_val = intent.intent
+
     return CanonicalOrderIntent(
         market_ticker=market_ticker,
         contract=contract,  # type: ignore[arg-type]
@@ -973,6 +1007,9 @@ def normalize_order(
         gross_edge=getattr(intent, "gross_edge", None),
         net_edge_pretrade=getattr(intent, "net_edge_pretrade", None),
         selected_outcome_price_cents=getattr(intent, "selected_outcome_price_cents", None),
+        intent=intent_val,
+        position_effect=position_effect_val,
+        economic_side=economic_side_val,
     )
 
 

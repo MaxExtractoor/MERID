@@ -56,9 +56,10 @@ export type SystemView = "overview" | "operator" | "logs" | "settings";
 // DEPRECATED: These legacy view names are maintained only for backward compatibility.
 // Do not add new entries to this type. Use the consolidated View types instead.
 //
-// NOTE: KalshiDashboardView and KalshiTerminalView removed (stub views, functionality moved to consolidated views)
+// NOTE: KalshiDashboardView and KalshiTerminalView retained as legacy deep-link targets.
 export type LegacyView =
   | "kalshi-all-markets"
+  | "kalshi-dashboard"
   | "kalshi-portfolio"
   | "positions"
   | "orders"
@@ -239,6 +240,7 @@ export const STAGE_GROUPS = [
 export const LEGACY_VIEW_MAP: Record<string, View> = {
   // Stage 1: Discover - all map to unified discover view
   "kalshi-all-markets": "discover",
+  "kalshi-dashboard": "discover",
   "discover-all-markets": "discover",
   "discover-trending": "discover",
   

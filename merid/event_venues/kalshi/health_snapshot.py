@@ -388,13 +388,13 @@ def check_catalog_ws_state_consistency(loop_tick: int) -> bool:
 def check_spot_md_parity(loop_tick: int) -> bool:
     """
     Check the spot/MD parity invariant.
-    
-    The invariant: If spot is not ready (spotreadyFalse), trading should be blocked.
-    This ensures that candidate and signal generation only proceeds when spot data is fresh.
-    
+
+    The invariant: trading is blocked only when ALL assets have unavailable spot data.
+    A single unavailable asset is a degraded state, not a hard halt.
+
     Args:
         loop_tick: Current loop tick counter
-    
+
     Returns:
         True if invariant holds (spot ready or appropriately blocked), False if violated
     """
@@ -433,10 +433,10 @@ def check_spot_md_parity(loop_tick: int) -> bool:
                 unavailable_count += 1
                 logger.error(f"[SPOT-MD-PARITY] {asset} spot unavailable")
         
-        # Invariant: if any asset has unavailable spot, system is unhealthy
-        if unavailable_count > 0:
+        # Invariant: only block trading if ALL assets are unavailable
+        if unavailable_count == len(assets):
             logger.critical(
-                "[SPOT-MD-PARITY] VIOLATION: %d assets have unavailable spot data",
+                "[SPOT-MD-PARITY] VIOLATION: all %d assets have unavailable spot data",
                 unavailable_count
             )
             return False

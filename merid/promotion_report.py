@@ -621,36 +621,6 @@ def _assess_domains(rings_pass: bool) -> List[DomainEligibility]:
     #     return []
     return []
 
-    # domains = []
-    # for name, dc in DOMAIN_CONFIGS.items():
-        blockers = []
-
-        if not dc.enabled:
-            blockers.append("domain disabled")
-        if not rings_pass:
-            blockers.append("validation rings not all passing")
-        if dc.mode.value != "paper":
-            blockers.append(f"mode is {dc.mode.value}, not paper")
-
-        # Check matching engine for prediction
-        if name == "prediction":
-            try:
-                from merid.matching_engine import get_matching_engine
-                engine = get_matching_engine("prediction")
-                if not engine.enabled:
-                    blockers.append("matching engine disabled")
-            except Exception:
-                blockers.append("matching engine not available")
-
-        domains.append(DomainEligibility(
-            domain=name,
-            eligible=len(blockers) == 0,
-            mode=dc.mode.value,
-            blockers=blockers,
-            reconciliation_venue=dc.reconciliation_venue,
-        ))
-
-    return domains
 
 
 # ── Main Runner ──────────────────────────────────────────────────────

@@ -814,6 +814,90 @@ def fill_to_signed_yes_exposure(action: str, side: str, count: int) -> int:
         return 0
 
 
+def held_outcome_from_legacy(side: str, action: str) -> str:
+    """Return the long outcome side from a legacy Kalshi (action, side) pair.
+
+    The canonical Kalshi matrix is:
+        BUY_YES  -> long YES
+        SELL_NO  -> long YES
+        BUY_NO   -> long NO
+        SELL_YES -> long NO
+
+    This is exactly the same mapping used by :func:`yes_delta`, but it returns
+    the held outcome side instead of the signed YES exposure.
+
+    Args:
+        side: "yes" or "no" (the traded contract side)
+        action: "buy" or "sell"
+
+    Returns:
+        The held outcome side ("yes" or "no")
+
+    Raises:
+        ValueError: for unsupported side/action combinations
+    """
+    side_lower = (side or "").lower()
+    action_lower = (action or "").lower()
+
+    if (action_lower, side_lower) in (("buy", "yes"), ("sell", "no")):
+        return "yes"
+    if (action_lower, side_lower) in (("buy", "no"), ("sell", "yes")):
+        return "no"
+
+    raise ValueError(f"Unsupported legacy side/action: side={side}, action={action}")
+
+
+def traded_side_from_held(held_side: str, action: str) -> str:
+    """Return the raw traded contract side given a held outcome and action.
+
+    Inverse of :func:`held_outcome_from_legacy`:
+        - BUY held  -> trade the held side
+        - SELL held -> trade the opposite side (which makes you long the held)
+
+    Args:
+        held_side: "yes" or "no" (the long outcome side)
+        action: "buy" or "sell"
+
+    Returns:
+        The traded contract side ("yes" or "no")
+
+    Raises:
+        ValueError: for unsupported held_side/action combinations
+    """
+    held = (held_side or "").lower()
+    act = (action or "").lower()
+
+    if act == "buy":
+        if held == "yes":
+            return "yes"
+        if held == "no":
+            return "no"
+    elif act == "sell":
+        if held == "yes":
+            return "no"  # selling NO is long YES
+        if held == "no":
+            return "yes"  # selling YES is long NO
+
+    raise ValueError(f"Unsupported held/action: held={held_side}, action={action}")
+
+
+def book_side_from_outcome_action(held_side: str, action: str) -> str:
+    """Return the Kalshi V2 book side (bid/ask) for a given held outcome and action.
+
+    Mapping:
+        - BUY YES  -> bid (buy YES)
+        - SELL NO  -> bid (buy YES)
+        - BUY NO   -> ask (sell YES)
+        - SELL YES -> ask (sell YES)
+    """
+    traded = traded_side_from_held(held_side, action)
+    act = (action or "").lower()
+    # bid = buy YES / sell NO; ask = sell YES / buy NO
+    if (act == "buy" and traded == "yes") or (act == "sell" and traded == "no"):
+        return "bid"
+    return "ask"
+
+
 # ── Canonical Price Range Checking ─────────────────────────────────────────────
 
 # Canonical price ranges (NON-NEGOTIABLE invariants)

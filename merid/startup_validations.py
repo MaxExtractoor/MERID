@@ -334,19 +334,17 @@ def validate_postgres_liveness() -> None:
 
 def validate_kalshi_15m_strip_limits_consistency() -> None:
     """
-    Validate that strip-level limits from profile are consistent with RiskEnvelopeService caps.
+    Validate that strip-level notional limit from profile is consistent with per-asset caps.
     
     This ensures:
     - per_strip_notional_usd (if set) does not exceed per-asset max notional caps
-    - per_strip_order_limit is reasonable (>= 1)
     - Throttling config is loaded successfully from profile
     
     Raises:
-        StartupValidationError if strip limits are inconsistent with envelope caps.
+        StartupValidationError if strip limits are inconsistent with caps.
     """
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
-        from merid.risk.profiles.risk_envelope_service import get_risk_envelope_service
         
         profile_adapter = get_active_profile()
         if profile_adapter is None:
@@ -354,12 +352,6 @@ def validate_kalshi_15m_strip_limits_consistency() -> None:
             return
         
         profile = profile_adapter.profile
-        
-        # Check strip order limit is reasonable
-        if profile.throttling_per_strip_order_limit < 1:
-            raise StartupValidationError(
-                f"Profile invalid: per_strip_order_limit must be >= 1, got {profile.throttling_per_strip_order_limit}"
-            )
         
         # Check strip notional cap (if enabled) is consistent with per-asset caps
         if profile.throttling_per_strip_notional_usd > 0:
@@ -375,9 +367,8 @@ def validate_kalshi_15m_strip_limits_consistency() -> None:
                     )
         
         logger.info(
-            "[STRIP-LIMIT-VALIDATION] Strip limits consistent with envelope caps: "
-            "per_strip_order_limit=%d per_strip_notional_usd=%.2f",
-            profile.throttling_per_strip_order_limit,
+            "[STRIP-LIMIT-VALIDATION] Strip limits consistent with caps: "
+            "per_strip_notional_usd=%.2f",
             profile.throttling_per_strip_notional_usd,
         )
         

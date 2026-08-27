@@ -355,6 +355,56 @@ class FillsPoller:
             except asyncio.TimeoutError:
                 pass
     
+    async def _reconcile_submission_unknown_records(self, client: Any) -> None:
+        """Reconcile all SUBMISSION_UNKNOWN pre-trade gate records.
+
+        The in-route fast path only runs a single 1.5s ``get_order`` lookup.
+        The FillsPoller owns the full, unbounded reconcile so the loop never
+        stalls waiting for broker lookups.
+        """
+        try:
+            from merid.event_venues.kalshi.order_gate import get_pre_trade_gate, OrderStatus
+            from merid.event_venues.kalshi.order_router import reconcile_submission_unknown_client_order_id
+
+            ptg = get_pre_trade_gate()
+            records = [
+                rec for rec in ptg.store.snapshot()
+                if rec.status == OrderStatus.SUBMISSION_UNKNOWN
+            ]
+            if not records:
+                return
+
+            logger.info(
+                "[SUBMISSION-RECONCILE-POLLER] %d SUBMISSION_UNKNOWN records to reconcile",
+                len(records),
+            )
+            for rec in records:
+                try:
+                    await reconcile_submission_unknown_client_order_id(
+                        client,
+                        rec.client_order_id,
+                        rec.contract_id,
+                    )
+                except Exception as _e:
+                    logger.warning(
+                        "[SUBMISSION-RECONCILE-POLLER] failed for %s: %s",
+                        rec.client_order_id,
+                        _e,
+                    )
+
+            # Sweep SUBMISSION_UNKNOWN records that the broker never resolved.
+            # Other statuses are intentionally left untouched (use float("inf")).
+            try:
+                ptg.store.prune_stale_pending(
+                    pending_ttl_s=float("inf"),
+                    submitted_ttl_s=float("inf"),
+                    submission_unknown_ttl_s=120.0,
+                )
+            except Exception as _e:
+                logger.debug("[SUBMISSION-RECONCILE-POLLER] stale sweep failed: %s", _e)
+        except Exception as _e:
+            logger.warning("[SUBMISSION-RECONCILE-POLLER] setup failed: %s", _e)
+
     async def _do_reconcile(self) -> Dict[str, Any]:
         """Execute one reconciliation cycle."""
         logger.info("[RECONCILE] Starting reconciliation cycle")
@@ -366,7 +416,12 @@ class FillsPoller:
         try:
             logger.info("[RECONCILE] Connecting to Kalshi execution port")
             await client.connect()
-            
+
+            # First, reconcile any SUBMISSION_UNKNOWN orders.  This is the
+            # primary recovery path for lost create-order acks; the in-route
+            # fast path only runs a 1.5s ``get_order`` lookup.
+            await self._reconcile_submission_unknown_records(client)
+
             # Get positions from Kalshi through the normalized execution port.
             # Use the fail-closed adapter so missing identity/quantity fields do not
             # silently become ledger entries with implied sides or zero prices.
@@ -878,10 +933,6 @@ class FillsPoller:
                     _side_hint = tracker._open_trades[matching_keys[0]].side
 
                 if settled_yes is None:
-                    # AUDIT-4 FIX: Two-step outcome inference with Outcome enum
-                    # Step 1: Try official Kalshi outcomes (already attempted above)
-                    # Step 2: Only infer if API unavailable AND market is clearly expired with no open position
-                    
                     _require_api = _os.getenv(
                         "MERID_SETTLEMENT_REQUIRE_API_RESULT", ""
                     ).strip().lower() in ("1", "true", "yes", "on")
@@ -893,45 +944,18 @@ class FillsPoller:
                             ticker,
                         )
                         continue
-                    
-                    # Import Outcome enum for structured inference
-                    try:
-                        from merid.event_venues.kalshi.side_semantics import Outcome
-                        
-                        # Record position side at close separately from inferred outcome
-                        position_side_at_close = _side_hint
-                        
-                        # Infer outcome using conservative fallback (WARNING: not authoritative)
-                        inferred_outcome = Outcome.from_side_hint(_side_hint)
-                        settled_yes = inferred_outcome.to_settled_yes()
-                        
-                        logger.warning(
-                            "[SETTLEMENT-AUDIT] INFERRED outcome for %s (Kalshi API unavailable): "
-                            "inferred_outcome=%s position_side_at_close=%s settled_yes=%s. "
-                            "This is a FALLBACK - verify manually or set MERID_SETTLEMENT_REQUIRE_API_RESULT=true "
-                            "to hard-fail on missing API outcome.",
-                            ticker,
-                            inferred_outcome.value,
-                            position_side_at_close,
-                            settled_yes,
-                        )
-                        
-                        # Record both inferred outcome and position side for later reconciliation
-                        # Reconciliation of inferred vs actual outcomes is handled by portfolio_reconciliation.py
-                        # which compares internal state against Kalshi API settlements endpoint.
-                        
-                    except ImportError:
-                        # Fallback to old logic if enum unavailable
-                        settled_yes = _side_hint == "yes"
-                        logger.warning(
-                            "[SETTLEMENT-AUDIT] INFERRED outcome for %s (Kalshi API unavailable, enum fallback): "
-                            "settled_yes=%s inferred from side=%s. "
-                            "Verify manually or set MERID_SETTLEMENT_REQUIRE_API_RESULT=true "
-                            "to hard-fail on missing API outcome.",
-                            ticker,
-                            settled_yes,
-                            _side_hint,
-                        )
+
+                    # DO NOT infer the market outcome from the position side. That would credit a win for
+                    # the held side regardless of the actual result and corrupt PnL/ledger. Retry the API
+                    # on the next reconcile cycle.
+                    logger.warning(
+                        "[SETTLEMENT-AUDIT] No authoritative outcome for %s from Kalshi API; "
+                        "position side is %s. Skipping record_outcome and will retry. "
+                        "Set MERID_SETTLEMENT_REQUIRE_API_RESULT=true to hard-fail instead.",
+                        ticker,
+                        _side_hint,
+                    )
+                    continue
                 else:
                     logger.info("[SETTLEMENT-AUDIT] %s settled_yes=%s (from Kalshi API)", ticker, settled_yes)
 

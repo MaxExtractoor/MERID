@@ -111,6 +111,7 @@ class VenuePosition:
     venue: str = ""
     created_at: Optional[datetime] = None
     raw_data: Optional[Dict[str, Any]] = None
+    exchange_index: Optional[int] = None  # Kalshi exchange shard index
 
 
 @dataclass

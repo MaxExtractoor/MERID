@@ -402,7 +402,8 @@ momentum_fvg:
   # CRITICAL: These are the single source of truth for FVG configuration
   # Previously used environment variables (MERID_FVG_*), now consolidated to profile YAML
   fvg_window_size: 20  # Rolling window size for FVG detection (number of candles)
-  fvg_min_gap_cents: 2.0  # Minimum gap size in cents to consider valid FVG
+  fvg_min_gap_cents: 2.0  # Absolute floor for gap size in cents
+  fvg_min_gap_size_atr: 1.5  # ATR multiplier: min valid gap = max(floor, atr * this)
   fvg_fill_threshold_cents: 5.0  # Distance threshold to consider FVG as filling
   fvg_atr_period: 14  # ATR period for FVG strength calculation
   fvg_max_age_bars: 4  # Maximum age of FVG in bars (15m bars, 4 bars = 60min)

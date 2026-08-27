@@ -402,6 +402,8 @@ class DeterministicKalshiClient:
         if not oid:
             return OperationResult.ok(None)
         placed = self._orders[oid]
+        if market_id and placed.market_id != market_id:
+            return OperationResult.ok(None)
         self._maybe_expire(placed)
         return OperationResult.ok(placed)
 
@@ -467,6 +469,8 @@ class DeterministicKalshiClient:
         cursor: Optional[str] = None,
         since_ts: Optional[int] = None,
         limit: int = 200,
+        ticker: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> OperationResult[List[Dict[str, Any]]]:
         filtered: List[Dict[str, Any]] = []
         for f in self._fills:
@@ -474,6 +478,10 @@ class DeterministicKalshiClient:
                 ts = self._parse_created_time(f.get("created_time"))
                 if ts is not None and ts < since_ts:
                     continue
+            if ticker and f.get("ticker") != ticker:
+                continue
+            if order_id and f.get("order_id") != order_id:
+                continue
             filtered.append(f)
 
         if limit:

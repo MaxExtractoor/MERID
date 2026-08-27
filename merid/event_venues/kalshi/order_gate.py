@@ -508,7 +508,7 @@ class IdempotentOrderStore:
             # PHASE1-DUP-5: Check transition invariants
             if not self._check_transition_allowed(rec, OrderStatus.REJECTED, "mark_rejected"):
                 return
-            if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
+            if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.SUBMISSION_UNKNOWN):
                 rec.status = OrderStatus.REJECTED
                 rec.updated_at = _time.time()
 
@@ -790,15 +790,20 @@ class IdempotentOrderStore:
     # SUBMITTED without an ack past the longer TTL is a zombie that will
     # later be resolved by the reconciler — we only mark it so operators can
     # see it in the gate metrics.
+    # SUBMISSION_UNKNOWN records that are not resolved by the broker-reconcile
+    # poller within a couple of minutes are treated as genuinely lost; the
+    # slot must be freed or the same logical candidate can never be retried.
     # 2026 FIX: Reduced ORPHAN_PENDING_TTL_S from 300s to 15s for 15m crypto trading
     # 15m markets move fast - 5 minutes is too long for orphan cleanup
     ORPHAN_PENDING_TTL_S: float = 15.0        # 15 seconds (was 5 minutes - too slow for 15m crypto)
     ORPHAN_SUBMITTED_TTL_S: float = 60.0      # 1 minute (was 1 hour - too slow for 15m crypto)
+    ORPHAN_SUBMISSION_UNKNOWN_TTL_S: float = 120.0  # 2 minutes (broker-reconcile window)
 
     def prune_stale_pending(
         self,
         pending_ttl_s: Optional[float] = None,
         submitted_ttl_s: Optional[float] = None,
+        submission_unknown_ttl_s: Optional[float] = None,
     ) -> Dict[str, int]:
         """Mark orphaned non-terminal records as REJECTED so they can be pruned.
 
@@ -809,13 +814,12 @@ class IdempotentOrderStore:
         anything else in the system.
 
         The transition is lossy-but-safe: the record is marked REJECTED with
-        reason ``"orphaned_pending"`` / ``"orphaned_submitted"``, its
-        ``updated_at`` is bumped, and the next ``prune_old`` pass will
-        eventually delete it once the terminal TTL elapses.  This keeps the
-        PENDING slot free for a legitimate retry of the same logical order.
+        reason ``"orphaned_pending"`` / ``"orphaned_submitted"`` /
+        ``"orphaned_submission_unknown"``, its ``updated_at`` is bumped, and
+        the next ``prune_old`` pass will eventually delete it once the terminal
+        TTL elapses.  This keeps the slot free for a legitimate retry.
 
-        Returns a small dict of counts for observability:
-        ``{"orphaned_pending": N, "orphaned_submitted": M}``.
+        Returns a small dict of counts for observability.
         """
         pending_cutoff = _time.time() - (
             pending_ttl_s if pending_ttl_s is not None else self.ORPHAN_PENDING_TTL_S
@@ -823,7 +827,16 @@ class IdempotentOrderStore:
         submitted_cutoff = _time.time() - (
             submitted_ttl_s if submitted_ttl_s is not None else self.ORPHAN_SUBMITTED_TTL_S
         )
-        result = {"orphaned_pending": 0, "orphaned_submitted": 0}
+        submission_unknown_cutoff = _time.time() - (
+            submission_unknown_ttl_s
+            if submission_unknown_ttl_s is not None
+            else self.ORPHAN_SUBMISSION_UNKNOWN_TTL_S
+        )
+        result = {
+            "orphaned_pending": 0,
+            "orphaned_submitted": 0,
+            "orphaned_submission_unknown": 0,
+        }
         now = _time.time()
         with self._lock:
             for rec in self._orders.values():
@@ -835,6 +848,13 @@ class IdempotentOrderStore:
                     rec.status = OrderStatus.REJECTED
                     rec.updated_at = now
                     result["orphaned_submitted"] += 1
+                elif (
+                    rec.status == OrderStatus.SUBMISSION_UNKNOWN
+                    and rec.updated_at < submission_unknown_cutoff
+                ):
+                    rec.status = OrderStatus.REJECTED
+                    rec.updated_at = now
+                    result["orphaned_submission_unknown"] += 1
         return result
 
     def snapshot(self) -> List[OrderRecord]:
@@ -1214,8 +1234,10 @@ class PreTradeGate:
             or (entry_or_exit is None and action == "buy" and not reduce_only)
         )
         if is_entry:
+            # ``existing_filled`` is in whole contracts (display units); convert to
+            # canonical centi-contracts before comparing with ``qty_cc``.
             already_filled = (
-                existing_filled
+                existing_filled * 100
                 if existing_filled is not None
                 else self._store.filled_count_for_contract(contract_id, side, strategy_group)
             )
@@ -1556,8 +1578,10 @@ class PreTradeGate:
             or (entry_or_exit is None and action == "buy" and not reduce_only)
         )
         if is_entry:
+            # ``existing_filled`` is in whole contracts (display units); convert to
+            # canonical centi-contracts before comparing with ``qty_cc``.
             already_filled = (
-                existing_filled
+                existing_filled * 100
                 if existing_filled is not None
                 else self._store.filled_count_for_contract(contract_id, side, strategy_group)
             )
@@ -1642,6 +1666,7 @@ class PreTradeGate:
         ttl_s: Optional[float] = None,
         pending_ttl_s: Optional[float] = None,
         submitted_ttl_s: Optional[float] = None,
+        submission_unknown_ttl_s: Optional[float] = None,
     ) -> Dict[str, int]:
         """Run both the terminal prune and the orphan sweep.
 
@@ -1652,24 +1677,30 @@ class PreTradeGate:
           (FILLED / REJECTED / CANCELED) older than ``ttl_s`` (default
           24h).  This is the long-TTL GC that keeps the dict bounded.
         * :meth:`IdempotentOrderStore.prune_stale_pending` — marks orphaned
-          PENDING / SUBMITTED records as REJECTED so the terminal prune
-          can eventually sweep them.  Without this step, a PENDING record
-          produced by a crashed upstream caller would leak forever.
+          PENDING / SUBMITTED / SUBMISSION_UNKNOWN records as REJECTED so
+          the terminal prune can eventually sweep them.
 
-        Returns a dict with ``pruned_terminal``, ``orphaned_pending``, and
-        ``orphaned_submitted`` counts for observability.
+        Returns a dict with counts for observability.
         """
         # Mark orphans BEFORE running the terminal prune so the records
         # marked in this tick don't have to wait until the next one to be
         # candidates (they still have to age past ``ttl_s`` of course, but
         # operators get a single consistent snapshot of "what happened").
-        orphans = self._store.prune_stale_pending(pending_ttl_s, submitted_ttl_s)
+        orphans = self._store.prune_stale_pending(
+            pending_ttl_s,
+            submitted_ttl_s,
+            submission_unknown_ttl_s,
+        )
         pruned = self._store.prune_old(ttl_s)
 
         if pruned > 0 or any(orphans.values()):
             logger.info(
-                "[GATE] cleanup_stale: pruned_terminal=%d orphaned_pending=%d orphaned_submitted=%d",
-                pruned, orphans["orphaned_pending"], orphans["orphaned_submitted"],
+                "[GATE] cleanup_stale: pruned_terminal=%d orphaned_pending=%d "
+                "orphaned_submitted=%d orphaned_submission_unknown=%d",
+                pruned,
+                orphans.get("orphaned_pending", 0),
+                orphans.get("orphaned_submitted", 0),
+                orphans.get("orphaned_submission_unknown", 0),
             )
 
         return {

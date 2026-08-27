@@ -12,8 +12,15 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
+from merid.data.price_precision import (
+    get_asset_settlement_digits,
+    get_asset_settlement_quantum,
+    parse_price,
+    settlement_round,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.data.settlement_rti_buffer")
@@ -28,23 +35,30 @@ class SettlementRTIBuffer:
     market_ticker: str
     asset: str
     expiry_epoch: int
-    _slots: List[Optional[float]] = field(default_factory=lambda: [None] * SLOT_COUNT)
+    settlement_digits: Optional[int] = None
+    _slots: List[Optional[Decimal]] = field(default_factory=lambda: [None] * SLOT_COUNT)
     _window_start: int = field(init=False)
 
     def __post_init__(self) -> None:
         self.asset = self.asset.upper()
         self.expiry_epoch = int(self.expiry_epoch)
         self._window_start = self.expiry_epoch - (SLOT_COUNT - 1)
+        if self.settlement_digits is None:
+            self.settlement_digits = get_asset_settlement_digits(self.asset)
+        if isinstance(self._slots, list) and len(self._slots) == SLOT_COUNT:
+            self._slots = [parse_price(s) for s in self._slots]
 
-    def ingest(self, ts: float, price: float) -> bool:
+    def ingest(self, ts: float, price: Any) -> bool:
         """Record one RTI tick; overwrites prior value in the same second."""
         sec = int(math.floor(float(ts)))
         if sec < self._window_start or sec > self.expiry_epoch:
             return False
         idx = sec - self._window_start
         if 0 <= idx < SLOT_COUNT:
-            self._slots[idx] = float(price)
-            return True
+            parsed = parse_price(price)
+            if parsed is not None and parsed.is_finite() and parsed > 0:
+                self._slots[idx] = parsed
+                return True
         return False
 
     @property
@@ -62,10 +76,37 @@ class SettlementRTIBuffer:
     @property
     def avg_received(self) -> float:
         """Average over received samples only (not authoritative until full)."""
+        avg = self.avg_received_decimal
+        if avg is None:
+            return 0.0
+        return float(avg)
+
+    @property
+    def avg_received_decimal(self) -> Optional[Decimal]:
+        """Exact average over received samples as a :class:`Decimal`."""
         got = [s for s in self._slots if s is not None]
         if not got:
+            return None
+        return sum(got, Decimal("0")) / Decimal(len(got))
+
+    @property
+    def quantized_avg_decimal(self) -> Optional[Decimal]:
+        """Settlement average quantized to the market's settlement digits."""
+        avg = self.avg_received_decimal
+        if avg is None or self.settlement_digits is None:
+            return avg
+        try:
+            return settlement_round(avg, self.settlement_digits)
+        except Exception:
+            return avg
+
+    @property
+    def quantized_avg(self) -> float:
+        """Settlement average as a float after one quantization step."""
+        q = self.quantized_avg_decimal
+        if q is None:
             return 0.0
-        return sum(got) / len(got)
+        return float(q)
 
     def is_settlement_grade(self) -> bool:
         return self.filled_count == SLOT_COUNT
@@ -73,7 +114,7 @@ class SettlementRTIBuffer:
     @property
     def avg_60(self) -> float:
         """Alias: mean of all 60 slots when settlement-grade; else partial avg."""
-        return self.avg_received
+        return self.quantized_avg if self.is_settlement_grade() else self.avg_received
 
     def seconds_to_expiry_from_now(self) -> Optional[float]:
         now = time.time()
@@ -123,13 +164,18 @@ class SettlementBufferRegistry:
         with cls._lock_inst:
             cls._instance = None
 
-    def ensure_buffer(self, market_ticker: str, asset: str, expiry_epoch: int) -> SettlementRTIBuffer:
+    def ensure_buffer(self, market_ticker: str, asset: str, expiry_epoch: int, settlement_digits: Optional[int] = None) -> SettlementRTIBuffer:
         exp = int(expiry_epoch)
         with self._lock:
             existing = self._buffers.get(market_ticker)
             if existing and existing.expiry_epoch == exp:
                 return existing
-            buf = SettlementRTIBuffer(market_ticker=market_ticker, asset=asset, expiry_epoch=exp)
+            buf = SettlementRTIBuffer(
+                market_ticker=market_ticker,
+                asset=asset,
+                expiry_epoch=exp,
+                settlement_digits=settlement_digits,
+            )
             self._buffers[market_ticker] = buf
             logger.debug(
                 "settlement_buffer registered ticker=%s asset=%s expiry=%s",

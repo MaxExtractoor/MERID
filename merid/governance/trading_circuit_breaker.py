@@ -387,6 +387,94 @@ class TradingCircuitBreaker:
         with self._lock:
             return not self._halted and self._autonomous_exits_enabled
 
+    def maybe_auto_resume_unmatched(
+        self,
+        *,
+        exchange_positions_count: int,
+        open_orders_count: int,
+        fill_state: Optional[Dict[str, Any]] = None,
+        recent_unmatched_count: int = 0,
+    ) -> bool:
+        """Attempt to auto-resume from an ``unmatched_live_exchange_fill`` halt.
+
+        The breaker only auto-resumes when all of the following are true:
+
+        1. The breaker is halted with reason ``unmatched_live_exchange_fill``.
+        2. The triggering ``fill_id`` is recorded in the halt metadata.
+        3. The offending fill is now classified as resolved (``fill_state``
+           has ``resolved=True``).
+        4. The exchange reports zero open positions.
+        5. The exchange reports zero open orders.
+        6. There are no other unresolved unmatched fills in the last 30 minutes.
+
+        This is the automated counterpart to ``admin_release`` for the specific
+        ``unmatched_live_exchange_fill`` reason. It is deliberately conservative:
+        any live exposure, open order, or unresolved fill blocks auto-resume.
+        """
+        with self._lock:
+            if not self._halted:
+                return False
+            if self._halt_record is None or self._halt_record.reason != "unmatched_live_exchange_fill":
+                return False
+            fill_id = self._halt_record.metadata.get("fill_id") if self._halt_record.metadata else None
+            if not fill_id:
+                logger.warning(
+                    "[TRADING-CIRCUIT-BREAKER] Auto-resume blocked: no fill_id in halt metadata"
+                )
+                return False
+
+        if exchange_positions_count != 0:
+            logger.warning(
+                "[TRADING-CIRCUIT-BREAKER] Auto-resume blocked: %d exchange position(s) remain",
+                exchange_positions_count,
+            )
+            return False
+
+        if open_orders_count != 0:
+            logger.warning(
+                "[TRADING-CIRCUIT-BREAKER] Auto-resume blocked: %d open order(s) remain",
+                open_orders_count,
+            )
+            return False
+
+        if recent_unmatched_count != 0:
+            logger.warning(
+                "[TRADING-CIRCUIT-BREAKER] Auto-resume blocked: %d other unresolved unmatched fill(s) in last 30 minutes",
+                recent_unmatched_count,
+            )
+            return False
+
+        if not fill_state:
+            logger.warning(
+                "[TRADING-CIRCUIT-BREAKER] Auto-resume blocked: no fill_state provided"
+            )
+            return False
+
+        if not fill_state.get("found"):
+            logger.warning(
+                "[TRADING-CIRCUIT-BREAKER] Auto-resume blocked: triggering fill %s not found",
+                fill_id,
+            )
+            return False
+
+        if not fill_state.get("resolved"):
+            logger.warning(
+                "[TRADING-CIRCUIT-BREAKER] Auto-resume blocked: triggering fill %s still unresolved (unmatched=%s, reason=%s)",
+                fill_id,
+                fill_state.get("unmatched"),
+                fill_state.get("unmatched_reason"),
+            )
+            return False
+
+        # All safety checks passed.  Write an audit log and resume.
+        logger.critical(
+            "[TRADING-CIRCUIT-BREAKER] Auto-resuming from unmatched_live_exchange_fill: "
+            "fill_id=%s exchange_positions=%d open_orders=%d recent_unmatched=%d",
+            fill_id, exchange_positions_count, open_orders_count, recent_unmatched_count,
+        )
+        self.resume()
+        return True
+
     def require_live_fill_identity(
         self,
         fill: Any,

@@ -442,7 +442,6 @@ class TestAssertionConsistency:
             profile_capital_usd=0.0,
             max_single_order_notional_usd=1.0,  # Fixed $1 exposure
             max_total_notional_usd=1.0,  # Fixed $1 exposure
-            max_concurrent_trades=5,
             asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={},
             agent_max_notional_usd=1.0,  # Fixed $1 exposure

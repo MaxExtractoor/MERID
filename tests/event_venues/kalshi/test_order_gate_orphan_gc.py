@@ -54,7 +54,7 @@ class TestPruneStalePendingBasics:
 
         result = store.prune_stale_pending(pending_ttl_s=300)
 
-        assert result == {"orphaned_pending": 1, "orphaned_submitted": 0}
+        assert result == {"orphaned_pending": 1, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
         assert stale_pending.status == OrderStatus.REJECTED
         # updated_at bumped so prune_old's 24h TTL restarts from now.
         assert stale_pending.updated_at > time.time() - 5
@@ -67,7 +67,7 @@ class TestPruneStalePendingBasics:
 
         result = store.prune_stale_pending(pending_ttl_s=300)
 
-        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0}
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
         assert fresh.status == OrderStatus.PENDING
 
     def test_submitted_older_than_long_ttl_is_marked_rejected(self):
@@ -77,8 +77,30 @@ class TestPruneStalePendingBasics:
 
         result = store.prune_stale_pending(submitted_ttl_s=3600)
 
-        assert result == {"orphaned_pending": 0, "orphaned_submitted": 1}
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 1, "orphaned_submission_unknown": 0}
         assert zombie.status == OrderStatus.REJECTED
+
+    def test_submission_unknown_older_than_reconcile_ttl_is_marked_rejected(self):
+        """A SUBMISSION_UNKNOWN record that outlives the broker-reconcile window is freed."""
+        store = IdempotentOrderStore()
+        lost = _make_record("coid-lost", OrderStatus.SUBMISSION_UNKNOWN, time.time() - 300)
+        store._orders["coid-lost"] = lost
+
+        result = store.prune_stale_pending(submission_unknown_ttl_s=60)
+
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 1}
+        assert lost.status == OrderStatus.REJECTED
+
+    def test_fresh_submission_unknown_is_left_alone(self):
+        """A SUBMISSION_UNKNOWN record inside the reconcile window is still retried."""
+        store = IdempotentOrderStore()
+        fresh = _make_record("coid-fresh-unknown", OrderStatus.SUBMISSION_UNKNOWN, time.time() - 5)
+        store._orders["coid-fresh-unknown"] = fresh
+
+        result = store.prune_stale_pending(submission_unknown_ttl_s=120)
+
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
+        assert fresh.status == OrderStatus.SUBMISSION_UNKNOWN
 
     def test_live_records_are_never_touched(self):
         """LIVE records are not orphans — only the reconciler resolves them."""
@@ -88,7 +110,7 @@ class TestPruneStalePendingBasics:
 
         result = store.prune_stale_pending(pending_ttl_s=1, submitted_ttl_s=1)
 
-        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0}
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
         assert live.status == OrderStatus.LIVE
 
     def test_terminal_records_are_never_touched(self):
@@ -100,7 +122,7 @@ class TestPruneStalePendingBasics:
 
         result = store.prune_stale_pending(pending_ttl_s=1, submitted_ttl_s=1)
 
-        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0}
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
         # All three preserved at their original terminal status.
         for status in (OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED):
             assert store._orders[f"coid-{status.value}"].status == status
