@@ -296,3 +296,52 @@ class TestPortLedgerAdapterFractional:
         result = port_fill_to_ledger_dict(fill)
         assert result["quantity_cc"] == 49
         assert result["count_fp"] == "0.49"
+
+
+class TestFillFeeAudit:
+    """Per-fill fee audit record captures gross, fee, and net economics."""
+
+    @pytest.mark.asyncio
+    async def test_fill_fee_audit_computes_net_price(self, ledger, caplog):
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill
+
+        fill = KalshiFill(
+            fill_id="fill-fee-audit-01",
+            order_id="order-fee-audit-01",
+            client_order_id="coid-fee-audit-01",
+            market_ticker="KXETH15M-TEST",
+            market_id="KXETH15M-TEST",
+            canonical_position_side="yes",
+            canonical_position_action="buy",
+            side="yes",
+            action="buy",
+            count_fp=Decimal("2"),
+            quantity_cc=200,
+            yes_price_dollars=Decimal("0.5500"),
+            no_price_dollars=Decimal("0.4500"),
+            fee_cost=Decimal("0.14"),  # 2 contracts * 7c taker fee
+            canonicalization_state="TRUSTED_LIVE_V1",
+        )
+
+        ledger._fills[fill.fill_id] = fill
+        ledger._index_fill(fill)
+        ledger._emit_fill_fee_audit(fill)
+
+        assert fill.fee_cost_cents == 14
+        assert fill.fee_per_contract_cents == Decimal("7")
+        assert fill.net_price_cents == Decimal("62")
+
+        # The structured audit record should be in the log extra dict.
+        audit_records = [
+            r for r in caplog.records
+            if "[FILL-FEE-AUDIT]" in r.getMessage()
+        ]
+        assert len(audit_records) == 1
+        audit = audit_records[0].fill_fee_audit
+        assert audit["fill_id"] == fill.fill_id
+        assert audit["gross_price_cents"] == 55
+        assert audit["fee_cost_cents"] == 14
+        assert audit["fee_per_contract_cents"] == 7.0
+        assert audit["net_price_cents"] == 62.0
+        assert audit["order_id"] == "order-fee-audit-01"
+        assert audit["client_order_id"] == "coid-fee-audit-01"

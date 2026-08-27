@@ -793,6 +793,34 @@ class KalshiFill:
         return 0
 
     @property
+    def fee_cost_cents(self) -> int:
+        """Actual fee paid in integer cents, rounded half-up."""
+        return fee_dollars_to_cents(self.fee_cost)
+
+    @property
+    def fee_per_contract_cents(self) -> Decimal:
+        """Actual fee per whole contract in cents."""
+        if self.count_fp and self.count_fp > 0:
+            return Decimal(str(self.fee_cost_cents)) / self.count_fp
+        return Decimal("0")
+
+    @property
+    def net_price_cents(self) -> Decimal:
+        """Gross execution price adjusted for fee per contract.
+
+        For a BUY, the all-in cost is price + fee.  For a SELL, the proceeds
+        are price - fee.  The sign convention is the same as the price itself:
+        positive in both cases, with the fee already backing out of the realized
+        PnL in ``proceeds_dollars``.
+        """
+        gross = Decimal(str(self.price_cents))
+        if self.canonical_position_action == "buy":
+            return gross + self.fee_per_contract_cents
+        if self.canonical_position_action == "sell":
+            return gross - self.fee_per_contract_cents
+        return gross
+
+    @property
     def notional_usd(self) -> Decimal:
         """Calculate notional value (count * canonical side price)."""
         _side = self.canonical_position_side or self.side
@@ -4464,6 +4492,65 @@ class KalshiFillsLedger:
         fill.confirmed_by_rest = True
         return new_id
 
+    def _emit_fill_fee_audit(self, fill: KalshiFill) -> None:
+        """Emit a durable, structured per-fill fee audit record.
+
+        This is the authoritative fill-fee telemetry record used to reconcile
+        expected vs. realized economics.  It carries the same canonical fee
+        computation that drives take-profit decisions (Fix 4) so the two paths
+        can be compared end-to-end.
+        """
+        try:
+            gross_cents = fill.price_cents
+            fee_cents = fill.fee_cost_cents
+            fee_per = float(fill.fee_per_contract_cents) if fill.count_fp > 0 else 0.0
+            net_cents = float(fill.net_price_cents)
+
+            audit = {
+                "fill_id": fill.fill_id,
+                "trade_id": fill.trade_id,
+                "order_id": fill.order_id,
+                "client_order_id": fill.client_order_id,
+                "client_tag": fill.client_tag,
+                "intent_id": fill.intent_id,
+                "decision_trace_id": fill.decision_trace_id,
+                "market_ticker": fill.market_ticker,
+                "asset": fill.asset,
+                "canonical_position_side": fill.canonical_position_side,
+                "canonical_position_action": fill.canonical_position_action,
+                "position_effect": fill.position_effect,
+                "is_exit": fill.is_exit,
+                "is_live": fill.is_live,
+                "fill_source": fill.fill_source,
+                "liquidity_role": fill.liquidity_role,
+                "count_fp": str(fill.count_fp),
+                "quantity_cc": fill.quantity_cc,
+                "gross_price_cents": gross_cents,
+                "fee_cost_cents": fee_cents,
+                "fee_per_contract_cents": round(fee_per, 4),
+                "net_price_cents": round(net_cents, 4),
+                "proceeds_dollars": float(fill.proceeds_dollars) if fill.proceeds_dollars is not None else None,
+                "yes_price_dollars": float(fill.yes_price_dollars) if fill.yes_price_dollars is not None else None,
+                "no_price_dollars": float(fill.no_price_dollars) if fill.no_price_dollars is not None else None,
+                "canonicalization_state": fill.canonicalization_state,
+                "canonicalization_version": fill.canonicalization_version,
+                "created_time": fill.created_time.isoformat() if fill.created_time else None,
+            }
+
+            logger.info(
+                "[FILL-FEE-AUDIT] fill_id=%s ticker=%s gross=%dc fee=%dc net=%.4fc role=%s source=%s",
+                fill.fill_id,
+                fill.market_ticker,
+                gross_cents,
+                fee_cents,
+                net_cents,
+                fill.liquidity_role or "none",
+                fill.fill_source or "unknown",
+                extra={"fill_fee_audit": audit},
+            )
+        except Exception as exc:
+            logger.warning("[FILLS-LEDGER] Failed to emit fill fee audit: %s", exc)
+
     def on_fill(self, fill: KalshiFill) -> None:
         """Handle fill event with position state machine.
 
@@ -4476,6 +4563,10 @@ class KalshiFillsLedger:
         if fill.fill_id and fill.fill_id not in self._fills:
             self._fills[fill.fill_id] = fill
             self._index_fill(fill)
+
+        # Emit the per-fill fee audit record regardless of downstream state
+        # machine acceptance; quarantined fills are still part of the audit trail.
+        self._emit_fill_fee_audit(fill)
 
         # 2026-08-13: Fills without an explicit trusted canonicalization state are
         # quarantined.  A `None` state means an unpatched producer, partial
