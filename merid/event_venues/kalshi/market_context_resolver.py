@@ -14,6 +14,7 @@ from merid.event_venues.kalshi.market_wiring.models import (
     MarketMapping,
     KalshiMarketRecord,
     MarketContextConfig,
+    RiskProfile,
 )
 from merid.event_venues.kalshi.market_wiring.store import get_kalshi_market_store
 from merid.event_venues.kalshi.market_mapping import get_market_mapping_registry

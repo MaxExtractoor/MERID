@@ -47,6 +47,7 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
 
+from merid.data.ingress_replay import replay_time
 from merid.data.price_precision import (
     format_price as _format_price,
     get_asset_settlement_digits,
@@ -509,7 +510,7 @@ class CatalogSnapshot:
         # P0 FIX: require a small safety margin before market close to avoid
         # subscribing to/entering a market that is about to expire (clock skew).
         _MIN_SUBSCRIBE_TTE_S = 5.0
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
 
         # Find the market that exactly matches the current ET window end time
         # This enforces the single-market invariant: no selection, just exact match
@@ -695,7 +696,7 @@ class KalshiMarketCatalog:
 
     def get_health_status(self) -> Dict[str, Any]:
         """Get catalog health status for readiness endpoint."""
-        now = datetime.now(timezone.utc)
+        now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
         with self._refresh_lock:
             last_refresh = self._last_refresh
         
@@ -909,7 +910,7 @@ class KalshiMarketCatalog:
         # CRITICAL FIX: Implement rate limiting to prevent excessive catalog refreshes
         # Only refresh if at least 30 seconds have passed since last refresh
         # Rate limiting is bypassed when force=True (for periodic loop calls)
-        now = datetime.now(timezone.utc)
+        now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
         with self._refresh_lock:
             last_refresh = self._last_refresh
         time_since_refresh = (now - last_refresh).total_seconds() if last_refresh else 0
@@ -926,8 +927,8 @@ class KalshiMarketCatalog:
                    last_refresh, f"{time_since_refresh:.1f}s" if last_refresh else "N/A")
         logger.debug("[CATALOG-REFRESH-ENTRY] refresh() called, force=%s", force)
 
-        refresh_start = datetime.now(timezone.utc)
-        now_utc = datetime.now(timezone.utc)
+        refresh_start = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
+        now_utc = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
 
         # CRITICAL FIX: Remove lock to prevent deadlock
         # The refresh loop runs in a separate thread with its own event loop
@@ -1231,7 +1232,7 @@ class KalshiMarketCatalog:
         # Filter to only markets within 0-15.5 minutes to expiry (current 15m window)
         # This prevents 4-day future markets and old tickers from previous windows from being fed to the state store
         from merid.event_venues.kalshi.kalshi_15m_time import compute_minutes_to_expiry
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
         
         # Visibility filter: markets visible for data/WS subscription (-5 to 15.5 min)
         # CRITICAL FIX: Include markets from -5 minutes to account for Kalshi's lifecycle
@@ -1360,7 +1361,7 @@ class KalshiMarketCatalog:
             )
         self._market_universe.log_summary()
 
-        now = datetime.now(timezone.utc)
+        now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
 
         # Offload the CPU-bound enrichment loop (now for filtered markets only)
         # to a thread pool executor so it cannot block the event loop.
@@ -1469,7 +1470,7 @@ class KalshiMarketCatalog:
                 )
         
         # Calculate total refresh latency
-        refresh_end = datetime.now(timezone.utc)
+        refresh_end = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
         total_latency_ms = (refresh_end - refresh_start).total_seconds() * 1000
         time_since_last = (now - last_refresh).total_seconds() if last_refresh else 0
         
@@ -2766,7 +2767,7 @@ class KalshiMarketCatalog:
                 # 2026-08-11: This is routine during incremental catalog refresh and
                 # while individual assets are between 15m windows.  Only escalate to
                 # WARNING when the catalog is mature and an asset is still missing.
-                now = datetime.now(timezone.utc)
+                now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
                 with self._refresh_lock:
                     last_refresh = self._last_refresh
                 catalog_age_s = (now - last_refresh).total_seconds() if last_refresh else float('inf')
@@ -3014,7 +3015,7 @@ class KalshiMarketCatalog:
                 if kalshi_market:
                     event_market = kalshi_client._to_event_market(kalshi_market)
                     if event_market:
-                        catalog_market = self._enrich(event_market, datetime.now(timezone.utc))
+                        catalog_market = self._enrich(event_market, datetime.fromtimestamp(replay_time(), tz=timezone.utc))
                         enriched.append(catalog_market)
             except Exception as e:
                 logger.warning(
@@ -3076,7 +3077,7 @@ class KalshiMarketCatalog:
         MIN_MINUTES_TO_EXPIRY = 0.5
         MAX_MINUTES_TO_EXPIRY = 17.0
         
-        now = datetime.now(timezone.utc)
+        now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
         
         logger.info("[SNAPSHOT-CREATE] Starting snapshot creation, total_catalog_markets=%d catalog_id=%s", len(self._markets), id(self))
         
@@ -3117,7 +3118,7 @@ class KalshiMarketCatalog:
 
         # DIAGNOSTIC: Log snapshot tickers to debug stale data issue
         tickers_in_snapshot = [m.market.market_id for m in active_markets] if active_markets else []
-        now = datetime.now(timezone.utc)
+        now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
         # Thread-safe read of _last_refresh (refresh runs in separate thread)
         with self._refresh_lock:
             last_refresh = self._last_refresh

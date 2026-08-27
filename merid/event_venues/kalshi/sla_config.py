@@ -9,7 +9,7 @@ data quality enforcement across the stack.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Literal
+from typing import Dict, Literal, Optional
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.sla_config")

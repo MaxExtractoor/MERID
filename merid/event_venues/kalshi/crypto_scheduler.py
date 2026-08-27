@@ -6,7 +6,7 @@ Wire crypto bot into MERID's scheduler system
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)

@@ -28,6 +28,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from merid.event_venues.kalshi.kalshi_config import get_kalshi_config, KalshiConfig
+from merid.data.ingress_recorder import record_ingress, SOURCE_CFB_RTI_WS
+from merid.data.ingress_replay import (
+    is_replay_active,
+    get_replay_dispatcher,
+    ReplayExhausted,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.data.kalshi_cf_rti_ws")
@@ -166,6 +172,11 @@ class KalshiCfRtiStream:
         headers = self._build_auth_headers()
         logger.info("[KALSHI-CF-RTI-WS] Connecting to %s", self.ws_url)
 
+        if is_replay_active():
+            logger.info("[KALSHI-CF-RTI-WS-REPLAY] Using replay tape")
+            self._ws = get_replay_dispatcher().websocket_for(SOURCE_CFB_RTI_WS)
+            return
+
         try:
             self._ws = await websockets.connect(
                 self.ws_url,
@@ -189,11 +200,20 @@ class KalshiCfRtiStream:
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
         try:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=timeout)
+            if is_replay_active():
+                raw = await self._ws.recv()
+            else:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=timeout)
         except asyncio.TimeoutError:
             return None
         except websockets.ConnectionClosed:
             raise
+
+        record_ingress(
+            SOURCE_CFB_RTI_WS,
+            raw,
+            metadata={"index_ids": list(self._index_ids)},
+        )
 
         try:
             return json.loads(raw)
@@ -423,6 +443,10 @@ class KalshiCfRtiStream:
                 logger.info("[KALSHI-CF-RTI-WS] Connection closed")
                 self._call_callback(self.on_disconnect)
                 break
+            except ReplayExhausted:
+                logger.info("[KALSHI-CF-RTI-WS-REPLAY] tape exhausted, stopping")
+                self._call_callback(self.on_disconnect)
+                break
             except Exception as e:
                 logger.warning("[KALSHI-CF-RTI-WS] recv error: %s", e)
                 self._call_callback(self.on_disconnect)
@@ -447,6 +471,10 @@ class KalshiCfRtiStream:
                 # inherit a stale 60s delay from a previous outage.
                 if time.monotonic() - run_started > 60.0:
                     self._reconnect_delay = 1.0
+            except ReplayExhausted:
+                logger.info("[KALSHI-CF-RTI-WS-REPLAY] tape exhausted, stopping run loop")
+                self._running = False
+                break
             except Exception as e:
                 logger.error("[KALSHI-CF-RTI-WS] Run-cycle error: %s", e)
                 if self._running:
