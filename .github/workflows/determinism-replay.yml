@@ -7,7 +7,14 @@ on:
       - develop
     paths:
       - 'merid/prediction/**'
+      - 'merid/data/**'
+      - 'merid/event_venues/**'
+      - 'merid/utils/**'
+      - 'merid/audit/**'
       - 'merid/tools/determinism_replay.py'
+      - 'tests/data/test_ingress_replay.py'
+      - 'tests/data/test_replay_state_diff.py'
+      - 'tests/data/golden/**'
       - 'config/kalshi_*.yaml'
   pull_request:
     branches:
@@ -15,7 +22,14 @@ on:
       - develop
     paths:
       - 'merid/prediction/**'
+      - 'merid/data/**'
+      - 'merid/event_venues/**'
+      - 'merid/utils/**'
+      - 'merid/audit/**'
       - 'merid/tools/determinism_replay.py'
+      - 'tests/data/test_ingress_replay.py'
+      - 'tests/data/test_replay_state_diff.py'
+      - 'tests/data/golden/**'
       - 'config/kalshi_*.yaml'
   schedule:
     # Run nightly at 2 AM UTC
@@ -27,36 +41,40 @@ jobs:
     name: Determinism Replay (CI Mode)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           pip install -e .
-      
-      - name: Run determinism replay (CI mode)
-        env:
-          MERID_DETERMINISM_MODE: ci
-          MERID_DETERMINISM_SAMPLE_SIZE: 10
+
+      - name: Smoke test replay dispatcher on sample tape
         run: |
           python -m merid.tools.determinism_replay \
-            --mode ci \
-            --sample-size 10 \
-            --fail-on-error
-      
-      - name: Upload results
+            --replay-tape tests/data/golden/replay_tape \
+            --smoke
+
+      - name: Run ingress replay unit tests
+        run: |
+          python -m pytest tests/data/test_ingress_replay.py -v
+
+      - name: Run golden-file state diff regression test
+        run: |
+          python -m pytest tests/data/test_replay_state_diff.py -v
+
+      - name: Upload state diff artifact
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: determinism-replay-results
-          path: determinism_replay_results.json
+          name: replay-state-diff
+          path: data/replay_state_diff/state_diff_replay.jsonl
           retention-days: 30
 
   determinism-replay-full:
@@ -64,40 +82,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           pip install -e .
-      
-      - name: Run determinism replay (Full mode)
-        env:
-          MERID_DETERMINISM_MODE: full
-          MERID_DETERMINISM_WINDOW_DAYS: 1
+
+      - name: Smoke test replay dispatcher on sample tape
         run: |
           python -m merid.tools.determinism_replay \
-            --mode full \
-            --window-days 1 \
-            --output determinism_replay_full_results.json
-      
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: determinism-replay-full-results
-          path: determinism_replay_full_results.json
-          retention-days: 30
-      
-      - name: Emit Prometheus metrics
-        if: always()
+            --replay-tape tests/data/golden/replay_tape \
+            --smoke
+
+      - name: Run full replay regression suite
         run: |
-          # TODO: Push results to Prometheus
-          echo "Determinism replay metrics would be pushed to Prometheus here"
+          python -m pytest \
+            tests/data/test_ingress_replay.py \
+            tests/data/test_replay_state_diff.py \
+            -v
+
+      - name: Upload full state diff artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-state-diff-full
+          path: data/replay_state_diff/state_diff_replay.jsonl
+          retention-days: 30

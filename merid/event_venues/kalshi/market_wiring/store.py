@@ -6,6 +6,7 @@ Persistent storage for Kalshi markets, mappings, and coverage tracking.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import os

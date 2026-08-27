@@ -30,6 +30,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 from merid.event_venues.base import EventVenueStream, QuoteEvent
 from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
+from merid.data.ingress_recorder import record_ingress, SOURCE_KALSHI_WS
+from merid.data.ingress_replay import (
+    is_replay_active,
+    get_replay_dispatcher,
+    ReplayExhausted,
+    replay_random,
+    replay_time,
+    replay_start_time,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.ws")
@@ -468,6 +477,24 @@ class KalshiWebSocket(EventVenueStream):
         
         logger.info("[WS-CLIENT-CONNECT] connect() method invoked")
         
+        if is_replay_active():
+            logger.info("[WS-REPLAY] Using replay tape for Kalshi WebSocket")
+            dispatcher = get_replay_dispatcher()
+            self._ws = dispatcher.websocket_for(SOURCE_KALSHI_WS)
+            self._running = True
+            self._reconnect_delay = 1.0
+            self._reconnect_count = 0
+            self._connection_generation += 1
+            self._session_id = f"kalshi-ws-replay-{self._connection_generation:04d}"
+            self._connect_ts = _time.monotonic()
+            self._last_message_ts = _time.monotonic()
+            self._last_raw_delivery_ts = _time.monotonic()
+            logger.info(
+                "[WS-REPLAY] stand-in WebSocket ready session=%s",
+                self._session_id,
+            )
+            return
+        
         # Load RSA private key for signature
         # Unified config supports both private_key_path and private_key_pem
         private_key_pem = getattr(self.config, 'private_key_pem', None)
@@ -506,7 +533,7 @@ class KalshiWebSocket(EventVenueStream):
         from email.utils import parsedate_to_datetime
         import requests
         
-        timestamp = str(int(_time.time() * 1000))  # Default to local time
+        timestamp = str(int(replay_time() * 1000))  # Default to local time
         skew_compensated = False
         
         try:
@@ -518,7 +545,7 @@ class KalshiWebSocket(EventVenueStream):
                 if server_date_str:
                     server_dt = parsedate_to_datetime(server_date_str)
                     server_time = server_dt.timestamp()
-                    local_time = _time.time()
+                    local_time = replay_time()
                     skew_seconds = server_time - local_time
                     
                     logger.info(f"[WS-AUTH] Clock skew: {skew_seconds:.2f}s (server - local)")
@@ -1457,7 +1484,10 @@ class KalshiWebSocket(EventVenueStream):
                     # CRITICAL FIX (2026-08-02): Increased timeout to 90s for more tolerant detection
                     # Previous 60s was still causing premature reconnections during quiet market periods
                     # Research shows 90-120s is standard for production WebSocket recv timeout
-                    msg = await asyncio.wait_for(self._ws.recv(), timeout=90.0)
+                    if is_replay_active():
+                        msg = await self._ws.recv()
+                    else:
+                        msg = await asyncio.wait_for(self._ws.recv(), timeout=90.0)
 
                     # Track message count for metrics
                     raw_message_count += 1
@@ -1505,6 +1535,18 @@ class KalshiWebSocket(EventVenueStream):
                     msg_type = "unknown"
                     ticker = "unknown"
                     logger.debug("[WS-RAW-DELIVERY] non_dict_or_truncated_preview size=%d", len(raw))
+
+                # Capture raw bytes at the boundary before any downstream parsing.
+                # The preview-derived msg_type/ticker are best-effort metadata only.
+                record_ingress(
+                    SOURCE_KALSHI_WS,
+                    raw,
+                    metadata={
+                        "msg_type": msg_type,
+                        "ticker": ticker,
+                        "size": len(raw),
+                    },
+                )
 
                 # P0-1 WS UPSTREAM: Update idle timer for connection stall detection
                 self._last_raw_delivery_ts = _time.monotonic()
@@ -1670,6 +1712,11 @@ class KalshiWebSocket(EventVenueStream):
                     type(e).__name__, e,
                 )
                 continue
+            except ReplayExhausted:
+                # End of replay tape — stop cleanly instead of reconnecting.
+                logger.info("[WS-REPLAY] tape exhausted, stopping message loop")
+                self._running = False
+                break
             except Exception as e:  # BUG-10: catch websockets.ConnectionClosed and any other
                 if self._running:
                     logger.warning(
@@ -2327,7 +2374,7 @@ class KalshiWebSocket(EventVenueStream):
             try:
                 self._reconnect_count += 1
                 # Add jitter (±25%) to avoid thundering herd
-                jitter = self._reconnect_delay * 0.25 * (2 * random.random() - 1)
+                jitter = self._reconnect_delay * 0.25 * (2 * replay_random() - 1)
                 delay = max(0.5, self._reconnect_delay + jitter)
 
                 logger.info(
@@ -3101,7 +3148,7 @@ class KalshiWebSocket(EventVenueStream):
         try:
             os.makedirs(os.path.dirname(self._SNAPSHOT_PATH), exist_ok=True)
             payload = {
-                "ts": _time.time(),
+                "ts": replay_time(),
                 "snapshots": {k: v for k, v in self._ob_snapshots.items()},
                 "last_seq": self._last_seq,
             }
@@ -3119,11 +3166,15 @@ class KalshiWebSocket(EventVenueStream):
 
         Returns the number of markets restored (0 if stale/missing).
         """
+        if is_replay_active():
+            # During replay, state must come from the ingress tape, not a stale
+            # disk snapshot from a previous live run.
+            return 0
         import json
         try:
             with open(self._SNAPSHOT_PATH) as f:
                 payload = json.load(f)
-            age = _time.time() - payload.get("ts", 0)
+            age = replay_time() - payload.get("ts", 0)
             if age > max_age_seconds:
                 logger.info("B3: snapshot is %.0fs old (> %.0fs) — skipping", age, max_age_seconds)
                 return 0

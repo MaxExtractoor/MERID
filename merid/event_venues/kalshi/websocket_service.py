@@ -7,7 +7,7 @@ reconnection, and market data distribution to all consumers.
 
 import asyncio
 import threading
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from dataclasses import dataclass
 from pathlib import Path
 
