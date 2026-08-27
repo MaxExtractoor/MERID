@@ -62,6 +62,7 @@ MERID_EXIT_ALLOWED_REASONS = frozenset({
     "expiry_liquidation",
     "reconciliation",
     "manual",
+    "ratchet_trim",
 })
 
 # Map internal ExitReason enum values to canonical audit reasons.
@@ -69,6 +70,7 @@ _EXIT_REASON_CANONICAL_MAP = {
     "stop_loss": "stop_loss",
     "trailing_stop": "trailing_stop",
     "trail": "trailing_stop",
+    "ratchet_trim": "trailing_stop",
     "take_profit": "take_profit",
     "time_stop": "time_exit",
     "adaptive_timing": "time_exit",
@@ -2974,15 +2976,12 @@ async def _execute_exit_order(
                 finalize_order_identity,
                 derive_exit_client_order_id,
                 derive_exit_intent_id,
+                resolve_exit_parent_id,
             )
 
             # CRITICAL FIX (2026-08-27): Derive a stable, authoritative exit identity
             # from the entry fill id so exit parentage and audit logs share one key.
-            exit_parent_id = (
-                getattr(position, "entry_fill_id", None)
-                or getattr(position, "client_order_id", None)
-                or position.position_id
-            )
+            exit_parent_id = resolve_exit_parent_id(position)
             intent.intent_id = derive_exit_intent_id(exit_parent_id, exit_reason_str)
 
             if not client_order_id and self._position_monitor:

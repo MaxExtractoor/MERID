@@ -49,6 +49,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# Maximum age (seconds) of the last orderbook snapshot that can be used as a
+# near-pre-fill fallback when a contemporaneous (AT_FILL) book cannot be
+# captured.  A stale-but-recent book is tagged AT_FILL_OR_NEAREST_PRE_FILL so
+# spread-stop invariants can still arm rather than leaving the position unprotected.
+MERID_ENTRY_BOOK_NEAR_PRE_FILL_MAX_AGE_S = _env_int("MERID_ENTRY_BOOK_NEAR_PRE_FILL_MAX_AGE_S", 30)
+
+
 try:
     from merid.event_venues.kalshi.binary_price_space import (
         canonical_outcome_side,
@@ -2515,9 +2522,15 @@ class KalshiPositionCache:
                         entry_book_source = getattr(mkt_state, "source", None) or "market_state"
 
                         # Contemporaneous if the book is live and fresh right now.
+                        # If the live book is slightly stale, fall back to the
+                        # nearest pre-fill book as long as it is within the bounded
+                        # freshness window.  This preserves stop-loss arming when
+                        # a WS/RTI fill race prevents a perfectly AT_FILL capture.
                         book_age_s = getattr(mkt_state, "book_age_s", float('inf'))
                         if not mkt_state.book_stale and book_age_s < 1.0:
                             entry_book_capture_quality = "AT_FILL"
+                        elif book_age_s <= MERID_ENTRY_BOOK_NEAR_PRE_FILL_MAX_AGE_S:
+                            entry_book_capture_quality = "AT_FILL_OR_NEAREST_PRE_FILL"
                         else:
                             entry_book_capture_quality = "POST_FILL"
                 except Exception as book_err:

@@ -34,6 +34,26 @@ class OrderIdentityError(Exception):
 _ORDER_STATUS = "PERSISTED"
 
 
+def resolve_exit_parent_id(position: Any) -> str:
+    """Return the most authoritative durable parent id for an exit.
+
+    The canonical parent is the entry fill id.  For pre-Fix-3 positions or
+    REST-synced fills that lack a fill id, fall back through the entry order
+    id, the entry client order id, and finally the local position id.  Using
+    the same resolver everywhere makes exit client order ids deterministic and
+    backward-compatible with positions created before ``entry_fill_id`` was
+    promoted to canonical.
+    """
+    parent = (
+        getattr(position, "entry_fill_id", None)
+        or getattr(position, "entry_order_id", None)
+        or getattr(position, "client_order_id", None)
+        or getattr(position, "entry_intent_id", None)
+        or getattr(position, "position_id", None)
+    )
+    return str(parent or "unknown")
+
+
 def _resolve_tif(intent: "OrderIntent") -> str:
     """Return canonical lowercase TIF without mutating intent."""
     return (getattr(intent, "time_in_force", None) or "gtc").lower()
@@ -97,7 +117,6 @@ def _compute_fingerprint(intent: "OrderIntent") -> str:
         "count_fp": f"{count_fp:.6f}",
         "tif": _resolve_tif(intent),
         "reduce_only": bool(getattr(intent, "reduce_only", False)),
-        "decision_id": str(getattr(intent, "decision_id", "")),
     }
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -207,33 +226,42 @@ def finalize_order_identity(
         # silently minting a new idempotency key for the same coid.
         record = store.get_by_client_order_id(existing_coid)
         if record is not None:
-            logger.info(
-                "[ORDER-IDENTITY] Recovering order_attempt_id=%s from legacy client_order_id=%s",
-                record.order_attempt_id,
+            if record.fingerprint == fingerprint:
+                logger.info(
+                    "[ORDER-IDENTITY] Recovering order_attempt_id=%s from legacy client_order_id=%s",
+                    record.order_attempt_id,
+                    existing_coid,
+                )
+                intent.order_attempt_id = record.order_attempt_id
+                return intent
+            # The coid already exists with a different fingerprint (e.g., the
+            # guard repriced the order or the decision tag changed). Do not reuse
+            # it for a materially different order; fall through and mint a fresh
+            # coid so the durable identity stays accurate.
+            logger.warning(
+                "[ORDER-IDENTITY] coid=%s exists with a different fingerprint; "
+                "minting a new idempotency key instead of reusing a mismatched attempt",
                 existing_coid,
             )
-            if record.fingerprint != fingerprint:
-                raise OrderIdentityError(
-                    f"existing coid {existing_coid} fingerprint does not match this intent"
-                )
-            intent.order_attempt_id = record.order_attempt_id
-            return intent
+            existing_coid = None
 
         # Trusted callers (pre-trade gate, position-monitor exits) may have
         # reserved a deterministic client_order_id before reaching the router.
-        # Adopt it by minting a matching order_attempt_id and persisting a
-        # PERSISTED record so the durable identity layer stays authoritative.
-        logger.warning(
-            "[ORDER-IDENTITY] Adopting pre-supplied client_order_id=%s without an attempt record",
-            existing_coid,
-        )
-        order_attempt_id = f"oa_{uuid.uuid4().hex}"
-        record = _build_record(order_attempt_id, existing_coid, intent, fingerprint)
-        store.persist_attempt(record)
-        intent.client_order_id = existing_coid
-        intent.order_attempt_id = order_attempt_id
-        intent.client_tag = existing_coid
-        return intent
+        # If the coid is still set (no existing store record, no mismatch), adopt
+        # it by minting a matching order_attempt_id and persisting a PERSISTED
+        # record so the durable identity layer stays authoritative.
+        if existing_coid:
+            logger.warning(
+                "[ORDER-IDENTITY] Adopting pre-supplied client_order_id=%s without an attempt record",
+                existing_coid,
+            )
+            order_attempt_id = f"oa_{uuid.uuid4().hex}"
+            record = _build_record(order_attempt_id, existing_coid, intent, fingerprint)
+            store.persist_attempt(record)
+            intent.client_order_id = existing_coid
+            intent.order_attempt_id = order_attempt_id
+            intent.client_tag = existing_coid
+            return intent
 
     # Normal path: fresh intent with no coid. Look for an unresolved in-flight
     # attempt with the same fingerprint (durable dedup) before minting a new one.
