@@ -46,6 +46,11 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _max_exit_adverse_pnl_cents(default: int = 5000) -> int:
+    """Adverse-PnL budget for risk-reducing exits, distinct from the entry budget."""
+    return _env_int("MERID_MAX_EXIT_ADVERSE_PNL_CENTS", default)
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -618,7 +623,13 @@ class ExecutionRiskFirewall:
         expected_pnl: Optional[int],
         original_intent: Optional[Any] = None,
     ) -> Tuple[bool, str]:
-        max_adverse = self._max_adverse_pnl_cents()
+        # Exits are risk-reducing and use a separate, permissive adverse-PnL
+        # budget so that closing an underwater position is not blocked by the
+        # tight entry budget (default 3 cents).
+        if getattr(canonical, "purpose", None) == "close":
+            max_adverse = _max_exit_adverse_pnl_cents()
+        else:
+            max_adverse = self._max_adverse_pnl_cents()
         # Forced exits (safety, stop, expiry, manual) are allowed to close at an
         # inherent loss; only discretionary profit exits are bound by the adverse
         # PnL budget.

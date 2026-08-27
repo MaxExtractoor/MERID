@@ -195,6 +195,9 @@ def port_fill_to_ledger_dict(fill: Fill) -> Dict[str, Any]:
         # Provenance
         "source": "http_poller",
         "raw_data": fill.raw_data if fill.raw_data is not None else {},
+        # 2026-08-27: Maintain client_tag alias so legacy ledger promotion never
+        # dereferences a missing attribute when the dict is parsed back.
+        "client_tag": fill.client_order_id,
     }
 
 

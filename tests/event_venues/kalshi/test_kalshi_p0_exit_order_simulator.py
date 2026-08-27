@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, List, Optional
 
 import pytest
 
@@ -36,6 +36,7 @@ from merid.event_venues.kalshi.contract_lease import (
     reset_contract_lease_registry_for_testing,
 )
 from merid.event_venues.kalshi.port import (
+    CreateOrderResponse,
     get_kalshi_execution_port,
     reset_kalshi_execution_port_for_testing,
     set_kalshi_execution_port,
@@ -399,3 +400,83 @@ async def test_exit_order_cancel_after_partial_fill(
     assert final is not None
     assert final.status == "canceled"
     assert final.filled_size == Decimal("3")
+
+
+@pytest.mark.asyncio
+async def test_exit_order_timeout_after_submit_not_submitted(
+    client: DeterministicKalshiClient, monkeypatch,
+) -> None:
+    """Lost ack plus an authoritative empty broker lookup returns not_submitted.
+
+    This is the signal that the POST never reached the exchange, so the
+    caller can safely resubmit with the same client_order_id.
+    """
+    client.set_initial_position(TICKER, "yes", 5, avg_price_cents=50)
+    client.set_orderbook(TICKER, best_bid_cents=50, best_ask_cents=60,
+                         bid_size=Decimal("10"), ask_size=Decimal("10"))
+    client.set_timeout_after_submit("once")
+
+    intent = _exit_intent(price_cents=50, count=2)
+    coid = _reserve_gate(intent, monkeypatch)
+
+    # Simulate a lagging/inconsistent exchange: no order and no fills.
+    async def _no_order(**kwargs) -> None:
+        return None
+
+    async def _no_fills(**kwargs) -> List[Any]:
+        return []
+
+    client.get_order = _no_order  # type: ignore[assignment]
+    client.get_fills = _no_fills  # type: ignore[assignment]
+
+    result = await _route(intent)
+
+    assert result.status == "not_submitted", (result.status, result.reason)
+    assert not result.requires_recovery
+    assert "authoritative_lookup_empty" in result.reason
+
+    rec = _gate_record(coid)
+    assert rec is not None
+    assert rec.status == OrderStatus.SUBMISSION_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_submission_unknown_duplicate_client_order_id_returns_duplicate_unknown(
+    client: DeterministicKalshiClient, monkeypatch,
+) -> None:
+    """Resubmitting with the same client_order_id and getting a 409 duplicate,
+    but the exchange lookup cannot find the order, must yield ``duplicate_unknown``.
+
+    This is distinct from a hard rejection (which would release risk) and from
+    ``not_submitted`` (which would allow resubmission).  The result stays in
+    ``requires_recovery`` until the background reconciler can confirm the order.
+    """
+    client.set_initial_position(TICKER, "yes", 5, avg_price_cents=50)
+    client.set_orderbook(TICKER, best_bid_cents=50, best_ask_cents=60,
+                         bid_size=Decimal("10"), ask_size=Decimal("10"))
+
+    intent = _exit_intent(price_cents=50, count=2)
+    coid = _reserve_gate(intent, monkeypatch)
+
+    # Force create_order to return a 409-style duplicate.  The simulator's
+    # exchange-side record is also cleared so the duplicate lookup cannot
+    # resolve the order, leaving it ambiguous.
+    async def _create_duplicate(request) -> CreateOrderResponse:
+        return CreateOrderResponse(success=False, error="409 duplicate client_order_id")
+
+    client.create_order = _create_duplicate
+    client._client_to_order = {}
+
+    result = await _route(intent)
+
+    assert result.status == "duplicate_unknown", (result.status, result.reason)
+    assert result.requires_recovery
+    assert "duplicate" in result.reason.lower()
+    assert result.submission_certainty == "unknown"
+
+    # The gate record must not be terminalised as rejected/filled while the
+    # order state is still ambiguous.
+    rec = _gate_record(coid)
+    assert rec is not None
+    assert rec.status in (OrderStatus.PENDING, OrderStatus.SUBMISSION_UNKNOWN)
+

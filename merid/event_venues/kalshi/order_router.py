@@ -32,16 +32,20 @@ import os
 import random
 import threading
 import time as _time
+import uuid
+
+from merid.data.ingress_replay import replay_time, replay_start_time
 
 # Verify os module is loaded at module level
 assert os is not None, "os module failed to import at module level"
 from dataclasses import dataclass, field, replace as _dc_replace
 from enum import Enum
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+from merid.data.ingress_replay import replay_seed_for_intent
 from merid.intent_types import ExposureChange
 from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.trading_mode import TradingMode
@@ -929,7 +933,7 @@ def check_market_microstructure_edge_aware(
                         policy_intended_role=existing_trace.policy_intended_role,
                         economics_mode=EconomicsMode.MAKER if use_maker_economics else EconomicsMode.TAKER,
                         aggressiveness=aggressiveness,
-                        microstructure_timestamp=_time.time(),
+                        microstructure_timestamp=replay_time(),
                         yes_bid_cents=yes_bid_cents,
                         no_bid_cents=no_bid_cents,
                         order_price_cents=order_price_cents,
@@ -1256,7 +1260,7 @@ def _check_duplicate_order(intent: OrderIntent) -> Optional[str]:
     
     duplicate_key = (ticker_normalized, side_normalized, action_normalized, price_cents)
     
-    current_ts = _time.time()
+    current_ts = replay_time()
     
     with _duplicate_order_lock:
         last_order_ts = _duplicate_order_tracker.get(duplicate_key)
@@ -1291,7 +1295,7 @@ def _record_order_placed(intent: OrderIntent) -> None:
     
     duplicate_key = (ticker_normalized, side_normalized, action_normalized, price_cents)
     
-    current_ts = _time.time()
+    current_ts = replay_time()
     
     with _duplicate_order_lock:
         _duplicate_order_tracker[duplicate_key] = current_ts
@@ -1311,7 +1315,7 @@ def check_and_cancel_stale_orders() -> List[str]:
     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
     
     canceled_ids = []
-    current_ts = _time.time()
+    current_ts = replay_time()
     
     with _resting_orders_lock:
         for order_id, order in list(_resting_orders.items()):
@@ -2331,7 +2335,7 @@ class OrderIntent:
     decision_id: Optional[str] = None
     run_id: Optional[str] = field(default_factory=lambda: os.environ.get("MERID_RUN_ID", "unset"))
     process_id: Optional[str] = field(default_factory=lambda: str(os.getpid()))
-    reason: Optional[str] = field(default_factory=lambda: f"unset_{_time.time()}")
+    reason: Optional[str] = field(default_factory=lambda: f"unset_{replay_time()}")
     parent_entry_fill_id: Optional[str] = None
     parent_entry_order_id: Optional[str] = None
     parent_entry_signal_id: Optional[str] = None
@@ -2886,7 +2890,7 @@ def _canonical_yes_book_from_port(ob_result: Any) -> Optional[Dict[str, Any]]:
 
     timestamp = getattr(ob_result, "timestamp", None)
     if timestamp is None:
-        timestamp = _time.time()
+        timestamp = replay_time()
     elif isinstance(timestamp, datetime):
         timestamp = timestamp.timestamp()
 
@@ -3088,7 +3092,12 @@ def _resolve_from_broker_evidence(
     _client_order_id: str,
     _client_tag: str,
 ) -> Optional[Any]:
-    """Pick the strongest order snapshot from the three broker queries."""
+    """Pick the strongest order snapshot from the broker queries.
+
+    If no order snapshot exists but fills are present, synthesize an order from
+    the matching fills, summing their fixed-point size so fractional partial
+    fills are not lost.
+    """
     _order_id = getattr(_order_data, "order_id", None)
 
     _open_match = next(
@@ -3097,31 +3106,36 @@ def _resolve_from_broker_evidence(
          or getattr(o, "client_tag", "") == _client_tag),
         None,
     )
-    _fill_match = next(
-        (f for f in _recent_fills
-         if getattr(f, "client_order_id", "") == _client_order_id
-         or getattr(f, "client_tag", "") == _client_tag
-         or getattr(f, "order_id", "") == (_order_id or "")),
-        None,
-    )
+    _matching_fills = [
+        f for f in _recent_fills
+        if getattr(f, "client_order_id", "") == _client_order_id
+        or getattr(f, "client_tag", "") == _client_tag
+        or (getattr(f, "order_id", "") and getattr(f, "order_id", "") == (_order_id or ""))
+    ]
 
-    # Direct order lookup > open-order match > fill match.
+    # Direct order lookup > open-order match > aggregated fill match.
     _resolved_order = _order_data or _open_match
-    if _resolved_order is None and _fill_match is not None:
-        _synthetic_size = getattr(_fill_match, "size", None)
-        if _synthetic_size is None:
-            _synthetic_size = getattr(_fill_match, "count", Decimal("0")) or Decimal("0")
+    if _resolved_order is None and _matching_fills:
+        _total_filled = sum(
+            (
+                getattr(f, "size", None)
+                or getattr(f, "count", Decimal("0"))
+                or Decimal("0")
+            )
+            for f in _matching_fills
+        )
+        _last_fill = _matching_fills[-1]
         _resolved_order = SimpleNamespace(
-            order_id=getattr(_fill_match, "order_id", None),
+            order_id=getattr(_last_fill, "order_id", None),
             client_order_id=_client_order_id,
             status="filled",
-            size=_synthetic_size,
-            filled_size=_synthetic_size,
+            size=_total_filled,
+            filled_size=_total_filled,
             remaining_size=Decimal("0"),
-            price_cents=getattr(_fill_match, "price_cents", 0) or 0,
+            price_cents=getattr(_last_fill, "price_cents", 0) or 0,
             time_in_force="gtc",
-            side=getattr(_fill_match, "side", None),
-            outcome=getattr(_fill_match, "outcome", None),
+            side=getattr(_last_fill, "side", None),
+            outcome=getattr(_last_fill, "outcome", None),
         )
     return _resolved_order
 
@@ -3129,44 +3143,99 @@ def _resolve_from_broker_evidence(
 async def _reconcile_submission_unknown(
     intent: OrderIntent, port: Any, mode: TradingMode, t0: float
 ) -> Optional[OrderResult]:
-    """In-route fast reconcile: single ``get_order`` lookup, bounded by ~1.5s.
+    """In-route fast reconcile: parallel order + fill lookup.
 
-    If the broker already knows the order, resolve it immediately and promote
-    the gate/attempt records.  If not, return ``None`` and let the background
-    poller run the full three-query reconcile without the route timeout
-    pressure.
+    Runs ``port.get_order(client_order_id=...)`` and ``port.get_fills``
+    concurrently. If the broker knows the order or has recorded a fill, resolve
+    it immediately and promote the state. If the lookup is authoritative and
+    empty, return ``rejected:not_submitted`` so the caller can safely resubmit
+    with the same ``client_order_id``. If the reconcile itself times out, return
+    ``None`` and the caller falls back to ``submission_unknown``.
     """
     _client_tag = intent.client_tag or ""
     _client_order_id = intent.client_order_id or _client_tag
+    _ticker = intent.ticker
     _latency = (_time.monotonic() - t0) * 1000
 
-    try:
-        _order_data = await asyncio.wait_for(
-            port.get_order(
-                client_order_id=_client_order_id,
-                market_id=intent.ticker,
-            ),
-            timeout=1.5,
-        )
-        if _order_data is not None:
-            logger.info(
-                "[SUBMISSION-RECONCILE-FAST] intent_id=%s ticker=%s client_tag=%s resolved",
-                intent.intent_id,
-                intent.ticker,
-                _client_tag,
-            )
-            return _apply_reconciled_order(_order_data, intent, mode, _latency)
-    except asyncio.TimeoutError:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FAST] get_order timed out for %s", _client_order_id
-        )
-    except Exception as _e:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FAST] get_order failed for %s: %s",
-            _client_order_id, _e,
-        )
+    _since_ts = int(
+        (datetime.now(timezone.utc) - timedelta(seconds=30)).timestamp() * 1000
+    )
 
-    return None
+    _reconcile_timeout = float(
+        os.environ.get("MERID_SUBMISSION_UNKNOWN_RECONCILE_TIMEOUT_SECONDS", "3.0")
+    )
+
+    try:
+        _order_data, _fills_resp = await asyncio.wait_for(
+            asyncio.gather(
+                port.get_order(client_order_id=_client_order_id, market_id=_ticker),
+                port.get_fills(market_id=_ticker, since_ts=_since_ts, limit=50),
+                return_exceptions=True,
+            ),
+            timeout=_reconcile_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[SUBMISSION-RECONCILE-FAST] timeout after %.1fs for client_order_id=%s ticker=%s",
+            _reconcile_timeout, _client_order_id, _ticker,
+        )
+        return None
+    except Exception as _e:
+        logger.warning(
+            "[SUBMISSION-RECONCILE-FAST] gather failed for client_order_id=%s ticker=%s: %s",
+            _client_order_id, _ticker, _e,
+        )
+        return None
+
+    if isinstance(_order_data, Exception):
+        logger.debug("[SUBMISSION-RECONCILE-FAST] get_order error: %s", _order_data)
+        _order_data = None
+    if isinstance(_fills_resp, Exception):
+        logger.debug("[SUBMISSION-RECONCILE-FAST] get_fills error: %s", _fills_resp)
+        _fills_resp = None
+
+    if _order_data is not None:
+        logger.info(
+            "[SUBMISSION-RECONCILE-FAST] intent_id=%s ticker=%s client_order_id=%s resolved by order",
+            intent.intent_id, _ticker, _client_order_id,
+        )
+        return _apply_reconciled_order(_order_data, intent, mode, _latency)
+
+    _recent_fills: List[Any] = []
+    if _fills_resp is not None:
+        _recent_fills = getattr(_fills_resp, "fills", []) or []
+
+    _matching_fills = [
+        f for f in _recent_fills
+        if getattr(f, "client_order_id", None) == _client_order_id
+        or getattr(f, "client_tag", None) == _client_tag
+    ]
+
+    if _matching_fills:
+        logger.info(
+            "[SUBMISSION-RECONCILE-FAST] intent_id=%s ticker=%s client_order_id=%s resolved by %d fill(s)",
+            intent.intent_id, _ticker, _client_order_id, len(_matching_fills),
+        )
+        _resolved = _resolve_from_broker_evidence(
+            None, [], _matching_fills, _client_order_id, _client_tag
+        )
+        if _resolved is not None:
+            return _apply_reconciled_order(_resolved, intent, mode, _latency)
+
+    logger.info(
+        "[SUBMISSION-RECONCILE-FAST] client_order_id=%s ticker=%s not found; authoritative empty",
+        _client_order_id, _ticker,
+    )
+    return OrderResult(
+        status="not_submitted",
+        mode=mode,
+        reason="not_submitted:authoritative_lookup_empty",
+        latency_ms=round(_latency, 2),
+        submission_attempted=True,
+        exchange_request_sent=True,
+        exchange_ack_received=False,
+        submission_certainty="not_submitted",
+    )
 
 
 async def reconcile_submission_unknown_client_order_id(
@@ -3206,75 +3275,51 @@ async def reconcile_submission_unknown_client_order_id(
     except Exception:
         pass
 
-    _order_data: Optional[Any] = None
-    _open_orders: List[Any] = []
-    _recent_fills: List[Any] = []
+    _since_ts = int((replay_time() - 300.0) * 1000)
 
-    _RECONCILE_QUERY_TIMEOUT = 10.0
+    _RECONCILE_QUERY_TIMEOUT = float(
+        os.environ.get("MERID_SUBMISSION_UNKNOWN_RECONCILE_TIMEOUT_SECONDS", "5.0")
+    )
+
+    _order_data: Optional[Any] = None
+    _fills_resp: Optional[Any] = None
 
     try:
-        _order_data = await asyncio.wait_for(
-            client.get_order(
-                client_order_id=client_order_id,
-                market_id=ticker,
+        _order_data, _fills_resp = await asyncio.wait_for(
+            asyncio.gather(
+                client.get_order(client_order_id=client_order_id, market_id=ticker),
+                client.get_fills(since_ts=_since_ts, limit=50, market_id=ticker),
+                return_exceptions=True,
             ),
             timeout=_RECONCILE_QUERY_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] get_order timed out for %s", client_order_id
+        logger.warning(
+            "[SUBMISSION-RECONCILE-FULL] timeout after %.1fs for client_order_id=%s ticker=%s",
+            _RECONCILE_QUERY_TIMEOUT, client_order_id, ticker,
         )
+        return None
     except Exception as _e:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] get_order(client_order_id=%s, market_id=%s) failed: %s",
+        logger.warning(
+            "[SUBMISSION-RECONCILE-FULL] gather failed for client_order_id=%s ticker=%s: %s",
             client_order_id, ticker, _e,
         )
+        return None
 
-    try:
-        _open_orders = await asyncio.wait_for(
-            client.get_open_orders(ticker=ticker),
-            timeout=_RECONCILE_QUERY_TIMEOUT,
-        ) or []
-    except asyncio.TimeoutError:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] get_open_orders timed out for %s", ticker
-        )
-    except Exception as _e:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] get_open_orders(ticker=%s) failed: %s",
-            ticker, _e,
-        )
+    if isinstance(_order_data, Exception):
+        logger.debug("[SUBMISSION-RECONCILE-FULL] get_order error: %s", _order_data)
+        _order_data = None
+    if isinstance(_fills_resp, Exception):
+        logger.debug("[SUBMISSION-RECONCILE-FULL] get_fills error: %s", _fills_resp)
+        _fills_resp = None
 
-    _order_id = getattr(_order_data, "order_id", None)
-    _since_ts = int((_time.time() - 300.0) * 1000)
-    try:
-        _fills_kwargs: Dict[str, Any] = {
-            "since_ts": _since_ts,
-            "limit": 50,
-            "market_id": ticker,
-        }
-        if _order_id:
-            _fills_kwargs["order_id"] = _order_id
-
-        _fills_resp = await asyncio.wait_for(
-            client.get_fills(**_fills_kwargs),
-            timeout=_RECONCILE_QUERY_TIMEOUT,
-        )
-        if _fills_resp is not None:
-            _recent_fills = getattr(_fills_resp, "fills", []) or []
-    except asyncio.TimeoutError:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] get_fills timed out for %s", ticker
-        )
-    except Exception as _e:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] get_fills(market_id=%s, order_id=%s) failed: %s",
-            ticker, _order_id, _e,
-        )
+    _recent_fills: List[Any] = []
+    if _fills_resp is not None:
+        _recent_fills = getattr(_fills_resp, "fills", []) or []
 
     _resolved_order = _resolve_from_broker_evidence(
         _order_data,
-        _open_orders,
+        [],
         _recent_fills,
         client_order_id,
         client_order_id,
@@ -3284,12 +3329,21 @@ async def reconcile_submission_unknown_client_order_id(
     if _resolved_order is not None:
         return _apply_reconciled_order(_resolved_order, intent, mode, _latency)
 
-    logger.debug(
-        "[SUBMISSION-RECONCILE-FULL] client_order_id=%s ticker=%s not found; will retry",
+    logger.info(
+        "[SUBMISSION-RECONCILE-FULL] client_order_id=%s ticker=%s not found; authoritative empty",
         client_order_id,
         ticker,
     )
-    return None
+    return OrderResult(
+        status="not_submitted",
+        mode=mode,
+        reason="not_submitted:authoritative_lookup_empty",
+        latency_ms=round(_latency, 2),
+        submission_attempted=True,
+        exchange_request_sent=True,
+        exchange_ack_received=False,
+        submission_certainty="not_submitted",
+    )
 
 
 async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t0: float) -> Optional[OrderResult]:
@@ -3368,7 +3422,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             )
             return None
 
-        now = _time.time()
+        now = replay_time()
         rest_age_ms = (now - rest_book["timestamp"]) * 1000.0
         max_rest_age_ms = float(os.environ.get("MERID_WS_REST_MAX_REST_AGE_MS", "500"))
 
@@ -3438,7 +3492,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         if ob_result2.success:
             rest_book2 = _canonical_yes_book_from_port(ob_result2)
             if rest_book2 is not None:
-                rest_age2_ms = (_time.time() - rest_book2["timestamp"]) * 1000.0
+                rest_age2_ms = (replay_time() - rest_book2["timestamp"]) * 1000.0
                 if rest_age2_ms <= max_rest_age_ms:
                     rest_book2_side = _side_aware_book_for_intent(rest_book2, intent.side)
                     bid_div2 = abs(ws_book["bid_cents"] - rest_book2_side["bid_cents"])
@@ -4347,7 +4401,7 @@ class ResolvedTIF:
 
 def _now_unix_s() -> int:
     """Current wall-clock time as a Unix epoch timestamp in seconds."""
-    return int(_time.time())
+    return int(replay_time())
 
 
 def _resolve_rest_seconds(intent: OrderIntent) -> int:
@@ -4822,10 +4876,10 @@ def simulate_paper_fill(
     if _TRACE_AVAILABLE and intent.trace_id and fill_qty_cc > 0:
         update_trace(
             intent.trace_id,
-            fill_time=_time.time(),
+            fill_time=replay_time(),
             fill_price=fill_price / 100.0  # Convert cents to probability
         )
-        logger.debug("[TRACE-UPDATE] Updated trace_id=%s with fill_time=%.2f fill_price=%.2f (paper)", intent.trace_id, _time.time(), fill_price / 100.0)
+        logger.debug("[TRACE-UPDATE] Updated trace_id=%s with fill_time=%.2f fill_price=%.2f (paper)", intent.trace_id, replay_time(), fill_price / 100.0)
 
     return {
         "fill_id": fill_id,
@@ -4868,7 +4922,7 @@ def simulate_paper_fill(
 _global_order_timestamps = []
 _MAX_ORDERS_PER_MINUTE = 30  # Hard cap: 30 orders per minute across all assets (increased from 10 to support 5 assets trading simultaneously)
 _MIN_SECONDS_BETWEEN_ORDERS = 0.1  # Minimum 0.1 seconds between orders (reduced from 0.3s for 15m market opportunity capture)
-_startup_time = _time.time()
+_startup_time = replay_start_time()
 _MIN_STARTUP_GRACE_PERIOD = 5.0  # Minimum 5 seconds before allowing any orders (reduced from 20s for 15m market alignment)
 
 # End-to-end latency tracking (2026-07-11: added for observability)
@@ -4889,7 +4943,7 @@ def _check_global_rate_limit(intent: OrderIntent) -> Optional[str]:
         return None
 
     global _global_order_timestamps
-    current_time = _time.time()
+    current_time = replay_time()
 
     # CRITICAL: Check startup grace period to prevent immediate orders after restart
     time_since_startup = current_time - _startup_time
@@ -4937,7 +4991,7 @@ def _record_successful_order() -> None:
     This should only be called after an order is successfully submitted to the exchange.
     """
     global _global_order_timestamps
-    current_time = _time.time()
+    current_time = replay_time()
     _global_order_timestamps.append(current_time)
     logger.info(
         "[GLOBAL-RATE-LIMIT] Recorded successful order: orders_in_last_minute=%d/%d",
@@ -6698,7 +6752,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     # wall timestamp available: explicit intent age, then intent.snapshot_ts,
     # then the state book update timestamp, then the state age_ms.
     if _snapshot_age_ms is None or _snapshot_age_ms <= 0:
-        _now = _time.time()
+        _now = replay_time()
         _state_age_ms = getattr(state, 'age_ms', None)
         _state_wall_ts = getattr(state, 'last_book_update_wall_ts', None) or 0.0
         _intent_snapshot_ts = getattr(intent, 'snapshot_ts', None) or 0.0
@@ -7386,7 +7440,7 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
         minutes_to_expiry = seconds_to_expiry / 60.0 if seconds_to_expiry is not None else None
         from merid.event_venues.kalshi.sla_config import get_md_max_age_seconds
         max_age = get_md_max_age_seconds(minutes_to_expiry)
-        if (_time.time() - last_update) > max_age:
+        if (replay_time() - last_update) > max_age:
             return "net_of_cost:stale_book"
 
     # Allow small duality/locked-book tolerance (matches market_state duality check).
@@ -7661,7 +7715,7 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any],
     if state is not None:
         last_update = getattr(state, "last_book_update_wall_ts", None)
         if last_update:
-            book_age_ms = int((_time.time() - last_update) * 1000)
+            book_age_ms = int((replay_time() - last_update) * 1000)
 
     logger.info(
         "[PRICE-VALIDATION-MODE] ticker=%s mode=%s tif=%s price=%dc outcome=%s "
@@ -8149,7 +8203,7 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
     # This reduces slippage risk while maintaining execution capability
     # Use deterministic random based on ticker and time to ensure consistency
     # for the same market conditions
-    random_seed = hash(f"{intent.ticker}:{intent.side}:{intent.action}:{int(_time.time() // 60)}")
+    random_seed = replay_seed_for_intent(f"{intent.ticker}:{intent.side}:{intent.action}")
     rng = random.Random(random_seed)
     rand_val = rng.random()
     
@@ -8886,7 +8940,7 @@ async def _apply_order_result_to_canonical_state(
     yes_delta_cc = yes_delta(canonical_action, canonical_side, quantity_cc)
 
     if status in {"filled_mock", "filled_paper"}:
-        fill_id = fill.get("fill_id") or f"paper_{intent.intent_id}_{int(_time.time()*1000)}"
+        fill_id = fill.get("fill_id") or f"paper_{intent.intent_id}_{int(replay_time()*1000)}"
         canonicalization_state = "TRUSTED_PAPER_V1"
     else:
         _venue_oid = result.order_id or fill.get("order_id") or intent.client_order_id or intent.intent_id
@@ -9473,7 +9527,7 @@ def _prepare_order_for_gate(
     except NameError as ne:
         logger.error(f"[DEBUG] NameError at line 1879: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
         raise
-    _snap_age = _time.time() - intent.snapshot_ts
+    _snap_age = replay_time() - intent.snapshot_ts
     if _snap_age > _SNAPSHOT_MAX_AGE_S:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
@@ -9624,7 +9678,7 @@ def _prepare_order_for_gate(
                     f"source={diagnostic_before['source']}"
                 )
 
-                now = _time.time()
+                now = replay_time()
                 exchange_ts = None
                 received_ts = now
                 if hasattr(state, 'book_updated_ts') and state.book_updated_ts:
@@ -9785,7 +9839,7 @@ def _prepare_order_for_gate(
     else:
         book_age_ms = 0.0
     if book_age_ms == 0.0 and intent.snapshot_ts:
-        book_age_ms = (_time.time() - intent.snapshot_ts) * 1000.0
+        book_age_ms = (replay_time() - intent.snapshot_ts) * 1000.0
 
     if book_age_ms > STALENESS_SLO_MS and not _is_exit:
         latency = (_time.monotonic() - t0) * 1000
@@ -9949,7 +10003,7 @@ async def _route_live(
         intent.rationale or "none",
         intent.edge_pct or "none",
         _mode_value(mode),
-        _time.time() - intent.snapshot_ts,
+        replay_time() - intent.snapshot_ts,
     )
     
     # Snapshot staleness gate — refuse stale intents regardless of caller path.
@@ -9960,7 +10014,7 @@ async def _route_live(
     except NameError as ne:
         logger.error(f"[DEBUG] NameError at line 1879: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
         raise
-    _snap_age = _time.time() - intent.snapshot_ts
+    _snap_age = replay_time() - intent.snapshot_ts
     if _snap_age > _SNAPSHOT_MAX_AGE_S:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
@@ -11867,7 +11921,7 @@ async def _route_live(
                     side=intent.side,
                     action=intent.action,
                     limit_price_cents=final_price_cents,
-                    placed_at_ts=_time.time(),
+                    placed_at_ts=replay_time(),
                     edge_at_placement=intent.edge_pct or 0.0,
                     min_live_edge=min_live_edge,
                     max_live_seconds=max_live_seconds,
@@ -12124,7 +12178,7 @@ async def _route_live(
                 logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping STP mapping")
 
         # Log order intent before API call for lifecycle traceability
-        trace_id = intent.client_tag or generate_trace_id()
+        trace_id = intent.client_tag or uuid.uuid4().hex
         logger.info(
             "[SUBMIT-ORDER-INTENT] trace_id=%s asset=%s market_id=%s side=%s action=%s price_cents=%d count=%d notional_cents=%d client_tag=%s order_group_id=%s liquidity_role=%s stp=%s snapshot_ts=%.3f snapshot_age_ms=%.0f expected_fee_role=%s expected_fee_rate_bps=%.2f expected_fee_cents=%d",
             trace_id,
@@ -12528,7 +12582,7 @@ async def _route_live(
         # 2026-08-25: Immutable order-attempt lifecycle record.
         # This is the single pre-send audit log; terminal state is emitted in
         # route_order_async after the result is finalized.
-        _order_lifecycle_send_ts = _time.time()
+        _order_lifecycle_send_ts = replay_time()
         try:
             _send_state = market_state_store.get(intent.ticker)
         except Exception:
@@ -12539,7 +12593,7 @@ async def _route_live(
         _strategy_snapshot_age_ms = 0.0
         _execution_price_source = "UNKNOWN"
         if _send_state is not None:
-            _now = _time.time()
+            _now = replay_time()
             _book_receive_age_ms = max(0.0, (_now - getattr(_send_state, "last_book_update_ts", _now)) * 1000.0)
             _book_exchange_age_ms = max(0.0, (_now - getattr(_send_state, "last_ws_update_ts", _now)) * 1000.0)
             _book_sequence = getattr(_send_state, "last_sequence", None)
@@ -12996,7 +13050,7 @@ async def _route_live(
             if asset and intent.action.lower() == "buy":
                 try:
                     with _asset_entry_windows_lock:
-                        current_window = int(_time.time() // 900) * 900
+                        current_window = int(replay_time() // 900) * 900
                         if _asset_entry_windows.get(asset) == current_window:
                             del _asset_entry_windows[asset]
                             logger.info(
@@ -13195,10 +13249,10 @@ async def _route_live(
         if _TRACE_AVAILABLE and intent.trace_id and filled_count > 0:
             update_trace(
                 intent.trace_id,
-                fill_time=_time.time(),
+                fill_time=replay_time(),
                 fill_price=fill_price_cents / 100.0  # Convert cents to probability
             )
-            logger.debug("[TRACE-UPDATE] Updated trace_id=%s with fill_time=%.2f fill_price=%.2f", intent.trace_id, _time.time(), fill_price_cents / 100.0)
+            logger.debug("[TRACE-UPDATE] Updated trace_id=%s with fill_time=%.2f fill_price=%.2f", intent.trace_id, replay_time(), fill_price_cents / 100.0)
         
         # Log order acknowledgment for successful submission
         logger.info(
@@ -14561,7 +14615,7 @@ def _run_shared_risk_guard_and_dedup(
             # Release the dedup slot so a corrected/reduced intent can retry.
             try:
                 from merid.guards.order_dedup_registry import get_order_dedup_registry
-                get_order_dedup_registry().release(intent.ticker, intent.side, action)
+                get_order_dedup_registry().release(intent.ticker, intent.side, intent.action)
             except Exception:
                 pass
             return OrderResult(

@@ -1392,6 +1392,40 @@ class PositionMonitor:
             if position_id in self._position_to_client_order:
                 del self._position_to_client_order[position_id]
 
+    def _get_unresolved_exit_client_order_id(
+        self, position_id: str
+    ) -> Optional[str]:
+        """Return the unresolved in-flight exit client_order_id for a position.
+
+        Returns the client_order_id only when the intent is in a non-terminal
+        state (EXECUTION_PENDING, SUBMITTED, SUBMISSION_UNKNOWN, RETRYABLE_FAILURE)
+        so the loop can resubmit with the same idempotency key.
+        """
+        with self._lock:
+            flight = self._exit_intent_in_flight.get(position_id)
+            if flight is not None:
+                state = flight.get("state")
+                if state not in ("RECONCILED",):
+                    return flight.get("client_order_id") or self._position_to_client_order.get(position_id)
+            return self._position_to_client_order.get(position_id)
+
+    def _mark_exit_intent_submission_unknown(
+        self, position_id: str, reason: str
+    ) -> None:
+        """Mark an exit intent as SUBMISSION_UNKNOWN (lost ack in flight)."""
+        with self._lock:
+            flight = self._exit_intent_in_flight.get(position_id)
+            if flight is None:
+                return
+            flight["state"] = "SUBMISSION_UNKNOWN"
+            flight["error_type"] = "submission_unknown"
+            flight["error"] = reason
+            flight["timestamp"] = time.time()
+            logger.warning(
+                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent SUBMISSION_UNKNOWN: position_id=%s reason=%s",
+                position_id[:8], reason,
+            )
+
     def _is_exit_intent_in_flight(self, position_id: str) -> bool:
         """
         Check if an exit intent is currently in-flight for a position.

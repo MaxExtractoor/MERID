@@ -333,7 +333,7 @@ class IdempotentOrderStore:
         valid_transitions = {
             OrderStatus.PENDING: {OrderStatus.SUBMITTED, OrderStatus.LIVE, OrderStatus.REJECTED, OrderStatus.CANCELED},
             OrderStatus.SUBMITTED: {OrderStatus.SUBMISSION_UNKNOWN, OrderStatus.LIVE, OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED},
-            OrderStatus.SUBMISSION_UNKNOWN: {OrderStatus.LIVE, OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED},
+            OrderStatus.SUBMISSION_UNKNOWN: {OrderStatus.SUBMITTED, OrderStatus.LIVE, OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED},
             OrderStatus.LIVE: {OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.CANCELED},
             OrderStatus.PARTIAL: {OrderStatus.FILLED, OrderStatus.CANCELED},
         }
@@ -365,7 +365,7 @@ class IdempotentOrderStore:
             # PHASE1-DUP-5: Check transition invariants
             if not self._check_transition_allowed(rec, OrderStatus.SUBMITTED, "mark_submitted"):
                 return
-            if rec.status in (OrderStatus.PENDING,):
+            if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMISSION_UNKNOWN):
                 rec.status = OrderStatus.SUBMITTED
                 rec.venue_order_id = venue_order_id
                 rec.updated_at = _time.time()
