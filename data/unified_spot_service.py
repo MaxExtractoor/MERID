@@ -49,6 +49,7 @@ import random
 from utils.logger import get_logger
 from data.spot_sla_config import get_spot_max_age
 from merid.data.price_precision import format_price as _format_price, parse_price
+from merid.data.ingress_replay import is_replay_active, replay_time
 
 logger = get_logger("data.unified_spot_service")
 
@@ -377,7 +378,11 @@ class UnifiedSpotService:
     
     async def _fetch_asset(self, asset: str) -> bool:
         """Fetch single asset data from Coinbase Exchange API.
-        
+
+        In replay mode, public spot is not a captured feed (the canonical
+        settlement reference is CFB RTI), so we skip network fetches to keep
+        the replay deterministic and network-free.
+
         Priority order:
         1. Coinbase Public Ticker API - real-time price for velocity calculation (FASTEST)
         2. Coinbase Public Candles API - public OHLC data (no auth required)
@@ -400,7 +405,11 @@ class UnifiedSpotService:
         if not pair:
             logger.error(f"[UNIFIED-SPOT] Unsupported asset: {asset}")
             return False
-        
+
+        if is_replay_active():
+            logger.info(f"[UNIFIED-SPOT] Replay mode: skipping live fetch for {asset}")
+            return False
+
         # CRITICAL FIX: Try ticker FIRST for real-time price (most reliable, no auth needed)
         ticker_data = None
         try:
@@ -513,7 +522,7 @@ class UnifiedSpotService:
         }
         
         # Generate timestamp and signature
-        timestamp = str(int(time.time()))
+        timestamp = str(int(replay_time()))
         request_path = f"/products/{pair}/candles?granularity=60&limit=1"
         signature = _generate_coinbase_signature(timestamp, "GET", request_path, "", api_secret)
         
@@ -669,7 +678,7 @@ class UnifiedSpotService:
             ohlc_data: Dict with 'open', 'high', 'low', 'close', 'volume'
             source: Data source identifier
         """
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
 
         # Enforce the OHLC invariant: high >= max(open, close) and low <= min(open, close).
         # This is critical because we combine a live ticker close with open/high/low from a
@@ -731,7 +740,7 @@ class UnifiedSpotService:
         Returns:
             DataState classification
         """
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
         age_s = (now_ms - timestamp_ms) / 1000.0
         
         # Check if source is a fallback
@@ -793,14 +802,14 @@ class UnifiedSpotService:
             return SignalQualityScore(
                 composite=0.0,
                 components={},
-                timestamp=int(time.time() * 1000),
+                timestamp=int(replay_time() * 1000),
                 trade_permitted=False,
                 threshold=self._sqs_thresholds.get(asset, 50.0),
                 degradation_level="red"
             )
         
         # Component 1: Data freshness (30% weight)
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
         age_s = (now_ms - data['timestamp']) / 1000.0
         freshness_score = max(0.0, 100.0 * (1.0 - min(age_s / 30.0, 1.0)))  # Linear decay over 30s
         freshness_component = ComponentScore(
@@ -917,7 +926,7 @@ class UnifiedSpotService:
         max_age_s = get_spot_max_age()
         
         # Calculate age in seconds
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
         age_ms = now_ms - data['timestamp']
         age_s = age_ms / 1000.0
         
@@ -970,7 +979,7 @@ class UnifiedSpotService:
             return None
         
         # Convert SpotPrice to legacy format expected by agents
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
         staleness_ms = now_ms - result.timestamp
         
         # Create legacy-style spot snapshot object
@@ -1007,7 +1016,7 @@ class UnifiedSpotService:
             return None
         
         # Convert SpotPrice to legacy format expected by callers
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
         staleness_ms = now_ms - result.timestamp
         
         # Create legacy-style spot snapshot object
@@ -1062,7 +1071,7 @@ class UnifiedSpotService:
         # Use current spot data to create a single candle
         # In production, this would return a buffer of historical candles
         # For now, return a single candle from current data
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
         
         candle = OHLCVCandle(
             open=result.open if result.open else result.price,
@@ -1164,7 +1173,7 @@ class UnifiedSpotService:
             return []
         
         # Filter by time window
-        now_ms = int(time.time() * 1000)
+        now_ms = int(replay_time() * 1000)
         window_ms = window_s * 1000
         cutoff_ms = now_ms - window_ms
         

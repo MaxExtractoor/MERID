@@ -297,8 +297,16 @@ from merid.event_venues.base import QuoteEvent, VenueTrade
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_FREQS
 from config.kalshi_universe import ACTIVE_CRYPTO_WS_TIMEFRAMES
 from merid.event_venues.kalshi import get_kalshi_client
-from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
+from merid.event_venues.kalshi.kalshi_config import get_kalshi_config, KalshiConfig
+from merid.settings import settings
+from merid.data.ingress_replay import replay_start_time, replay_time
+from merid.utils.sequence_reorder_buffer import ResyncRequired, SequenceReorderBuffer
 from merid.event_venues.kalshi.ws import KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE, KalshiWebSocket
+
+
+def _utc_now():
+    """UTC now for bridge diagnostics; deterministic in replay mode."""
+    return datetime.fromtimestamp(replay_time(), tz=timezone.utc)
 from merid.event_venues.kalshi.market_constraints import (
     ALLOWED_TIMEFRAMES as _ALLOWED_TIMEFRAMES,
     ALLOWED_UNDERLYINGS as _ALLOWED_UNDERLYINGS,
@@ -502,6 +510,18 @@ class KalshiWebSocketBridge:
         self._last_sequence: Dict[str, Optional[int]] = {}  # event_type -> last sequence
         self._sequence_gaps: int = 0
         self._sequence_gaps_list: List[Tuple[str, int, int]] = []  # Track (event_type, gap_start, gap_end) for logging
+
+        # Deterministic, single-writer sequence ordering (flag-gated bridge hardening)
+        try:
+            self._single_writer_mode = getattr(settings, "MERID_WS_BRIDGE_SINGLE_WRITER", False)
+            self._reorder_max_buffered = int(getattr(settings, "MERID_WS_BRIDGE_MAX_BUFFERED", 4096))
+        except Exception:
+            self._single_writer_mode = False
+            self._reorder_max_buffered = 4096
+        self._reorder_buffer: Optional[SequenceReorderBuffer] = None
+        if self._single_writer_mode:
+            self._reorder_buffer = SequenceReorderBuffer(max_buffered=self._reorder_max_buffered)
+            logger.info("[WS-BRIDGE-INIT] single-writer sequence reorder enabled")
         
         # Message deduplication cache (per-ticker)
         self._message_cache: Dict[str, Dict[str, Any]] = {}  # ticker -> last message hash
@@ -517,7 +537,7 @@ class KalshiWebSocketBridge:
         # WS liveness = "has the bridge received ANY messages recently?"
         # MD SLA = "is a specific contract's orderbook fresh enough to trade?"
         # These are separate concerns: bridge can be alive but individual contracts stale
-        self._last_message_at: float = _time.time()
+        self._last_message_at: float = replay_start_time()
         self._bridge_status: str = "ALIVE"  # ALIVE, STALE, DEAD
         # WS liveness threshold: reconnect if no messages for 30s (far expiry bucket)
         # This is about detecting dead connections, not per-contract staleness
@@ -594,9 +614,9 @@ class KalshiWebSocketBridge:
         self._events_enqueued: int = 0
         
         # Forward loop health tracking (for MD_FROZEN guard)
-        self._forward_last_event_ts: float = _time.time()
+        self._forward_last_event_ts: float = replay_start_time()
         self._forward_event_count: int = 0
-        self._forward_last_health_check: float = _time.time()
+        self._forward_last_health_check: float = replay_start_time()
         
         # CRITICAL: Forwarder loop heartbeat tracking
         self._last_heartbeat_ts: float = _time.monotonic()
@@ -984,7 +1004,7 @@ class KalshiWebSocketBridge:
                 # Estimate last client message time from current time and message rate
                 # This is a simplification - in production, the WS client should track this
                 if ws_client_msg_count > 0:
-                    last_client_msg_ts = _time.time()  # Assume recent if count > 0
+                    last_client_msg_ts = replay_start_time()  # Assume recent if count > 0
         except Exception:
             pass
         
@@ -1195,7 +1215,7 @@ class KalshiWebSocketBridge:
                 logger.info("[SNAPSHOT-BOOTSTRAP] Fetching snapshot for %s", ticker)
                 try:
                     # Add per-request timeout to prevent individual hangs
-                    fetched_at = datetime.now(timezone.utc)
+                    fetched_at = _utc_now()
                     result = await asyncio.wait_for(
                         client._request_with_resilience(
                             "GET", f"/markets/{ticker}/orderbook",
@@ -1302,6 +1322,7 @@ class KalshiWebSocketBridge:
     async def start(self, tickers: Optional[List[str]] = None) -> None:
         """Connect WS, subscribe to channels, and start forwarding."""
         # REMOVED: Excessive diagnostic file I/O - using logger instead
+        summary: Dict[str, Any] = {"actions": []}
         logger.info("[WS-BRIDGE-START] start() invoked with %d tickers", len(tickers) if tickers else 0)
         
         # TARGETED DIAGNOSTIC: Add three sequential logs to pinpoint exact stall location
@@ -1567,7 +1588,7 @@ class KalshiWebSocketBridge:
                                 "sequence": 0,
                                 "yes": yes_levels,
                                 "no": no_levels,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": _utc_now().isoformat(),
                             }
                             # P0 DEBUG: Log REST fallback
                             logger.info("[REST-FALLBACK] ticker=%s source=ws_fallback", ticker)
@@ -1649,7 +1670,7 @@ class KalshiWebSocketBridge:
                                         "sequence": 0,
                                         "yes": yes_levels,
                                         "no": no_levels,
-                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        "timestamp": _utc_now().isoformat(),
                                     }
                                     store.apply_orderbook_message(msg, "ws_fallback")
                             except Exception as e:
@@ -2798,7 +2819,7 @@ class KalshiWebSocketBridge:
                             "sequence": 0,
                             "yes": yes_levels,
                             "no": no_levels,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": _utc_now().isoformat(),
                         }
                         # P0 DEBUG: Log REST subscribe fallback
                         logger.info("[REST-BOOTSTRAP] ticker=%s source=subscribe_fallback", ticker)
@@ -2901,7 +2922,7 @@ class KalshiWebSocketBridge:
             "sequence": 0,
             "yes": yes_levels,
             "no": no_levels,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": _utc_now().isoformat(),
         }
         logger.info(
             "[REST-POLLING] ticker=%s source=%s yes_levels=%d no_levels=%d",
@@ -3049,7 +3070,7 @@ class KalshiWebSocketBridge:
                 for ticker in tickers:
                     try:
                         from datetime import datetime, timezone
-                        fetched_at = datetime.now(timezone.utc)
+                        fetched_at = _utc_now()
                         logger.info("[WS-FALLBACK] REST-ORDERBOOK-FETCH ticker=%s starting", ticker)
                         orderbook = await self._fetch_rest_orderbook(client, ticker)
                         logger.info("[WS-FALLBACK] REST-ORDERBOOK-FETCH ticker=%s result=%s", ticker, type(orderbook).__name__ if orderbook else "None")
@@ -3130,7 +3151,7 @@ class KalshiWebSocketBridge:
                                 "sequence": 0,
                                 "yes": yes_levels,
                                 "no": no_levels,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": _utc_now().isoformat(),
                             }
                             logger.info("[WS-FALLBACK] STATESTORE-UPDATE ticker=%s yes_levels=%d no_levels=%d", ticker, len(yes_levels), len(no_levels))
                             # P0 DEBUG: Log REST polling update
@@ -3377,7 +3398,7 @@ class KalshiWebSocketBridge:
                             )
                             # Alert when queue is approaching capacity
                             if queue_utilization >= self._dead_letter_alert_threshold:
-                                now = _time.time()
+                                now = replay_time()
                                 if now - self._dead_letter_last_alert_ts > 60.0:  # Alert at most once per minute
                                     logger.critical(
                                         "[WS_BRIDGE_FILL_QUEUE_ALERT] Dead-letter queue at %.1f%% capacity (%d/%d). "
@@ -3498,7 +3519,7 @@ class KalshiWebSocketBridge:
 
                 self._message_cache[ticker] = {
                     "key": event_key,
-                    "ts": _time.time()
+                    "ts": replay_time()
                 }
         
         # EVENT-LOOP-FIX: Check queue depth and apply backpressure
@@ -3776,8 +3797,109 @@ class KalshiWebSocketBridge:
 
         logger.warning("[WS-DRAIN-THREAD] Drain thread exiting")
 
-    def _drain_put_nowait(self, event: Any) -> None:
-        """Callback scheduled on the forwarder event loop by the drain thread."""
+    # ── Deterministic sequence reorder helpers (single-writer drain) ──────
+
+    def _reorder_channel_and_seq(self, event: Any) -> tuple:
+        """Return (channel, seq) for an event.  Non-integral seq is treated as None.
+
+        Kalshi WS v2 nests the payload under ``msg`` and identifies the market by
+        ``market_ticker`` (or ``ticker``).  We prefer the nested values because the
+        top-level ``seq`` is a global connection counter that is not contiguous for
+        any single market; using it as a per-channel sequence would force a resync
+        every few hundred deltas.
+        """
+        if not isinstance(event, dict):
+            return "kalshi", None
+
+        # Prefer the nested Kalshi message body for market/sequence.
+        body = event.get("msg")
+        if not isinstance(body, dict):
+            body = event
+
+        channel = (
+            body.get("market_ticker")
+            or body.get("ticker")
+            or event.get("market_ticker")
+            or event.get("ticker")
+            or event.get("type")
+            or "kalshi"
+        )
+
+        raw = (
+            body.get("sequence")
+            or body.get("seq")
+            or event.get("sequence")
+            or event.get("seq")
+            or event.get("msg_id")
+        )
+        seq = None
+        if raw is not None and isinstance(raw, int) and not isinstance(raw, bool):
+            seq = raw
+        return channel, seq
+
+    def _is_snapshot(self, event: Any) -> bool:
+        """Return True if the event is a full snapshot and should re-anchor the watermark."""
+        if not isinstance(event, dict):
+            return False
+        etype = event.get("type", "")
+        return etype in ("orderbook_snapshot", "snapshot", "trade_break")
+
+    def _reorder_push_one(self, event: Any) -> None:
+        """Push one event through the reorder buffer and into the async queue.
+
+        This is the *single writer* path when ``MERID_WS_BRIDGE_SINGLE_WRITER``
+        is enabled.  Release order is a pure function of ``(channel, seq)``.
+        Snapshots re-anchor the watermark so deltas are ordered relative to the
+        last full book.
+        """
+        if not self._async_queue:
+            return
+
+        if not self._single_writer_mode or self._reorder_buffer is None:
+            self._drain_put_event(event)
+            return
+
+        channel, seq = self._reorder_channel_and_seq(event)
+        rb = self._reorder_buffer
+
+        if seq is None:
+            # No sequence field: treat as the next in-order event for this channel.
+            nxt = rb.next_seq(channel)
+            if nxt is None:
+                rb.reset(channel, -1)
+                nxt = rb.next_seq(channel)
+            seq = nxt
+        else:
+            nxt = rb.next_seq(channel)
+            if nxt is None:
+                # First event for this channel.  Use its own sequence as the
+                # base so we can release it and continue contiguously.  If the
+                # event has no sequence (raw was None) it was already set to the
+                # next available counter in the seq==None branch, which is fine.
+                rb.reset(channel, seq - 1)
+            elif self._is_snapshot(event):
+                # New snapshot re-anchors the watermark.
+                rb.reset(channel, seq - 1)
+            elif nxt > seq:
+                # Already-past stale / duplicate
+                self._events_dropped += 1
+                return
+
+        try:
+            released = rb.push(channel, seq, event)
+        except ResyncRequired as exc:
+            now = _time.monotonic()
+            if now - getattr(self, "_last_resync_warn_ts", 0) > 1.0:
+                self._last_resync_warn_ts = now
+                logger.warning("[WS-REORDER] %s", exc)
+            self._schedule_reorder_resync(channel, seq, event)
+            return
+
+        for ev in released:
+            self._drain_put_event(ev)
+
+    def _drain_put_event(self, event: Any) -> None:
+        """Put a single, already-ordered event into the async queue."""
         if not self._async_queue:
             return
         try:
@@ -3789,22 +3911,69 @@ class KalshiWebSocketBridge:
                 self._last_drain_drop_warn_ts = now
                 logger.warning("[WS-DRAIN-THREAD] async_queue full, dropping event (queue_size=%d)", self._async_queue.qsize())
 
+    def _schedule_reorder_resync(self, channel: str, seq: int, event: Any) -> None:
+        """Fast-forward the reorder watermark for a channel and request a snapshot.
+
+        We cannot repair a large gap without a fresh snapshot, so we drop stale
+        buffered events, accept the current event as the new base, and try to
+        fetch a fresh orderbook snapshot for the ticker if we can.
+        """
+        logger.info("[WS-REORDER] scheduling resync for channel=%s seq=%d", channel, seq)
+        if self._reorder_buffer is not None:
+            released = self._reorder_buffer.reset_and_catch_up(channel, seq, event)
+            for ev in released:
+                self._drain_put_event(ev)
+
+        # Request a fresh snapshot via the main event loop if this is a market.
+        loop = getattr(self, "_main_loop", None)
+        if loop is not None and not loop.is_closed() and isinstance(channel, str) and channel.startswith("KX"):
+            try:
+                loop.call_soon_threadsafe(self._request_ws_snapshot, channel)
+            except Exception:
+                pass
+
+    def _request_ws_snapshot(self, ticker: str) -> None:
+        """Schedule a REST orderbook snapshot fetch for *ticker* on the main loop."""
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            client = get_kalshi_client()
+            store = get_kalshi_market_state_store()
+        except Exception as e:
+            logger.warning("[WS-REORDER] cannot get client/store for resync snapshot %s: %s", ticker, e)
+            return
+        loop = getattr(self, "_main_loop", None)
+        if loop is None or loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._fetch_and_apply_rest_orderbook(client, store, ticker), loop
+            )
+        except Exception:
+            pass
+
+    async def _fetch_and_apply_rest_orderbook(self, client, store, ticker: str) -> None:
+        """Fetch and apply a single REST orderbook snapshot for resync."""
+        try:
+            orderbook = await asyncio.wait_for(self._fetch_rest_orderbook(client, ticker), timeout=5.0)
+        except Exception as e:
+            logger.warning("[WS-REORDER] REST snapshot fetch failed for %s: %s", ticker, e)
+            return
+        if not orderbook:
+            return
+        try:
+            self._update_statestore_from_rest(orderbook, ticker, store, via="ws_resync")
+            logger.info("[WS-REORDER] REST resync snapshot applied for %s", ticker)
+        except Exception as e:
+            logger.warning("[WS-REORDER] REST snapshot apply failed for %s: %s", ticker, e)
+
+    def _drain_put_nowait(self, event: Any) -> None:
+        """Callback scheduled on the forwarder event loop by the drain thread."""
+        self._reorder_push_one(event)
+
     def _drain_put_batch(self, batch: List[Any]) -> None:
         """Bulk callback scheduled on the forwarder event loop by the drain thread."""
-        if not self._async_queue:
-            return
-        dropped = 0
         for event in batch:
-            try:
-                self._async_queue.put_nowait(event)
-            except asyncio.QueueFull:
-                dropped += 1
-                self._events_dropped += 1
-        if dropped:
-            now = _time.monotonic()
-            if now - getattr(self, '_last_drain_drop_warn_ts', 0) > 5.0:
-                self._last_drain_drop_warn_ts = now
-                logger.warning("[WS-DRAIN-THREAD] async_queue full, dropping %d events (queue_size=%d)", dropped, self._async_queue.qsize())
+            self._reorder_push_one(event)
     
     async def _forward_loop(self) -> None:
         """Continuously drain the async queue and publish to the event bus.
@@ -4144,7 +4313,7 @@ class KalshiWebSocketBridge:
                             # Changed to every 5000 events
                             if self._total_events_processed % 5000 == 0:
                                 logger.info("[WS-FORWARD-COUNTER] events_processed=%d ticker=%s", self._total_events_processed, ticker)
-                        self._last_message_at = _time.time()
+                        self._last_message_at = replay_time()
                     else:
                         # DISABLED: Excessive logging - every 100 events = 180+ log lines for 18K events
                         # Changed to every 5000 events
@@ -4308,7 +4477,7 @@ class KalshiWebSocketBridge:
                             "volume": float(event.volume) if event.volume else None,
                             "venue": "kalshi",
                             "ts": _tick_ts,
-                            "age_ms": round((_time.time() - _tick_ts) * 1000),
+                            "age_ms": round((replay_time() - _tick_ts) * 1000),
                         },
                         source="kalshi_ws_bridge",
                     )
@@ -4391,7 +4560,7 @@ class KalshiWebSocketBridge:
                 
                 # DIAGNOSTIC: Log first orderbook message per ticker only
                 if ticker not in self._first_orderbook_seen:
-                    self._first_orderbook_seen[ticker] = _time.time()
+                    self._first_orderbook_seen[ticker] = replay_time()
                     if len(self._first_orderbook_seen) > self._first_orderbook_seen_max:
                         evict_count = len(self._first_orderbook_seen) // 2
                         for _ in range(evict_count):

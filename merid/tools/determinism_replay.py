@@ -1,426 +1,222 @@
 """
-Determinism Replay Job
+Determinism replay — run the production binary from an ingress tape.
 
-Replays historical trading decisions through the current strategy and models
-to verify that the same inputs produce the same outputs. This catches
-non-determinism bugs, config drift, and model changes.
+This is the Phase 2 runtime mode.  It does not simulate anything; it swaps the
+four ingress points (Kalshi WS, Kalshi REST, CF Benchmarks RTI WS, CF
+Benchmarks RTI REST) to read from a captured JSON-line tape.  The rest of the
+production stack — parser, book builder, strategy, risk, router — runs
+unchanged, and wall-clock / random calls are seeded from the tape.
 
 Usage:
-    python -m merid.tools.determinism_replay --mode ci --sample-size 10
-    python -m merid.tools.determinism_replay --mode full --window-days 1
-    python -m merid.tools.determinism_replay --bundle-id <bundle_id>
+    python -m merid.tools.determinism_replay --replay-tape data/ingress/20260827
+    python -m merid.tools.determinism_replay --replay-tape data/ingress/20260827 --host 127.0.0.1 --port 8000
 """
 
-import argparse
-import hashlib
-import json
-import sys
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import List, Optional, Dict, Any
+from __future__ import annotations
 
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+from merid.data.ingress_replay import get_replay_dispatcher
+from merid.data.replay_config_snapshot import apply_snapshot
 from utils.logger import get_logger
-from merid.tools.determinism_types import (
-    DeterminismBundle,
-    ReplayResult,
-    ReplaySummary,
-    DecisionType,
-)
 
 logger = get_logger("merid.tools.determinism_replay")
 
 
-# Configuration
-PROB_EDGE_TOLERANCE = 0.01  # 1% tolerance for probability edge
-SIZE_TOLERANCE = 1  # 1 contract tolerance for size
-
-
-class DeterminismReplayer:
-    """
-    Replays historical trading decisions to verify determinism.
-    
-    This class loads determinism bundles from storage, replays them through
-    the current strategy and models, and compares outputs against the
-    original decisions.
-    """
-    
-    def __init__(
-        self,
-        storage_path: Optional[Path] = None,
-        prob_edge_tolerance: float = PROB_EDGE_TOLERANCE,
-        size_tolerance: int = SIZE_TOLERANCE,
-    ):
-        """
-        Initialize the replayer.
-        
-        Args:
-            storage_path: Path to bundle storage directory
-            prob_edge_tolerance: Tolerance for probability edge comparison
-            size_tolerance: Tolerance for size comparison
-        """
-        self.storage_path = storage_path or Path("data/determinism_bundles")
-        self.prob_edge_tolerance = prob_edge_tolerance
-        self.size_tolerance = size_tolerance
-        
-        # Ensure storage directory exists
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-    
-    def load_bundles(
-        self,
-        window_days: Optional[int] = None,
-        asset: Optional[str] = None,
-        limit: Optional[int] = None,
-    ) -> List[DeterminismBundle]:
-        """
-        Load determinism bundles from storage.
-        
-        Args:
-            window_days: Only load bundles from last N days
-            asset: Only load bundles for specific asset
-            limit: Maximum number of bundles to load
-            
-        Returns:
-            List of determinism bundles
-        """
-        bundles = []
-        
-        # Load from JSON files in storage directory
-        bundle_files = list(self.storage_path.glob("*.json"))
-        
-        # Filter by time window
-        if window_days:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-            bundle_files = [
-                f for f in bundle_files
-                if datetime.fromisoformat(f.stem.split("_")[1]) >= cutoff
-            ]
-        
-        # Filter by asset
-        if asset:
-            bundle_files = [
-                f for f in bundle_files
-                if asset.lower() in f.name.lower()
-            ]
-        
-        # Limit
-        if limit:
-            bundle_files = bundle_files[:limit]
-        
-        for bundle_file in bundle_files:
-            try:
-                with open(bundle_file, 'r') as f:
-                    data = json.load(f)
-                
-                bundle = DeterminismBundle(
-                    bundle_id=data["bundle_id"],
-                    timestamp=datetime.fromisoformat(data["timestamp"]),
-                    market_id=data["market_id"],
-                    asset=data["asset"],
-                    timeframe=data["timeframe"],
-                    decision_type=DecisionType(data["decision_type"]),
-                    feature_vector=data["feature_vector"],
-                    config_hash=data["config_hash"],
-                    model_version=data["model_version"],
-                    contract_metadata=data["contract_metadata"],
-                    kill_switch_state=data["kill_switch_state"],
-                    risk_regime=data["risk_regime"],
-                    original_signal_direction=data["original_signal_direction"],
-                    original_prob_edge=data["original_prob_edge"],
-                    original_size_intent=data["original_size_intent"],
-                    original_reason=data["original_reason"],
-                    correlation_id=data.get("correlation_id"),
-                    agent_id=data.get("agent_id"),
-                )
-                bundles.append(bundle)
-                
-            except Exception as e:
-                logger.warning(f"Failed to load bundle {bundle_file}: {e}")
-        
-        logger.info(f"Loaded {len(bundles)} bundles from storage")
-        return bundles
-    
-    def replay_bundle(self, bundle: DeterminismBundle) -> ReplayResult:
-        """
-        Replay a single determinism bundle.
-        
-        Args:
-            bundle: Determinism bundle to replay
-            
-        Returns:
-            Replay result with comparison
-        """
-        logger.debug(f"Replaying bundle {bundle.bundle_id}")
-
-        # NOTE: Replay logic not yet implemented
-        # This would require:
-        # 1. Loading the strategy and model at the appropriate version
-        # 2. Setting up the system state (kill switch, risk regime)
-        # 3. Feeding the feature vector into the model
-        # 4. Getting the signal direction, prob_edge, size_intent
-        # 5. Comparing against original outputs
-        # For now, return a mock result for testing
-        replay_signal_direction = bundle.original_signal_direction
-        replay_prob_edge = bundle.original_prob_edge
-        replay_size_intent = bundle.original_size_intent
-        replay_reason = bundle.original_reason
-        
-        # Compare outputs
-        direction_match = replay_signal_direction == bundle.original_signal_direction
-        prob_edge_match = abs(replay_prob_edge - bundle.original_prob_edge) < 1e-9
-        size_match = replay_size_intent == bundle.original_size_intent
-        reason_match = replay_reason == bundle.original_reason
-        
-        # Tolerance checks
-        prob_edge_diff = abs(replay_prob_edge - bundle.original_prob_edge)
-        prob_edge_within_tolerance = prob_edge_diff <= self.prob_edge_tolerance
-        size_diff = abs(replay_size_intent - bundle.original_size_intent)
-        size_within_tolerance = size_diff <= self.size_tolerance
-        
-        # Overall pass/fail
-        passed = (
-            direction_match
-            and prob_edge_within_tolerance
-            and size_within_tolerance
+def _fail_if_live_latches() -> None:
+    """Make sure this runtime is not accidentally allowed to trade."""
+    live_latches = [
+        os.getenv("TRADING_ENABLED", "").lower() in ("1", "true"),
+        os.getenv("MERID_PM_LIVE_ENABLED", "").lower() in ("1", "true"),
+        os.getenv("MERID_ALLOW_LIVE_TRADES", "").lower() in ("1", "true"),
+        os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live",
+    ]
+    if any(live_latches):
+        logger.critical(
+            "[REPLAY-SECURITY] Replay cannot be combined with live trading latches. "
+            "Set MERID_ALLOW_LIVE_TRADES=false, MERID_PM_TRADING_MODE=dry_run."
         )
-        
-        failure_reason = None
-        if not passed:
-            reasons = []
-            if not direction_match:
-                reasons.append(f"direction mismatch: {bundle.original_signal_direction} vs {replay_signal_direction}")
-            if not prob_edge_within_tolerance:
-                reasons.append(f"prob_edge diff {prob_edge_diff:.4f} exceeds tolerance {self.prob_edge_tolerance}")
-            if not size_within_tolerance:
-                reasons.append(f"size diff {size_diff} exceeds tolerance {self.size_tolerance}")
-            failure_reason = "; ".join(reasons)
-        
-        return ReplayResult(
-            bundle_id=bundle.bundle_id,
-            replay_signal_direction=replay_signal_direction,
-            replay_prob_edge=replay_prob_edge,
-            replay_size_intent=replay_size_intent,
-            replay_reason=replay_reason,
-            direction_match=direction_match,
-            prob_edge_match=prob_edge_match,
-            size_match=size_match,
-            reason_match=reason_match,
-            prob_edge_diff=prob_edge_diff,
-            prob_edge_within_tolerance=prob_edge_within_tolerance,
-            size_diff=size_diff,
-            size_within_tolerance=size_within_tolerance,
-            passed=passed,
-            failure_reason=failure_reason,
-        )
-    
-    def replay_bundles(self, bundles: List[DeterminismBundle]) -> ReplaySummary:
-        """
-        Replay multiple determinism bundles.
-        
-        Args:
-            bundles: List of determinism bundles to replay
-            
-        Returns:
-            Replay summary with results
-        """
-        logger.info(f"Replaying {len(bundles)} bundles")
-        
-        results = []
-        passed = 0
-        failed = 0
-        skipped = 0
-        
-        direction_mismatches = 0
-        prob_edge_mismatches = 0
-        size_mismatches = 0
-        reason_mismatches = 0
-        
-        prob_edge_diffs = []
-        size_diffs = []
-        
-        for bundle in bundles:
-            try:
-                result = self.replay_bundle(bundle)
-                results.append(result)
-                
-                if result.passed:
-                    passed += 1
-                else:
-                    failed += 1
-                    
-                    if not result.direction_match:
-                        direction_mismatches += 1
-                    if not result.prob_edge_within_tolerance:
-                        prob_edge_mismatches += 1
-                    if not result.size_within_tolerance:
-                        size_mismatches += 1
-                    if not result.reason_match:
-                        reason_mismatches += 1
-                    
-                    prob_edge_diffs.append(result.prob_edge_diff)
-                    size_diffs.append(result.size_diff)
-                    
-            except Exception as e:
-                logger.error(f"Failed to replay bundle {bundle.bundle_id}: {e}")
-                skipped += 1
-        
-        # Calculate summary metrics
-        total = len(bundles)
-        pass_rate = passed / total if total > 0 else 0.0
-        avg_prob_edge_diff = sum(prob_edge_diffs) / len(prob_edge_diffs) if prob_edge_diffs else 0.0
-        avg_size_diff = sum(size_diffs) / len(size_diffs) if size_diffs else 0.0
-        
-        summary = ReplaySummary(
-            total_bundles=total,
-            passed=passed,
-            failed=failed,
-            skipped=skipped,
-            direction_mismatches=direction_mismatches,
-            prob_edge_mismatches=prob_edge_mismatches,
-            size_mismatches=size_mismatches,
-            reason_mismatches=reason_mismatches,
-            pass_rate=pass_rate,
-            avg_prob_edge_diff=avg_prob_edge_diff,
-            avg_size_diff=avg_size_diff,
-            results=results,
-        )
-        
-        logger.info(
-            f"Replay complete: {passed}/{total} passed ({pass_rate:.1%}), "
-            f"{failed} failed, {skipped} skipped"
-        )
-        
-        return summary
-    
-    def save_bundle(self, bundle: DeterminismBundle):
-        """
-        Save a determinism bundle to storage.
-        
-        Args:
-            bundle: Determinism bundle to save
-        """
-        filename = f"{bundle.bundle_id}_{bundle.timestamp.isoformat()}.json"
-        filepath = self.storage_path / filename
-        
-        with open(filepath, 'w') as f:
-            json.dump(bundle.to_dict(), f, indent=2)
-        
-        logger.debug(f"Saved bundle to {filepath}")
-
-
-def compute_config_hash(config: Dict[str, Any]) -> str:
-    """
-    Compute hash of configuration for determinism tracking.
-    
-    Args:
-        config: Configuration dictionary
-        
-    Returns:
-        SHA256 hash of configuration
-    """
-    # Convert config to sorted JSON string
-    config_str = json.dumps(config, sort_keys=True)
-    return hashlib.sha256(config_str.encode()).hexdigest()
-
-
-def main():
-    """Main entry point for determinism replay job."""
-    parser = argparse.ArgumentParser(description="Determinism replay job")
-    parser.add_argument(
-        "--mode",
-        choices=["ci", "full"],
-        default="ci",
-        help="Execution mode: ci (small sample) or full (time window)"
-    )
-    parser.add_argument(
-        "--window-days",
-        type=int,
-        default=1,
-        help="Time window in days (full mode only)"
-    )
-    parser.add_argument(
-        "--sample-size",
-        type=int,
-        default=10,
-        help="Sample size (ci mode only)"
-    )
-    parser.add_argument(
-        "--asset",
-        type=str,
-        help="Filter by asset"
-    )
-    parser.add_argument(
-        "--bundle-id",
-        type=str,
-        help="Replay specific bundle by ID"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        help="Output file for results (JSON)"
-    )
-    parser.add_argument(
-        "--fail-on-error",
-        action="store_true",
-        help="Exit with error code if any replay fails"
-    )
-    
-    args = parser.parse_args()
-    
-    replayer = DeterminismReplayer()
-    
-    if args.bundle_id:
-        # Replay specific bundle
-        bundles = replayer.load_bundles(limit=1)
-        bundles = [b for b in bundles if b.bundle_id == args.bundle_id]
-        if not bundles:
-            logger.error(f"Bundle {args.bundle_id} not found")
-            sys.exit(1)
-    elif args.mode == "ci":
-        # CI mode: small fixed sample
-        bundles = replayer.load_bundles(limit=args.sample_size, asset=args.asset)
-    else:
-        # Full mode: time window
-        bundles = replayer.load_bundles(
-            window_days=args.window_days,
-            asset=args.asset
-        )
-    
-    if not bundles:
-        logger.warning("No bundles to replay")
-        sys.exit(0)
-    
-    # Replay bundles
-    summary = replayer.replay_bundles(bundles)
-    
-    # Print summary
-    print("\n" + "="*60)
-    print("Determinism Replay Summary")
-    print("="*60)
-    print(f"Total bundles: {summary.total_bundles}")
-    print(f"Passed: {summary.passed} ({summary.pass_rate:.1%})")
-    print(f"Failed: {summary.failed}")
-    print(f"Skipped: {summary.skipped}")
-    print()
-    print("Mismatches:")
-    print(f"  Direction: {summary.direction_mismatches}")
-    print(f"  Prob Edge: {summary.prob_edge_mismatches}")
-    print(f"  Size: {summary.size_mismatches}")
-    print(f"  Reason: {summary.reason_mismatches}")
-    print()
-    print(f"Avg prob edge diff: {summary.avg_prob_edge_diff:.4f}")
-    print(f"Avg size diff: {summary.avg_size_diff:.2f}")
-    print("="*60)
-    
-    # Save results if requested
-    if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(summary.to_dict(), f, indent=2)
-        logger.info(f"Results saved to {args.output}")
-    
-    # Exit with error if any failures and fail-on-error is set
-    if args.fail_on_error and summary.failed > 0:
-        logger.error(f"{summary.failed} replay failures detected")
         sys.exit(1)
+
+
+def configure_replay_environment(tape_dir: Path) -> None:
+    """Set the environment variables needed to run the binary in replay mode."""
+    # Set safety latches first so apply_snapshot cannot overwrite them.
+    protected = {
+        "MERID_REPLAY_TAPE",
+        "MERID_INGRESS_RECORDING",
+        "TRADING_ENABLED",
+        "MERID_PM_LIVE_ENABLED",
+        "MERID_ALLOW_LIVE_TRADES",
+        "MERID_EXECUTION_MODE",
+        "MERID_LOOP_DRY_RUN",
+        "MERID_ALLOW_CT_SCRIPT_BYPASS",
+        "MERID_REQUIRE_EXIT_PARENTAGE",
+        "MERID_EXIT_FIREWALL_OBSERVE_ONLY",
+        "MERID_CIRCUIT_BREAKER_DISABLED",
+        "MERID_PM_TRADING_MODE",
+    }
+    os.environ["MERID_REPLAY_TAPE"] = str(tape_dir.resolve())
+    os.environ["MERID_INGRESS_RECORDING"] = "false"
+    os.environ["TRADING_ENABLED"] = "false"
+    os.environ["MERID_PM_LIVE_ENABLED"] = "false"
+    os.environ["MERID_ALLOW_LIVE_TRADES"] = "false"
+    os.environ["MERID_EXECUTION_MODE"] = "dry_run"
+    os.environ["MERID_LOOP_DRY_RUN"] = "true"
+    os.environ["MERID_ALLOW_CT_SCRIPT_BYPASS"] = "false"
+    os.environ["MERID_REQUIRE_EXIT_PARENTAGE"] = "1"
+    os.environ["MERID_EXIT_FIREWALL_OBSERVE_ONLY"] = "true"
+    os.environ["MERID_CIRCUIT_BREAKER_DISABLED"] = "false"
+    # Make sure the production startup guard does not see this as live.
+    if os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live":
+        os.environ["MERID_PM_TRADING_MODE"] = "dry_run"
+
+    # Pin the captured config/reference data so it is replayed verbatim.
+    apply_snapshot(tape_dir, protected_keys=protected)
+
+
+def replay_bundle(
+    tape_dir: Path,
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    one_shot: bool = False,
+    smoke: bool = False,
+) -> None:
+    """Run the production binary from the captured ingress tape.
+
+    This sets replay env, pre-loads the dispatcher, and starts the FastAPI
+    application via uvicorn.  In one-shot mode, the process exits after the
+    dispatcher reports the tape is exhausted (the WS/RTI loops stop themselves).
+    In smoke mode, the dispatcher is loaded and validated but the server is not
+    started; useful for CI and for verifying a tape without running the app.
+    """
+    if not tape_dir.exists() or not tape_dir.is_dir():
+        logger.error("[REPLAY] Tape directory does not exist: %s", tape_dir)
+        sys.exit(1)
+
+    configure_replay_environment(tape_dir)
+    _fail_if_live_latches()
+
+    # Pre-load the dispatcher so the heavy file scan happens once at startup,
+    # not on the first ingress read.
+    dispatcher = get_replay_dispatcher()
+    if dispatcher is None:
+        logger.error("[REPLAY] Failed to load replay dispatcher for %s", tape_dir)
+        sys.exit(1)
+
+    logger.info(
+        "[REPLAY] bundle tape_dir=%s records=%d active=%s one_shot=%s smoke=%s",
+        tape_dir,
+        len(dispatcher._records),
+        sorted(dispatcher._active_sources),
+        one_shot,
+        smoke,
+    )
+
+    if smoke:
+        logger.info("[REPLAY-SMOKE] dispatcher validated; smoke mode exits without starting server")
+        return
+
+    try:
+        import uvicorn
+    except ImportError as exc:
+        logger.error("[REPLAY] uvicorn is required to run the production binary: %s", exc)
+        sys.exit(1)
+
+    if one_shot:
+        # Start a watcher that exits the process once the tape is consumed.
+        # This is a best-effort background task: the replay loops themselves
+        # already stop on ReplayExhausted; this task catches any tail.
+        _start_one_shot_watcher()
+
+    uvicorn.run(
+        "web.main_15m_lean:app",
+        host=host,
+        port=port,
+        lifespan="on",
+    )
+
+
+def _start_one_shot_watcher() -> None:
+    """Attach a background task that exits the process when the tape ends."""
+    import asyncio
+    import threading
+
+    async def _watcher() -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            dispatcher = get_replay_dispatcher()
+            if dispatcher is None:
+                continue
+            # If every active source has seen the end of the tape, we are done.
+            if dispatcher._next_index >= len(dispatcher._records):
+                logger.info("[REPLAY-ONE-SHOT] tape exhausted, exiting")
+                os._exit(0)
+
+    def _run_watcher() -> None:
+        try:
+            asyncio.new_event_loop().run_until_complete(_watcher())
+        except Exception as exc:
+            logger.warning("[REPLAY-ONE-SHOT] watcher error: %s", exc)
+
+    watcher_thread = threading.Thread(target=_run_watcher, daemon=True)
+    watcher_thread.start()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Deterministic replay of a captured ingress tape through the production binary."
+    )
+    parser.add_argument(
+        "--replay-tape",
+        type=Path,
+        required=True,
+        help="Path to an ingress JSON-line tape directory captured by the ingress recorder.",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind the replayed production server on (default: 0.0.0.0).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to bind the replayed production server on (default: 8000).",
+    )
+    parser.add_argument(
+        "--one-shot",
+        action="store_true",
+        help="Exit the process once the tape is exhausted.",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Load the dispatcher and exit without starting the server; for CI tape validation.",
+    )
+    parser.add_argument(
+        "--active-sources",
+        type=str,
+        default=None,
+        help="Comma-separated source IDs to replay (default: all sources in the tape).",
+    )
+    args = parser.parse_args()
+
+    if args.active_sources:
+        os.environ["MERID_REPLAY_ACTIVE_SOURCES"] = args.active_sources
+
+    replay_bundle(
+        tape_dir=args.replay_tape,
+        host=args.host,
+        port=args.port,
+        one_shot=args.one_shot,
+        smoke=args.smoke,
+    )
 
 
 if __name__ == "__main__":
