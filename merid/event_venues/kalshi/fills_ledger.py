@@ -160,6 +160,8 @@ def _intent_to_durable(intent: "OrderIntent") -> Dict[str, Any]:
         "action": intent.action,
         "client_order_id": getattr(intent, "client_order_id", None),
         "client_tag": getattr(intent, "client_tag", None),
+        "liquidity_role": getattr(intent, "liquidity_role", None),
+        "estimated_fee_cents": getattr(intent, "estimated_fee_cents", None),
         "order_id": getattr(intent, "order_id", None),
         "entry_or_exit": getattr(intent, "entry_or_exit", None),
         "reduce_only": getattr(intent, "reduce_only", False),
@@ -385,6 +387,71 @@ def _safe_price_to_cents(p) -> Optional[int]:
     return None
 
 
+def _derive_liquidity_role(raw: Dict[str, Any], intent: Optional[Any]) -> Optional[str]:
+    """Extract the liquidity role from the raw fill or the originating intent.
+
+    Kalshi's HTTP fill payloads expose the role as ``is_taker`` / ``taker``.
+    The intent may also record the expected role.  ``None`` means unknown.
+    """
+    # Direct role fields (legacy / intent)
+    for key in ("liquidity_role", "fee_type", "expected_role"):
+        role = raw.get(key)
+        if role in ("maker", "taker"):
+            return role
+    if isinstance(raw, dict):
+        for key in ("is_taker", "taker"):
+            val = raw.get(key)
+            if val is not None:
+                return "taker" if val else "maker"
+    if intent is not None:
+        role = getattr(intent, "liquidity_role", None) or getattr(intent, "fee_type", None) or getattr(intent, "expected_role", None)
+        if role in ("maker", "taker"):
+            return role
+        val = getattr(intent, "is_taker", None)
+        if val is not None:
+            return "taker" if val else "maker"
+    return None
+
+
+def _derive_client_tag(raw: Dict[str, Any], client_order_id: Optional[str], intent: Optional[Any]) -> Optional[str]:
+    """Extract the client tag (idempotency key) from the raw fill or intent."""
+    client_tag = raw.get("client_tag")
+    if client_tag:
+        return client_tag
+    if client_order_id:
+        return client_order_id
+    if intent is not None:
+        client_tag = getattr(intent, "client_tag", None)
+        if client_tag:
+            return client_tag
+        client_order_id = getattr(intent, "client_order_id", None)
+        if client_order_id:
+            return client_order_id
+    return None
+
+
+def _compute_modeled_fee_cents(liquidity_role: Optional[str], count_fp: Decimal, price_cents: Optional[int]) -> Optional[int]:
+    """Compute the modeled Kalshi fee in cents from the role, count, and price.
+
+    Uses the in-repo fee schedule: taker 0.07, maker 0.0175.
+    The price is the held-side price in cents; the formula is symmetric
+    (price * (1 - price)) for a one-dollar binary contract.
+    """
+    if liquidity_role not in ("maker", "taker"):
+        return None
+    if price_cents is None or not (0 <= price_cents <= 100):
+        return None
+    try:
+        from config.kalshi_fee_schedule import get_active_fee_schedule
+        schedule = get_active_fee_schedule()
+        rate = schedule.taker_rate if liquidity_role == "taker" else schedule.maker_rate
+    except Exception:
+        rate = Decimal("0.07") if liquidity_role == "taker" else Decimal("0.0175")
+    price = Decimal(price_cents) / Decimal("100")
+    fee_dollars = rate * count_fp * price * (Decimal("1") - price)
+    return int((fee_dollars * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
 def derive_position_effect(
     execution_outcome_side: Optional[str],
     execution_action: Optional[str],
@@ -497,6 +564,8 @@ class KalshiFill:
     fee_cost: Decimal = Decimal("0")  # Fee paid
     proceeds_dollars: Optional[Decimal] = None  # Net proceeds (price * count - fees)
     client_order_id: Optional[str] = None  # Our idempotency key
+    client_tag: Optional[str] = None  # Idempotency/dedup key (often client_order_id)
+    liquidity_role: Optional[str] = None  # "maker" or "taker"
     subaccount_number: Optional[int] = None
     created_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -4276,6 +4345,7 @@ class KalshiFillsLedger:
         existing.order_id = fill.order_id or existing.order_id
         existing.client_order_id = fill.client_order_id or existing.client_order_id
         existing.client_tag = fill.client_tag or existing.client_tag
+        existing.liquidity_role = fill.liquidity_role or existing.liquidity_role
         existing.yes_price_dollars = fill.yes_price_dollars or existing.yes_price_dollars
         existing.no_price_dollars = fill.no_price_dollars or existing.no_price_dollars
         existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or existing.canonical_leg_price_cents
@@ -4312,6 +4382,8 @@ class KalshiFillsLedger:
         fill.trade_id = existing.trade_id
         fill.order_id = existing.order_id
         fill.client_order_id = existing.client_order_id
+        fill.client_tag = existing.client_tag
+        fill.liquidity_role = existing.liquidity_role
         fill.canonicalization_state = existing.canonicalization_state
         fill.confirmed_by_rest = True
         return existing_id
@@ -6035,6 +6107,8 @@ class KalshiFillsLedger:
             fee_cost=fee_decimal,
             proceeds_dollars=proceeds,
             client_order_id=raw.get("client_order_id") or client_order_id or None,  # Use recovered client_order_id if Kalshi omitted it
+            client_tag=_derive_client_tag(raw, client_order_id, intent),
+            liquidity_role=_derive_liquidity_role(raw, intent),
             subaccount_number=raw.get("subaccount_number"),
             created_time=created_time,
             idempotency_key=raw.get("idempotency_key"),
@@ -6113,13 +6187,23 @@ class KalshiFillsLedger:
             fill_price_cents = kalshi_fill.price_cents
             limit_price_cents = getattr(intent, 'price_cents', None) if intent else None
             modeled_fee_cents = getattr(intent, 'fee_cents', None) if intent else None
+            # If the intent has no pre-trade fee estimate, compute the modeled fee
+            # from the derived liquidity role and canonical fill price.
+            if modeled_fee_cents is None and kalshi_fill.liquidity_role and fill_price_cents is not None:
+                modeled_fee_cents = _compute_modeled_fee_cents(
+                    kalshi_fill.liquidity_role, _count_fp, fill_price_cents
+                )
             reported_fee_cents = int(fee_decimal * Decimal("100"))
             fee_delta_cents = (
                 (modeled_fee_cents - reported_fee_cents)
                 if modeled_fee_cents is not None
                 else None
             )
-            liquidity_role = getattr(intent, 'liquidity_role', None) if intent else 'taker'
+            # Persist the computed/modeled fee on the fill record when the
+            # intent did not carry an explicit pre-trade estimate.
+            if kalshi_fill.fee_cents is None and modeled_fee_cents is not None:
+                kalshi_fill.fee_cents = float(modeled_fee_cents)
+            liquidity_role = kalshi_fill.liquidity_role or (getattr(intent, 'liquidity_role', None) if intent else None) or 'taker'
 
             logger.info(
                 "[FILL-FEE-AUDIT] fill_id=%s ticker=%s order_id=%s side=%s action=%s "
@@ -6192,6 +6276,8 @@ class KalshiFillsLedger:
                     fee_cost REAL,
                     proceeds_dollars REAL,
                     client_order_id TEXT,
+                    client_tag TEXT,
+                    liquidity_role TEXT,
                     subaccount_number INTEGER,
                     created_time TEXT,
                     ingestion_source TEXT,
@@ -6375,6 +6461,21 @@ class KalshiFillsLedger:
             except Exception as backfill_exc:
                 logger.warning("Could not backfill canonical fields: %s", backfill_exc)
 
+            # SCHEMA-FIX-006: Migrate client_tag and liquidity_role columns for
+            # fee/role audit and idempotency recovery on replay.
+            for _fill_col, _fill_type in (
+                ("client_tag", "TEXT"),
+                ("liquidity_role", "TEXT"),
+            ):
+                if _fill_col not in _cols:
+                    try:
+                        logger.info("Migrating kalshi_fills: adding %s column", _fill_col)
+                        await db.execute(f"ALTER TABLE kalshi_fills ADD COLUMN {_fill_col} {_fill_type}")
+                        await db.commit()
+                        logger.info("Migration complete: %s column added", _fill_col)
+                    except Exception as migrate_exc:
+                        logger.error(f"Failed to add {_fill_col} column: {migrate_exc}")
+
             # Now that all columns exist, create indexes that reference them.
             # Each is wrapped individually so a failure on one does not block others.
             for _idx_sql in (
@@ -6469,6 +6570,8 @@ class KalshiFillsLedger:
                         fee_cost DECIMAL(10, 4),
                         created_at TIMESTAMP WITH TIME ZONE NOT NULL,
                         client_order_id TEXT,
+                        client_tag TEXT,
+                        liquidity_role TEXT,
                         intent_id TEXT,
                         agent_id TEXT,
                         fill_source TEXT,
@@ -6532,6 +6635,9 @@ class KalshiFillsLedger:
                     ("ledger_schema_version", "INTEGER DEFAULT 0"),
                     ("canonicalization_version", "INTEGER DEFAULT 0"),
                     ("canonicalization_state", "TEXT"),
+                    # 2026-08-27: Fee/role audit columns.
+                    ("client_tag", "TEXT"),
+                    ("liquidity_role", "TEXT"),
                 ):
                     if col not in existing_col_names:
                         try:
@@ -6608,6 +6714,9 @@ class KalshiFillsLedger:
                 no_price_dollars REAL,
                 fee_cost REAL,
                 proceeds_dollars REAL,
+                client_order_id TEXT,
+                client_tag TEXT,
+                liquidity_role TEXT,
                 execution_outcome_side TEXT,
                 execution_action TEXT,
                 execution_price_cents INTEGER,
@@ -6618,7 +6727,6 @@ class KalshiFillsLedger:
                 ledger_schema_version INTEGER DEFAULT 0,
                 canonicalization_version INTEGER DEFAULT 0,
                 canonicalization_state TEXT,
-                client_order_id TEXT,
                 subaccount_number INTEGER,
                 created_time TEXT,
                 ingestion_source TEXT,
@@ -6664,6 +6772,9 @@ class KalshiFillsLedger:
             ("ledger_schema_version", "INTEGER DEFAULT 0"),
             ("canonicalization_version", "INTEGER DEFAULT 0"),
             ("canonicalization_state", "TEXT"),
+            # 2026-08-27: Fee/role audit columns.
+            ("client_tag", "TEXT"),
+            ("liquidity_role", "TEXT"),
         ]:
             if col not in existing_col_names:
                 try:
@@ -7071,14 +7182,15 @@ class KalshiFillsLedger:
                         INSERT INTO kalshi_fills
                         (fill_id, trade_id, order_id, market_ticker, side, action,
                          count, price_cents, fee_cost, created_at, client_order_id,
+                         client_tag, liquidity_role,
                          intent_id, agent_id, fill_source, raw_response,
                          is_exit, reduce_only, entry_or_exit,
                          execution_outcome_side, execution_action, execution_price_cents,
                          canonical_position_side, canonical_position_action,
                          canonical_leg_price_cents, canonical_yes_delta_cc,
                          ledger_schema_version, canonicalization_version, canonicalization_state)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-                                $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
                         ON CONFLICT (fill_id) DO NOTHING
                     """,
                         fill.fill_id,
@@ -7092,6 +7204,8 @@ class KalshiFillsLedger:
                         float(fill.fee_cost) if fill.fee_cost else None,
                         fill.created_time,
                         fill.client_order_id,
+                        fill.client_tag,
+                        fill.liquidity_role,
                         fill.intent_id,
                         fill.agent_id,
                         fill.fill_source,
@@ -7171,12 +7285,12 @@ class KalshiFillsLedger:
                             canonical_position_side, canonical_position_action,
                             canonical_leg_price_cents, canonical_yes_delta_cc,
                             ledger_schema_version, canonicalization_version, canonicalization_state,
-                            client_order_id, subaccount_number, created_time,
+                            client_order_id, client_tag, liquidity_role, subaccount_number, created_time,
                             ingestion_source, ingested_at, agent_id, intent_id,
                             reconciled, raw_payload, decision_trace_id, fill_source,
                             hedge_reason, hedge_pnl_cents, related_alpha_fill_id,
                             is_exit, reduce_only, entry_or_exit
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         fill.fill_id, fill.trade_id, fill.order_id, fill.market_ticker,
                         fill.side, fill.action, str(fill.count_fp), fill.quantity_cc or int(fill.count_fp * 100),
@@ -7194,7 +7308,8 @@ class KalshiFillsLedger:
                         fill.ledger_schema_version,
                         fill.canonicalization_version,
                         fill.canonicalization_state,
-                        fill.client_order_id, fill.subaccount_number,
+                        fill.client_order_id, fill.client_tag, fill.liquidity_role,
+                        fill.subaccount_number,
                         fill.created_time.isoformat(),
                         fill.ingestion_source,
                         fill.ingested_at.isoformat(),
@@ -7431,6 +7546,8 @@ class KalshiFillsLedger:
                         fee_cost=Decimal(str(row["fee_cost"])) if row["fee_cost"] else Decimal("0"),
                         proceeds_dollars=proceeds_dollars,
                         client_order_id=row["client_order_id"],
+                        client_tag=row["client_tag"] if "client_tag" in row.keys() else None,
+                        liquidity_role=row["liquidity_role"] if "liquidity_role" in row.keys() else None,
                         subaccount_number=row["subaccount_number"],
                         created_time=datetime.fromisoformat(row["created_time"]) if row["created_time"] else datetime.now(timezone.utc),
                         ingestion_source=row["ingestion_source"] or "db_restore",
