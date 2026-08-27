@@ -31,9 +31,10 @@ import asyncio
 import inspect
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from typing import Optional, Dict, Any, Callable, List
 
 from utils.logger import get_logger
@@ -52,6 +53,40 @@ _BANKROLL_SUMMARY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_SUMMARY_TIMEOUT_S"
 # CRITICAL FIX: Bound the actual /portfolio/balance API call so a single slow response
 # cannot starve the 15m strategy's refresh cadence.
 _BANKROLL_BALANCE_API_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_BALANCE_API_TIMEOUT_S", "10.0"))
+
+# CRITICAL FIX (2026-08-27): Bankroll drawdown circuit breaker tunables.
+# These are *fundamental* (not fetch-circuit) breakers: they protect the live
+# bankroll from drawdown spirals and consecutive-loss streaks.
+_BANKROLL_MAX_DRAWDOWN_PCT = Decimal(os.getenv("MERID_BANKROLL_MAX_DRAWDOWN_PCT", "10.0"))
+_BANKROLL_CONSECUTIVE_LOSS_TICKS = int(os.getenv("MERID_BANKROLL_CONSECUTIVE_LOSS_TICKS", "3"))
+_BANKROLL_COOLDOWN_TICKS = int(os.getenv("MERID_BANKROLL_COOLDOWN_TICKS", "6"))
+_BANKROLL_HALF_OPEN_PROBE_PCT = Decimal(os.getenv("MERID_BANKROLL_HALF_OPEN_PROBE_PCT", "5.0"))
+_BANKROLL_MIN_PROBE_CONTRACTS = Decimal(os.getenv("MERID_BANKROLL_MIN_PROBE_CONTRACTS", "1"))
+
+
+class BankrollCircuitState(str, Enum):
+    """States of the bankroll drawdown circuit breaker."""
+
+    CLOSED = "closed"       # Normal operation
+    OPEN = "open"           # New entries blocked; exits remain enabled
+    HALF_OPEN = "half_open" # One probe position allowed; re-trip on loss
+
+
+@dataclass(frozen=True)
+class BankrollCircuitSnapshot:
+    """Read-only view of the bankroll circuit-breaker state."""
+
+    state: BankrollCircuitState
+    drawdown_pct: Decimal
+    high_watermark_usd: Optional[Decimal]
+    low_watermark_at_open_usd: Optional[Decimal]
+    consecutive_loss_ticks: int
+    consecutive_win_ticks: int
+    cooldown_ticks_remaining: int
+    is_entry_allowed: bool
+    is_exit_allowed: bool = True
+
+
 from merid.event_venues.kalshi.types import (
     BalanceResult, BalanceSuccess, BalanceTemporaryError, BalancePermanentError,
     InternalBankroll, BalanceState,
@@ -80,7 +115,10 @@ class BankrollSummary:
     consecutive_timeout_count: int = 0
     consecutive_error_count: int = 0
     using_cached: bool = False
-    
+
+    # CRITICAL FIX (2026-08-27): bankroll drawdown circuit-breaker snapshot
+    circuit_snapshot: Optional[BankrollCircuitSnapshot] = None
+
     @property
     def is_tradable(self) -> bool:
         """Can we trade? Only FRESH with known equity and cash above minimum."""
@@ -191,7 +229,22 @@ class BankrollServiceV2:
         self._circuit_breaker_window_seconds = float(
             os.getenv("MERID_BANKROLL_CIRCUIT_WINDOW_S", "120.0")
         )
-        
+
+        # Bankroll drawdown / consecutive-loss circuit breaker state.
+        # CRITICAL FIX (2026-08-27): Protects the live bankroll from drawdown spirals
+        # independent of the API-fetch circuit breaker above.
+        self._drawdown_circuit_state = BankrollCircuitState.CLOSED
+        self._high_watermark_usd: Optional[Decimal] = None
+        self._low_watermark_at_open_usd: Optional[Decimal] = None
+        self._consecutive_loss_ticks = 0
+        self._consecutive_win_ticks = 0
+        self._cooldown_ticks_remaining = 0
+        self._half_open_probe_seen = False
+
+        # Cache staleness / TTL control
+        self._bankroll_cache_ttl_seconds = refresh_interval_seconds
+        self._bankroll_stale_after_seconds = 2 * refresh_interval_seconds
+
         # Thread safety - lazy initialize lock to avoid event loop binding issues
         # Lock is created on first use in the correct event loop
         self._lock: Optional[asyncio.Lock] = None
@@ -590,9 +643,13 @@ class BankrollServiceV2:
                     # Could trigger PagerDuty/Slack here
                     pass
             
+            # Evaluate drawdown / consecutive-loss circuit breaker.
+            # CRITICAL FIX (2026-08-27): every fresh bankroll refresh is a tick.
+            self._evaluate_drawdown_circuit()
+
             # Notify subscribers
             summary = self._build_summary_locked()
-        
+
         # Notify outside lock
         for cb in self._subscribers:
             try:
@@ -676,11 +733,12 @@ class BankrollServiceV2:
                 source="kalshi",
                 last_error_reason=self._last_error,
                 last_error_time=self._last_error_time,
+                circuit_snapshot=self.get_circuit_snapshot(),
             )
-        
+
         # Check invariant: equity ≈ cash + portfolio_value
         self._check_equity_invariant_locked()
-        
+
         using_cached = self._current.state in (
             BalanceState.DEGRADED,
             BalanceState.STALE,
@@ -699,7 +757,242 @@ class BankrollServiceV2:
             consecutive_timeout_count=self._consecutive_timeout_count,
             consecutive_error_count=self._consecutive_error_count,
             using_cached=using_cached,
+            circuit_snapshot=self.get_circuit_snapshot(),
         )
+
+    def _effective_equity_for_drawdown(self) -> Optional[Decimal]:
+        """Equity used for drawdown math: cash + unrealized PnL.
+
+        The authoritative cash balance is the hard settlement floor, but drawdown
+        must react to open positions. We layer conservative mark-to-market from the
+        position cache on top.
+        """
+        if self._current is None:
+            return None
+
+        cash = self._current.available_cash_usd
+        portfolio_usd = Decimal("0")
+        try:
+            portfolio_cents = self._calculate_portfolio_value_cents_locked()
+            portfolio_usd = Decimal(str(portfolio_cents)) / Decimal("100")
+        except Exception as exc:
+            logger.debug("[BANKROLL-DRAWDOWN] Failed to mark portfolio to market: %s", exc)
+
+        return cash + portfolio_usd
+
+    def _evaluate_drawdown_circuit(self) -> None:
+        """Evaluate and transition the bankroll drawdown circuit breaker.
+
+        Must be called from within the bankroll lock. A "tick" is one invocation of
+        this method (driven by each successful bankroll refresh or trade outcome).
+        """
+        equity = self._effective_equity_for_drawdown()
+        if equity is None or equity <= 0:
+            return
+
+        # Update high watermark
+        if self._high_watermark_usd is None or equity > self._high_watermark_usd:
+            self._high_watermark_usd = equity
+
+        drawdown_pct = Decimal("0")
+        if self._high_watermark_usd is not None and self._high_watermark_usd > 0:
+            drawdown_pct = (
+                (self._high_watermark_usd - equity) / self._high_watermark_usd
+            ) * Decimal("100")
+        drawdown_pct = max(Decimal("0"), drawdown_pct.quantize(Decimal("0.01")))
+
+        # Consecutive loss tick handling: a "tick" where drawdown deepens is a loss.
+        # A tick that improves from the low is a win.
+        if self._low_watermark_at_open_usd is not None:
+            is_loss_tick = equity < self._low_watermark_at_open_usd
+            is_win_tick = equity > self._low_watermark_at_open_usd
+        else:
+            # In CLOSED, a drawdown that widens from the high watermark is a loss tick.
+            prior_high = self._high_watermark_usd if self._high_watermark_usd is not None else equity
+            is_loss_tick = equity < prior_high and drawdown_pct > _BANKROLL_HALF_OPEN_PROBE_PCT
+            is_win_tick = not is_loss_tick
+
+        if is_loss_tick:
+            self._consecutive_loss_ticks += 1
+            self._consecutive_win_ticks = 0
+        elif is_win_tick:
+            self._consecutive_win_ticks += 1
+            self._consecutive_loss_ticks = 0
+        else:
+            # Unchanged: reset neither counter.
+            pass
+
+        # State machine
+        if self._drawdown_circuit_state == BankrollCircuitState.CLOSED:
+            # Either a deep drawdown or a consecutive-loss streak opens the breaker.
+            if (
+                drawdown_pct >= _BANKROLL_MAX_DRAWDOWN_PCT
+                or self._consecutive_loss_ticks >= _BANKROLL_CONSECUTIVE_LOSS_TICKS
+            ):
+                self._drawdown_circuit_state = BankrollCircuitState.OPEN
+                self._low_watermark_at_open_usd = equity
+                self._cooldown_ticks_remaining = _BANKROLL_COOLDOWN_TICKS
+                self._half_open_probe_seen = False
+                logger.critical(
+                    "[BANKROLL-DRAWDOWN-OPEN] equity=%.2f high=%.2f drawdown=%.2f%% "
+                    "consecutive_loss_ticks=%d - opening breaker",
+                    float(equity),
+                    float(self._high_watermark_usd or 0),
+                    float(drawdown_pct),
+                    self._consecutive_loss_ticks,
+                )
+
+        elif self._drawdown_circuit_state == BankrollCircuitState.OPEN:
+            # Count down the cooldown while no new low is made.
+            if self._low_watermark_at_open_usd is not None and equity < self._low_watermark_at_open_usd:
+                # New low resets cooldown and low watermark.
+                self._low_watermark_at_open_usd = equity
+                self._cooldown_ticks_remaining = _BANKROLL_COOLDOWN_TICKS
+                self._consecutive_loss_ticks += 1
+                self._consecutive_win_ticks = 0
+                logger.warning(
+                    "[BANKROLL-DRAWDOWN-OPEN] New low equity=%.2f - reset cooldown_ticks=%d",
+                    float(equity),
+                    self._cooldown_ticks_remaining,
+                )
+            else:
+                if self._cooldown_ticks_remaining > 0:
+                    self._cooldown_ticks_remaining -= 1
+
+            # OPEN -> HALF_OPEN after cooldown and equity at or above the open low
+            # (no new drawdown lows during the cooldown window).
+            if self._cooldown_ticks_remaining <= 0:
+                if self._low_watermark_at_open_usd is not None and equity >= self._low_watermark_at_open_usd:
+                    self._drawdown_circuit_state = BankrollCircuitState.HALF_OPEN
+                    self._half_open_probe_seen = False
+                    self._consecutive_loss_ticks = 0
+                    self._consecutive_win_ticks = 0
+                    logger.info(
+                        "[BANKROLL-DRAWDOWN-HALF-OPEN] equity=%.2f high=%.2f - half-open probe",
+                        float(equity),
+                        float(self._high_watermark_usd or 0),
+                    )
+
+        elif self._drawdown_circuit_state == BankrollCircuitState.HALF_OPEN:
+            # The outcome of the probe is recorded externally via record_trade_outcome.
+            # Without a probe observed, we remain half-open until one tick proves recovery.
+            if self._half_open_probe_seen:
+                if self._consecutive_win_ticks > 0:
+                    self._drawdown_circuit_state = BankrollCircuitState.CLOSED
+                    self._low_watermark_at_open_usd = None
+                    self._cooldown_ticks_remaining = 0
+                    self._half_open_probe_seen = False
+                    logger.info(
+                        "[BANKROLL-DRAWDOWN-CLOSED] Probe profitable - breaker closed "
+                        "equity=%.2f high=%.2f",
+                        float(equity),
+                        float(self._high_watermark_usd or 0),
+                    )
+                elif self._consecutive_loss_ticks > 0:
+                    self._drawdown_circuit_state = BankrollCircuitState.OPEN
+                    self._low_watermark_at_open_usd = equity
+                    self._cooldown_ticks_remaining = _BANKROLL_COOLDOWN_TICKS
+                    self._half_open_probe_seen = False
+                    logger.critical(
+                        "[BANKROLL-DRAWDOWN-OPEN] Probe lost - breaker re-opened "
+                        "equity=%.2f high=%.2f",
+                        float(equity),
+                        float(self._high_watermark_usd or 0),
+                    )
+
+    def record_trade_outcome(
+        self,
+        realized_pnl_usd: Decimal,
+        is_probe: bool = False,
+    ) -> None:
+        """Record a completed trade outcome to drive the drawdown breaker.
+
+        This is called once per settled position using the authoritative fill_id.
+        Positive pnl is a win; negative is a loss. Set ``is_probe=True`` when the
+        position was a half-open probe.
+        """
+        with self._get_sync_lock():
+            if realized_pnl_usd > 0:
+                self._consecutive_win_ticks += 1
+                self._consecutive_loss_ticks = 0
+            elif realized_pnl_usd < 0:
+                self._consecutive_loss_ticks += 1
+                self._consecutive_win_ticks = 0
+            else:
+                # Break-even: does not continue either streak.
+                self._consecutive_loss_ticks = 0
+                self._consecutive_win_ticks = 0
+
+            if is_probe:
+                self._half_open_probe_seen = True
+
+            if self._current is not None:
+                self._effective_equity_for_drawdown()
+            self._evaluate_drawdown_circuit()
+
+    def get_circuit_snapshot(self) -> BankrollCircuitSnapshot:
+        """Return a read-only snapshot of the drawdown circuit state."""
+        equity = Decimal("0")
+        if self._current is not None:
+            try:
+                eff = self._effective_equity_for_drawdown()
+                if eff is not None:
+                    equity = eff
+            except Exception:
+                pass
+
+        drawdown_pct = Decimal("0")
+        if self._high_watermark_usd is not None and self._high_watermark_usd > 0 and equity > 0:
+            drawdown_pct = (
+                (self._high_watermark_usd - equity) / self._high_watermark_usd
+            ) * Decimal("100")
+            drawdown_pct = max(Decimal("0"), drawdown_pct.quantize(Decimal("0.01")))
+
+        is_entry_allowed = (
+            self._drawdown_circuit_state in (
+                BankrollCircuitState.CLOSED,
+                BankrollCircuitState.HALF_OPEN,
+            )
+            and self.is_bankroll_fresh()
+        )
+
+        return BankrollCircuitSnapshot(
+            state=self._drawdown_circuit_state,
+            drawdown_pct=drawdown_pct,
+            high_watermark_usd=self._high_watermark_usd,
+            low_watermark_at_open_usd=self._low_watermark_at_open_usd,
+            consecutive_loss_ticks=self._consecutive_loss_ticks,
+            consecutive_win_ticks=self._consecutive_win_ticks,
+            cooldown_ticks_remaining=self._cooldown_ticks_remaining,
+            is_entry_allowed=is_entry_allowed,
+            is_exit_allowed=True,
+        )
+
+    def is_entry_allowed(self) -> bool:
+        """Return True if new entries are permitted by the bankroll breaker."""
+        return self.get_circuit_snapshot().is_entry_allowed
+
+    def is_exit_allowed(self) -> bool:
+        """Return True if exits are permitted. Exits are always allowed."""
+        return True
+
+    def is_bankroll_fresh(self) -> bool:
+        """Check whether the cached bankroll is within the staleness window."""
+        if self._current is None:
+            return False
+        age_seconds = (
+            datetime.now(timezone.utc) - self._current.as_of
+        ).total_seconds() if self._current.as_of else float("inf")
+        return age_seconds < self._bankroll_stale_after_seconds
+
+    def min_entry_contracts(self) -> Decimal:
+        """Smallest allowed position for a half-open probe, capped by equity."""
+        return _BANKROLL_MIN_PROBE_CONTRACTS
+
+    def get_summary_sync(self) -> Optional[BankrollSummary]:
+        """Synchronous summary for sync callers like order_router."""
+        with self._get_sync_lock():
+            return self._build_summary_locked()
     
     def _check_equity_invariant_locked(self) -> None:
         """Check invariant: equity ≈ available_cash + portfolio_value (must hold lock).

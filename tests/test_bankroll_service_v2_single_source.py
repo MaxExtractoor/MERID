@@ -20,15 +20,18 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from merid.event_venues.kalshi.bankroll_service_v2 import (
-    BankrollServiceV2, 
+    BankrollServiceV2,
     get_bankroll_service,
     get_equity_for_risk_calc_sync,
     BalanceState,
     BalanceSuccess,
     BalanceTemporaryError,
     BalancePermanentError,
-    BankrollSummary
+    BankrollSummary,
+    BankrollCircuitState,
+    _BANKROLL_COOLDOWN_TICKS,
 )
+from merid.event_venues.kalshi.types import InternalBankroll
 
 
 @dataclass
@@ -517,7 +520,7 @@ class TestBankrollServiceV2SingleSource:
             expected = 15.51
             assert all(result == expected for result in results), \
                 f"Concurrent requests returned inconsistent results: {results}"
-                
+
         finally:
             # Cleanup
             if service._refresh_task and not service._refresh_task.done():
@@ -527,4 +530,161 @@ class TestBankrollServiceV2SingleSource:
                 except asyncio.CancelledError:
                     pass
             # Restore original global singleton
+            bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service
+
+
+class TestBankrollDrawdownCircuitBreaker:
+    """Tests for the bankroll drawdown / consecutive-loss circuit breaker (Fix 5)."""
+
+    def test_drawdown_opens_breaker_and_blocks_entries(self):
+        """A 10%+ drawdown from the high watermark opens the breaker."""
+        from merid.event_venues.kalshi import bankroll_service_v2
+
+        mock_client = MockKalshiClient(balance_response=100.0)
+        service = BankrollServiceV2(mock_client)
+
+        original_service = bankroll_service_v2._BANKROLL_SERVICE_V2
+        bankroll_service_v2._BANKROLL_SERVICE_V2 = service
+
+        try:
+            service._current = InternalBankroll(
+                equity_usd=Decimal("100.0"),
+                available_cash_usd=Decimal("95.0"),
+                max_riskable_frac=Decimal("0.02"),
+                state=BalanceState.FRESH,
+                as_of=datetime.now(timezone.utc),
+                source="kalshi",
+            )
+            service._high_watermark_usd = Decimal("100.0")
+
+            # 12% drawdown should open the breaker
+            service._current = InternalBankroll(
+                equity_usd=Decimal("88.0"),
+                available_cash_usd=Decimal("88.0"),
+                max_riskable_frac=Decimal("0.02"),
+                state=BalanceState.FRESH,
+                as_of=datetime.now(timezone.utc),
+                source="kalshi",
+            )
+            service._evaluate_drawdown_circuit()
+            assert service._drawdown_circuit_state == BankrollCircuitState.OPEN
+            assert not service.is_entry_allowed()
+            assert service.is_exit_allowed()
+
+            snapshot = service.get_circuit_snapshot()
+            assert snapshot.drawdown_pct == Decimal("12.00")
+            assert snapshot.low_watermark_at_open_usd == Decimal("88.0")
+        finally:
+            bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service
+
+    def test_consecutive_losses_open_breaker(self):
+        """Three consecutive losing ticks open the breaker even without 10% drawdown."""
+        from merid.event_venues.kalshi import bankroll_service_v2
+
+        mock_client = MockKalshiClient(balance_response=100.0)
+        service = BankrollServiceV2(mock_client)
+
+        original_service = bankroll_service_v2._BANKROLL_SERVICE_V2
+        bankroll_service_v2._BANKROLL_SERVICE_V2 = service
+
+        try:
+            service._current = InternalBankroll(
+                equity_usd=Decimal("100.0"),
+                available_cash_usd=Decimal("95.0"),
+                max_riskable_frac=Decimal("0.02"),
+                state=BalanceState.FRESH,
+                as_of=datetime.now(timezone.utc),
+                source="kalshi",
+            )
+            service._high_watermark_usd = Decimal("100.0")
+
+            # Three consecutive losing ticks (each > 5% drawdown)
+            for equity in (Decimal("94.0"), Decimal("88.0"), Decimal("82.0")):
+                service._current = InternalBankroll(
+                    equity_usd=equity,
+                    available_cash_usd=equity,
+                    max_riskable_frac=Decimal("0.02"),
+                    state=BalanceState.FRESH,
+                    as_of=datetime.now(timezone.utc),
+                    source="kalshi",
+                )
+                service._evaluate_drawdown_circuit()
+
+            assert service._drawdown_circuit_state == BankrollCircuitState.OPEN
+            assert not service.is_entry_allowed()
+        finally:
+            bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service
+
+    def test_cooldown_then_half_open_then_closed_on_win(self):
+        """After cooldown, a probe win closes the breaker."""
+        from merid.event_venues.kalshi import bankroll_service_v2
+
+        mock_client = MockKalshiClient(balance_response=100.0)
+        service = BankrollServiceV2(mock_client)
+
+        original_service = bankroll_service_v2._BANKROLL_SERVICE_V2
+        bankroll_service_v2._BANKROLL_SERVICE_V2 = service
+
+        try:
+            service._current = InternalBankroll(
+                equity_usd=Decimal("100.0"),
+                available_cash_usd=Decimal("95.0"),
+                max_riskable_frac=Decimal("0.02"),
+                state=BalanceState.FRESH,
+                as_of=datetime.now(timezone.utc),
+                source="kalshi",
+            )
+            service._high_watermark_usd = Decimal("100.0")
+
+            # Open the breaker
+            service._current = InternalBankroll(
+                equity_usd=Decimal("88.0"),
+                available_cash_usd=Decimal("88.0"),
+                max_riskable_frac=Decimal("0.02"),
+                state=BalanceState.FRESH,
+                as_of=datetime.now(timezone.utc),
+                source="kalshi",
+            )
+            service._evaluate_drawdown_circuit()
+            assert service._drawdown_circuit_state == BankrollCircuitState.OPEN
+
+            # Run out the cooldown while equity stays at the open low
+            for _ in range(_BANKROLL_COOLDOWN_TICKS):
+                service._evaluate_drawdown_circuit()
+
+            assert service._drawdown_circuit_state == BankrollCircuitState.HALF_OPEN
+
+            # Record a winning probe
+            service.record_trade_outcome(Decimal("1.0"), is_probe=True)
+            assert service._drawdown_circuit_state == BankrollCircuitState.CLOSED
+            assert service.is_entry_allowed()
+        finally:
+            bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service
+
+    def test_stale_bankroll_blocks_entries(self):
+        """Bankroll older than 2x refresh interval is stale and blocks entries."""
+        from merid.event_venues.kalshi import bankroll_service_v2
+        from datetime import timedelta
+
+        mock_client = MockKalshiClient(balance_response=100.0)
+        service = BankrollServiceV2(mock_client, refresh_interval_seconds=10.0)
+
+        original_service = bankroll_service_v2._BANKROLL_SERVICE_V2
+        bankroll_service_v2._BANKROLL_SERVICE_V2 = service
+
+        try:
+            old_time = datetime.now(timezone.utc) - timedelta(seconds=25)
+            service._current = InternalBankroll(
+                equity_usd=Decimal("100.0"),
+                available_cash_usd=Decimal("95.0"),
+                max_riskable_frac=Decimal("0.02"),
+                state=BalanceState.FRESH,
+                as_of=old_time,
+                source="kalshi",
+            )
+            service._high_watermark_usd = Decimal("100.0")
+
+            assert not service.is_bankroll_fresh()
+            assert not service.is_entry_allowed()
+        finally:
             bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service

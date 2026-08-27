@@ -757,6 +757,23 @@ class CachedPosition:
                 self.quantity_cc = int(new_quantity_cc)
                 self.contracts = int(new_quantity_cc) // 100
 
+                # CRITICAL FIX (2026-08-27): Feed realized PnL to the bankroll drawdown
+                # breaker once the position is fully settled. Exits are the canonical
+                # settlement hook and use the authoritative fill_id already applied above.
+                if new_quantity_cc == 0 and pre_quantity_cc > 0:
+                    try:
+                        from merid.event_venues.kalshi.bankroll_service_v2 import _BANKROLL_SERVICE_V2
+                        if _BANKROLL_SERVICE_V2 is not None:
+                            _BANKROLL_SERVICE_V2.record_trade_outcome(
+                                self.realized_pnl_usd,
+                                is_probe=False,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "[POSITION-CACHE] Failed to record trade outcome to bankroll breaker: %s",
+                            exc,
+                        )
+
         # Update side/thesis when the position is fully closed (keep for logging).
         if self.quantity_cc == 0:
             # Side/thesis remain as-is for post-mortem logging; next entry will reset.
