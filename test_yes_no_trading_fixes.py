@@ -2,7 +2,7 @@
 
 Tests all P0, P1, and P2 fixes for enabling NO-side trading:
 - P0: Arbitrage callback wiring
-- P0: Non-zero synthetic bias (updated to 10% based on research)
+- P0: No-signal directional fallback defers to implied probability
 - P1: Market making execution
 - P1: Sentiment model integration
 - P2: Side diversity in strategy selection
@@ -179,145 +179,114 @@ class TestSourceValidationFix:
         assert intent.source == "market_maker_15m"
 
 
-class TestSyntheticBiasEnablement:
-    """Test P0 fix: Non-zero synthetic bias for NO-side trading."""
-    
+class TestNoSyntheticBias:
+    """Test that no-signal directional fallback defers to implied probability."""
+
     @pytest.fixture
     def prediction_model(self):
         """Create a PredictionMarketModel instance."""
         return PredictionMarketModel()
-    
-    @patch.dict('os.environ', {'MERID_PROFILE': 'kalshi_crypto_15m_v2'})
-    @patch.dict('os.environ', {'MERID_SYNTHETIC_BIAS': '0.10'})
-    def test_synthetic_bias_enabled_for_profile(self, prediction_model):
-        """Test that synthetic bias is enabled for kalshi_crypto_15m_v2 profile."""
-        # This test verifies the fix in model.py:604 where bias is set to 0.10 instead of 0.0
-        # Updated to 10% based on industry research (2-3% minimum, 3.5% peak fee at 50¢)
-        # The actual bias value is set in the compute_edge method
-        
-        # Verify environment variable is set
-        import os
-        assert os.getenv('MERID_PROFILE') == 'kalshi_crypto_15m_v2'
-        assert os.getenv('MERID_SYNTHETIC_BIAS') == '0.10'
-    
-    @patch.dict('os.environ', {'MERID_PROFILE': 'kalshi_crypto_15m_v2'})
-    @patch.dict('os.environ', {'MERID_SYNTHETIC_BIAS': '0.10'})
-    def test_no_side_bias_generation(self, prediction_model):
-        """Test that NO-side signals can be generated with synthetic bias."""
+
+    def test_no_signal_model_prob_equals_implied(self, prediction_model):
+        """When no calibrated signal exists, model prob must equal market-implied prob."""
         from merid.prediction.model import ImpliedProbability
-        
-        # Create a scenario where NO is cheaper (should bias toward NO)
-        # NO_ask < YES_ask means NO is cheaper
+
         implied = ImpliedProbability(
             yes_bid=Decimal("53"),
             yes_ask=Decimal("55"),
             no_bid=Decimal("45"),
             no_ask=Decimal("47"),
             yes_prob=Decimal("0.54"),
-            no_prob=Decimal("0.46")
+            no_prob=Decimal("0.46"),
         )
-        
-        # Compute edge for NO side
+
         edge = prediction_model.compute_edge(
             market_id="KXBTC15M-TEST",
             implied=implied,
             side="no",
-            action="buy"
+            action="buy",
         )
-        
-        # With 10% synthetic bias, NO should have positive model probability
-        # when NO is cheaper than YES
+
         assert edge is not None
-        # The bias should create a directional signal
-        if edge:
-            # Verify edge has meaningful directionality
-            assert edge.side == "no"
-            # Verify net_edge is positive after costs (10% bias - 3.5% fee - 1% slippage = ~5.5%)
-            assert edge.net_edge > 0, f"Expected positive net_edge, got {edge.net_edge}"
-    
-    @patch.dict('os.environ', {'MERID_PROFILE': 'other_profile'})
-    def test_synthetic_bias_fallback_for_other_profiles(self):
-        """Test that other profiles use default bias values."""
-        import os
-        # For non-kalshi_crypto_15m_v2 profiles, should use default bias
-        # This verifies the else branch in model.py:606-609
-        assert os.getenv('MERID_PROFILE') == 'other_profile'
-    
-    @patch.dict('os.environ', {'MERID_PROFILE': 'kalshi_crypto_15m_v2'})
-    @patch.dict('os.environ', {'MERID_SYNTHETIC_BIAS': '0.10'})
-    def test_synthetic_bias_overcomes_transaction_costs(self, prediction_model):
-        """Test that 10% synthetic bias overcomes transaction costs."""
+        assert edge.model_prob == edge.market_prob, (
+            f"model_prob {edge.model_prob} must equal market_prob {edge.market_prob} "
+            f"when no real signal is available"
+        )
+
+    def test_no_signal_edge_is_blocked(self, prediction_model):
+        """When no calibrated signal exists, net edge must be negative (no trade)."""
         from merid.prediction.model import ImpliedProbability
-        
-        # Create a scenario at 50¢ (worst case for fees)
-        # NO is cheaper to trigger positive bias
+
+        # NO is cheaper; previously this would trigger a synthetic 0.5+bias.
+        implied = ImpliedProbability(
+            yes_bid=Decimal("53"),
+            yes_ask=Decimal("55"),
+            no_bid=Decimal("45"),
+            no_ask=Decimal("47"),
+            yes_prob=Decimal("0.54"),
+            no_prob=Decimal("0.46"),
+        )
+
+        edge = prediction_model.compute_edge(
+            market_id="KXBTC15M-TEST",
+            implied=implied,
+            side="no",
+            action="buy",
+        )
+
+        assert edge is not None
+        assert edge.raw_edge == 0, f"raw_edge should be 0, got {edge.raw_edge}"
+        assert edge.net_edge <= 0, f"net_edge should be <= 0 without real signal, got {edge.net_edge}"
+        assert not edge.is_actionable
+
+    def test_transaction_costs_block_no_signal_trade(self, prediction_model):
+        """Fees and slippage must block a no-signal trade at any price."""
+        from merid.prediction.model import ImpliedProbability
+
         implied = ImpliedProbability(
             yes_bid=Decimal("52"),
             yes_ask=Decimal("54"),
             no_bid=Decimal("46"),
             no_ask=Decimal("48"),
             yes_prob=Decimal("0.53"),
-            no_prob=Decimal("0.47")
+            no_prob=Decimal("0.47"),
         )
-        
-        # Compute edge for NO side at 50¢ (peak fee region)
+
         edge = prediction_model.compute_edge(
             market_id="KXBTC15M-TEST",
             implied=implied,
             side="no",
-            action="buy"
+            action="buy",
         )
-        
+
         assert edge is not None
-        # With 10% bias, net_edge should be positive even at 50¢ (worst fee case)
-        # Expected: 10% bias - 3.5% fee - 1% slippage = ~5.5% net edge
-        if edge:
-            assert edge.net_edge > 0, f"Expected positive net_edge at 50¢, got {edge.net_edge}"
-            # Verify net_edge is above industry minimum of 2-3%
-            assert float(edge.net_edge) > 0.02, f"Expected net_edge > 2%, got {edge.net_edge}"
-            logger.info(f"[TEST] Net edge at 50¢: {edge.net_edge} (above 2% minimum)")
-    
-    @patch.dict('os.environ', {'MERID_PROFILE': 'kalshi_crypto_15m_v2'})
-    @patch.dict('os.environ', {'MERID_SYNTHETIC_BIAS': '0.10'})
-    def test_synthetic_bias_edge_calculation_logging(self, prediction_model):
-        """Test that NO-side edge calculation is logged for diagnosis."""
+        assert edge.net_edge <= 0, (
+            f"No-signal trade at 50¢ must not be profitable after costs, got {edge.net_edge}"
+        )
+        assert not edge.is_actionable
+
+    def test_no_signal_edge_calculation_logging(self, prediction_model):
+        """No-signal edge calculation runs without crashing and returns a valid estimate."""
         from merid.prediction.model import ImpliedProbability
-        from io import StringIO
-        
-        # Capture log output
-        log_capture = StringIO()
-        handler = logging.StreamHandler(log_capture)
-        handler.setLevel(logging.INFO)
-        model_logger = logging.getLogger('merid.prediction.model')
-        model_logger.addHandler(handler)
-        
-        # Create scenario for NO side
+
         implied = ImpliedProbability(
             yes_bid=Decimal("45"),
             yes_ask=Decimal("47"),
             no_bid=Decimal("53"),
             no_ask=Decimal("55"),
             yes_prob=Decimal("0.46"),
-            no_prob=Decimal("0.54")
+            no_prob=Decimal("0.54"),
         )
-        
-        # Compute edge for NO side
+
         edge = prediction_model.compute_edge(
             market_id="KXBTC15M-TEST",
             implied=implied,
             side="no",
-            action="buy"
+            action="buy",
         )
-        
-        # Verify edge was computed
+
         assert edge is not None
-        
-        # Check if diagnostic logging was triggered
-        log_output = log_capture.getvalue()
-        # The diagnostic log should contain NO-SIDE-EDGE-DIAG for sentiment-driven edges
-        # This test verifies the logging infrastructure is in place
-        
-        model_logger.removeHandler(handler)
+        assert edge.model_prob == edge.market_prob
 
 
 class TestMarketMakingExecution:
@@ -543,17 +512,9 @@ class TestEndToEndIntegration:
         """Test complete pipeline from signal generation to order execution for NO side."""
         # This is a high-level integration test
         
-        # 1. Signal generation with synthetic bias should produce NO signals
-        # 2. Side diversity should ensure balanced YES/NO selection
-        # 3. Order routing should handle BUY_NO/SELL_NO correctly
-        # 4. Position management should track NO positions correctly
-        
-        # Mock the components
-        with patch.dict('os.environ', {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}):
-            with patch.dict('os.environ', {'MERID_SYNTHETIC_BIAS': '0.02'}):
-                # Verify environment is set correctly
-                import os
-                assert os.getenv('MERID_SYNTHETIC_BIAS') == '0.02'
+        # 1. No-signal fallback must not produce actionable edge
+        # 2. Order routing should handle BUY_NO/SELL_NO correctly
+        # 3. Position management should track NO positions correctly
         
         # Verify the pipeline components are present
         from merid.prediction.model import PredictionMarketModel
@@ -573,53 +534,56 @@ class TestEndToEndIntegration:
         validator.set_arbitrage_callback(test_callback)
         assert validator._arbitrage_callback == test_callback
     
-    def test_yes_no_signal_balance(self):
-        """Test that YES and NO signals can both be generated."""
-        # This verifies the synthetic bias fix enables NO-side signals
+    def test_yes_no_no_signal_not_actionable(self):
+        """When no real signal exists, neither YES nor NO edge is actionable."""
+        # Both sides can be evaluated but should not be tradeable without genuine edge
         
-        with patch.dict('os.environ', {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}):
-            with patch.dict('os.environ', {'MERID_SYNTHETIC_BIAS': '0.02'}):
-                from merid.prediction.model import PredictionMarketModel, ImpliedProbability
-                from decimal import Decimal
-                
-                model = PredictionMarketModel()
-                
-                # Test YES-side signal (YES cheaper)
-                implied_yes = ImpliedProbability(
-                    yes_bid=Decimal("48"),
-                    yes_ask=Decimal("50"),
-                    no_bid=Decimal("50"),
-                    no_ask=Decimal("52"),
-                    yes_prob=Decimal("0.49"),
-                    no_prob=Decimal("0.51")
-                )
-                
-                edge_yes = model.compute_edge(
-                    market_id="KXBTC15M-TEST",
-                    implied=implied_yes,
-                    side="yes",
-                    action="buy"
-                )
-                
-                # Test NO-side signal (NO cheaper)
-                implied_no = ImpliedProbability(
-                    yes_bid=Decimal("52"),
-                    yes_ask=Decimal("54"),
-                    no_bid=Decimal("46"),
-                    no_ask=Decimal("48"),
-                    yes_prob=Decimal("0.53"),
-                    no_prob=Decimal("0.47")
-                )
-                
-                edge_no = model.compute_edge(
-                    market_id="KXBTC15M-TEST",
-                    implied=implied_no,
-                    side="no",
-                    action="buy"
-                )
-                
-                # Both edges should be generated
-                assert edge_yes is not None or edge_no is not None
+        from merid.prediction.model import PredictionMarketModel, ImpliedProbability
+        from decimal import Decimal
+
+        # MERID_SYNTHETIC_BIAS is no longer consulted by the model
+
+        model = PredictionMarketModel()
+
+        # Test YES-side signal (YES cheaper)
+        implied_yes = ImpliedProbability(
+            yes_bid=Decimal("48"),
+            yes_ask=Decimal("50"),
+            no_bid=Decimal("50"),
+            no_ask=Decimal("52"),
+            yes_prob=Decimal("0.49"),
+            no_prob=Decimal("0.51"),
+        )
+
+        edge_yes = model.compute_edge(
+            market_id="KXBTC15M-TEST",
+            implied=implied_yes,
+            side="yes",
+            action="buy",
+        )
+
+        # Test NO-side signal (NO cheaper)
+        implied_no = ImpliedProbability(
+            yes_bid=Decimal("52"),
+            yes_ask=Decimal("54"),
+            no_bid=Decimal("46"),
+            no_ask=Decimal("48"),
+            yes_prob=Decimal("0.53"),
+            no_prob=Decimal("0.47"),
+        )
+
+        edge_no = model.compute_edge(
+            market_id="KXBTC15M-TEST",
+            implied=implied_no,
+            side="no",
+            action="buy",
+        )
+
+        # Both edges should be generated, but neither should be actionable
+        assert edge_yes is not None
+        assert edge_no is not None
+        assert not edge_yes.is_actionable, f"YES edge should not be actionable without signal: {edge_yes}"
+        assert not edge_no.is_actionable, f"NO edge should not be actionable without signal: {edge_no}"
 
 
 if __name__ == "__main__":

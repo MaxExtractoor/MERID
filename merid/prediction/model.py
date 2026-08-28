@@ -593,94 +593,16 @@ class PredictionMarketModel:
                     market_id, side, mp,
                 )
             else:
-                # SWEET SPOT FIX: Create synthetic edge from bid-ask spread for 50/50 markets
-                # When sentiment is neutral, use the cheaper side as a signal
-                # If YES ask < NO ask, bias toward YES (market thinks NO is more likely)
-                # This creates real edges from market microstructure
-                # 15m scalper: configurable bias (5% vs 7% default) - less conservative
-                
-                # PROFILE-GUARD: Use conservative synthetic bias for kalshi_crypto_15m_v2 (profile-driven architecture)
-                # CRITICAL FIX (2026-07-31): Changed from 0.0 to 0.10 to enable NO-side trading
-                # Previous neutralization prevented directional signals from spread analysis, causing YES-only trading
-                # CRITICAL FIX (2026-07-31): Increased to 10% based on research into prediction market trading economics
-                # Research findings:
-                # - Kalshi taker fees peak at 3.5% at 50¢ contracts (AgentBets.ai)
-                # - Minimum profitable edge threshold: 2-3% net after costs (ClawArbs)
-                # - Standard accounts need 20% edge to cover fees + uncertainty (GitHub trading bot research)
-                # - Break-even at 50¢ with 2% fee requires p_true ≥ 0.52 (Chudi.dev)
-                # Transaction costs: ~3-4% (2-3c fees + 1c slippage) + execution uncertainty
-                # 10% bias provides clear margin above costs and aligns with industry research
-                _profile = os.getenv("MERID_PROFILE", "").lower()
-                if _profile == "kalshi_crypto_15m_v2":
-                    _SYNTHETIC_BIAS = Decimal(os.getenv("MERID_SYNTHETIC_BIAS", "0.10"))
-                    logger.debug("[model] Using 10%% synthetic bias for kalshi_crypto_15m_v2 (research-aligned for profitable NO-side trading)")
-                else:
-                    _is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
-                    _default_bias = "0.05" if _is_scalper else "0.07"
-                    _SYNTHETIC_BIAS = Decimal(os.getenv("MERID_SYNTHETIC_BIAS", _default_bias))
-                
-                if side == "yes" and implied.yes_ask is not None and implied.no_ask is not None:
-                    if implied.yes_ask < implied.no_ask:
-                        # YES is cheaper - slight bias toward YES being undervalued
-                        mp = Decimal("0.5") + _SYNTHETIC_BIAS
-                        _sentiment_driven = True
-                        logger.debug(
-                            "[model] Spread-driven directional model for %s side=%s — "
-                            "yes_ask=%s no_ask=%s model_prob=%s (YES cheaper)",
-                            market_id, side, implied.yes_ask, implied.no_ask, mp,
-                        )
-                    elif implied.yes_ask > implied.no_ask:
-                        # NO is cheaper - slight bias against YES
-                        mp = Decimal("0.5") - _SYNTHETIC_BIAS
-                        _sentiment_driven = True
-                        logger.debug(
-                            "[model] Spread-driven directional model for %s side=%s — "
-                            "yes_ask=%s no_ask=%s model_prob=%s (NO cheaper)",
-                            market_id, side, implied.yes_ask, implied.no_ask, mp,
-                        )
-                    else:
-                        # Spreads are equal - no synthetic bias, use implied prob
-                        mp = implied.yes_prob
-                        logger.debug(
-                            "[model] Symmetric spread for %s side=%s — "
-                            "yes_ask=%s no_ask=%s (no bias, using implied)",
-                            market_id, side, implied.yes_ask, implied.no_ask,
-                        )
-                elif side == "no" and implied.yes_ask is not None and implied.no_ask is not None:
-                    if implied.no_ask < implied.yes_ask:
-                        # NO is cheaper - slight bias toward NO being undervalued
-                        mp = Decimal("0.5") + _SYNTHETIC_BIAS
-                        _sentiment_driven = True
-                        logger.debug(
-                            "[model] Spread-driven directional model for %s side=%s — "
-                            "yes_ask=%s no_ask=%s model_prob=%s (NO cheaper)",
-                            market_id, side, implied.yes_ask, implied.no_ask, mp,
-                        )
-                    elif implied.no_ask > implied.yes_ask:
-                        # YES is cheaper - slight bias against NO
-                        mp = Decimal("0.5") - _SYNTHETIC_BIAS
-                        _sentiment_driven = True
-                        logger.debug(
-                            "[model] Spread-driven directional model for %s side=%s — "
-                            "yes_ask=%s no_ask=%s model_prob=%s (YES cheaper)",
-                            market_id, side, implied.yes_ask, implied.no_ask, mp,
-                        )
-                    else:
-                        # Spreads are equal - no synthetic bias, use implied prob
-                        mp = implied.no_prob
-                        logger.debug(
-                            "[model] Symmetric spread for %s side=%s — "
-                            "yes_ask=%s no_ask=%s (no bias, using implied)",
-                            market_id, side, implied.yes_ask, implied.no_ask,
-                        )
-                else:
-                    # Fallback to implied prob if no spread data
-                    mp = implied.yes_prob if side == "yes" else implied.no_prob
-                    logger.debug(
-                        "[model] Directional fallback for %s side=%s — no strike, neutral sentiment, "
-                        "using implied prob (edge will be ~fee+slippage)",
-                        market_id, side,
-                    )
+                # No calibrated directional signal available.
+                # Defer to the market's implied probability instead of fabricating
+                # edge from a contrarian 0.5 assumption. This makes raw_edge ~0
+                # and lets the edge > 0 gate block noise trades.
+                mp = implied.yes_prob if side == "yes" else implied.no_prob
+                logger.debug(
+                    "[model] No-signal directional fallback for %s side=%s — "
+                    "using implied prob (edge will be ~fee+slippage)",
+                    market_id, side,
+                )
 
         market_prob = implied.yes_prob if side == "yes" else implied.no_prob
 
