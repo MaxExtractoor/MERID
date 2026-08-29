@@ -104,21 +104,46 @@ def _is_live_trading_intent() -> bool:
     return trade_mode == "live" or pm_trade_mode == "live" or allow_live
 
 
+def _get_repo_root() -> Path:
+    """Discover the repository root, fail-closed.
+
+    MERID_REPO_ROOT may be set to override the repository root for testing or
+    non-standard deployments. Otherwise, the root is discovered with
+    ``git rev-parse --show-toplevel`` from the directory containing this file,
+    so the gate does not depend on the process's current working directory.
+    """
+    repo_root_raw = os.getenv("MERID_REPO_ROOT", "")
+    if repo_root_raw:
+        return Path(repo_root_raw)
+
+    module_dir = Path(__file__).resolve().parent
+    try:
+        output = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=module_dir,
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        detail = str(exc)
+        if isinstance(exc, subprocess.CalledProcessError):
+            detail = exc.output or detail
+        raise StartupValidationError(
+            f"[DIRTY-TREE-GATE] Could not discover git repository root: {detail}. "
+            "Set MERID_REPO_ROOT or ensure the source tree is a git repository."
+        )
+
+    return Path(output)
+
+
 def _get_live_path_git_status() -> List[Tuple[str, str]]:
     """Return git status --porcelain entries for the live money path.
 
     Each entry is a (status_code, path) tuple, where status_code is the
     two-letter porcelain prefix (e.g. ' M', 'M ', '??').
-
-    MERID_REPO_ROOT may be set to override the repository root for testing
-    or non-standard deployments; otherwise the root is inferred from the
-    source location.
     """
-    repo_root_raw = os.getenv("MERID_REPO_ROOT", "")
-    if repo_root_raw:
-        repo_root = Path(repo_root_raw)
-    else:
-        repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_root = _get_repo_root()
     try:
         output = subprocess.check_output(
             ["git", "status", "--porcelain", "--", *LIVE_MONEY_PATH_FILES],

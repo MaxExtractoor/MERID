@@ -219,6 +219,49 @@ def test_validate_dirty_tree_passes_real_clean_live_path(tmp_path, monkeypatch):
     validate_dirty_tree()
 
 
+def test_get_repo_root_ignores_process_cwd(monkeypatch, tmp_path):
+    """_get_repo_root must discover the repo from the module location, not the cwd."""
+    import os
+    import subprocess
+
+    monkeypatch.delenv("MERID_REPO_ROOT", raising=False)
+    from merid.startup_validations import _get_repo_root
+
+    original_cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)  # a non-repo directory; this is the failure mode from the live restart
+        root = _get_repo_root()
+    finally:
+        os.chdir(original_cwd)
+
+    # The real MERID checkout should be discoverable from the module location.
+    subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=root, check=True, capture_output=True)
+    assert (root / ".git").exists()
+
+
+def test_get_repo_root_uses_env_override(tmp_path, monkeypatch):
+    """_get_repo_root must honor MERID_REPO_ROOT when set."""
+    import subprocess
+
+    repo = tmp_path / "fake_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+
+    monkeypatch.setenv("MERID_REPO_ROOT", str(repo))
+    from merid.startup_validations import _get_repo_root
+    assert _get_repo_root() == repo
+
+
+def test_validate_dirty_tree_fails_closed_for_bad_repo_root(monkeypatch, tmp_path):
+    """The dirty-tree gate must fail closed when MERID_REPO_ROOT points to a non-repo."""
+    monkeypatch.setenv("MERID_ENV", "prod")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setenv("MERID_REPO_ROOT", str(tmp_path))
+    from merid.startup_validations import validate_dirty_tree, StartupValidationError
+    with pytest.raises(StartupValidationError, match="Could not verify live-path git status"):
+        validate_dirty_tree()
+
+
 # ---------------------------------------------------------------------------
 # Direct submission policy
 # ---------------------------------------------------------------------------
