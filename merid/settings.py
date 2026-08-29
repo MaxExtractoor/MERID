@@ -1129,38 +1129,39 @@ class Settings(BaseSettings):
         if self.MERID_TOTAL_CAPITAL_USD <= 0:
             # In replay, balance is pinned by the tape config snapshot; do not
             # re-fetch from the network at settings import time.
-            try:
-                from merid.data.ingress_replay import is_replay_active
-                if is_replay_active():
-                    logger.info(
-                        "[RISK-CONFIG] Replay mode: skipping live Kalshi balance fetch; "
-                        "balance must be provided by the tape config snapshot or settings."
-                    )
-                    kalshi_balance = 0.0
-                else:
+            # Avoid importing merid.data.ingress_replay here; it imports
+            # merid.settings and causes a circular import during module load.
+            if self.MERID_REPLAY_TAPE:
+                logger.info(
+                    "[RISK-CONFIG] Replay mode: skipping live Kalshi balance fetch; "
+                    "balance must be provided by the tape config snapshot or settings."
+                )
+                kalshi_balance = 0.0
+            else:
+                try:
                     kalshi_balance = self._fetch_kalshi_balance()
-                if kalshi_balance > 0:
-                    self.MERID_TOTAL_CAPITAL_USD = kalshi_balance
-                    logger.info(
-                        "[RISK_CONFIG] MERID_TOTAL_CAPITAL_USD auto-fetched from Kalshi balance: $%.2f",
-                        self.MERID_TOTAL_CAPITAL_USD
-                    )
-                else:
-                    # Fetch returned 0 — API reachable but balance empty or auth failed
-                    # FAIL CLOSED: Use 0 - bankroll_service_v2 will provide live data at runtime
-                    self.MERID_TOTAL_CAPITAL_USD = 0.0
+                except Exception as exc:
+                    # Network/auth not ready at import time — FAIL CLOSED with 0
+                    # bankroll_service_v2 will provide live data when async loop is ready
+                    kalshi_balance = 0.0
                     logger.warning(
-                        "[RISK_CONFIG] Kalshi balance fetch returned $0. "
-                        "Using 0 as placeholder — BankrollService will provide live data at runtime."
+                        "[RISK_CONFIG] Kalshi balance fetch failed at startup: %s. "
+                        "Using 0 as placeholder — BankrollService will provide live data at runtime.",
+                        exc,
                     )
-            except Exception as exc:
-                # Network/auth not ready at import time — FAIL CLOSED with 0
-                # bankroll_service_v2 will provide live data when async loop is ready
+            if kalshi_balance > 0:
+                self.MERID_TOTAL_CAPITAL_USD = kalshi_balance
+                logger.info(
+                    "[RISK_CONFIG] MERID_TOTAL_CAPITAL_USD auto-fetched from Kalshi balance: $%.2f",
+                    self.MERID_TOTAL_CAPITAL_USD
+                )
+            else:
+                # Fetch returned 0 — API reachable but balance empty or auth failed
+                # FAIL CLOSED: Use 0 - bankroll_service_v2 will provide live data at runtime
                 self.MERID_TOTAL_CAPITAL_USD = 0.0
                 logger.warning(
-                    "[RISK_CONFIG] Kalshi balance fetch failed at startup: %s. "
-                    "Using 0 as placeholder — BankrollService will provide live data at runtime.",
-                    exc,
+                    "[RISK_CONFIG] Kalshi balance fetch returned $0. "
+                    "Using 0 as placeholder — BankrollService will provide live data at runtime."
                 )
         
         # Settings-derived bankroll is DEPRECATED for Kalshi 15m.
@@ -1176,8 +1177,7 @@ class Settings(BaseSettings):
         Returns:
             Balance in USD as float. Returns 0 if unable to fetch.
         """
-        from merid.data.ingress_replay import is_replay_active
-        if is_replay_active():
+        if self.MERID_REPLAY_TAPE:
             logger.info("[KALSHI_BALANCE_FETCH] Replay mode: skipping live balance fetch")
             return 0.0
 
