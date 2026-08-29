@@ -37,14 +37,57 @@ TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MI
 # Hard entry-price floor for the held side.  Contracts with a held-side price
 # below this (in cents) are rejected because the 7-day data showed 0/16 wins in
 # the 0-19c tail.  Override with MERID_MIN_HELD_PRICE_CENTS to raise/lower.
-MERID_MIN_HELD_PRICE_CENTS = float(os.environ.get("MERID_MIN_HELD_PRICE_CENTS", "20"))
+# 2026-08-28: raised to 35c to match the cheap-tail filter.  Trades below this
+# floor are only allowed when the model probability is exceptionally high (see
+# MERID_CHEAP_TAIL_P_EXCEPTION).
+MERID_MIN_HELD_PRICE_CENTS = float(os.environ.get("MERID_MIN_HELD_PRICE_CENTS", "35"))
+
+# Very high-confidence cheap-tail exception.  DISABLED by default (threshold 1.0)
+# because 7-day data showed the cheap tail (0-19c held) has a near-zero realized
+# win rate and the model is overconfident there.  The per-side isotonic
+# recalibration must be proven out-of-sample before re-enabling any value < 1.0.
+# Setting this to 0.95 re-enables the old high-confidence exception.
+MERID_CHEAP_TAIL_P_EXCEPTION = float(os.environ.get("MERID_CHEAP_TAIL_P_EXCEPTION", "1.0"))
 
 # Tail calibration applies the isotonic correction from
 # data/probability_tail_calibration.json (produced by scripts/calibrate_tail_probability.py).
 # It caps model probability at historical actual_win_rate + buffer.
 MERID_TAIL_CALIBRATION_ENABLED = os.environ.get("MERID_TAIL_CALIBRATION_ENABLED", "1").lower() in ("1", "true", "yes")
 MERID_TAIL_CALIBRATION_BUFFER = float(os.environ.get("MERID_TAIL_CALIBRATION_BUFFER", "0.05"))
-MERID_TAIL_CALIBRATION_PRICE_FLOOR = float(os.environ.get("MERID_TAIL_CALIBRATION_PRICE_FLOOR", "0.30"))
+MERID_TAIL_CALIBRATION_PRICE_FLOOR = float(os.environ.get("MERID_TAIL_CALIBRATION_PRICE_FLOOR", "0.35"))
+
+# Fail-closed gate for externally supplied hybrid p_yes.  Bachelier-only is the
+# live baseline; a hybrid probability is only accepted when this flag is
+# explicitly enabled, and still subject to tail calibration / π* / floor gates.
+MERID_TRADE_DECISION_ALLOW_HYBRID_P = os.environ.get("MERID_TRADE_DECISION_ALLOW_HYBRID_P", "").strip().lower() in ("1", "true", "yes")
+
+# Per-bucket π* EV gate.  The minimum required p_selected for a positive
+# risk-adjusted EV is (held_price + fee + risk_premium) / 100.  The risk
+# premium is tiered by held price to reflect the observed tail overconfidence:
+# cheap-tail contracts need a much larger safety margin than high-price ones.
+MERID_PI_STAR_TIERED = os.environ.get("MERID_PI_STAR_TIERED", "1").lower() in ("1", "true", "yes")
+MERID_PI_STAR_FLAT_PREMIUM_CENTS = int(os.environ.get("MERID_PI_STAR_FLAT_PREMIUM_CENTS", "0"))
+MERID_PI_STAR_TIERS_CENTS = os.environ.get("MERID_PI_STAR_TIERS_CENTS", "0:40,20:25,40:10,60:0")
+
+def _parse_pi_star_tiers() -> List[Tuple[int, int]]:
+    tiers: List[Tuple[int, int]] = []
+    for part in MERID_PI_STAR_TIERS_CENTS.split(","):
+        if not part:
+            continue
+        price, premium = part.split(":")
+        tiers.append((int(price), int(premium)))
+    tiers.sort(key=lambda x: x[0])
+    return tiers
+
+def _pi_star_risk_premium(held_price_cents: int) -> int:
+    if not MERID_PI_STAR_TIERED:
+        return MERID_PI_STAR_FLAT_PREMIUM_CENTS
+    tiers = _parse_pi_star_tiers()
+    premium = 0
+    for price_threshold, tier_premium in tiers:
+        if held_price_cents >= price_threshold:
+            premium = tier_premium
+    return premium
 
 # Allowed data-state and regime-label values.
 # `unknown` is a data-quality state; it must never be an economic regime.
@@ -608,7 +651,9 @@ def compute_trade_decision(
     p_yes_raw = max(0.0, min(1.0, p_yes_raw))
 
     p_yes_calibrated = p_yes_raw
-    if p_yes_model is not None and math.isfinite(p_yes_model):
+    # 2026-08-28: accept externally supplied p_yes_model only when hybrid
+    # probabilities are explicitly enabled.  Bachelier-only is the live default.
+    if MERID_TRADE_DECISION_ALLOW_HYBRID_P and p_yes_model is not None and math.isfinite(p_yes_model):
         p_yes_calibrated = max(0.0, min(1.0, p_yes_model))
     # P0 FIX: Clamp to Kalshi venue-invariant [0.05, 0.95] so the downstream
     # order router does not reject high-confidence signals as invalid_model_prob.
@@ -633,17 +678,20 @@ def compute_trade_decision(
     # probability at actual_win_rate + buffer for the held-side price.  This
     # prevents the model from overestimating cheap-tail contracts where the
     # observed win rate was far below the market-implied probability.
-    # The cap is applied only when the model actually believes the cheap side
-    # (p_selected > 0.5), so it does not disturb well-calibrated 30-59c trades.
+    # The cap is applied unconditionally whenever the held-side price is below
+    # the floor, not only when the raw model probability is > 0.5.  Cost-basis
+    # and low-confidence trades in the 0-29c tail were the dominant source of
+    # recent losses; the calibrator must gate them regardless of the model's
+    # directional delta.
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None:
-            if p_yes_calibrated > 0.5 and yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
+            if yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
                 p_yes_calibrated = tail_calibrator.cap_p_yes(
                     p_yes_calibrated, yes_entry
                 )
                 p_no_calibrated = 1.0 - p_yes_calibrated
-            if p_no_calibrated > 0.5 and no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
+            if no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
                 p_no_calibrated = tail_calibrator.cap_p_no(
                     p_no_calibrated, no_entry
                 )
@@ -754,11 +802,17 @@ def compute_trade_decision(
         gross_edge = Decimal(str(edge_breakdown.gross_edge))
         net_edge = Decimal(str(edge_breakdown.net_edge))
 
-        # Held-side entry price floor.  The 7-day data showed 0/16 wins in the
-        # 0-19c tail; block entries below ~20c until the model is recalibrated.
-        min_held_price_dollars = MERID_MIN_HELD_PRICE_CENTS / 100.0
-        held_price = float(selected_outcome_price)
-        if held_price < min_held_price_dollars:
+        # 2026-08-28: Per-bucket π* EV gate.
+        # The minimum model probability for a positive risk-adjusted expected
+        # value is (held_price + fee + risk_premium) / 100.  Cheap-tail
+        # contracts require a larger risk premium because the 7-day data showed
+        # severe overconfidence and a 37c average loser.
+        _held_price_cents = int(round(float(selected_outcome_price) * 100.0))
+        _fee_cents = int(round(fee * 100.0))
+        _risk_premium_cents = _pi_star_risk_premium(_held_price_cents)
+        _pi_star = (_held_price_cents + _fee_cents + _risk_premium_cents) / 100.0
+        if edge_breakdown.p_selected < _pi_star - 1e-9:
+            _pi_star_p = edge_breakdown.p_selected
             selected_outcome = None
             selected_action = None
             approved_size_cc = Decimal("0")
@@ -768,7 +822,32 @@ def compute_trade_decision(
             gross_edge = None
             net_edge = None
             edge_breakdown = None
-            no_trade_reason = f"held_entry_price_below_floor:{held_price:.2f}"
+            no_trade_reason = f"p_selected_below_pi_star:{_pi_star_p:.3f}<{_pi_star:.3f}"
+
+    if selected_outcome is not None:
+        # 2026-08-28: Held-side entry price floor.  Cheap-tail contracts have a
+        # near-zero realized win rate; we block entries below 35c unless the
+        # model is extremely confident (p_selected >= MERID_CHEAP_TAIL_P_EXCEPTION).
+        min_held_price_dollars = MERID_MIN_HELD_PRICE_CENTS / 100.0
+        held_price = float(selected_outcome_price)
+        if (
+            held_price < min_held_price_dollars
+            and edge_breakdown.p_selected < MERID_CHEAP_TAIL_P_EXCEPTION - 1e-9
+        ):
+            _floor_p = edge_breakdown.p_selected
+            selected_outcome = None
+            selected_action = None
+            approved_size_cc = Decimal("0")
+            p_selected = None
+            p_opposite = None
+            selected_outcome_price = None
+            gross_edge = None
+            net_edge = None
+            edge_breakdown = None
+            no_trade_reason = (
+                f"held_entry_price_below_floor:{held_price:.2f}<"
+                f"{MERID_MIN_HELD_PRICE_CENTS/100.0:.2f}|p={_floor_p:.3f}"
+            )
 
     # Final confidence gate: even if a side qualifies, an invalid confidence
     # blocks the trade.  This is the hard no-trade rule for missing/fallback
@@ -825,12 +904,10 @@ def compute_trade_decision(
         expected_exit_cost_yes=Decimal(str(expected_exit_cost_yes)),
         expected_exit_cost_no=Decimal(str(expected_exit_cost_no)),
         yes_score=Decimal(str(
-            yes_score if yes_score is not None
-            else (p_yes_model if p_yes_model is not None else p_yes_calibrated)
+            yes_score if yes_score is not None else p_yes_calibrated
         )),
         no_score=Decimal(str(
-            no_score if no_score is not None
-            else (p_no_model if p_no_model is not None else p_no_calibrated)
+            no_score if no_score is not None else p_no_calibrated
         )),
         yes_vote_count=yes_vote_count,
         no_vote_count=no_vote_count,

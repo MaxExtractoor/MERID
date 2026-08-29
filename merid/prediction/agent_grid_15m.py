@@ -23,7 +23,9 @@ import asyncio
 
 import os
 
-from typing import Any, Optional, Dict, List, Tuple
+import statistics
+
+from typing import Any, Optional, Dict, List, Set, Tuple
 
 from dataclasses import dataclass, field, asdict, replace
 
@@ -63,6 +65,8 @@ from merid.validation.regime_gating_invariants import (
 )
 
 # Import candidate tracing for end-to-end validation
+logger = get_logger("merid.prediction.agent_grid_15m")
+
 try:
     from merid.event_venues.kalshi.candidate_trace import (
         CandidateTrace,
@@ -82,8 +86,6 @@ try:
 except ImportError:
     SIGNAL_SNAPSHOT_AVAILABLE = False
     logger.warning("signal_snapshot module not available - intent verification disabled")
-
-logger = get_logger("merid.prediction.agent_grid_15m")
 
 
 def _is_legacy_signal_enabled() -> bool:
@@ -6813,12 +6815,17 @@ class LeanAgent15m:
         """
         import math
 
-        # Production-safe containment: Bachelier-only mode disables all
-        # indicator/velocity/FVG deltas so the model can be audited against a
-        # clean baseline without sign-inverted components contaminating it.
+        # Production-safe containment: Bachelier-only mode is the default live
+        # baseline.  Hybrid indicator/velocity/FVG deltas are disabled until the
+        # model passes a Brier/reliability/PBO audit (see AGENTS.md 2026-08-28
+        # calibration notes).  Re-enablement requires explicit
+        # MERID_HYBRID_ENABLE_DELTAS=1; MERID_HYBRID_BACHELIER_ONLY and
+        # MERID_HYBRID_DISABLE_ALL_DELTAS still force Bachelier-only.
         if not bachelier_only:
+            hybrid_enabled = os.environ.get("MERID_HYBRID_ENABLE_DELTAS", "").strip().lower() in ("1", "true", "yes")
             bachelier_only = (
-                os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
+                not hybrid_enabled
+                or os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
                 or os.environ.get("MERID_HYBRID_DISABLE_ALL_DELTAS", "").strip().lower() in ("1", "true", "yes")
             )
 
@@ -7112,6 +7119,11 @@ class LeanAgent15m:
             return None
 
         ticker = market.market.market_id if hasattr(market, 'market') else (getattr(market, 'market_id', None) or getattr(market, 'ticker', asset))
+        market_id = ticker  # Alias for rejection telemetry
+        # The rejection helpers may be called before velocity is computed; None lets
+        # _record_signal_rejection backfill from _last_velocity_value/_last_velocity_threshold.
+        velocity = None
+        velocity_threshold = None
 
         # CRITICAL FIX (2026-08-22): Authoritative *entry* readiness gate before any
         # new signal/edge computation.  If the market data is not ready (stale,
@@ -7386,8 +7398,11 @@ class LeanAgent15m:
         decision_bachelier = decision
         hybrid_bachelier: Optional[HybridProbability] = hybrid
         p_yes_bachelier = p_yes_model
-        bachelier_only_live = os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes") \
+        bachelier_only_live = (
+            not os.environ.get("MERID_HYBRID_ENABLE_DELTAS", "").strip().lower() in ("1", "true", "yes")
+            or os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
             or os.environ.get("MERID_HYBRID_DISABLE_ALL_DELTAS", "").strip().lower() in ("1", "true", "yes")
+        )
         shadow_bachelier = os.environ.get("MERID_SHADOW_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
         if shadow_bachelier and not bachelier_only_live and hybrid is not None:
             try:
@@ -7830,6 +7845,17 @@ class LeanAgent15m:
         if not _is_legacy_signal_enabled():
             logger.warning("[LEGACY-SIGNAL-DISABLED] _generate_price_based_signal blocked in %s mode", os.environ.get("MERID_PM_TRADING_MODE", "unknown"))
             return None
+
+        # Telemetry aliases. Velocity is not computed in this legacy path; _record_signal_rejection
+        # will backfill from _last_velocity_value/_last_velocity_threshold when None is passed.
+        market_id = (
+            getattr(market, 'market_id', None)
+            or getattr(getattr(market, 'market', None), 'market_id', None)
+            or getattr(market, 'ticker', None)
+            or asset
+        )
+        velocity = None
+        velocity_threshold = None
 
         # PRICE-BASED STRATEGY (Turbine research winner: +56.6% ROI)
 
@@ -10390,7 +10416,8 @@ class LeanAgent15m:
 
         # Generate trading signal using Coinbase 1-minute velocity (2026 #1 winning strategy).
 
-        logger.debug("[GENERATE-SIGNAL-ENTRY] spot_price=%s market_type=%s minutes_to_expiry=%s", spot_price, type(market), minutes_to_expiry)
+        asset = getattr(market, 'asset', self.config.name) or self.config.name
+        logger.debug("[GENERATE-SIGNAL-ENTRY] asset=%s spot_price=%s market_type=%s minutes_to_expiry=%s", asset, spot_price, type(market), minutes_to_expiry)
 
 
 
@@ -12163,7 +12190,7 @@ class LeanAgent15m:
 
                 "[EDGE-SELECTION] asset=%s selected_side=%s edge=%.3f%% market_price=%.2f (all_edges=%s with_bonus=%s)",
 
-                asset, signal_side, selected_edge, market_price, side_edges, side_edges_with_bonus
+                asset, signal_side, selected_edge, market_price, side_edges, positive_sides
 
             )
 
@@ -13378,6 +13405,7 @@ class LeanAgent15m:
         # Phase 2: Classify regime from market state
 
         ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+        market_id = ticker  # Alias for rejection telemetry
 
         regime = self._classify_regime(ticker)
 

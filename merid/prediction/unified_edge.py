@@ -761,10 +761,10 @@ class UnifiedEdgeComputer:
             except Exception as e:
                 logger.debug("[EDGE-CHECK] Failed to load experimental price band thresholds from profile: %s", e)
             
-            if price_cents < min_price_cents or price_cents > max_price_cents:
+            if contract_price_cents < min_price_cents or contract_price_cents > max_price_cents:
                 return EdgeCheckResult(
                     passes=False,
-                    reason=f"experimental_price_band: asset={asset} price={price_cents}c outside experimental range [{min_price_cents}c-{max_price_cents}c]",
+                    reason=f"experimental_price_band: asset={asset} price={contract_price_cents}c outside experimental range [{min_price_cents}c-{max_price_cents}c]",
                     edge_result=edge_result,
                     spread_pct=spread_pct,
                     min_edge_cents=min_edge_cents,
@@ -922,10 +922,10 @@ class UnifiedEdgeComputer:
                         return EdgeCheckResult(
                             passes=False,
                             reason=reject_reason,
+                            edge_result=edge_result,
                             spread_pct=spread_pct,
-                            edge_cents=edge_cents,
                             min_edge_cents=min_edge_cents,
-                            max_spread_cents=max_spread_cents,
+                            max_spread_pct=max_spread_pct,
                         )
                 
                 logger.debug(

@@ -799,7 +799,7 @@ class KalshiVenueClient(EventVenueClient):
             # Fast path: reuse instance-cached key if same source
             if self._private_key is not None and self._cached_key_source == _this_cache_key:
                 self._auth_mode = "rsa"
-                logger.debug("Kalshi RSA auth ready (cached, source: %s)", self._cached_key_source)
+                logger.debug("Kalshi RSA auth ready (cached)")
                 return
 
             from cryptography.hazmat.primitives import serialization
@@ -808,10 +808,10 @@ class KalshiVenueClient(EventVenueClient):
             if self.config.private_key_path:
                 with open(self.config.private_key_path, "rb") as f:
                     pem_bytes = f.read()
-                logger.info("Loaded Kalshi RSA key from file: %s", self.config.private_key_path)
+                logger.info("Loaded Kalshi RSA key from file")
             elif getattr(self.config, "private_key_pem", None):
                 pem_bytes = self.config.private_key_pem.encode()
-                logger.info("Loaded Kalshi RSA key from inline PEM (KALSHI_PRIVATE_KEY_PEM)")
+                logger.info("Loaded Kalshi RSA key from inline PEM")
 
             if pem_bytes is None:
                 raise ValueError("No RSA key source: set private_key_path or KALSHI_PRIVATE_KEY_PEM")
@@ -819,7 +819,7 @@ class KalshiVenueClient(EventVenueClient):
             self._private_key = serialization.load_pem_private_key(pem_bytes, password=None)
             self._auth_mode = "rsa"
             self._cached_key_source = _this_cache_key
-            logger.info("Kalshi RSA auth ready (source: %s)", _this_cache_key)
+            logger.info("Kalshi RSA auth ready")
         except ImportError as e:
             # BUG-3: no silent fallback — cryptography is a required dependency for RSA auth
             raise RuntimeError(
@@ -828,7 +828,7 @@ class KalshiVenueClient(EventVenueClient):
             ) from e
         except (FileNotFoundError, ValueError, OSError) as e:
             # BUG-3: raise unconditionally; do not silently downgrade to password auth
-            logger.error("[kalshi] Failed to load RSA key (source=%s): %s", _this_cache_key, e)
+            logger.error("[kalshi] Failed to load RSA key: %s", e)
             raise
 
     def _sign_headers(self, method: str, path: str) -> Dict[str, str]:
@@ -852,7 +852,9 @@ class KalshiVenueClient(EventVenueClient):
 
         # Timestamp in milliseconds (Kalshi requires this)
         ts_ms = str(int(replay_time() * 1000))
-        message = ts_ms + method.upper() + path
+        # Kalshi signs only the path, never query parameters.
+        signing_path = path.split("?")[0]
+        message = ts_ms + method.upper() + signing_path
         signature = self._private_key.sign(
             message.encode(),
             padding.PSS(

@@ -33,7 +33,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional, Dict, Any, Callable, List
 
@@ -243,7 +243,9 @@ class BankrollServiceV2:
 
         # Cache staleness / TTL control
         self._bankroll_cache_ttl_seconds = refresh_interval_seconds
-        self._bankroll_stale_after_seconds = 2 * refresh_interval_seconds
+        self._bankroll_stale_after_seconds = float(
+            os.getenv("MERID_BANKROLL_STALE_AFTER_S", str(2 * refresh_interval_seconds))
+        )
 
         # Thread safety - lazy initialize lock to avoid event loop binding issues
         # Lock is created on first use in the correct event loop
@@ -361,6 +363,7 @@ class BankrollServiceV2:
         retry_count = 0
         max_retries = 5
         while not self._shutdown:
+            loop_start = time.time()
             try:
                 fetched = await self._fetch_and_update_with_retry()
                 if fetched:
@@ -383,7 +386,12 @@ class BankrollServiceV2:
                     logger.warning(f"[BANKROLL-REFRESH] Retry {retry_count}/{max_retries} in {backoff:.1f}s: {e}")
                     await asyncio.sleep(backoff)
                     continue
-            await asyncio.sleep(self._refresh_interval)
+            # Deadline-based sleep: keep cadence close to refresh_interval even
+            # when a slow API call occupies the loop. This prevents the bankroll
+            # from going stale while a fetch is still in flight.
+            elapsed = time.time() - loop_start
+            sleep_for = max(0.0, self._refresh_interval - elapsed)
+            await asyncio.sleep(sleep_for)
     
     async def _fetch_and_update_with_retry(self, max_retries: int = 3) -> bool:
         """Fetch from Kalshi with retry logic and circuit-breaker.
@@ -1043,7 +1051,10 @@ class BankrollServiceV2:
             for pos in positions.values():
                 if pos.contracts > 0:
                     cost_basis = pos.contracts * pos.avg_price_cents
-                    unrealized_cents = int(float(pos.unrealized_pnl_usd) * 100)
+                    unrealized_usd = pos.unrealized_pnl_usd or 0
+                    unrealized_cents = int(
+                        (Decimal(str(unrealized_usd)) * 100).to_integral_value(rounding=ROUND_HALF_UP)
+                    )
                     total_portfolio_cents += cost_basis + unrealized_cents
             
             return total_portfolio_cents

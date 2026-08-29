@@ -69,6 +69,7 @@ class RiskLimits:
     max_cycle_risk_pct: float = 0.0  # DISABLED - fixed $1 cap via global slot allocator
     max_total_risk_pct: float = 0.0  # DISABLED - fixed $1 cap via global slot allocator
     daily_loss_pct: float = 0.20  # 20% (loss guardrail, aligned with drawdown halt - NOT allocation)
+    weekly_loss_pct: float = 0.35  # 35% weekly loss guardrail for Half-Kelly/daily-weekly cap sizing
     cluster_stop_pct: float = 0.025
     
     # Category caps (DISABLED 2026-07-16: pct==0.0 defers to fixed $1 exposure cap)
@@ -159,10 +160,15 @@ class UnifiedRiskManager:
             self._total_exposure_usd: float = 0.0
             self._cycle_exposure_usd: float = 0.0
             
-            # Daily loss tracking
+            # Daily/weekly loss tracking for Half-Kelly / daily-weekly cap sizing
             self._daily_loss_usd: float = 0.0
+            self._daily_pnl_usd: float = 0.0
             self._daily_start_usd: float = 0.0
             self._last_reset_date: Optional[datetime] = None
+            self._weekly_loss_usd: float = 0.0
+            self._weekly_pnl_usd: float = 0.0
+            self._weekly_start_usd: float = 0.0
+            self._last_reset_week: Optional[int] = None
             
             # Rate limiting
             self._trades_this_hour: int = 0
@@ -202,6 +208,7 @@ class UnifiedRiskManager:
                 limits.max_cycle_risk_pct = config['bankroll'].get('max_cycle_risk_pct', 0.0)  # DISABLED - fixed $1 model
                 limits.max_total_risk_pct = config['bankroll'].get('max_total_risk_pct', 0.0)  # DISABLED - fixed $1 model
                 limits.daily_loss_pct = config['bankroll'].get('daily_loss_pct', 0.20)  # Loss guardrail (not allocation)
+                limits.weekly_loss_pct = config['bankroll'].get('weekly_loss_pct', 0.35)
                 limits.cluster_stop_pct = config['bankroll'].get('cluster_stop_pct', 0.025)
             
             # Category caps (DISABLED defaults: 0.0 defers to fixed $1 exposure cap)
@@ -267,9 +274,19 @@ class UnifiedRiskManager:
             now = datetime.now(timezone.utc)
             if self._last_reset_date is None or now.date() != self._last_reset_date.date():
                 self._daily_loss_usd = 0.0
+                self._daily_pnl_usd = 0.0
                 self._daily_start_usd = self._bankroll_usd
                 self._last_reset_date = now
                 logger.info(f"[UNIFIED_RISK] Daily tracking reset for {now.date()}")
+
+            # Reset weekly tracking if it's a new ISO week
+            current_week = now.isocalendar().week
+            if self._last_reset_week is None or current_week != self._last_reset_week:
+                self._weekly_loss_usd = 0.0
+                self._weekly_pnl_usd = 0.0
+                self._weekly_start_usd = self._bankroll_usd
+                self._last_reset_week = current_week
+                logger.info(f"[UNIFIED_RISK] Weekly tracking reset for ISO week {current_week}")
             
             # Log calibrated limits
             logger.info(
@@ -278,7 +295,66 @@ class UnifiedRiskManager:
                 f"Total cap: ${self._get_total_cap_usd():.2f} (fixed $1 model) | "
                 f"Correlated cap: ${self._get_correlated_cap_usd():.2f} (fixed $1 model)"
             )
-    
+
+    def record_pnl(self, pnl_usd: float) -> None:
+        """Record realized PnL and update daily/weekly loss trackers."""
+        with self._lock:
+            # Make sure day/week tracking is current before booking PnL
+            now = datetime.now(timezone.utc)
+            if self._last_reset_date is None or now.date() != self._last_reset_date.date():
+                self._daily_loss_usd = 0.0
+                self._daily_pnl_usd = 0.0
+                self._last_reset_date = now
+            current_week = now.isocalendar().week
+            if self._last_reset_week is None or current_week != self._last_reset_week:
+                self._weekly_loss_usd = 0.0
+                self._weekly_pnl_usd = 0.0
+                self._last_reset_week = current_week
+
+            self._daily_pnl_usd += pnl_usd
+            self._weekly_pnl_usd += pnl_usd
+            self._daily_loss_usd = max(0.0, -self._daily_pnl_usd)
+            self._weekly_loss_usd = max(0.0, -self._weekly_pnl_usd)
+
+    def get_loss_adjusted_size_scale(self) -> float:
+        """Return a sizing multiplier for daily/weekly cap sizing.
+
+        Half-Kelly is enforced in unified_sizing; this is the loss-throttle
+        companion.  Returns 1.0 when no cap is hit, 0.0 when the cap is
+        exceeded (reject new trades), and a configurable fraction for the
+        warning zone.
+
+        The effective caps are anchored to the per-trade max risk so the throttle
+        bites in the 3x-per-trade / 2x-daily ballpark instead of being dominated
+        by a loose percentage of a large bankroll.
+        """
+        with self._lock:
+            if self._bankroll_usd <= 0:
+                return 1.0
+
+            # Per-trade max risk is the fixed exposure cap (worst-case notional loss
+            # for one filled order).  Daily = 3x, weekly = 2x daily.
+            per_trade_max_risk = max(self._limits.fixed_exposure_cap_usd, 0.01)
+            daily_cap = min(
+                self._bankroll_usd * self._limits.daily_loss_pct,
+                3.0 * per_trade_max_risk,
+            )
+            weekly_cap = min(
+                self._bankroll_usd * self._limits.weekly_loss_pct,
+                2.0 * daily_cap,
+            )
+
+            if self._daily_loss_usd >= daily_cap or self._weekly_loss_usd >= weekly_cap:
+                return 0.0
+
+            # Warning zone: between 50% and 100% of the cap, linearly throttle
+            daily_frac = self._daily_loss_usd / daily_cap if daily_cap > 0 else 0.0
+            weekly_frac = self._weekly_loss_usd / weekly_cap if weekly_cap > 0 else 0.0
+            max_frac = max(daily_frac, weekly_frac)
+            if max_frac >= 0.5:
+                return max(0.0, 1.0 - (max_frac - 0.5) * 2.0)
+            return 1.0
+
     def _get_cycle_cap_usd(self) -> float:
         """Get cycle cap in USD.
 
@@ -468,15 +544,25 @@ class UnifiedRiskManager:
                 logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
                 return False, reason
             
-            # Daily loss check
+            # Daily/weekly loss check for daily-weekly cap sizing
             # CRITICAL FIX (2026-08-16): New order notional is NOT a realized loss.
-            # The daily loss guard should only trigger on realized PnL, not on open
+            # The loss guard should only trigger on realized PnL, not on open
             # position sizing. Position sizing is bounded by per-trade/total caps above.
             daily_loss_cap = self._bankroll_usd * self._limits.daily_loss_pct
             if self._daily_loss_usd > daily_loss_cap:
                 reason = (
                     f"DAILY_LOSS: realized=${self._daily_loss_usd:.2f} "
                     f"> ${daily_loss_cap:.2f}"
+                )
+                self._rejections += 1
+                logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
+                return False, reason
+
+            weekly_loss_cap = self._bankroll_usd * self._limits.weekly_loss_pct
+            if self._weekly_loss_usd > weekly_loss_cap:
+                reason = (
+                    f"WEEKLY_LOSS: realized=${self._weekly_loss_usd:.2f} "
+                    f"> ${weekly_loss_cap:.2f}"
                 )
                 self._rejections += 1
                 logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")

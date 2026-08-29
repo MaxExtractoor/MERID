@@ -347,6 +347,9 @@ class WSFeedManager:
         return {"active": False}
 
 
+# Backward-compatible alias
+WebSocketPriceFeed = CoinbasePriceFeed
+
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _feed: Optional[WebSocketPriceFeed] = None

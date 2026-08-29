@@ -412,13 +412,20 @@ class UnifiedRiskEngine:
             except Exception as e:
                 logger.warning(f"Failed to record PnL to RiskController: {e}")
             
-            # Update KalshiRiskManager with position
+            # Update KalshiRiskManager and UnifiedRiskManager with PnL/position
             try:
                 from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk_manager
                 risk_manager = get_kalshi_risk_manager()
                 risk_manager.record_trade(result.ticker, result.executed_contracts, result.pnl_usd)
             except Exception as e:
                 logger.warning(f"Failed to record trade to KalshiRiskManager: {e}")
+
+            try:
+                from merid.risk.unified_risk_manager import get_unified_risk_manager
+                unified_risk = get_unified_risk_manager()
+                unified_risk.record_pnl(result.pnl_usd)
+            except Exception as e:
+                logger.warning(f"Failed to record PnL to UnifiedRiskManager: {e}")
             
             # Add to audit trail
             self._add_audit_entry({

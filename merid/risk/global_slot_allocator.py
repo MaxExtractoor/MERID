@@ -15,6 +15,7 @@ Key Rules:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -99,20 +100,23 @@ class AllocationRequest:
 class GlobalSlotAllocator:
     """
     Global slot allocator for 15m Kalshi crypto trading.
-    
-    Manages a $2 exposure cap across all 5 assets using slot-based allocation.
+
+    Manages an exposure cap across all 5 assets using slot-based allocation.
     Each position consumes its entry price from the cap, and slots are recycled
     when positions exit.
-    
+
     Thread-safe for concurrent access from multiple agents.
+
+    2026-08-28: Hard limits are now env-overridable so the $2/2-contract defaults
+    can be lowered without code changes while the account is small.
     """
-    
-    # Hard limits
-    MAX_EXPOSURE_USD = 2.00
-    MIN_ENTRY_CENTS = 10
-    MAX_ENTRY_CENTS = 75  # 2026-07-12: Expanded from 50c to 75c for current market conditions
-    MAX_CONTRACTS_PER_ORDER = 2  # 2026-08-22: Raised from 1 to 2 (still capped by $2 exposure)
-    MAX_POSITIONS_PER_ASSET = 1  # 2026-07-13: Only 1 position per asset allowed at a time
+
+    # Hard limits (env-overridable; default to legacy $2 / 2-contract values)
+    MAX_EXPOSURE_USD = float(os.getenv("MERID_MAX_EXPOSURE_USD", "2.00"))
+    MIN_ENTRY_CENTS = int(os.getenv("MERID_MIN_ENTRY_CENTS", "10"))
+    MAX_ENTRY_CENTS = int(os.getenv("MERID_MAX_ENTRY_CENTS", "75"))
+    MAX_CONTRACTS_PER_ORDER = int(os.getenv("MERID_MAX_CONTRACTS_PER_ORDER", "2"))
+    MAX_POSITIONS_PER_ASSET = int(os.getenv("MERID_MAX_POSITIONS_PER_ASSET", "1"))
     
     def __init__(self):
         self._lock = threading.RLock()  # Use reentrant lock to prevent deadlock

@@ -681,7 +681,7 @@ def calculate_kelly_fraction(
     model_prob: float,
     price_cents: int,
     confidence: float = 0.5,
-    fractional_kelly: float = 0.25,
+    fractional_kelly: float = 0.50,
     side: str = "yes",
     consider_fee_impact: bool = False,
     fee_cents: Optional[float] = None,
@@ -859,7 +859,7 @@ def compute_order_size(
             model_prob=model_prob,
             price_cents=price_cents,
             confidence=confidence_float,
-            fractional_kelly=0.25,  # Quarter-Kelly for production
+            fractional_kelly=0.50,  # Half-Kelly (2026-08-28)
             side=side,
             consider_fee_impact=consider_fee_impact or estimated_fee_cents is not None,
             fee_cents=_fee_cents,
@@ -1003,6 +1003,28 @@ def compute_order_size(
     contract_count = min(target_contracts, max_contracts_cap, max_by_exposure)
     if max_by_notional is not None:
         contract_count = min(contract_count, max_by_notional)
+
+    # 2026-08-28: Half-Kelly / daily-weekly cap sizing.  The UnifiedRiskManager
+    # tracks realized PnL and throttles or blocks new size when the daily or
+    # weekly loss cap is approached.  This is a fail-closed companion to the
+    # half-Kelly fraction used above.
+    try:
+        from merid.risk.unified_risk_manager import get_unified_risk_manager
+        loss_size_scale = get_unified_risk_manager().get_loss_adjusted_size_scale()
+    except Exception:
+        loss_size_scale = 1.0
+    if loss_size_scale <= 0.0:
+        logger.warning(
+            "[UNIFIED-SIZING] Daily/weekly loss cap hit; rejecting size for asset=%s",
+            asset,
+        )
+        return 0, Decimal("0"), {
+            "bankroll_usd": float(bankroll_usd),
+            "price_cents": price_cents,
+            "asset": asset,
+            "reason": "daily_weekly_loss_cap",
+        }
+    contract_count = max(0, int(contract_count * loss_size_scale))
 
     if contract_count < 1:
         # Defensive: should not reach here because of the exposure check above,
