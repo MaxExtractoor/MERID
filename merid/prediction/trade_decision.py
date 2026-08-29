@@ -82,7 +82,7 @@ MERID_EV_GATE_AUTHORITATIVE = os.environ.get("MERID_EV_GATE_AUTHORITATIVE", "1")
 
 # 2026-08-29: Order decision ledger collection.  When enabled, every trade
 # decision is persisted before any order is submitted.
-MERID_ORDER_DECISION_LEDGER_ENABLED = os.environ.get("MERID_ORDER_DECISION_LEDGER_ENABLED", "0").lower() in ("1", "true", "yes")
+MERID_ORDER_DECISION_LEDGER_ENABLED = os.environ.get("MERID_ORDER_DECISION_LEDGER_ENABLED", "1").lower() in ("1", "true", "yes")
 
 def _get_resolved_live_config() -> Optional[Any]:
     """Return the resolved live config if available, otherwise None."""
