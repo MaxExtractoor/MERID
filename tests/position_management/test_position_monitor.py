@@ -931,10 +931,12 @@ class TestPositionMonitorStartupLoading:
             ),
         }
         mock_cache.get_all_positions.return_value = cached_positions
+        mock_cache.is_settled.return_value = False
+        mock_cache.is_quarantined.return_value = False
         mock_get_cache.return_value = mock_cache
-        
+
         monitor = PositionMonitor()
-        
+
         # Start monitor - should load positions from cache
         await monitor.start()
         
@@ -987,13 +989,15 @@ class TestPositionMonitorStartupLoading:
             ),
         }
         mock_cache.get_all_positions.return_value = cached_positions
+        mock_cache.is_settled.return_value = False
+        mock_cache.is_quarantined.return_value = False
         mock_get_cache.return_value = mock_cache
-        
+
         monitor = PositionMonitor()
-        
+
         # Start monitor
         await monitor.start()
-        
+
         # Only non-zero position should be loaded
         assert len(monitor.get_open_positions()) == 1
         assert monitor.get_position_by_market("KXETH15M-5678") is not None
@@ -1008,6 +1012,8 @@ class TestPositionMonitorStartupLoading:
         # Mock position cache that raises error
         mock_cache = Mock()
         mock_cache.get_all_positions.side_effect = Exception("Cache error")
+        mock_cache.is_settled.return_value = False
+        mock_cache.is_quarantined.return_value = False
         mock_get_cache.return_value = mock_cache
         
         monitor = PositionMonitor()
@@ -1040,13 +1046,15 @@ class TestPositionMonitorStartupLoading:
             ),
         }
         mock_cache.get_all_positions.return_value = cached_positions
+        mock_cache.is_settled.return_value = False
+        mock_cache.is_quarantined.return_value = False
         mock_get_cache.return_value = mock_cache
-        
+
         monitor = PositionMonitor()
-        
+
         # Start monitor
         await monitor.start()
-        
+
         # Should use thesis_side (NO) not side (YES)
         position = monitor.get_position_by_market("KXBTC15M-1234")
         assert position is not None
@@ -1073,13 +1081,15 @@ class TestPositionMonitorStartupLoading:
             ),
         }
         mock_cache.get_all_positions.return_value = cached_positions
+        mock_cache.is_settled.return_value = False
+        mock_cache.is_quarantined.return_value = False
         mock_get_cache.return_value = mock_cache
-        
+
         monitor = PositionMonitor()
-        
+
         # Start monitor
         await monitor.start()
-        
+
         # Should fall back to side when thesis_side is None
         position = monitor.get_position_by_market("KXBTC15M-1234")
         assert position is not None

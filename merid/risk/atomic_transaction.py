@@ -9,7 +9,7 @@ CRITICAL FIX (2026-08-01): Addresses Bug 10 - No atomic transactions across enfo
 
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Optional, List, Any
+from typing import Any, Callable, Dict, List, Optional
 from contextlib import contextmanager
 
 from utils.logger import get_logger

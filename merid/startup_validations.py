@@ -362,6 +362,65 @@ def validate_live_trading_safety() -> None:
         )
 
 
+def validate_order_safety_controls() -> None:
+    """Confirm STP, MaxExecutionCost, and cancel_order_on_pause are wired.
+
+    This is a runtime structural check: it does not require a live venue
+    connection, but it verifies that the order request objects carry the
+    safety fields and the system default for pause-cancellation is fail-closed.
+
+    Raises:
+        StartupValidationError if any required control is missing or disabled.
+    """
+    from merid.settings import settings
+    from merid.event_venues.kalshi.port import CreateOrderRequest
+    from merid.event_venues.base import VenueOrder
+    from merid.event_venues.kalshi.order_router import OrderIntent
+
+    issues: List[str] = []
+
+    # Default must be True (cancel on pause) for fail-closed behavior.
+    if not getattr(settings, "KALSHI_CANCEL_ORDER_ON_PAUSE", False):
+        issues.append("KALSHI_CANCEL_ORDER_ON_PAUSE is not True")
+
+    # Structural check: fields must exist on the canonical request classes.
+    if not hasattr(CreateOrderRequest, "self_trade_prevention_type"):
+        issues.append("CreateOrderRequest missing self_trade_prevention_type")
+    if not hasattr(CreateOrderRequest, "max_execution_cost_cents"):
+        issues.append("CreateOrderRequest missing max_execution_cost_cents")
+    if not hasattr(CreateOrderRequest, "cancel_order_on_pause"):
+        issues.append("CreateOrderRequest missing cancel_order_on_pause")
+
+    if not hasattr(VenueOrder, "self_trade_prevention_type"):
+        issues.append("VenueOrder missing self_trade_prevention_type")
+    if not hasattr(VenueOrder, "max_execution_cost_cents"):
+        issues.append("VenueOrder missing max_execution_cost_cents")
+    if not hasattr(VenueOrder, "cancel_order_on_pause"):
+        issues.append("VenueOrder missing cancel_order_on_pause")
+
+    if not hasattr(OrderIntent, "self_trade_prevention_type"):
+        issues.append("OrderIntent missing self_trade_prevention_type")
+    if not hasattr(OrderIntent, "cancel_order_on_pause"):
+        issues.append("OrderIntent missing cancel_order_on_pause")
+
+    # Verify the CreateOrderRequest default is fail-closed.
+    from dataclasses import fields
+    for f in fields(CreateOrderRequest):
+        if f.name == "cancel_order_on_pause":
+            if f.default is not True:
+                issues.append(f"CreateOrderRequest.cancel_order_on_pause default is {f.default}, expected True")
+            break
+    else:
+        issues.append("CreateOrderRequest.cancel_order_on_pause field not found")
+
+    if issues:
+        raise StartupValidationError("Order safety controls incomplete: " + "; ".join(issues))
+
+    logger.info(
+        "[ORDER-SAFETY-CONTROLS] STP/MaxExecutionCost/cancel_order_on_pause wired and active"
+    )
+
+
 def validate_production_startup() -> None:
     """Fail closed if production startup sees test/debug/bypass flags.
 
@@ -430,6 +489,12 @@ def validate_production_startup() -> None:
                 forbidden.extend(legacy_issues)
         except Exception as exc:
             forbidden.append(f"could not validate 15m production settings: {exc}")
+
+    # STP, MaxExecutionCost, and cancel_order_on_pause must be wired and active.
+    try:
+        validate_order_safety_controls()
+    except StartupValidationError as exc:
+        forbidden.append(str(exc))
 
     # Live money path must not contain uncommitted changes in production live mode.
     forbidden.extend(_check_dirty_tree())

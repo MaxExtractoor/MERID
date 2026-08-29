@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from merid.prediction.forecasters.base import Forecaster, ForecastResult
 from utils.logger import get_logger

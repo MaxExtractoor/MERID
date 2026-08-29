@@ -18,6 +18,10 @@ from enum import Enum
 from typing import Optional, Dict, Any, Callable, List
 import os
 
+from utils.logger import get_logger
+
+logger = get_logger("merid.prediction.risk.sentiment_vol_types")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Regime Classifications

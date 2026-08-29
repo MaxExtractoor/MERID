@@ -154,54 +154,38 @@ class TestKalshiRSASigning:
 class TestFillsPollerAuthentication:
     """Test fills poller uses correct authentication."""
     
-    def test_fills_poller_uses_get_kalshi_config(self):
-        """Verify fills poller calls get_kalshi_config() for credentials."""
+    def test_fills_poller_uses_execution_port(self):
+        """Verify fills poller returns the process-wide KalshiExecutionPort."""
         from merid.event_venues.kalshi.fills_poller import FillsPoller
-        
+
         poller = FillsPoller()
-        
-        # Patch at the actual module locations where imports happen
-        with patch('merid.event_venues.kalshi.kalshi_config.get_kalshi_config') as mock_get_config, \
-             patch('merid.event_venues.kalshi.client.get_kalshi_client') as mock_get_client:
-            
-            mock_config = Mock()
-            mock_get_config.return_value = mock_config
-            mock_client = Mock()
-            mock_get_client.return_value = mock_client
-            
-            # Call _get_client
+
+        with patch('merid.event_venues.kalshi.port.get_kalshi_execution_port') as mock_get_port:
+            mock_port = Mock()
+            mock_get_port.return_value = mock_port
+
             client = poller._get_client()
-            
-            # Verify get_kalshi_config was called
-            mock_get_config.assert_called_once()
-            
-            # Verify get_kalshi_client was called with config
-            mock_get_client.assert_called_once_with(mock_config)
-    
+
+            # Verify the port singleton is fetched
+            mock_get_port.assert_called_once()
+            assert client is mock_port
+
     def test_fills_poller_client_caching(self):
-        """Verify fills poller caches client instance."""
+        """Verify fills poller reuses the same port instance."""
         from merid.event_venues.kalshi.fills_poller import FillsPoller
-        
+
         poller = FillsPoller()
-        
-        # Patch at the actual module locations where imports happen
-        with patch('merid.event_venues.kalshi.kalshi_config.get_kalshi_config') as mock_get_config, \
-             patch('merid.event_venues.kalshi.client.get_kalshi_client') as mock_get_client:
-            
-            mock_config = Mock()
-            mock_get_config.return_value = mock_config
-            mock_client = Mock()
-            mock_get_client.return_value = mock_client
-            
-            # Call _get_client twice
+
+        with patch('merid.event_venues.kalshi.port.get_kalshi_execution_port') as mock_get_port:
+            mock_port = Mock()
+            mock_get_port.return_value = mock_port
+
             client1 = poller._get_client()
             client2 = poller._get_client()
-            
-            # Verify get_kalshi_client was called only once (cached)
-            assert mock_get_client.call_count == 1, \
-                "get_kalshi_client should be called once and cached"
-            
-            # Verify same client returned
+
+            # The port singleton is fetched each call, but the same object is returned
+            assert mock_get_port.call_count == 2, \
+                "get_kalshi_execution_port should be called on each access"
             assert client1 is client2, \
                 "Same client instance should be returned from cache"
 

@@ -274,7 +274,8 @@ class Settings(BaseSettings):
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
     KALSHI_API_HOST: Optional[str] = Field(default=None, description="Kalshi API host override (leave unset to use the URL determined by KALSHI_USE_DEMO/KALSHI_ENV)")
     KALSHI_MIN_CLOSE_SECONDS_AGO: Optional[int] = Field(default=None, description="Freshness cutoff for market discovery: only return markets closing after (now - N seconds). None/0 = disabled (return all open markets).")
-    
+    KALSHI_CANCEL_ORDER_ON_PAUSE: bool = Field(default=True, description="SAFETY: cancel open/resting orders automatically when the exchange pauses")
+
     # =============================================================================
     # CFB RTI (Crypto Facilities Benchmarks Real-Time Index) SETTINGS
     # Required for live Kalshi crypto contract settlement reference prices
@@ -1379,14 +1380,17 @@ class Settings(BaseSettings):
     
     def validate_15m_production(self) -> list[str]:
         """Validate that legacy settings are not used in 15m Kalshi production mode.
-        
+
         This ensures the production stack uses only Kalshi-specific settings and
         does not accidentally use legacy exchange APIs or research agents.
         """
         issues = []
-        
-        # Only check if we're in 15m production mode
-        if self.MERID_PROFILE != "kalshi_crypto_15m_v2":
+
+        # Only check if we're in 15m production mode.  Use the live process
+        # environment so tests and canary restarts can change the profile without
+        # reloading the settings singleton.
+        merid_profile = os.environ.get("MERID_PROFILE", self.MERID_PROFILE or "")
+        if merid_profile != "kalshi_crypto_15m_v2":
             return issues
         
         # Check for legacy research agent flags
@@ -1573,111 +1577,7 @@ class Settings(BaseSettings):
                 )
         
         return issues
-    
-    def get_dynamic_asset_caps(self) -> Dict[str, AssetCapConfig]:
-        """Compute dynamic asset caps based on portfolio bankroll.
-        
-        Replaces hardcoded caps with risk-parity or Kelly-optimal allocations
-        that respond to market conditions and portfolio size.
-        
-        Returns:
-            Dict mapping asset -> AssetCapConfig with dynamic daily/single-trade caps
-        """
-        import time
-        import json
-        
-        # Check cache
-        cache_age = time.time() - self._asset_caps_cache_time
-        if self._asset_caps_cache is not None and cache_age < 60:  # 1 minute cache
-            return self._asset_caps_cache
-        
-        # Check for static override
-        if not self.MERID_USE_DYNAMIC_ALLOCATION:
-            if self.MERID_STATIC_ALLOCATION_OVERRIDE:
-                try:
-                    override = json.loads(self.MERID_STATIC_ALLOCATION_OVERRIDE)
-                    caps = {}
-                    for asset, cap_usd in override.items():
-                        caps[asset] = AssetCapConfig(
-                            max_daily_notional_usd=float(cap_usd),
-                            max_single_trade_usd=float(cap_usd) * 0.25
-                        )
-                    return caps
-                except Exception:
-                    pass
-            # Fallback to fixed $2 exposure cap if static mode but no override (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $2 exposure cap
-            logger.warning(
-                "[STATIC_FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED)"
-            )
-            # Use fixed $2 exposure cap from environment variable
-            import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
-            return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "SOL": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "XRP": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-            }
-        
-        # Compute dynamic allocations
-        try:
-            from merid.prediction.dynamic_allocation_calculator import get_dynamic_allocation_calculator
-            calculator = get_dynamic_allocation_calculator()
-            
-            # Get portfolio value from bankroll setting
-            portfolio_value = self.KALSHI_PORTFOLIO_BANKROLL_CENTS / 100.0
-            
-            # Get dynamic caps for all assets
-            all_caps = calculator.get_all_caps(portfolio_value, self.MERID_DYNAMIC_ALLOCATION_STRATEGY)
-            
-            # Convert to AssetCapConfig objects
-            caps = {}
-            for asset, daily_cap in all_caps.items():
-                caps[asset] = AssetCapConfig(
-                    max_daily_notional_usd=daily_cap,
-                    max_single_trade_usd=daily_cap * 0.25  # 25% of daily as single trade max
-                )
-            
-            # Cache result
-            self._asset_caps_cache = caps
-            self._asset_caps_cache_time = time.time()
-            
-            return caps
-        except Exception as e:
-            logger.warning(f"Dynamic allocation calculation failed: {e}, using fallback")
-            # CRITICAL: Compute fallback from actual bankroll, NOT hardcoded defaults
-            bankroll_usd = self.KALSHI_PORTFOLIO_BANKROLL_CENTS / 100.0
-            if bankroll_usd <= 0:
-                logger.critical("[PRODUCTION HARDENING] Cannot determine asset caps: bankroll=%s", bankroll_usd)
-                raise RuntimeError(
-                    "Asset cap calculation failed and bankroll is zero/invalid. "
-                    "Cannot proceed without valid bankroll from Kalshi balance."
-                )
-            
-            # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # FIX: Changed to fixed $2 exposure cap (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $2 exposure cap
-            logger.warning(
-                "[FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
-            )
-            # Use fixed $2 exposure cap from environment variable
-            import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
-            return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "SOL": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "XRP": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
-            }
-    
-    def get_asset_cap(self, asset: str) -> AssetCapConfig:
-        """Get dynamic cap for a specific asset."""
-        caps = self.get_dynamic_asset_caps()
-        return caps.get(asset, AssetCapConfig(max_daily_notional_usd=1000, max_single_trade_usd=250))
-    
+
     def validate_for_go_live(self, venues: list[str] = None) -> dict:
         """
         Comprehensive validation for going live.

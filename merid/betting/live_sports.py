@@ -253,6 +253,7 @@ class SportsInstrumentBridge:
 
         # Push to consensus store
         try:
+            from merid.prediction.consensus import get_prediction_consensus_store
             store = get_prediction_consensus_store()
             for outcome_label, prob in implied_probs.items():
                 symbol = _sports_symbol(event_id, outcome_label)

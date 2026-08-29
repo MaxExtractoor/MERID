@@ -2870,11 +2870,20 @@ class KalshiRiskManager:
         # The active-profile path returns early above; default to empty policy here.
         profile_data: Dict[str, Any] = {}
 
-        # Load bankroll from bankroll_service_v2 for dynamic daily loss computation
-        # CRITICAL FIX: Skip bankroll access during import time to prevent bankroll service initialization
-        # This method is called during module import, before bankroll service is ready
-        # Defer to runtime - will be updated during startup after bankroll service is ready
-        bankroll_cents = 0
+        # Use the provided balance as the bankroll anchor for dynamic limit computation.
+        # When the bankroll service has a fresh equity value, prefer it; otherwise fall
+        # back to the balance snapshot that triggered calibration.  This avoids the
+        # previous bug where bankroll_cents was hard-coded to 0 and all dynamic caps
+        # collapsed to zero.
+        bankroll_cents = balance_cents
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+
+            equity_usd = get_equity_for_risk_calc_sync(force_refresh=False)
+            if equity_usd is not None and equity_usd > 0:
+                bankroll_cents = int(round(equity_usd * 100))
+        except Exception:
+            pass
 
         with self._lock:
             cfg.max_total_notional_usd = balance_usd * cfg.max_total_notional_pct

@@ -5949,7 +5949,18 @@ class KalshiPositionCache:
             market_ticker,
             outcome,
         )
+        # Capture position before mark_settled removes it.
+        position = self._positions.get(market_ticker)
         await self.mark_settled(market_ticker)
+
+        # Record settlement in the unified trade attribution fact table (non-blocking).
+        try:
+            from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
+            table = get_trade_attribution_table()
+            if table is not None:
+                table.record_settlement(market_ticker, outcome, position)
+        except Exception as e:
+            logger.warning("[POSITION-CACHE] trade attribution record_settlement failed: %s", e)
 
     async def _lookup_fill_source(
         self,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+from decimal import Decimal
 
 import pytest
 
@@ -120,29 +121,42 @@ def test_selects_no_when_believed_and_cheap():
     assert float(d.p_selected) == float(d.p_no_calibrated)
 
 
-def test_rejects_cost_basis_override_yes():
+def test_rejects_cost_basis_override_yes(monkeypatch):
     """A cheap YES contract with p_yes <= 0.5 must be rejected."""
     # spot == strike -> p_yes == 0.5.  YES ask 20 is cheap, but the model
     # does not believe YES is > 50%.
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.TRADE_DECISION_MIN_P_SELECTED",
+        Decimal("0.50"),
+    )
     d = _make_decision(spot=100.0, strike=100.0, yes_ask=20.0, no_ask=80.0)
     assert d.selected_outcome is None
     assert d.no_trade_reason == "cost_basis_override_yes"
 
 
-def test_rejects_cost_basis_override_no():
-    """A cheap NO contract with p_no <= 0.5 must be rejected."""
-    d = _make_decision(spot=100.0, strike=100.0, yes_ask=80.0, no_ask=20.0)
+def test_rejects_cost_basis_override_no(monkeypatch):
+    """A NO contract with p_no <= 0.5 and positive raw edge must be rejected."""
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.TRADE_DECISION_MIN_P_SELECTED",
+        Decimal("0.50"),
+    )
+    # Use a NO ask above the tail-calibration floor so the test isolates the
+    # cost-basis gate.  At p_no == 0.5 the model does not believe NO, so a
+    # positive net edge must still be rejected.
+    d = _make_decision(spot=100.0, strike=100.0, yes_ask=65.0, no_ask=35.0)
     assert d.selected_outcome is None
     assert d.no_trade_reason == "cost_basis_override_no"
 
 
 def test_rejects_insufficient_edge():
     """A believed side with net edge below threshold must be rejected."""
+    # Keep the NO ask above the tail-calibration floor so the YES edge-below
+    # threshold path is the clean rejection reason (not a calibrated tie).
     d = _make_decision(
         spot=100.5,
         strike=100.0,
         yes_ask=95.0,  # very expensive, tiny edge
-        no_ask=5.0,
+        no_ask=35.0,
         min_edge=0.10,
     )
     assert d.selected_outcome is None

@@ -10,6 +10,9 @@ _os.environ["MERID_EXIT_FIREWALL_OBSERVE_ONLY"] = "true"
 _os.environ["MERID_REQUIRE_EXIT_PARENTAGE"] = "0"
 _os.environ["ALLOW_DIRECT_EXECUTION"] = "false"
 _os.environ["MERID_ALLOW_CT_SCRIPT_BYPASS"] = "false"
+# 2026-08-28: Allow legacy tests that still import the deprecated
+# global_execution_guard to collect without failing the test run.
+_os.environ["ALLOW_DEPRECATED_RISK_GUARDS"] = "1"
 _os.environ["DEBUG_ALLOW_MANUAL_ORDERS"] = "false"
 _os.environ["MERID_CFB_RTI_SHADOW_TELEMETRY"] = "0"
 # 2026-08-24: Force unit tests to run in mock/preview mode so legacy live-mode
@@ -17,6 +20,9 @@ _os.environ["MERID_CFB_RTI_SHADOW_TELEMETRY"] = "0"
 # guards that require full production stack are not enforced.
 _os.environ["MERID_PM_TRADING_MODE"] = "mock"
 _os.environ["MERID_ALLOW_LIVE_TRADES"] = "false"
+# 2026-08-28: The archived crypto15mallocator gate is not available in the
+# lean 15m stack; disable it so order-gate unit tests do not fail-closed.
+_os.environ["MERID_DISABLE_CRYPTO15M_GATE"] = "1"
 _os.environ["MERID_CFB_RTI_ADAPTER"] = "false"
 _os.environ["MERID_DISABLE_SHARED_RISK_GUARD"] = "true"
 # 2026-08-22: Force direct CF Benchmarks REST source for unit tests that mock

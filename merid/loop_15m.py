@@ -961,6 +961,12 @@ class Kalshi15mLoop:
             "ENTRIES_DISABLED": 0,
             "signal_rejected": 0,
         })
+
+        # Health-snapshot visibility: snapshot the last completed tick's
+        # candidate/execution/rejection summary before counters are reset.
+        self._last_tick_total_candidates: int = 0
+        self._last_tick_rejection_breakdown: Dict[str, int] = {}
+        self._last_tick_executed: int = 0
         
         # Market making integration
         self._market_maker = None
@@ -5035,6 +5041,12 @@ async def _run_loop(self) -> None:
                         tick_id, total_candidates, lifecycle_terminal_count,
                     )
                     self._error_count += 1
+
+                # Snapshot the completed tick for health / observability before reset.
+                self._last_tick_total_candidates = total_candidates
+                self._last_tick_rejection_breakdown = dict(self._rejection_counters)
+                self._last_tick_executed = tick_executed
+
                 # Reset rejection counters for next tick to prevent accumulation
                 for key in self._rejection_counters:
                     self._rejection_counters[key] = 0

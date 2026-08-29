@@ -153,12 +153,6 @@ class Top3Batch:
             "closed_assets": list(self.closed_assets),
         }
     
-    def all_positions_closed(self) -> bool:
-        """Check if all allocated positions have been closed."""
-        if not self.allocations:
-            return False  # No allocations means nothing to close - not "all closed"
-        return len(self.closed_assets) >= len(self.allocations)
-    
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Top3Batch":
         """Deserialize from dict."""

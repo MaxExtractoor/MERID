@@ -8,6 +8,7 @@ already consumes — no new endpoints.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger

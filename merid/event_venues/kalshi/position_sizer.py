@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 if TYPE_CHECKING:
     from merid.prediction.unified_edge import EdgeResult
 
-from merid.event_venues.kalshi.fees import calculate_kalshi_fee_per_contract_cents
 from merid.event_venues.kalshi.risk_parameters import (
     DEFAULT_KELLY_FRACTION,  # DEPRECATED: Use profile when available
     SIZER_MIN_CONTRACTS,

@@ -48,7 +48,6 @@ CRYPTO_ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 SNAPSHOT_STALE_SECONDS = max_spot_age_seconds()
 
 # P0-002 FIX: Load edge thresholds from canonical YAML config
-from typing import Dict
 import yaml
 from pathlib import Path
 
@@ -87,7 +86,6 @@ from merid.formulas import (
     AUDIT_SPEC_VERSION,
     get_version_info,
     generate_correlation_id,
-    kelly_fraction,
     kelly_fraction_from_edge,
     quarter_kelly_size,
     PositionSizingInputs,
@@ -436,14 +434,12 @@ class KalshiStrategy:
                 price_cents = int(snapshot.implied.no_ask or snapshot.implied.no_bid or 50)
 
             # Apply cycle cap
-            capped_size, reason = apply_cycle_cap_to_kelly_size(
-                kelly_contracts=size,
-                bankroll_usd=bankroll_usd,
-                price_cents=price_cents,
-                ticker=snapshot.market_id,
-                side=side,
-                edge=Decimal(str(net_edge)) if net_edge else None,
-            )
+            price_cents = price_cents or 50
+            price_usd = Decimal(price_cents) / Decimal("100")
+            max_risk_usd = bankroll_usd * Decimal("0.02")
+            cap_contracts = int(max_risk_usd / price_usd) if price_usd > 0 else size
+            capped_size = min(size, cap_contracts)
+            reason = "bankroll_cycle_cap"
 
             if capped_size < size:
                 logger.info(
@@ -764,7 +760,7 @@ class KalshiStrategy:
                 model_prob=float(edge.model_prob),
                 confidence=Decimal(str(max(0.0, min(1.0, size_factor)))),
                 consider_fee_impact=True,
-                side=best.side,
+                side=edge.side,
             )
             
             # unified_sizing already enforces $1 cap via slot allocator
@@ -1595,6 +1591,7 @@ class KalshiStrategy:
         fvg_entry_boost = 1.0
         try:
             from merid.prediction.fvg_integration import get_fvg_entry_exit_timing, is_fvg_enabled
+            _resolved_tf = self._resolve_timeframe_from_agent_name()
             if is_fvg_enabled() and snapshot.implied:
                 bid = (snapshot.implied.yes_bid or 50) / 100.0
                 ask = (snapshot.implied.yes_ask or 50) / 100.0

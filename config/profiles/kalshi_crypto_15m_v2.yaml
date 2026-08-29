@@ -261,7 +261,11 @@ ratchet_profit_floor:
 # Staged Time-Based Exit Configuration
 # Partial exits at time intervals for volatile markets
 staged_time_exit:
-  enabled: true  # CRITICAL FIX: 2026-07-17 - Enabled (logic implemented in PositionMonitor)
+  # DISABLED 2026-08-28: with MAX_CONTRACTS_PER_ORDER=2 the 40/30/30% stages
+  # truncate to 0 partial exits (int(2 * 0.4) = 0).  Use stop-loss + 8-min hard hold instead.
+  # If re-enabled, stages must be compatible with 1-2 contract sizing (e.g. 50/50)
+  # and position_monitor.py must use round/ceil, not int(), to avoid truncating to 0.
+  enabled: false
   # Staged exits: [minutes, percent_to_close]
   # Example: At 5 min close 40%, at 10 min close 30%, at 13 min close remaining 30%
   stages:
@@ -271,7 +275,7 @@ staged_time_exit:
       percent: 30
     - minutes: 13
       percent: 30
-  description: "Staged time exits: partial liquidation at time intervals (enabled in PositionMonitor)"
+  description: "Staged time exits: partial liquidation at time intervals (disabled until integer-truncation bug is fixed)"
 
 # Dynamic Take Profit Zones Configuration
 # 2026-08-12: DISABLED. Edge-based take-profit in resolve_exit_policy is the primary exit.
@@ -472,7 +476,9 @@ momentum_fvg:
 # on both legs, while the net-of-cost gate still rejects fee-negative edges.
 price_based:
   buy_threshold: 0.50  # Buy YES when price <= 50c (cheap YES contracts)
-  sell_threshold: 0.50  # Buy NO when price >= 50c (cheap NO contracts)
+  # RAISED 2026-08-28: model under-predicts YES, so cheap NO (YES >= 50c) loses.
+  # Only take NO side when YES is very expensive (>=85c), giving real downside edge.
+  sell_threshold: 0.85  # Buy NO when price >= 85c (very expensive YES contracts)
 
 # ── Hybrid Mode Price Caps (2026 Optimized) ───────────────────────────────
 # Hybrid mode combines momentum signals with price discipline
@@ -525,7 +531,8 @@ drawdown_semantics:
 capital_usd: 0  # Live mode: derive from live Kalshi equity via router/bankroll engine
 
 # Minimum trade size (floor) - single source of truth for all agents
-min_notional_usd: 0.50  # Minimum notional per trade (uniform for all account sizes)
+# Lowered 2026-08-28: allow 1-contract entries at cheap prices (<50c) while account is small.
+min_notional_usd: 0.10  # Minimum notional per trade (uniform for all account sizes)
 min_contracts: 1  # Minimum 1 contract per trade (Kalshi venue invariant)
 
 # Fallback pricing configuration
@@ -1324,9 +1331,10 @@ contract_caps:
 # Replaces percentage-based sizing with fixed dollar cap to ensure $2+ profit per 15m window
 risk_policy:
   # FIXED DOLLAR EXPOSURE MODEL (2026-07-08)
-  # Ensures never more than $2 exposure at any time
+  # Ensures never more than $0.75 exposure at any time (~10% of $7.71 bankroll)
   # Forces entries in sweet spot (10-75c) and enables mandatory profit exits
-  fixed_exposure_cap_usd: 2.00  # CRITICAL: $2 max total exposure across all assets
+  # 2026-08-28: lowered from $2.00 to survive the $7.71 account and avoid 26% single-trade risk.
+  fixed_exposure_cap_usd: 0.75  # CRITICAL: $0.75 max total exposure across all assets
   sequential_trading: true  # No new entries until all positions exit
   # MANDATORY PROFIT EXIT (2026-07-08)
   # Automatic profit-taking based on entry price to ensure quick wins
@@ -1454,7 +1462,7 @@ edge_lag_filter:
 # Research findings: profitable systems trade edges down to 1-2%, 53% accuracy minimum
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 strategy_policy:
-  min_edge: 0.015  # LOWERED: 1.5% global minimum edge (research: profitable systems trade edges down to 1-2%)
+  min_edge: 0.05  # RAISED: 5% global minimum edge (research: 3-5% net edge is the practical Kalshi floor after fees)
   min_confidence: 0.50  # LEGACY VALUE: Not actively used - primary confidence threshold is in confidence.min_confidence_threshold (0.65)
   max_md_staleness_sec: 20.0  # RELAXED: Strategy-specific MD staleness threshold (increased from 15s to 20s for more opportunities)
   
@@ -1516,15 +1524,18 @@ exit_policy:
       XRP: 0.65  # XRP: 65% of max gain as fallback
       DOGE: 0.65  # DOGE: 65% of max gain as fallback
     # Stop loss distance as percentage of entry price
+    # NOTE: resolve_exit_policy uses dynamic_risk.sl_cents_* for the actual cent offset;
+    # this percentage is a fallback/legacy.  Research: 6-10c hard stop is correct for 15m.
     sl_distance_pct:
-      BTC: 0.40  # BTC: 40% SL distance (raised from 7.5%)
-      ETH: 0.40  # ETH: 40% SL distance (raised from 7.5%)
-      SOL: 0.40  # SOL: 40% SL distance (raised from 8%)
-      XRP: 0.40  # XRP: 40% SL distance (raised from 8%)
-      DOGE: 0.40  # DOGE: 40% SL distance (raised from 6.7%)
+      BTC: 0.15  # BTC: 15% SL distance
+      ETH: 0.15  # ETH: 15% SL distance
+      SOL: 0.15  # SOL: 15% SL distance
+      XRP: 0.15  # XRP: 15% SL distance
+      DOGE: 0.15  # DOGE: 15% SL distance
     # CRITICAL FIX (2026-08-10): upstream/midstream/downstream stop-loss kill switch.
-    # Disable the stop-loss so trades run until take-profit, trailing stop, ratchet, or time exit.
-    stop_loss_enabled: false
+    # Re-enabled 2026-08-28: research shows holding losers to expiry is the dominant P&L leak;
+    # the dynamic_risk sl_cents values (6/8/10c) provide the actual stop distance.
+    stop_loss_enabled: true
 
     # ── Mean-Reversion Take-Profit (2026-08-25) ──────────────────────────────
     # Symmetric 50¢ TP for the price-based fade.  Positions are always long their
@@ -1574,7 +1585,8 @@ exit_policy:
     # Minimum minutes before expiry to force exit (time-based stop)
     cutoff_minutes_before_expiry: 0  # Trade full 15m window (no cutoff)
     # Maximum holding time in minutes (absolute time limit)
-    max_hold_minutes: 15  # Max 15 minute hold for 15m contracts
+    # Tightened 2026-08-28: 15m research shows 7-8 min is the practical half-life of an edge.
+    max_hold_minutes: 8  # Max 8 minute hold for 15m contracts
     # Forced market exit this many seconds before settlement (T-2min for 15m)
     settlement_guard_seconds: 120
 
@@ -1686,7 +1698,7 @@ calibration_config:
 # Fee-aware edge calculation to prevent unprofitable small-edge trades
 # Based on research: small-edge trades lose money after Kalshi fees
 fee_aware_edge:
-  enabled: false  # DISABLED for price-based strategy (no edge calculation, trades based on price thresholds)
+  enabled: true  # ENABLED 2026-08-28: ensures net edge exceeds taker fee drag before entry.
   # RE-ENABLE RISKS: If re-enabled with momentum_fvg mode, may conflict with velocity-based edge
   # RE-ENABLE REQUIREMENTS: Verify edge calculation is compatible with momentum_fvg signal mode
   min_edge_cents: 2  # $0.02 minimum edge after fees

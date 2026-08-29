@@ -703,6 +703,70 @@ class TestOrderOperations:
         assert result.success is True
         client._http_client.request.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_place_order_cancel_on_pause_true_in_wire(self, client, monkeypatch):
+        """cancel_order_on_pause=True must be sent to the Kalshi API."""
+        monkeypatch.setenv("DEBUG_ALLOW_MANUAL_ORDERS", "true")
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(return_value={"order": {"order_id": "o1", "ticker": "KXBTC15M-001", "status": "resting"}}),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side="buy",
+            outcome_id="yes",
+            size=Decimal("1"),
+            price=Decimal("0.55"),
+            order_type="limit",
+            time_in_force="GTC",
+            client_order_id="test-cancel-on-pause",
+            self_trade_prevention_type="taker_at_cross",
+            cancel_order_on_pause=True,
+        )
+
+        result = await client.place_order_result(order)
+
+        assert result.success is True
+        json_data = client._http_client.request.call_args.kwargs["json"]
+        assert json_data.get("cancel_order_on_pause") is True
+
+    @pytest.mark.asyncio
+    async def test_place_order_cancel_on_pause_false_in_wire(self, client, monkeypatch):
+        """cancel_order_on_pause=False must be sent to the Kalshi API."""
+        monkeypatch.setenv("DEBUG_ALLOW_MANUAL_ORDERS", "true")
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(return_value={"order": {"order_id": "o1", "ticker": "KXBTC15M-001", "status": "resting"}}),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side="buy",
+            outcome_id="yes",
+            size=Decimal("1"),
+            price=Decimal("0.55"),
+            order_type="limit",
+            time_in_force="GTC",
+            client_order_id="test-cancel-on-pause-false",
+            self_trade_prevention_type="taker_at_cross",
+            cancel_order_on_pause=False,
+        )
+
+        result = await client.place_order_result(order)
+
+        assert result.success is True
+        json_data = client._http_client.request.call_args.kwargs["json"]
+        assert json_data.get("cancel_order_on_pause") is False
+
 
 class TestSubaccountOperations:
     """Tests for subaccount-specific operations."""

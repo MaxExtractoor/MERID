@@ -10,6 +10,7 @@ credentials for the same environment.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -19,6 +20,19 @@ logger = get_logger("merid.event_venues.kalshi.kalshi_config")
 
 # Global flag for Kalshi readiness - set by verify_kalshi_config()
 KALSHI_READY = False
+
+
+def _credential_ref(value: Optional[str]) -> str:
+    """Return an opaque, non-reversible reference for a credential.
+
+    Logs MUST NOT contain API key IDs, key fingerprints, private key paths,
+    signature lengths, or signed message contents.  This helper produces a
+    stable 12-character SHA-256 prefix that can be used to correlate logs
+    across components without exposing the underlying credential.
+    """
+    if not value:
+        return "NOT_SET"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass
@@ -34,8 +48,12 @@ class KalshiConfig:
     private_key_pem: Optional[str] = None  # Alternative to file path
     
     def __repr__(self) -> str:
-        masked_key = self.api_key_id[:4] + "****" + self.api_key_id[-4:] if len(self.api_key_id) > 8 else "****"
-        return f"KalshiConfig(env={self.env}, key={masked_key}, rest={self.rest_base_url}, ws={self.ws_base_url})"
+        return (
+            f"KalshiConfig(env={self.env}, "
+            f"credential_ref={_credential_ref(self.api_key_id)}, "
+            f"rest={self.rest_base_url}, "
+            f"ws={self.ws_base_url})"
+        )
 
 
 # Environment-specific URLs per Kalshi docs
@@ -177,26 +195,34 @@ def get_kalshi_config(env: Optional[str] = None) -> KalshiConfig:
         public_rest_api_url=urls.get("public_rest_api_url"),
     )
     
-    logger.info(f"[KALSHI-CONFIG] Loaded config: {config}")
+    logger.info(
+        f"[KALSHI-CONFIG] Loaded config: env={config.env} "
+        f"credential_ref={_credential_ref(config.api_key_id)} "
+        f"rest={config.rest_base_url} ws={config.ws_base_url}"
+    )
     return config
 
 
 def build_auth_message(timestamp_ms: str, method: str, path: str) -> str:
     """
     Build the authentication message string for signing.
-    
+
     Both REST and WS use the same message format per Kalshi docs:
     timestamp + method.upper() + path
-    
+
+    Query parameters are NOT part of the signed path.  Any ``?...`` suffix is
+    stripped to avoid signature mismatches on paginated endpoints.
+
     Args:
         timestamp_ms: Timestamp in milliseconds (as string)
         method: HTTP method (e.g., "GET", "POST")
         path: API path (e.g., "/trade-api/v2/portfolio/balance" or "/trade-api/ws/v2")
-    
+
     Returns:
         Message string to be signed
     """
-    return timestamp_ms + method.upper() + path
+    signing_path = path.split("?")[0]
+    return timestamp_ms + method.upper() + signing_path
 
 
 def log_auth_debug(
@@ -205,31 +231,18 @@ def log_auth_debug(
     method: str,
     path: str,
     timestamp_ms: str,
-    message: str,
-    signature_length: int,
 ) -> None:
     """
-    Log authentication debug information for side-by-side comparison.
-    
-    Args:
-        component: "REST" or "WS"
-        config: KalshiConfig instance
-        method: HTTP method
-        path: API path
-        timestamp_ms: Timestamp used
-        message: Message that was signed
-        signature_length: Length of signature in bytes
+    Log a safe, non-secret authentication diagnostic.
+
+    This deliberately omits the API key ID, the signed message, the signature,
+    and the private key path.  Those values are operational secrets and must not
+    be written to normal application logs.
     """
-    masked_key = config.api_key_id[:4] + "****" + config.api_key_id[-4:] if len(config.api_key_id) > 8 else "****"
-    
     logger.info(
         f"[AUTH-{component}] env={config.env} "
-        f"key={masked_key} "
-        f"method={method} "
-        f"path={path} "
-        f"timestamp={timestamp_ms} "
-        f"message='{message}' "
-        f"signature_length={signature_length}"
+        f"credential_ref={_credential_ref(config.api_key_id)} "
+        f"method={method} path={path} timestamp={timestamp_ms}"
     )
 
 
@@ -279,25 +292,28 @@ def verify_kalshi_config() -> tuple[bool, str, KalshiConfig]:
             "KALSHI_DEMO_PRIVATE_KEY_PEM",
         ])
     
+    # Log only whether each required credential source is present, never its value.
     for var in env_vars_to_check:
         value = os.getenv(var)
         if value:
-            masked_value = value[:4] + "****" + value[-4:] if len(value) > 8 else "****"
-            logger.info(f"[KALSHI-CONFIG-VERIFY] {var}={masked_value}")
+            logger.info(f"[KALSHI-CONFIG-VERIFY] {var}=SET")
         else:
             logger.debug(f"[KALSHI-CONFIG-VERIFY] {var}=NOT_SET")
-    
+
     # Try to load config
     try:
         config = get_kalshi_config()
-        logger.info(f"[KALSHI-CONFIG-VERIFY] Config loaded successfully: {config}")
-        
+        logger.info(
+            f"[KALSHI-CONFIG-VERIFY] Config loaded successfully: "
+            f"env={config.env} credential_ref={_credential_ref(config.api_key_id)}"
+        )
+
         # Check if key file exists
         if config.private_key_path and not config.private_key_pem:
             if os.path.exists(config.private_key_path):
-                logger.info(f"[KALSHI-CONFIG-VERIFY] Key file exists: {config.private_key_path}")
+                logger.info("[KALSHI-CONFIG-VERIFY] Key file exists")
             else:
-                error_msg = f"Key file not found: {config.private_key_path}"
+                error_msg = "Key file not found"
                 logger.error(f"[KALSHI-CONFIG-VERIFY] {error_msg}")
                 KALSHI_READY = False
                 return False, error_msg, config

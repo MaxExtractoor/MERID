@@ -440,11 +440,14 @@ class PortfolioRiskAgent:
         # 3b2. Update balance calibrator to trigger dynamic limit recalibration
         #      including computed drawdown thresholds based on equity tier
         try:
-            total_balance_cents = int(
-                (snapshot.available_balance_usd + snapshot.locked_balance_usd) * 100
+            from merid.event_venues.kalshi.balance_calibrator import (
+                get_balance_calibrator,
+                dollars_to_cents,
+            )
+            total_balance_cents = dollars_to_cents(
+                snapshot.available_balance_usd + snapshot.locked_balance_usd
             )
             if total_balance_cents > 0:
-                from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
                 did_recalibrate = get_balance_calibrator().update(total_balance_cents)
                 if did_recalibrate:
                     logger.info(

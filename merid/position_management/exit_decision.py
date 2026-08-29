@@ -65,9 +65,11 @@ class ExitPriority(int, Enum):
     ADAPTIVE_TIMING = 45
     TIME_STOP = 40
     TRAIL = 36
+    CURRENT_EDGE_REVERSAL = 37  # 2026-08-28: mark-to-model edge realization
     EDGE_DECAY = 35
     OPPORTUNITY_COST = 33  # 2026-08-01: Exit when better opportunity exists
     SCALE_OUT = 30
+    CONTINUATION_STOP = 25  # 2026-08-25: 5m underlying continuation stop
     MANUAL = 20
 
 
@@ -136,10 +138,12 @@ def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
         ExitReason.CANDLE_REVERSAL: ExitPriority.CANDLE_REVERSAL,
         ExitReason.ADAPTIVE_TIMING: ExitPriority.ADAPTIVE_TIMING,
         ExitReason.TIME_STOP: ExitPriority.TIME_STOP,
+        ExitReason.CURRENT_EDGE_REVERSAL: ExitPriority.CURRENT_EDGE_REVERSAL,
         ExitReason.EDGE_DECAY: ExitPriority.EDGE_DECAY,
         ExitReason.OPPORTUNITY_COST: ExitPriority.OPPORTUNITY_COST,
         ExitReason.SCALE_OUT: ExitPriority.SCALE_OUT,
         ExitReason.TRAIL: ExitPriority.TRAIL,
+        ExitReason.CONTINUATION_STOP: ExitPriority.CONTINUATION_STOP,
         ExitReason.MANUAL: ExitPriority.MANUAL,
         ExitReason.MODEL_INVALIDATION_LOSS_EXIT: ExitPriority.MODEL_INVALIDATION_LOSS_EXIT,
         ExitReason.SETTLEMENT_GUARD: ExitPriority.SETTLEMENT_GUARD,

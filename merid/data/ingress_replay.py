@@ -238,9 +238,6 @@ class _ReplayWebSocket:
     async def close(self) -> None:
         pass
 
-    def close(self) -> None:
-        pass
-
 
 def _parse_active_sources(raw: Optional[str]) -> Optional[Set[str]]:
     if not raw:

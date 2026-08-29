@@ -311,5 +311,28 @@ class KalshiAdapter(VenueAdapter):
         return [t.__dict__ for t in res.data]
 
 
-# Singleton
-kalshi_adapter = KalshiAdapter()
+# Lazy singleton: do not instantiate at import time.  Credentials and
+# the active Kalshi environment may not be available during test collection
+# or in canary process startup, so initialisation is deferred until first use.
+class _LazyKalshiAdapter:
+    """Proxy that constructs the real KalshiAdapter on first attribute access."""
+
+    def __init__(self) -> None:
+        self._instance: Optional[KalshiAdapter] = None
+
+    def __getattr__(self, name: str) -> Any:
+        if self._instance is None:
+            self._instance = KalshiAdapter()
+        return getattr(self._instance, name)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        # In case someone treats the singleton as a callable.
+        if self._instance is None:
+            self._instance = KalshiAdapter(*args, **kwargs)
+        return self._instance
+
+    def __bool__(self) -> bool:
+        return True  # Legacy code expects a truthy adapter in dict filters.
+
+
+kalshi_adapter = _LazyKalshiAdapter()
