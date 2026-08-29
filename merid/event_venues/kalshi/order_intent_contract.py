@@ -503,7 +503,9 @@ class CanonicalOrderIntent:
     thesis_side: str | None = None
     parent_entry_fill_id: str | None = None
     parent_entry_order_id: str | None = None
+    parent_entry_intent_id: str | None = None
     parent_entry_signal_id: str | None = None
+    parent_decision_id: str | None = None
     parentage_status: str = "UNKNOWN"  # CANONICAL_FILL | ORDER_LINKED | SIGNAL_ONLY | UNKNOWN
     # 2026-08-19: Decision/economic provenance required for audit and fill-adjusted edge.
     run_id: str | None = None
@@ -570,7 +572,9 @@ class CanonicalOrderIntent:
             "thesis_side": self.thesis_side,
             "parent_entry_fill_id": self.parent_entry_fill_id,
             "parent_entry_order_id": self.parent_entry_order_id,
+            "parent_entry_intent_id": self.parent_entry_intent_id,
             "parent_entry_signal_id": self.parent_entry_signal_id,
+            "parent_decision_id": self.parent_decision_id,
             "parentage_status": self.parentage_status,
             "run_id": self.run_id,
             "p_yes": self.p_yes,
@@ -1031,7 +1035,9 @@ def normalize_order(
         thesis_side=getattr(intent, "thesis_side", None),
         parent_entry_fill_id=getattr(intent, "parent_entry_fill_id", None),
         parent_entry_order_id=getattr(intent, "parent_entry_order_id", None),
+        parent_entry_intent_id=getattr(intent, "parent_entry_intent_id", None),
         parent_entry_signal_id=getattr(intent, "parent_entry_signal_id", None),
+        parent_decision_id=getattr(intent, "parent_decision_id", None),
         parentage_status=getattr(intent, "parentage_status", "UNKNOWN"),
         run_id=getattr(intent, "run_id", None),
         p_yes=getattr(intent, "p_yes", None),

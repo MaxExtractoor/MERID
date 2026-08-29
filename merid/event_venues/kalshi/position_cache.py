@@ -429,6 +429,8 @@ class CachedPosition:
     entry_execution_mode: Optional[str] = None
     client_order_id: Optional[str] = None
     entry_intent_id: Optional[str] = None
+    # 2026-08-29: Decision ID for end-to-end ledger provenance.
+    decision_id: Optional[str] = None
     # CRITICAL FIX (2026-08-11): Executable entry book for spread-only exit invariants
     entry_executable_bid_cents: Optional[int] = None
     entry_executable_ask_cents: Optional[int] = None
