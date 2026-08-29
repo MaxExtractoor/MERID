@@ -2937,6 +2937,17 @@ async def _execute_exit_order(
         if not (_parent_entry_fill_id and _parent_entry_fill_id.strip()):
             _parent_entry_fill_id = _entry_order_id
 
+        # Resolve live config/build provenance for the exit intent.
+        _exit_config_hash = None
+        _exit_build_sha = None
+        try:
+            _resolved_exit_cfg = get_resolved_live_config(allow_unresolved=True)
+            if _resolved_exit_cfg and _resolved_exit_cfg.resolved:
+                _exit_config_hash = _resolved_exit_cfg.config_hash
+                _exit_build_sha = getattr(_resolved_exit_cfg, "build_sha", None) or os.environ.get("MERID_BUILD_SHA")
+        except Exception:
+            pass
+
         intent = OrderIntent(
             ticker=position.market_id,
             side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES/SELL_YES/BUY_NO/SELL_NO)
@@ -2961,6 +2972,8 @@ async def _execute_exit_order(
             expected_post_position_fp=_expected_post_position_fp,  # Exact centi-contract size after order
             # EXIT GUARD (2026-08-19): carry the guard decision and parent fill for audit.
             decision_id=guard_decision_id,
+            config_hash=_exit_config_hash,
+            build_sha=_exit_build_sha,
             reason=f"exit:{exit_reason_str}",
             # CRITICAL FIX (2026-08-22): Separate durable parentage identifiers.  A
             # signal_id proves a strategy signal existed, not that a fill created
@@ -8310,8 +8323,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             decision_id=candidate.get("decision_id"),
             decision_trace_id=candidate.get("decision_id"),
             run_id=candidate.get("run_id"),
-            config_hash=candidate.get("config_hash"),
-            build_sha=candidate.get("build_sha"),
+            config_hash=candidate.get("config_hash") or getattr(trade_decision, "config_hash", None),
+            build_sha=candidate.get("build_sha") or getattr(trade_decision, "build_sha", None),
             confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
             confidence_valid=confidence_valid,
             confidence_source=confidence_source,
