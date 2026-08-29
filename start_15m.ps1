@@ -240,6 +240,16 @@ if (-not $env:KALSHI_LIVE_PRIVATE_KEY_PATH) {
     $env:KALSHI_LIVE_PRIVATE_KEY_PATH = $env:KALSHI_PRIVATE_KEY_PATH
 }
 
+# 3.1a Mirror the live credentials to the canonical Kalshi credential names used by
+# merid.settings and the settlement poller.  This ensures the settlement poller and
+# balance fetcher can find credentials when only the KALSHI_LIVE_* variants are set.
+if (-not $env:KALSHI_API_KEY_ID) {
+    $env:KALSHI_API_KEY_ID = $env:KALSHI_LIVE_API_KEY_ID
+}
+if (-not $env:KALSHI_PRIVATE_KEY_PATH) {
+    $env:KALSHI_PRIVATE_KEY_PATH = $env:KALSHI_LIVE_PRIVATE_KEY_PATH
+}
+
 Write-Host "[start_15m] MERID_KALSHI_ENV=$($env:MERID_KALSHI_ENV)" -ForegroundColor Cyan
 Write-Host "[start_15m] KALSHI_USE_DEMO=$($env:KALSHI_USE_DEMO)" -ForegroundColor Cyan
 Write-Host "[start_15m] MERID_KALSHI_HTTP_BASE=$($env:MERID_KALSHI_HTTP_BASE)" -ForegroundColor Cyan
