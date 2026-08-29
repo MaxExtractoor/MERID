@@ -3245,15 +3245,6 @@ async def _run_full_startup_in_lifespan(app):
                 logger.warning("[STARTUP-STACK] P2.7: RestingOrderMonitor start failed (non-fatal): %s", e)
 
             try:
-                from merid.event_venues.kalshi.fills_poller import get_fills_poller
-                _fills_poller = get_fills_poller()
-                await _fills_poller.start()
-                app.state.fills_poller = _fills_poller
-                logger.info("[STARTUP-STACK] P2.7: FillsPoller started (periodic REST fills reconciliation)")
-            except Exception as e:
-                logger.warning("[STARTUP-STACK] P2.7: FillsPoller start failed (non-fatal): %s", e)
-
-            try:
                 from merid.event_venues.kalshi.settlement_poller import start_settlement_polling_auto
                 _settlement_poller = await start_settlement_polling_auto()
                 if _settlement_poller is not None:
@@ -3263,6 +3254,15 @@ async def _run_full_startup_in_lifespan(app):
                     logger.warning("[STARTUP-STACK] P2.7: Settlement poller NOT started (Kalshi credentials unavailable)")
             except Exception as e:
                 logger.warning("[STARTUP-STACK] P2.7: Settlement poller start failed (non-fatal): %s", e)
+
+            try:
+                from merid.event_venues.kalshi.fills_poller import get_fills_poller
+                _fills_poller = get_fills_poller()
+                await _fills_poller.start()
+                app.state.fills_poller = _fills_poller
+                logger.info("[STARTUP-STACK] P2.7: FillsPoller started (periodic REST fills reconciliation)")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.7: FillsPoller start failed (non-fatal): %s", e)
 
             # CRITICAL FIX (2026-07-17): Start continuous position reconciliation
             # This ensures position drift is detected and corrected in real-time (60s interval)
