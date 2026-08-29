@@ -132,6 +132,48 @@ def test_production_startup_passes_with_canonical_env(monkeypatch):
     validate_production_startup()
 
 
+def test_production_startup_rejects_dirty_tree_in_live_mode(monkeypatch):
+    _clean_prod(monkeypatch)
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setattr(
+        "merid.startup_validations._get_live_path_git_status",
+        lambda: [(" M", "merid/event_venues/kalshi/order_router.py")],
+    )
+    with pytest.raises(StartupValidationError, match="uncommitted"):
+        validate_production_startup()
+
+
+def test_production_startup_allows_dirty_tree_with_override(monkeypatch):
+    _clean_prod(monkeypatch)
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setenv("MERID_ALLOW_DIRTY_TREE", "1")
+    monkeypatch.setattr(
+        "merid.startup_validations._get_live_path_git_status",
+        lambda: [(" M", "merid/event_venues/kalshi/order_router.py")],
+    )
+    validate_production_startup()
+
+
+def test_production_startup_skips_dirty_tree_in_paper_mode(monkeypatch):
+    _clean_prod(monkeypatch)
+    monkeypatch.setenv("MERID_TRADE_MODE", "paper")
+    monkeypatch.setattr(
+        "merid.startup_validations._get_live_path_git_status",
+        lambda: [(" M", "merid/event_venues/kalshi/order_router.py")],
+    )
+    validate_production_startup()
+
+
+def test_production_startup_skips_dirty_tree_in_testing_env(monkeypatch):
+    monkeypatch.setenv("MERID_ENV", "testing")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setattr(
+        "merid.startup_validations._get_live_path_git_status",
+        lambda: [(" M", "merid/event_venues/kalshi/order_router.py")],
+    )
+    validate_production_startup()
+
+
 # ---------------------------------------------------------------------------
 # Direct submission policy
 # ---------------------------------------------------------------------------
