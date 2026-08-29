@@ -22,9 +22,7 @@ from merid.pipeline.proposal import ExecutionResult, TradeProposal, OrderSide, O
 from merid.event_venues.kalshi.client import KalshiVenueClient, get_kalshi_client
 from merid.event_venues.kalshi.models import KalshiConfig
 from merid.event_venues.base import VenueOrder, MarketFilter
-# SEV-1 FIX: Removed deprecated GlobalExecutionGuard import
-# The unified pipeline system is not used by the 15m Kalshi production stack
-# which uses loop_15m.py directly with the risk envelope system
+from merid.guards.global_execution_guard import get_global_execution_guard
 
 from utils.logger import get_logger
 

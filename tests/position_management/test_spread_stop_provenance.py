@@ -113,8 +113,10 @@ class TestFallbackTakeProfitSafety:
             risk_params_schema_version=2,
         )
         assert position.take_profit_price_cents is not None
-        # fair 60c - fee 2c - 1c buffer = 57c; 75% of 11c edge = 8.25c; TP = 49 + 8 = 57c
-        assert position.take_profit_price_cents == 57
+        # With the canonical round-trip taker fee schedule, entry at 49c needs
+        # an exit of at least 56c to be net profitable (gross >= 5c and net >=
+        # fee + 2c + 1c buffer). The model fair value cap keeps it at 56c.
+        assert position.take_profit_price_cents == 56
 
     def test_unknown_position_with_no_fill_price_gets_no_tp(self):
         position = Position(

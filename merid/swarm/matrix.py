@@ -22,6 +22,9 @@ from config.trading_constants import (
     SHARPE_WINDOW_SHORT, SHARPE_WINDOW_MEDIUM, SHARPE_MIN_SAMPLES,
     SHARPE_ANNUALISATION, SHARPE_DOWNWEIGHT_THRESHOLD,
 )
+from utils.logger import get_logger
+
+logger = get_logger("merid.swarm.matrix")
 
 
 PromotionStage = Literal["paper", "shadow", "live"]

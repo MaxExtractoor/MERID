@@ -112,46 +112,62 @@ class TestValidateKalshiFormatConversion:
 
 
 class TestValidateApiSideMapping:
-    """Test validation of Kalshi API side mapping (Bug #3)."""
-    
+    """Test validation of Kalshi V2 book-side mapping (Bug #3).
+
+    V2 has a single YES-space book.  The book side is determined by the
+    *held outcome* produced by the order, not by the action alone:
+
+        BUY_YES  -> long YES -> bid
+        SELL_NO  -> long YES -> bid
+        BUY_NO   -> long NO  -> ask
+        SELL_YES -> long NO  -> ask
+    """
+
     def test_buy_yes_bid_mapping(self):
         """Test BUY_YES -> bid mapping."""
         is_valid, error = validate_api_side_mapping("yes", "buy", "bid")
         assert is_valid
         assert error is None
-    
+
     def test_sell_yes_ask_mapping(self):
         """Test SELL_YES -> ask mapping."""
         is_valid, error = validate_api_side_mapping("yes", "sell", "ask")
         assert is_valid
         assert error is None
-    
-    def test_buy_no_bid_mapping(self):
-        """Test BUY_NO -> bid mapping (Bug #3 fix)."""
-        is_valid, error = validate_api_side_mapping("no", "buy", "bid")
+
+    def test_buy_no_ask_mapping(self):
+        """Test BUY_NO -> ask mapping (Bug #3 fix)."""
+        is_valid, error = validate_api_side_mapping("no", "buy", "ask")
         assert is_valid
         assert error is None
-    
-    def test_sell_no_ask_mapping(self):
-        """Test SELL_NO -> ask mapping (Bug #3 fix)."""
-        is_valid, error = validate_api_side_mapping("no", "sell", "ask")
+
+    def test_sell_no_bid_mapping(self):
+        """Test SELL_NO -> bid mapping (Bug #3 fix)."""
+        is_valid, error = validate_api_side_mapping("no", "sell", "bid")
         assert is_valid
         assert error is None
-    
+
     def test_incorrect_buy_yes_mapping(self):
         """Test incorrect BUY_YES mapping (would cause side inversion)."""
         is_valid, error = validate_api_side_mapping("yes", "buy", "ask")
         assert not is_valid
         assert error is not None
         assert "API side mapping error" in error
-    
+
     def test_incorrect_buy_no_mapping(self):
         """Test incorrect BUY_NO mapping (would cause side inversion)."""
-        is_valid, error = validate_api_side_mapping("no", "buy", "ask")
+        is_valid, error = validate_api_side_mapping("no", "buy", "bid")
         assert not is_valid
         assert error is not None
         assert "API side mapping error" in error
-    
+
+    def test_incorrect_sell_no_mapping(self):
+        """Test incorrect SELL_NO mapping (would cause side inversion)."""
+        is_valid, error = validate_api_side_mapping("no", "sell", "ask")
+        assert not is_valid
+        assert error is not None
+        assert "API side mapping error" in error
+
     def test_invalid_kalshi_side(self):
         """Test invalid Kalshi API side."""
         is_valid, error = validate_api_side_mapping("yes", "buy", "invalid")

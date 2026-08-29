@@ -83,6 +83,7 @@ class VenueOrder:
     exchange_index: Optional[int] = None  # Venue exchange shard index (Kalshi)
     self_trade_prevention_type: Optional[str] = None  # Kalshi STP mode
     max_execution_cost_cents: Optional[int] = None  # fee-aware EV-derived cost cap
+    cancel_order_on_pause: Optional[bool] = None  # cancel resting order if Kalshi pauses
 
 
 @dataclass

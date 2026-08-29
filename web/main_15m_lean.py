@@ -938,6 +938,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[LIFESPAN] Step 9j: Unexpected error stopping heartbeat monitor: {e}")
 
+    # Stop trade attribution fact table (flush queued rows)
+    try:
+        trade_attribution = getattr(app.state, "trade_attribution_table", None)
+        if trade_attribution is not None:
+            logger.info("[LIFESPAN] Step 9k0: Stopping trade attribution fact table")
+            await trade_attribution.stop()
+            logger.info("[LIFESPAN] Step 9k0: Trade attribution fact table stopped")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9k0: Trade attribution missing stop method: {e}")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9k0: Error stopping trade attribution: {e}")
+
     # CRITICAL FIX: Close database connections if any
     try:
         logger.info("[LIFESPAN] Step 9k: Closing database connections")
@@ -1142,8 +1154,19 @@ async def readiness_check():
     
     # Check if lifespan startup completed
     startup_completed = getattr(app.state, "startup_completed", False)
+
+    # Check order safety controls are wired and active
+    safety_ok = True
+    safety_detail: Dict[str, Any] = {}
+    try:
+        from merid.startup_validations import validate_order_safety_controls
+        validate_order_safety_controls()
+        safety_detail = {"status": "ok", "reason": None}
+    except Exception as e:
+        safety_ok = False
+        safety_detail = {"status": "failed", "reason": str(e)}
     
-    ready = startup_completed and loop_alive
+    ready = startup_completed and loop_alive and safety_ok
     
     return {
         "status": "ready" if ready else "not_ready",
@@ -1152,6 +1175,7 @@ async def readiness_check():
         "startup_started": startup_state.started,
         "startup_completed": startup_completed,
         "loop_task_alive": loop_alive,
+        "safety_controls": safety_detail,
         "error": startup_state.error,
         "started_at": startup_state.started_at.isoformat() if startup_state.started_at else None,
         "completed_at": startup_state.completed_at.isoformat() if startup_state.completed_at else None,
@@ -1750,7 +1774,16 @@ async def self_check():
     
     # Run invariants check
     invariants = check_15m_production_invariants()
-    
+
+    # Order safety controls check
+    safety_controls = {"ok": False, "reason": None}
+    try:
+        from merid.startup_validations import validate_order_safety_controls
+        validate_order_safety_controls()
+        safety_controls = {"ok": True, "reason": None}
+    except Exception as e:
+        safety_controls = {"ok": False, "reason": str(e)}
+
     # Structure response
     response = {
         "profile": {
@@ -1775,6 +1808,7 @@ async def self_check():
             "kalshi_client": hasattr(app.state, "kalshi_client") and app.state.kalshi_client is not None
         },
         "legacy": legacy_report,
+        "safety_controls": safety_controls,
         "invariants": invariants
     }
     
@@ -3257,6 +3291,18 @@ async def _run_full_startup_in_lifespan(app):
             # The loop_15m.py has the correct Kalshi side mapping (SELL_YES, SELL_NO)
             # main_15m_lean.py had wrong side logic that was overwriting the correct callback
             logger.info("[STARTUP-STACK] P2.7: PositionMonitor will be started by Kalshi15mLoop.start() (correct side mapping)")
+
+            # P2.7.1: Start the trade attribution fact table (non-fatal, best-effort).
+            # This joins intent -> order -> fill -> settlement -> P&L into one
+            # append-only table for downstream monitoring and calibration.
+            try:
+                from merid.monitoring.trade_attribution_fact_table import TradeAttributionTable
+                trade_attribution = TradeAttributionTable.get_instance()
+                await trade_attribution.start()
+                app.state.trade_attribution_table = trade_attribution
+                logger.info("[STARTUP-STACK] P2.7.1: TradeAttributionTable started")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.7.1: TradeAttributionTable start failed (non-fatal): %s", e)
 
             # CRITICAL FIX: Start CryptoHedgeEngine auto-exit loop for hedge position TP/SL
             # This ensures hedge positions are automatically exited when TP/SL levels are hit

@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set, Tuple
 
+from merid.event_venues.kalshi.order_router import OrderIntent, OrderResult
 from merid.prediction.trading_mode import TradingMode
 from utils.logger import get_logger
 

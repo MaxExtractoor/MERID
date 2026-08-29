@@ -24,6 +24,15 @@ from enum import Enum
 from collections import defaultdict, deque
 from functools import wraps
 
+try:
+    from fastapi import HTTPException
+except Exception:
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str = "", headers: Optional[Dict[str, str]] = None) -> None:
+            self.status_code = status_code
+            self.detail = detail
+            self.headers = headers or {}
+
 from utils.logger import get_logger
 
 logger = get_logger("merid.rate_limiter")

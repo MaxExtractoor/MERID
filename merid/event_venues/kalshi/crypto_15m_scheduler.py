@@ -145,7 +145,6 @@ class Crypto15mScheduler:
         et_window = get_kalshi_15m_window(now_utc)
         
         # Get next window by adding 15 minutes to current window start
-        from datetime import timedelta
         next_start_utc = et_window.start_utc + timedelta(minutes=15)
         next_end_utc = et_window.end_utc + timedelta(minutes=15)
         
@@ -170,7 +169,6 @@ class Crypto15mScheduler:
         et_window = get_kalshi_15m_window(now_utc)
         
         # Get previous window by subtracting 15 minutes from current window start
-        from datetime import timedelta
         prev_start_utc = et_window.start_utc - timedelta(minutes=15)
         prev_end_utc = et_window.end_utc - timedelta(minutes=15)
         

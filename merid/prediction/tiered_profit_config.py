@@ -20,6 +20,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from merid.hedging.config import TakeProfitConfig
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.tiered_profit_config")

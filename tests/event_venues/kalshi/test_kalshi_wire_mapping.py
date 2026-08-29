@@ -229,3 +229,34 @@ def test_build_create_order_request_computes_max_execution_cost_from_p_selected(
     )
     # max = count * p_selected * 100 = 55 cents; bounded below by all_in (20+0) + 1
     assert req.max_execution_cost_cents == 55
+
+
+def test_build_create_order_request_cancel_order_on_pause_defaults_to_true():
+    intent = _make_intent("yes", "buy", entry_or_exit="entry")
+    req = _build_create_order_request(
+        intent,
+        ticker=intent.ticker,
+        exchange_index=2,
+        final_price_cents=55,
+        effective_order_type="limit",
+        effective_tif="GTC",
+        expiration_ts=1700000000,
+        post_only=False,
+    )
+    assert req.cancel_order_on_pause is True
+
+
+def test_build_create_order_request_cancel_order_on_pause_intent_override():
+    intent = _make_intent("yes", "buy", entry_or_exit="entry")
+    intent.cancel_order_on_pause = False
+    req = _build_create_order_request(
+        intent,
+        ticker=intent.ticker,
+        exchange_index=2,
+        final_price_cents=55,
+        effective_order_type="limit",
+        effective_tif="GTC",
+        expiration_ts=1700000000,
+        post_only=False,
+    )
+    assert req.cancel_order_on_pause is False

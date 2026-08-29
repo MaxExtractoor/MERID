@@ -124,7 +124,7 @@ def compute_pm_live_readiness() -> Dict[str, Any]:
             "venue_gate_live": vg_ok,
         },
         "redis": redis_info,
-        "agent_grid_startup": startup,
+        "agent_grid_startup": grid_ok,
         "kill_switch": kill_switch,
         "execution_gate": gate,
         "venue_gate": venue_gate,

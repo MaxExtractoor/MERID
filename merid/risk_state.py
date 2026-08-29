@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 
+from merid.execution_guard import ExecutionGuard
+
 
 class CapSnapshot(BaseModel):
     """Single cap snapshot with limit, usage, and utilization."""

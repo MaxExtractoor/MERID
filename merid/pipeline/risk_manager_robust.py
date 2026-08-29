@@ -21,6 +21,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Optional, Callable, Any
 
 from merid.pipeline.proposal import TradeDomain, TradeProposal, ProposalStatus
+from merid.pipeline.risk_context import RiskContext
 from merid.pipeline.robustness import (
     ThreadSafeState, HealthChecker, PipelineMetrics, GracefulShutdown,
     validate_inputs, validate_positive_number, ErrorRecovery,

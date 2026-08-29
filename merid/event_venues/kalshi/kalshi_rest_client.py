@@ -7,7 +7,7 @@ This module wraps the existing KalshiClientV2 for fills and portfolio operations
 from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from utils.logger import get_logger
 
@@ -111,8 +111,6 @@ class KalshiRestClient:
         Returns:
             List of fill dictionaries
         """
-        from datetime import datetime, timezone, timedelta
-        
         end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(minutes=minutes)
         

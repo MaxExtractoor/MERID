@@ -42,6 +42,7 @@ class CreateOrderRequest:
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = "taker_at_cross"
     max_execution_cost_cents: Optional[int] = None  # fee-aware EV-derived slippage guard
+    cancel_order_on_pause: Optional[bool] = True  # cancel resting order if exchange pauses
     source: Optional[str] = "agent_grid"
     take_profit_price_cents: Optional[int] = None
     stop_loss_price_cents: Optional[int] = None

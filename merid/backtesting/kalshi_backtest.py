@@ -21,7 +21,7 @@ from __future__ import annotations
 from utils.logger import get_logger
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from merid.risk.btc_promotion_config import BacktestReport
 

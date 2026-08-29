@@ -14,6 +14,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Optional
 
 from merid.pipeline.proposal import TradeDomain, TradeProposal, ProposalStatus
+from merid.pipeline.risk_context import RiskContext
 
 from utils.logger import get_logger
 

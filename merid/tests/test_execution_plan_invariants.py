@@ -52,7 +52,7 @@ def make_intent(**overrides) -> OrderIntent:
         "post_only": False,
         "snapshot_ts": time.time(),
         "snapshot_age_ms": 0.0,
-        "model_prob": 0.55,
+        "model_prob": 0.95,
         "effective_equity_usd": 10000.0,
         "source": "kalshi_tools",
         "agent_id": "BTC_15M",
@@ -64,6 +64,8 @@ def make_intent(**overrides) -> OrderIntent:
         "risk_tier": "A",
         "max_hold_seconds": 600,
         "confidence": 0.5,
+        "time_to_expiry_seconds": 600.0,
+        "p_selected": 0.95,
     }
     defaults.update(overrides)
     return OrderIntent(**defaults)
@@ -93,7 +95,12 @@ def make_state(**overrides) -> SimpleNamespace:
 
 
 def _fake_store_with_state(state):
-    return MagicMock(get=Mock(return_value=state), _states={})
+    return MagicMock(
+        get=Mock(return_value=state),
+        _states={},
+        is_market_entry_ready=Mock(return_value=(True, "")),
+        is_market_execution_ready=Mock(return_value=(True, "")),
+    )
 
 
 @pytest.fixture
@@ -124,13 +131,59 @@ def router_mocks(monkeypatch):
     monkeypatch.setattr(order_router, "_check_intent_risk", lambda intent: None)
     monkeypatch.setattr(order_router, "_resolve_max_slippage_cents", lambda: 5)
     monkeypatch.setattr(
+        order_router,
+        "_get_strategy_policy",
+        lambda intent: {"min_edge": 0.02, "min_confidence": 0.50},
+    )
+    monkeypatch.setattr(
+        "merid.risk.profiles.crypto_15m_profile.get_active_profile",
+        lambda: MagicMock(
+            profile=MagicMock(
+                guardrails_max_snapshot_age_ms=5000,
+                profile_name="",
+                agent_max_yes_position=100,
+                agent_max_no_position=100,
+            )
+        ),
+    )
+    monkeypatch.setattr(
         "merid.risk.unified_risk_manager.get_unified_risk_manager",
         lambda: MagicMock(
             check_order=Mock(return_value=(True, "")),
             calibrate_from_balance=Mock(),
             record_fill=Mock(),
             release=Mock(),
+            record_pnl=Mock(),
+            get_loss_adjusted_size_scale=Mock(return_value=1.0),
         ),
+    )
+
+    # Keep planning tests isolated from production service initialization.
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.position_cache.get_position_cache",
+        lambda: MagicMock(
+            is_reconciliation_halted=Mock(return_value=False),
+            get_position=Mock(return_value=None),
+            get_all_positions=Mock(return_value={}),
+        ),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.rate_limiter.get_rate_limiter",
+        lambda: MagicMock(acquire=AsyncMock(return_value=True)),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.monitoring.get_monitor",
+        lambda: MagicMock(update_order_metrics=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.bankroll_service_v2.get_bankroll_service",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(order_router, "TRADING_SCOPE_AVAILABLE", False)
+    monkeypatch.setattr(order_router, "LIQUIDITY_FALLBACK_AVAILABLE", False)
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_intent_contract.persist_order_decision",
+        Mock(),
     )
 
 
@@ -140,6 +193,10 @@ def fresh_state(router_mocks, monkeypatch):
     monkeypatch.setattr(
         "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
         lambda: _fake_store_with_state(state),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.canonical_portfolio.get_canonical_portfolio_store",
+        lambda: MagicMock(current=Mock(return_value=None)),
     )
     return state
 
@@ -205,8 +262,21 @@ def route_live_env(fresh_state, monkeypatch):
     monkeypatch.setattr(
         "merid.risk.profiles.crypto_15m_profile.get_active_profile",
         lambda: MagicMock(
-            profile=MagicMock(agent_max_yes_position=100, agent_max_no_position=100)
+            profile=MagicMock(
+                agent_max_yes_position=100,
+                agent_max_no_position=100,
+                guardrails_max_snapshot_age_ms=5000,
+                profile_name="",
+            )
         ),
+    )
+    monkeypatch.setattr(
+        "merid.risk.kill_switches.risk_controller",
+        MagicMock(can_trade=Mock(return_value=True), record_pnl=Mock()),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.client.get_kalshi_client",
+        lambda: MagicMock(),
     )
     monkeypatch.setattr(
         "merid.event_venues.kalshi.order_deduplication.get_order_cache",
@@ -282,7 +352,10 @@ def test_taker_buy_uses_taker_economics(fresh_state):
     assert intent.aggressiveness == 1.0
     assert intent.order_type == "limit"
     assert intent.time_in_force == "IOC"
-    assert intent.price_cents == 51  # lifted to side_ask
+    # The taker repricer now caps the limit at mid + max_slippage (50 + 5 = 55)
+    # so the order can absorb small ask moves without being rejected before it
+    # reaches the exchange.
+    assert intent.price_cents == 55
     assert intent.fee_type == "taker"
     assert intent.estimated_fee_cents is not None
 
@@ -504,5 +577,6 @@ async def test_route_order_async_plans_before_gate(router_mocks, monkeypatch, fr
     assert result.status == "submitted_live"
     assert len(gate_calls) == 1
     assert len(live_calls) == 1
-    assert gate_calls[0][0].price_cents == 51
-    assert live_calls[0][0].price_cents == 51
+    # _prepare lifts the taker limit to the slippage cap (55c) before the gate.
+    assert gate_calls[0][0].price_cents == 55
+    assert live_calls[0][0].price_cents == 55

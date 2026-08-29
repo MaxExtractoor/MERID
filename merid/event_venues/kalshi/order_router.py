@@ -2509,6 +2509,9 @@ class OrderIntent:
 
     # Kalshi exchange shard index (e.g. 2 for crypto 15m markets). None means unresolved.
     exchange_index: Optional[int] = None
+    # cancel_order_on_pause: True -> venue cancels resting order on any exchange pause.
+    # None uses the configured system default (settings.KALSHI_CANCEL_ORDER_ON_PAUSE).
+    cancel_order_on_pause: Optional[bool] = None
 
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
@@ -3905,8 +3908,15 @@ def _build_create_order_request(
     # Fee-aware EV-derived maximum execution cost cap.
     max_execution_cost_cents = _compute_max_execution_cost_cents(intent, final_price_cents)
 
+    # cancel_order_on_pause: fail-closed default from settings; intent may override.
+    from merid.settings import settings
+    cancel_order_on_pause = getattr(intent, "cancel_order_on_pause", None)
+    if cancel_order_on_pause is None:
+        cancel_order_on_pause = settings.KALSHI_CANCEL_ORDER_ON_PAUSE
+
     metadata["max_execution_cost_cents"] = max_execution_cost_cents
     metadata["self_trade_prevention_type"] = stp
+    metadata["cancel_order_on_pause"] = cancel_order_on_pause
     metadata["ev_net_cents"] = getattr(intent, "ev_net_cents", None)
     metadata["all_in_cost_cents"] = getattr(intent, "all_in_cost_cents", None)
 
@@ -3931,11 +3941,23 @@ def _build_create_order_request(
         order_group_id=intent.order_group_id,
         self_trade_prevention_type=stp,
         max_execution_cost_cents=max_execution_cost_cents,
+        cancel_order_on_pause=cancel_order_on_pause,
         source=intent.source or "agent_grid",
         take_profit_price_cents=intent.take_profit_price_cents,
         stop_loss_price_cents=intent.stop_loss_price_cents,
         metadata=metadata,
     )
+
+    # Record intent in the unified trade attribution fact table (non-blocking).
+    try:
+        from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
+        table = get_trade_attribution_table()
+        if table is not None:
+            table.record_intent(intent, req)
+    except Exception as e:
+        logger.warning("[ORDER-ROUTER] trade attribution record_intent failed: %s", e)
+
+    return req
 
 
 def _price_for_side(

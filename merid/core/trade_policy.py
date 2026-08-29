@@ -77,7 +77,7 @@ class TradePolicyResult:
 
 
 @dataclass
-class OrderDecision:
+class OrderDecisionResult:
     """Result of order decision based on phase, policy, and positions."""
     decision: OrderDecision
     reason: str
@@ -85,7 +85,7 @@ class OrderDecision:
     max_size_multiplier: float = 1.0  # Size multiplier based on phase
 
     def __repr__(self) -> str:
-        return f"OrderDecision(decision={self.decision}, phase={self.phase}, reason={self.reason})"
+        return f"OrderDecisionResult(decision={self.decision}, phase={self.phase}, reason={self.reason})"
 
 
 def classify_liquidity(
@@ -265,7 +265,7 @@ def decide_orders_for_ticker(
     minutes_to_expiry: float,
     has_position: bool = False,
     position_side: Optional[Literal["YES", "NO"]] = None,
-) -> OrderDecision:
+) -> OrderDecisionResult:
     """
     Decide order type based on trade policy, phase, and current positions.
 
@@ -286,7 +286,7 @@ def decide_orders_for_ticker(
 
     # Hard block from trade policy - skip entirely
     if policy_result.policy == "BLOCKED":
-        return OrderDecision(
+        return OrderDecisionResult(
             decision="SKIP",
             reason=f"Trade policy blocked: {policy_result.reason_code}",
             phase=phase,
@@ -296,7 +296,7 @@ def decide_orders_for_ticker(
     # TAIL phase: no new positions, only profit-taking or risk reduction
     if phase == "TAIL":
         if not has_position:
-            return OrderDecision(
+            return OrderDecisionResult(
                 decision="SKIP",
                 reason="TAIL phase: no new positions allowed",
                 phase=phase,
@@ -304,7 +304,7 @@ def decide_orders_for_ticker(
             )
         else:
             # Has position - allow close or adjust for profit-taking
-            return OrderDecision(
+            return OrderDecisionResult(
                 decision="CLOSE",
                 reason="TAIL phase: profit-taking or risk reduction only",
                 phase=phase,
@@ -314,14 +314,14 @@ def decide_orders_for_ticker(
     # WARMUP phase: smaller sizes, cautious entry
     if phase == "WARMUP":
         if policy_result.policy == "SIZE_LIMITED":
-            return OrderDecision(
+            return OrderDecisionResult(
                 decision="OPEN",
                 reason=f"WARMUP phase with size limit: {policy_result.reason_code}",
                 phase=phase,
                 max_size_multiplier=0.5,  # Even smaller in warmup
             )
         else:
-            return OrderDecision(
+            return OrderDecisionResult(
                 decision="OPEN",
                 reason="WARMUP phase: cautious entry with reduced size",
                 phase=phase,
@@ -331,14 +331,14 @@ def decide_orders_for_ticker(
     # ACTIVE phase: normal trading
     if phase == "ACTIVE":
         if policy_result.policy == "SIZE_LIMITED":
-            return OrderDecision(
+            return OrderDecisionResult(
                 decision="ADJUST",
                 reason=f"ACTIVE phase with size limit: {policy_result.reason_code}",
                 phase=phase,
                 max_size_multiplier=0.5,
             )
         else:
-            return OrderDecision(
+            return OrderDecisionResult(
                 decision="OPEN",
                 reason="ACTIVE phase: normal trading",
                 phase=phase,
@@ -346,7 +346,7 @@ def decide_orders_for_ticker(
             )
 
     # Fallback (should not reach here)
-    return OrderDecision(
+    return OrderDecisionResult(
         decision="SKIP",
         reason="Unknown phase or policy combination",
         phase=phase,

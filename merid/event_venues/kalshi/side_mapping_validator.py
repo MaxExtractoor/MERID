@@ -19,6 +19,10 @@ from merid.event_venues.kalshi.binary_price_space import (
     validate_duality,
     yes_to_no_price,
     no_to_yes_price,
+    Side,
+    BookSide,
+    outcome_from_action,
+    book_from_outcome,
 )
 
 logger = get_logger("merid.event_venues.kalshi.side_mapping_validator")
@@ -94,48 +98,54 @@ def validate_kalshi_format_conversion(
 
 
 def validate_api_side_mapping(
-    outcome: str,
+    traded_side: str,
     action: str,
     kalshi_side: str,
 ) -> Tuple[bool, Optional[str]]:
-    """Validate Kalshi API side mapping (bid/ask semantics).
-    
-    This addresses Bug #3 by validating the mapping from outcome/action to
-    Kalshi's bid/ask semantics is correct.
-    
-    Kalshi V2 API mapping:
-    - BUY_YES = bid (bidding to buy YES)
-    - SELL_YES = ask (asking to sell YES)
-    - BUY_NO = bid (bidding to buy NO)
-    - SELL_NO = ask (asking to sell NO)
-    
+    """Validate Kalshi V2 API book-side mapping.
+
+    This is the canonical bid/ask check from the 2026-08-27 playbook.  V2
+    does not have separate YES/NO books; it has a single YES-space book where
+    ``bid`` is the YES side and ``ask`` is the NO side.  The book side is
+    determined by the **held outcome** produced by the order, not by the
+    action alone:
+
+    - BUY_YES  -> long YES -> bid
+    - SELL_NO  -> long YES -> bid
+    - BUY_NO   -> long NO  -> ask
+    - SELL_YES -> long NO  -> ask
+
     Args:
-        outcome: "yes" or "no"
+        traded_side: the contract side being traded ("yes" or "no")
         action: "buy" or "sell"
-        kalshi_side: "bid" or "ask" (Kalshi API side)
-        
+        kalshi_side: "bid" or "ask" (Kalshi V2 book side)
+
     Returns:
         (is_valid, error_message)
     """
     # Validate inputs
-    is_valid, error = validate_side_action_combination(outcome, action)
+    is_valid, error = validate_side_action_combination(traded_side, action)
     if not is_valid:
         return False, error
-    
+
     if kalshi_side not in ("bid", "ask"):
         return False, f"Invalid kalshi_side: {kalshi_side} (must be 'bid' or 'ask')"
-    
-    # Expected mapping: buy = bid, sell = ask (regardless of outcome)
-    expected_kalshi_side = "bid" if action.lower() == "buy" else "ask"
-    
-    if kalshi_side != expected_kalshi_side:
+
+    try:
+        expected = book_from_outcome(
+            outcome_from_action(action, Side(traded_side.lower()))
+        ).value
+    except ValueError as e:
+        return False, f"API side mapping validation error: {e}"
+
+    if kalshi_side != expected:
         error = (
-            f"API side mapping error: outcome={outcome} action={action} -> "
-            f"expected kalshi_side={expected_kalshi_side} actual={kalshi_side}"
+            f"API side mapping error: traded_side={traded_side} action={action} -> "
+            f"expected kalshi_side={expected} actual={kalshi_side}"
         )
         logger.error(f"[API-SIDE-MAPPING-VALIDATION] {error}")
         return False, error
-    
+
     return True, None
 
 

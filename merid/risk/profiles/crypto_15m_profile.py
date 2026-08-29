@@ -1521,7 +1521,6 @@ class Crypto15mProfileAdapter:
             # CRITICAL FIX: Add cluster stop loss with sensible defaults to prevent order blocking
             'max_stop_loss_usd_per_cluster': 2.00,  # $2.00 aggregate cluster stop-loss (sensible default)
             'per_asset_cluster_stop_loss': {'BTC': 2.00, 'ETH': 2.00, 'SOL': 2.00, 'XRP': 2.00, 'DOGE': 2.00},  # Per-asset cluster stop-loss
-            'bankroll_cap_pct': p.venue_bankroll_cap_pct,  # Bankroll cap percentage from profile (2026 best practice)
             'category_limits': {
                 'crypto': {
                     'category': 'crypto',

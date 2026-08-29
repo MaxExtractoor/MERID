@@ -13,7 +13,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -748,7 +748,6 @@ def force_align_from_venue(venue_name: str, user_id: str = "operator") -> Dict[s
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Any
 
 
 class ReconciliationSeverity(Enum):

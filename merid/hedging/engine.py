@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from merid.hedging.config import HedgeConfig
 from utils.logger import get_logger
 
 logger = get_logger("merid.hedging.engine")

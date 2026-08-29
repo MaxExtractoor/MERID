@@ -12,7 +12,9 @@ position: same sign opens/adds, opposite sign (without flipping) closes.
 """
 
 import pytest
+from unittest.mock import MagicMock, Mock
 from merid.event_venues.kalshi.position_cache import CachedPosition
+from merid.position_management.exit_policy import ExitReason
 
 
 class TestPositionCacheCanonicalBinaryHandling:
@@ -99,6 +101,51 @@ class TestPositionCacheCanonicalBinaryHandling:
         position.apply_fill(contracts=1, price_cents=40, fee_cents=2, side="yes", action="buy")
 
         assert position.contracts == 0
+
+
+class TestRecordPnlOnExitFill:
+    """UnifiedRiskManager.record_pnl must fire on every exit fill, regardless of ExitReason."""
+
+    @pytest.mark.parametrize("reason", list(ExitReason))
+    def test_record_pnl_called_for_every_exit_reason(self, reason, monkeypatch):
+        """Each ExitReason produces a fill path through CachedPosition.apply_fill.
+
+        The exit reason itself lives in the order/intent layer, but the position
+        cache is the canonical realized-PnL hook for all fill-based exits (TP, SL,
+        time stop, edge reversal, trim, scale, etc.). This test asserts that the
+        unified daily/weekly loss tracker sees the PnL for every reason path.
+        """
+        fake_risk = MagicMock(record_pnl=Mock())
+        monkeypatch.setattr(
+            "merid.risk.unified_risk_manager.get_unified_risk_manager",
+            lambda: fake_risk,
+        )
+
+        position = CachedPosition(
+            market_id="KXBTC15M-TEST",
+            agent_id="test_agent",
+            thesis_side="yes",
+            contracts=1,
+            side="yes",
+            avg_price_cents=50,
+            realized_pnl_usd=0,
+            unrealized_pnl_usd=0,
+        )
+
+        # Buy YES at 50c, then exit at 60c with a 2c fee -> 8c net realized PnL.
+        position.apply_fill(
+            contracts=1,
+            price_cents=60,
+            fee_cents=2,
+            side="yes",
+            action="sell",
+            is_exit=True,
+        )
+
+        assert position.contracts == 0
+        fake_risk.record_pnl.assert_called_once()
+        call_args = fake_risk.record_pnl.call_args[0][0]
+        assert call_args == pytest.approx(0.08, abs=1e-6)
 
 
 if __name__ == "__main__":

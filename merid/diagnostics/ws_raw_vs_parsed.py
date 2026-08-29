@@ -9,6 +9,7 @@ This module provides the structure and tracking logic that should be integrated
 into the WS client.
 """
 
+import asyncio
 import time
 from collections import defaultdict
 from datetime import datetime, timezone

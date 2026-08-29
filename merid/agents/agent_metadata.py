@@ -77,9 +77,7 @@ AGENT_CLASSIFICATION_MAP: Dict[str, str] = {
     
     # remove
     "Skeptic": "remove",
-    "RiskAgent": "remove",  # Legacy registry version
-    "StrategyAgent": "remove",  # Legacy registry version
-    
+
     # Default
     "default": "research_only",
 }

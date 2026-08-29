@@ -35,8 +35,8 @@ from merid.validation.spot_strike_distance_invariants import (
 
 logger = get_logger("merid.prediction.spot_strike")
 
-# LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
-# Single-threaded FastAPI startup doesn't need lock protection
+# Trace throttling lock/counter
+_trace_lock = threading.Lock()
 _trace_counters: Dict[str, int] = {}
 
 

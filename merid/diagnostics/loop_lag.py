@@ -198,7 +198,6 @@ class LoopLagMonitor:
     
     def _record_high_lag_profile(self, lag_ms: float, tasks: List[Dict[str, Any]]) -> None:
         """Record profiling data for high-lag period."""
-        import traceback
         profile = {
             "timestamp": time.time(),
             "lag_ms": lag_ms,

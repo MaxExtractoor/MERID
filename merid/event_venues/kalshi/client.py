@@ -2411,6 +2411,11 @@ class KalshiVenueClient(EventVenueClient):
         if getattr(order, "post_only", False):
             kalshi_order["post_only"] = True
 
+        # Add cancel_order_on_pause if specified (default True for fail-closed safety)
+        _cancel_on_pause = getattr(order, "cancel_order_on_pause", None)
+        if _cancel_on_pause is not None:
+            kalshi_order["cancel_order_on_pause"] = bool(_cancel_on_pause)
+
         # Canonical V2 wire mapping: book_side is the *only* direction field in the
         # CreateOrderV2 request.  Log it explicitly so the human-readable intent is
         # unambiguous (e.g. "SELL_NO" -> bid, "BUY_NO" -> ask).

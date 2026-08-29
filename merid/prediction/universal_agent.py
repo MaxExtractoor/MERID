@@ -349,6 +349,9 @@ class KalshiUniversalAgent:
             )
             kalshi_side = "BUY_YES"
 
+        # Canonical side for risk checks, logging, and downstream telemetry.
+        side = thesis_side.value
+
         # Risk check
         if self._risk:
             try:

@@ -243,6 +243,8 @@ class TradingStateMachine:
         vol_spike: bool = False,
         regime_action: Optional[str] = None,
         manual_override: Optional[TradingState] = None,
+        hedge_effectiveness: Optional[float] = None,
+        unlinked_hedge_count: int = 0,
     ) -> Optional[StateTransition]:
         """Evaluate if state transition should occur.
         
@@ -264,9 +266,9 @@ class TradingStateMachine:
         self._consecutive_losses = consecutive_losses
         
         # Manual override takes precedence
-        if hedge_effectiveness is not None and hedge_effectiveness != self._state:
+        if manual_override is not None and manual_override != self._state:
             return self._transition(
-                hedge_effectiveness,
+                manual_override,
                 TransitionReason.MANUAL_OVERRIDE,
                 drawdown_pct,
                 {"manual": True}

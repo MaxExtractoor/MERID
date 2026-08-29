@@ -100,6 +100,7 @@ class KalshiVenueClientExecutionPort:
             exchange_index=request.exchange_index,
             self_trade_prevention_type=request.self_trade_prevention_type,
             max_execution_cost_cents=request.max_execution_cost_cents,
+            cancel_order_on_pause=request.cancel_order_on_pause,
         )
 
         result = await self._client.place_order_result(
@@ -110,10 +111,26 @@ class KalshiVenueClientExecutionPort:
         )
 
         if not result.success or result.data is None:
-            return CreateOrderResponse(success=False, error=str(result.error))
+            response = CreateOrderResponse(success=False, error=str(result.error))
+            try:
+                from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
+                table = get_trade_attribution_table()
+                if table is not None:
+                    table.record_order(request, response, None)
+            except Exception as e:
+                logger.warning("[VENUE-CLIENT-PORT] trade attribution record_order failed: %s", e)
+            return response
 
         placed: PlacedOrder = result.data
-        return _placed_order_to_response(placed, request.client_order_id)
+        response = _placed_order_to_response(placed, request.client_order_id)
+        try:
+            from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
+            table = get_trade_attribution_table()
+            if table is not None:
+                table.record_order(request, response, placed)
+        except Exception as e:
+            logger.warning("[VENUE-CLIENT-PORT] trade attribution record_order failed: %s", e)
+        return response
 
     async def get_order(
         self,

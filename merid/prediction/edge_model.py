@@ -440,7 +440,7 @@ class EdgeModel:
         Uses cached snapshots synchronously; schedules async refresh if stale.
         Never blocks the calling thread.
         """
-        import asyncio, threading
+        import asyncio
         now = datetime.now(timezone.utc).timestamp()
 
         def _run_refresh():

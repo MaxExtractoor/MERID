@@ -66,6 +66,19 @@ class GateDecisionModel(BaseModel):
     reason: Optional[str]
 
 
+class TradingHealthModel(BaseModel):
+    """Trading/execution health for the current 15m window."""
+    status: str = "unknown"  # watching | no_candidates | executing | error | unknown
+    last_cycle_ts: Optional[str] = None
+    last_cycle_age_s: Optional[float] = None
+    candidates_last_cycle: int = 0
+    executed_last_cycle: int = 0
+    rejection_breakdown: Dict[str, int] = {}
+    open_orders: int = 0
+    open_positions: int = 0
+    loop_error_count: int = 0
+
+
 class HealthSnapshotModel(BaseModel):
     """Complete 15m health snapshot."""
     timestamp: str
@@ -76,6 +89,7 @@ class HealthSnapshotModel(BaseModel):
     gates: GateDecisionModel
     quarantine_path: str = "unknown"  # active / inactive / unknown
     scenario_mapping: Optional[str] = None
+    trading: Optional[TradingHealthModel] = None
 
 
 @router.get("/", response_model=HealthSnapshotModel)
@@ -165,7 +179,59 @@ async def get_health_snapshot(request: Request):
             # Convert to dict and add scenario mapping
             snapshot_dict = snapshot.to_dict()
             snapshot_dict["scenario_mapping"] = snapshot.map_to_scenario()
-            
+
+            # Augment with live trading/execution status.
+            try:
+                loop = getattr(state, "kalshi_15m_loop", None)
+                agent_grid = getattr(state, "agent_grid_15m", None)
+                position_cache = getattr(state, "position_cache", None)
+
+                last_cycle_ts = getattr(loop, "last_cycle_ts", None)
+                last_cycle_age_s = None
+                if last_cycle_ts is not None:
+                    from datetime import datetime, timezone
+                    last_cycle_age_s = (datetime.now(timezone.utc) - last_cycle_ts).total_seconds()
+                    last_cycle_ts = last_cycle_ts.isoformat()
+
+                executed = getattr(loop, "_last_tick_executed", 0) if loop else 0
+                candidates = getattr(loop, "_last_tick_total_candidates", 0) if loop else 0
+                rejection_breakdown = getattr(loop, "_last_tick_rejection_breakdown", {}) if loop else {}
+
+                if loop is None:
+                    status = "unknown"
+                elif executed > 0:
+                    status = "executing"
+                elif candidates == 0:
+                    status = "no_candidates"
+                else:
+                    status = "candidates_pending"
+
+                open_orders = 0
+                if agent_grid is not None:
+                    open_orders = len(getattr(agent_grid, "_last_open_orders", []))
+
+                open_positions = 0
+                if position_cache is not None:
+                    try:
+                        all_positions = position_cache.get_all_positions(validate_freshness=False)
+                        open_positions = sum(1 for p in all_positions.values() if getattr(p, "contracts", 0) > 0)
+                    except Exception:
+                        pass
+
+                snapshot_dict["trading"] = {
+                    "status": status,
+                    "last_cycle_ts": last_cycle_ts,
+                    "last_cycle_age_s": last_cycle_age_s,
+                    "candidates_last_cycle": candidates,
+                    "executed_last_cycle": executed,
+                    "rejection_breakdown": rejection_breakdown,
+                    "open_orders": open_orders,
+                    "open_positions": open_positions,
+                    "loop_error_count": getattr(loop, "error_count", 0) if loop else 0,
+                }
+            except Exception as trading_err:
+                logger.warning("[HEALTH-SNAPSHOT-API] Failed to collect trading status: %s", trading_err)
+
             logger.info(f"[HEALTH-SNAPSHOT-API] Returning snapshot with book_consistency={snapshot_dict.get('book', {}).get('book_consistency')}")
             return snapshot_dict
         except Exception as e:

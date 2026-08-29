@@ -9,7 +9,6 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
-from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.models")
 

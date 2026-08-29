@@ -1948,6 +1948,15 @@ class KalshiFillsLedger:
                 new_count += 1
                 new_fill_ids.append(fill.fill_id)
 
+                # Record fill in the unified trade attribution fact table (non-blocking).
+                try:
+                    from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
+                    table = get_trade_attribution_table()
+                    if table is not None:
+                        table.record_fill(fill)
+                except Exception as e:
+                    logger.warning("[FILLS-LEDGER] trade attribution record_fill failed: %s", e)
+
                 # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
                 intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None
                 # 2026-08-12: Log canonical side for accounting traceability.
@@ -2247,6 +2256,15 @@ class KalshiFillsLedger:
             self._fills[fill.fill_id] = fill
             self._index_fill(fill)
             self._ws_ingested += 1
+
+            # Record fill in the unified trade attribution fact table (non-blocking).
+            try:
+                from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
+                table = get_trade_attribution_table()
+                if table is not None:
+                    table.record_fill(fill)
+            except Exception as e:
+                logger.warning("[FILLS-LEDGER] trade attribution record_fill failed: %s", e)
 
             # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
             intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None

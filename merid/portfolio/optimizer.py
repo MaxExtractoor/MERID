@@ -660,7 +660,8 @@ class PortfolioOptimizer:
             Otherwise returns portfolio with adjusted weights and risk info.
         """
         weights = portfolio["weights"]
-        
+        use_percent_mode = equity is not None and equity > 0
+
         # Calculate per-asset risk allocation (percent-of-equity mode only)
         asset_risks = {}
         feasible = True

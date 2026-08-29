@@ -11,6 +11,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Tuple
 from merid.event_venues.kalshi.market_catalog import get_market_catalog
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
+from utils.logger import get_logger
+
+logger = get_logger("merid.diagnostics.ticker_inference_vs_close_ts")
 
 
 def parse_close_time_from_ticker(ticker: str) -> datetime:

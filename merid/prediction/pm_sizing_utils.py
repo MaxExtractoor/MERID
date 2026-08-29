@@ -8,6 +8,8 @@ imported without starting CT or duplicating formulas in agent code.
 
 from __future__ import annotations
 
+import logging
+
 from merid.formulas import PositionSizingInputs, quarter_kelly_size
 
 

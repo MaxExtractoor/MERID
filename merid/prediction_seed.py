@@ -27,9 +27,6 @@ from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger
 
-from utils.logger import get_logger
-logger = get_logger("prediction_seed")
-
 logger = get_logger(__name__)
 
 

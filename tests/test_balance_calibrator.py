@@ -84,9 +84,9 @@ def test_cat_tracker_calibrate_sets_crypto_cap():
 def test_cat_tracker_calibrate_sets_corr_cap():
     tracker = CategoryExposureTracker()
     tracker.calibrate_from_balance(500_000)
-    # default corr fraction 0.20 → $1 000
+    # default correlated-stack fraction is taken from settings (CORRELATED_STACK_PCT)
     snap = tracker.get_snapshot()
-    assert snap.corr_cap == pytest.approx(1000.0)
+    assert snap.corr_cap == pytest.approx(1250.0)
 
 
 def test_cat_tracker_calibrate_zero_is_noop():
