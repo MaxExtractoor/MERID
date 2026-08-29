@@ -3855,6 +3855,21 @@ def _build_create_order_request(
             )
 
     # ── Price bounds ─────────────────────────────────────────────────────
+    # 2026-08-29: Use resolved live-config canonical entry/exit range.  Exits
+    # and reduce-only orders may close outside the entry band; everything else
+    # must stay inside [min_entry_cents, max_entry_cents].
+    min_entry_cents = 10
+    max_entry_cents = 75
+    try:
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved.resolved:
+            min_entry_cents = resolved.min_entry_cents
+            max_entry_cents = resolved.max_entry_cents
+    except Exception:
+        pass
+
     if (effective_order_type or "limit") != "market":
         price = int(final_price_cents)
         if not (1 <= price <= 99):
@@ -3863,11 +3878,13 @@ def _build_create_order_request(
                 f"(ticker={intent.ticker})"
             )
         # Sub-10c is an entry guard only; reduce-only exits may close lower.
-        if price < 10 and not (_is_exit_order(intent) or getattr(intent, "reduce_only", False)):
-            raise ValueError(
-                f"min_price_violation:price_cents={price}<10 "
-                f"(ticker={intent.ticker})"
-            )
+        if not (_is_exit_order(intent) or getattr(intent, "reduce_only", False)):
+            if price < min_entry_cents or price > max_entry_cents:
+                raise ValueError(
+                    f"entry_price_outside_canonical_range:price_cents={price} "
+                    f"not_in[{min_entry_cents},{max_entry_cents}] "
+                    f"(ticker={intent.ticker})"
+                )
 
     # ── Correlation metadata ─────────────────────────────────────────────
     metadata: Dict[str, Any] = {
@@ -4619,14 +4636,34 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
         IOC_AUTO_BELOW_SECONDS,
     )
 
+    # 2026-08-29: Prefer the resolved live config for the IOC auto-threshold.
+    resolved = None
     ioc_threshold = IOC_AUTO_BELOW_SECONDS
     try:
-        from merid.risk.profiles.crypto_15m_profile import get_active_profile
-        adapter = get_active_profile()
-        if adapter is not None and adapter.profile is not None:
-            ioc_threshold = float(adapter.profile.venue_invariants_ioc_auto_below_seconds)
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved.resolved:
+            ioc_threshold = float(resolved.ioc_auto_below_seconds)
     except Exception:
-        pass
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+
+            adapter = get_active_profile()
+            if adapter is not None and adapter.profile is not None:
+                ioc_threshold = float(adapter.profile.venue_invariants_ioc_auto_below_seconds)
+        except Exception:
+            pass
+
+    # 2026-08-29: If the intent still has the legacy "gtc" default and a resolved
+    # live config is active, pick the canonical entry/exit TIF.  Explicit caller
+    # values and execution_mode take precedence later.
+    raw_tif = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
+    if resolved is not None and resolved.resolved and raw_tif == "gtc":
+        if _is_exit_order(intent):
+            intent.time_in_force = resolved.exit_tif_default
+        else:
+            intent.time_in_force = resolved.entry_tif_default
 
     # Reduce-only / exit orders must be IOC so they either fill immediately or cancel.
     if getattr(intent, "reduce_only", False):

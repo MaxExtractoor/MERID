@@ -69,6 +69,52 @@ MERID_PI_STAR_TIERED = os.environ.get("MERID_PI_STAR_TIERED", "1").lower() in ("
 MERID_PI_STAR_FLAT_PREMIUM_CENTS = int(os.environ.get("MERID_PI_STAR_FLAT_PREMIUM_CENTS", "0"))
 MERID_PI_STAR_TIERS_CENTS = os.environ.get("MERID_PI_STAR_TIERS_CENTS", "0:40,20:25,40:10,60:0")
 
+def _get_resolved_live_config() -> Optional[Any]:
+    """Return the resolved live config if available, otherwise None."""
+    try:
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved.resolved:
+            return resolved
+    except Exception:
+        pass
+    return None
+
+
+def _get_resolved_min_required_edge(default: float) -> float:
+    """Use the resolved live config edge floor if it is stricter."""
+    resolved = _get_resolved_live_config()
+    if resolved is None:
+        return default
+    resolved_edge = float(resolved.min_required_edge)
+    return max(default, resolved_edge)
+
+
+def _get_resolved_min_p_selected(default: float) -> float:
+    """Use the resolved live config p_selected floor if it is stricter."""
+    resolved = _get_resolved_live_config()
+    if resolved is None:
+        return default
+    resolved_p = float(resolved.min_p_selected)
+    return max(default, resolved_p)
+
+
+def _get_resolved_min_held_price_cents(default: float) -> float:
+    """Use the resolved live config held-price floor if it is stricter."""
+    resolved = _get_resolved_live_config()
+    if resolved is None:
+        return default
+    resolved_floor = float(resolved.min_held_price_cents)
+    return max(default, resolved_floor)
+
+
+def _get_resolved_config_hash() -> Optional[str]:
+    """Return the resolved live config hash if available."""
+    resolved = _get_resolved_live_config()
+    return resolved.config_hash if resolved is not None else None
+
+
 def _parse_pi_star_tiers() -> List[Tuple[int, int]]:
     tiers: List[Tuple[int, int]] = []
     for part in MERID_PI_STAR_TIERS_CENTS.split(","):
@@ -233,6 +279,9 @@ class TradeDecision:
     min_required_edge: Decimal = Decimal("0")
     approved_size_cc: Decimal = Decimal("0")
     policy_version: str = "trade_decision_v2"
+
+    # 2026-08-29: Hash of the resolved live config that authorized this decision.
+    config_hash: Optional[str] = None
 
     @property
     def side(self) -> Optional[Literal["yes", "no"]]:
@@ -570,6 +619,16 @@ def compute_trade_decision(
         regime_probability=regime_probability, regime_label=_regime_label
     )
 
+    # Layer-0: Resolve live config overrides.  When a resolved live config is
+    # active, use its stricter safety floors for edge, p_selected, and the
+    # held-side price floor.  Attach its hash to the decision for audit.
+    _resolved = _get_resolved_live_config()
+    _config_hash = _get_resolved_config_hash() if _resolved is not None else None
+    if _resolved is not None:
+        min_required_edge = _get_resolved_min_required_edge(min_required_edge)
+    min_p_selected = _get_resolved_min_p_selected(TRADE_DECISION_MIN_P_SELECTED)
+    min_held_price_cents = _get_resolved_min_held_price_cents(MERID_MIN_HELD_PRICE_CENTS)
+
     def _no_trade(reason: str) -> TradeDecision:
         decision = TradeDecision(
             run_id=run_id,
@@ -600,6 +659,7 @@ def compute_trade_decision(
             selected_side_pre_edge=selected_side_pre_edge,
             selection_reason=selection_reason,
             policy_version=policy_version,
+            config_hash=_config_hash,
         )
         record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
         return decision
@@ -759,11 +819,11 @@ def compute_trade_decision(
 
     yes_qualifies = (
         yes_breakdown.net_edge >= min_required_edge
-        and yes_breakdown.p_selected > TRADE_DECISION_MIN_P_SELECTED
+        and yes_breakdown.p_selected > min_p_selected
     )
     no_qualifies = (
         no_breakdown.net_edge >= min_required_edge
-        and no_breakdown.p_selected > TRADE_DECISION_MIN_P_SELECTED
+        and no_breakdown.p_selected > min_p_selected
     )
 
     if yes_qualifies and no_qualifies:
@@ -828,7 +888,7 @@ def compute_trade_decision(
         # 2026-08-28: Held-side entry price floor.  Cheap-tail contracts have a
         # near-zero realized win rate; we block entries below 35c unless the
         # model is extremely confident (p_selected >= MERID_CHEAP_TAIL_P_EXCEPTION).
-        min_held_price_dollars = MERID_MIN_HELD_PRICE_CENTS / 100.0
+        min_held_price_dollars = min_held_price_cents / 100.0
         held_price = float(selected_outcome_price)
         if (
             held_price < min_held_price_dollars
@@ -846,7 +906,7 @@ def compute_trade_decision(
             edge_breakdown = None
             no_trade_reason = (
                 f"held_entry_price_below_floor:{held_price:.2f}<"
-                f"{MERID_MIN_HELD_PRICE_CENTS/100.0:.2f}|p={_floor_p:.3f}"
+                f"{min_held_price_cents/100.0:.2f}|p={_floor_p:.3f}"
             )
 
     # Final confidence gate: even if a side qualifies, an invalid confidence
@@ -949,6 +1009,7 @@ def compute_trade_decision(
         min_required_edge=Decimal(str(min_required_edge)),
         approved_size_cc=approved_size_cc,
         policy_version=policy_version,
+        config_hash=_config_hash,
     )
     record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
     return decision

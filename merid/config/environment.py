@@ -52,7 +52,7 @@ def current_env() -> Env:
     # Map common aliases
     if value in ("production", "live"):
         value = "prod"
-    elif value in ("development",):
+    elif value in ("development", "testing"):
         value = "dev"
     
     try:

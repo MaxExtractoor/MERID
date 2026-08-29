@@ -384,9 +384,14 @@ class KalshiCrypto15mRiskEnvelope:
     # ── Computed Venue-Level Caps ────────────────────────────────────────────
     # Per-trade cap (derived from profile percentage × capital)
     max_single_order_notional_usd: float
-    
+
     # Max total notional (sum of all positions)
     max_total_notional_usd: float
+
+    # 2026-08-29: Absolute fixed exposure cap from resolved live config.
+    # This is the single source of truth for the global slot allocator and
+    # all window/total exposure hard stops.
+    fixed_exposure_cap_usd: float = 2.00
     
     # Max concurrent trades (from profile agent_defaults)
     # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $2 exposure cap is the limit
@@ -426,6 +431,12 @@ class KalshiCrypto15mRiskEnvelope:
     max_daily_loss_usd: float
     drawdown_halt_pct: float
     drawdown_unwind_pct: float
+
+    # 2026-08-29: Stop-loss/daily-loss policy from the resolved live config.
+    stop_loss_enabled: bool = False
+
+    # 2026-08-29: Hash of the resolved live config that authorized this envelope.
+    config_hash: Optional[str] = None
     
     # ── Drawdown Tracking ─────────────────────────────────────────────────────
     peak_equity_usd: float
@@ -465,6 +476,8 @@ class KalshiCrypto15mRiskEnvelope:
             raise ValueError(f"max_single_order_notional_usd must be non-negative, got {self.max_single_order_notional_usd}")
         if self.max_total_notional_usd is None or self.max_total_notional_usd < 0:
             raise ValueError(f"max_total_notional_usd must be non-negative, got {self.max_total_notional_usd}")
+        if self.fixed_exposure_cap_usd is None or self.fixed_exposure_cap_usd < 0:
+            raise ValueError(f"fixed_exposure_cap_usd must be non-negative, got {self.fixed_exposure_cap_usd}")
         if self.is_halted is None:
             self.is_halted = False
         if self.current_risk_band is None:
@@ -595,8 +608,8 @@ class KalshiCrypto15mRiskEnvelope:
         """
         # 2026-07-08: DISABLED percentage-based calculation - using fixed $2 exposure cap
         # 2026-08-16: Clamped to live bankroll so an underfunded account cannot overallocate.
-        import os
-        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+        # 2026-08-29: Prefer the resolved live config over free-floating env reads.
+        fixed_exposure_cap_usd = self.fixed_exposure_cap_usd
         return min(fixed_exposure_cap_usd, self.live_bankroll_usd)
     
     def distance_to_halt_pct(self) -> float:
@@ -738,12 +751,11 @@ class KalshiCrypto15mRiskEnvelope:
             if asset:
                 current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
         
-        # CRITICAL: System uses fixed $2.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
-        # Percentage-based limits (3% per-agent, 5% total venue) are DISABLED
-        # Global slot allocator is the single source of truth for $2.00 total cap enforcement
+        # CRITICAL: System uses the fixed exposure cap from the resolved live
+        # config.  Percentage-based limits (3% per-agent, 5% total venue) are DISABLED.
+        # Global slot allocator is the single source of truth for total cap enforcement.
         # 2026-08-16: Cap cannot exceed peak/live bankroll (underfunded account protection).
-        import os
-        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+        fixed_exposure_cap_usd = self.fixed_exposure_cap_usd
         effective_cap_usd = min(fixed_exposure_cap_usd, peak_bankroll_usd)
         total_venue_limit_usd = effective_cap_usd  # No percentage overrides allowed
         
@@ -1034,7 +1046,26 @@ def compute_kalshi_crypto_15m_risk_envelope(
             f"[RISK-ENVELOPE] Invalid bankroll_usd={live_bankroll_usd} - using conservative default $100.00 for graceful degradation"
         )
         live_bankroll_usd = 100.0
-    
+
+    # 2026-08-29: Prefer the resolved live config when it is available.
+    # It provides the single source of truth for the fixed exposure cap, daily
+    # loss, stop-loss policy, and entry/exit TIF.
+    resolved_config = None
+    resolved_hash = None
+    try:
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved_config = get_resolved_live_config(allow_unresolved=True)
+        if resolved_config.resolved:
+            resolved_hash = resolved_config.config_hash
+    except Exception:
+        resolved_config = None
+
+    def _fixed_exposure_cap() -> float:
+        if resolved_config is not None and resolved_config.resolved:
+            return min(float(resolved_config.fixed_exposure_cap_usd), live_bankroll_usd)
+        return min(float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00')), live_bankroll_usd)
+
     # CRITICAL FIX 2026-07-08: Initialize peak bankroll on envelope creation
     # This ensures peak bankroll is set even before first check_window_limit call
     with _WINDOW_TRACKING_LOCK:
@@ -1143,12 +1174,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # ── Compute Venue-Level Caps ────────────────────────────────────────────
     # 2026-07-08: DISABLED percentage-based calculations - using fixed $2 exposure model
-    # Fixed exposure cap from environment variable or default $2.00
+    # 2026-08-29: Fixed exposure cap is now sourced from the resolved live config.
     # CRITICAL FIX (2026-08-16): Cap cannot exceed live bankroll. An underfunded account
     # cannot expose more notional than it has, so the effective cap is the smaller of the
     # configured fixed cap and the live bankroll.
-    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
-    fixed_exposure_cap_usd = min(fixed_exposure_cap_usd, live_bankroll_usd)
+    fixed_exposure_cap_usd = _fixed_exposure_cap()
     # Per-trade cap = total cap because slot allocator may allocate all exposure to single best edge
     max_single_order_notional_usd = fixed_exposure_cap_usd
     max_total_notional_usd = fixed_exposure_cap_usd  # Total exposure cap = fixed cap (clamped)
@@ -1243,34 +1273,48 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # Extract kelly fraction (CRITICAL FIX: 0.02 - aligned with profile (was 0.05))
     kelly_fraction = kelly_config.get('kelly_fraction', kelly_config.get('kelly_hard_cap', 0.02))
     
-    daily_loss_enabled = guardrails.get('daily_loss_enabled', False)
-    
-    # Daily loss is optional; if disabled, set to very high value (effectively disabled)
-    if daily_loss_enabled:
-        # Get operation mode from profile YAML or environment variable
-        # Priority: env var > profile YAML > default (prod)
-        operation_mode = os.getenv('MERID_OPERATION_MODE', profile_config.get('operation_mode', 'prod')).lower()
-        
-        # Get daily loss limit based on operation mode
-        max_daily_loss_pct_raw = guardrails.get('max_daily_loss_pct', 0.20)  # CRITICAL FIX: 20% aligned with drawdown halt (was 0.05)
-        if isinstance(max_daily_loss_pct_raw, dict):
-            # Mode-specific limits: {test: 0.20, prod: 0.20}
-            max_daily_loss_pct = max_daily_loss_pct_raw.get(operation_mode, max_daily_loss_pct_raw.get('prod', 0.20))
+    # 2026-08-29: Daily loss policy is now sourced from the resolved live config.
+    # It can still be overridden by the guardrails block when resolution is not
+    # available, but the resolved config is the single source of truth.
+    if resolved_config is not None and resolved_config.resolved:
+        daily_loss_enabled = resolved_config.daily_loss_enabled
+        if daily_loss_enabled:
+            max_daily_loss_pct = float(resolved_config.max_daily_loss_pct)
+            max_daily_loss_usd = float(resolved_config.max_daily_loss_usd)
+            if max_daily_loss_usd is None or max_daily_loss_usd <= 0:
+                max_daily_loss_usd = effective_capital * max_daily_loss_pct
         else:
-            # Legacy single value (backward compatibility)
-            max_daily_loss_pct = max_daily_loss_pct_raw
-        
-        # Log operation mode and limit
-        logger.info(
-            f"[RISK-ENVELOPE] Operation mode: {operation_mode}, "
-            f"Daily loss limit: ${effective_capital * max_daily_loss_pct:.2f}"
-        )
-        
-        max_daily_loss_usd = effective_capital * max_daily_loss_pct
+            max_daily_loss_pct = None
+            max_daily_loss_usd = float('inf')
     else:
-        # Daily loss disabled; drawdown is the single source of truth
-        max_daily_loss_pct = None
-        max_daily_loss_usd = float('inf')  # Effectively disabled
+        daily_loss_enabled = guardrails.get('daily_loss_enabled', False)
+
+        # Daily loss is optional; if disabled, set to very high value (effectively disabled)
+        if daily_loss_enabled:
+            # Get operation mode from profile YAML or environment variable
+            # Priority: env var > profile YAML > default (prod)
+            operation_mode = os.getenv('MERID_OPERATION_MODE', profile_config.get('operation_mode', 'prod')).lower()
+
+            # Get daily loss limit based on operation mode
+            max_daily_loss_pct_raw = guardrails.get('max_daily_loss_pct', 0.20)  # CRITICAL FIX: 20% aligned with drawdown halt (was 0.05)
+            if isinstance(max_daily_loss_pct_raw, dict):
+                # Mode-specific limits: {test: 0.20, prod: 0.20}
+                max_daily_loss_pct = max_daily_loss_pct_raw.get(operation_mode, max_daily_loss_pct_raw.get('prod', 0.20))
+            else:
+                # Legacy single value (backward compatibility)
+                max_daily_loss_pct = max_daily_loss_pct_raw
+
+            # Log operation mode and limit
+            logger.info(
+                f"[RISK-ENVELOPE] Operation mode: {operation_mode}, "
+                f"Daily loss limit: ${effective_capital * max_daily_loss_pct:.2f}"
+            )
+
+            max_daily_loss_usd = effective_capital * max_daily_loss_pct
+        else:
+            # Daily loss disabled; drawdown is the single source of truth
+            max_daily_loss_pct = None
+            max_daily_loss_usd = float('inf')  # Effectively disabled
     
     # 2026-07-08: DISABLED percentage-based guardrails - using fixed $2 exposure model
     logger.info(
@@ -1382,7 +1426,14 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # CRITICAL FIX (2026-08-16): Window limits also clamped to live bankroll above.
     per_agent_window_limit_usd = fixed_exposure_cap_usd  # This is GLOBAL limit, not per-agent
     total_venue_window_limit_usd = fixed_exposure_cap_usd  # Same global limit
-    
+
+    # 2026-08-29: Stop-loss policy from resolved live config or guardrails fallback.
+    stop_loss_enabled = (
+        resolved_config.stop_loss_enabled
+        if resolved_config is not None and resolved_config.resolved
+        else guardrails.get('stop_loss_enabled', daily_loss_enabled)
+    )
+
     envelope = KalshiCrypto15mRiskEnvelope(
         live_bankroll_usd=live_bankroll_usd,
         profile_capital_usd=profile_capital,
@@ -1422,6 +1473,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
         # so callers and logs see the bankroll-capped value, not the default $2.00.
         per_agent_window_limit_usd=fixed_exposure_cap_usd,
         total_venue_window_limit_usd=fixed_exposure_cap_usd,
+        fixed_exposure_cap_usd=fixed_exposure_cap_usd,
+        stop_loss_enabled=stop_loss_enabled,
+        config_hash=resolved_hash,
     )
     
     # ── Log Envelope Snapshot ───────────────────────────────────────────────────

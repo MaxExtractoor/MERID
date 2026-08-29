@@ -19,13 +19,27 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 import numpy as np
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.risk.global_slot_allocator")
+
+
+def _get_resolved_or_default() -> Optional[Any]:
+    """Return the resolved live config if available, otherwise None."""
+    try:
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved.resolved:
+            return resolved
+    except Exception:
+        pass
+    return None
+
 
 # Maximum contracts per order under the fixed $2 exposure cap.
 # 2026-08-22: Raised from 1 to 2 to double per-asset exposure while keeping total ≤ $2.
@@ -77,18 +91,23 @@ class AllocationRequest:
     
     def __post_init__(self):
         """Validate request parameters."""
+        resolved = _get_resolved_or_default()
+        max_contracts = resolved.max_contracts_per_order if resolved else MAX_CONTRACTS_PER_ORDER
+        min_entry_cents = resolved.min_entry_cents if resolved else 10
+        max_entry_cents = resolved.max_entry_cents if resolved else 75
+
         if self.count < 1:
             raise ValueError(f"count>0 required, got count={self.count}")
         # Only validate entry price and per-order count cap for entry orders.
         # Exit orders can be at any price and may exceed 2 contracts to close a position.
         if not self.is_exit_order:
-            if not (1 <= self.count <= MAX_CONTRACTS_PER_ORDER):
+            if not (1 <= self.count <= max_contracts):
                 raise ValueError(
-                    f"Entry orders must have count between 1 and {MAX_CONTRACTS_PER_ORDER}, got count={self.count}"
+                    f"Entry orders must have count between 1 and {max_contracts}, got count={self.count}"
                 )
-            if self.entry_price_cents < 10 or self.entry_price_cents > 75:
+            if self.entry_price_cents < min_entry_cents or self.entry_price_cents > max_entry_cents:
                 raise ValueError(
-                    f"Entry price {self.entry_price_cents}c outside allowed range [10, 75]"
+                    f"Entry price {self.entry_price_cents}c outside allowed range [{min_entry_cents}, {max_entry_cents}]"
                 )
             # Validate confidence range
             if not 0.0 <= self.confidence <= 1.0:
@@ -117,31 +136,46 @@ class GlobalSlotAllocator:
     MAX_ENTRY_CENTS = int(os.getenv("MERID_MAX_ENTRY_CENTS", "75"))
     MAX_CONTRACTS_PER_ORDER = int(os.getenv("MERID_MAX_CONTRACTS_PER_ORDER", "2"))
     MAX_POSITIONS_PER_ASSET = int(os.getenv("MERID_MAX_POSITIONS_PER_ASSET", "1"))
-    
+
     def __init__(self):
         self._lock = threading.RLock()  # Use reentrant lock to prevent deadlock
-        
+
         # Active position slots
         self._slots: Dict[str, PositionSlot] = {}  # slot_id -> PositionSlot
-        
+
         # Allocation statistics
         self._total_requests = 0
         self._total_allocations = 0
         self._total_rejections = 0
         self._total_releases = 0
-        
+
+        # Prefer the resolved live config; fall back to class defaults.
+        resolved = _get_resolved_or_default()
+        if resolved is not None:
+            self.max_exposure_usd = float(resolved.fixed_exposure_cap_usd)
+            self.min_entry_cents = int(resolved.min_entry_cents)
+            self.max_entry_cents = int(resolved.max_entry_cents)
+            self.max_contracts_per_order = int(resolved.max_contracts_per_order)
+            self.max_positions_per_asset = int(resolved.max_positions_per_asset)
+        else:
+            self.max_exposure_usd = self.MAX_EXPOSURE_USD
+            self.min_entry_cents = self.MIN_ENTRY_CENTS
+            self.max_entry_cents = self.MAX_ENTRY_CENTS
+            self.max_contracts_per_order = self.MAX_CONTRACTS_PER_ORDER
+            self.max_positions_per_asset = self.MAX_POSITIONS_PER_ASSET
+
         logger.info(
             "[SLOT-ALLOCATOR] Initialized with max_exposure=$%.2f, "
             "entry_range=[%dc-%dc], max_contracts=%d",
-            self.MAX_EXPOSURE_USD, self.MIN_ENTRY_CENTS, 
-            self.MAX_ENTRY_CENTS, self.MAX_CONTRACTS_PER_ORDER
+            self.max_exposure_usd, self.min_entry_cents,
+            self.max_entry_cents, self.max_contracts_per_order
         )
     
     def get_available_exposure(self) -> float:
         """Get available exposure in USD."""
         with self._lock:
             total_exposure = round(sum(slot.exposure_usd for slot in self._slots.values()), 2)
-            available = round(self.MAX_EXPOSURE_USD - total_exposure, 2)
+            available = round(self.max_exposure_usd - total_exposure, 2)
             return max(0.0, available)
     
     def get_total_exposure(self) -> float:
@@ -399,19 +433,25 @@ class GlobalSlotAllocator:
             Tuple of (allowed, reason)
         """
         # Check entry price range
-        if entry_price_cents < self.MIN_ENTRY_CENTS:
-            return False, f"Entry price {entry_price_cents}c below minimum {self.MIN_ENTRY_CENTS}c"
+        if entry_price_cents < self.min_entry_cents:
+            return False, f"Entry price {entry_price_cents}c below minimum {self.min_entry_cents}c"
 
-        if entry_price_cents > self.MAX_ENTRY_CENTS:
-            return False, f"Entry price {entry_price_cents}c above maximum {self.MAX_ENTRY_CENTS}c"
+        if entry_price_cents > self.max_entry_cents:
+            return False, f"Entry price {entry_price_cents}c above maximum {self.max_entry_cents}c"
+
+        if count > self.max_contracts_per_order:
+            return False, (
+                f"Contract count {count} exceeds max {self.max_contracts_per_order} "
+                f"per order"
+            )
 
         # Check per-asset position limit (2026-07-13: Only 1 position per asset)
         if asset is not None:
             existing_asset_slots = self.get_slots_by_asset(asset)
-            if len(existing_asset_slots) >= self.MAX_POSITIONS_PER_ASSET:
+            if len(existing_asset_slots) >= self.max_positions_per_asset:
                 return False, (
                     f"Asset {asset} already has {len(existing_asset_slots)} position(s), "
-                    f"max {self.MAX_POSITIONS_PER_ASSET} allowed"
+                    f"max {self.max_positions_per_asset} allowed"
                 )
 
         # Check available exposure
@@ -433,7 +473,7 @@ class GlobalSlotAllocator:
         # Re-enable if needed with proper configuration and testing.
 
         # Check if enough room for minimum entry (10c)
-        if round(available - required_exposure, 2) < round(self.MIN_ENTRY_CENTS / 100.0, 2):
+        if round(available - required_exposure, 2) < round(self.min_entry_cents / 100.0, 2):
             # This is OK - we just won't be able to add another position after this one
             logger.debug(
                 "[SLOT-ALLOCATOR] Allocation would leave <10c available: "
@@ -471,11 +511,11 @@ class GlobalSlotAllocator:
         
         # Validate request for entry orders
         try:
-            if request.entry_price_cents < self.MIN_ENTRY_CENTS:
+            if request.entry_price_cents < self.min_entry_cents:
                 self._total_rejections += 1
                 return False, f"Entry price {request.entry_price_cents}c below minimum", None
             
-            if request.entry_price_cents > self.MAX_ENTRY_CENTS:
+            if request.entry_price_cents > self.max_entry_cents:
                 self._total_rejections += 1
                 return False, f"Entry price {request.entry_price_cents}c above maximum", None
         except ValueError as e:
@@ -764,7 +804,7 @@ class GlobalSlotAllocator:
 
                     # Log the release
                     total_exposure = sum(s.exposure_usd for s in self._slots.values())
-                    available = self.MAX_EXPOSURE_USD - total_exposure
+                    available = self.max_exposure_usd - total_exposure
 
                     logger.info(
                         "[SLOT-ALLOCATOR] Released slot by ticker: slot_id=%s agent=%s asset=%s ticker=%s "

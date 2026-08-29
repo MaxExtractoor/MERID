@@ -526,6 +526,11 @@ class CanonicalOrderIntent:
     position_effect: Literal["OPEN", "CLOSE"] | None = None
     economic_side: Literal["YES", "NO"] | None = None
 
+    # 2026-08-29: Configuration hash of the resolved live config that authorized
+    # this order.  Provides cryptographic audit linkage from every intent back
+    # to the active safety policy.
+    config_hash: str | None = None
+
     def yes_delta(self) -> int:
         """Signed-YES centi-contract delta for this order."""
         return yes_delta(self.action, self.contract, self.qty_cc)
@@ -584,6 +589,7 @@ class CanonicalOrderIntent:
             "intent": self.intent,
             "position_effect": self.position_effect,
             "economic_side": self.economic_side,
+            "config_hash": self.config_hash,
         }
 
 
@@ -960,6 +966,40 @@ def normalize_order(
     if getattr(intent, "intent", None) in ("OPEN", "CLOSE", "REDUCE", "CANCEL_REPLACE"):
         intent_val = intent.intent
 
+    # Resolve time-in-force from the canonical live config when no explicit
+    # TIF is supplied on the intent.  Exits are allowed to rest; entries are
+    # immediate (ioc/fok) to avoid stale capital.
+    explicit_tif = getattr(intent, "time_in_force", None)
+    if explicit_tif:
+        time_in_force = str(explicit_tif).lower()
+    else:
+        try:
+            from merid.config.live_config import get_resolved_live_config
+
+            resolved = get_resolved_live_config(allow_unresolved=True)
+            if resolved.resolved:
+                time_in_force = (
+                    resolved.exit_tif_default
+                    if purpose == "close"
+                    else resolved.entry_tif_default
+                )
+            else:
+                time_in_force = "gtc"
+        except Exception:
+            time_in_force = "gtc"
+
+    # Attach the configuration hash that authorized this order.
+    config_hash = getattr(intent, "config_hash", None)
+    if not config_hash:
+        try:
+            from merid.config.live_config import get_resolved_live_config
+
+            resolved = get_resolved_live_config(allow_unresolved=True)
+            if resolved.resolved:
+                config_hash = resolved.config_hash
+        except Exception:
+            config_hash = None
+
     return CanonicalOrderIntent(
         market_ticker=market_ticker,
         contract=contract,  # type: ignore[arg-type]
@@ -980,7 +1020,7 @@ def normalize_order(
         kalshi_side=kalshi_side,
         fee_cents=fee,
         reduce_only=bool(getattr(intent, "reduce_only", False)),
-        time_in_force=str(getattr(intent, "time_in_force", "gtc") or "gtc").lower(),
+        time_in_force=time_in_force,
         all_in_cost_cents=getattr(intent, "all_in_cost_cents", None),
         ev_net_cents=getattr(intent, "ev_net_cents", None),
         slippage_cents=getattr(intent, "slippage_cents", None),
@@ -1010,6 +1050,7 @@ def normalize_order(
         intent=intent_val,
         position_effect=position_effect_val,
         economic_side=economic_side_val,
+        config_hash=config_hash,
     )
 
 
