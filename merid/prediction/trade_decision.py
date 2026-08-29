@@ -78,7 +78,7 @@ MERID_PI_STAR_TIERS_CENTS = os.environ.get("MERID_PI_STAR_TIERS_CENTS", "0:40,20
 # does not clear the configured thresholds.  The old edge-%/p_selected gates
 # remain visible in the decision as telemetry, but the EV gate is the sole
 # authority for live entries.
-MERID_EV_GATE_AUTHORITATIVE = os.environ.get("MERID_EV_GATE_AUTHORITATIVE", "0").lower() in ("1", "true", "yes")
+MERID_EV_GATE_AUTHORITATIVE = os.environ.get("MERID_EV_GATE_AUTHORITATIVE", "1").lower() in ("1", "true", "yes")
 
 # 2026-08-29: Order decision ledger collection.  When enabled, every trade
 # decision is persisted before any order is submitted.
