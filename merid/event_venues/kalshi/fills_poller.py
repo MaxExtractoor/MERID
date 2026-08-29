@@ -900,6 +900,24 @@ class FillsPoller:
                                 settled_yes = True
                             elif res in ("no", "false", "0") or result_str in ("no", "false", "0"):
                                 settled_yes = False
+                    # The /markets endpoint for finalized 15m contracts no longer
+                    # includes the result.  Fall back to the canonical settlement
+                    # poller cache, which parses /portfolio/settlements.
+                    if settled_yes is None:
+                        try:
+                            from merid.event_venues.kalshi.settlement_poller import get_settlement_poller, SettlementStatus
+                            kalshi_client = client
+                            if hasattr(client, "_client"):
+                                kalshi_client = client._client
+                            poller = get_settlement_poller(kalshi_client)
+                            cached = poller.get_settlement(ticker) if poller else None
+                            if cached and cached.status == SettlementStatus.SETTLED:
+                                if cached.settlement_price_cents == 100:
+                                    settled_yes = True
+                                elif cached.settlement_price_cents == 0:
+                                    settled_yes = False
+                        except Exception:
+                            pass
                 except Exception as _mkt_exc:
                     # 404 for a settled/deleted market means we cannot fetch the
                     # official outcome and should stop retrying.
