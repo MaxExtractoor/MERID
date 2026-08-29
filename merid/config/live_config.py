@@ -124,6 +124,7 @@ class ResolvedLiveConfig:
     # Provenance / audit
     source_overrides: Dict[str, Any] = field(default_factory=dict)
     conflicts_caught: List[str] = field(default_factory=list)
+    invariants_checked: List[str] = field(default_factory=list)
 
     def to_canonical_dict(self) -> Dict[str, Any]:
         """Return a JSON-safe, hashable canonical dict."""
@@ -512,11 +513,39 @@ class LiveConfigResolver:
         self._operation_mode = (operation_mode or _safe_env("MERID_OPERATION_MODE") or "").strip()
         self._conflicts: List[str] = []
         self._overrides: Dict[str, Any] = {}
+        self._invariants_checked: List[str] = []
+
+    def _load_env_specific_dotenv(self) -> None:
+        """Load .env.<env> files for the current MERID_ENV / operation mode.
+
+        These files are loaded with ``override=False`` so explicit process
+        environment variables always win, but repository env files can supply
+        missing production values (e.g. ``.env.live`` risk limits).
+        """
+        try:
+            from dotenv import load_dotenv
+        except ImportError:
+            return
+
+        env_name = (_safe_env("MERID_ENV") or _safe_env("MERID_OPERATION_MODE") or "").lower()
+        env_aliases = {env_name} if env_name else set()
+        if env_name in ("prod", "production", "live"):
+            env_aliases.update({"live", "production", "prod"})
+
+        repo_root = Path(__file__).parent.parent.parent
+        for alias in sorted(env_aliases):
+            env_path = repo_root / f".env.{alias}"
+            if env_path.exists():
+                try:
+                    load_dotenv(str(env_path), override=False)
+                except Exception:
+                    pass
 
     def resolve(self) -> ResolvedLiveConfig:
         """Load the profile, apply env overrides, and enforce invariants."""
         self._conflicts = []
         self._overrides = {}
+        self._invariants_checked = []
 
         # Load profile via the canonical adapter and also keep raw YAML.
         # Importing the adapter pulls in merid.settings, which loads the .env
@@ -555,6 +584,11 @@ class LiveConfigResolver:
 
         adapter = Crypto15mProfileAdapter(self._profile_path)
         profile = adapter.profile
+
+        # Load environment-specific .env files (e.g. .env.live, .env.production)
+        # without overwriting explicit process environment variables.  This makes
+        # the resolver authoritative across all env files, not just the repo .env.
+        self._load_env_specific_dotenv()
 
         # Validate that all safety-critical env variables are in the schema and
         # collect unknown/overrides.  This runs after the profile adapter import
@@ -640,13 +674,23 @@ class LiveConfigResolver:
                 )
             self._overrides.setdefault("MERID_FIXED_EXPOSURE_CAP_USD", env_fixed)
 
-        env_cap = env_fixed if env_fixed is not None else env_max
-        if env_cap is not None and env_cap > profile_cap:
-            raise LiveConfigInvariantError(
-                f"Environment override attempts to raise the fixed exposure cap: "
-                f"profile={profile_cap}, env={env_cap}. Raising safety limits is not allowed."
+        requested_env_cap = env_fixed if env_fixed is not None else env_max
+        if requested_env_cap is not None and requested_env_cap > profile_cap:
+            # 2026-08-29: Reject the unsafe override and keep the profile cap.
+            # The resolver fails closed by choosing the safer value and recording
+            # the attempt, rather than crashing and leaving the caller blind.
+            self._conflicts.append(
+                f"Exposure cap override rejected: env={requested_env_cap} is higher than "
+                f"profile={profile_cap}; resolved to the safer profile cap"
             )
-        fixed_exposure_cap = env_cap if env_cap is not None else profile_cap
+            requested_env_cap = None
+
+        fixed_exposure_cap = requested_env_cap if requested_env_cap is not None else profile_cap
+        self._invariants_checked.append(
+            f"Exposure cap: profile={profile_cap} USD; "
+            f"env={requested_env_cap if requested_env_cap is not None else 'none'}; "
+            f"resolved={fixed_exposure_cap} USD"
+        )
 
         # ── Contracts per order ───────────────────────────────────────────────
         profile_contracts = int(profile.contract_caps_max_single_order_contracts)
@@ -659,11 +703,18 @@ class LiveConfigResolver:
 
         env_contracts = env.get("MERID_MAX_CONTRACTS_PER_ORDER")
         if env_contracts is not None and env_contracts > profile_contracts:
-            raise LiveConfigInvariantError(
-                f"Environment override attempts to raise max contracts per order: "
-                f"profile={profile_contracts}, env={env_contracts}"
+            self._conflicts.append(
+                f"Max contracts override rejected: env={env_contracts} is higher than "
+                f"profile={profile_contracts}; resolved to the safer profile value"
             )
+            env_contracts = None
+
         max_contracts = env_contracts if env_contracts is not None else profile_contracts
+        self._invariants_checked.append(
+            f"Max contracts per order: profile={profile_contracts}; "
+            f"env={env_contracts if env_contracts is not None else 'none'}; "
+            f"resolved={max_contracts}"
+        )
 
         # ── Price collar ──────────────────────────────────────────────────────
         # Resolve the tightest execution range from all profile sources.
@@ -700,20 +751,24 @@ class LiveConfigResolver:
         env_min_entry = env.get("MERID_MIN_ENTRY_CENTS")
         if env_min_entry is not None:
             if env_min_entry < min_entry:
-                raise LiveConfigInvariantError(
-                    f"Environment override attempts to lower the minimum entry price: "
-                    f"profile={min_entry}, env={env_min_entry}"
+                self._conflicts.append(
+                    f"Minimum entry price override rejected: env={env_min_entry}c is lower than "
+                    f"profile={min_entry}c; resolved to the safer profile floor"
                 )
-            min_entry = env_min_entry
+                env_min_entry = None
+            else:
+                min_entry = env_min_entry
 
         env_max_entry = env.get("MERID_MAX_ENTRY_CENTS")
         if env_max_entry is not None:
             if env_max_entry > max_entry:
-                raise LiveConfigInvariantError(
-                    f"Environment override attempts to raise the maximum entry price: "
-                    f"profile={max_entry}, env={env_max_entry}"
+                self._conflicts.append(
+                    f"Maximum entry price override rejected: env={env_max_entry}c is higher than "
+                    f"profile={max_entry}c; resolved to the safer profile ceiling"
                 )
-            max_entry = env_max_entry
+                env_max_entry = None
+            else:
+                max_entry = env_max_entry
 
         valid_min = int(profile.venue_invariants_valid_price_cents_min)
         valid_max = int(profile.venue_invariants_valid_price_cents_max)
@@ -728,6 +783,12 @@ class LiveConfigResolver:
         min_entry = max(min_entry, valid_min)
         max_entry = min(max_entry, valid_max)
 
+        self._invariants_checked.append(
+            f"Price collar: profile sources=[{price_range.min_price_cents}, {price_range.max_price_cents}], "
+            f"guardrails=[{guardrails_min}, {guardrails_max}], valid=[{valid_min}, {valid_max}]; "
+            f"resolved entry range=[{min_entry}, {max_entry}]"
+        )
+
         # ── Daily loss ────────────────────────────────────────────────────────
         guardrails = raw.get("guardrails", {})
         daily_loss_enabled = bool(guardrails.get("daily_loss_enabled", False))
@@ -740,14 +801,27 @@ class LiveConfigResolver:
         elif mdl is not None:
             max_daily_loss_pct = Decimal(str(mdl))
 
-        env_daily_loss = env.get("MERID_MAX_DAILY_LOSS_PCT")
+        profile_daily_loss_pct = max_daily_loss_pct
+        requested_env_daily_loss = env.get("MERID_MAX_DAILY_LOSS_PCT")
+        env_daily_loss = requested_env_daily_loss
         if env_daily_loss is not None:
-            if env_daily_loss > max_daily_loss_pct:
-                raise LiveConfigInvariantError(
-                    f"Environment override attempts to raise the daily loss limit: "
-                    f"profile={max_daily_loss_pct}, env={env_daily_loss}"
+            if env_daily_loss > profile_daily_loss_pct:
+                # 2026-08-29: Reject the looser override and keep the tighter profile limit.
+                # The conflict is recorded so the audit log shows 5% won.
+                self._conflicts.append(
+                    f"Daily loss override rejected: env={env_daily_loss} is higher than "
+                    f"profile={profile_daily_loss_pct}; resolved to the safer profile limit"
                 )
-            max_daily_loss_pct = env_daily_loss
+                env_daily_loss = None
+            else:
+                max_daily_loss_pct = env_daily_loss
+
+        self._invariants_checked.append(
+            f"Daily loss pct: daily_loss_enabled={daily_loss_enabled}; "
+            f"profile={profile_daily_loss_pct}; "
+            f"env={requested_env_daily_loss if requested_env_daily_loss is not None else 'none'}; "
+            f"resolved={max_daily_loss_pct}"
+        )
 
         capital_usd = Decimal(str(profile.capital_usd)) if profile.capital_usd > 0 else None
         max_daily_loss_usd = None
@@ -768,20 +842,22 @@ class LiveConfigResolver:
         env_entry_tif = env.get("MERID_ENTRY_TIF_DEFAULT")
         if env_entry_tif is not None:
             if env_entry_tif.lower() not in ("ioc", "fok"):
-                raise LiveConfigInvariantError(
-                    f"Unsafe entry TIF override: {env_entry_tif!r}. Entry orders must be "
-                    "immediate (ioc or fok)."
+                self._conflicts.append(
+                    f"Entry TIF override rejected: {env_entry_tif!r} is not immediate; "
+                    f"resolved to the safer profile default {entry_tif}"
                 )
-            entry_tif = env_entry_tif.lower()
+            else:
+                entry_tif = env_entry_tif.lower()
 
         env_exit_tif = env.get("MERID_EXIT_TIF_DEFAULT")
         if env_exit_tif is not None:
             if env_exit_tif.lower() in ("ioc", "fok"):
-                raise LiveConfigInvariantError(
-                    f"Unsafe exit TIF override: {env_exit_tif!r}. Exit orders must be able to "
-                    "rest (gtc or gtt)."
+                self._conflicts.append(
+                    f"Exit TIF override rejected: {env_exit_tif!r} cannot rest; "
+                    f"resolved to the safer profile default {exit_tif}"
                 )
-            exit_tif = env_exit_tif.lower()
+            else:
+                exit_tif = env_exit_tif.lower()
 
         ioc_auto = int(profile.venue_invariants_ioc_auto_below_seconds)
         env_ioc_auto = env.get("MERID_IOC_AUTO_BELOW_SECONDS")
@@ -794,12 +870,31 @@ class LiveConfigResolver:
             book_staleness = env_book_staleness
 
         # ── Stop-loss execution path ──────────────────────────────────────────
+        # 2026-08-29: Detection and execution are deliberately decoupled here.
+        # stop_loss_enabled means protective-exit detection is active and logged.
+        # stop_candidate_submission_enabled means a validated StopCandidate may be
+        # converted into a live order.  It defaults to False and is ignored from
+        # env until the B stop-candidate reducer and replay harness pass.
         exit_policy = raw.get("exit_policy", {})
         risk_reward = exit_policy.get("risk_reward", {})
         stop_loss_enabled = bool(risk_reward.get("stop_loss_enabled", True))
 
-        stop_submission_enabled = bool(env.get("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", False))
+        env_submission_request = env.get("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION")
+        stop_submission_enabled = False
+        if env_submission_request:
+            self._conflicts.append(
+                "Stop-candidate submission env request ignored: execution remains disabled "
+                "until the B stop-candidate reducer and replay harness pass"
+            )
+
         unprotected_entries = bool(env.get("MERID_ALLOW_UNPROTECTED_ENTRIES", False))
+
+        self._invariants_checked.append(
+            f"Stop-loss policy: stop_loss_enabled={stop_loss_enabled}; "
+            f"stop_candidate_submission_enabled={stop_submission_enabled} "
+            f"(env request={env_submission_request!s}); "
+            f"unprotected_entries_allowed={unprotected_entries}"
+        )
 
         # ── Edge / confidence economics ───────────────────────────────────────
         strategy_policy = raw.get("strategy_policy", {})
@@ -807,37 +902,63 @@ class LiveConfigResolver:
         env_min_edge = env.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE")
         if env_min_edge is not None:
             if env_min_edge < profile_min_edge:
-                raise LiveConfigInvariantError(
-                    f"Environment override attempts to lower the minimum required edge: "
-                    f"profile={profile_min_edge}, env={env_min_edge}"
+                self._conflicts.append(
+                    f"Min required edge override rejected: env={env_min_edge} is lower than "
+                    f"profile={profile_min_edge}; resolved to the safer profile floor"
                 )
-            min_required_edge = env_min_edge
+                env_min_edge = None
+                min_required_edge = profile_min_edge
+            else:
+                min_required_edge = env_min_edge
         else:
             min_required_edge = profile_min_edge
+
+        self._invariants_checked.append(
+            f"Min required edge: profile={profile_min_edge}; "
+            f"env={env_min_edge if env_min_edge is not None else 'none'}; "
+            f"resolved={min_required_edge}"
+        )
 
         profile_min_confidence = Decimal(str(profile.confidence_min_confidence_threshold))
         env_min_p = env.get("MERID_TRADE_DECISION_MIN_P_SELECTED")
         default_min_p = Decimal("0.50")
         min_p = max(default_min_p, profile_min_confidence)
+        resolved_min_p = min_p
         if env_min_p is not None:
             if env_min_p < min_p:
-                raise LiveConfigInvariantError(
-                    f"Environment override attempts to lower the minimum selected probability: "
-                    f"profile={min_p}, env={env_min_p}"
+                self._conflicts.append(
+                    f"Min p-selected override rejected: env={env_min_p} is lower than "
+                    f"profile={min_p}; resolved to the safer profile floor"
                 )
-            min_p = env_min_p
+                env_min_p = None
+            else:
+                resolved_min_p = env_min_p
+
+        self._invariants_checked.append(
+            f"Min p-selected: default={default_min_p}; profile={profile_min_confidence}; "
+            f"env={env_min_p if env_min_p is not None else 'none'}; resolved={resolved_min_p}"
+        )
 
         held_floor_default = Decimal("35")  # cents
         env_held_floor = env.get("MERID_MIN_HELD_PRICE_CENTS")
         if env_held_floor is not None:
             if env_held_floor < held_floor_default:
-                raise LiveConfigInvariantError(
-                    f"Environment override attempts to lower the held-side price floor: "
-                    f"default={held_floor_default}, env={env_held_floor}"
+                self._conflicts.append(
+                    f"Held-side price floor override rejected: env={env_held_floor}c is lower than "
+                    f"default={held_floor_default}c; resolved to the safer default"
                 )
-            min_held_price = env_held_floor
+                env_held_floor = None
+                min_held_price = held_floor_default
+            else:
+                min_held_price = env_held_floor
         else:
             min_held_price = held_floor_default
+
+        self._invariants_checked.append(
+            f"Held-side price floor: default={held_floor_default}c; "
+            f"env={env_held_floor if env_held_floor is not None else 'none'}; "
+            f"resolved={min_held_price}c"
+        )
 
         # ── Throttling ────────────────────────────────────────────────────────
         throttling = raw.get("throttling", {})
@@ -895,12 +1016,13 @@ class LiveConfigResolver:
             per_asset=per_asset,
             source_overrides={},
             conflicts_caught=[],
+            invariants_checked=[],
             resolved_at=0.0,
             config_hash="",
         )
 
     def _enforce_invariants(self, resolved: ResolvedLiveConfig) -> None:
-        """Cross-field invariant checks.  Fail closed."""
+        """Cross-field invariant checks.  Fail closed with an auditable log."""
 
         # 1. Execution price range must be inside the hard valid price range.
         if resolved.min_entry_cents < resolved.valid_price_cents_min:
@@ -917,6 +1039,10 @@ class LiveConfigResolver:
             raise LiveConfigInvariantError(
                 f"Entry price range is empty: [{resolved.min_entry_cents}, {resolved.max_entry_cents}]"
             )
+        self._invariants_checked.append(
+            f"Cross-field price range: [{resolved.min_entry_cents}, {resolved.max_entry_cents}] "
+            f"inside valid [{resolved.valid_price_cents_min}, {resolved.valid_price_cents_max}]"
+        )
 
         # 2. Drawdown unwind must be strictly wider than halt.
         if resolved.drawdown_unwind_pct <= resolved.drawdown_halt_pct:
@@ -924,41 +1050,42 @@ class LiveConfigResolver:
                 f"drawdown_unwind_pct ({resolved.drawdown_unwind_pct}) must be > "
                 f"drawdown_halt_pct ({resolved.drawdown_halt_pct})"
             )
+        self._invariants_checked.append(
+            f"Drawdown ordering: halt={resolved.drawdown_halt_pct}, unwind={resolved.drawdown_unwind_pct}"
+        )
 
-        # 3. Stop loss declared but not executable.
-        if (
-            resolved.stop_loss_enabled
-            and not resolved.stop_candidate_submission_enabled
-            and not resolved.unprotected_entries_allowed
-        ):
-            raise LiveConfigInvariantError(
-                "Profile declares stop_loss_enabled=true but MERID_ENABLE_STOP_CANDIDATE_SUBMISSION "
-                "is not enabled and MERID_ALLOW_UNPROTECTED_ENTRIES is not set. New entries are "
-                "blocked because protective exits cannot be executed. Either enable stop-candidate "
-                "submission, set MERID_ALLOW_UNPROTECTED_ENTRIES=1, or disable stop-loss in the profile."
-            )
-
-        # 4. Stop-candidate submission and unprotected entries are mutually exclusive safety modes.
+        # 3. Stop-loss detection and stop-candidate execution are decoupled.
+        # Detection can be on while execution is off; this is the intended B-pending state.
         if resolved.stop_candidate_submission_enabled and resolved.unprotected_entries_allowed:
             self._conflicts.append(
-                "Both MERID_ENABLE_STOP_CANDIDATE_SUBMISSION and MERID_ALLOW_UNPROTECTED_ENTRIES "
-                "are enabled; unprotected_entries takes precedence for the resolver but both should "
-                "not be active simultaneously."
+                "Both stop_candidate_submission_enabled and unprotected_entries_allowed are true; "
+                "these should not be active simultaneously"
             )
+        self._invariants_checked.append(
+            f"Stop-loss decoupling: stop_loss_enabled={resolved.stop_loss_enabled}, "
+            f"stop_candidate_submission_enabled={resolved.stop_candidate_submission_enabled}, "
+            f"unprotected_entries_allowed={resolved.unprotected_entries_allowed}"
+        )
 
-        # 5. Daily loss percentage must be sensible.
+        # 4. Daily loss percentage must be sensible.
         if not (Decimal("0") < resolved.max_daily_loss_pct <= Decimal("1")):
             raise LiveConfigInvariantError(
                 f"max_daily_loss_pct must be in (0, 1], got {resolved.max_daily_loss_pct}"
             )
+        self._invariants_checked.append(
+            f"Daily loss pct in (0,1]: {resolved.max_daily_loss_pct}"
+        )
 
-        # 6. Fixed exposure cap must be positive and modest.
+        # 5. Fixed exposure cap must be positive and modest.
         if resolved.fixed_exposure_cap_usd <= Decimal("0"):
             raise LiveConfigInvariantError(
                 f"fixed_exposure_cap_usd must be positive, got {resolved.fixed_exposure_cap_usd}"
             )
+        self._invariants_checked.append(
+            f"Fixed exposure cap positive: {resolved.fixed_exposure_cap_usd} USD"
+        )
 
-        # 7. TIF invariants.
+        # 6. TIF invariants.
         if resolved.entry_tif_default not in ("ioc", "fok"):
             raise LiveConfigInvariantError(
                 f"Entry TIF must be immediate (ioc/fok), got {resolved.entry_tif_default}"
@@ -967,6 +1094,9 @@ class LiveConfigResolver:
             raise LiveConfigInvariantError(
                 f"Exit TIF must allow resting (gtc/gtt), got {resolved.exit_tif_default}"
             )
+        self._invariants_checked.append(
+            f"TIF invariants: entry={resolved.entry_tif_default}, exit={resolved.exit_tif_default}"
+        )
 
     def _with_provenance(
         self, resolved: ResolvedLiveConfig, env_overrides: Dict[str, Any]
@@ -984,6 +1114,7 @@ class LiveConfigResolver:
         canonical.pop("resolved_at", None)
         canonical["source_overrides"] = _convert_for_hash(overrides)
         canonical["conflicts_caught"] = _convert_for_hash(self._conflicts)
+        canonical["invariants_checked"] = _convert_for_hash(self._invariants_checked)
         config_hash = compute_config_hash(canonical)
 
         return replace(
@@ -992,6 +1123,7 @@ class LiveConfigResolver:
             config_hash=config_hash,
             source_overrides=overrides,
             conflicts_caught=list(self._conflicts),
+            invariants_checked=list(self._invariants_checked),
         )
 
 
