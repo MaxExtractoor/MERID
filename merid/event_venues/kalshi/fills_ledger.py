@@ -5092,11 +5092,18 @@ class KalshiFillsLedger:
 
             # Settlement is a realized PnL event like any exit fill; feed it to
             # the unified daily/weekly loss tracker so the throttle is current.
+            # 2026-08-29: Pass the market expiry so stale pre-startup settlements
+            # are not treated as today's session loss.
             if settlement_pnl != 0:
                 try:
                     from merid.risk.unified_risk_manager import get_unified_risk_manager
+                    from merid.event_venues.kalshi.market_filter import parse_expiry_from_ticker
 
-                    get_unified_risk_manager().record_pnl(float(settlement_pnl))
+                    expiry_ts = parse_expiry_from_ticker(market_ticker)
+                    get_unified_risk_manager().record_pnl(
+                        float(settlement_pnl),
+                        pnl_ts=expiry_ts if expiry_ts > 0 else None,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "[FILLS-LEDGER] Failed to record settlement PnL to UnifiedRiskManager: %s",
