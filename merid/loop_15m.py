@@ -363,7 +363,6 @@ def assert_exit_delta(pre_position_size_cc: int, count_cc: int, market_id: str, 
 # should trade BTC/ETH/SOL (degraded mode) rather than blocking all trading (halt mode).
 
 import sys
-from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 # Module-level settings import to avoid UnboundLocalError in exception handlers
@@ -441,6 +440,8 @@ from merid.utils.kalshi_identity import extract_asset
 from merid.prediction.agent_grid_15m import CycleResult
 from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 
+logger = get_logger("merid.loop_15m")
+
 # Import candidate tracing for end-to-end validation
 try:
     from merid.event_venues.kalshi.candidate_trace import (
@@ -464,7 +465,6 @@ from merid.event_venues.kalshi.binary_price_space import (
     extract_action,
 )
 
-logger = get_logger("merid.loop_15m")
 logger.info("[15M-LOOP] MODULE VERSION v20260529a-cache-fix")
 
 # CRITICAL FIX (2026-08-02): Import unified probability model integration
@@ -1484,8 +1484,11 @@ class Kalshi15mLoop:
                 # This fixes the hardcoded $50 correlation stack cap bug
                 logger.info("[15M-LOOP-WRAPPER] BALANCE-CALIBRATOR: About to call BalanceCalibrator")
                 try:
-                    from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
-                    balance_cents = int(cycle_bankroll * 100)
+                    from merid.event_venues.kalshi.balance_calibrator import (
+                        get_balance_calibrator,
+                        dollars_to_cents,
+                    )
+                    balance_cents = dollars_to_cents(cycle_bankroll)
                     logger.info("[15M-LOOP-WRAPPER] Calling BalanceCalibrator.update with balance_cents=%d", balance_cents)
                     did_recalibrate = get_balance_calibrator().update(balance_cents)
                     logger.info("[15M-LOOP-WRAPPER] BalanceCalibrator.update returned did_recalibrate=%s", did_recalibrate)
@@ -4106,8 +4109,11 @@ async def _run_loop(self) -> None:
                         # This fixes the hardcoded $50 correlation stack cap bug
                         logger.info("[15m-LOOP] BALANCE-CALIBRATOR: About to call BalanceCalibrator")
                         try:
-                            from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
-                            balance_cents = int(cycle_bankroll * 100)
+                            from merid.event_venues.kalshi.balance_calibrator import (
+                                get_balance_calibrator,
+                                dollars_to_cents,
+                            )
+                            balance_cents = dollars_to_cents(cycle_bankroll)
                             logger.info("[15m-LOOP] Calling BalanceCalibrator.update with balance_cents=%d", balance_cents)
                             did_recalibrate = get_balance_calibrator().update(balance_cents)
                             logger.info("[15m-LOOP] BalanceCalibrator.update returned did_recalibrate=%s", did_recalibrate)
@@ -4414,7 +4420,8 @@ async def _run_loop(self) -> None:
                             # CRITICAL FIX (2026-07-21): Use same source of truth as router (position_cache + resting_order_monitor)
                             # to ensure loop and router don't diverge on window state
                             asset_window_key = self._get_asset_window_key(candidate)
-                            
+                            window_id = candidate.get("ticker", "")
+
                             # RESEARCH-ALIGNED: Exposure-aware re-entry logic instead of binary block
                             # Allow re-entry if: (1) current exposure < cap, OR (2) new edge > prior edge + delta
                             # This captures late-window edge formation instead of blocking all re-entries
@@ -5555,7 +5562,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                             if md_age < -5 or md_age > 3600:
                                 logger.error(
                                     "[MD-AGE-DIAGNOSTIC] Impossible age: ticker=%s age=%.1fs now=%r last_update=%r",
-                                    ticker, md_age, time.monotonic(), state.last_book_update_ts,
+                                    market_id, md_age, time.monotonic(), state.last_book_update_ts,
                                 )
                         
                         logger.info(
@@ -5607,7 +5614,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                             if age_s < -5 or age_s > 3600:
                                 logger.error(
                                     "[MD-AGE-DIAGNOSTIC] Impossible age (depth check): ticker=%s age=%.1fs now=%r last_update=%r",
-                                    ticker, age_s, time.monotonic(), last_update_ts,
+                                    market_id, age_s, time.monotonic(), last_update_ts,
                                 )
                         else:
                             age_s = 9999
@@ -5772,7 +5779,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                                                     price_cents=int(round(quote.price_cents)),
                                                     count=quote.count,  # Number of contracts
                                                     source="market_maker_15m",
-                                                    intent_id=f"mm_{quote.ticker}_{quote.side}_{quote.action}_{_time.monotonic():.0f}",
+                                                    intent_id=f"mm_{quote.ticker}_{quote.side}_{quote.action}_{time.monotonic():.0f}",
                                                     entry_or_exit="entry",  # CRITICAL: Explicitly mark as entry order
                                                 )
                                                 
@@ -6275,7 +6282,7 @@ async def _run_one_cycle(self, tick: int) -> None:
             # If catalog_staleness_enforced is false, catalog staleness is purely informational
             # P0 FIX: Separate universe consistency from MD staleness
             # Check if health snapshot has universe_consistency_violation reason
-            elif 'snapshot' in locals() and snapshot and "universe_consistency_violation" in snapshot.reasons:
+            elif 'snapshot' in locals() and locals().get('snapshot') is not None and "universe_consistency_violation" in locals().get('snapshot').reasons:
                 no_trade_reason = "UNIVERSE_INCONSISTENT"
                 halt_components.append("UNIVERSE_INCONSISTENT")
             elif not md_coverage_ok:
@@ -6439,7 +6446,7 @@ async def _run_one_cycle(self, tick: int) -> None:
             if not catalog_fresh:
                 violations.append("catalog_stale")
             if not catalog_age_ok:
-                violations.append(f"catalog_too_old({catalog_age_s:.1f}s>{CATALOG_MAX_AGE_SECONDS}s)")
+                violations.append(f"catalog_too_old({catalog_age_s:.1f}s>{CATALOG_STALE_BLOCK_SECONDS}s)")
             if not md_coverage_ok:
                 violations.append(f"md_coverage_insufficient({md_fresh_count}/5)")
             if not depth_coverage_ready:
@@ -6538,9 +6545,9 @@ async def _run_one_cycle(self, tick: int) -> None:
                     "top3_gate": "HEALTH_GOOD" if top3_gate_available else "HEALTH_ERROR"
                 },
                 "ws_forwarder": {
-                    "events_per_sec": events_per_sec if 'events_per_sec' in locals() else 0.0,
-                    "time_since_last_event": time_since_last_event if 'time_since_last_event' in locals() else float('inf'),
-                    "stalled": stalled if 'stalled' in locals() else True,
+                    "events_per_sec": locals().get('events_per_sec', 0.0),
+                    "time_since_last_event": locals().get('time_since_last_event', float('inf')),
+                    "stalled": locals().get('stalled', True),
                     "status": "OK" if ws_forwarder_healthy else "ERROR"
                 },
                 "bankroll": {
@@ -8028,7 +8035,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside dynamic price_range [%d,%d] ticker=%s side=%s edge_pct=%s "
                 "candidate_price_cents=%s source=%s time_to_expiry=%ds",
                 trace_id, price_cents, min_price_cents, max_price_cents, ticker, kalshi_side, edge_pct,
-                candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m", time_to_expiry_sec
+                candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m", candidate.get("time_to_expiry_sec", 0)
             )
             raise AssertionError(f"Order price {price_cents}c outside dynamic price_range [{min_price_cents},{max_price_cents}] for ticker={ticker}")
 

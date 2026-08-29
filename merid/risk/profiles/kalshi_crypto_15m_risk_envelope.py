@@ -1125,7 +1125,6 @@ def compute_kalshi_crypto_15m_risk_envelope(
     profile_capital = profile_config.get('capital_usd', 0)
     # For production, always use live bankroll for dynamic risk scaling
     # Profile capital is only for validation/calibration mode
-    import os
     is_validation = os.getenv('MERID_VALIDATION_MODE', 'false').lower() in ('true', '1')
     effective_capital = profile_capital if (profile_capital > 0 and is_validation) else live_bankroll_usd
     

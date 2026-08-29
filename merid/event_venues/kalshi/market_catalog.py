@@ -591,7 +591,6 @@ class KalshiMarketCatalog:
         _MIN_REFRESH_INTERVAL_S = 2.0
         _MAX_REFRESH_INTERVAL_S = 600.0  # Maximum 10 minutes to prevent stale catalog
         if refresh_interval_s is None:
-            import os
             # PERFORMANCE FIX: Default refresh interval is 30s for 15m crypto markets.
             # 15m markets have a 15-minute trading window, and a 30s refresh still catches
             # window rollovers while reducing GIL contention that starves the WS keepalive loop.
@@ -1643,7 +1642,6 @@ class KalshiMarketCatalog:
 
     def _log_catalog_snapshot(self, now_utc: datetime) -> None:
         """Log CATALOG-SNAPSHOT for each 15m series with window alignment check."""
-        import os
         from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers
 
         series_tickers = kalshi_agent_grid_catalog_series_tickers()
@@ -2725,7 +2723,6 @@ class KalshiMarketCatalog:
             max_minutes_to_expiry: Optional maximum minutes to expiry (e.g., 15.0 for 15-minute window)
         """
         from datetime import datetime, timezone
-        from pathlib import Path
         from merid.settings import settings
         
         # CRITICAL: Define the 5-asset 15m crypto universe
@@ -2847,7 +2844,6 @@ class KalshiMarketCatalog:
             Single CatalogMarket for the current 15m window, or None if not found
         """
         from datetime import datetime, timezone
-        from pathlib import Path
 
         # Get current ET 15m window
         from merid.event_venues.kalshi.kalshi_15m_time import get_kalshi_15m_window

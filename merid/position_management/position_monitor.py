@@ -2195,6 +2195,61 @@ class PositionMonitor:
                     position.avg_entry_price_cents,
                 )
 
+        # CRITICAL FIX (2026-08-28): Asymmetric loss exits.
+        # 1) Mark-to-model edge realization: if the held-side market bid has
+        #    reached the model's current fair value, the edge is realized (or the
+        #    market has converged to the model).  Sell at the market before the
+        #    edge can decay further.
+        # 2) 60%-window time stop: if the position is not winning after 60% of
+        #    the 15-minute window, force a full exit.  This prevents the
+        #    "hold losers to expiry" leak while allowing winners to run to TP /
+        #    trailing.
+        _fair_value_cents: Optional[int] = None
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            _state_store = get_kalshi_market_state_store()
+            _unified_state = _state_store.get_unified(position.market_id) if hasattr(_state_store, "get_unified") else None
+            _kalshi_state = _state_store.get(position.market_id)
+            _state = _unified_state or _kalshi_state
+            if _state is not None:
+                _fair_value_cents = _get_fair_value_cents(_state, position.side.value)
+        except Exception as _fair_err:
+            logger.debug("[POSITION-MONITOR] Could not fetch fair value for edge-realization: %s", _fair_err)
+
+        if _fair_value_cents is not None and 1 <= _fair_value_cents <= 99:
+            if current_price_cents >= _fair_value_cents:
+                logger.info(
+                    "[POSITION-MONITOR] EDGE-REALIZATION triggered: position=%s side=%s price=%dc fair=%dc "
+                    "entry=%dc age=%.1fs - exiting at market",
+                    position.position_id[:8],
+                    position.side.value,
+                    current_price_cents,
+                    _fair_value_cents,
+                    position.avg_entry_price_cents,
+                    position.time_since_entry_seconds,
+                )
+                await self._emit_exit_intent(position, ExitReason.CURRENT_EDGE_REVERSAL, current_price_cents, snapshot=snapshot)
+                return
+
+        _contract_life_seconds = 900.0
+        if (
+            position.time_since_entry_seconds >= 0.60 * _contract_life_seconds
+            and position.unrealized_pnl_cents <= 0
+        ):
+            _secs_to_expiry = _seconds_to_expiry_from_ticker(position.market_id)
+            _settlement_guard = _get_settlement_guard_seconds()
+            if _secs_to_expiry is None or _secs_to_expiry > _settlement_guard + 5.0:
+                logger.info(
+                    "[POSITION-MONITOR] 60PCT-WINDOW-TIME-STOP triggered: position=%s price=%dc pnl=%dc "
+                    "age=%.1fs - force full exit of underwater position",
+                    position.position_id[:8],
+                    current_price_cents,
+                    position.unrealized_pnl_cents,
+                    position.time_since_entry_seconds,
+                )
+                await self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, snapshot=snapshot)
+                return
+
         # Log position state for debugging
         logger.debug(
             "[POSITION-MONITOR] Checking position=%s market=%s side=%s entry=%dc current=%dc pnl=%dc R=%.2f "

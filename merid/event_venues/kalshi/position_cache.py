@@ -206,14 +206,15 @@ def _is_expired_ticker(ticker: str) -> bool:
 
     from datetime import datetime, timezone, timedelta
 
-    # Explicit settlement notification from the position cache or settlement poller.
+    # Explicit settlement or quarantine notification from the position cache.
     try:
         from merid.event_venues.kalshi.position_cache import get_position_cache
 
         cache = get_position_cache()
         if cache is not None:
-            is_settled = cache.is_settled(ticker)
-            if isinstance(is_settled, bool) and is_settled:
+            if cache.is_settled(ticker):
+                return True
+            if cache.is_quarantined(ticker):
                 return True
     except Exception:
         pass
@@ -760,6 +761,7 @@ class CachedPosition:
                 # Long position PnL: exit price - entry price in own-side cents.
                 pnl_per = adjusted_price_cents - self.avg_price_cents
                 pnl_cents = Decimal(closed_quantity_cc * pnl_per) / Decimal("100")
+                _realized_pnl_before = self.realized_pnl_usd
                 self.realized_pnl_usd += Decimal(pnl_cents) / Decimal("100") - Decimal(fee_cents) / Decimal("100")
                 self.quantity_cc = int(new_quantity_cc)
                 self.contracts = int(new_quantity_cc) // 100
@@ -778,6 +780,21 @@ class CachedPosition:
                     except Exception as exc:
                         logger.warning(
                             "[POSITION-CACHE] Failed to record trade outcome to bankroll breaker: %s",
+                            exc,
+                        )
+
+                # Feed every realized PnL delta to the unified risk manager so the
+                # daily/weekly loss throttle is current on all exit fills (partial,
+                # full, TP, SL, time stop, edge reversal, etc.).
+                _realized_delta = self.realized_pnl_usd - _realized_pnl_before
+                if _realized_delta != 0:
+                    try:
+                        from merid.risk.unified_risk_manager import get_unified_risk_manager
+
+                        get_unified_risk_manager().record_pnl(float(_realized_delta))
+                    except Exception as exc:
+                        logger.warning(
+                            "[POSITION-CACHE] Failed to record PnL to UnifiedRiskManager: %s",
                             exc,
                         )
 
@@ -860,6 +877,12 @@ class KalshiPositionCache:
         # not be rebuilt from the fills ledger.  Populated by ``on_market_settlement``
         # and used by ``_is_expired_ticker`` to decide when a position can be removed.
         self._settled_tickers: Set[str] = set()
+
+        # 2026-08-28: Closed-but-not-yet-settled markets that the exchange still
+        # reports as non-zero positions.  These cannot be traded, should not block
+        # new entries, and must be excluded from active exposure until Kalshi
+        # resolves them and on_market_settlement fires.
+        self._quarantined_tickers: Set[str] = set()
 
         # 2026-08-12/13: Latest known signed-YES exposure and sync timestamp per
         # ticker, populated by REST sync and used by the per-fill
@@ -1241,7 +1264,10 @@ class KalshiPositionCache:
             # rejected by the exit guard and leave the position unmonitored.
             if tp_price is None and price_cents and 0 < price_cents < 100:
                 try:
-                    from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
+                    from merid.event_venues.kalshi.fees import (
+                        min_profitable_exit_price_cents,
+                        MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS,
+                    )
                     from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
                     entry_ref = int(price_cents)
                     size_fp = Decimal(cached_position.quantity_cc) / Decimal("100") if cached_position.quantity_cc else Decimal("0")
@@ -1252,11 +1278,10 @@ class KalshiPositionCache:
                     )
                     if fee_aware_floor is None:
                         raise ValueError("fee_aware_floor is None")
-                    margin = fee_aware_floor - entry_ref
-                    if side.lower() == "yes":
-                        tp_price = int(min(99, fee_aware_floor))
-                    else:
-                        tp_price = int(max(1, entry_ref - margin))
+                    # Side-space: a position is long its own side and profit means the
+                    # own-side price rises.  The fee-aware floor is already in the same
+                    # price space as entry_ref, so it is the correct TP for both YES and NO.
+                    tp_price = int(min(99, fee_aware_floor))
                     tp_r = tp_r or 1.5
                     logger.warning(
                         "[POSITION-CACHE-TP-FALLBACK] market=%s side=%s entry=%dc - "
@@ -1264,10 +1289,15 @@ class KalshiPositionCache:
                         market_id, side, entry_ref, tp_price, tp_r,
                     )
                 except Exception:
-                    if side.lower() == "yes":
-                        tp_price = min(99, price_cents + MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS)
-                    else:
-                        tp_price = max(1, price_cents - MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS)
+                    # Safe minimum gross-profit floor.  The constant is imported above
+                    # in the try block; if that import itself failed, fall back to 5c.
+                    _tp_floor = 5
+                    try:
+                        from merid.event_venues.kalshi.fees import MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS
+                        _tp_floor = MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS
+                    except Exception:
+                        pass
+                    tp_price = min(99, price_cents + _tp_floor)
                     tp_r = tp_r or 1.5
 
             final_tp_price = (
@@ -2895,14 +2925,11 @@ class KalshiPositionCache:
                     # This ensures r_multiple is never 0.00 when valid TP/SL prices exist
                     if tp_r == 0.0 and tp_price > 0 and sl_price > 0:
                         # Calculate R-multiple from actual TP and SL prices
-                        if side.lower() == "yes":
-                            # YES: R = entry - SL, TP-R = (TP - entry) / R
-                            risk_distance = price_cents - sl_price
-                            profit_distance = tp_price - price_cents
-                        else:
-                            # NO: R = SL - entry, TP-R = (entry - TP) / R
-                            risk_distance = sl_price - price_cents
-                            profit_distance = price_cents - tp_price
+                        # Side-space: a long position is long its own side.  Risk is the
+                        # distance from entry toward the stop, profit is the distance from
+                        # entry toward the take-profit, for both YES and NO.
+                        risk_distance = price_cents - sl_price
+                        profit_distance = tp_price - price_cents
 
                         if risk_distance > 0:
                             tp_r = profit_distance / risk_distance
@@ -4529,6 +4556,15 @@ class KalshiPositionCache:
                                     "[POSITION-MONITOR-INTEGRATION] Failed to remove closed position from monitor: %s",
                                     monitor_err
                                 )
+                        elif not is_zero:
+                            # 2026-08-28: Exchange is still reporting a non-zero
+                            # position for an expired/closed market that has not
+                            # settled.  Quarantine it so it does not block new
+                            # entries or consume a slot.
+                            logger.warning(
+                                f"[POSITION-CACHE-SYNC-QUARANTINE] Quarantining expired non-zero position: {market_id}"
+                            )
+                            await self.quarantine_ticker(market_id)
                         else:
                             logger.warning(f"Skipping expired ticker in position cache sync: {market_id}")
                         positions_filtered += 1
@@ -5098,15 +5134,13 @@ class KalshiPositionCache:
                         from merid.position_management.position_monitor import get_position_monitor
                         from merid.position_management.position import Position, PositionSide, TrailingType
                         from merid.event_venues.kalshi.market_filter import parse_expiry_from_ticker
-                        import time
 
                         monitor = get_position_monitor()
 
                         # CRITICAL FIX (2026-07-19): Validate position age before adding to PositionMonitor
                         # Only add positions from current or recent 15-minute windows to prevent
                         # premature exit orders for stale positions from previous sessions
-                        import time
-                        now_ts = time.time()
+                        now_ts = _time.time()
 
                         # Read profile configuration for trailing stops
                         trailing_enabled = False
@@ -5744,6 +5778,23 @@ class KalshiPositionCache:
                 monitor_err
             )
 
+        # 2026-08-28: Release any GlobalSlotAllocator slot held by this ticker so
+        # quarantined/removed positions do not leak exposure and block new entries.
+        try:
+            from merid.risk.global_slot_allocator import get_global_slot_allocator
+            allocator = get_global_slot_allocator()
+            if allocator.release_slot_by_ticker(market_id):
+                logger.info(
+                    "[SLOT-ALLOCATOR-RELEASE] Released slot for removed position: market=%s",
+                    market_id,
+                )
+        except Exception as slot_err:
+            logger.warning(
+                "[SLOT-ALLOCATOR-RELEASE] Could not release slot for removed position %s: %s",
+                market_id,
+                slot_err,
+            )
+
     async def clear(self) -> None:
         """Clear all cached positions.
 
@@ -5843,11 +5894,34 @@ class KalshiPositionCache:
         """Mark a market as settled and remove its cached position."""
         self._settled_tickers.add(market_ticker)
         self._reconciliation_halted.pop(market_ticker, None)
+        self._quarantined_tickers.discard(market_ticker)
         if market_ticker in self._positions:
             self._positions[market_ticker].settlement_status = "settled"
             await self._remove_position_and_monitor(market_ticker)
             logger.info(
                 "[POSITION-CACHE-SETTLEMENT] Removed settled position for %s",
+                market_ticker,
+            )
+
+    def is_quarantined(self, market_ticker: str) -> bool:
+        """Return True if the market is quarantined (closed but not settled)."""
+        return market_ticker in self._quarantined_tickers
+
+    async def quarantine_ticker(self, market_ticker: str) -> None:
+        """Quarantine a closed-but-unsettled market and remove it from active state.
+
+        This is the recovery hook for markets the exchange still reports as open
+        after close_time has passed and status is 'closed' but resolved=False.
+        """
+        if market_ticker in self._quarantined_tickers:
+            return
+        self._quarantined_tickers.add(market_ticker)
+        self._reconciliation_halted.pop(market_ticker, None)
+        if market_ticker in self._positions:
+            self._positions[market_ticker].settlement_status = "quarantined"
+            await self._remove_position_and_monitor(market_ticker)
+            logger.warning(
+                "[POSITION-CACHE-QUARANTINE] Removed quarantined position for %s",
                 market_ticker,
             )
 

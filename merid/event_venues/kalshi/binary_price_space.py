@@ -261,11 +261,49 @@ class PositionDataError(SideValidationError):
     """A position record has missing, invalid, or self-contradictory outcome side data."""
 
 
-class OutcomeSide(StrEnum):
-    """Canonical binary market outcome side."""
+class Side(StrEnum):
+    """Canonical binary market side (traded contract side).
+
+    This is the single source of truth for the ``yes``/``no`` vocabulary in
+    the Kalshi venue integration.  Every other representation (signal side,
+    intent side, outcome side, position side) must translate through this
+    table; no code path is permitted to re-derive it with ad-hoc ``if``/``==``
+    logic.
+
+    Invariant: ``Side.YES`` (the YES contract) and ``Side.NO`` (the NO
+    contract) always sum to a dollar; the canonical price space conversions
+    preserve this.
+    """
 
     YES = "yes"
     NO = "no"
+
+    def flip(self) -> "Side":
+        """Return the opposite side."""
+        return Side.NO if self is Side.YES else Side.YES
+
+
+# Backward-compatible alias used by existing code and tests.
+# ``OutcomeSide`` is the held-outcome vocabulary; it is the same canonical
+# enum because the held outcome of an order is always one of ``yes``/``no``.
+OutcomeSide = Side
+
+
+class BookSide(StrEnum):
+    """Kalshi V2 book side.
+
+    Invariant (Kalshi V2): ``bid`` is the YES side of the book,
+    ``ask`` is the NO side of the book.
+
+    - BUY_YES  and SELL_NO  rest on the ``bid``.
+    - SELL_YES and BUY_NO   rest on the ``ask``.
+
+    This is *not* the same as "buy = bid / sell = ask".  Book side is a
+    function of the **held outcome** produced by the order, not the action.
+    """
+
+    BID = "bid"  # ≡ YES
+    ASK = "ask"  # ≡ NO
 
 
 def _try_parse_side(value: Any) -> Optional[str]:
@@ -617,6 +655,168 @@ def v2_to_legacy(book_side: str, yes_space_price_cents: int, outcome_side: str, 
         return "sell", "yes", yes_space_price_cents
 
     raise ValueError(f"Invalid V2 direction: book_side={book_side}, outcome_side={outcome_side}, action={action}")
+
+
+# ── Canonical Side Mapping Table (playbook 2026-08-27) ──────────────────────────
+#
+# The following functions are the single permitted place where Side/BookSide
+# translations happen.  Every other module must call these; no hand-rolled
+# ``if side == "yes"`` logic is allowed.
+
+
+def outcome_from_action(action: str, side: Side) -> Side:
+    """Return the held outcome side produced by a (traded_side, action) order.
+
+    Canonical Kalshi exposure matrix:
+        - buy YES  -> long YES
+        - sell NO  -> long YES
+        - buy NO   -> long NO
+        - sell YES -> long NO
+
+    Args:
+        action: ``buy`` or ``sell``
+        side: the traded contract side (``Side.YES`` or ``Side.NO``)
+
+    Returns:
+        The resulting held outcome side.
+
+    Example:
+        >>> outcome_from_action("buy", Side.YES)
+        <Side.YES: 'yes'>
+        >>> outcome_from_action("sell", Side.NO)
+        <Side.YES: 'yes'>
+        >>> outcome_from_action("buy", Side.NO)
+        <Side.NO: 'no'>
+    """
+    action_lower = action.lower()
+    if action_lower not in ("buy", "sell"):
+        raise ValueError(f"Invalid action: {action!r}. Must be 'buy' or 'sell'.")
+    if side not in (Side.YES, Side.NO):
+        raise ValueError(f"Invalid side: {side!r}. Must be Side.YES or Side.NO.")
+
+    # buy the traded side -> long that side; sell the traded side -> long opposite
+    return side if action_lower == "buy" else side.flip()
+
+
+def book_from_outcome(outcome: Side) -> BookSide:
+    """Return the Kalshi V2 book side for an order that produces ``outcome``.
+
+    Invariant: bid <-> long YES, ask <-> long NO.
+
+    Args:
+        outcome: the held outcome side produced by the order
+
+    Returns:
+        ``BookSide.BID`` for YES exposure, ``BookSide.ASK`` for NO exposure.
+
+    Example:
+        >>> book_from_outcome(Side.YES)
+        <BookSide.BID: 'bid'>
+        >>> book_from_outcome(Side.NO)
+        <BookSide.ASK: 'ask'>
+    """
+    if outcome not in (Side.YES, Side.NO):
+        raise ValueError(f"Invalid outcome: {outcome!r}. Must be Side.YES or Side.NO.")
+    return BookSide.BID if outcome is Side.YES else BookSide.ASK
+
+
+def book_price_cents(side: Side, price_cents: int) -> int:
+    """Return the YES-space price for an order on ``side`` at ``price_cents``.
+
+    Kalshi V2 only has one price space (YES cents).  A YES-side order keeps
+    its price; a NO-side order is reflected across the complement.
+
+    Args:
+        side: the traded contract side
+        price_cents: limit price in the side's own space (0-100 cents)
+
+    Returns:
+        The price in YES-space cents.
+
+    Example:
+        >>> book_price_cents(Side.YES, 60)
+        60
+        >>> book_price_cents(Side.NO, 30)
+        70
+    """
+    if side not in (Side.YES, Side.NO):
+        raise ValueError(f"Invalid side: {side!r}. Must be Side.YES or Side.NO.")
+    return price_cents if side is Side.YES else 100 - price_cents
+
+
+def book_price_dollars(side: Side, price_dollars: Union[Decimal, float]) -> Decimal:
+    """Return the price in the side's own canonical dollar price space.
+
+    This is the type-safe identity carrier used for YES/NO duality checks.
+    It does **not** convert prices; it asserts that the supplied price is a
+    valid probability in [0.0, 1.0] and returns it in the side's own space.
+    """
+    p = price_dollars if isinstance(price_dollars, Decimal) else Decimal(str(price_dollars))
+    if side not in (Side.YES, Side.NO):
+        raise ValueError(f"Invalid side: {side!r}. Must be Side.YES or Side.NO.")
+    if not (Decimal("0") <= p <= Decimal("1")):
+        raise ValueError(f"Price {p} out of range [0, 1]")
+    return p
+
+
+# Convenience name matching the playbook.
+book_price = book_price_dollars
+
+
+def to_v2_order(side: Side, action: str, price_cents: int) -> Tuple[BookSide, int]:
+    """Convert a (traded_side, action, price_cents) order to Kalshi V2.
+
+    This is the canonical order-encoding path.  It collapses the four legacy
+    order forms into (book_side, yes_space_price_cents).
+
+    Returns:
+        ``(book_side, yes_space_price_cents)``
+
+    Example:
+        >>> to_v2_order(Side.NO, "buy", 30)
+        (<BookSide.ASK: 'ask'>, 70)
+        >>> to_v2_order(Side.YES, "sell", 55)
+        (<BookSide.ASK: 'ask'>, 55)
+    """
+    book = book_from_outcome(outcome_from_action(action, side))
+    yes_price = book_price_cents(side, price_cents)
+    return book, yes_price
+
+
+class SideReconciliationError(SideValidationError):
+    """A fill or position from the venue disagrees with the internal side."""
+
+
+def reconcile_venue_side(
+    internal_side: Side,
+    venue_outcome_side: Side,
+    fill_id: str,
+    ticker: str,
+) -> bool:
+    """Fail loudly if a venue-reported side disagrees with the internal side.
+
+    This is the reconciliation guard from the 2026-08-27 playbook.  A mismatch
+    is evidence of a side-inversion bug and must trigger a halt for the ticker
+    (``reconciliation_halted``) rather than be silently absorbed.
+
+    Args:
+        internal_side: the side the system expected/intended for this fill
+        venue_outcome_side: the side Kalshi reported in the fill/position
+        fill_id: immutable fill id for the audit trail
+        ticker: market ticker for routing halt targeting
+
+    Returns:
+        True if the sides agree.
+
+    Raises:
+        SideReconciliationError: if the sides disagree.
+    """
+    if internal_side != venue_outcome_side:
+        raise SideReconciliationError(
+            f"Side reconciliation failed: internal={internal_side.value} "
+            f"venue={venue_outcome_side.value} fill={fill_id} ticker={ticker}"
+        )
+    return True
 
 
 def close_book_side(outcome_side: str) -> str:

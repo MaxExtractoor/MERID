@@ -471,10 +471,8 @@ class KalshiWebSocket(EventVenueStream):
     
     async def connect(self) -> None:
         """Connect to Kalshi WebSocket with RSA-PSS authentication."""
-        import websockets
-        import base64
         from pathlib import Path
-        
+
         logger.info("[WS-CLIENT-CONNECT] connect() method invoked")
         
         if is_replay_active():

@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from collections import OrderedDict
-from typing import Dict, Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # CRITICAL FIX: 2026-07-16 - Wire FVG integration to WebSocket orderbook data
 # This ensures FVG detection receives real-time Kalshi price updates
@@ -142,7 +142,13 @@ import numbers
 import os
 import queue  # Thread-safe queue for cross-thread communication
 import asyncio  # For asyncio.Queue in dual-queue pattern
+import threading
+import math  # CRITICAL FIX: Import math for isfinite validation
+import re  # P1 FIX: Regex patterns for fill key validation
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from decimal import Decimal
 
 # CRITICAL DIAGNOSTIC: Log module load to confirm code version
 from utils.logger import get_logger
@@ -163,15 +169,6 @@ def log_ws_bridge_version() -> None:
     """Log WS bridge version at startup (not import time)."""
     logger.info("[WS-BRIDGE] MODULE VERSION v20260529a-cache-fix")
     logger.info("[WS-BRIDGE-MODULE-LOADED] path=%s rest_fallback_removed=True", __file__)
-import threading
-import asyncio
-import time as _time
-import math  # CRITICAL FIX: Import math for isfinite validation
-import re  # P1 FIX: Regex patterns for fill key validation
-from collections import defaultdict
-from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
 
 # Module-level forward loop thread for asyncio isolation
 _ws_forward_loop_thread: Optional[threading.Thread] = None
@@ -275,11 +272,8 @@ def _check_production_invariant(store) -> Tuple[bool, List[str]]:
     
     Returns tuple of (all_markets_initialized, missing_snapshots).
     """
-    from merid.event_venues.kalshi.market_state import (
-        _ALLOWED_UNDERLYINGS,
-        _ALLOWED_TIMEFRAMES,
-        _parse_market_ticker
-    )
+    # Module-level constants are available at call time (imported later in the module).
+    pass
     all_markets_initialized = True
     missing_snapshots = []
     
@@ -297,7 +291,7 @@ from merid.event_venues.base import QuoteEvent, VenueTrade
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_FREQS
 from config.kalshi_universe import ACTIVE_CRYPTO_WS_TIMEFRAMES
 from merid.event_venues.kalshi import get_kalshi_client
-from merid.event_venues.kalshi.kalshi_config import get_kalshi_config, KalshiConfig
+from merid.event_venues.kalshi.kalshi_config import get_kalshi_config, KalshiConfig, _credential_ref
 from merid.settings import settings
 from merid.data.ingress_replay import replay_start_time, replay_time
 from merid.utils.sequence_reorder_buffer import ResyncRequired, SequenceReorderBuffer
@@ -1385,24 +1379,29 @@ class KalshiWebSocketBridge:
             elif hasattr(cfg, 'use_demo'):
                 demo_flag = cfg.use_demo
             
-            logger.info("[WS-CONNECT] url=%s demo=%s has_api_key=%s has_private_key=%s",
-                       cfg.ws_base_url, demo_flag, bool(cfg.api_key_id), bool(cfg.private_key_path))
-            
+            logger.info(
+                "[WS-CONNECT] url=%s demo=%s credential_ref=%s has_credentials=%s",
+                cfg.ws_base_url,
+                demo_flag,
+                _credential_ref(cfg.api_key_id),
+                bool(cfg.api_key_id and (cfg.private_key_path or cfg.private_key_pem)),
+            )
+
             if not cfg.api_key_id:
                 logger.error("[WS-BOOT] ABORTING - No API key configured")
                 return
-            if not cfg.private_key_path:
-                logger.error("[WS-BOOT] ABORTING - No private key path configured")
+            if not cfg.private_key_path and not cfg.private_key_pem:
+                logger.error("[WS-BOOT] ABORTING - No private key source configured")
                 return
             from pathlib import Path
-            logger.debug("[WS-DEBUG] Checking private key path: %s", cfg.private_key_path)
-            
-            if not Path(cfg.private_key_path).exists():
-                logger.error("[WS-BOOT] ABORTING - Private key file not found: %s", cfg.private_key_path)
+            if cfg.private_key_path and not Path(cfg.private_key_path).exists():
+                logger.error("[WS-BOOT] ABORTING - Private key file not found")
                 return
-            
-            logger.info("[WS-BOOT] config OK (key=%s..., key_file=%s)",
-                       cfg.api_key_id[:8] if cfg.api_key_id else 'None', cfg.private_key_path)
+
+            logger.info(
+                "[WS-BOOT] config OK credential_ref=%s",
+                _credential_ref(cfg.api_key_id),
+            )
             logger.info("[WS-DEBUG-POST-CONFIG] About to check circuit breaker and start connection loop")
             logger.info("[WS-DEBUG] Circuit breaker tripped=%s", self._circuit_breaker_tripped)
             logger.info("[WS-DEBUG] About to enter connection loop - tickers=%d", len(tickers) if tickers else 0)

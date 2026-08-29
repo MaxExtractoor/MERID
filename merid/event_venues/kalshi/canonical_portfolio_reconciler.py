@@ -44,7 +44,7 @@ from merid.event_venues.kalshi.canonical_portfolio import (
     collect_all_pages,
     get_canonical_portfolio_store,
 )
-from merid.event_venues.kalshi.position_cache import get_position_cache
+from merid.event_venues.kalshi.position_cache import get_position_cache, _is_expired_ticker
 
 logger = get_logger("merid.event_venues.kalshi.canonical_portfolio_reconciler")
 
@@ -122,6 +122,23 @@ def _yes_exposure_from_qcc(side: str, qcc: int) -> int:
     if side == "no":
         return -qcc
     return qcc
+
+
+def _is_expired_market(ticker: str) -> bool:
+    """Quarantine-expiry check for the canonical reconciler.
+
+    Markets that are past their close/expiration window should not participate
+    in active exposure, reconciliation, or new-entry gating.  This prevents a
+    closed-but-not-yet-settled exchange position (e.g. KXETH15M-26AUG280800-00)
+    from keeping portfolio_authoritative=False indefinitely.
+
+    Uses the same expiry fallback logic as position_cache and fills_ledger.
+    """
+    try:
+        return _is_expired_ticker(ticker)
+    except Exception as e:
+        logger.debug("[CANONICAL-RECONCILER] expiry check failed for %s: %s", ticker, e)
+        return False
 
 
 class CanonicalPortfolioReconciler:
@@ -245,6 +262,29 @@ class CanonicalPortfolioReconciler:
 
     # ── Snapshot builder ───────────────────────────────────────────────────────
 
+    def _filter_expired_positions(
+        self,
+        positions: Dict[str, Any],
+        source: str,
+    ) -> Dict[str, Any]:
+        """Remove expired/closed-but-unsettled positions from reconciliation.
+
+        Exchange sometimes reports a non-zero position for a market whose
+        status='closed' but resolved=False.  The market cannot be traded and
+        should not count toward active exposure or block new entries.
+        """
+        filtered: Dict[str, Any] = {}
+        for market_id, pos in positions.items():
+            if _is_expired_market(market_id):
+                logger.warning(
+                    "[CANONICAL-RECONCILER] Quarantining expired %s position: %s",
+                    source,
+                    market_id,
+                )
+                continue
+            filtered[market_id] = pos
+        return filtered
+
     async def build_snapshot(self) -> CanonicalPortfolioSnapshot:
         """Build a new canonical portfolio snapshot."""
         t0 = time.monotonic()
@@ -253,13 +293,16 @@ class CanonicalPortfolioReconciler:
         positions_result = await self._fetch_exchange_positions()
         exchange_positions = positions_result[0]
         rest_failed = exchange_positions is None
-        exchange_positions = exchange_positions or {}
+        exchange_positions = (exchange_positions or {})
+        exchange_positions = self._filter_expired_positions(exchange_positions, "exchange")
 
         # 2. Local ledger positions.
         ledger_positions = self._fetch_ledger_positions()
+        ledger_positions = self._filter_expired_positions(ledger_positions, "ledger")
 
         # 3. Local cache positions.
         cache_positions = self._fetch_cache_positions()
+        cache_positions = self._filter_expired_positions(cache_positions, "cache")
 
         # 4. Working orders (REST + WS + order gate).
         working_orders, orders_complete = await self._fetch_working_orders()
@@ -742,17 +785,21 @@ class CanonicalPortfolioReconciler:
         self,
         mismatch_tickers: List[str],
         open_orders: List[Dict[str, Any]],
+        exchange_positions: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
-        """Attempt to rebuild cache for mismatching tickers from the fills ledger.
+        """Attempt to rebuild cache for mismatching tickers from the exchange.
 
-        This is a conservative, first-principles recovery: the fills ledger is the
-        canonical source of truth for executed exposure.  For each affected ticker:
+        The exchange REST position snapshot is the single authoritative source of
+        executed exposure.  When it disagrees with the local cache or ledger, we
+        first re-align the cache to the exchange view, then use the ledger only as
+        a secondary source when the exchange is unavailable.
 
-        1. Recompute the position from the ledger deterministically.
-        2. If the recomputed position differs materially from the cache, force-sync
-           the cache to the ledger-derived view.
-        3. Release any stale order-group / slot reservations for tickers that have
-           no working exchange order and no unapplied fill in the ledger.
+        For each affected ticker:
+
+        1. If the exchange reports a position, force-sync the cache to that view.
+        2. If the exchange reports no position and there is no working order, the
+           cache entry is a phantom and is removed.
+        3. If the exchange is unavailable, fall back to a ledger-derived view.
 
         The method is gated by ``MERID_RECONCILER_ALLOW_CACHE_REBUILD`` (default
         ``true``) so it can be disabled if it ever makes a bad problem worse.
@@ -772,15 +819,86 @@ class CanonicalPortfolioReconciler:
         open_order_tickers = {o.get("market_id") or o.get("ticker") for o in open_orders}
         open_order_tickers.discard(None)
 
+        exchange_available = exchange_positions is not None
+        if not exchange_available:
+            logger.warning(
+                "[PORTFOLIO-AUTHORITY-REBUILD] Exchange positions not available; "
+                "falling back to ledger-derived cache rebuild only"
+            )
+
         for ticker in mismatch_tickers:
             try:
                 agent_id = _ticker_to_agent(ticker)
 
+                # Prefer the authoritative exchange view when we have it.
+                if exchange_available:
+                    if ticker in exchange_positions:
+                        exp = exchange_positions[ticker]
+                        qty_fp = Decimal(str(exp.get("quantity_fp", exp.get("contracts", 0))))
+                        qty_cc = int(qty_fp * Decimal("100"))
+                        side = exp.get("outcome", "yes")
+
+                        existing = cache.get_position(ticker)
+                        existing_tp = getattr(existing, "take_profit_price_cents", None)
+                        existing_sl = getattr(existing, "stop_loss_price_cents", None)
+
+                        pos_dict = {
+                            "market_id": ticker,
+                            "outcome_id": side,
+                            "side": side,
+                            "thesis_side": side,
+                            "outcome_side": side,
+                            "contracts": int(qty_fp),
+                            "quantity_fp": qty_fp,
+                            "quantity_cc": qty_cc,
+                            "avg_price_cents": int(exp.get("avg_price_cents", 0) or 0),
+                            "take_profit_price_cents": existing_tp,
+                            "stop_loss_price_cents": existing_sl,
+                            "source": "exchange_rest_rebuild",
+                        }
+
+                        logger.warning(
+                            "[PORTFOLIO-AUTHORITY-REBUILD] ticker=%s agent=%s "
+                            "exchange_contracts=%s side=%s avg_price=%s — syncing cache to exchange",
+                            ticker,
+                            agent_id,
+                            qty_fp,
+                            side,
+                            pos_dict["avg_price_cents"],
+                        )
+
+                        await cache.sync_from_rest(
+                            [pos_dict],
+                            rest_timestamp=time.time(),
+                            force=True,
+                            open_orders=open_orders,
+                            cleanup_stale=False,
+                        )
+                        continue
+
+                    # Exchange reports no position for this ticker.  If the cache still
+                    # has an entry and there is no working open order, it is a phantom.
+                    if (
+                        cache.get_position(ticker) is not None
+                        and ticker not in open_order_tickers
+                    ):
+                        logger.warning(
+                            "[PORTFOLIO-AUTHORITY-REBUILD] ticker=%s exchange empty, no open orders, "
+                            "removing phantom cache entry",
+                            ticker,
+                        )
+                        await cache.sync_from_rest(
+                            [],
+                            rest_timestamp=time.time(),
+                            force=True,
+                            open_orders=open_orders,
+                            cleanup_stale=True,
+                        )
+                    continue
+
+                # Fallback to the ledger-derived path when the exchange is unavailable.
                 recomputed = await cache.recompute_position_from_ledger(ticker, agent_id)
                 if recomputed is None:
-                    # No fills for this ticker.  If the cache still has a position and
-                    # the exchange shows none and there are no open orders, the cache
-                    # entry is a phantom and we can remove it under cleanup_stale.
                     if (
                         cache.get_position(ticker) is not None
                         and ticker not in open_order_tickers
@@ -799,9 +917,6 @@ class CanonicalPortfolioReconciler:
                         )
                     continue
 
-                # Convert the recomputed CachedPosition into a REST-style dict that
-                # ``sync_from_rest`` can consume.  We only include fields that survive
-                # the sync path and keep any existing TP/SL targets.
                 existing = cache.get_position(ticker)
                 existing_tp = getattr(existing, "take_profit_price_cents", None)
                 existing_sl = getattr(existing, "stop_loss_price_cents", None)
@@ -821,7 +936,7 @@ class CanonicalPortfolioReconciler:
 
                 logger.warning(
                     "[PORTFOLIO-AUTHORITY-REBUILD] ticker=%s agent=%s "
-                    "recomputed_contracts=%d side=%s avg_price=%s tp=%s sl=%s",
+                    "ledger_contracts=%d side=%s avg_price=%s tp=%s sl=%s",
                     ticker,
                     agent_id,
                     pos_dict["contracts"],
@@ -845,7 +960,7 @@ class CanonicalPortfolioReconciler:
                     ticker,
                     e,
                     exc_info=True,
-        )
+                )
 
     async def _recover_authority(
         self,
@@ -909,9 +1024,19 @@ class CanonicalPortfolioReconciler:
                     }
                     for o in (initial.working_orders_by_id or {}).values()
                 ]
+
+                # Refresh the authoritative exchange snapshot before rebuilding the
+                # cache.  The cache is always rebuilt to the exchange view first; the
+                # ledger is consulted only when the exchange is unavailable.
+                client = self._get_client()
+                if client is None:
+                    exchange_positions = None
+                else:
+                    exchange_positions, _ = await self._fetch_exchange_positions()
                 await self._rebuild_affected_cache_and_reservations(
                     mismatch_tickers,
                     working_order_dicts,
+                    exchange_positions=exchange_positions,
                 )
 
                 snapshot = await self.build_snapshot()

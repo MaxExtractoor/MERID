@@ -52,6 +52,9 @@ from merid.prediction.trading_mode import TradingMode
 from utils.logger import get_logger
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
+from merid.prediction.trade_decision import (
+    TRADE_DECISION_MIN_P_SELECTED,
+)
 from merid.event_venues.kalshi.order_identity import (
     finalize_order_identity,
     OrderIdentityError,
@@ -1711,19 +1714,34 @@ def resolve_exit_policy(
         # Tier 2 assets: slightly wider TP thresholds
         tp_min_cents = max(tp_min_cents, 4)
     
-    # CRITICAL FIX: Load sl_cents from profile config (2026-07-06)
-    # Previously hardcoded to 5 - now uses upstream/midstream/downstream consistency
-    # sl_cents is the SL offset in cents (not absolute SL price)
-    sl_cents_offset = 5  # Default fallback
-    try:
-        from merid.risk.profiles.crypto_15m_profile import get_active_profile
-        profile = get_active_profile().profile
-        # Use normal volatility SL as default offset for policy resolution
-        sl_cents_offset = profile.dynamic_risk_sl_cents_normal_vol
-    except Exception as e:
-        logger.warning("[ORDER-ROUTER] Failed to load SL config from profile: %s", e)
-        # Fallback to hardcoded value
-        sl_cents_offset = 5
+    # CRITICAL FIX (2026-08-28): Research-backed 50%-of-premium stop.
+    # For a binary contract the premium paid is the entry price.  We want the
+    # position closed when the held-side market price falls to the level that
+    # preserves ~50% of the premium paid (i.e. a 50% max loss).  This converts
+    # the observed -56c average open loss into bounded ~8-9c cuts for typical
+    # 17c entries while still giving high-price positions room to move.
+    #
+    #    sl_cents_offset = max(MIN, min(MAX, round(price_cents * 0.5)))
+    #
+    # The entry_price_cents is taken from the strip_context when available;
+    # otherwise we fall back to the normal-volatility profile offset.
+    _sl_min_cents = 3
+    _sl_max_cents = 35
+    _sl_premium_pct = 0.50
+    entry_price_cents_from_strip = strip_context.get("entry_price_cents")
+    if entry_price_cents_from_strip is not None and 0 < entry_price_cents_from_strip < 100:
+        sl_cents_offset = int(
+            max(_sl_min_cents, min(_sl_max_cents, round(entry_price_cents_from_strip * _sl_premium_pct)))
+        )
+    else:
+        # Legacy fallback for callers that do not supply an entry price.
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile = get_active_profile().profile
+            sl_cents_offset = max(_sl_min_cents, profile.dynamic_risk_sl_cents_normal_vol)
+        except Exception as e:
+            logger.warning("[ORDER-ROUTER] Failed to load SL config from profile: %s", e)
+            sl_cents_offset = 5
     
     # CRITICAL FIX: Load trailing_giveback_cents from profile config (2026-07-13)
     # Previously hardcoded to 5 - now uses profile configuration
@@ -4204,6 +4222,8 @@ async def _canonical_order_intent_validation(
                 "ticker": canonical.market_ticker,
                 "intent_id": canonical.intent_id,
                 "client_order_id": canonical.client_order_id,
+                "decision_id": canonical.decision_id,
+                "decision_trace_id": getattr(intent, "decision_trace_id", None) or canonical.decision_id,
                 "contract": canonical.contract,
                 "action": canonical.action,
                 "purpose": canonical.purpose,
@@ -4252,6 +4272,8 @@ async def _canonical_order_intent_validation(
                 "ticker": intent.ticker,
                 "intent_id": getattr(intent, "intent_id", None),
                 "client_order_id": getattr(intent, "client_order_id", None) or getattr(intent, "client_tag", None),
+                "decision_id": getattr(intent, "decision_id", None),
+                "decision_trace_id": getattr(intent, "decision_trace_id", None) or getattr(intent, "decision_id", None),
                 "allowed": False,
                 "reason": reason,
                 "mode": get_venue_gate().mode.value if get_venue_gate().mode else None,
@@ -4327,6 +4349,8 @@ def _sync_canonical_order_intent_validation(
                 "ticker": canonical.market_ticker,
                 "intent_id": canonical.intent_id,
                 "client_order_id": canonical.client_order_id,
+                "decision_id": canonical.decision_id,
+                "decision_trace_id": getattr(intent, "decision_trace_id", None) or canonical.decision_id,
                 "contract": canonical.contract,
                 "action": canonical.action,
                 "purpose": canonical.purpose,
@@ -4357,6 +4381,8 @@ def _sync_canonical_order_intent_validation(
                 "ticker": intent.ticker,
                 "intent_id": getattr(intent, "intent_id", None),
                 "client_order_id": getattr(intent, "client_order_id", None) or getattr(intent, "client_tag", None),
+                "decision_id": getattr(intent, "decision_id", None),
+                "decision_trace_id": getattr(intent, "decision_trace_id", None) or getattr(intent, "decision_id", None),
                 "allowed": False,
                 "reason": reason,
                 "mode": _resolve_mode(intent.mode).value,
@@ -12220,19 +12246,20 @@ async def _route_live(
                     latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
 
-            # Release gate: the selected side must have a model probability > 0.5.
-            # A p_hat_side_cents <= 50 means the model does not believe the side
-            # being bought is more likely than not (cost-basis override).
-            if p_hat_side_cents <= 50.0:
+            # Release gate: the selected side must have a model probability above
+            # the configured minimum (default 0.50, overridable via
+            # MERID_TRADE_DECISION_MIN_P_SELECTED for cost-basis entries).
+            min_p_hat_cents = TRADE_DECISION_MIN_P_SELECTED * 100.0
+            if p_hat_side_cents <= min_p_hat_cents:
                 logger.error(
-                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s p_hat_side_cents=%.2f <= 50 - "
+                    "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s p_hat_side_cents=%.2f <= %.2f - "
                     "REJECTING ORDER (model does not believe selected side)",
-                    intent.ticker, intent.side, p_hat_side_cents
+                    intent.ticker, intent.side, p_hat_side_cents, min_p_hat_cents
                 )
                 return OrderResult(
                     status="rejected",
                     mode=get_venue_gate().mode,
-                    reason="router_invariant_fail:p_hat_below_50_cost_basis_override",
+                    reason=f"router_invariant_fail:p_hat_below_{min_p_hat_cents:.0f}_cost_basis_override",
                     latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
 
@@ -14831,17 +14858,22 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             bankroll_service = await get_bankroll_service()
             if bankroll_service and not bankroll_service.is_entry_allowed():
                 snapshot = bankroll_service.get_circuit_snapshot()
+                is_fresh = bankroll_service.is_bankroll_fresh()
+                reason = (
+                    "bankroll_stale" if not is_fresh else "bankroll_drawdown_halt"
+                )
                 logger.critical(
-                    "[ORDER-ROUTER-REJECT] intent_id=%s bankroll drawdown breaker open "
-                    "state=%s drawdown=%.2f%% - rejecting entry",
+                    "[ORDER-ROUTER-REJECT] intent_id=%s bankroll entry blocked "
+                    "state=%s drawdown=%.2f%% is_fresh=%s - rejecting entry",
                     getattr(intent, "intent_id", None),
                     snapshot.state.value,
                     float(snapshot.drawdown_pct),
+                    is_fresh,
                 )
                 return OrderResult(
                     status="rejected",
                     mode=mode,
-                    reason="bankroll_drawdown_halt",
+                    reason=reason,
                     latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
         except Exception as exc:

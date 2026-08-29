@@ -8,13 +8,31 @@ Kalshi balance fetch.  Recalibration fires only when balance moves by more than
 from __future__ import annotations
 
 import threading
-from typing import Optional
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional, Union
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.balance_calibrator")
 
 _DEFAULT_THRESHOLD = 0.05  # 5 % balance change triggers recalibration
+
+
+def dollars_to_cents(value: Union[int, float, Decimal, str, None]) -> int:
+    """Convert a dollar-denominated balance to integer cents without float drift.
+
+    Accepts int (treated as cents already), float, Decimal, or numeric string.
+    Floats are converted via ``Decimal(str(value))`` to avoid binary-float
+    artefacts like ``int(9.2 * 100) == 919``.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal):
+        return int((value * 100).to_integral_value(rounding=ROUND_HALF_UP))
+    # float or string
+    return int((Decimal(str(value)) * 100).to_integral_value(rounding=ROUND_HALF_UP))
 
 
 class BalanceCalibrator:
@@ -29,10 +47,18 @@ class BalanceCalibrator:
     # ── Public API ────────────────────────────────────────────────────────
 
     def update(self, balance_cents: int) -> bool:
-        """Update balance.  Returns True when recalibration was triggered.
+        """Update balance in integer cents.  Returns True when recalibration was triggered.
 
         Thread-safe.  Silently ignores zero or negative balances.
+        Float inputs are a bug and are normalized via ``dollars_to_cents``;
+        callers should pass integer cents.
         """
+        if isinstance(balance_cents, float):
+            logger.warning(
+                "BalanceCalibrator.update received float (%s); use dollars_to_cents() at the call site",
+                balance_cents,
+            )
+            balance_cents = dollars_to_cents(balance_cents)
         if balance_cents <= 0:
             return False
         should_recalibrate = False

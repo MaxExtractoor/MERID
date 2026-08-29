@@ -3329,6 +3329,8 @@ class KalshiFillsLedger:
             # Use a 30s settlement buffer (aligned with _is_expired_ticker) to avoid
             # the 90s window where the ledger still reports a phantom position after
             # the cache and exchange have already moved on to the next 15m window.
+            # 2026-08-28: Also call position_cache._is_expired_ticker so closed-but-
+            # not-yet-settled markets are not counted as live exposure.
             try:
                 from merid.event_venues.kalshi.market_filter import parse_expiry_from_ticker
                 expiry_ts = parse_expiry_from_ticker(market_ticker)
@@ -3336,6 +3338,12 @@ class KalshiFillsLedger:
                     logger.debug(
                         f"Skipping expired/settled market in compute_net_positions: "
                         f"{market_ticker} (expired {int(now_ts - expiry_ts)}s ago)"
+                    )
+                    continue
+                from merid.event_venues.kalshi.position_cache import _is_expired_ticker
+                if _is_expired_ticker(market_ticker):
+                    logger.debug(
+                        f"Skipping quarantined/expired market in compute_net_positions: {market_ticker}"
                     )
                     continue
             except Exception as _exp_err:
@@ -3424,6 +3432,24 @@ class KalshiFillsLedger:
                 continue
 
             checked_markets.add(ticker)
+
+            # Kalshi reports positions for closed/determined markets that have not yet
+            # finalized settlement. Until settlement completes, the local fills ledger may
+            # legitimately have no fill for that position (Kalshi does not emit a closing
+            # fill). Treat these as pending-settlement positions, not ghost trades, and
+            # do not include them in active-exposure reconciliation.
+            try:
+                from merid.event_venues.kalshi.position_cache import _is_expired_ticker
+
+                if _is_expired_ticker(ticker):
+                    logger.info(
+                        "[RECONCILIATION-PENDING-SETTLEMENT] %s: skipping closed-but-not-finalized position from active reconciliation",
+                        ticker,
+                    )
+                    continue
+            except Exception:
+                pass
+
             computed = await self.compute_position_from_fills_async(ticker)
 
             # Fail-closed: missing/inconsistent Kalshi side is a reconciliation
@@ -5026,6 +5052,19 @@ class KalshiFillsLedger:
 
             self._session_realized_pnl += settlement_pnl
             self._update_cumulative_realized_pnl(settlement_pnl)
+
+            # Settlement is a realized PnL event like any exit fill; feed it to
+            # the unified daily/weekly loss tracker so the throttle is current.
+            if settlement_pnl != 0:
+                try:
+                    from merid.risk.unified_risk_manager import get_unified_risk_manager
+
+                    get_unified_risk_manager().record_pnl(float(settlement_pnl))
+                except Exception as exc:
+                    logger.warning(
+                        "[FILLS-LEDGER] Failed to record settlement PnL to UnifiedRiskManager: %s",
+                        exc,
+                    )
 
             del self._open_positions[instrument_key]
 

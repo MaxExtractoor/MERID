@@ -43,10 +43,11 @@ from merid.event_venues.kalshi.types import (
 )
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 from merid.event_venues.kalshi.kalshi_config import (
-    get_kalshi_config, 
-    build_auth_message, 
+    get_kalshi_config,
+    build_auth_message,
     log_auth_debug,
-    verify_kalshi_config
+    verify_kalshi_config,
+    _credential_ref,
 )
 
 logger = get_logger("merid.event_venues.kalshi.client_v2")
@@ -101,9 +102,11 @@ class KalshiClientV2:
             self._private_key_pem = config.private_key_pem
             self._config = config  # Store for auth logging
             
-            # Log that we're using unified config
+            # Log that we're using unified config (no credential fingerprints)
             logger.info(
-                f"[KALSHI-CONFIG-REST] env={config.env} rest_base={config.rest_base_url} key_id={config.api_key_id[:4]}****{config.api_key_id[-4:] if len(config.api_key_id) > 8 else '****'}"
+                f"[KALSHI-CONFIG-REST] env={config.env} "
+                f"credential_ref={_credential_ref(config.api_key_id)} "
+                f"rest_base={config.rest_base_url}"
             )
         except Exception as e:
             error_msg = f"[KalshiClientV2] Failed to load unified config: {e}"
@@ -132,11 +135,11 @@ class KalshiClientV2:
         # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
         self._rate_limit_lock: Optional[asyncio.Lock] = None
         
-        # Log credential config (masked) for debugging
-        key_preview = self._api_key_id[:8] + "..." if self._api_key_id else "NOT SET"
+        # Log credential config using an opaque reference only.
         logger.info(
-            f"[KalshiClientV2] Initializing: base_url={self._base_url}, key_id={key_preview}, "
-            f"key_path={self._private_key_path or 'NOT SET'}, rate_tier={rate_limit_tier}"
+            f"[KalshiClientV2] Initializing: base_url={self._base_url} "
+            f"credential_ref={_credential_ref(self._api_key_id)} "
+            f"rate_tier={rate_limit_tier}"
         )
         
         # HTTP client (lazily initialized)
@@ -286,7 +289,7 @@ class KalshiClientV2:
                 hashes.SHA256(),
             )
             
-            # Side-by-side auth logging for debugging
+            # Safe auth diagnostic (no key, message, or signature metadata)
             if self._config:
                 log_auth_debug(
                     component="REST",
@@ -294,8 +297,6 @@ class KalshiClientV2:
                     method=method,
                     path=path,
                     timestamp_ms=ts_ms,
-                    message=message,
-                    signature_length=len(signature),
                 )
             
             return {
@@ -444,15 +445,11 @@ class KalshiClientV2:
         env = os.getenv("MERID_ENV", "unknown")
         profile = os.getenv("MERID_PROFILE", "unknown")
         
-        # Log client initialization details
+        # Log client initialization details (no credential fingerprints)
         client_info = f"env={env}, profile={profile}"
-        if hasattr(self, 'key_id'):
-            client_info += f", key_id={self.key_id}"
-        if hasattr(self, 'key_path'):
-            client_info += f", key_path={self.key_path}"
-        if hasattr(self, 'base_url'):
-            client_info += f", base_url={self.base_url}"
-        
+        if self._base_url:
+            client_info += f", base_url={self._base_url}"
+
         logger.info(f"[KALSHI-CLIENT-INSTRUMENT] get_balance() called - {client_info}")
         
         start_ms = time.time() * 1000
@@ -479,14 +476,14 @@ class KalshiClientV2:
             if response.status_code == 401:
                 # Auth error - permanent
                 error_body = response.text[:500] if response.text else "No response body"
-                key_preview = self._api_key_id[:8] + "..." if self._api_key_id else "NOT SET"
+                credential_ref = _credential_ref(self._api_key_id)
                 logger.error(
                     f"[{operation}] Authentication failed: status={response.status_code}, "
-                    f"key_id={key_preview}, body={error_body}"
+                    f"credential_ref={credential_ref}"
                 )
                 return BalancePermanentError(
                     reason="Kalshi authentication failed - check API credentials",
-                    details={"status_code": 401, "key_id_preview": key_preview, "response": error_body},
+                    details={"status_code": 401, "credential_ref": credential_ref, "response": error_body},
                     alert_immediately=True,
                 )
             

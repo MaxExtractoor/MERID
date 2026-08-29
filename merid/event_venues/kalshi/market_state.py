@@ -106,7 +106,6 @@ from merid.event_venues.kalshi.market_catalog import get_market_catalog
 # Production scope validation
 # DISABLED IN TESTS: Set TRADING_SCOPE_AVAILABLE=False to allow synthetic test tickers
 # Production: Set TRADING_SCOPE_AVAILABLE=True to enforce scope validation
-import os
 TRADING_SCOPE_AVAILABLE = os.getenv("MERID_ENABLE_SCOPE_VALIDATION", "false").lower() in ("true", "1", "yes")
 if TRADING_SCOPE_AVAILABLE:
     try:
