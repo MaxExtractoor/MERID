@@ -1930,28 +1930,6 @@ class KalshiPositionCache:
                     fill_yes_delta = 0
             expected_post_yes = pre_position_yes + fill_yes_delta
 
-            # FIX 3: Price repeat check to prevent duplicate execution via WebSocket
-            # This uses the same logic as order_gate.check_price_repeat() to ensure
-            # consistent enforcement across all fill paths (WebSocket and HTTP).
-            try:
-                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
-                gate = get_pre_trade_gate()
-                allowed, reason, last_price = gate.check_price_repeat(
-                    contract_id=market_id,
-                    side=side,
-                    price_cents=price_cents,
-                    allow_lower_price=True  # Allow scaling in at lower prices
-                )
-                if not allowed:
-                    logger.warning(
-                        "[POSITION-CACHE-PRICE-REPEAT-BLOCK] fill_id=%s market=%s side=%s price=%dc blocked: %s",
-                        fill_id or "N/A", market_id, side, price_cents, reason
-                    )
-                    # Reject the fill - do not update position state
-                    return
-            except Exception as price_check_err:
-                logger.debug("[POSITION-CACHE] Price repeat check failed (non-fatal): %s", price_check_err)
-
             # Task 2: Look up fill_source from fills_ledger if fill_id provided
             fill_source = await self._lookup_fill_source(fill_id, client_order_id)
 
@@ -5953,12 +5931,13 @@ class KalshiPositionCache:
         position = self._positions.get(market_ticker)
         await self.mark_settled(market_ticker)
 
-        # Record settlement in the unified trade attribution fact table (non-blocking).
+        # Record settlement in the unified trade attribution fact table.
         try:
             from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
             table = get_trade_attribution_table()
             if table is not None:
                 table.record_settlement(market_ticker, outcome, position)
+                await table.flush()
         except Exception as e:
             logger.warning("[POSITION-CACHE] trade attribution record_settlement failed: %s", e)
 

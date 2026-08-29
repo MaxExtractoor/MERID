@@ -1948,12 +1948,13 @@ class KalshiFillsLedger:
                 new_count += 1
                 new_fill_ids.append(fill.fill_id)
 
-                # Record fill in the unified trade attribution fact table (non-blocking).
+                # Record fill in the unified trade attribution fact table.
                 try:
                     from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
                     table = get_trade_attribution_table()
                     if table is not None:
                         table.record_fill(fill)
+                        await table.flush()
                 except Exception as e:
                     logger.warning("[FILLS-LEDGER] trade attribution record_fill failed: %s", e)
 
@@ -2257,12 +2258,13 @@ class KalshiFillsLedger:
             self._index_fill(fill)
             self._ws_ingested += 1
 
-            # Record fill in the unified trade attribution fact table (non-blocking).
+            # Record fill in the unified trade attribution fact table.
             try:
                 from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
                 table = get_trade_attribution_table()
                 if table is not None:
                     table.record_fill(fill)
+                    await table.flush()
             except Exception as e:
                 logger.warning("[FILLS-LEDGER] trade attribution record_fill failed: %s", e)
 
