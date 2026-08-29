@@ -307,22 +307,57 @@ class UnifiedRiskManager:
                 f"Correlated cap: ${self._get_correlated_cap_usd():.2f} (fixed $1 model)"
             )
 
-    def record_pnl(self, pnl_usd: float) -> None:
-        """Record realized PnL and update daily/weekly loss trackers."""
+    def record_pnl(
+        self,
+        pnl_usd: float,
+        pnl_ts: Optional[Union[float, datetime]] = None,
+    ) -> None:
+        """Record realized PnL and update daily/weekly loss trackers.
+
+        Args:
+            pnl_usd: Realized PnL in USD.
+            pnl_ts: Optional event timestamp.  If provided, PnL realized before
+                the current daily/weekly reset (e.g. stale settlement replay at
+                startup) is ignored so it does not poison the session's loss
+                throttle.  Defaults to the current time for live fills.
+        """
         with self._lock:
             # Make sure day/week tracking is current before booking PnL
             now = datetime.now(timezone.utc)
-            if self._last_reset_date is None or now.date() != self._last_reset_date.date():
+            if (
+                self._last_reset_date is None
+                or now.date() != self._last_reset_date.date()
+                or self._daily_start_usd == 0.0
+            ):
                 self._daily_loss_usd = 0.0
                 self._daily_pnl_usd = 0.0
                 self._daily_start_usd = self._bankroll_usd
                 self._last_reset_date = now
             current_week = now.isocalendar().week
-            if self._last_reset_week is None or current_week != self._last_reset_week:
+            if (
+                self._last_reset_week is None
+                or current_week != self._last_reset_week
+                or self._weekly_start_usd == 0.0
+            ):
                 self._weekly_loss_usd = 0.0
                 self._weekly_pnl_usd = 0.0
                 self._weekly_start_usd = self._bankroll_usd
                 self._last_reset_week = current_week
+
+            # Ignore PnL for events that pre-date the current session reset.
+            # This prevents startup settlement replay of old markets from being
+            # treated as today's realized loss.
+            if pnl_ts is not None:
+                if isinstance(pnl_ts, (int, float)):
+                    pnl_dt = datetime.fromtimestamp(float(pnl_ts), tz=timezone.utc)
+                else:
+                    pnl_dt = pnl_ts
+                if pnl_dt < self._last_reset_date:
+                    logger.info(
+                        "[UNIFIED-RISK] Ignoring stale PnL %.2f (event at %s, before reset at %s)",
+                        pnl_usd, pnl_dt, self._last_reset_date
+                    )
+                    return
 
             self._daily_pnl_usd += pnl_usd
             self._weekly_pnl_usd += pnl_usd
