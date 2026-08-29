@@ -159,3 +159,73 @@ def test_build_create_order_request_reduce_only_false_is_respected():
         post_only=False,
     )
     assert req.reduce_only is False
+
+
+def test_build_create_order_request_resolves_stp_from_liquidity_role():
+    intent = _make_intent("yes", "buy", entry_or_exit="entry")
+    intent.liquidity_role = "maker"
+    intent.self_trade_prevention_type = None
+    req = _build_create_order_request(
+        intent,
+        ticker=intent.ticker,
+        exchange_index=2,
+        final_price_cents=55,
+        effective_order_type="limit",
+        effective_tif="GTC",
+        expiration_ts=1700000000,
+        post_only=True,
+    )
+    assert req.self_trade_prevention_type == "maker"
+
+
+def test_build_create_order_request_resolves_stp_from_explicit_intent():
+    intent = _make_intent("yes", "buy", entry_or_exit="entry")
+    intent.self_trade_prevention_type = "taker_at_cross"
+    req = _build_create_order_request(
+        intent,
+        ticker=intent.ticker,
+        exchange_index=2,
+        final_price_cents=55,
+        effective_order_type="limit",
+        effective_tif="GTC",
+        expiration_ts=1700000000,
+        post_only=False,
+    )
+    assert req.self_trade_prevention_type == "taker_at_cross"
+
+
+def test_build_create_order_request_computes_max_execution_cost_from_ev():
+    intent = _make_intent("yes", "buy", entry_or_exit="entry", count=2)
+    intent.all_in_cost_cents = 22.0  # 20c price + 2c fee
+    intent.ev_net_cents = 33.0       # p=0.55 -> break-even at 55c/contract
+    intent.fee_cents = 2.0
+    req = _build_create_order_request(
+        intent,
+        ticker=intent.ticker,
+        exchange_index=2,
+        final_price_cents=20,
+        effective_order_type="limit",
+        effective_tif="IOC",
+        expiration_ts=None,
+        post_only=False,
+    )
+    # max = count * (all_in + ev_net) = 2 * (22 + 33) = 110 cents
+    assert req.max_execution_cost_cents == 110
+
+
+def test_build_create_order_request_computes_max_execution_cost_from_p_selected():
+    intent = _make_intent("no", "buy", entry_or_exit="entry", count=1)
+    intent.p_selected = 0.55
+    intent.fee_cents = 0.0
+    req = _build_create_order_request(
+        intent,
+        ticker=intent.ticker,
+        exchange_index=2,
+        final_price_cents=20,
+        effective_order_type="limit",
+        effective_tif="GTC",
+        expiration_ts=1700000000,
+        post_only=False,
+    )
+    # max = count * p_selected * 100 = 55 cents; bounded below by all_in (20+0) + 1
+    assert req.max_execution_cost_cents == 55

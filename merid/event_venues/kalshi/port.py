@@ -41,6 +41,7 @@ class CreateOrderRequest:
     reduce_only: bool = False
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = "taker_at_cross"
+    max_execution_cost_cents: Optional[int] = None  # fee-aware EV-derived slippage guard
     source: Optional[str] = "agent_grid"
     take_profit_price_cents: Optional[int] = None
     stop_loss_price_cents: Optional[int] = None

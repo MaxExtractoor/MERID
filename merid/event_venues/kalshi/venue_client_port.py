@@ -98,6 +98,8 @@ class KalshiVenueClientExecutionPort:
             stop_loss_price_cents=request.stop_loss_price_cents,
             firewall_approval_id=firewall_approval_id,
             exchange_index=request.exchange_index,
+            self_trade_prevention_type=request.self_trade_prevention_type,
+            max_execution_cost_cents=request.max_execution_cost_cents,
         )
 
         result = await self._client.place_order_result(

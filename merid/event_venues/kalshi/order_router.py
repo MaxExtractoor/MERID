@@ -41,7 +41,7 @@ assert os is not None, "os module failed to import at module level"
 from dataclasses import dataclass, field, replace as _dc_replace
 from enum import Enum
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -3658,6 +3658,90 @@ def _validate_canonical_price_placement(
         return True, None
 
 
+def _resolve_self_trade_prevention_type(intent: "OrderIntent") -> str:
+    """Return a deliberate, validated STP mode for the order.
+
+    Self-trade prevention is not a maker/taker selector; it decides which of
+    the user's orders is canceled on a self-cross.  Never leave it unset.
+    """
+    explicit = getattr(intent, "self_trade_prevention_type", None)
+    if explicit:
+        return explicit.lower()
+
+    role = getattr(intent, "liquidity_role", None)
+    if role:
+        try:
+            from merid.prediction.kalshi_maker_taker_contract import (
+                LiquidityRole,
+                SelfTradePreventionType,
+                map_liquidity_role_to_stp,
+            )
+
+            return map_liquidity_role_to_stp(
+                LiquidityRole(role), None
+            ).value
+        except Exception:
+            logger.warning(
+                "[STP-RESOLVE] Failed to map liquidity_role=%s; defaulting to taker_at_cross",
+                role,
+            )
+
+    return "taker_at_cross"
+
+
+def _compute_max_execution_cost_cents(
+    intent: "OrderIntent",
+    final_price_cents: int,
+) -> Optional[int]:
+    """Fee-aware EV-derived cost cap for marketable orders.
+
+    The maximum total execution cost (price + fees, in cents) is the breakeven
+    cost implied by the model's selected-side probability.  If slippage pushes
+    the realized cost above this cap, the order would have negative or zero
+    net edge.  For the special case of price=1c, the cap is bounded below by
+    the all-in cost so the cap is never absurdly small.
+
+    Returns ``None`` only when neither EV provenance nor a model probability is
+    available; callers should fail-closed if they require the guard.
+    """
+    canonical_count = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    if canonical_count <= 0:
+        return None
+
+    # Prefer the signal's own fee-aware EV math if it is present.
+    all_in_cost_cents = getattr(intent, "all_in_cost_cents", None)
+    ev_net_cents = getattr(intent, "ev_net_cents", None)
+    if all_in_cost_cents is not None and ev_net_cents is not None:
+        per_contract_max = float(all_in_cost_cents) + float(ev_net_cents)
+    else:
+        # Fall back to p_selected if the signal did not carry the cost stack.
+        p_selected = getattr(intent, "p_selected", None)
+        if p_selected is None:
+            # Try the side-specific probability field.
+            if (intent.side or "").lower() == "yes":
+                p_selected = getattr(intent, "p_yes", None)
+            else:
+                p_selected = getattr(intent, "p_no", None)
+        if p_selected is None:
+            return None
+        per_contract_max = float(p_selected) * 100.0
+
+    fee_cents = getattr(intent, "fee_cents", None) or 0.0
+    price = float(final_price_cents)
+    all_in_cost_fallback = price + float(fee_cents)
+
+    # The cap must at least cover the intended all-in cost; otherwise it would
+    # reject the order at the intended price.  This guards against pathological
+    # signals with tiny ev_net or stale probabilities.
+    per_contract_max = max(per_contract_max, all_in_cost_fallback)
+
+    # For very low prices, ensure the cap allows at least a 1c slippage buffer.
+    per_contract_max = max(per_contract_max, all_in_cost_fallback + 1.0)
+
+    total_max_cents = canonical_count * Decimal(per_contract_max)
+    return int(total_max_cents.to_integral_value(rounding=ROUND_HALF_UP))
+
+
 def _build_create_order_request(
     intent: "OrderIntent",
     *,
@@ -3815,6 +3899,17 @@ def _build_create_order_request(
 
     canonical_count = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
 
+    # Resolve a deliberate STP mode; never leave it unset.
+    stp = _resolve_self_trade_prevention_type(intent)
+
+    # Fee-aware EV-derived maximum execution cost cap.
+    max_execution_cost_cents = _compute_max_execution_cost_cents(intent, final_price_cents)
+
+    metadata["max_execution_cost_cents"] = max_execution_cost_cents
+    metadata["self_trade_prevention_type"] = stp
+    metadata["ev_net_cents"] = getattr(intent, "ev_net_cents", None)
+    metadata["all_in_cost_cents"] = getattr(intent, "all_in_cost_cents", None)
+
     return CreateOrderRequest(
         ticker=ticker,
         exchange_index=exchange_index,
@@ -3834,7 +3929,8 @@ def _build_create_order_request(
             else _is_exit_order(intent)
         ),
         order_group_id=intent.order_group_id,
-        self_trade_prevention_type=intent.self_trade_prevention_type,
+        self_trade_prevention_type=stp,
+        max_execution_cost_cents=max_execution_cost_cents,
         source=intent.source or "agent_grid",
         take_profit_price_cents=intent.take_profit_price_cents,
         stop_loss_price_cents=intent.stop_loss_price_cents,
