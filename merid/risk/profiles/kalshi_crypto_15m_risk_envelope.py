@@ -388,10 +388,8 @@ class KalshiCrypto15mRiskEnvelope:
     # Max total notional (sum of all positions)
     max_total_notional_usd: float
 
-    # 2026-08-29: Absolute fixed exposure cap from resolved live config.
-    # This is the single source of truth for the global slot allocator and
-    # all window/total exposure hard stops.
-    fixed_exposure_cap_usd: float = 2.00
+    # Absolute fixed exposure cap is defined at the end of the dataclass
+    # because it carries a default value.
     
     # Max concurrent trades (from profile agent_defaults)
     # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $2 exposure cap is the limit
@@ -432,12 +430,6 @@ class KalshiCrypto15mRiskEnvelope:
     drawdown_halt_pct: float
     drawdown_unwind_pct: float
 
-    # 2026-08-29: Stop-loss/daily-loss policy from the resolved live config.
-    stop_loss_enabled: bool = False
-
-    # 2026-08-29: Hash of the resolved live config that authorized this envelope.
-    config_hash: Optional[str] = None
-    
     # ── Drawdown Tracking ─────────────────────────────────────────────────────
     peak_equity_usd: float
     current_equity_usd: float
@@ -466,6 +458,17 @@ class KalshiCrypto15mRiskEnvelope:
     guardrails_total_venue_risk_pct: float = 0.0  # Deprecated; percentage venue cap removed
     per_agent_window_limit_usd: float = 2.00  # Deprecated: Fixed $2 global cap (not per-agent)
     total_venue_window_limit_usd: float = 2.00  # Deprecated: Fixed $2 global cap (not per-agent)
+
+    # 2026-08-29: Absolute fixed exposure cap from resolved live config.
+    # This is the single source of truth for the global slot allocator and
+    # all window/total exposure hard stops.
+    fixed_exposure_cap_usd: float = 2.00
+
+    # 2026-08-29: Stop-loss/daily-loss policy from the resolved live config.
+    stop_loss_enabled: bool = False
+
+    # 2026-08-29: Hash of the resolved live config that authorized this envelope.
+    config_hash: Optional[str] = None
 
     def __post_init__(self):
         # 2026-08-18: Fail-closed validation. Do not silently default to
