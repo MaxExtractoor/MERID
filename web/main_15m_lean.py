@@ -3176,13 +3176,16 @@ async def _run_full_startup_in_lifespan(app):
             logger.info("[STARTUP-STACK] P2.6.5: Starting balance calibrator (non-blocking)")
             async def calibrate_balance_async():
                 try:
-                    from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
+                    from merid.event_venues.kalshi.balance_calibrator import (
+                        get_balance_calibrator,
+                        dollars_to_cents,
+                    )
                     from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
                     service = await get_bankroll_service()
                     if service:
                         result = await service.get_current_bankroll()
                         if result.state.value == "fresh" and result.equity_usd:
-                            balance_cents = int(result.equity_usd * 100)
+                            balance_cents = dollars_to_cents(result.equity_usd)
                             get_balance_calibrator().update(balance_cents)
                             logger.info("[STARTUP-STACK] Balance calibrator completed: balance_cents=%d", balance_cents)
                 except Exception as e:
@@ -3892,7 +3895,10 @@ async def _run_startup_phases_v20260530(app):
         
         market_state_store = get_kalshi_market_state_store()
         agent_grid = get_agent_grid()
-        
+
+        # Make the singleton available to the health-snapshot API and probes.
+        app.state.market_state_store = market_state_store
+
         if agent_grid and hasattr(agent_grid, 'set_market_state_store'):
             agent_grid.set_market_state_store(market_state_store)
             logger.info("[STARTUP] P1.5.1: Market state store wired to agent grid")
