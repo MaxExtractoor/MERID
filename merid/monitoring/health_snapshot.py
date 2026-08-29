@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any
 import time
 import json
 
+from merid.data.ingress_replay import replay_time
 from utils.logger import get_logger
 
 logger = get_logger("merid.monitoring.health_snapshot")
@@ -233,7 +234,9 @@ def get_health_snapshot(
     Returns:
         HealthSnapshot with current health metrics
     """
-    now = time.time()
+    # Use the same clock source the WS bridge uses for its last-message timestamp.
+    # This keeps the heartbeat age correct whether the process is in replay or live.
+    now = replay_time()
     now_dt = datetime.now(timezone.utc)
     
     # Collect WS health
@@ -242,8 +245,9 @@ def get_health_snapshot(
         stats = ws_bridge.stats()
         connection_state = 'CONNECTED' if stats.get('connected', False) else 'DISCONNECTED'
         last_message_at = stats.get('last_message_time', None)
-        heartbeat_age_s = (now - last_message_at / 1000) if last_message_at else 999999
-        last_heartbeat_ts = last_message_at / 1000 if last_message_at else 0
+        # last_message_at is already in seconds (replay_time() or time.time()).
+        heartbeat_age_s = (now - last_message_at) if last_message_at else 999999
+        last_heartbeat_ts = last_message_at if last_message_at else 0
         is_connected = stats.get('connected', False)
     else:
         # Fallback for bridge without stats() method
