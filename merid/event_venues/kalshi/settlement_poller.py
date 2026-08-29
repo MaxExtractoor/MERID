@@ -20,6 +20,7 @@ import threading
 import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Callable, Set
 from enum import Enum
 
@@ -355,6 +356,96 @@ class KalshiSettlement:
     no_count: int = 0
     realized_pnl_cents: Optional[float] = None
     
+    @classmethod
+    def from_api(cls, item: Dict[str, Any]) -> "KalshiSettlement":
+        """Build a KalshiSettlement from a /portfolio/settlements API item.
+
+        The live Kalshi endpoint returns a different field layout than the
+        dataclass expects.  Map the authoritative fields so the downstream
+        grading pipeline receives a correctly-typed settlement event.
+        """
+        market_id = item.get("ticker") or item.get("market_id") or ""
+        # market_id is the full market ticker (e.g. KXSOL15M-26AUG291100-00).
+        # ticker is the series root used for bus-publish validation
+        # (e.g. KXSOL15M, later normalized to KXSOL-15M).
+        if market_id and "-" in market_id:
+            ticker = market_id.split("-")[0]
+        else:
+            ticker = market_id
+
+        market_result = str(item.get("market_result") or "").lower().strip()
+        if market_result in ("yes", "no"):
+            status = SettlementStatus.SETTLED
+        elif market_result in ("cancelled", "void", "invalid"):
+            status = SettlementStatus.CANCELLED
+        else:
+            status = SettlementStatus.PENDING
+
+        settlement_price_cents = item.get("value")
+        if settlement_price_cents is not None:
+            try:
+                settlement_price_cents = int(settlement_price_cents)
+            except (TypeError, ValueError):
+                settlement_price_cents = None
+
+        # settlement_value is gross payout/revenue in cents.
+        settlement_value: Optional[float] = None
+        revenue = item.get("revenue")
+        if revenue is not None:
+            try:
+                settlement_value = float(revenue)
+            except (TypeError, ValueError):
+                settlement_value = None
+
+        # Realized PnL = gross revenue - entry cost - fees.  Prefer the cost
+        # for the held side (the side with a non-zero position count).
+        realized_pnl_cents: Optional[float] = None
+        try:
+            fee_cost = Decimal(str(item.get("fee_cost") or "0"))
+            revenue_dec = Decimal(str(revenue)) if revenue is not None else Decimal("0")
+            yes_count = Decimal(str(item.get("yes_count_fp") or "0"))
+            no_count = Decimal(str(item.get("no_count_fp") or "0"))
+            yes_cost = Decimal(str(item.get("yes_total_cost_dollars") or "0"))
+            no_cost = Decimal(str(item.get("no_total_cost_dollars") or "0"))
+
+            if yes_count > 0 and no_count <= 0:
+                cost = yes_cost
+            elif no_count > 0 and yes_count <= 0:
+                cost = no_cost
+            else:
+                # Ambiguous / both sides held: use the cost of the winning side
+                # for a conservative gross PnL estimate.
+                cost = yes_cost if market_result == "yes" else no_cost
+
+            # revenue is in cents; cost and fee are in dollars.
+            realized_pnl_cents = float(revenue_dec - (cost * Decimal("100")) - (fee_cost * Decimal("100")))
+        except Exception:
+            realized_pnl_cents = None
+
+        def _parse_count(raw: Any) -> int:
+            if raw is None:
+                return 0
+            try:
+                return int(Decimal(str(raw)))
+            except Exception:
+                return 0
+
+        return cls(
+            market_id=market_id,
+            ticker=ticker,
+            title=item.get("title") or "",
+            category=item.get("category") or "",
+            status=status,
+            settlement_price_cents=settlement_price_cents,
+            settlement_value=settlement_value,
+            expiry_time=item.get("settled_time"),
+            settlement_time=item.get("settled_time"),
+            position_count=_parse_count(item.get("yes_count_fp")) + _parse_count(item.get("no_count_fp")),
+            yes_count=_parse_count(item.get("yes_count_fp")),
+            no_count=_parse_count(item.get("no_count_fp")),
+            realized_pnl_cents=realized_pnl_cents,
+        )
+
     def to_outcome(self) -> Optional[Outcome]:
         """Convert settlement to unified Outcome enum per Contract §2.2."""
         if self.status == SettlementStatus.CANCELLED:
@@ -670,22 +761,7 @@ class KalshiSettlementPoller:
             settlements = []
             raw_settlements = response.get("settlements") or []
             for item in raw_settlements:
-                settlement = KalshiSettlement(
-                    market_id=item.get("market_id", ""),
-                    ticker=item.get("ticker", ""),
-                    title=item.get("title", ""),
-                    category=item.get("category", ""),
-                    status=SettlementStatus(item.get("status", "pending")),
-                    settlement_price_cents=item.get("settlement_price"),
-                    settlement_value=item.get("settlement_value"),
-                    expiry_time=item.get("expiration_time"),
-                    settlement_time=item.get("settlement_time"),
-                    position_count=item.get("position_count", 0),
-                    yes_count=item.get("yes_count", 0),
-                    no_count=item.get("no_count", 0),
-                    realized_pnl_cents=item.get("realized_profit", 0),
-                )
-                settlements.append(settlement)
+                settlements.append(KalshiSettlement.from_api(item))
             
             return settlements
             
@@ -798,22 +874,7 @@ class KalshiSettlementPoller:
                 # Parse settlements from this page
                 page_settlements = []
                 for item in response.get("settlements", []):
-                    settlement = KalshiSettlement(
-                        market_id=item.get("market_id", ""),
-                        ticker=item.get("ticker", ""),
-                        title=item.get("title", ""),
-                        category=item.get("category", ""),
-                        status=SettlementStatus(item.get("status", "pending")),
-                        settlement_price_cents=item.get("settlement_price"),
-                        settlement_value=item.get("settlement_value"),
-                        expiry_time=item.get("expiration_time"),
-                        settlement_time=item.get("settlement_time"),
-                        position_count=item.get("position_count", 0),
-                        yes_count=item.get("yes_count", 0),
-                        no_count=item.get("no_count", 0),
-                        realized_pnl_cents=item.get("realized_profit", 0),
-                    )
-                    page_settlements.append(settlement)
+                    page_settlements.append(KalshiSettlement.from_api(item))
                 
                 # INVARIANT CHECK: No duplicates within this fetch call
                 for s in page_settlements:
@@ -1145,12 +1206,14 @@ class SettlementToGradingBridge:
         except Exception as exc:
             logger.debug("[TRACE-SETTLEMENT] Failed to finalize trace for market_id=%s: %s", settlement.market_id, exc)
         
-        # Session-based PnL tracking: notify fills_ledger and position_cache of market settlement
+        # Session-based PnL tracking: notify fills_ledger and position_cache of market settlement.
+        # Use the full market_id (e.g. KXSOL15M-26AUG291100-00) so ledger/cache lookups and the
+        # trade-attribution fact table use the same ticker key as the fill rows.
         try:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
             outcome = "yes" if settlement.outcome_str == "YES" else "no"
-            ledger.on_market_settlement(settlement.ticker, outcome)
+            ledger.on_market_settlement(settlement.market_id, outcome)
         except Exception as exc:
             logger.warning(f"Failed to notify fills_ledger of settlement: {exc}")
 
@@ -1158,7 +1221,7 @@ class SettlementToGradingBridge:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             cache = get_position_cache()
             outcome = "yes" if settlement.outcome_str == "YES" else "no"
-            await cache.on_market_settlement(settlement.ticker, outcome)
+            await cache.on_market_settlement(settlement.market_id, outcome)
         except Exception as exc:
             logger.warning(f"Failed to notify position_cache of settlement: {exc}")
         
