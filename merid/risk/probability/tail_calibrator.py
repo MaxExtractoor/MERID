@@ -18,14 +18,31 @@ by ``scripts/calibrate_tail_probability.py`` (or any caller) and can use NumPy.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+logger = logging.getLogger(__name__)
+
 
 def _default_calibration_path() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent / "data" / "probability_tail_calibration.json"
+
+
+def _sort_price_prob_pair(prices: List[float], probs: List[float]) -> Tuple[List[float], List[float]]:
+    """Sort held-price / actual-probability pairs by price ascending.
+
+    PAVA and the lookup function both assume monotonically increasing held prices.
+    Sorting defensively prevents a malformed or manually-edited calibration file
+    from silently disabling the cheap-tail cap.
+    """
+    if not prices:
+        return prices, probs
+    paired = list(zip(prices, probs))
+    paired.sort(key=lambda pair: pair[0])
+    return [p for p, _ in paired], [q for _, q in paired]
 
 
 def _pava_isotonic(
@@ -94,37 +111,87 @@ class TailProbabilityCalibrator:
 
     The calibrator is intentionally not a generic Platt scaler.  It is fit on
     the held-side market price (the price of the contract we are long) and
-    observed win/loss outcomes.  The transform caps model probability at
-    ``actual_win_rate + buffer`` so tail overconfidence cannot produce positive
-    edge.
+    observed win/loss outcomes.  Separate YES and NO curves are maintained so
+    the transform can cap model probability at ``actual_win_rate + buffer`` on
+    the actual held side, not a symmetric dual approximation.
     """
 
     def __init__(
         self,
-        held_prices: List[float],
-        actual_probs: List[float],
+        yes_held_prices: Optional[List[float]] = None,
+        yes_actual_probs: Optional[List[float]] = None,
+        no_held_prices: Optional[List[float]] = None,
+        no_actual_probs: Optional[List[float]] = None,
+        held_prices: Optional[List[float]] = None,  # legacy single-curve
+        actual_probs: Optional[List[float]] = None,  # legacy single-curve
         buffer: float = 0.05,
         n_trades: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ):
-        if len(held_prices) != len(actual_probs):
-            raise ValueError("held_prices and actual_probs must have same length")
-        self.held_prices = list(held_prices)
-        self.actual_probs = list(actual_probs)
+        # Legacy single-curve path: use one curve for both sides.
+        if held_prices is not None and actual_probs is not None:
+            yes_held_prices = held_prices
+            yes_actual_probs = actual_probs
+            no_held_prices = [1.0 - x for x in held_prices]
+            no_actual_probs = [1.0 - y for y in actual_probs]
+
+        self.yes_held_prices = list(yes_held_prices or [])
+        self.yes_actual_probs = list(yes_actual_probs or [])
+        self.no_held_prices = list(no_held_prices or [])
+        self.no_actual_probs = list(no_actual_probs or [])
+        if len(self.yes_held_prices) != len(self.yes_actual_probs):
+            raise ValueError("yes_held_prices and yes_actual_probs must have same length")
+        if len(self.no_held_prices) != len(self.no_actual_probs):
+            raise ValueError("no_held_prices and no_actual_probs must have same length")
+
+        # Defensive: PAVA and _lookup both require ascending held prices.
+        self.yes_held_prices, self.yes_actual_probs = _sort_price_prob_pair(
+            self.yes_held_prices, self.yes_actual_probs
+        )
+        self.no_held_prices, self.no_actual_probs = _sort_price_prob_pair(
+            self.no_held_prices, self.no_actual_probs
+        )
+
         self.buffer = buffer
         self.n_trades = n_trades
         self.metadata = metadata or {}
 
+        # Detect whether the NO curve is merely the YES dual (1 - p) rather than
+        # fit on real NO-held data.  A real NO calibration must be re-fit from
+        # held NO prices and outcomes; using the dual silently exposes the NO
+        # side to the YES tail miscalibration.  Per-side fits will not be exactly
+        # the mirror image, so this detection is conservative.
+        self.no_curve_is_dual = self._check_no_curve_is_dual()
+
+    def _check_no_curve_is_dual(self) -> bool:
+        if not self.yes_held_prices or not self.no_held_prices:
+            return False
+        if len(self.yes_held_prices) != len(self.no_held_prices):
+            return False
+
+        yes_idx = sorted(range(len(self.yes_held_prices)), key=lambda i: self.yes_held_prices[i])
+        no_idx = sorted(range(len(self.no_held_prices)), key=lambda i: self.no_held_prices[i], reverse=True)
+
+        tol = 1e-6
+        for i in range(len(yes_idx)):
+            yes_price = self.yes_held_prices[yes_idx[i]]
+            no_price = self.no_held_prices[no_idx[i]]
+            yes_prob = self.yes_actual_probs[yes_idx[i]]
+            no_prob = self.no_actual_probs[no_idx[i]]
+            if (
+                abs((1.0 - yes_price) - no_price) > tol
+                or abs((1.0 - yes_prob) - no_prob) > tol
+            ):
+                return False
+        return True
+
     def p_yes(self, held_yes_price: float) -> float:
         """Actual P(YES wins) for a YES-held contract at ``held_yes_price``."""
-        return self._lookup(held_yes_price)
+        return self._lookup(held_yes_price, self.yes_held_prices, self.yes_actual_probs)
 
     def p_no(self, held_no_price: float) -> float:
-        """Actual P(NO wins) for a NO-held contract at ``held_no_price``.
-
-        Uses the dual of the YES-held calibration.
-        """
-        return 1.0 - self._lookup(1.0 - held_no_price)
+        """Actual P(NO wins) for a NO-held contract at ``held_no_price``."""
+        return self._lookup(held_no_price, self.no_held_prices, self.no_actual_probs)
 
     def cap_p_yes(self, p_yes_model: float, held_yes_price: float) -> float:
         """Cap model P(YES) at actual + buffer for a YES-held price."""
@@ -134,34 +201,50 @@ class TailProbabilityCalibrator:
         """Cap model P(NO) at actual + buffer for a NO-held price."""
         return min(p_no_model, self.p_no(held_no_price) + self.buffer)
 
-    def _lookup(self, price: float) -> float:
+    @staticmethod
+    def _lookup(price: float, held_prices: List[float], actual_probs: List[float]) -> float:
         price = max(0.0, min(1.0, price))
-        if not self.held_prices:
+        if not held_prices:
             return price  # uncalibrated fallback: trust the market
-        if price <= self.held_prices[0]:
-            return self.actual_probs[0]
+        if price <= held_prices[0]:
+            return actual_probs[0]
         # PAVA returns right-endpoint knots.  The step value for any price is the
         # value at the first knot that is at or above it.  This preserves the
         # monotonic blocks instead of interpolating across gaps in the data.
-        for x, y in zip(self.held_prices, self.actual_probs):
+        for x, y in zip(held_prices, actual_probs):
             if price <= x:
                 return y
-        return self.actual_probs[-1]
+        return actual_probs[-1]
 
     def to_dict(self) -> Dict[str, Any]:
+        metadata = dict(self.metadata)
+        metadata["no_curve_is_dual"] = self.no_curve_is_dual
         return {
-            "held_prices": self.held_prices,
-            "actual_probs": self.actual_probs,
+            "yes_held_prices": self.yes_held_prices,
+            "yes_actual_probs": self.yes_actual_probs,
+            "no_held_prices": self.no_held_prices,
+            "no_actual_probs": self.no_actual_probs,
             "buffer": self.buffer,
             "n_trades": self.n_trades,
-            "metadata": self.metadata,
+            "metadata": metadata,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TailProbabilityCalibrator":
+        # Backward compatibility with single-curve legacy files.
+        if "yes_held_prices" not in data and "held_prices" in data:
+            return cls(
+                held_prices=data.get("held_prices", []),
+                actual_probs=data.get("actual_probs", []),
+                buffer=data.get("buffer", 0.05),
+                n_trades=data.get("n_trades", 0),
+                metadata=data.get("metadata", {}),
+            )
         return cls(
-            held_prices=data.get("held_prices", []),
-            actual_probs=data.get("actual_probs", []),
+            yes_held_prices=data.get("yes_held_prices", []),
+            yes_actual_probs=data.get("yes_actual_probs", []),
+            no_held_prices=data.get("no_held_prices", []),
+            no_actual_probs=data.get("no_actual_probs", []),
             buffer=data.get("buffer", 0.05),
             n_trades=data.get("n_trades", 0),
             metadata=data.get("metadata", {}),
@@ -173,11 +256,18 @@ class TailProbabilityCalibrator:
         trades: List[Dict[str, Any]],
         buffer: float = 0.05,
     ) -> "TailProbabilityCalibrator":
-        """Fit PAVA isotonic regression on the held side of trade analysis data."""
+        """Fit per-side PAVA isotonic regression on trade analysis data.
+
+        Each trade is converted into its held-side coordinate independently for
+        YES-held and NO-held contracts.  This keeps the YES and NO calibrations
+        separate instead of forcing symmetry through the dual relationship.
+        """
         from decimal import Decimal
 
-        held_prices: List[float] = []
-        wins: List[int] = []
+        yes_prices: List[float] = []
+        yes_wins: List[int] = []
+        no_prices: List[float] = []
+        no_wins: List[int] = []
 
         for trade in trades:
             side = (trade.get("side") or "").upper()
@@ -185,45 +275,43 @@ class TailProbabilityCalibrator:
             price = Decimal(str(trade.get("price", 0)))
             market_result = (trade.get("market_result") or "").lower()
 
+            # Determine the held side and the price paid for that held side.
             if action == "buy":
                 held_side = side
                 held_price = float(price)
-            else:  # sell -> held is the opposite side
+            else:  # sell -> held is the opposite side; price received is premium
                 held_side = "YES" if side == "NO" else "NO"
                 held_price = float(Decimal(1) - price)
 
             if held_side == "YES":
                 win = 1 if market_result == "yes" else 0
+                yes_prices.append(held_price)
+                yes_wins.append(win)
             else:
                 win = 1 if market_result == "no" else 0
+                no_prices.append(held_price)
+                no_wins.append(win)
 
-            # Convert all observations to a unified YES-held coordinate so the
-            # isotonic is over the probability of the held side winning.
-            if held_side == "YES":
-                held_yes_price = held_price
-                win_yes = win
-            else:
-                held_yes_price = 1.0 - held_price
-                win_yes = 1 - win
+        if len(yes_prices) < 5 and len(no_prices) < 5:
+            raise ValueError(
+                f"Need at least 5 YES and 5 NO trades to fit per-side calibration, "
+                f"got YES={len(yes_prices)} NO={len(no_prices)}"
+            )
 
-            if 0.0 <= held_yes_price <= 1.0:
-                held_prices.append(held_yes_price)
-                wins.append(win_yes)
-
-        if len(held_prices) < 10:
-            raise ValueError(f"Need at least 10 trades to fit tail calibration, got {len(held_prices)}")
-
-        right_xs, ys = _pava_isotonic(held_prices, wins)
+        yes_xs, yes_ys = _pava_isotonic(yes_prices, yes_wins) if yes_prices else ([], [])
+        no_xs, no_ys = _pava_isotonic(no_prices, no_wins) if no_prices else ([], [])
 
         return cls(
-            held_prices=right_xs,
-            actual_probs=ys,
+            yes_held_prices=yes_xs,
+            yes_actual_probs=yes_ys,
+            no_held_prices=no_xs,
+            no_actual_probs=no_ys,
             buffer=buffer,
-            n_trades=len(held_prices),
+            n_trades=len(yes_prices) + len(no_prices),
             metadata={
                 "source": "trade_analysis_raw_7d",
-                "fit_method": "pava_isotonic_regression",
-                "held_side": "yes",
+                "fit_method": "per_side_pava_isotonic_regression",
+                "held_side": "both",
             },
         )
 
@@ -253,6 +341,12 @@ def load_tail_calibrator(
         data = json.load(f)
 
     _cached_calibrator = TailProbabilityCalibrator.from_dict(data)
+    if _cached_calibrator.no_curve_is_dual:
+        logger.warning(
+            "[TAIL-CALIBRATOR] NO curve is the YES dual (1 - p_yes) from %s; "
+            "treat NO-side tail caps as provisional until re-fit on real NO-held data.",
+            path,
+        )
     return _cached_calibrator
 
 
