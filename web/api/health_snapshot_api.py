@@ -74,6 +74,7 @@ class HealthSnapshotModel(BaseModel):
     book: BookHealthModel
     risk: RiskHealthModel
     gates: GateDecisionModel
+    quarantine_path: str = "unknown"  # active / inactive / unknown
     scenario_mapping: Optional[str] = None
 
 

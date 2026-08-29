@@ -127,6 +127,16 @@ if (Test-Path $EnvFile) {
 # 0.2 Strip legacy exchange credentials from the live 15m process environment.
 Remove-LegacyExchangeCredentials
 
+# 0.2a Never allow replay mode in a live trading process. An inherited or stale
+# MERID_REPLAY_TAPE would silently switch ingress to a tape and corrupt time math.
+@("MERID_REPLAY_TAPE", "MERID_REPLAY_SEED", "MERID_REPLAY_ACTIVE_SOURCES") | ForEach-Object {
+    $val = [Environment]::GetEnvironmentVariable($_, "Process")
+    if ($val) {
+        Remove-Item -Path "env:$_" -ErrorAction SilentlyContinue
+        Write-Host "[start_15m] Removed replay env $_ from live process" -ForegroundColor Yellow
+    }
+}
+
 # 0.3 Canonical environment resolver.
 # MERID_ENV=prod is the canonical application mode for this production startup script.
 $existingMeridEnv = [Environment]::GetEnvironmentVariable("MERID_ENV", "Process")
@@ -292,4 +302,6 @@ Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
 # CRITICAL FIX: Remove --lifespan on (redundant - app already has lifespan defined)
 $env:PYTHONUNBUFFERED = "1"
 $ErrorActionPreference = "Continue"
-& py -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level info
+# Prefer the project virtualenv so the exact package set is used.
+$python = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.exe" } else { "py" }
+& $python -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level info
