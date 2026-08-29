@@ -38,7 +38,6 @@ handler.setFormatter(formatter)
 log.addHandler(handler)
 
 # Health snapshot API endpoint
-import os
 api_host = os.getenv("MERID_API_HOST", "127.0.0.1")
 api_port = os.getenv("MERID_API_PORT", "8011")
 HEALTH_URL = os.environ.get(
@@ -63,6 +62,7 @@ EXPECTED_WS_STATE = "CONNECTED"
 EXPECTED_BOOK_CONSISTENCY = "GOOD"
 EXPECTED_SPOT_RUNNING = True
 EXPECTED_GATE_OVERALL = "PASS"
+EXPECTED_QUARANTINE_PATH = "active"
 
 # Monitoring interval (seconds)
 MONITOR_INTERVAL = 5.0
@@ -279,6 +279,16 @@ def check_gates(snapshot: Dict[str, Any]) -> None:
         log.error(f"[15M-PROBE-ANOMALY] type=gate_risk actual={risk}")
 
 
+def check_quarantine(snapshot: Dict[str, Any]) -> None:
+    """Check that the stuck-position quarantine path is active."""
+    quarantine_path = snapshot.get("quarantine_path", "unknown")
+    if quarantine_path != EXPECTED_QUARANTINE_PATH:
+        log.error(
+            f"[15M-PROBE-ANOMALY] type=quarantine_path expected={EXPECTED_QUARANTINE_PATH} "
+            f"actual={quarantine_path}"
+        )
+
+
 def check_cross_layer_consistency(snapshot: Dict[str, Any]) -> None:
     """Check cross-layer consistency."""
     ws = snapshot.get("ws", {})
@@ -368,6 +378,7 @@ def main():
                 check_book(snapshot)
                 check_risk(snapshot)
                 check_gates(snapshot)
+                check_quarantine(snapshot)
                 check_cross_layer_consistency(snapshot)
                 
                 # Write snapshot JSON for offline analysis
