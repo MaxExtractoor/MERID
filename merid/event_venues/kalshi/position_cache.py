@@ -5914,7 +5914,12 @@ class KalshiPositionCache:
             )
 
     async def on_market_settlement(
-        self, market_ticker: str, outcome: str
+        self,
+        market_ticker: str,
+        outcome: str,
+        settlement_price_cents: Optional[int] = None,
+        realized_pnl_cents: Optional[int] = None,
+        settlement_ts: Optional[str] = None,
     ) -> None:
         """Handle a market settlement event by finalizing the cached position.
 
@@ -5923,9 +5928,11 @@ class KalshiPositionCache:
         rebuilt from the fills ledger.
         """
         logger.info(
-            "[POSITION-CACHE-SETTLEMENT] market=%s outcome=%s",
+            "[POSITION-CACHE-SETTLEMENT] market=%s outcome=%s price_cents=%s pnl_cents=%s",
             market_ticker,
             outcome,
+            settlement_price_cents,
+            realized_pnl_cents,
         )
         # Capture position before mark_settled removes it.
         position = self._positions.get(market_ticker)
@@ -5936,7 +5943,14 @@ class KalshiPositionCache:
             from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
             table = get_trade_attribution_table()
             if table is not None:
-                table.record_settlement(market_ticker, outcome, position)
+                table.record_settlement(
+                    market_ticker,
+                    outcome,
+                    position,
+                    settlement_price_cents=settlement_price_cents,
+                    realized_pnl_cents=realized_pnl_cents,
+                    settlement_ts=settlement_ts,
+                )
                 await table.flush()
         except Exception as e:
             logger.warning("[POSITION-CACHE] trade attribution record_settlement failed: %s", e)
