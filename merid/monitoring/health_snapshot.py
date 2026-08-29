@@ -314,26 +314,32 @@ def get_health_snapshot(
     
     # Try to get book health from market state store
     try:
-        # Get a sample market state (e.g., BTC)
-        catalog = getattr(market_state_store, '_catalog', None)
-        if catalog:
-            active_tickers = catalog.get_active_tickers()
-            if active_tickers:
-                sample_ticker = active_tickers[0]
-                state = market_state_store.get_state(sample_ticker)
+        if market_state_store is not None and hasattr(market_state_store, 'get_all'):
+            all_states = market_state_store.get_all()
+            # Prefer a BTC market, then any tracked 15m ticker.
+            sample_ticker = None
+            for t in all_states:
+                if t.startswith('KXBTC15M'):
+                    sample_ticker = t
+                    break
+            if sample_ticker is None and all_states:
+                sample_ticker = next(iter(all_states))
+            if sample_ticker:
+                state = market_state_store.get(sample_ticker)
                 if state:
-                    book_age = now - state.last_update_ts
-                    has_bids = len(state.bids) > 0
-                    has_asks = len(state.asks) > 0
+                    update_ts = getattr(state, 'last_book_update_wall_ts', 0.0) or getattr(state, 'last_book_update_ts', 0.0)
+                    book_age = max(0.0, now - update_ts) if update_ts else 9999.0
+                    has_bids = bool(getattr(state, 'has_bid', False))
+                    has_asks = bool(getattr(state, 'has_ask', False))
                     best_bid = state.best_bid_cents if has_bids else None
                     best_ask = state.best_ask_cents if has_asks else None
-                    spread = (best_ask - best_bid) if (best_bid and best_ask) else None
-                    mid = (best_bid + best_ask) / 2 if (best_bid and best_ask) else None
+                    spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else None
+                    mid = (best_bid + best_ask) / 2 if (best_bid is not None and best_ask is not None) else None
                     spread_pct = (spread / mid * 100) if (spread and mid) else None
-                    
+
                     book_consistency = getattr(state, 'book_consistency', 'UNKNOWN')
-                    suspect_reason = getattr(state, 'suspect_reason', None)
-                    
+                    suspect_reason = getattr(state, 'invalidation_cause', None)
+
                     book_health = BookHealth(
                         book_consistency=book_consistency,
                         suspect_reason=suspect_reason,
@@ -349,7 +355,7 @@ def get_health_snapshot(
                     )
     except Exception as e:
         # If we can't get book health, keep defaults
-        pass
+        logger.warning("[HEALTH-SNAPSHOT] Failed to collect book health: %s", e)
     
     # Cross-layer consistency: if WS is disconnected, mark book as SUSPECT
     # This must be OUTSIDE the try/except to ensure it always runs
