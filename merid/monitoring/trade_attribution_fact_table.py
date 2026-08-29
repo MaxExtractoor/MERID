@@ -206,6 +206,11 @@ class TradeAttributionTable:
                     CREATE INDEX IF NOT EXISTS idx_trade_attribution_run
                     ON trade_attribution_fact (run_id)
                 """)
+                await db.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_attribution_settlement
+                    ON trade_attribution_fact (ticker, settlement_outcome, settlement_price_cents)
+                    WHERE event_type = 'settlement'
+                """)
                 await db.commit()
             self._initialized = True
             logger.info("[TRADE-ATTRIBUTION] schema initialized")
@@ -245,6 +250,7 @@ class TradeAttributionTable:
         ]
         placeholders = ",".join("?" * len(columns))
         sql = f"INSERT INTO trade_attribution_fact ({','.join(columns)}) VALUES ({placeholders})"
+        settlement_sql = f"INSERT OR IGNORE INTO trade_attribution_fact ({','.join(columns)}) VALUES ({placeholders})"
 
         try:
             import aiosqlite
@@ -253,7 +259,10 @@ class TradeAttributionTable:
                 await db.execute("PRAGMA busy_timeout=5000;")
                 for row in rows:
                     values = [row.get(c) for c in columns]
-                    await db.execute(sql, values)
+                    if row.get("event_type") == "settlement":
+                        await db.execute(settlement_sql, values)
+                    else:
+                        await db.execute(sql, values)
                 await db.commit()
             logger.debug("[TRADE-ATTRIBUTION] flushed %d rows", len(rows))
         except Exception as e:
@@ -389,16 +398,20 @@ class TradeAttributionTable:
         outcome: str,
         position: Optional[Any] = None,
         settlement_price_cents: Optional[int] = None,
+        realized_pnl_cents: Optional[int] = None,
+        settlement_ts: Optional[str] = None,
     ) -> None:
         """Record a market settlement and realized PnL for the position."""
         try:
             if settlement_price_cents is None and outcome:
                 settlement_price_cents = 100 if outcome.lower() == "yes" else 0
 
-            realized_pnl_cents: Optional[int] = None
-            if position is not None:
+            if realized_pnl_cents is None and position is not None:
                 realized_pnl = getattr(position, "realized_pnl_usd", Decimal("0")) or Decimal("0")
                 realized_pnl_cents = int(realized_pnl * 100)
+
+            if settlement_ts is None:
+                settlement_ts = datetime.now(timezone.utc).isoformat()
 
             row: Dict[str, Any] = {
                 "intent_id": getattr(position, "entry_intent_id", None) if position else None,
@@ -408,7 +421,7 @@ class TradeAttributionTable:
                 "realized_pnl_cents": realized_pnl_cents,
                 "settlement_outcome": outcome,
                 "settlement_price_cents": settlement_price_cents,
-                "settlement_ts": datetime.now(timezone.utc).isoformat(),
+                "settlement_ts": settlement_ts,
                 "metadata": json.dumps(
                     {
                         "avg_price_cents": getattr(position, "avg_price_cents", None),

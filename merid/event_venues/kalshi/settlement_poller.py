@@ -1221,7 +1221,15 @@ class SettlementToGradingBridge:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             cache = get_position_cache()
             outcome = "yes" if settlement.outcome_str == "YES" else "no"
-            await cache.on_market_settlement(settlement.market_id, outcome)
+            price_cents = settlement.settlement_price_cents
+            pnl_cents = int(settlement.realized_pnl_cents) if settlement.realized_pnl_cents is not None else None
+            await cache.on_market_settlement(
+                settlement.market_id,
+                outcome,
+                settlement_price_cents=price_cents,
+                realized_pnl_cents=pnl_cents,
+                settlement_ts=settlement.settlement_time,
+            )
         except Exception as exc:
             logger.warning(f"Failed to notify position_cache of settlement: {exc}")
         
@@ -1313,6 +1321,9 @@ async def start_settlement_polling_auto() -> Optional[KalshiSettlementPoller]:
     if client is None:
         return None
     poller = get_settlement_poller(client)
+    # Ensure the bridge that records settlements, updates ledger/cache, and
+    # publishes to the event bus is wired before polling starts.
+    get_settlement_bridge(client, grading_callback=None)
     await poller.start()
     return poller
 
