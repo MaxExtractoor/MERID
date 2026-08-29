@@ -784,6 +784,10 @@ class ReconciliationReport:
     summary: str
     issues: List[ReconciliationIssue]
 
+    # 2026-08-29: Hash of the resolved live config that authorized this
+    # reconciliation run.  Links the report to the active safety policy.
+    config_hash: Optional[str] = None
+
 
 class KalshiReconciler:
     """Production stack reconciler wrapper for UI-UX endpoints.
@@ -865,10 +869,22 @@ class KalshiReconciler:
         
         summary = f"Reconciliation complete: {len(issues)} issues found"
         
+        # Attach the resolved live config hash for audit.
+        config_hash = None
+        try:
+            from merid.config.live_config import get_resolved_live_config
+
+            resolved = get_resolved_live_config(allow_unresolved=True)
+            if resolved.resolved:
+                config_hash = resolved.config_hash
+        except Exception:
+            config_hash = None
+
         return ReconciliationReport(
             severity=severity,
             summary=summary,
             issues=issues,
+            config_hash=config_hash,
         )
 
 

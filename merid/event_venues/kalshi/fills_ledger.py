@@ -677,6 +677,11 @@ class KalshiFill:
     position_effect: Optional[str] = None  # OPEN or CLOSE
     economic_side: Optional[str] = None  # YES or NO
 
+    # 2026-08-29: Hash of the resolved live config at the time of this fill.
+    # Fills are immutable audit records; the config hash links them to the
+    # safety policy that was in effect when they were ingested.
+    config_hash: Optional[str] = None
+
     def __post_init__(self) -> None:
         """Fail-closed defaults for trust and canonical quantity.
 
@@ -702,6 +707,18 @@ class KalshiFill:
         # Explicit version for newly generated fills; preserve 0 for legacy rows.
         if self.canonicalization_version == 0 and self.canonicalization_state != "UNTRUSTED_LEGACY":
             self.canonicalization_version = CANONICALIZATION_VERSION
+
+        # Attach the resolved live config hash for audit.  Fills created before
+        # resolution (e.g. in tests or replay) are allowed to remain None.
+        if self.config_hash is None:
+            try:
+                from merid.config.live_config import get_resolved_live_config
+
+                resolved = get_resolved_live_config(allow_unresolved=True)
+                if resolved.resolved:
+                    self.config_hash = resolved.config_hash
+            except Exception:
+                pass
 
         # Derive immutable intent/position-effect/economic-side provenance for
         # downstream audit joins.  is_exit is authoritative when set by the

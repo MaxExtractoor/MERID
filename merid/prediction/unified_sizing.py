@@ -892,12 +892,21 @@ def compute_order_size(
     # All percentage-based sizing has been removed
     # New model: sum of all contract prices must be ≤ $2
     
-    # Step 1: Get fixed $2 exposure cap from profile
+    # Step 1: Get fixed exposure cap from the resolved live config.
+    # The resolved config is the single source of truth for the $2 / $1 cap.
     fixed_exposure_cap_usd = Decimal("2.00")  # Default
-    if _PROFILE_AVAILABLE and is_profile_active():
-        adapter = get_active_profile()
-        profile = adapter.profile
-        fixed_exposure_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
+    try:
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved.resolved:
+            fixed_exposure_cap_usd = resolved.fixed_exposure_cap_usd
+    except Exception:
+        # Fallback to active profile if resolver is not active.
+        if _PROFILE_AVAILABLE and is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            fixed_exposure_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
     
     # Step 2: Get existing total exposure from slot allocator
     # CRITICAL FIX: 2026-07-13 - Use slot_allocator for exposure check
