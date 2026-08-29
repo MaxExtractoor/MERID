@@ -42,49 +42,79 @@ def test_get_resolved_live_config_returns_same_singleton(monkeypatch):
     assert first is second
 
 
-def test_environment_override_lowers_min_required_edge_fails(monkeypatch):
+def test_environment_override_lowers_min_required_edge_is_rejected(monkeypatch):
+    """A lower edge floor is unsafe and is ignored; the profile floor wins."""
     monkeypatch.setenv("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.01")
-    with pytest.raises(LiveConfigInvariantError) as exc:
-        resolve_live_config()
-    assert "lower the minimum required edge" in str(exc.value)
+    resolved = resolve_live_config()
+    assert resolved.min_required_edge == Decimal("0.05")
+    assert any(
+        "Min required edge override rejected" in c for c in resolved.conflicts_caught
+    )
 
 
-def test_environment_override_lowers_min_held_price_fails(monkeypatch):
+def test_environment_override_lowers_min_held_price_is_rejected(monkeypatch):
+    """A lower held-side price floor is unsafe and is ignored."""
     monkeypatch.setenv("MERID_MIN_HELD_PRICE_CENTS", "20")
-    with pytest.raises(LiveConfigInvariantError) as exc:
-        resolve_live_config()
-    assert "lower the held-side price floor" in str(exc.value)
+    resolved = resolve_live_config()
+    assert resolved.min_held_price_cents == Decimal("35")
+    assert any(
+        "Held-side price floor override rejected" in c for c in resolved.conflicts_caught
+    )
 
 
-def test_environment_override_raises_fixed_exposure_cap_fails(monkeypatch):
+def test_environment_override_raises_fixed_exposure_cap_is_rejected(monkeypatch):
+    """A higher exposure cap is unsafe and is ignored; the profile cap wins."""
     monkeypatch.setenv("MERID_FIXED_EXPOSURE_CAP_USD", "3.00")
-    with pytest.raises(LiveConfigInvariantError) as exc:
-        resolve_live_config()
-    assert "raise the fixed exposure cap" in str(exc.value)
+    resolved = resolve_live_config()
+    # profile fixed cap is 0.75; the unsafe 3.00 override is rejected
+    assert resolved.fixed_exposure_cap_usd == Decimal("0.75")
+    assert any(
+        "Exposure cap override rejected" in c for c in resolved.conflicts_caught
+    )
 
 
-def test_environment_override_daily_loss_above_profile_fails(monkeypatch):
+def test_environment_override_daily_loss_above_profile_is_rejected(monkeypatch):
+    """A higher daily loss pct is unsafe and is ignored; the 5% prod profile wins."""
+    # Force prod mode so the profile daily loss is 0.05 and the .env 0.15 is rejected.
+    monkeypatch.setenv("MERID_OPERATION_MODE", "prod")
     monkeypatch.setenv("MERID_MAX_DAILY_LOSS_PCT", "0.15")
-    with pytest.raises(LiveConfigInvariantError) as exc:
-        resolve_live_config()
-    assert "raise the daily loss limit" in str(exc.value)
+    resolved = resolve_live_config()
+    assert resolved.max_daily_loss_pct == Decimal("0.05")
+    assert any(
+        "Daily loss override rejected" in c for c in resolved.conflicts_caught
+    )
 
 
-def test_stop_loss_without_submission_or_unprotected_fails(monkeypatch):
-    # The conftest autouse fixture sets MERID_ALLOW_UNPROTECTED_ENTRIES=1 for
-    # legacy tests; we explicitly clear it here to test the fail-closed path.
-    monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "0")
+def test_stop_loss_detection_decoupled_from_stop_candidate_execution(monkeypatch):
+    """stop_loss_enabled (detection) can be true while execution stays off."""
     monkeypatch.setenv("MERID_ALLOW_UNPROTECTED_ENTRIES", "0")
-    with pytest.raises(LiveConfigInvariantError) as exc:
-        resolve_live_config()
-    assert "protective exits cannot be executed" in str(exc.value)
+    resolved = resolve_live_config()
+    assert resolved.stop_loss_enabled
+    assert not resolved.stop_candidate_submission_enabled
+    assert not resolved.unprotected_entries_allowed
 
 
-def test_entry_price_floor_env_below_canonical_fails(monkeypatch):
+def test_stop_candidate_submission_env_request_is_ignored(monkeypatch):
+    """MERID_ENABLE_STOP_CANDIDATE_SUBMISSION is a request, not an enablement,
+    until the B stop-candidate reducer and replay harness pass."""
+    monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "1")
+    monkeypatch.setenv("MERID_ALLOW_UNPROTECTED_ENTRIES", "0")
+    resolved = resolve_live_config()
+    assert not resolved.stop_candidate_submission_enabled
+    assert any(
+        "Stop-candidate submission env request ignored" in c
+        for c in resolved.conflicts_caught
+    )
+
+
+def test_entry_price_floor_env_below_canonical_is_rejected(monkeypatch):
+    """A lower entry price floor is unsafe and is ignored."""
     monkeypatch.setenv("MERID_MIN_ENTRY_CENTS", "5")
-    with pytest.raises(LiveConfigInvariantError) as exc:
-        resolve_live_config()
-    assert "lower the minimum entry price" in str(exc.value)
+    resolved = resolve_live_config()
+    assert resolved.min_entry_cents == 10
+    assert any(
+        "Minimum entry price override rejected" in c for c in resolved.conflicts_caught
+    )
 
 
 def test_allowed_environment_override_applies(monkeypatch):
@@ -99,6 +129,17 @@ def test_price_floor_disagreement_is_caught_and_resolved():
     resolved = resolve_live_config()
     assert resolved.min_entry_cents == 10
     assert any("Profile price floor disagreement" in c for c in resolved.conflicts_caught)
+
+
+def test_invariants_checked_lists_every_safety_check():
+    """The resolver must report every invariant it evaluated, not just failures."""
+    resolved = resolve_live_config()
+    assert resolved.invariants_checked
+    assert any("Exposure cap" in i for i in resolved.invariants_checked)
+    assert any("Daily loss pct" in i for i in resolved.invariants_checked)
+    assert any("Price collar" in i for i in resolved.invariants_checked)
+    assert any("TIF invariants" in i for i in resolved.invariants_checked)
+    assert any("Stop-loss policy" in i for i in resolved.invariants_checked)
 
 
 def test_config_hash_is_stable(monkeypatch):

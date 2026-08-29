@@ -75,12 +75,23 @@ ENABLE_STOP_CANDIDATE_SUBMISSION = _env_bool(
 def stop_submission_enabled() -> bool:
     """Return True when stop candidates may be converted into live orders.
 
-    Read dynamically so ops can toggle the flag without a process restart.
-    ``MERID_STOP_SUBMISSION_KILL=1`` is an emergency kill switch that
-    overrides both the enable flag and any ``force=True`` caller.
+    The resolved live config is the authority once it is available; until then
+    the legacy ``MERID_ENABLE_STOP_CANDIDATE_SUBMISSION`` env var is used so
+    existing replay and unit tests continue to work.  ``MERID_STOP_SUBMISSION_KILL=1``
+    is an emergency kill switch that overrides both.
     """
     if _env_bool("MERID_STOP_SUBMISSION_KILL", False):
         return False
+
+    try:
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved.resolved:
+            return resolved.stop_candidate_submission_enabled
+    except Exception:
+        pass
+
     # Default to False (fail-closed) so monkeypatch.delenv() in tests and
     # missing env both disable automatic submission.
     return _env_bool(
