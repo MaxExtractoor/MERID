@@ -270,18 +270,29 @@ class UnifiedRiskManager:
             self._bankroll_cents = balance_cents
             self._bankroll_usd = balance_cents / 100.0
             
-            # Reset daily tracking if it's a new day
+            # Reset daily tracking if it's a new day or this is the first
+            # calibration of the process (daily_start_usd == 0).  The latter
+            # prevents a pre-calibration record_pnl() (e.g. stale settlement
+            # replay at startup) from poisoning the session's loss throttle.
             now = datetime.now(timezone.utc)
-            if self._last_reset_date is None or now.date() != self._last_reset_date.date():
+            if (
+                self._last_reset_date is None
+                or now.date() != self._last_reset_date.date()
+                or self._daily_start_usd == 0.0
+            ):
                 self._daily_loss_usd = 0.0
                 self._daily_pnl_usd = 0.0
                 self._daily_start_usd = self._bankroll_usd
                 self._last_reset_date = now
                 logger.info(f"[UNIFIED_RISK] Daily tracking reset for {now.date()}")
 
-            # Reset weekly tracking if it's a new ISO week
+            # Reset weekly tracking if it's a new ISO week or first calibration.
             current_week = now.isocalendar().week
-            if self._last_reset_week is None or current_week != self._last_reset_week:
+            if (
+                self._last_reset_week is None
+                or current_week != self._last_reset_week
+                or self._weekly_start_usd == 0.0
+            ):
                 self._weekly_loss_usd = 0.0
                 self._weekly_pnl_usd = 0.0
                 self._weekly_start_usd = self._bankroll_usd
@@ -304,11 +315,13 @@ class UnifiedRiskManager:
             if self._last_reset_date is None or now.date() != self._last_reset_date.date():
                 self._daily_loss_usd = 0.0
                 self._daily_pnl_usd = 0.0
+                self._daily_start_usd = self._bankroll_usd
                 self._last_reset_date = now
             current_week = now.isocalendar().week
             if self._last_reset_week is None or current_week != self._last_reset_week:
                 self._weekly_loss_usd = 0.0
                 self._weekly_pnl_usd = 0.0
+                self._weekly_start_usd = self._bankroll_usd
                 self._last_reset_week = current_week
 
             self._daily_pnl_usd += pnl_usd
