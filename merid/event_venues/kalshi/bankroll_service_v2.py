@@ -1152,8 +1152,11 @@ class BankrollServiceV2:
     async def get_equity_for_risk_calc(self) -> Optional[Decimal]:
         """Get equity for position sizing.
 
-        Returns None if in ERROR state or never fetched.
-        Returns equity only if FRESH (fail-closed).
+        Returns None if in ERROR state, never fetched, or stale.
+        Returns equity if FRESH, or if DEGRADED/STALE but still within the
+        configured staleness window (MERID_BANKROLL_STALE_AFTER_S).  This keeps
+        a single slow balance API call from halting the loop while a recent
+        cached snapshot is still trustworthy.
         """
         async with self._get_lock():
             if self._current is None:
@@ -1162,33 +1165,40 @@ class BankrollServiceV2:
             if self._current.state == BalanceState.ERROR:
                 logger.debug("[EQUITY-CALC] Bankroll in ERROR state - returning None")
                 return None
-            if self._current.state != BalanceState.FRESH:
-                logger.debug("[EQUITY-CALC] Bankroll not in FRESH state - returning None")
-                return None
-            logger.debug("[EQUITY-CALC] Returning equity: %s, state: %s", self._current.equity_usd, self._current.state.value)
-            return self._current.equity_usd
+            if self._current.state == BalanceState.FRESH or self.is_bankroll_fresh():
+                logger.info(
+                    "[EQUITY-CALC] Returning equity: %s, state: %s",
+                    self._current.equity_usd,
+                    self._current.state.value,
+                )
+                return self._current.equity_usd
+            logger.warning(
+                "[EQUITY-CALC] Bankroll stale (state=%s) - returning None to fail closed",
+                self._current.state.value,
+            )
+            return None
     
     def get_equity_for_risk_calc_sync_cached(self) -> Optional[float]:
         """Synchronous wrapper to get cached equity without async overhead.
-        
+
         This is optimized for PnL snapshot and other synchronous contexts where
         we just need the current cached value and don't want to wait for async.
-        
+
         Returns None if:
         - Bankroll never fetched (UNKNOWN state)
         - Bankroll in ERROR state
-        - Bankroll not in FRESH state
-        
-        Returns float equity USD if FRESH.
+        - Bankroll is stale (outside MERID_BANKROLL_STALE_AFTER_S)
+
+        Returns float equity USD if FRESH or a recent cached snapshot.
         """
         with self._get_sync_lock():
             if self._current is None:
                 return None
             if self._current.state == BalanceState.ERROR:
                 return None
-            if self._current.state != BalanceState.FRESH:
-                return None
-            return float(self._current.equity_usd)
+            if self._current.state == BalanceState.FRESH or self.is_bankroll_fresh():
+                return float(self._current.equity_usd)
+            return None
     
     async def force_refresh(self) -> BalanceResult:
         """Force immediate refresh, return raw result."""
