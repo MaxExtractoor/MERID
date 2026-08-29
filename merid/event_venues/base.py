@@ -81,6 +81,8 @@ class VenueOrder:
     reduce_only: bool = False  # Local reduce-only flag: do not increase net exposure
     firewall_approval_id: Optional[str] = None  # ExecutionRiskFirewall decision id
     exchange_index: Optional[int] = None  # Venue exchange shard index (Kalshi)
+    self_trade_prevention_type: Optional[str] = None  # Kalshi STP mode
+    max_execution_cost_cents: Optional[int] = None  # fee-aware EV-derived cost cap
 
 
 @dataclass

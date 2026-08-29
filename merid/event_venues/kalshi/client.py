@@ -16,6 +16,13 @@ import random
 import time as _time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
+try:
+    from merid.prediction.unified_sizing import compute_fee_cents
+    UNIFIED_SIZING_AVAILABLE = True
+except Exception:
+    UNIFIED_SIZING_AVAILABLE = False
+
 from typing import Any, Dict, List, Optional, TypeVar
 
 import uuid
@@ -2308,13 +2315,63 @@ class KalshiVenueClient(EventVenueClient):
         # lands on the default shard and produces a 404 market_not_found.
         _wire_exchange_index = exchange_index if exchange_index is not None else getattr(order, "exchange_index", None)
 
+        # ── Self-Trade Prevention (STP) ───────────────────────────────────────
+        # Resolve deliberately: explicit argument > order attribute > default.
+        # Kalshi V2 valid values are "taker_at_cross" and "maker"; never leave it unset.
+        _stp = (self_trade_prevention_type or getattr(order, "self_trade_prevention_type", None) or "taker_at_cross").lower()
+        if _stp not in ("taker_at_cross", "maker"):
+            logger.critical(
+                "[KALSHI-CLIENT-BLOCKED] Invalid STP mode for ticker=%s: %s",
+                ticker, _stp
+            )
+            return OperationResult.fail(
+                f"Invalid self_trade_prevention_type: {_stp}",
+                latency_ms=0.0,
+                retries=0,
+            )
+
+        # ── Max Execution Cost guard (marketable orders only) ──────────────────
+        # The cap is derived from fee-aware EV math (all_in_cost + ev_net = break-even).
+        # For limit orders this is a redundant bound; for marketable IOC/FOK orders it
+        # is the worst total cost we are willing to accept before the trade becomes
+        # negative EV due to slippage.
+        tif = (getattr(order, "time_in_force", None) or "GTC").strip().upper()
+        is_marketable = tif in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL") or order.order_type == "market"
+        _max_cost_cents = getattr(order, "max_execution_cost_cents", None)
+        if is_marketable and _max_cost_cents is not None:
+            if UNIFIED_SIZING_AVAILABLE:
+                try:
+                    _fee_cents = compute_fee_cents(raw_price_cents)
+                except Exception:
+                    _fee_cents = 0.0
+            else:
+                _fee_cents = 0.0
+            _all_in_per_contract = float(raw_price_cents) + float(_fee_cents)
+            _total_cost_cents = float(order.size) * _all_in_per_contract
+            if _total_cost_cents > _max_cost_cents:
+                logger.critical(
+                    "[MAX-EXECUTION-COST-BLOCKED] ticker=%s cost=%.2fc cap=%sc size=%s price=%sc fee=%sc",
+                    ticker, _total_cost_cents, _max_cost_cents,
+                    order.size, raw_price_cents, _fee_cents,
+                )
+                return OperationResult.fail(
+                    f"max_execution_cost_exceeded: estimated={_total_cost_cents:.2f}c cap={_max_cost_cents}c",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+            logger.info(
+                "[MAX-EXECUTION-COST-OK] ticker=%s cost=%.2fc cap=%sc size=%s price=%sc fee=%sc",
+                ticker, _total_cost_cents, _max_cost_cents,
+                order.size, raw_price_cents, _fee_cents,
+            )
+
         kalshi_order: Dict[str, Any] = {
             "ticker": ticker,
             "side": kalshi_side,           # V2 BookSide: "bid" (outcome=yes) or "ask" (outcome=no)
             "count": count_str,            # V2 API requires count as string
             "type": order.order_type,       # "limit" or "market" (legacy helper, V2 ignores it)
             "client_order_id": canonical_coid,
-            "self_trade_prevention_type": "taker_at_cross",  # V2 API required field (valid values: taker_at_cross, maker)
+            "self_trade_prevention_type": _stp,  # V2 API required field (valid values: taker_at_cross, maker)
             "reduce_only": getattr(order, "reduce_only", False),
             "price": wire_price,
         }

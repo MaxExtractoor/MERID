@@ -594,6 +594,116 @@ class TestOrderOperations:
         assert json_data["reduce_only"] is True
 
 
+    @pytest.mark.asyncio
+    async def test_place_order_uses_stp_mode_from_order(self, client, monkeypatch):
+        """The V2 wire must use the STP mode carried by the VenueOrder."""
+        monkeypatch.setenv("DEBUG_ALLOW_MANUAL_ORDERS", "true")
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(return_value={"order": {"order_id": "o1", "ticker": "KXBTC15M-001", "status": "resting"}}),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side="buy",
+            outcome_id="yes",
+            size=Decimal("1"),
+            price=Decimal("0.55"),
+            order_type="limit",
+            client_order_id="test-stp",
+            self_trade_prevention_type="maker",
+        )
+
+        result = await client.place_order_result(order)
+
+        assert result.success is True
+        json_data = client._http_client.request.call_args.kwargs["json"]
+        assert json_data["self_trade_prevention_type"] == "maker"
+
+    @pytest.mark.asyncio
+    async def test_place_order_rejects_invalid_stp_mode(self, client, monkeypatch):
+        """An invalid STP mode must be rejected before any network call."""
+        monkeypatch.setenv("DEBUG_ALLOW_MANUAL_ORDERS", "true")
+
+        client._http_client.request = AsyncMock()
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side="buy",
+            outcome_id="yes",
+            size=Decimal("1"),
+            price=Decimal("0.55"),
+            order_type="limit",
+            client_order_id="test-stp-invalid",
+            self_trade_prevention_type="unknown_mode",
+        )
+
+        result = await client.place_order_result(order)
+
+        assert result.success is False
+        assert "self_trade_prevention_type" in str(result.error).lower()
+        client._http_client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_place_order_max_execution_cost_blocks_marketable(self, client, monkeypatch):
+        """Marketable IOC orders whose estimated cost exceeds the EV-derived cap must fail."""
+        monkeypatch.setenv("DEBUG_ALLOW_MANUAL_ORDERS", "true")
+
+        client._http_client.request = AsyncMock()
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side="buy",
+            outcome_id="yes",
+            size=Decimal("2"),
+            price=Decimal("0.60"),
+            order_type="limit",
+            time_in_force="IOC",
+            client_order_id="test-maxcost-block",
+            max_execution_cost_cents=50,  # well below 2 * (60c + ~2c fee)
+        )
+
+        result = await client.place_order_result(order)
+
+        assert result.success is False
+        assert "max_execution_cost_exceeded" in str(result.error)
+        client._http_client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_place_order_max_execution_cost_allows_within_cap(self, client, monkeypatch):
+        """Marketable IOC orders within the EV-derived cap are sent normally."""
+        monkeypatch.setenv("DEBUG_ALLOW_MANUAL_ORDERS", "true")
+
+        response = MagicMock(
+            status_code=201,
+            json=MagicMock(return_value={"order": {"order_id": "o1", "ticker": "KXBTC15M-001", "status": "resting"}}),
+            headers={},
+            text="",
+        )
+        client._http_client.request = AsyncMock(return_value=response)
+
+        order = VenueOrder(
+            market_id="KXBTC15M-001",
+            side="buy",
+            outcome_id="yes",
+            size=Decimal("2"),
+            price=Decimal("0.60"),
+            order_type="limit",
+            time_in_force="IOC",
+            client_order_id="test-maxcost-ok",
+            max_execution_cost_cents=200,  # above 2 * (60c + ~2c fee)
+        )
+
+        result = await client.place_order_result(order)
+
+        assert result.success is True
+        client._http_client.request.assert_called_once()
+
+
 class TestSubaccountOperations:
     """Tests for subaccount-specific operations."""
 
