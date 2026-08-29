@@ -462,3 +462,52 @@ async def test_shadow_mode_logs_intent_without_submission():
     assert result.intent.reduce_only is True
     assert len(submit_log) == 0
     assert len(cancel_log) == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_candidate_inherits_entry_parentage(monkeypatch):
+    """Exit intent carries the originating entry's fill, order, intent and decision IDs."""
+    from merid.event_venues.kalshi.position_cache import CachedPosition
+
+    cached = CachedPosition(
+        market_id="KXBTC15M-TEST",
+        agent_id="test",
+        contracts=10,
+        side="yes",
+        thesis_side="yes",
+        avg_price_cents=50,
+        entry_fill_id="fill-123",
+        entry_order_id="order-123",
+        entry_intent_id="intent-123",
+        decision_id="dec-123",
+        entry_signal_id="sig-123",
+    )
+
+    class FakeCache:
+        def get_position(self, ticker):
+            return cached
+
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.position_cache.get_position_cache",
+        lambda: FakeCache(),
+    )
+
+    fetch, open, cancel, submit, pos_state, cancel_log, submit_log = _actor(
+        position=1000, submit_result=_FakeOrderResult("filled_live")
+    )
+    reducer = StopCandidateExecutionReducer(
+        fetch_position=fetch,
+        get_open_orders=open,
+        cancel_order=cancel,
+        submit_order=submit,
+    )
+    candidate = _yes_candidate()
+    result = await reducer.reduce(candidate, force=True, shadow_mode=True)
+    assert result.status == "shadow"
+    intent = result.intent
+    assert intent.parentage_status == "CANONICAL_FILL"
+    assert intent.parent_entry_fill_id == "fill-123"
+    assert intent.parent_entry_order_id == "order-123"
+    assert intent.parent_entry_intent_id == "intent-123"
+    assert intent.parent_decision_id == "dec-123"
+    assert intent.parent_entry_signal_id == "sig-123"

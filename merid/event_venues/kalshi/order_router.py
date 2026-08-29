@@ -2356,7 +2356,9 @@ class OrderIntent:
     reason: Optional[str] = field(default_factory=lambda: f"unset_{replay_time()}")
     parent_entry_fill_id: Optional[str] = None
     parent_entry_order_id: Optional[str] = None
+    parent_entry_intent_id: Optional[str] = None
     parent_entry_signal_id: Optional[str] = None
+    parent_decision_id: Optional[str] = None
     parentage_status: str = "UNKNOWN"  # CANONICAL_FILL | ORDER_LINKED | SIGNAL_ONLY | UNKNOWN
     is_manual_emergency_close: bool = False
     approval_token: Optional[str] = None  # Required to bypass circuit breaker

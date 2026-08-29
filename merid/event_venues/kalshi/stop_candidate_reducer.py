@@ -684,7 +684,9 @@ class StopCandidateExecutionReducer:
         parentage_status = "UNKNOWN"
         parent_entry_fill_id: Optional[str] = None
         parent_entry_order_id: Optional[str] = None
+        parent_entry_intent_id: Optional[str] = None
         parent_entry_signal_id: Optional[str] = None
+        parent_decision_id: Optional[str] = None
         exit_policy_id = f"stop_candidate_reducer:{candidate.candidate_id}"
         try:
             cache = get_position_cache()
@@ -704,6 +706,10 @@ class StopCandidateExecutionReducer:
                         parent_entry_order_id = cached_position.client_order_id
                         if parentage_status == "UNKNOWN":
                             parentage_status = "ORDER_LINKED"
+                    if getattr(cached_position, "entry_intent_id", None):
+                        parent_entry_intent_id = cached_position.entry_intent_id
+                    if getattr(cached_position, "decision_id", None):
+                        parent_decision_id = cached_position.decision_id
                     if getattr(cached_position, "entry_signal_id", None):
                         parent_entry_signal_id = cached_position.entry_signal_id
         except Exception:
@@ -735,7 +741,9 @@ class StopCandidateExecutionReducer:
             parentage_status=parentage_status,
             parent_entry_fill_id=parent_entry_fill_id,
             parent_entry_order_id=parent_entry_order_id,
+            parent_entry_intent_id=parent_entry_intent_id,
             parent_entry_signal_id=parent_entry_signal_id,
+            parent_decision_id=parent_decision_id,
             snapshot_age_ms=float(candidate.quote_age_ms or 0),
         )
 
