@@ -574,7 +574,10 @@ class KalshiSettlementPoller:
     
     # Canonical identity for settlement tracking (asset, timeframe, ticker, market_id)
     _VALID_ASSETS: Set[str] = frozenset(ACTIVE_CRYPTO_ASSETS)
-    _VALID_TIMEFRAMES: Set[str] = frozenset(ACTIVE_CRYPTO_FREQS)
+    # Crypto settlement poller must accept all Kalshi crypto tenors (15M, 1H, D1, W1).
+    # ACTIVE_CRYPTO_FREQS is 15M-only for the trading lane, but settled markets can
+    # arrive for any supported tenor, and decode_ticker_to_asset_timeframe supports all four.
+    _VALID_TIMEFRAMES: Set[str] = frozenset({"15M", "1H", "D1", "W1"})
     
     def _is_valid_crypto_grid(self, asset: str, timeframe: str) -> bool:
         """
