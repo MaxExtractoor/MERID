@@ -998,13 +998,28 @@ def compute_order_size(
     else:
         target_contracts = _get_max_contracts_per_asset(asset)
 
-    # Step 7: Get effective max contracts cap (per-asset and dynamic)
+    # Step 7: Get effective max contracts cap (per-asset, dynamic, and live config)
     max_contracts_cap = _get_max_contracts_per_asset(asset)
     if _is_dynamic_sizing_enabled():
         dynamic_max = _get_dynamic_sizing_max_contracts()
         if dynamic_max < 1:
             dynamic_max = 1
         max_contracts_cap = min(max_contracts_cap, dynamic_max)
+
+    # 2026-08-29: Respect the resolved live-config per-order contract cap.  The
+    # canary invariant forces max_contracts_per_order=1 even if the profile's
+    # per-asset max_contracts is 2.
+    try:
+        from merid.config.live_config import get_resolved_live_config
+
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved and resolved.resolved and resolved.max_contracts_per_order is not None:
+            resolved_max = int(resolved.max_contracts_per_order)
+            if resolved_max < 1:
+                resolved_max = 1
+            max_contracts_cap = min(max_contracts_cap, resolved_max)
+    except Exception as exc:
+        logger.warning("[UNIFIED-SIZING] Failed to read resolved max_contracts_per_order: %s", exc)
 
     # Step 8: Cap by the number of whole contracts that fit in the available $2 exposure
     max_by_exposure = int(available_exposure_usd // contract_cost_usd)

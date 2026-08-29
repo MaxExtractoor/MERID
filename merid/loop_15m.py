@@ -438,7 +438,19 @@ from merid.utils.kalshi_identity import extract_asset
 
 # Single source of truth for cycle rejection breakdown and lifecycle events
 from merid.prediction.agent_grid_15m import CycleResult
-from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
+
+
+def _get_max_contracts_per_order() -> int:
+    """Return the authoritative per-order contract cap (canary = 1)."""
+    try:
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+
+        return get_global_slot_allocator().max_contracts_per_order
+    except Exception:
+        try:
+            return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "2"))
+        except Exception:
+            return 2
 
 logger = get_logger("merid.loop_15m")
 
@@ -4917,7 +4929,7 @@ async def _run_loop(self) -> None:
                                 # Skip liquidity-aware sizing; unified_sizing determines count (1 or 2) within the $1 cap.
                                 logger.debug(
                                     "[15m-LOOP] Liquidity-aware sizing DISABLED for $1 global rule enforcement: ticker=%s count=%d (up to %d contracts per trade)",
-                                    ticker, count, MAX_CONTRACTS_PER_ORDER
+                                    ticker, count, _get_max_contracts_per_order()
                                 )
                             except Exception as sizing_err:
                                 logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
@@ -7658,14 +7670,14 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         count = int(candidate.get("count", 1))
         
         # 2026-08-22: Count is computed by unified_sizing under the $1 cap. Allow up to
-        # MAX_CONTRACTS_PER_ORDER as a defensive ceiling; compute_order_size will still
+        # _get_max_contracts_per_order() as a defensive ceiling; compute_order_size will still
         # reduce the count when price/exposure doesn't allow 2 contracts.
-        if count > MAX_CONTRACTS_PER_ORDER:
+        if count > _get_max_contracts_per_order():
             logger.warning(
                 "[15M-LOOP] CRITICAL: count=%d exceeds max_contracts_per_order=%d, capping. ticker=%s",
-                count, MAX_CONTRACTS_PER_ORDER, ticker
+                count, _get_max_contracts_per_order(), ticker
             )
-            count = MAX_CONTRACTS_PER_ORDER
+            count = _get_max_contracts_per_order()
         
         # Validate count is reasonable
         if count < 1:
