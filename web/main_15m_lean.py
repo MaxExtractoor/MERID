@@ -529,7 +529,30 @@ async def lifespan(app: FastAPI):
         startup_state.started = True
         startup_state.started_at = datetime.now(timezone.utc)
         logger.info("[LIFESPAN] Step 1c: startup_state.started set to True")
-        
+
+        # Resolve live config before any trade decisions are made, so every
+        # TradeDecision and OrderIntent carries config_hash and build_sha.
+        logger.info("[LIFESPAN] Step 1d: Resolving live configuration")
+        try:
+            from merid.config.live_config import resolve_live_config
+            _resolved_cfg = resolve_live_config()
+            logger.info(
+                "[LIFESPAN] Step 1d: Live config resolved: profile=%s version=%s mode=%s hash=%s build_sha=%s max_contracts=%s exposure_cap=%s",
+                _resolved_cfg.profile_name,
+                _resolved_cfg.profile_version,
+                _resolved_cfg.operation_mode,
+                _resolved_cfg.config_hash,
+                _resolved_cfg.build_sha,
+                _resolved_cfg.max_contracts_per_order,
+                _resolved_cfg.fixed_exposure_cap_usd,
+            )
+        except Exception as e:
+            logger.critical(
+                "[LIFESPAN] Step 1d: Live config resolution failed: %s - server cannot start without a resolved live config",
+                e,
+            )
+            raise
+
         # Startup
         logger.info("[LIFESPAN] Step 2: ENTER lifespan startup - RUNNING STARTUP")
         
