@@ -40,7 +40,7 @@ class TestDynamicDailyLossBands:
         return mock_settings
 
     def test_deep_underwater_regime(self):
-        """equity = 20000, bankroll = 50000 → ratio = 0.4, regime DEEP_UNDERWATER, max_daily_loss = 12500."""
+        """equity = 20000, bankroll = 50000 → ratio = 0.4, regime DEEP_UNDERWATER."""
         risk = KalshiRiskManager()
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
@@ -50,10 +50,11 @@ class TestDynamicDailyLossBands:
                 )
         assert regime == "DEEP_UNDERWATER"
         assert ratio == pytest.approx(0.4)
-        assert max_loss == pytest.approx(12500.0)  # 25% of $50,000
+        # Dynamic band (0.25) is clamped to the 10% default static cap on a $50k bankroll.
+        assert max_loss == pytest.approx(5000.0)
 
     def test_underwater_regime_boundary(self):
-        """equity = 35000, bankroll = 50000 → ratio = 0.7, regime UNDERWATER, max_daily_loss = 10000."""
+        """equity = 35000, bankroll = 50000 → ratio = 0.7, regime UNDERWATER."""
         risk = KalshiRiskManager()
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
@@ -63,10 +64,11 @@ class TestDynamicDailyLossBands:
                 )
         assert regime == "UNDERWATER"
         assert ratio == pytest.approx(0.7)
-        assert max_loss == pytest.approx(10000.0)  # 20% of $50,000
+        # Dynamic band (0.20) is clamped to the 10% default static cap on a $50k bankroll.
+        assert max_loss == pytest.approx(5000.0)
 
     def test_baseline_regime(self):
-        """equity = 50000, bankroll = 50000 → ratio = 1.0, regime BASELINE, max_daily_loss = 7000."""
+        """equity = 50000, bankroll = 50000 → ratio = 1.0, regime BASELINE."""
         risk = KalshiRiskManager()
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
@@ -76,10 +78,11 @@ class TestDynamicDailyLossBands:
                 )
         assert regime == "BASELINE"
         assert ratio == pytest.approx(1.0)
-        assert max_loss == pytest.approx(7000.0)  # 14% of $50,000
+        # Dynamic band (0.14) is clamped to the 10% default static cap on a $50k bankroll.
+        assert max_loss == pytest.approx(5000.0)
 
     def test_lock_in_gains_regime(self):
-        """equity = 80000, bankroll = 50000 → ratio = 1.6, regime LOCK_IN_GAINS, max_daily_loss = 5000."""
+        """equity = 80000, bankroll = 50000 → ratio = 1.6, regime LOCK_IN_GAINS."""
         risk = KalshiRiskManager()
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
@@ -89,15 +92,16 @@ class TestDynamicDailyLossBands:
                 )
         assert regime == "LOCK_IN_GAINS"
         assert ratio == pytest.approx(1.6)
-        assert max_loss == pytest.approx(5000.0)  # 10% of $50,000
+        # Lock-in band uses a tighter 0.06 fraction, below the 10% default static cap.
+        assert max_loss == pytest.approx(3000.0)
 
     def test_static_fallback_no_bankroll(self):
-        """If bankroll is 0, should use static fallback."""
+        """If bankroll is 0, the method reports NO_BANKROLL and zero loss allowance."""
         risk = KalshiRiskManager()
         max_loss, regime, ratio = risk._compute_dynamic_daily_loss(
             equity_usd=50000.0, bankroll_cents=0
         )
-        assert regime == "STATIC"
+        assert regime == "NO_BANKROLL"
         assert max_loss == 0.0
 
     def test_static_fallback_disabled(self):

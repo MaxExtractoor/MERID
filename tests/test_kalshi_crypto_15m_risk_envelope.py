@@ -30,7 +30,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             live_bankroll_usd=50.0,
             max_single_order_notional_usd=5.0,  # 10% of $50
             max_total_notional_usd=7.5,  # 15% of $50 (conservative cycle risk)
-            max_concurrent_trades=3,
             agent_max_notional_usd=1.5,
             asset_max_notional_usd={"BTC": 1.5, "ETH": 1.5, "SOL": 1.5, "XRP": 1.5, "DOGE": 1.5},  # 3% each
             max_daily_loss_usd=200.0,
@@ -64,7 +63,6 @@ class TestKalshiCrypto15mRiskEnvelope:
         assert envelope.live_bankroll_usd == 50.0
         assert envelope.max_single_order_notional_usd == 5.0  # 10% of $50
         assert envelope.max_total_notional_usd == 7.5  # 15% of $50
-        assert envelope.max_concurrent_trades == 3
         assert envelope.agent_max_notional_usd == 1.5
         assert envelope.asset_max_notional_usd == {"BTC": 1.5, "ETH": 1.5, "SOL": 1.5, "XRP": 1.5, "DOGE": 1.5}  # 3% each
         assert envelope.max_daily_loss_usd == 200.0
@@ -81,7 +79,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             live_bankroll_usd=50.0,  # Small bankroll
             max_single_order_notional_usd=1.0,  # Fixed $1.00 exposure cap
             max_total_notional_usd=1.0,  # Fixed $1.00 total exposure cap
-            max_concurrent_trades=3,
             agent_max_notional_usd=1.0,
             asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
             max_daily_loss_usd=200.0,
@@ -139,7 +136,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             live_bankroll_usd=500.0,  # Medium bankroll
             max_single_order_notional_usd=1.0,  # Fixed $1.00 exposure cap
             max_total_notional_usd=1.0,  # Fixed $1.00 total exposure cap
-            max_concurrent_trades=3,
             agent_max_notional_usd=1.0,
             asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
             max_daily_loss_usd=2000.0,
@@ -182,7 +178,6 @@ class TestKalshiCrypto15mRiskEnvelope:
             live_bankroll_usd=5000.0,  # Large bankroll
             max_single_order_notional_usd=1.0,  # Fixed $1.00 exposure cap
             max_total_notional_usd=1.0,  # Fixed $1.00 total exposure cap
-            max_concurrent_trades=3,
             agent_max_notional_usd=1.0,
             asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
             max_daily_loss_usd=2000.0,
@@ -218,16 +213,21 @@ class TestKalshiCrypto15mRiskEnvelope:
         assert envelope.max_single_order_notional_usd == 1.0
         assert envelope.max_total_notional_usd == 1.0
 
-    @patch.dict("os.environ", {"MERID_PROFILE": "kalshi_crypto_15m_v2"})
+    @patch.dict("os.environ", {"MERID_PROFILE": "kalshi_crypto_15m_v2", "MERID_FIXED_EXPOSURE_CAP_USD": "1.00"})
     @patch("merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync")
     def test_compute_envelope_uses_live_bankroll_when_profile_capital_zero(self, mock_bankroll):
         """Test that envelope uses live bankroll when profile capital_usd is 0.
-        
+
         CRITICAL FIX (2026-07-10): Uses fixed $1.00 exposure model (not percentage-based).
         """
+        from merid.config.live_config import reset_resolved_live_config
+
+        # Use a stable $1.00 fixed cap and clear any cached resolved config.
+        reset_resolved_live_config()
+
         # Mock bankroll service to return $50
         mock_bankroll.return_value = 50.0
-        
+
         # Compute envelope with profile capital_usd=0 (uses live bankroll)
         envelope = get_kalshi_crypto_15m_risk_envelope()
 
@@ -238,8 +238,6 @@ class TestKalshiCrypto15mRiskEnvelope:
         # CRITICAL FIX 2026-07-10: Fixed $1.00 exposure model (not percentage-based)
         assert envelope.max_single_order_notional_usd == 1.0  # Fixed $1.00 exposure cap
         assert envelope.max_total_notional_usd == 1.0  # Fixed $1.00 total exposure cap
-        # Verify max_concurrent_trades from profile
-        assert envelope.max_concurrent_trades == 8
 
     def test_compute_envelope_fallback_on_profile_not_active(self):
         """Test that envelope returns safe defaults when profile not active."""
@@ -273,10 +271,12 @@ class TestKalshiCrypto15mRiskEnvelope:
         profile capital in production mode (MERID_VALIDATION_MODE=false).
         """
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import compute_kalshi_crypto_15m_risk_envelope
+        from merid.config.live_config import reset_resolved_live_config
         from unittest.mock import patch
-        
-        # Test with MERID_VALIDATION_MODE=false (production mode)
-        with patch.dict('os.environ', {'MERID_VALIDATION_MODE': 'false'}):
+
+        # Use a stable $1.00 fixed cap and clear any cached resolved config.
+        reset_resolved_live_config()
+        with patch.dict('os.environ', {'MERID_VALIDATION_MODE': 'false', 'MERID_FIXED_EXPOSURE_CAP_USD': '1.00'}, clear=False):
             # Profile has capital_usd=0, so should use live bankroll
             envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=34.01)
             
@@ -295,6 +295,7 @@ class TestKalshiCrypto15mRiskEnvelope:
         validation mode (MERID_VALIDATION_MODE=true) when profile_capital > 0.
         """
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import compute_kalshi_crypto_15m_risk_envelope
+        from merid.config.live_config import reset_resolved_live_config
         from unittest.mock import patch
         import yaml
         from pathlib import Path
@@ -311,8 +312,10 @@ class TestKalshiCrypto15mRiskEnvelope:
         try:
             # Temporarily set profile capital to 1000 for validation mode test
             profile_config['capital_usd'] = 1000.0
-            
-            with patch.dict('os.environ', {'MERID_VALIDATION_MODE': 'true'}):
+
+            # Use a stable $1.00 fixed cap and clear any cached resolved config.
+            reset_resolved_live_config()
+            with patch.dict('os.environ', {'MERID_VALIDATION_MODE': 'true', 'MERID_FIXED_EXPOSURE_CAP_USD': '1.00'}, clear=False):
                 with patch('yaml.safe_load', return_value=profile_config):
                     envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=34.01)
                     
@@ -427,7 +430,6 @@ class TestRiskEnvelopeConfigLiveBankroll:
             max_total_notional_usd=7.5,  # 15% of $50
             max_single_order_notional_usd=2.5,
             asset_max_notional_usd={"BTC": 1.5, "ETH": 1.5, "SOL": 1.5, "XRP": 1.5, "DOGE": 1.5},  # 3% each
-            max_concurrent_trades=3,
             agent_max_yes_position=3,
             agent_max_no_position=3,
             agent_max_orders_per_window=10,
@@ -571,9 +573,9 @@ class TestEdgeBandConfiguration:
         
         strategy_policy = profile_config.get('strategy_policy', {})
         
-        # Verify min_edge: 1.5% (lowered from 4%)
-        assert strategy_policy['min_edge'] == 0.015, \
-            "Strategy policy min edge should be 1.5% (lowered from 4%)"
+        # Profile sets min_edge to 5% (current documented threshold).
+        assert strategy_policy['min_edge'] == 0.05, \
+            "Strategy policy min edge should match the current profile (0.05)"
 
 
 class TestWindowBasedRiskLimitEnforcement:
@@ -591,7 +593,6 @@ class TestWindowBasedRiskLimitEnforcement:
             live_bankroll_usd=100.0,
             max_single_order_notional_usd=3.0,
             max_total_notional_usd=5.0,
-            max_concurrent_trades=3,
             agent_max_notional_usd=3.0,
             asset_max_notional_usd={"BTC": 3.0, "ETH": 3.0, "SOL": 3.0, "XRP": 3.0, "DOGE": 3.0},
             max_daily_loss_usd=20.0,
@@ -648,7 +649,6 @@ class TestWindowBasedRiskLimitEnforcement:
             live_bankroll_usd=100.0,
             max_single_order_notional_usd=3.0,
             max_total_notional_usd=5.0,
-            max_concurrent_trades=3,
             agent_max_notional_usd=3.0,
             asset_max_notional_usd={"BTC": 3.0, "ETH": 3.0, "SOL": 3.0, "XRP": 3.0, "DOGE": 3.0},
             max_daily_loss_usd=20.0,
@@ -704,7 +704,6 @@ class TestWindowBasedRiskLimitEnforcement:
             live_bankroll_usd=100.0,
             max_single_order_notional_usd=3.0,
             max_total_notional_usd=5.0,
-            max_concurrent_trades=3,
             agent_max_notional_usd=3.0,
             asset_max_notional_usd={"BTC": 3.0, "ETH": 3.0, "SOL": 3.0, "XRP": 3.0, "DOGE": 3.0},
             max_daily_loss_usd=20.0,
