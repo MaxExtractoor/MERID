@@ -7775,6 +7775,8 @@ class LeanAgent15m:
             "confidence_source": decision.confidence_source,
             "confidence_reasons": decision.confidence_reasons,
             "count": int(decision.approved_size_cc) // 100,
+            "config_hash": decision.config_hash,
+            "build_sha": decision.build_sha,
             "trade_decision": decision,
             "rationale": f"trade_decision: {decision.decision_id} p_yes={float(decision.p_yes_calibrated):.3f} p_no={float(decision.p_no_calibrated):.3f} p_selected={model_prob:.3f} edge={edge_pct:.3f}",
             "thesis_side": thesis_side,
