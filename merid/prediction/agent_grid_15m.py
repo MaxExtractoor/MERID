@@ -15266,9 +15266,11 @@ class LeanAgent15m:
 
                 "no_depth": None,
 
-                # CRITICAL FIX 2026-08-20: order identity/provenance fields required by order_router
-                "run_id": f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}",
-                "decision_id": f"decision_{uuid.uuid4().hex[:16]}",
+                # CRITICAL FIX 2026-08-29: propagate the authoritative TradeDecision
+                # identity downstream.  This is the durable operation key for the ledger
+                # and OrderIntent; it must never be regenerated after the decision.
+                "run_id": signal.get("run_id") or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}",
+                "decision_id": signal.get("decision_id") or f"decision_{uuid.uuid4().hex[:16]}",
                 "data_state": "healthy" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "cf_rti_unavailable",
                 "regime_label": signal.get("regime") or "normal",
                 "regime_probability": signal.get("hmm_regime_confidence", 1.0) or 1.0,

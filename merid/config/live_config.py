@@ -74,6 +74,7 @@ class ResolvedLiveConfig:
     profile_path: str = ""
     operation_mode: str = "prod"
     config_hash: str = ""
+    build_sha: str = ""
     resolved_at: float = 0.0
 
     # Exposure and sizing
@@ -1085,7 +1086,25 @@ class LiveConfigResolver:
             f"Fixed exposure cap positive: {resolved.fixed_exposure_cap_usd} USD"
         )
 
-        # 6. TIF invariants.
+        # 6. Canary mode invariants.  When the account-level max position is 1,
+        # the live config must also enforce one contract per order and a
+        # sub-dollar exposure cap so a one-contract canary cannot silently double.
+        _kalshi_max_pos = os.environ.get("KALSHI_TRADER_MAX_POSITION", "")
+        _canary_flag = os.environ.get("MERID_LIVE_CANARY", "")
+        if _kalshi_max_pos == "1" or _canary_flag == "1":
+            if resolved.max_contracts_per_order != 1:
+                raise LiveConfigInvariantError(
+                    f"Canary mode requires max_contracts_per_order=1, got {resolved.max_contracts_per_order}"
+                )
+            if resolved.fixed_exposure_cap_usd > Decimal("0.90"):
+                raise LiveConfigInvariantError(
+                    f"Canary mode requires fixed_exposure_cap_usd<=0.90, got {resolved.fixed_exposure_cap_usd}"
+                )
+            self._invariants_checked.append(
+                f"Canary invariants: max_contracts_per_order=1, fixed_exposure_cap_usd={resolved.fixed_exposure_cap_usd}"
+            )
+
+        # 7. TIF invariants.
         if resolved.entry_tif_default not in ("ioc", "fok"):
             raise LiveConfigInvariantError(
                 f"Entry TIF must be immediate (ioc/fok), got {resolved.entry_tif_default}"
@@ -1109,8 +1128,12 @@ class LiveConfigResolver:
         overrides["profile_path"] = str(self._profile_path)
         overrides["operation_mode"] = self._operation_mode
 
+        # Build SHA is the git commit of the running code, not part of config hash.
+        build_sha = self._resolve_build_sha()
+
         canonical = resolved.to_canonical_dict()
         canonical.pop("config_hash", None)
+        canonical.pop("build_sha", None)
         canonical.pop("resolved_at", None)
         canonical["source_overrides"] = _convert_for_hash(overrides)
         canonical["conflicts_caught"] = _convert_for_hash(self._conflicts)
@@ -1121,10 +1144,32 @@ class LiveConfigResolver:
             resolved,
             resolved_at=time.time(),
             config_hash=config_hash,
+            build_sha=build_sha,
             source_overrides=overrides,
             conflicts_caught=list(self._conflicts),
             invariants_checked=list(self._invariants_checked),
         )
+
+    def _resolve_build_sha(self) -> str:
+        """Return the build SHA from env or the current git HEAD."""
+        build_sha = os.environ.get("MERID_BUILD_SHA", "").strip()
+        if build_sha:
+            return build_sha
+        try:
+            import subprocess
+            repo_root = Path(__file__).resolve().parents[2]
+            build_sha = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(repo_root),
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+                .strip()
+            )
+        except Exception:
+            build_sha = ""
+        return build_sha
 
 
 def _extract_venue_invariant_value(invariants: Dict[str, Any], key: str, default: str) -> str:

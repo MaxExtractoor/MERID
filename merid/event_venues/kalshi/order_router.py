@@ -2353,6 +2353,8 @@ class OrderIntent:
     decision_id: Optional[str] = None
     run_id: Optional[str] = field(default_factory=lambda: os.environ.get("MERID_RUN_ID", "unset"))
     process_id: Optional[str] = field(default_factory=lambda: str(os.getpid()))
+    config_hash: Optional[str] = None
+    build_sha: Optional[str] = None
     reason: Optional[str] = field(default_factory=lambda: f"unset_{replay_time()}")
     parent_entry_fill_id: Optional[str] = None
     parent_entry_order_id: Optional[str] = None
@@ -16208,6 +16210,131 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         (result.reason or result.error or "")[:80],
         result.latency_ms,
     )
+
+    # 2026-08-29: Append the order lifecycle to the durable decision ledger.
+    # The ledger record was started in compute_trade_decision before any order
+    # was submitted; here we append submission and any immediate fill.
+    _MERID_ORDER_DECISION_LEDGER_ENABLED = (
+        os.environ.get("MERID_ORDER_DECISION_LEDGER_ENABLED", "1") == "1"
+    )
+    _decision_id = getattr(intent, "decision_id", None)
+    if _MERID_ORDER_DECISION_LEDGER_ENABLED and _decision_id:
+        try:
+            from merid.execution.order_decision_ledger import (
+                get_order_decision_ledger,
+            )
+            from merid.execution.order_decision_schema import FillEvent, ExitEvent
+
+            ledger = get_order_decision_ledger()
+
+            # Map liquidity role to ledger entry mode.
+            _entry_mode = "unknown"
+            _liquidity_role = getattr(intent, "liquidity_role", "") or ""
+            _execution_mode = getattr(intent, "execution_mode", "") or ""
+            if _liquidity_role == "maker" or _execution_mode == "maker":
+                _entry_mode = "passive"
+            elif _liquidity_role == "taker" or _execution_mode in ("taker", "staged_ioc"):
+                _entry_mode = "aggressive"
+            else:
+                _entry_mode = "aggressive" if getattr(intent, "time_in_force", "").upper() == "IOC" else "passive"
+
+            ledger.record_submission(
+                _decision_id,
+                entry_mode=_entry_mode,
+                submitted_price_cents=int(getattr(intent, "price_cents", 0) or 0),
+                intended_qty_cc=(getattr(intent, "count", 0) or 0) * 100,
+                client_order_id=getattr(intent, "client_order_id", None),
+                order_id=result.order_id,
+                intent_id=getattr(intent, "intent_id", None),
+            )
+
+            if result and result.is_terminal:
+                ledger.record_terminal(
+                    _decision_id,
+                    result.status,
+                    reason=result.reason or result.error,
+                )
+
+            if result and result.has_execution:
+                _fill = result.fill or {}
+                _fill_id = (
+                    _fill.get("fill_id")
+                    or result.order_id
+                    or f"{getattr(intent, 'client_order_id', '')}-fill"
+                )
+                _fill_price = (
+                    _fill.get("price_cents")
+                    or _fill.get("avg_price_cents")
+                    or getattr(intent, "price_cents", 0)
+                    or 0
+                )
+                _fee_cents = int(_fill.get("fee_cents") or _fill.get("fee") or 0)
+
+                # Canonical side is the outcome side (yes/no), not Kalshi book side.
+                _intent_side = (getattr(intent, "side", "") or "").lower()
+                _ledger_side: str = "yes"
+                if "no" in _intent_side:
+                    _ledger_side = "no"
+                _ledger_action = "buy" if (getattr(intent, "action", "") or "").lower() == "buy" else "sell"
+
+                fill_event = FillEvent(
+                    fill_id=str(_fill_id),
+                    fill_at=datetime.now(timezone.utc),
+                    side=_ledger_side,
+                    action=_ledger_action,
+                    qty_cc=result.executed_quantity_cc,
+                    price_cents=int(_fill_price),
+                    fee_cents=_fee_cents,
+                    order_id=result.order_id,
+                    client_order_id=getattr(intent, "client_order_id", None),
+                    latency_ms=result.latency_ms,
+                )
+                ledger.record_fill(_decision_id, fill_event)
+
+                # 2026-08-29: If this was an exit order, append an exit event to
+                # the parent entry decision so the ledger shows the full round-trip.
+                _parent_decision_id = getattr(intent, "parent_decision_id", None)
+                if _parent_decision_id and _ledger_action == "sell":
+                    try:
+                        _parent_record = ledger.get(_parent_decision_id)
+                        if _parent_record:
+                            _entry_price = (
+                                _parent_record.executable_price_cents
+                                or int(getattr(intent, "selected_outcome_price_cents", 0) or 0)
+                            )
+                            _exit_price = int(_fill_price)
+                            _qty_contracts = result.executed_quantity_cc // 100
+                            _realized_pnl = None
+                            if _entry_price and _exit_price:
+                                if _parent_record.selected_side == "no":
+                                    _realized_pnl = (_entry_price - _exit_price) * _qty_contracts
+                                else:
+                                    _realized_pnl = (_exit_price - _entry_price) * _qty_contracts
+                            exit_event = ExitEvent(
+                                exit_at=datetime.now(timezone.utc),
+                                reason="exit_order_fill",
+                                order_id=result.order_id,
+                                exit_price_cents=_exit_price,
+                                qty_cc=result.executed_quantity_cc,
+                                stop_candidate_id=getattr(intent, "stop_candidate_id", None),
+                            )
+                            ledger.record_exit(
+                                _parent_decision_id,
+                                exit_event,
+                                realized_pnl_cents=_realized_pnl,
+                            )
+                    except Exception as exit_exc:
+                        logger.warning(
+                            "[ORDER-DECISION-LEDGER] failed to record exit for parent_decision_id=%s: %s",
+                            _parent_decision_id,
+                            exit_exc,
+                        )
+        except Exception as ledger_exc:
+            logger.warning(
+                "[ORDER-DECISION-LEDGER] failed to record submission/fill for decision_id=%s: %s",
+                _decision_id,
+                ledger_exc,
+            )
 
     # Shadow telemetry for replay and lifecycle analysis (off by default).
     try:

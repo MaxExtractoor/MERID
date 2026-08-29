@@ -7368,12 +7368,44 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
     # Returns True if order was submitted, False if order was rejected/skipped.
     try:
         from merid.event_venues.kalshi.order_router import OrderIntent, resolve_window_policy, resolve_exit_policy, route_order_async
+        from merid.risk.executable_cost_ev_gate import evaluate_executable_cost_ev, EVInput
         
         ticker = candidate.get("ticker")
         if not ticker:
             logger.warning("[15M-LOOP] Candidate missing ticker, skipping")
             return False
-        
+
+        # 2026-08-29: Extract the authoritative TradeDecision up-front.  The EV
+        # gate approved a specific executable price and quantity; the order must
+        # not drift to a different price downstream.
+        trade_decision = candidate.get("trade_decision")
+        approved_price_cents: Optional[int] = None
+        approved_size_cc: Optional[int] = None
+        if trade_decision is not None:
+            _sop = getattr(trade_decision, "selected_outcome_price", None)
+            if _sop is not None:
+                try:
+                    approved_price_cents = int(round(float(_sop) * 100.0))
+                except Exception:
+                    approved_price_cents = None
+            _asc = getattr(trade_decision, "approved_size_cc", None)
+            if _asc is not None:
+                try:
+                    approved_size_cc = int(_asc)
+                except Exception:
+                    approved_size_cc = None
+            _td_run_id = getattr(trade_decision, "run_id", None)
+            _td_decision_id = getattr(trade_decision, "decision_id", None)
+            if _td_run_id:
+                candidate["run_id"] = _td_run_id
+            if _td_decision_id:
+                candidate["decision_id"] = _td_decision_id
+                candidate["decision_trace_id"] = _td_decision_id
+            candidate["approved_price_cents"] = approved_price_cents
+        elif candidate.get("selected_outcome_price"):
+            approved_price_cents = int(candidate["selected_outcome_price"])
+            candidate["approved_price_cents"] = approved_price_cents
+
         # Resolve policies
         try:
             # Extract asset from ticker (e.g., "KXBTCD-..." -> "BTC")
@@ -7473,23 +7505,32 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             )
             return False
         
-        # CRITICAL FIX: Respect signal's price_cents unless invalid
-        # Signal generation now sets correct price based on side (YES uses YES price, NO uses NO price)
-        # Only override if signal's price_cents is invalid (<=0 or outside canonical range)
-        price_cents = candidate.get("price_cents", 0)
-        
-        # CRITICAL FIX (2026-08-14): Single canonical entry range 10c-75c.
-        # The previous side-aware/late-expiry expansion (15c-99c NO, 1c-90c YES)
-        # allowed 97c extreme fills that destroyed the bankroll.
+        # CRITICAL FIX (2026-08-29): The EV gate approved a specific executable
+        # price.  That price is the single source of truth for the order limit.
+        # If it is missing or stale, fall back to the candidate price or market
+        # state, and re-gate the final price before submission.
         from merid.event_venues.kalshi.binary_price_space import CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
         min_price_cents, max_price_cents = CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
-        
-        # Validate signal's price_cents
-        price_valid = (price_cents > 0) and (min_price_cents <= price_cents <= max_price_cents)
-        
-        if price_valid:
+
+        _candidate_price_cents = int(candidate.get("price_cents", 0) or 0)
+        if (
+            approved_price_cents is not None
+            and min_price_cents <= approved_price_cents <= max_price_cents
+        ):
+            if _candidate_price_cents != approved_price_cents:
+                logger.warning(
+                    "[15M-LOOP] ticker=%s candidate price %dc replaced by EV-approved executable price %dc",
+                    ticker, _candidate_price_cents, approved_price_cents,
+                )
+            price_cents = approved_price_cents
+            candidate["price_cents"] = price_cents
+        elif (
+            _candidate_price_cents > 0
+            and min_price_cents <= _candidate_price_cents <= max_price_cents
+        ):
             # Signal's price is valid - use it directly
-            logger.info("[15M-LOOP] ticker=%s using signal price_cents=%d (side=%s, valid in canonical range)", 
+            price_cents = _candidate_price_cents
+            logger.info("[15M-LOOP] ticker=%s using signal price_cents=%d (side=%s, valid in canonical range)",
                       ticker, price_cents, candidate.get("side"))
         else:
             # Signal's price is invalid - fall back to market state
@@ -7625,6 +7666,66 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             count, position_notional_usd, ticker
         )
 
+        # 2026-08-29: The quantity must never exceed the EV-gated approved size.
+        if approved_size_cc is not None and approved_size_cc > 0:
+            approved_count = approved_size_cc // 100
+            if approved_count > 0 and count > approved_count:
+                logger.warning(
+                    "[15M-LOOP] count=%d exceeds EV-approved count=%d; capping. ticker=%s",
+                    count, approved_count, ticker,
+                )
+                count = approved_count
+
+        # 2026-08-29: Re-gate the final submitted price and quantity with the
+        # executable-cost EV gate.  The gate approved a decision-time snapshot;
+        # if the actual submitted price or quantity has drifted, it must be
+        # re-evaluated and rejected if no longer positive EV.
+        if trade_decision is not None:
+            try:
+                _side = candidate.get("side", "").lower()
+                _td_side = getattr(trade_decision, "selected_outcome", None)
+                _side_for_cost = _td_side or _side
+                if _side_for_cost == "yes":
+                    _entry_fee = getattr(trade_decision, "entry_fee_yes", Decimal("0")) or Decimal("0")
+                    _exit_cost = getattr(trade_decision, "exit_cost_reserve_yes", Decimal("0")) or Decimal("0")
+                else:
+                    _entry_fee = getattr(trade_decision, "entry_fee_no", Decimal("0")) or Decimal("0")
+                    _exit_cost = getattr(trade_decision, "exit_cost_reserve_no", Decimal("0")) or Decimal("0")
+                _p_model = getattr(trade_decision, "p_selected", None)
+                if _p_model is not None and price_cents is not None and price_cents > 0 and count > 0:
+                    ev_input = EVInput(
+                        p_model=_p_model,
+                        p_exec=Decimal(str(price_cents)) / Decimal("100"),
+                        qty_cc=count * 100,
+                        entry_fee_per_contract=_entry_fee,
+                        expected_exit_cost_per_contract=_exit_cost,
+                        adverse_selection_reserve_per_contract=getattr(trade_decision, "adverse_selection_reserve", Decimal("0")) or Decimal("0"),
+                        uncertainty_reserve_per_contract=getattr(trade_decision, "uncertainty_reserve", Decimal("0")) or Decimal("0"),
+                        ticker=ticker,
+                        decision_id=str(candidate.get("decision_id") or ""),
+                    )
+                    ev_result = evaluate_executable_cost_ev(ev_input)
+                    if not ev_result.allowed:
+                        self._rejection_counters["ev_gate_rejected"] += 1
+                        logger.error(
+                            "[15M-LOOP] EV gate REJECTS submitted price=%dc count=%d for ticker=%s reasons=%s",
+                            price_cents, count, ticker, ev_result.reasons,
+                        )
+                        return False
+                    logger.info(
+                        "[15M-LOOP] EV gate ALLOWS submitted price=%dc count=%d for ticker=%s net_ev=%s",
+                        price_cents, count, ticker, ev_result.net_ev,
+                    )
+                    candidate["submitted_price_cents"] = price_cents
+                    candidate["approved_price_cents"] = approved_price_cents
+                    candidate["count"] = count
+            except Exception as ev_err:
+                logger.error(
+                    "[15M-LOOP] EV re-gate failed for ticker=%s: %s - rejecting for safety",
+                    ticker, ev_err,
+                )
+                return False
+
         # BUG #34 FIX: Extract edge_pct, confidence, model_prob from candidate
         # These are now computed in signal generation (BUG #36) and carried through candidate
         edge_pct = candidate.get("edge_pct", 0.0)
@@ -7642,10 +7743,20 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # identity and settlement chain.
         trade_decision = candidate.get("trade_decision")
         if trade_decision is not None:
-            if not candidate.get("run_id"):
-                candidate["run_id"] = getattr(trade_decision, "run_id", None)
-            if not candidate.get("decision_id"):
-                candidate["decision_id"] = getattr(trade_decision, "decision_id", None)
+            # 2026-08-29: decision_id is the durable operation key minted in
+            # compute_trade_decision.  It must never be regenerated or shadowed
+            # by any downstream copy; the ledger joins the entire lifecycle on it.
+            _td_run_id = getattr(trade_decision, "run_id", None)
+            _td_decision_id = getattr(trade_decision, "decision_id", None)
+            if _td_run_id:
+                candidate["run_id"] = _td_run_id
+            if _td_decision_id:
+                candidate["decision_id"] = _td_decision_id
+                candidate["decision_trace_id"] = _td_decision_id
+            if not candidate.get("config_hash"):
+                candidate["config_hash"] = getattr(trade_decision, "config_hash", None)
+            if not candidate.get("build_sha"):
+                candidate["build_sha"] = getattr(trade_decision, "build_sha", None)
             if not candidate.get("confidence_valid"):
                 candidate["confidence_valid"] = bool(getattr(trade_decision, "confidence_valid", False))
             if not candidate.get("confidence_source") or candidate.get("confidence_source") == "unknown":
@@ -8199,6 +8310,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             decision_id=candidate.get("decision_id"),
             decision_trace_id=candidate.get("decision_id"),
             run_id=candidate.get("run_id"),
+            config_hash=candidate.get("config_hash"),
+            build_sha=candidate.get("build_sha"),
             confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
             confidence_valid=confidence_valid,
             confidence_source=confidence_source,
