@@ -174,6 +174,51 @@ def test_production_startup_skips_dirty_tree_in_testing_env(monkeypatch):
     validate_production_startup()
 
 
+def test_validate_dirty_tree_blocks_real_uncommitted_live_path(tmp_path, monkeypatch):
+    """The dirty-tree gate must detect a real uncommitted live-path file in a real git repo."""
+    import subprocess
+
+    repo = tmp_path / "fake_repo"
+    repo.mkdir()
+    (repo / "merid" / "event_venues" / "kalshi").mkdir(parents=True)
+    live_file = repo / "merid" / "event_venues" / "kalshi" / "order_router.py"
+    live_file.write_text("uncommitted change")
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+
+    monkeypatch.setenv("MERID_ENV", "prod")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setenv("MERID_REPO_ROOT", str(repo))
+
+    from merid.startup_validations import validate_dirty_tree
+    with pytest.raises(StartupValidationError, match="uncommitted"):
+        validate_dirty_tree()
+
+
+def test_validate_dirty_tree_passes_real_clean_live_path(tmp_path, monkeypatch):
+    """The dirty-tree gate must pass when the live-path files are committed."""
+    import subprocess
+
+    repo = tmp_path / "fake_repo"
+    repo.mkdir()
+    (repo / "merid" / "event_venues" / "kalshi").mkdir(parents=True)
+    live_file = repo / "merid" / "event_venues" / "kalshi" / "order_router.py"
+    live_file.write_text("committed version")
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    monkeypatch.setenv("MERID_ENV", "prod")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setenv("MERID_REPO_ROOT", str(repo))
+
+    from merid.startup_validations import validate_dirty_tree
+    validate_dirty_tree()
+
+
 # ---------------------------------------------------------------------------
 # Direct submission policy
 # ---------------------------------------------------------------------------
