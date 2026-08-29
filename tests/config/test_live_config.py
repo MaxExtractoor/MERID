@@ -87,6 +87,7 @@ def test_environment_override_daily_loss_above_profile_is_rejected(monkeypatch):
 
 def test_stop_loss_detection_decoupled_from_stop_candidate_execution(monkeypatch):
     """stop_loss_enabled (detection) can be true while execution stays off."""
+    monkeypatch.delenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", raising=False)
     monkeypatch.setenv("MERID_ALLOW_UNPROTECTED_ENTRIES", "0")
     resolved = resolve_live_config()
     assert resolved.stop_loss_enabled
@@ -94,17 +95,14 @@ def test_stop_loss_detection_decoupled_from_stop_candidate_execution(monkeypatch
     assert not resolved.unprotected_entries_allowed
 
 
-def test_stop_candidate_submission_env_request_is_ignored(monkeypatch):
-    """MERID_ENABLE_STOP_CANDIDATE_SUBMISSION is a request, not an enablement,
-    until the B stop-candidate reducer and replay harness pass."""
+def test_stop_candidate_submission_env_request_is_honored(monkeypatch):
+    """MERID_ENABLE_STOP_CANDIDATE_SUBMISSION=1 enables protective-exit
+    submission now that the B stop-candidate reducer and replay harness pass."""
     monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "1")
     monkeypatch.setenv("MERID_ALLOW_UNPROTECTED_ENTRIES", "0")
     resolved = resolve_live_config()
-    assert not resolved.stop_candidate_submission_enabled
-    assert any(
-        "Stop-candidate submission env request ignored" in c
-        for c in resolved.conflicts_caught
-    )
+    assert resolved.stop_candidate_submission_enabled
+    assert not resolved.unprotected_entries_allowed
 
 
 def test_entry_price_floor_env_below_canonical_is_rejected(monkeypatch):
