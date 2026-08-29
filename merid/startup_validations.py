@@ -109,8 +109,16 @@ def _get_live_path_git_status() -> List[Tuple[str, str]]:
 
     Each entry is a (status_code, path) tuple, where status_code is the
     two-letter porcelain prefix (e.g. ' M', 'M ', '??').
+
+    MERID_REPO_ROOT may be set to override the repository root for testing
+    or non-standard deployments; otherwise the root is inferred from the
+    source location.
     """
-    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_root_raw = os.getenv("MERID_REPO_ROOT", "")
+    if repo_root_raw:
+        repo_root = Path(repo_root_raw)
+    else:
+        repo_root = Path(__file__).resolve().parent.parent.parent
     try:
         output = subprocess.check_output(
             ["git", "status", "--porcelain", "--", *LIVE_MONEY_PATH_FILES],
