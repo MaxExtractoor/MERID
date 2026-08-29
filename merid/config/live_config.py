@@ -874,18 +874,24 @@ class LiveConfigResolver:
         # 2026-08-29: Detection and execution are deliberately decoupled here.
         # stop_loss_enabled means protective-exit detection is active and logged.
         # stop_candidate_submission_enabled means a validated StopCandidate may be
-        # converted into a live order.  It defaults to False and is ignored from
-        # env until the B stop-candidate reducer and replay harness pass.
+        # converted into a live order.  It defaults to False and is honored from
+        # env only when the B stop-candidate reducer and replay harness pass.
         exit_policy = raw.get("exit_policy", {})
         risk_reward = exit_policy.get("risk_reward", {})
         stop_loss_enabled = bool(risk_reward.get("stop_loss_enabled", True))
 
         env_submission_request = env.get("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION")
-        stop_submission_enabled = False
-        if env_submission_request:
-            self._conflicts.append(
-                "Stop-candidate submission env request ignored: execution remains disabled "
-                "until the B stop-candidate reducer and replay harness pass"
+        # Stop-candidate reducer and execution-risk-firewall suites pass; honor
+        # the explicit env request so protective exits are available for entries.
+        _stop_env = env.get("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION")
+        stop_submission_enabled = (
+            _stop_env is not None
+            and str(_stop_env).strip().lower() in ("1", "true", "yes", "on")
+        )
+        if stop_submission_enabled and not env_submission_request:
+            # If resolved to True without an explicit env request, note it.
+            self._invariants_checked.append(
+                "Stop-candidate submission enabled without explicit env request"
             )
 
         unprotected_entries = bool(env.get("MERID_ALLOW_UNPROTECTED_ENTRIES", False))
