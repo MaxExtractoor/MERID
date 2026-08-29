@@ -81,7 +81,14 @@ class OrderDecisionLedger:
                 if record.config_hash is None:
                     record.config_hash = resolved.config_hash
                 if record.build_sha is None:
-                    record.build_sha = resolved.config_hash
+                    # Build SHA is the git commit of the running code, distinct from
+                    # the config hash.  Fall back to env, then config hash only if
+                    # nothing else is available.
+                    record.build_sha = (
+                        getattr(resolved, "build_sha", None)
+                        or os.environ.get("MERID_BUILD_SHA")
+                        or resolved.config_hash
+                    )
         except Exception:
             pass
 
@@ -121,6 +128,21 @@ class OrderDecisionLedger:
             "client_order_id": record.client_order_id,
             "order_id": record.order_id,
             "intent_id": record.intent_id,
+            "ts": time.time(),
+        })
+
+    def record_terminal(
+        self,
+        decision_id: str,
+        status: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Append a terminal order outcome (unfilled, rejected, canceled, etc.)."""
+        record = self._get_record(decision_id)
+        record.order_status = status
+        self._append_event(decision_id, "terminal", {
+            "status": status,
+            "reason": reason,
             "ts": time.time(),
         })
 

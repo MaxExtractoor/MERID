@@ -305,6 +305,7 @@ class TradeDecision:
 
     # 2026-08-29: Hash of the resolved live config that authorized this decision.
     config_hash: Optional[str] = None
+    build_sha: Optional[str] = None
 
     @property
     def side(self) -> Optional[Literal["yes", "no"]]:
@@ -649,6 +650,7 @@ def compute_trade_decision(
     # held-side price floor.  Attach its hash to the decision for audit.
     _resolved = _get_resolved_live_config()
     _config_hash = _get_resolved_config_hash() if _resolved is not None else None
+    _build_sha = getattr(_resolved, "build_sha", None) if _resolved is not None else None
     if _resolved is not None:
         min_required_edge = _get_resolved_min_required_edge(min_required_edge)
     min_p_selected = _get_resolved_min_p_selected(TRADE_DECISION_MIN_P_SELECTED)
@@ -685,6 +687,7 @@ def compute_trade_decision(
             selection_reason=selection_reason,
             policy_version=policy_version,
             config_hash=_config_hash,
+            build_sha=_build_sha,
         )
         record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
         return decision
@@ -1092,6 +1095,7 @@ def compute_trade_decision(
         ev_gate_allowed=ev_gate_allowed,
         ev_gate_result=ev_gate_result,
         config_hash=_config_hash,
+        build_sha=_build_sha,
     )
     record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
 
@@ -1108,7 +1112,7 @@ def compute_trade_decision(
             record = build_order_decision_record_from_trade_decision(
                 decision,
                 ev_gate_result=ev_gate_result,
-                build_sha=build_sha,
+                build_sha=_build_sha,
             )
             ledger.start(record)
         except Exception as exc:
