@@ -18,6 +18,10 @@ from typing import Optional, Dict, Any
 import time
 import json
 
+from utils.logger import get_logger
+
+logger = get_logger("merid.monitoring.health_snapshot")
+
 
 @dataclass
 class WsHealth:
@@ -108,6 +112,7 @@ class HealthSnapshot:
     book: BookHealth
     risk: RiskHealth
     gates: GateDecision
+    quarantine_path: str = "unknown"  # active / inactive / unknown
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert snapshot to dictionary for logging/serialization."""
@@ -118,6 +123,7 @@ class HealthSnapshot:
             "book": self.book.to_dict(),
             "risk": self.risk.to_dict(),
             "gates": self.gates.to_dict(),
+            "quarantine_path": self.quarantine_path,
         }
     
     def to_json(self) -> str:
@@ -133,6 +139,7 @@ class HealthSnapshot:
             f"  Book: consistency={self.book.book_consistency}, dual_sided={self.book.is_dual_sided}, age={self.book.last_update_age_s:.0f}s",
             f"  Risk: utilization={self.risk.utilization_pct:.1%}, exhausted={self.risk.is_exhausted}",
             f"  Gates: overall={self.gates.overall}, reason={self.gates.reason or 'none'}",
+            f"  Quarantine: path={self.quarantine_path}",
         ]
         return "\n".join(lines)
     
@@ -251,9 +258,9 @@ def get_health_snapshot(
         last_message_at = getattr(ws_bridge, '_last_message_at', None)
         
         # Determine connection state
-        if is_running and bridge_status == 'CONNECTED':
+        if is_running and connection_state == 'CONNECTED':
             connection_state = 'CONNECTED'
-        elif is_running and bridge_status == 'RECONNECTING':
+        elif is_running and connection_state == 'RECONNECTING':
             connection_state = 'RECONNECTING'
         else:
             connection_state = 'DISCONNECTED'
@@ -343,9 +350,7 @@ def get_health_snapshot(
     # Cross-layer consistency: if WS is disconnected, mark book as SUSPECT
     # This must be OUTSIDE the try/except to ensure it always runs
     if not ws_health.is_connected:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"[HEALTH-SNAPSHOT] Overriding book_consistency to SUSPECT due to WS disconnected")
+        logger.info("[HEALTH-SNAPSHOT] Overriding book_consistency to SUSPECT due to WS disconnected")
         book_health = BookHealth(
             book_consistency="SUSPECT",
             suspect_reason="ws_disconnected",
@@ -385,7 +390,16 @@ def get_health_snapshot(
         overall=getattr(gate_decision, 'overall', 'UNKNOWN'),
         reason=getattr(gate_decision, 'reason', None),
     )
-    
+
+    # 2026-08-29: Assert the stuck-position quarantine path is active.
+    quarantine_path = "unknown"
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        position_cache = get_position_cache()
+        quarantine_path = "active" if position_cache.quarantine_path_active else "inactive"
+    except Exception as exc:
+        logger.warning("[HEALTH-SNAPSHOT] Could not read quarantine path state: %s", exc)
+
     return HealthSnapshot(
         timestamp=now_dt.isoformat(),
         ws=ws_health,
@@ -393,6 +407,7 @@ def get_health_snapshot(
         book=book_health,
         risk=risk_health,
         gates=gate_health,
+        quarantine_path=quarantine_path,
     )
 
 

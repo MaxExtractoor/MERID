@@ -884,6 +884,11 @@ class KalshiPositionCache:
         # resolves them and on_market_settlement fires.
         self._quarantined_tickers: Set[str] = set()
 
+        # 2026-08-29: Startup marker so health probes can assert that the
+        # stuck-position quarantine path is actually loaded by this process.
+        self._quarantine_path_active = True
+        logger.info("[POSITION-CACHE] quarantine_path=active")
+
         # 2026-08-12/13: Latest known signed-YES exposure and sync timestamp per
         # ticker, populated by REST sync and used by the per-fill
         # FILL-CANONICALIZATION parity check with a fill-timestamp watermark.
@@ -942,6 +947,11 @@ class KalshiPositionCache:
         # PositionMonitor callback registration is done in loop_15m._start_position_monitor()
 
         logger.info("KalshiPositionCache initialized")
+
+    @property
+    def quarantine_path_active(self) -> bool:
+        """Return True once the stuck-position quarantine path has been loaded."""
+        return getattr(self, "_quarantine_path_active", False)
 
     def _is_exit_order_from_action(self, action: str, source: Optional[str] = None) -> bool:
         """Check if this is an exit order based on action and source.
