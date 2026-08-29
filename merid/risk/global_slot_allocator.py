@@ -264,10 +264,11 @@ class GlobalSlotAllocator:
                         changed += 1
                         continue
 
-                    if pos is None:
+                    if pos is None or getattr(pos, "contracts", 0) <= 0:
+                        pos_contracts = getattr(pos, "contracts", None)
                         logger.info(
-                            "[SLOT-ALLOCATOR] Removed orphaned slot: slot_id=%s ticker=%s agent=%s",
-                            slot_id, slot.ticker, slot.agent_id
+                            "[SLOT-ALLOCATOR] Removed orphaned/closed slot: slot_id=%s ticker=%s agent=%s contracts=%s",
+                            slot_id, slot.ticker, slot.agent_id, pos_contracts
                         )
                         del self._slots[slot_id]
                         self._total_releases += 1
@@ -305,6 +306,10 @@ class GlobalSlotAllocator:
                 # 2. Create slots for positions that do not have one.
                 for ticker, pos in position_by_ticker.items():
                     if ticker in tickers_with_slot:
+                        continue
+
+                    # Do not allocate slots for closed (zero-contract) positions.
+                    if getattr(pos, "contracts", 0) <= 0:
                         continue
 
                     # Do not allocate slots for positions in already-expired markets.

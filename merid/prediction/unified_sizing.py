@@ -1048,15 +1048,24 @@ def compute_order_size(
             "asset": asset,
             "reason": "daily_weekly_loss_cap",
         }
-    contract_count = max(0, int(contract_count * loss_size_scale))
+    # 2026-08-29: Round to the nearest whole contract, but require the
+    # scaled notional to be at least half a contract before allowing one.
+    # This prevents a single-contract canary from being floored to zero
+    # inside the warning zone (e.g. loss_size_scale=0.96 -> int(0.96)=0).
+    scaled = contract_count * loss_size_scale
+    if scaled >= 0.5:
+        contract_count = max(1, int(scaled + 0.5))
+    else:
+        contract_count = 0
 
     if contract_count < 1:
         # Defensive: should not reach here because of the exposure check above,
         # but handle the case where a cap reduced the count to 0.
         logger.warning(
             "[UNIFIED-SIZING] Insufficient exposure for requested count: "
-            "available=$%.2f, price=%dc, target=%d, max_cap=%d, by_exposure=%d, asset=%s",
-            float(available_exposure_usd), price_cents, target_contracts, max_contracts_cap, max_by_exposure, asset
+            "available=$%.2f, price=%dc, target=%d, max_cap=%d, by_exposure=%d, loss_scale=%.4f, asset=%s",
+            float(available_exposure_usd), price_cents, target_contracts, max_contracts_cap, max_by_exposure,
+            loss_size_scale, asset
         )
         return 0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
@@ -1069,6 +1078,7 @@ def compute_order_size(
             "max_contracts_cap": max_contracts_cap,
             "target_contracts": target_contracts,
             "max_by_exposure": max_by_exposure,
+            "loss_size_scale": float(loss_size_scale),
         }
 
     order_notional_usd = Decimal(contract_count) * contract_cost_usd
