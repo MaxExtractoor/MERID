@@ -130,6 +130,17 @@ def _get_resolved_config_hash() -> Optional[str]:
     return resolved.config_hash if resolved is not None else None
 
 
+def _get_resolved_max_contracts() -> int:
+    """Return the resolved per-order contract cap, falling back to env/default."""
+    resolved = _get_resolved_live_config()
+    if resolved is not None and resolved.max_contracts_per_order is not None:
+        return int(resolved.max_contracts_per_order)
+    try:
+        return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "2"))
+    except Exception:
+        return 2
+
+
 def _parse_pi_star_tiers() -> List[Tuple[int, int]]:
     tiers: List[Tuple[int, int]] = []
     for part in MERID_PI_STAR_TIERS_CENTS.split(","):
@@ -883,7 +894,10 @@ def compute_trade_decision(
 
     if selected_outcome is not None:
         selected_action = "buy"
-        approved_size_cc = Decimal("200")  # default 2 contracts; risk may resize down based on $1 cap and price
+        # 2026-08-29: Use the resolved live-config per-order contract cap as the
+        # default approved size.  In canary mode this is one contract (100 cc).
+        _max_contracts = _get_resolved_max_contracts()
+        approved_size_cc = Decimal(str(_max_contracts * 100))
         p_selected = Decimal(str(edge_breakdown.p_selected))
         p_opposite = Decimal(str(edge_breakdown.p_opposite))
         selected_outcome_price = Decimal(str(edge_breakdown.executable_entry_price))
