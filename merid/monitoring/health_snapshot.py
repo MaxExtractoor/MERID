@@ -246,7 +246,7 @@ def get_health_snapshot(
         connection_state = 'CONNECTED' if stats.get('connected', False) else 'DISCONNECTED'
         last_message_at = stats.get('last_message_time', None)
         # last_message_at is already in seconds (replay_time() or time.time()).
-        heartbeat_age_s = (now - last_message_at) if last_message_at else 999999
+        heartbeat_age_s = max(0.0, now - last_message_at) if last_message_at else 999999
         last_heartbeat_ts = last_message_at if last_message_at else 0
         is_connected = stats.get('connected', False)
     else:
@@ -271,7 +271,7 @@ def get_health_snapshot(
         
         # Calculate heartbeat age
         if last_message_at:
-            heartbeat_age_s = now - last_message_at
+            heartbeat_age_s = max(0.0, now - last_message_at)
             last_heartbeat_ts = last_message_at
         else:
             heartbeat_age_s = 9999.0
