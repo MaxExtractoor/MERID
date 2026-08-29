@@ -1283,9 +1283,12 @@ def compute_kalshi_crypto_15m_risk_envelope(
         daily_loss_enabled = resolved_config.daily_loss_enabled
         if daily_loss_enabled:
             max_daily_loss_pct = float(resolved_config.max_daily_loss_pct)
-            max_daily_loss_usd = float(resolved_config.max_daily_loss_usd)
-            if max_daily_loss_usd is None or max_daily_loss_usd <= 0:
+            if resolved_config.max_daily_loss_usd is None:
                 max_daily_loss_usd = effective_capital * max_daily_loss_pct
+            else:
+                max_daily_loss_usd = float(resolved_config.max_daily_loss_usd)
+                if max_daily_loss_usd <= 0:
+                    max_daily_loss_usd = effective_capital * max_daily_loss_pct
         else:
             max_daily_loss_pct = None
             max_daily_loss_usd = float('inf')
