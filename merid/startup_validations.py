@@ -16,6 +16,7 @@ Usage:
 
 import asyncio
 import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -38,6 +39,155 @@ if _IS_15M_MODE:
 class StartupValidationError(Exception):
     """Critical validation failed — cannot start in live mode."""
     pass
+
+
+# Live money path allowlist. Uncommitted changes to any of these files in
+# production with live-trading intent will block startup unless explicitly
+# overridden with MERID_ALLOW_DIRTY_TREE. This is an intentionally scoped
+# allowlist, not an exhaustive manifest, focused on surfaces that can directly
+# affect order routing, fill application, position/exposure state, risk
+# allocation, settlement pricing, or tail calibration.
+LIVE_MONEY_PATH_FILES = [
+    "AGENTS.md",
+    "data/probability_tail_calibration.json",
+    "merid/startup_validations.py",
+    "merid/loop_15m.py",
+    "merid/execution/router.py",
+    "merid/execution/executors/kalshi.py",
+    "merid/event_venues/kalshi/order_router.py",
+    "merid/event_venues/kalshi/order_gate.py",
+    "merid/event_venues/kalshi/order_intent_contract.py",
+    "merid/event_venues/kalshi/venue_client_port.py",
+    "merid/event_venues/kalshi/port.py",
+    "merid/event_venues/kalshi/client.py",
+    "merid/event_venues/kalshi/client_v2.py",
+    "merid/event_venues/kalshi/execution_risk_firewall.py",
+    "merid/event_venues/kalshi/fills_ledger.py",
+    "merid/event_venues/kalshi/position_cache.py",
+    "merid/event_venues/kalshi/canonical_portfolio_reconciler.py",
+    "merid/event_venues/kalshi/binary_price_space.py",
+    "merid/event_venues/kalshi/market_state.py",
+    "merid/event_venues/kalshi/market_catalog.py",
+    "merid/event_venues/kalshi/bankroll_service_v2.py",
+    "merid/event_venues/kalshi/bankroll_resolver.py",
+    "merid/event_venues/kalshi/balance_calibrator.py",
+    "merid/event_venues/kalshi/ws.py",
+    "merid/event_venues/kalshi/ws_bridge.py",
+    "merid/prediction/trade_decision.py",
+    "merid/prediction/agent_grid_15m.py",
+    "merid/prediction/unified_edge.py",
+    "merid/prediction/unified_sizing.py",
+    "merid/signals/crypto_15m_indicators.py",
+    "merid/signals/ws_price_feed.py",
+    "merid/data/cf_rti_adapter.py",
+    "merid/data/rti_feed_service.py",
+    "merid/data/settlement_rti_buffer.py",
+    "merid/data/rti_reconciler.py",
+    "merid/risk/probability/tail_calibrator.py",
+    "merid/risk/unified_risk_manager.py",
+    "merid/risk/unified_risk_engine.py",
+    "merid/risk/global_slot_allocator.py",
+    "merid/risk/profiles/kalshi_crypto_15m_risk_envelope.py",
+    "merid/position_management/position_monitor.py",
+    "merid/position_management/exit_policy.py",
+    "merid/position_management/exit_resolver.py",
+    "merid/governance/trading_circuit_breaker.py",
+    "merid/circuit_breaker.py",
+]
+
+
+def _is_live_trading_intent() -> bool:
+    """Return True if production is configured for live trading."""
+    trade_mode = os.getenv("MERID_TRADE_MODE", "").strip().lower()
+    pm_trade_mode = os.getenv("MERID_PM_TRADING_MODE", "").strip().lower()
+    allow_live = os.getenv("MERID_ALLOW_LIVE_TRADES", "").strip().lower() in ("1", "true", "yes")
+    return trade_mode == "live" or pm_trade_mode == "live" or allow_live
+
+
+def _get_live_path_git_status() -> List[Tuple[str, str]]:
+    """Return git status --porcelain entries for the live money path.
+
+    Each entry is a (status_code, path) tuple, where status_code is the
+    two-letter porcelain prefix (e.g. ' M', 'M ', '??').
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    try:
+        output = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", *LIVE_MONEY_PATH_FILES],
+            cwd=repo_root,
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        detail = str(exc)
+        if isinstance(exc, subprocess.CalledProcessError):
+            detail = exc.output or detail
+        raise StartupValidationError(
+            f"[DIRTY-TREE-GATE] Could not verify live-path git status: {detail}. "
+            "Ensure the working directory is a git repository and git is available."
+        )
+
+    dirty: List[Tuple[str, str]] = []
+    for line in output.strip().splitlines():
+        if len(line) < 4:
+            continue
+        status = line[:2]
+        path = line[3:]
+        if status and path:
+            dirty.append((status, path))
+    return dirty
+
+
+def _check_dirty_tree() -> List[str]:
+    """Check whether live money path files contain uncommitted changes.
+
+    Returns a list of violation messages; empty list means clean or not in
+    scope. Live-only: only enforced in production with live-trading intent.
+    Overrideable via MERID_ALLOW_DIRTY_TREE=1, which logs loudly but does not
+    block.
+    """
+    env = os.getenv("MERID_ENV", "").strip().lower()
+    if env not in ("prod", "production"):
+        logger.debug("[DIRTY-TREE-GATE] Not in production; skipping live-path git check")
+        return []
+    if not _is_live_trading_intent():
+        logger.info("[DIRTY-TREE-GATE] Production without live trading intent; skipping live-path git check")
+        return []
+
+    log_startup_phase("validate_dirty_tree", "merid.startup_validations")
+    try:
+        dirty = _get_live_path_git_status()
+    except StartupValidationError as exc:
+        return [str(exc)]
+
+    if not dirty:
+        logger.info("[DIRTY-TREE-GATE] OK: live money path files are committed")
+        return []
+
+    dirty_paths = [p for _, p in dirty]
+    msg = (
+        "CRITICAL SAFETY VIOLATION: production live trading startup detected "
+        f"uncommitted changes in live money path files: {dirty_paths}. "
+        "Commit or revert these files, or set MERID_ALLOW_DIRTY_TREE=1 with documented approval."
+    )
+    override = os.getenv("MERID_ALLOW_DIRTY_TREE", "").strip().lower() in ("1", "true", "yes")
+    if override:
+        logger.critical("[DIRTY-TREE-GATE] OVERRIDE: %s", msg)
+        return []
+    logger.critical(msg)
+    return [msg]
+
+
+def validate_dirty_tree() -> None:
+    """Fail closed if uncommitted changes exist on the live money path.
+
+    Convenience wrapper that raises StartupValidationError when _check_dirty_tree
+    finds a violation.
+    """
+    issues = _check_dirty_tree()
+    if issues:
+        raise StartupValidationError(issues[0])
 
 
 def is_kalshi_15m_profile() -> bool:
@@ -248,10 +398,14 @@ def validate_production_startup() -> None:
         except Exception as exc:
             forbidden.append(f"could not validate 15m production settings: {exc}")
 
+    # Live money path must not contain uncommitted changes in production live mode.
+    forbidden.extend(_check_dirty_tree())
+
     if forbidden:
         error_msg = (
             "CRITICAL SAFETY VIOLATION: production startup refuses to operate "
-            "with forbidden test/debug/bypass flags: " + ", ".join(forbidden) + ". "
+            "with forbidden test/debug/bypass flags or uncommitted live-path changes: "
+            + ", ".join(forbidden) + ". "
             "Use an explicit canary profile or fix the environment."
         )
         logger.critical(error_msg)
@@ -1829,52 +1983,7 @@ def run_kalshi_alignment_checks() -> bool:
     return all_passed
 
 
-def validate_profile_backtest_eligibility() -> None:
-    """Validate that profile config meets backtest requirements.
 
-    This is a cross-validation to prevent profile configurations that allow
-    live trading without meeting backtest eligibility criteria.
-
-    The function logs a warning if the profile allows live trading but the
-    backtest requirements are not met in the profile configuration.
-
-    Note: This is a startup guardrail - actual backtest validation is done
-    by the promotion engine before enabling live trading.
-
-    DE-SCOPED for kalshi_crypto_15m_v2: Backtest eligibility is handled
-    by the promotion engine, not a startup validation for this profile.
-    """
-    profile = os.getenv("MERID_PROFILE", "")
-    pm_profile = os.getenv("MERID_PM_PROFILE", "")
-
-    # DE-SCOPE: Skip for kalshi_crypto_15m_v2 profile
-    if profile == "kalshi_crypto_15m_v2":
-        logger.info(
-            "[PROFILE-BACKTEST-VALIDATION] Skipped for kalshi_crypto_15m_v2 - backtest eligibility validated by promotion engine"
-        )
-        return
-
-    log_startup_phase("validate_profile_backtest_eligibility", "merid.startup_validations", f"profile={profile}")
-
-    # Check if this is a live trading profile
-    is_live_profile = (
-        "live" in profile.lower() or
-        "production" in pm_profile.lower()
-    )
-
-    if not is_live_profile:
-        logger.info(
-            "[PROFILE-BACKTEST-VALIDATION] Profile %s is not a live profile - skipping backtest eligibility check",
-            profile
-        )
-        return
-
-    # Check if backtest requirements are defined in profile config
-    # This is informational - actual validation happens in promotion engine
-    logger.info(
-        "[PROFILE-BACKTEST-VALIDATION] Profile %s is a live profile - backtest eligibility will be validated by promotion engine",
-        profile
-    )
 
 
 def validate_field_name_consistency() -> None:
