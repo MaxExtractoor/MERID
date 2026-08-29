@@ -18,6 +18,9 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.data.ingress_replay import replay_time
 from merid.audit.replay_state_diff import record_state_checksum
+from utils.logger import get_logger
+
+logger = get_logger("merid.prediction.trade_decision")
 
 
 # Minimum posterior for a regime classification to be usable.
@@ -68,6 +71,18 @@ MERID_TRADE_DECISION_ALLOW_HYBRID_P = os.environ.get("MERID_TRADE_DECISION_ALLOW
 MERID_PI_STAR_TIERED = os.environ.get("MERID_PI_STAR_TIERED", "1").lower() in ("1", "true", "yes")
 MERID_PI_STAR_FLAT_PREMIUM_CENTS = int(os.environ.get("MERID_PI_STAR_FLAT_PREMIUM_CENTS", "0"))
 MERID_PI_STAR_TIERS_CENTS = os.environ.get("MERID_PI_STAR_TIERS_CENTS", "0:40,20:25,40:10,60:0")
+
+# 2026-08-29: Executable-cost EV gate becomes the final entry authority.
+# When enabled, the gate is evaluated after the existing edge/π* computation
+# and can overrule a selected side if the net dollar EV or EV/tail-risk ratio
+# does not clear the configured thresholds.  The old edge-%/p_selected gates
+# remain visible in the decision as telemetry, but the EV gate is the sole
+# authority for live entries.
+MERID_EV_GATE_AUTHORITATIVE = os.environ.get("MERID_EV_GATE_AUTHORITATIVE", "0").lower() in ("1", "true", "yes")
+
+# 2026-08-29: Order decision ledger collection.  When enabled, every trade
+# decision is persisted before any order is submitted.
+MERID_ORDER_DECISION_LEDGER_ENABLED = os.environ.get("MERID_ORDER_DECISION_LEDGER_ENABLED", "0").lower() in ("1", "true", "yes")
 
 def _get_resolved_live_config() -> Optional[Any]:
     """Return the resolved live config if available, otherwise None."""
@@ -279,6 +294,14 @@ class TradeDecision:
     min_required_edge: Decimal = Decimal("0")
     approved_size_cc: Decimal = Decimal("0")
     policy_version: str = "trade_decision_v2"
+
+    # 2026-08-29: Executable-cost EV gate state.
+    # The EV gate is the final entry authority; these fields carry its economics
+    # and its allow/reject outcome for audit and ledger provenance.
+    adverse_selection_reserve: Decimal = Decimal("0")
+    uncertainty_reserve: Decimal = Decimal("0")
+    ev_gate_allowed: bool = False
+    ev_gate_result: Optional[Dict[str, Any]] = None
 
     # 2026-08-29: Hash of the resolved live config that authorized this decision.
     config_hash: Optional[str] = None
@@ -593,6 +616,8 @@ def compute_trade_decision(
     min_required_edge: float = TRADE_DECISION_MIN_REQUIRED_EDGE,
     settlement_reference: str = "unknown",
     policy_version: str = "trade_decision_v2",
+    quote_age_ms: Optional[int] = None,
+    build_sha: Optional[str] = None,
 ) -> TradeDecision:
     """Compute a calibrated, cost-aware trade decision for a 15m binary market.
 
@@ -924,6 +949,59 @@ def compute_trade_decision(
         edge_breakdown = None
         no_trade_reason = "invalid_confidence"
 
+    # 2026-08-29: Executable-cost EV gate.  This is the final entry authority.
+    # It is evaluated with the executable price, not the midpoint, and it
+    # enforces a minimum dollar EV and a minimum EV/tail-risk ratio.  When it
+    # rejects, the selected side is cleared and ``no_trade_reason`` is set to
+    # the gate's reason.  The old edge-% and π* outputs remain in the decision
+    # record as telemetry.
+    ev_gate_allowed = False
+    ev_gate_result: Optional[Dict[str, Any]] = None
+    adverse_selection_reserve = Decimal("0")
+    uncertainty_reserve = Decimal(str(model_risk_reserve))
+
+    if selected_outcome is not None:
+        from merid.risk.executable_cost_ev_gate import evaluate_executable_cost_ev, EVInput
+
+        entry_fee = (
+            Decimal(str(yes_breakdown.entry_fee))
+            if selected_outcome == "yes"
+            else Decimal(str(no_breakdown.entry_fee))
+        )
+        exit_cost = (
+            Decimal(str(yes_breakdown.exit_cost_reserve))
+            if selected_outcome == "yes"
+            else Decimal(str(no_breakdown.exit_cost_reserve))
+        )
+
+        ev_input = EVInput(
+            p_model=p_selected,
+            p_exec=selected_outcome_price,
+            qty_cc=int(approved_size_cc),
+            entry_fee_per_contract=entry_fee,
+            expected_exit_cost_per_contract=exit_cost,
+            adverse_selection_reserve_per_contract=adverse_selection_reserve,
+            uncertainty_reserve_per_contract=uncertainty_reserve,
+            quote_age_ms=quote_age_ms,
+            ticker=ticker,
+            decision_id=decision_id,
+        )
+        ev_result = evaluate_executable_cost_ev(ev_input)
+        ev_gate_allowed = ev_result.allowed
+        ev_gate_result = ev_result.to_dict()
+
+        if MERID_EV_GATE_AUTHORITATIVE and not ev_result.allowed:
+            selected_outcome = None
+            selected_action = None
+            approved_size_cc = Decimal("0")
+            p_selected = None
+            p_opposite = None
+            selected_outcome_price = None
+            gross_edge = None
+            net_edge = None
+            edge_breakdown = None
+            no_trade_reason = ev_result.reasons[0] if ev_result.reasons else "ev_gate_rejected"
+
     # CRITICAL FIX (2026-08-27): Fail fast on dual-side contradiction.
     # The consumed side must equal the dual-side evaluator's output whenever
     # both are non-None.  A mismatch means the candidate generator would use the
@@ -1009,7 +1087,35 @@ def compute_trade_decision(
         min_required_edge=Decimal(str(min_required_edge)),
         approved_size_cc=approved_size_cc,
         policy_version=policy_version,
+        adverse_selection_reserve=adverse_selection_reserve,
+        uncertainty_reserve=uncertainty_reserve,
+        ev_gate_allowed=ev_gate_allowed,
+        ev_gate_result=ev_gate_result,
         config_hash=_config_hash,
     )
     record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
+
+    # 2026-08-29: Write the decision-time ledger snapshot before any order is
+    # submitted.  The ledger is append-only; subsequent fills/exit events are
+    # recorded by the order lifecycle.
+    if MERID_ORDER_DECISION_LEDGER_ENABLED:
+        from merid.execution.order_decision_ledger import (
+            build_order_decision_record_from_trade_decision,
+            get_order_decision_ledger,
+        )
+        try:
+            ledger = get_order_decision_ledger()
+            record = build_order_decision_record_from_trade_decision(
+                decision,
+                ev_gate_result=ev_gate_result,
+                build_sha=build_sha,
+            )
+            ledger.start(record)
+        except Exception as exc:
+            logger.warning(
+                "[TRADE-DECISION] failed to write decision ledger for %s: %s",
+                decision_id,
+                exc,
+            )
+
     return decision
