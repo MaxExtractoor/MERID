@@ -1282,6 +1282,28 @@ def validate_hybrid_signal_audit() -> None:
         )
         return
 
+    # Runtime gating in agent_grid_15m: hybrid indicator/velocity/FVG deltas are only
+    # applied when MERID_HYBRID_ENABLE_DELTAS=1. By default the model is Bachelier-only.
+    # MERID_HYBRID_BACHELIER_ONLY and MERID_HYBRID_DISABLE_ALL_DELTAS also force
+    # Bachelier-only. Only require an audit when the runtime actually enables deltas.
+    hybrid_enabled = os.getenv("MERID_HYBRID_ENABLE_DELTAS", "").strip().lower() in (
+        "1", "true", "yes"
+    )
+    bachelier_only = (
+        os.getenv("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
+        or os.getenv("MERID_HYBRID_DISABLE_ALL_DELTAS", "").strip().lower() in ("1", "true", "yes")
+    )
+    if not hybrid_enabled or bachelier_only:
+        logger.info(
+            "[HYBRID-SIGNAL-AUDIT] profile signal_mode=hybrid, but runtime is "
+            "Bachelier-only (MERID_HYBRID_ENABLE_DELTAS=%s, MERID_HYBRID_BACHELIER_ONLY=%s, "
+            "MERID_HYBRID_DISABLE_ALL_DELTAS=%s). Audit not required.",
+            os.getenv("MERID_HYBRID_ENABLE_DELTAS", ""),
+            os.getenv("MERID_HYBRID_BACHELIER_ONLY", ""),
+            os.getenv("MERID_HYBRID_DISABLE_ALL_DELTAS", ""),
+        )
+        return
+
     # Live trading with hybrid signals: require a passing audit artifact.
     audit_path = Path(
         os.getenv("MERID_HYBRID_SIGNAL_AUDIT_PATH", "data/hybrid_signal_audit.json")
