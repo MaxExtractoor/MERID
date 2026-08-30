@@ -7316,14 +7316,28 @@ class LeanAgent15m:
             or _vol_defaults.get(asset.upper(), 0.80)
         )
 
-        # Fee per contract for the winning side; approximate entry fee as the
-        # larger of the two side fees to stay conservative.
+        # Role-aware fee per contract.  Compute both taker and maker fees for
+        # the two sides now; the actual role (maker vs taker) is selected after
+        # the first EV computation, and the decision is recomputed with the
+        # matching fee.  Using the max of the two side fees keeps the EV gate
+        # conservative until the side is known.
+        taker_fee_yes_cents = 0.0
+        taker_fee_no_cents = 0.0
+        maker_fee_yes_cents = 0.0
+        maker_fee_no_cents = 0.0
         try:
-            fee_yes_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(yes_ask))))
-            fee_no_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(no_ask))))
-            fee_cents = max(fee_yes_cents, fee_no_cents)
+            taker_fee_yes_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(yes_ask))))
+            taker_fee_no_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(no_ask))))
+            maker_fee_yes_cents = float(_kalshi_maker_fee_cents(yes_ask / 100.0, 1))
+            maker_fee_no_cents = float(_kalshi_maker_fee_cents(no_ask / 100.0, 1))
         except Exception:
-            fee_cents = 0.0
+            pass
+        taker_fee_cents = max(taker_fee_yes_cents, taker_fee_no_cents)
+        maker_fee_cents = max(maker_fee_yes_cents, maker_fee_no_cents)
+        if taker_fee_cents <= 0.0:
+            taker_fee_cents = 2.0
+        if maker_fee_cents <= 0.0:
+            maker_fee_cents = 0.5
 
         data_quality = getattr(market_state, "data_quality", "unknown") or "unknown"
         if not getattr(market_state, "book_initialized", False):
@@ -7419,34 +7433,105 @@ class LeanAgent15m:
             or _numeric_pref(getattr(self.risk_config, "strategy_policy_min_edge", None))
         ) or 0.03
 
-        decision = compute_trade_decision(
-            run_id=run_id,
-            decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
-            ticker=getattr(market, "ticker", asset),
-            asset=asset,
-            spot_price=settlement_input_price,
-            strike_price=float(strike),
-            seconds_to_expiry=seconds_to_expiry,
-            yes_bid_cents=float(yes_bid),
-            yes_ask_cents=float(yes_ask),
-            no_bid_cents=float(no_bid),
-            no_ask_cents=float(no_ask),
-            yes_depth_cc=yes_depth_cc,
-            no_depth_cc=no_depth_cc,
-            fee_per_contract_cents=fee_cents,
-            annualized_vol=annualized_vol,
-            model_uncertainty=model_uncertainty,
-            data_quality=data_quality,
-            data_state=data_state,
-            regime=regime,
-            regime_label=regime_label,
-            regime_probability=regime_probability,
-            indicators={"p_yes_model": p_yes_model} if p_yes_model is not None else {},
-            p_yes_model=p_yes_model,
-            min_required_edge=min_required_edge,
-            settlement_reference=settlement_reference,
-            policy_version="trade_decision_v2",
+        def _call_trade_decision(
+            fee: float,
+            p_yes: Optional[float],
+            shadow_bachelier_only: bool = False,
+        ) -> TradeDecision:
+            """Call compute_trade_decision with a specific fee and optional hybrid p."""
+            indicators = {}
+            if p_yes is not None:
+                indicators["p_yes_model"] = p_yes
+            if shadow_bachelier_only:
+                indicators["shadow_bachelier_only"] = True
+            return compute_trade_decision(
+                run_id=run_id,
+                decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
+                ticker=getattr(market, "ticker", asset),
+                asset=asset,
+                spot_price=settlement_input_price,
+                strike_price=float(strike),
+                seconds_to_expiry=seconds_to_expiry,
+                yes_bid_cents=float(yes_bid),
+                yes_ask_cents=float(yes_ask),
+                no_bid_cents=float(no_bid),
+                no_ask_cents=float(no_ask),
+                yes_depth_cc=yes_depth_cc,
+                no_depth_cc=no_depth_cc,
+                fee_per_contract_cents=fee,
+                annualized_vol=annualized_vol,
+                model_uncertainty=model_uncertainty,
+                data_quality=data_quality,
+                data_state=data_state,
+                regime=regime,
+                regime_label=regime_label,
+                regime_probability=regime_probability,
+                indicators=indicators if indicators else {},
+                p_yes_model=p_yes,
+                min_required_edge=min_required_edge,
+                settlement_reference=settlement_reference,
+                policy_version="trade_decision_v2",
+            )
+
+        # Role-aware fee selection.  Start with the conservative taker fee,
+        # then prefer maker unless the trade justifies paying the spread (very
+        # close to expiry or gross edge above the taker threshold).  If the
+        # taker decision fails we still try maker, because the lower fee can
+        # rescue a trade that is only economic when resting.
+        decision_taker = _call_trade_decision(taker_fee_cents, p_yes_model)
+
+        taker_edge_threshold = _numeric_pref(
+            os.environ.get(f"MERID_TAKER_EDGE_THRESHOLD_{asset.upper()}")
+            or os.environ.get("MERID_TAKER_EDGE_THRESHOLD")
+            or 0.07
+        ) or 0.07
+        is_late = seconds_to_expiry < MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS
+        is_high_edge = (
+            decision_taker.gross_edge is not None
+            and float(decision_taker.gross_edge) >= taker_edge_threshold
         )
+
+        use_taker = (
+            decision_taker.selected_outcome is not None
+            and (is_late or is_high_edge)
+        )
+
+        if use_taker:
+            decision = decision_taker
+            liquidity_role = "taker"
+            aggressiveness = 1.0
+            post_only = False
+            time_in_force = "ioc"
+            execution_mode = "taker"
+            fee_cents = taker_fee_cents
+        else:
+            decision_maker = _call_trade_decision(maker_fee_cents, p_yes_model)
+            if decision_maker.selected_outcome is not None:
+                decision = decision_maker
+                liquidity_role = "maker"
+                aggressiveness = 0.0
+                post_only = True
+                time_in_force = "gtc"
+                execution_mode = "maker"
+                fee_cents = maker_fee_cents
+            elif decision_taker.selected_outcome is not None:
+                # Taker is economically viable but not preferred; fall back to it
+                # so we do not throw away a passing trade.
+                decision = decision_taker
+                liquidity_role = "taker"
+                aggressiveness = 1.0
+                post_only = False
+                time_in_force = "ioc"
+                execution_mode = "taker"
+                fee_cents = taker_fee_cents
+            else:
+                decision = decision_maker
+                liquidity_role = "taker"
+                aggressiveness = 1.0
+                post_only = False
+                time_in_force = "ioc"
+                execution_mode = "taker"
+                fee_cents = taker_fee_cents
 
         # Production-safe containment: compute a Bachelier-only shadow decision so
         # we can compare the live hybrid side against the baseline side on the same
@@ -7477,33 +7562,10 @@ class LeanAgent15m:
                 )
                 p_yes_bachelier = float(hybrid_bachelier) if hybrid_bachelier is not None else None
                 if p_yes_bachelier is not None:
-                    decision_bachelier = compute_trade_decision(
-                        run_id=run_id,
-                        decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
-                        ticker=getattr(market, "ticker", asset),
-                        asset=asset,
-                        spot_price=settlement_input_price,
-                        strike_price=float(strike),
-                        seconds_to_expiry=seconds_to_expiry,
-                        yes_bid_cents=float(yes_bid),
-                        yes_ask_cents=float(yes_ask),
-                        no_bid_cents=float(no_bid),
-                        no_ask_cents=float(no_ask),
-                        yes_depth_cc=yes_depth_cc,
-                        no_depth_cc=no_depth_cc,
-                        fee_per_contract_cents=fee_cents,
-                        annualized_vol=annualized_vol,
-                        model_uncertainty=model_uncertainty,
-                        data_quality=data_quality,
-                        data_state=data_state,
-                        regime=regime,
-                        regime_label=regime_label,
-                        regime_probability=regime_probability,
-                        indicators={"p_yes_model": p_yes_bachelier, "shadow_bachelier_only": True},
-                        p_yes_model=p_yes_bachelier,
-                        min_required_edge=min_required_edge,
-                        settlement_reference=settlement_reference,
-                        policy_version="trade_decision_v2",
+                    decision_bachelier = _call_trade_decision(
+                        fee_cents,
+                        p_yes_bachelier,
+                        shadow_bachelier_only=True,
                     )
             except Exception as bachelier_exc:
                 logger.warning("[HYBRID-P-YES-BACHELIER-SHADOW] asset=%s failed: %s", asset, bachelier_exc)
@@ -7865,8 +7927,11 @@ class LeanAgent15m:
             "regime": regime,
             "hmm_regime": None,
             "hmm_regime_confidence": 0.0,
-            "aggressiveness": 1.0,
-            "post_only": False,
+            "aggressiveness": aggressiveness,
+            "execution_mode": execution_mode,
+            "liquidity_role": liquidity_role,
+            "time_in_force": time_in_force,
+            "post_only": post_only,
             "order_type": "limit",
             "time_of_day_multiplier": 1.0,
             "take_profit_r_multiple": 0.8,
@@ -16603,29 +16668,27 @@ class LeanAgentGrid15m:
                                 ctr["constraint_reasons"][concrete] = ctr["constraint_reasons"].get(concrete, 0) + 1
                     elif _cand is None:
                         # No candidate generated for this asset: count as signal-level
-                        # rejection if the agent recorded a final reason.
-                        _decision = getattr(_agent, '_cycle_decision', {}) or {}
-                        _wf = _agent.get_rejection_waterfall()
-                        _reason = _decision.get('rejection_reason') or _wf.get('final_reason')
-                        if _reason:
-                            if _asset not in counters:
-                                counters[_asset] = {
-                                    "asset": _asset,
-                                    "candidates_generated": 0,
-                                    "allocator_evaluated": 0,
-                                    "selected": 0,
-                                    "allocator_rejected": 0,
-                                    "total_rejections": 0,
-                                    "terminal": 0,
-                                    "signal_rejected": 0,
-                                    "router_rejected": 0,
-                                    "execution_failed": 0,
-                                    "constraint_reasons": {},
-                                }
-                            ctr = counters[_asset]
-                            ctr["signal_rejected"] += 1
-                            ctr["total_rejections"] += 1
-                            ctr["constraint_reasons"][_reason] = ctr["constraint_reasons"].get(_reason, 0) + 1
+                        # rejection.  Normalize trade-decision edge reasons so the
+                        # counter keys match the loop_15m rejection counters.
+                        _reason = _get_agent_rejection_reason(_agent)
+                        if _asset not in counters:
+                            counters[_asset] = {
+                                "asset": _asset,
+                                "candidates_generated": 0,
+                                "allocator_evaluated": 0,
+                                "selected": 0,
+                                "allocator_rejected": 0,
+                                "total_rejections": 0,
+                                "terminal": 0,
+                                "signal_rejected": 0,
+                                "router_rejected": 0,
+                                "execution_failed": 0,
+                                "constraint_reasons": {},
+                            }
+                        ctr = counters[_asset]
+                        ctr["signal_rejected"] += 1
+                        ctr["total_rejections"] += 1
+                        ctr["constraint_reasons"][_reason] = ctr["constraint_reasons"].get(_reason, 0) + 1
 
                 counter_list = list(counters.values())
                 if counter_list:
@@ -16688,9 +16751,36 @@ class LeanAgentGrid15m:
         # be a subset after the allocator/entries-disabled gate.  The breakdown and lifecycle
         # events account for every generated candidate.
         pre_allocation_candidates = list(candidates)
-        total_generated = len(pre_allocation_candidates)
+
+        # total_generated now counts every agent that attempted a signal, so
+        # signal-level rejections are included in the loop_15m counter invariant.
+        total_generated = len(self._agents)
+
+        # Seed the rejection breakdown with canonical signal-level reasons from
+        # agents that produced no candidate.
         rejection_breakdown: Dict[str, int] = {}
         lifecycle_events: List[Dict[str, Any]] = []
+        for _agent, _result in zip(self._agents, results):
+            if _result is not None and not isinstance(_result, Exception):
+                continue
+            _asset = _agent.config.name.split('_')[0]
+            if isinstance(_result, Exception):
+                _reason = "signal_exception"
+            else:
+                _reason = _get_agent_rejection_reason(_agent)
+            # Count every agent attempt so total_generated == returned + rejected.
+            # If no canonical reason is recorded, bucket as no_trade.
+            rejection_breakdown[_reason] = rejection_breakdown.get(_reason, 0) + 1
+            lifecycle_events.append({
+                "candidate_id": "unknown",
+                "from_state": "RECEIVED",
+                "to_state": "REJECTED",
+                "reason": _reason,
+                "ticker": "",
+                "asset": _asset,
+                "side": "",
+                "source": "agent_grid_signal",
+            })
 
         # Phase 2: Apply global allocator to select best edges under venue cap
 
@@ -17083,6 +17173,7 @@ class LeanAgentGrid15m:
                         "side": oc.get("side"),
                     })
                 _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="allocator_phase_error")
+                _reconcile_cycle_counters(tick, total_generated, [], rejection_breakdown, allow_new_entries)
                 return CycleResult([], total_generated, rejection_breakdown, lifecycle_events)
 
         if not telemetry_state["emitted"]:
@@ -17113,11 +17204,74 @@ class LeanAgentGrid15m:
                     "side": c.get("side"),
                 })
             logger.info("[AGENT-GRID] allow_new_entries=False; returning %d filtered candidates (not allocated)", len(candidates))
+            _reconcile_cycle_counters(tick, total_generated, candidates, rejection_breakdown, allow_new_entries)
             return CycleResult(candidates, total_generated, rejection_breakdown, lifecycle_events)
 
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
+        _reconcile_cycle_counters(tick, total_generated, candidates, rejection_breakdown, allow_new_entries)
         return CycleResult(candidates, total_generated, rejection_breakdown, lifecycle_events)
+
+
+def _canonicalize_rejection_reason(reason: Optional[str]) -> str:
+    """Normalize trade-decision rejection reasons to the canonical loop key.
+
+    ``yes_edge_below_threshold`` / ``no_edge_below_threshold`` from
+    ``trade_decision.py`` are mapped to ``edge_below_threshold`` so that
+    ``[ALLOCATION-COUNTERS]`` and ``[COUNTER-SANITY-CHECK]`` refer to the same
+    key.
+    """
+    if not reason:
+        return "no_trade"
+    if reason in ("yes_edge_below_threshold", "no_edge_below_threshold"):
+        return "edge_below_threshold"
+    if reason in ("yes_edge_invalid_confidence", "no_edge_invalid_confidence"):
+        return "invalid_confidence"
+    return reason
+
+
+def _get_agent_rejection_reason(agent: LeanAgent15m) -> str:
+    """Return the canonical final rejection reason for an agent, if any."""
+    decision = getattr(agent, '_cycle_decision', {}) or {}
+    reason = decision.get('rejection_reason')
+    if not reason:
+        reason = agent.get_rejection_waterfall().get('final_reason')
+    return _canonicalize_rejection_reason(reason)
+
+
+def _reconcile_cycle_counters(
+    tick: int,
+    total_generated: int,
+    candidates: List[Dict[str, Any]],
+    rejection_breakdown: Dict[str, int],
+    allow_new_entries: bool,
+) -> None:
+    """Log a reconciled count of generated, returned, and rejected candidates.
+
+    This is the counter-reconciliation bridge between agent_grid and loop_15m:
+    every generated candidate must be accounted for as either returned in the
+    candidate list or recorded in the rejection breakdown.
+    """
+    rejected_count = sum(rejection_breakdown.values())
+    returned_count = len(candidates)
+    # When entries are disabled the returned list is for monitoring only;
+    # those candidates are counted in the rejection breakdown as ENTRIES_DISABLED.
+    if not allow_new_entries:
+        returned_count = 0
+    if returned_count + rejected_count != total_generated:
+        logger.warning(
+            "[COUNTER-RECONCILIATION-MISMATCH] tick=%d generated=%d "
+            "returned=%d rejected=%d breakdown=%s",
+            tick, total_generated, returned_count, rejected_count,
+            rejection_breakdown,
+        )
+    else:
+        logger.info(
+            "[COUNTER-RECONCILIATION] tick=%d generated=%d returned=%d "
+            "rejected=%d breakdown=%s",
+            tick, total_generated, returned_count, rejected_count,
+            rejection_breakdown,
+        )
 
 
 def _extract_error_message(result) -> str:
