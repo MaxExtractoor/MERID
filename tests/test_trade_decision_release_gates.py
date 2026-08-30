@@ -19,6 +19,12 @@ from decimal import Decimal
 import pytest
 
 from merid.prediction.trade_decision import compute_edge, compute_trade_decision
+from merid.risk.probability.calibration_diagnostics import (
+    brier_score,
+    expected_calibration_error,
+    reliability_curve,
+    calibration_summary,
+)
 
 
 def _make_decision(
@@ -305,4 +311,85 @@ def test_tail_calibration_caps_cheap_yes_belief(monkeypatch):
     # The raw model p_yes would be ~0.94, but the tail calibration forces it
     # close to the observed actual win rate in the 0-19c bucket (near 0).
     assert float(d.p_yes_calibrated) <= 0.10
+
+
+def test_no_dual_tail_cap_skips_moderate_raw_p_no(monkeypatch):
+    """A moderate raw p_no on a dual NO curve must not be over-capped to 0.05.
+
+    The NO curve in the current JSON is the YES dual, which says a 5c NO-held
+    contract wins 0% of the time.  When the Bachelier model itself says p_no is
+    moderate (>= the dual raw floor), the cap should be skipped so the dual
+    does not structurally suppress the NO side.
+    """
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 0.0
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_CHEAP_TAIL_P_EXCEPTION", 0.0
+    )
+    # Spot ~0.18% above strike gives a moderate raw p_no (~0.25) for a 5c NO ask,
+    # which should be above the dual raw floor and therefore not over-capped.
+    d = _make_decision(
+        spot=100.18,
+        strike=100.0,
+        yes_bid=90.0,
+        yes_ask=95.0,
+        no_bid=1.0,
+        no_ask=5.0,
+    )
+    _ind = d.indicators or {}
+    # NO entry is in the cheap-price tail, but the raw p_no should be moderate.
+    assert _ind.get("tail_cap_no_reason") == "dual_moderate_skipped"
+    assert float(d.p_no_calibrated) > 0.15
+
+
+def test_no_dual_tail_cap_applies_cheap_raw_p_no(monkeypatch):
+    """A cheap raw p_no on a dual NO curve is still capped to the dual tail."""
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 0.0
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_CHEAP_TAIL_P_EXCEPTION", 0.0
+    )
+    # Spot far above strike makes the Bachelier model itself believe NO is very
+    # unlikely, so p_no is in the cheap-tail region and the dual cap applies.
+    d = _make_decision(
+        spot=102.0,
+        strike=100.0,
+        yes_bid=90.0,
+        yes_ask=95.0,
+        no_bid=1.0,
+        no_ask=5.0,
+    )
+    _ind = d.indicators or {}
+    assert _ind.get("tail_cap_no_reason") == "dual_raw_cheap"
+    # The raw p_no was cheap and the dual cap should keep it near or below 0.10.
+    assert float(d.p_no_calibrated) <= 0.10
+
+
+def test_calibration_diagnostics_perfect_calibration():
+    """A perfectly calibrated model has zero ECE and Brier equal to p(1-p)."""
+    # 100 samples with p=0.2 where exactly 20% win -> perfectly calibrated.
+    probs = [0.2] * 100
+    outcomes = [1] * 20 + [0] * 80
+    summary = calibration_summary(probs, outcomes, n_bins=5)
+    assert math.isclose(summary["expected_calibration_error"], 0.0, abs_tol=1e-9)
+    assert math.isclose(summary["brier_score"], 0.2 * 0.8, rel_tol=1e-6)
+
+
+def test_calibration_diagnostics_uncalibrated_yes_no():
+    """A model that is underconfident on YES and overconfident on NO shows
+    ECE on both sides.
+    """
+    # YES side: all predictions 0.45 but true rate 0.60 -> ECE 0.15.
+    yes_probs = [0.45] * 100
+    yes_outcomes = [1] * 60 + [0] * 40
+    yes_summary = calibration_summary(yes_probs, yes_outcomes, n_bins=1, label="yes")
+    assert math.isclose(yes_summary["expected_calibration_error"], 0.15, abs_tol=1e-9)
+
+    # NO side: all predictions 0.70 but true rate 0.40 -> ECE 0.30.
+    no_probs = [0.70] * 100
+    no_outcomes = [1] * 40 + [0] * 60
+    no_summary = calibration_summary(no_probs, no_outcomes, n_bins=1, label="no")
+    assert math.isclose(no_summary["expected_calibration_error"], 0.30, abs_tol=1e-9)
 
