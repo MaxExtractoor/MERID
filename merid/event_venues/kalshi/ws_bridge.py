@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # CRITICAL FIX: 2026-07-16 - Wire FVG integration to WebSocket orderbook data
 # This ensures FVG detection receives real-time Kalshi price updates
@@ -383,9 +383,171 @@ _SUBSCRIPTION_PRIORITY_CRITICAL = ["fills"]  # Never drop
 _SUBSCRIPTION_PRIORITY_MEDIUM = ["orderbooks", "trades"]  # Drop after critical
 _SUBSCRIPTION_PRIORITY_LOW = ["quotes"]  # Drop first when backpressure
 
-# ALLOWED_SYMBOLS whitelist for 15m crypto markets (hard filter before subscription)
+# ALLOWED_SYMBOLS is superseded by _resolve_ws_subscription_assets() below.
+# Kept as a fail-visible fallback in case the profile/config resolution fails.
 _ALLOWED_SYMBOLS = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
 # Note: _ALLOWED_TIMEFRAMES is imported from market_state.py
+
+
+def _extract_asset_from_ticker(ticker: str) -> Optional[str]:
+    """Extract the 15m crypto asset symbol from a market ticker.
+
+    Accepts series tickers (e.g. ``KXBTC15M``) and full market tickers
+    (e.g. ``KXBTC15M-26AUG281200-45``).  Returns None for non-crypto/15m
+    tickers.
+    """
+    upper = (ticker or "").upper().strip()
+    for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+        if upper.startswith(f"KX{asset}15M"):
+            return asset
+    return None
+
+
+def _get_whitelisted_assets() -> Set[str]:
+    """Return the profile's 15m asset_whitelist.
+
+    Uses the same resolution path as build_15m_agent_grid and
+    merid.event_venues.kalshi.coarse_filter: the active profile's
+    coarse_filters.asset_whitelist gate.  Falls back to the legacy five-asset
+    set only if the config cannot be loaded, and logs the fallback.
+    """
+    try:
+        from config.trading_scope import get_trading_scope
+        scope = get_trading_scope()
+        return set(scope.ALLOWED_ASSETS)
+    except Exception as e:
+        logger.warning(
+            "[WS-UNIVERSE] Failed to resolve trading-scope whitelist: %s. "
+            "Falling back to legacy 5-asset set.",
+            e,
+        )
+        return set(_ALLOWED_SYMBOLS)
+
+
+def _get_open_position_assets() -> Set[str]:
+    """Return assets with currently open Kalshi positions.
+
+    These assets receive an exit-only subscription even if they are not in the
+    trading whitelist, so we never lose the quote feed needed to close a
+    residual position.
+    """
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        cache = get_position_cache()
+        if cache is None:
+            return set()
+        assets = set()
+        for market_id, pos in cache.get_all_positions(validate_freshness=False).items():
+            if pos and getattr(pos, "contracts", 0) > 0:
+                asset = _extract_asset_from_ticker(market_id)
+                if asset:
+                    assets.add(asset)
+        return assets
+    except Exception as e:
+        logger.warning(
+            "[WS-UNIVERSE] Failed to resolve open-position assets: %s. "
+            "Using whitelist only; residual positions may be orphaned.",
+            e,
+        )
+        return set()
+
+
+def _resolve_ws_subscription_assets() -> Set[str]:
+    """Return the complete WS subscription asset universe.
+
+    This is the union of:
+    - whitelisted assets (full trading capability), and
+    - assets with open positions (exit-only feed, kept to avoid orphaning exits).
+
+    Logs the resolved universe clearly with position state.
+    """
+    whitelist = _get_whitelisted_assets()
+    positions = _get_open_position_assets()
+    universe = whitelist | positions
+    logger.info(
+        "[WS-UNIVERSE] whitelist=%s positions=%s universe=%s",
+        sorted(whitelist), sorted(positions), sorted(universe),
+    )
+    return universe
+
+
+def _is_in_ws_subscription_scope(ticker: str) -> bool:
+    """Return True if ``ticker`` should be subscribed for WS updates."""
+    asset = _extract_asset_from_ticker(ticker)
+    if asset is None:
+        return False
+    return asset in _resolve_ws_subscription_assets()
+
+
+def _get_open_position_market_ids() -> Set[str]:
+    """Return the concrete market tickers of currently open Kalshi positions.
+
+    These are the exact markets that hold residual exposure, so the quote feed
+    must be kept for those specific tickers even if the asset is no longer in
+    the whitelist and even if a newer 15m window has rolled.
+    """
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        cache = get_position_cache()
+        if cache is None:
+            return set()
+        market_ids = set()
+        for market_id, pos in cache.get_all_positions(validate_freshness=False).items():
+            if pos and getattr(pos, "contracts", 0) > 0:
+                market_ids.add(market_id)
+        return market_ids
+    except Exception as e:
+        logger.warning("[WS-UNIVERSE] Failed to resolve open-position market IDs: %s", e)
+        return set()
+
+
+def _resolve_current_markets_for_universe(catalog) -> List[str]:
+    """Return the current 15m market ticker for each asset in the subscription universe."""
+    tickers = []
+    ws_assets = _resolve_ws_subscription_assets()
+    for asset in sorted(ws_assets):
+        try:
+            current_market = catalog.get_current_15m_market(asset)
+            if current_market:
+                market_id = (
+                    current_market.market.market_id
+                    if hasattr(current_market, "market")
+                    else current_market.market_id
+                )
+                tickers.append(market_id)
+        except Exception as e:
+            logger.warning("[WS-UNIVERSE] Failed to get current 15m market for %s: %s", asset, e)
+    return tickers
+
+
+def get_ws_subscription_tickers(input_tickers: Optional[List[str]] = None) -> List[str]:
+    """Public alias for the canonical WS subscription ticker builder.
+
+    Use this from callers such as ``web.main_15m_lean.refresh_catalog_and_ws``
+    to stay aligned with the bridge's own startup/reconnect logic.
+    """
+    return _resolve_ws_subscription_tickers(input_tickers)
+
+
+def _resolve_ws_subscription_tickers(input_tickers: Optional[List[str]] = None) -> List[str]:
+    """Build the canonical WS subscription ticker list.
+
+    The list is the union of:
+    - ``input_tickers`` (e.g. the caller's trading whitelist),
+    - the current 15m market for every asset in the subscription universe
+      (whitelist + open-position assets), and
+    - the exact market tickers of any open Kalshi position.
+
+    This guarantees that residual position assets always get an exit-only feed
+    even if the caller only passed the trading whitelist.
+    """
+    from merid.event_venues.kalshi.market_catalog import get_market_catalog
+    catalog = get_market_catalog()
+    universe_tickers = set(_resolve_current_markets_for_universe(catalog))
+    universe_tickers.update(_get_open_position_market_ids())
+    if input_tickers:
+        universe_tickers.update(input_tickers)
+    return sorted(universe_tickers)
 
 
 class KalshiWebSocketBridge:
@@ -1121,12 +1283,14 @@ class KalshiWebSocketBridge:
                 self._reconnect_in_progress = False
                 return
 
-            # Get current tickers from catalog for resubscription
+            # Get current tickers from catalog for resubscription.
+            # Use the config-driven whitelist plus assets with open positions.
             from merid.event_venues.kalshi.market_catalog import get_market_catalog
             catalog = get_market_catalog()
             tickers: List[str] = []
             try:
-                for asset in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']:
+                ws_assets = _resolve_ws_subscription_assets()
+                for asset in sorted(ws_assets):
                     current_market = catalog.get_current_15m_market(asset)
                     if current_market:
                         market_id = current_market.market.market_id if hasattr(current_market, 'market') else current_market.market_id
@@ -1316,6 +1480,15 @@ class KalshiWebSocketBridge:
     async def start(self, tickers: Optional[List[str]] = None) -> None:
         """Connect WS, subscribe to channels, and start forwarding."""
         # REMOVED: Excessive diagnostic file I/O - using logger instead
+
+        # Resolve the canonical subscription universe (profile whitelist + open
+        # positions) and merge it with any tickers supplied by the caller.  This
+        # makes startup exit-safe even if the caller only passed the whitelist.
+        try:
+            tickers = _resolve_ws_subscription_tickers(tickers)
+        except Exception as e:
+            logger.warning("[WS-BRIDGE-START] Failed to resolve canonical tickers: %s", e)
+
         summary: Dict[str, Any] = {"actions": []}
         logger.info("[WS-BRIDGE-START] start() invoked with %d tickers", len(tickers) if tickers else 0)
         
@@ -1492,7 +1665,19 @@ class KalshiWebSocketBridge:
             logger.info("[WS-START] start() called with %d tickers, rest_fallback_mode=%s", len(tickers), getattr(self, '_rest_fallback_mode', False))
             
             # UPSTREAM FIX: Apply hard cap and tiered subscription limiting
-            ut = sorted(set(tickers))
+            raw_tickers = sorted(set(tickers))
+
+            # CONFIG-DRIVEN + EXIT-SAFE: keep only whitelisted assets or assets
+            # with open positions.  This prevents orphaning residual exits while
+            # still only trading the configured whitelist.
+            ws_assets = _resolve_ws_subscription_assets()
+            ut = [t for t in raw_tickers if _extract_asset_from_ticker(t) in ws_assets]
+            if len(ut) != len(raw_tickers):
+                logger.info(
+                    "[WS-UNIVERSE-FILTER] filtered %d -> %d tickers by subscription scope",
+                    len(raw_tickers), len(ut)
+                )
+
             logger.info("[WS-START] Processing %d tickers, rest_fallback_mode=%s", len(ut), getattr(self, '_rest_fallback_mode', False))
             
             # DIAGNOSTIC: Check _rest_fallback_mode state before REST fallback
@@ -1794,10 +1979,9 @@ class KalshiWebSocketBridge:
                     # Extract unique assets from subscribed tickers
                     subscribed_assets = set()
                     for ticker in ut:
-                        for symbol in _ALLOWED_SYMBOLS:
-                            if symbol in ticker.upper():
-                                subscribed_assets.add(symbol)
-                                break
+                        asset = _extract_asset_from_ticker(ticker)
+                        if asset:
+                            subscribed_assets.add(asset)
                     
                     # Check catalog for which assets actually have markets
                     from merid.event_venues.kalshi.market_catalog import get_market_catalog
@@ -1807,8 +1991,10 @@ class KalshiWebSocketBridge:
                         if cm.asset:
                             assets_with_markets.add(cm.asset.upper())
                     
-                    # All 5 assets are required for kalshi_crypto_15m_v2 profile
-                    expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+                    # Expected assets are the config-driven whitelist plus any asset
+                    # with an open position (exit-safe).  Missing assets are only
+                    # those the system actually needs and cannot find.
+                    expected_assets = _resolve_ws_subscription_assets()
                     
                     missing_assets = expected_assets - subscribed_assets
                     
@@ -1886,15 +2072,14 @@ class KalshiWebSocketBridge:
                            len(self._subscribed_tickers) if self._subscribed_tickers else 0,
                            self._subscribed_tickers[:3] if self._subscribed_tickers else [])
                 
-                # WS SUBSCRIPTION CORRECTNESS CHECK: Verify 5 critical assets are subscribed
-                # This ensures BTC, ETH, SOL, XRP, DOGE are all present in subscriptions
-                expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+                # WS SUBSCRIPTION CORRECTNESS CHECK: Verify the subscription universe
+                # (profile whitelist + open-position assets) is present.
+                expected_assets = _resolve_ws_subscription_assets()
                 subscribed_assets = set()
                 for ticker in self._subscribed_tickers:
-                    for symbol in expected_assets:
-                        if symbol in ticker.upper():
-                            subscribed_assets.add(symbol)
-                            break
+                    asset = _extract_asset_from_ticker(ticker)
+                    if asset:
+                        subscribed_assets.add(asset)
 
                 missing_assets = expected_assets - subscribed_assets
                 has_subscriptions = len(self._subscribed_tickers) > 0
@@ -2361,15 +2546,14 @@ class KalshiWebSocketBridge:
         """
         global _ws_forward_first_event_ts, _ws_forward_last_event_ts, _ws_forward_events_per_sec, _ws_forward_queue_size, _ws_forward_stalled, _ws_forwarder_healthy
         
-        # Check subscription coverage for critical assets
+        # Check subscription coverage for the configured + exit-safe universe.
         subscribed_assets = set()
-        expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+        expected_assets = _resolve_ws_subscription_assets()
         
         for ticker in self._subscribed_tickers:
-            for symbol in expected_assets:
-                if symbol in ticker.upper():
-                    subscribed_assets.add(symbol)
-                    break
+            asset = _extract_asset_from_ticker(ticker)
+            if asset:
+                subscribed_assets.add(asset)
         
         missing_assets = expected_assets - subscribed_assets
         
@@ -2712,58 +2896,34 @@ class KalshiWebSocketBridge:
 
     async def subscribe(self, tickers: List[str]) -> None:
         """Subscribe to additional tickers while running.
-        
-        PRODUCTION AUDIT (Step 4): Scope validation - only 15m crypto allowed.
-        
+
+        Scope is the config-driven 15m whitelist plus any asset with an open
+        position (exit-safe).  The filter never subscribes to an alt solely for
+        trading, but keeps the quote feed for residual positions so they can be
+        closed.
+
         UPSTREAM FIX: Enforces hard cap on total subscriptions and applies
         tiered shedding when approaching threshold. Rotates subscriptions when at cap.
         """
-        # PRODUCTION AUDIT (Step 4): Filter tickers by trading scope
-        # P0 FIX: Fail-closed import - reject all tickers if trading_scope unavailable
-        try:
-            from config.trading_scope import validate_series_ticker_for_trading, validate_asset_for_trading
-            logger.info("[SCOPE-FILTER] trading_scope import successful, scope filtering enabled")
-        except ImportError as e:
-            # Fail-closed in production: functions always return False to reject everything
-            def validate_series_ticker_for_trading(t: str) -> bool:
-                return False
-            
-            def validate_asset_for_trading(a: str) -> bool:
-                return False
-            
-            logger.error(f"[SCOPE-FILTER] trading_scope import failed ({e}), scope filtering DISABLED - rejecting all tickers")
-        
+        # Resolve the subscription universe once and use it for all tickers.
+        ws_assets = _resolve_ws_subscription_assets()
+
         filtered_tickers = []
         for t in tickers:
-            # Extract asset
-            asset = None
-            if t.startswith("KXBTC"):
-                asset = "BTC"
-            elif t.startswith("KXETH"):
-                asset = "ETH"
-            elif t.startswith("KXSOL"):
-                asset = "SOL"
-            elif t.startswith("KXXRP"):
-                asset = "XRP"
-            elif t.startswith("KXDOGE"):
-                asset = "DOGE"
-            
-            # CRITICAL FIX: Add explicit per-asset logging for subscription debugging
+            asset = _extract_asset_from_ticker(t)
             if asset:
-                asset_valid = validate_asset_for_trading(asset)
-                ticker_valid = validate_series_ticker_for_trading(t)
-                logger.info(f"[WS-SUBSCRIBE] asset={asset} series={t} asset_valid={asset_valid} ticker_valid={ticker_valid}")
-                
-                # Check scope
-                if asset_valid and ticker_valid:
+                asset_valid = asset in ws_assets
+                logger.info("[WS-SUBSCRIBE] asset=%s series=%s in_universe=%s", asset, t, asset_valid)
+                if asset_valid:
                     filtered_tickers.append(t)
-                    logger.info(f"[WS-SUBSCRIBE] asset={asset} series={t} result=ok")
+                    logger.info("[WS-SUBSCRIBE] asset=%s series=%s result=ok", asset, t)
                 else:
                     logger.warning(
-                        f"[WS-SUBSCRIBE] asset={asset} series={t} result=rejected asset_valid={asset_valid} ticker_valid={ticker_valid}"
+                        "[WS-SUBSCRIBE] asset=%s series=%s result=rejected not_in_universe=%s",
+                        asset, t, sorted(ws_assets),
                     )
             else:
-                logger.warning(f"[WS-SUBSCRIBE] ticker={t} result=unknown_asset")
+                logger.warning("[WS-SUBSCRIBE] ticker=%s result=unknown_asset", t)
         tickers = filtered_tickers
         
         new = [t for t in tickers if t not in self._subscribed_tickers]
@@ -4339,12 +4499,11 @@ class KalshiWebSocketBridge:
                     from merid.core.ws_health_helpers import compute_ws_health, log_ws_health_diagnostics
                     
                     subscribed_assets = set()
-                    expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+                    expected_assets = _resolve_ws_subscription_assets()
                     for ticker in self._subscribed_tickers:
-                        for symbol in expected_assets:
-                            if symbol in ticker.upper():
-                                subscribed_assets.add(symbol)
-                                break
+                        asset = _extract_asset_from_ticker(ticker)
+                        if asset:
+                            subscribed_assets.add(asset)
                     
                     with self._total_events_processed_lock:
                         event_count_total = self._total_events_processed
@@ -5122,9 +5281,11 @@ def restart_ws_bridge_if_crashed() -> bool:
                 from merid.event_venues.kalshi.market_catalog import get_market_catalog
                 catalog = get_market_catalog()
                 
-                # Get all 15m tickers for crypto assets
+                # Get 15m tickers for the configured whitelist plus any asset
+                # with an open position, so reconnect does not orphan exits.
                 tickers = []
-                for asset in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']:
+                ws_assets = _resolve_ws_subscription_assets()
+                for asset in sorted(ws_assets):
                     series_ticker = f"KX{asset}15M"
                     asset_tickers = catalog.get_tickers(series_ticker)
                     if asset_tickers:

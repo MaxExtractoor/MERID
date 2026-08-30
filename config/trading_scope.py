@@ -1,23 +1,62 @@
-"""TRADING_SCOPE - Production Scope Freeze for BTC/ETH/SOL/XRP/DOGE 15m
+"""TRADING_SCOPE - Production Scope Freeze for the configured 15m crypto whitelist.
 
 This is the single source of truth for what is ALLOWED in production trading.
 Any market, asset, or timeframe outside this scope must be rejected with loud logging.
 
+The allowed asset list is resolved from the active profile's `coarse_filters`
+asset_whitelist gate (same resolution path used by build_15m_agent_grid and
+merid.event_venues.kalshi.coarse_filter).  A future whitelist change in the
+profile therefore propagates automatically to all trading-scope validations.
+
 PRODUCTION SCOPE:
-- Assets: BTC, ETH, SOL, XRP, DOGE only
+- Assets: configured by profile `coarse_filters.asset_whitelist` (currently BTC-only)
 - Timeframe: 15-minute markets only
 - Venue: Kalshi only
-- Series tickers: KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M only
+- Series tickers: KX{ASSET}15M for each whitelisted asset
 
 All trading paths must validate against this scope before order submission.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import FrozenSet, Optional, Set, Tuple
 from utils.logger import get_logger
 
 logger = get_logger("config.trading_scope")
+
+
+def _resolve_allowed_assets() -> FrozenSet[str]:
+    """Resolve allowed assets from the active profile's asset_whitelist gate.
+
+    This uses the same resolution path as build_15m_agent_grid and
+    merid.event_venues.kalshi.coarse_filter.  On failure it falls back to the
+    legacy five-asset set so the process does not die during startup, but it
+    logs loudly so the drift is visible.
+    """
+    try:
+        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+        profile = Crypto15mProfileAdapter().profile
+        if hasattr(profile, "coarse_filters") and hasattr(profile.coarse_filters, "gates"):
+            for gate in profile.coarse_filters.gates:
+                if getattr(gate, "name", "") == "asset_whitelist" and getattr(gate, "enabled", False):
+                    assets = getattr(gate, "assets", [])
+                    if assets:
+                        return frozenset(str(a).upper().strip() for a in assets)
+    except Exception as e:
+        logger.warning("[TRADING-SCOPE] Failed to load asset_whitelist from profile: %s", e)
+
+    # Fail-visible fallback: keep the historical 5-asset set but log it.
+    logger.warning(
+        "[TRADING-SCOPE] Falling back to legacy allowed asset set "
+        "(BTC, ETH, SOL, XRP, DOGE); check profile coarse_filters.asset_whitelist"
+    )
+    return frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE"})
+
+
+def _resolve_allowed_series_tickers(assets: Optional[FrozenSet[str]] = None) -> FrozenSet[str]:
+    """Build allowed series tickers from the allowed asset set."""
+    assets = assets or _resolve_allowed_assets()
+    return frozenset(f"KX{asset}15M" for asset in sorted(assets))
 
 
 class ScopeViolation(str, Enum):
@@ -31,24 +70,20 @@ class ScopeViolation(str, Enum):
 @dataclass(frozen=True)
 class TradingScope:
     """Production trading scope configuration."""
-    
-    # Allowed assets (uppercase)
-    ALLOWED_ASSETS: FrozenSet[str] = frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE"})
-    
+
+    # Allowed assets (uppercase) - resolved from profile coarse_filters.asset_whitelist
+    ALLOWED_ASSETS: FrozenSet[str] = field(default_factory=_resolve_allowed_assets)
+
     # Allowed timeframe (only 15m for production)
     ALLOWED_TIMEFRAME: str = "15m"
-    
+
     # Allowed venue (only Kalshi for production)
     ALLOWED_VENUE: str = "kalshi"
-    
-    # Allowed series tickers (5 assets × 15m only)
-    ALLOWED_SERIES_TICKERS: FrozenSet[str] = frozenset({
-        "KXBTC15M",
-        "KXETH15M",
-        "KXSOL15M",
-        "KXXRP15M",
-        "KXDOGE15M",
-    })
+
+    # Allowed series tickers - derived from ALLOWED_ASSETS at init time
+    ALLOWED_SERIES_TICKERS: FrozenSet[str] = field(
+        default_factory=_resolve_allowed_series_tickers
+    )
     
     # Legacy timeframe aliases that map to 15m (for backward compatibility)
     TIMEFRAME_ALIASES: FrozenSet[str] = frozenset({"15m", "15M", "scalp", "SCALP"})
