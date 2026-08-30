@@ -1022,7 +1022,7 @@ class LiveConfigResolver:
             max_book_staleness_ms=book_staleness,
             min_held_price_cents=min_held_price,
             min_required_edge=min_required_edge,
-            min_p_selected=min_p,
+            min_p_selected=resolved_min_p,
             per_asset=per_asset,
             source_overrides={},
             conflicts_caught=[],
