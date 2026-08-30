@@ -926,23 +926,26 @@ class LiveConfigResolver:
             f"resolved={min_required_edge}"
         )
 
-        profile_min_confidence = Decimal(str(profile.confidence_min_confidence_threshold))
+        # 2026-08-30: min_p_selected is now the *absolute* probability floor.
+        # The effective per-side minimum is computed by trade_decision from the
+        # held-side entry price plus all-in cost reserve (fee + exit reserve +
+        # model risk).  Keep this global floor at 0.0 so positive-EV cost-basis
+        # trades on cheap contracts are not blocked by an unconditional 0.5 veto.
         env_min_p = env.get("MERID_TRADE_DECISION_MIN_P_SELECTED")
-        default_min_p = Decimal("0.50")
-        min_p = max(default_min_p, profile_min_confidence)
-        resolved_min_p = min_p
+        default_min_p = Decimal("0.0")
+        resolved_min_p = default_min_p
         if env_min_p is not None:
-            if env_min_p < min_p:
+            if env_min_p < default_min_p:
                 self._conflicts.append(
                     f"Min p-selected override rejected: env={env_min_p} is lower than "
-                    f"profile={min_p}; resolved to the safer profile floor"
+                    f"default={default_min_p}; resolved to the safer default floor"
                 )
                 env_min_p = None
             else:
                 resolved_min_p = env_min_p
 
         self._invariants_checked.append(
-            f"Min p-selected: default={default_min_p}; profile={profile_min_confidence}; "
+            f"Min p-selected: default={default_min_p}; "
             f"env={env_min_p if env_min_p is not None else 'none'}; resolved={resolved_min_p}"
         )
 
