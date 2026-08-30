@@ -1214,7 +1214,7 @@ class Crypto15mProfileAdapter:
                 risk_policy_max_fee_to_notional_pct=self._normalize_percentage_value(risk_policy.get('max_fee_to_notional_pct', 15.0)),
                 
                 # Strategy policy (normalize dict format for percentage fields)
-                strategy_policy_min_edge=self._normalize_percentage_value(strategy_policy.get('min_edge', 0.05)),
+                strategy_policy_min_edge=self._normalize_percentage_value(strategy_policy.get('min_edge', 0.02)),
                 strategy_policy_min_confidence=strategy_policy.get('min_confidence', 0.65),  # 2026-07-15: Updated default to 0.65 to match profile YAML single source of truth
                 strategy_policy_max_md_staleness_sec=float(strategy_policy.get('max_md_staleness_sec', 120.0)),
                 

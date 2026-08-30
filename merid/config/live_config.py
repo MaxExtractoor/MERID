@@ -116,7 +116,7 @@ class ResolvedLiveConfig:
 
     # Edge / confidence economics
     min_held_price_cents: Decimal = Decimal("35")  # cents
-    min_required_edge: Decimal = Decimal("0.05")
+    min_required_edge: Decimal = Decimal("0.02")
     min_p_selected: Decimal = Decimal("0.50")
 
     # Per-asset overrides

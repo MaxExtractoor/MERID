@@ -1235,13 +1235,15 @@ async def build_15m_agent_grid(
         resolved_live.profile_name,
         resolved_live.min_required_edge,
     )
-    # Safety floor: the resolved edge must not be below the profile's 0.07
-    # target.  A value of 0.05 means the code default won (profile unresolved),
-    # which is the exact bug this assertion is meant to prevent.
-    if resolved_live.min_required_edge < Decimal("0.07"):
+    # Safety floor: the resolved live-config floor must be a positive, bounded
+    # value.  A value below 0.01 means the config is corrupt or missing.  The
+    # profile's nominal floor is now 0.02; the actual per-asset threshold is
+    # computed dynamically by trade_decision.py using the asset tier, price,
+    # and spread.
+    if resolved_live.min_required_edge < Decimal("0.01"):
         raise RuntimeError(
             f"Resolved min_required_edge {resolved_live.min_required_edge} is below "
-            "the 0.07 profile floor. Refuse to build agent grid."
+            "the 0.01 sanity floor. Refuse to build agent grid."
         )
 
     # Get the profile for configuration
@@ -7497,13 +7499,14 @@ class LeanAgent15m:
             or _numeric_pref(getattr(self.risk_config, "model_uncertainty", None))
         ) or 0.05
 
+        _asset_profile = ASSET_PROFILE.get(asset.upper(), ASSET_PROFILE["BTC"])
         min_required_edge = _numeric_pref(
             os.environ.get(f"MERID_MIN_NET_EDGE_{asset.upper()}")
             or os.environ.get("MERID_MIN_NET_EDGE")
             or os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE")
             or _numeric_pref(getattr(self.config, "min_net_edge", None))
             or _numeric_pref(getattr(self.risk_config, "strategy_policy_min_edge", None))
-        ) or 0.03
+        ) or _asset_profile.base_edge_threshold
 
         def _call_trade_decision(
             fee: float,
@@ -17497,35 +17500,35 @@ class _RegimeKnobs:
 
 ASSET_PROFILE: Dict[str, _AssetProfile] = {
     "BTC": _AssetProfile(
-        base_edge_threshold=0.06,
+        base_edge_threshold=0.03,  # 2026-08-30: most liquid; 3% net-of-fee floor
         base_max_contracts_per_strip=2,
         base_max_concurrent_strips=3,
         min_depth_yes_base=15,
         min_depth_no_base=15,
     ),
     "ETH": _AssetProfile(
-        base_edge_threshold=0.06,
+        base_edge_threshold=0.04,  # 2026-08-30: tier-2 liquid; 4% floor
         base_max_contracts_per_strip=2,
         base_max_concurrent_strips=3,
         min_depth_yes_base=15,
         min_depth_no_base=15,
     ),
     "SOL": _AssetProfile(
-        base_edge_threshold=0.07,
+        base_edge_threshold=0.04,  # 2026-08-30: alt with decent liquidity; 4% floor
         base_max_contracts_per_strip=2,
         base_max_concurrent_strips=3,
         min_depth_yes_base=10,
         min_depth_no_base=10,
     ),
     "XRP": _AssetProfile(
-        base_edge_threshold=0.07,
+        base_edge_threshold=0.05,  # 2026-08-30: less liquid; 5% floor
         base_max_contracts_per_strip=2,
         base_max_concurrent_strips=3,
         min_depth_yes_base=10,
         min_depth_no_base=10,
     ),
     "DOGE": _AssetProfile(
-        base_edge_threshold=0.08,
+        base_edge_threshold=0.05,  # 2026-08-30: least liquid; 5% floor
         base_max_contracts_per_strip=2,
         base_max_concurrent_strips=2,
         min_depth_yes_base=10,

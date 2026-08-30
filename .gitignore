@@ -371,6 +371,7 @@ tmp_tail*.py
 two_window_tail*.txt
 
 # Output / audit artifacts
+reports/
 output/
 audit_output_*/
 spread_analysis_output/

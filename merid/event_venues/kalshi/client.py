@@ -2411,6 +2411,27 @@ class KalshiVenueClient(EventVenueClient):
         if getattr(order, "post_only", False):
             kalshi_order["post_only"] = True
 
+        # CRITICAL GUARD: Kalshi V2 rejects post_only=True with time_in_force in
+        # {immediate_or_cancel, fill_or_kill} with "Post_only_but_execution_type_can't_rest".
+        # This is a fail-closed last-line-of-defense; the order router should never
+        # emit such a combination, but if it does we abort the wire call cleanly.
+        if kalshi_order.get("post_only") and kalshi_order.get("time_in_force") in (
+            "immediate_or_cancel",
+            "fill_or_kill",
+        ):
+            logger.critical(
+                "[CLIENT-POST-ONLY-TIF-INVARIANT] ticker=%s client_order_id=%s "
+                "post_only=True with time_in_force=%s is not supported by Kalshi; rejecting",
+                ticker,
+                kalshi_order.get("client_order_id", "N/A"),
+                kalshi_order["time_in_force"],
+            )
+            return OperationResult.fail(
+                "post_only_incompatible_with_tif",
+                latency_ms=0.0,
+                retries=0,
+            )
+
         # Add cancel_order_on_pause if specified (default True for fail-closed safety)
         _cancel_on_pause = getattr(order, "cancel_order_on_pause", None)
         if _cancel_on_pause is not None:

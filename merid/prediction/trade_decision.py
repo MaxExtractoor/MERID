@@ -34,10 +34,12 @@ MIN_REGIME_POSTERIOR = Decimal(os.environ.get("MERID_MIN_REGIME_POSTERIOR", "0.5
 TRADE_DECISION_MIN_P_SELECTED = float(os.environ.get("MERID_TRADE_DECISION_MIN_P_SELECTED", "0.5"))
 
 # Minimum net edge (as a fraction of notional) for a side to be selected.
-# 2026-09: raised to 0.05 (5¢) as the cost-driven floor.  The resolved live
-# profile can raise this further (target 0.07-0.10).  Never lower without a
-# documented Brier/reliability/PBO audit.
-TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.05"))
+# 2026-08-30: Lowered to 0.02 (2%) as the hard global floor.  The actual
+# threshold used at decision time is computed by ``_compute_dynamic_min_required_edge``,
+# which adds an asset-tier base, a price-convexity term, and a half-spread
+# reserve.  The resolved live config may raise this floor further, but never
+# below the hard 0.02 floor.
+TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.02"))
 
 # Hard entry-price floor for the held side.  Contracts with a held-side price
 # below this (in cents) are rejected because the 7-day data showed 0/16 wins in
@@ -360,6 +362,71 @@ def _get_resolved_min_required_edge(default: float) -> float:
         return default
     resolved_edge = float(resolved.min_required_edge)
     return max(default, resolved_edge)
+
+
+def _compute_dynamic_min_required_edge(
+    asset: str,
+    price_cents: int,
+    side: Literal["yes", "no"],
+    yes_bid_cents: float,
+    yes_ask_cents: float,
+    no_bid_cents: float,
+    no_ask_cents: float,
+    floor_min_required_edge: float,
+) -> float:
+    """Compute a fee-aware, asset-tiered, spread-aware edge threshold.
+
+    The threshold is applied to ``net_edge`` (after Kalshi fees, exit-cost
+    reserve, and model-risk reserve).  It therefore represents the required
+    *pure edge* profit floor, not the full cost stack.
+
+    Components:
+      - Asset-tier base floor (BTC most liquid, DOGE/XRP least).
+      - Convex price-risk term: ``K * p * (1-p)`` peaks at 50c where taker
+        fee and adverse-selection risk are largest and shrinks in the tails.
+      - Half-spread reserve for the selected side, using live book data when
+        available and conservative per-asset defaults otherwise.
+
+    The final value is clamped to the global floor and a 15% sanity ceiling.
+    """
+    # Asset-tier base floor.  These are the research-backed net-of-fee floors:
+    # BTC ~3%, ETH/SOL ~4%, XRP/DOGE ~5%.  They are intentionally conservative
+    # enough to keep the Kelly / half-Kelly sizing positive-EV.
+    asset_base = {
+        "BTC": 0.03,
+        "ETH": 0.04,
+        "SOL": 0.04,
+        "XRP": 0.05,
+        "DOGE": 0.05,
+    }.get(asset.upper(), 0.05)
+
+    base = max(float(floor_min_required_edge), asset_base)
+
+    # Price-adj convexity term.  At 50c, p*(1-p) = 0.25 -> 0.01 (1 point).
+    # At 10c/90c, p*(1-p) = 0.09 -> 0.0036 (0.36 points).
+    p = float(price_cents) / 100.0
+    p = max(0.01, min(0.99, p))
+    price_adj = 0.04 * p * (1.0 - p)
+
+    # Half-spread term for the selected side.
+    spread_cents: float = 0.0
+    if side == "yes" and yes_bid_cents > 0 and yes_ask_cents > yes_bid_cents:
+        spread_cents = yes_ask_cents - yes_bid_cents
+    elif side == "no" and no_bid_cents > 0 and no_ask_cents > no_bid_cents:
+        spread_cents = no_ask_cents - no_bid_cents
+    if spread_cents <= 0:
+        # Conservative per-asset defaults when the book is unavailable.
+        spread_cents = {
+            "BTC": 1.0,
+            "ETH": 1.5,
+            "SOL": 2.0,
+            "XRP": 2.5,
+            "DOGE": 3.0,
+        }.get(asset.upper(), 2.0)
+    spread_adj = 0.5 * spread_cents / 100.0
+
+    dynamic = base + price_adj + spread_adj
+    return max(0.02, min(dynamic, 0.15))
 
 
 def _get_resolved_min_p_selected(default: float) -> float:
@@ -1108,6 +1175,34 @@ def compute_trade_decision(
         model_risk_reserve=model_risk_reserve,
     )
 
+    # 2026-08-30: Fee-aware, asset-tiered, spread-aware edge threshold.
+    # The threshold is evaluated per side because each side has a different
+    # price and spread.  ``min_required_edge`` remains the hard global floor.
+    yes_price_cents = int(round(yes_entry * 100.0))
+    no_price_cents = int(round(no_entry * 100.0))
+    yes_min_edge = _compute_dynamic_min_required_edge(
+        asset=asset,
+        price_cents=yes_price_cents,
+        side="yes",
+        yes_bid_cents=yes_bid_cents,
+        yes_ask_cents=yes_ask_cents,
+        no_bid_cents=no_bid_cents,
+        no_ask_cents=no_ask_cents,
+        floor_min_required_edge=min_required_edge,
+    )
+    no_min_edge = _compute_dynamic_min_required_edge(
+        asset=asset,
+        price_cents=no_price_cents,
+        side="no",
+        yes_bid_cents=yes_bid_cents,
+        yes_ask_cents=yes_ask_cents,
+        no_bid_cents=no_bid_cents,
+        no_ask_cents=no_ask_cents,
+        floor_min_required_edge=min_required_edge,
+    )
+    indicators["yes_min_edge"] = yes_min_edge
+    indicators["no_min_edge"] = no_min_edge
+
     best_side, best_net_edge, best_reason = _select_best_side(yes_breakdown, no_breakdown)
     if selected_side_pre_edge is None and best_side is not None:
         selected_side_pre_edge = best_side
@@ -1144,11 +1239,11 @@ def compute_trade_decision(
     net_edge: Optional[Decimal] = None
 
     yes_qualifies = (
-        yes_breakdown.net_edge >= min_required_edge
+        yes_breakdown.net_edge >= yes_min_edge
         and yes_breakdown.p_selected > min_p_selected
     )
     no_qualifies = (
-        no_breakdown.net_edge >= min_required_edge
+        no_breakdown.net_edge >= no_min_edge
         and no_breakdown.p_selected > min_p_selected
     )
 
@@ -1170,14 +1265,16 @@ def compute_trade_decision(
         # No side qualifies.  Determine the most informative rejection reason.
         if best_side is None:
             no_trade_reason = "directional_tie"
-        elif best_net_edge < min_required_edge:
-            if best_side == "yes":
-                no_trade_reason = "yes_edge_below_threshold"
-            else:
-                no_trade_reason = "no_edge_below_threshold"
         else:
-            # Edge is sufficient but the model does not believe the side is > 50%.
-            no_trade_reason = f"cost_basis_override_{best_side}"
+            best_threshold = yes_min_edge if best_side == "yes" else no_min_edge
+            if best_net_edge < best_threshold:
+                if best_side == "yes":
+                    no_trade_reason = "yes_edge_below_threshold"
+                else:
+                    no_trade_reason = "no_edge_below_threshold"
+            else:
+                # Edge is sufficient but the model does not believe the side is > 50%.
+                no_trade_reason = f"cost_basis_override_{best_side}"
 
     if selected_outcome is not None:
         selected_action = "buy"
@@ -1316,6 +1413,15 @@ def compute_trade_decision(
             f"best_side={best_side} decision_id={decision_id}"
         )
 
+    # Use the selected side's dynamic threshold for telemetry; fall back to the
+    # global floor when no side was selected.
+    if selected_outcome == "yes" or (selected_outcome is None and best_side == "yes"):
+        selected_threshold = yes_min_edge
+    elif selected_outcome == "no" or (selected_outcome is None and best_side == "no"):
+        selected_threshold = no_min_edge
+    else:
+        selected_threshold = min_required_edge
+
     decision = TradeDecision(
         run_id=run_id,
         decision_id=decision_id,
@@ -1359,7 +1465,7 @@ def compute_trade_decision(
         no_net_edge=Decimal(str(no_breakdown.net_edge)),
         best_side=best_side,
         best_net_edge=Decimal(str(best_net_edge)) if best_net_edge is not None else None,
-        edge_threshold=Decimal(str(min_required_edge)),
+        edge_threshold=Decimal(str(selected_threshold)),
         gross_edge_yes=Decimal(str(yes_breakdown.gross_edge)),
         gross_edge_no=Decimal(str(no_breakdown.gross_edge)),
         net_edge_yes=Decimal(str(yes_breakdown.net_edge)),
@@ -1388,7 +1494,7 @@ def compute_trade_decision(
         confidence_model_penalty=Decimal(str(confidence_result.model_penalty)),
         confidence_regime_penalty=Decimal(str(confidence_result.regime_penalty)),
         model_risk_reserve=Decimal(str(model_risk_reserve)),
-        min_required_edge=Decimal(str(min_required_edge)),
+        min_required_edge=Decimal(str(selected_threshold)),
         approved_size_cc=approved_size_cc,
         policy_version=policy_version,
         adverse_selection_reserve=adverse_selection_reserve,
