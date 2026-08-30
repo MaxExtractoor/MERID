@@ -7816,6 +7816,8 @@ class LeanAgent15m:
                 "[TRADE-DECISION] asset=%s no_trade reason=%s p_yes=%.3f p_no=%.3f "
                 "yes_edge=%.3f no_edge=%.3f edge_threshold=%.4f "
                 "annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
+                "raw_p_yes=%.3f raw_p_no=%.3f p_yes_for_yes=%.3f p_no_for_no=%.3f "
+                "tail_cap_yes=%s tail_cap_no=%s tail_deviation_yes=%.3f tail_deviation_no=%.3f "
                 "confidence_valid=%s confidence_reasons=%s",
                 asset, decision.no_trade_reason, float(decision.p_yes_calibrated),
                 float(decision.p_no_calibrated), float(decision.yes_net_edge),
@@ -7824,6 +7826,14 @@ class LeanAgent15m:
                 _ind.get("annualized_vol_source", "unknown"),
                 float(_ind.get("z_score", 0.0)),
                 float(_ind.get("log_moneyness", 0.0)),
+                float(_ind.get("p_yes_raw", 0.0)),
+                float(_ind.get("p_no_raw", 0.0)),
+                float(_ind.get("p_yes_for_yes", 0.0)),
+                float(_ind.get("p_no_for_no", 0.0)),
+                _ind.get("tail_cap_yes", False),
+                _ind.get("tail_cap_no", False),
+                float(_ind.get("tail_deviation_yes", 0.0)),
+                float(_ind.get("tail_deviation_no", 0.0)),
                 decision.confidence_valid,
                 ",".join(decision.confidence_reasons),
             )
@@ -7910,6 +7920,8 @@ class LeanAgent15m:
             "p_yes=%.3f p_no=%.3f p_selected=%.3f "
             "entry_price=%.3f entry_fee=%.3f exit_reserve=%.3f risk_reserve=%.3f "
             "gross_edge=%.3f net_edge=%.3f annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
+            "raw_p_yes=%.3f raw_p_no=%.3f p_yes_for_yes=%.3f p_no_for_no=%.3f "
+            "tail_cap_yes=%s tail_cap_no=%s tail_deviation_yes=%.3f tail_deviation_no=%.3f "
             "confidence=%s confidence_valid=%s confidence_source=%s",
             asset, side, action, price_cents,
             float(decision.p_yes_calibrated), float(decision.p_no_calibrated), model_prob,
@@ -7923,6 +7935,14 @@ class LeanAgent15m:
             _ind.get("annualized_vol_source", "unknown"),
             float(_ind.get("z_score", 0.0)),
             float(_ind.get("log_moneyness", 0.0)),
+            float(_ind.get("p_yes_raw", 0.0)),
+            float(_ind.get("p_no_raw", 0.0)),
+            float(_ind.get("p_yes_for_yes", 0.0)),
+            float(_ind.get("p_no_for_no", 0.0)),
+            _ind.get("tail_cap_yes", False),
+            _ind.get("tail_cap_no", False),
+            float(_ind.get("tail_deviation_yes", 0.0)),
+            float(_ind.get("tail_deviation_no", 0.0)),
             str(decision.confidence),
             decision.confidence_valid,
             decision.confidence_source,
