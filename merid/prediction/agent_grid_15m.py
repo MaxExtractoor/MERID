@@ -1221,9 +1221,26 @@ async def build_15m_agent_grid(
     ws_bridge: Any = None,
 ) -> 'LeanAgentGrid15m':
 
-    """Build the 15m crypto agent grid with all 5 agents (BTC, ETH, SOL, XRP, DOGE)."""
+    """Build the 15m crypto agent grid, gated by the profile's asset_whitelist."""
 
     from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+    from merid.config.live_config import resolve_live_config
+
+    # Resolve and audit the live config before any agent is instantiated.
+    # This guarantees compute_trade_decision sees the profile's intended edge
+    # floor instead of the module fallback.
+    resolved_live = resolve_live_config()
+    logger.info(
+        "[AGENT-GRID-BUILD] Resolved live config profile=%s min_required_edge=%s",
+        resolved_live.profile_name,
+        resolved_live.min_required_edge,
+    )
+    # Safety floor: the resolved edge must not be below the hard 0.05 default.
+    if resolved_live.min_required_edge < Decimal("0.05"):
+        raise RuntimeError(
+            f"Resolved min_required_edge {resolved_live.min_required_edge} is below "
+            "the 0.05 safety floor. Refuse to build agent grid."
+        )
 
     # Get the profile for configuration
     profile = get_crypto_15m_profile()
@@ -1233,8 +1250,24 @@ async def build_15m_agent_grid(
     signal_mode = profile.signal_mode if hasattr(profile, 'signal_mode') else 'momentum_fvg'
     logger.info("[AGENT-GRID-BUILD] Using signal_mode from profile: %s", signal_mode)
 
-    # Create agent configurations for all 5 crypto assets
-    agent_configs = [
+    # Load the coarse asset whitelist from the profile.  This is the single
+    # source of truth for which agents may run.  Defaults are retained only
+    # for graceful fallback; any whitelist change must be made in the profile.
+    allowed_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+    try:
+        for gate in profile.coarse_filters.gates:
+            if gate.name == "asset_whitelist" and getattr(gate, "enabled", True):
+                allowed_assets = set(gate.assets)
+                break
+    except Exception as e:
+        logger.warning(
+            "[AGENT-GRID-BUILD] Could not load coarse asset_whitelist; "
+            "using default 5-asset set. error=%s",
+            e,
+        )
+
+    # Create agent configurations for all 5 crypto assets, then filter by whitelist
+    all_agent_configs = [
         LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
@@ -1282,6 +1315,25 @@ async def build_15m_agent_grid(
         ),
     ]
 
+    agent_configs = [
+        c for c in all_agent_configs
+        if c.name.split("_")[0] in allowed_assets
+    ]
+
+    for config in agent_configs:
+        logger.info(
+            "[AGENT-GRID-BUILD] Creating agent %s (asset whitelisted)",
+            config.name,
+        )
+
+    for config in all_agent_configs:
+        if config.name.split("_")[0] not in allowed_assets:
+            logger.info(
+                "[AGENT-GRID-BUILD] Skipping agent %s: not in profile asset_whitelist %s",
+                config.name,
+                sorted(allowed_assets),
+            )
+
     # Create agents
     agents = []
     for config in agent_configs:
@@ -1296,9 +1348,13 @@ async def build_15m_agent_grid(
         agents.append(agent)
         logger.info("[AGENT-GRID-BUILD] Created agent: %s", config.name)
 
-    # Create the agent grid
-    agent_grid = LeanAgentGrid15m(agents=agents)
-    logger.info("[AGENT-GRID-BUILD] Built LeanAgentGrid15m with %d agents", len(agents))
+    # Create the agent grid with the asset whitelist as a run-cycle defense.
+    agent_grid = LeanAgentGrid15m(agents=agents, allowed_assets=allowed_assets)
+    logger.info(
+        "[AGENT-GRID-BUILD] Built LeanAgentGrid15m with %d agents (whitelist=%s)",
+        len(agents),
+        sorted(allowed_assets),
+    )
 
     # Tie the agent grid (and each agent) to the segment run_id so telemetry,
     # decisions, and orders all share the same identity.
@@ -6094,7 +6150,7 @@ class LeanAgent15m:
             execution_mode = "maker"
             time_in_force = "gtc"
             post_only = True
-            fee_cents = 0.0
+            fee_cents = float(_kalshi_maker_fee_cents(price_cents / 100.0, 1)) if _UNIFIED_SIZING_AVAILABLE else 0.5
         else:
             liquidity_role = "taker"
             aggressiveness = 1.0
@@ -6450,7 +6506,7 @@ class LeanAgent15m:
         if liquidity_role == "taker":
             fee_cents = float(compute_fee_cents(price_cents)) if _UNIFIED_SIZING_AVAILABLE else 2.0
         else:
-            fee_cents = 0.0
+            fee_cents = float(_kalshi_maker_fee_cents(price_cents / 100.0, 1)) if _UNIFIED_SIZING_AVAILABLE else 0.5
         all_in_cost_cents = float(price_cents) + fee_cents + impact_reserve_cents
         ev_net_cents = (model_prob * 100.0) - all_in_cost_cents
 
@@ -8127,12 +8183,12 @@ class LeanAgent15m:
 
         # Fee-aware executable edges separate raw edge from spread and fee drag
         # for maker-first routing decisions.
-        # Maker fee on Kalshi is 0% for resting orders (maker coefficient = 0.0).
+        # Maker fee on Kalshi uses the parabolic 0.0175 rate, not zero.
         spread_pct = spread_width_cents / 100.0
         taker_fee_cents = canonical_calculate_kalshi_fee_cents(1, int(entry_price_cents))
-        maker_fee_cents = 0
+        maker_fee_cents = _kalshi_maker_fee_cents(entry_price_cents / 100.0, 1)
         taker_fee_pct = taker_fee_cents / entry_price_cents if entry_price_cents > 0 else 0.0
-        maker_fee_pct = 0.0
+        maker_fee_pct = maker_fee_cents / entry_price_cents if entry_price_cents > 0 else 0.0
         executable_edge_maker_pct = edge_pct - maker_fee_pct
         executable_edge_taker_pct = edge_pct - spread_pct - taker_fee_pct
 
@@ -8795,12 +8851,21 @@ class LeanAgent15m:
             cb_signal_type = str(cb_signal.get('signal_type', 'none'))
             cb_velocity = float(cb_signal.get('velocity', 0.0))
 
-            if cb_timestamp > 1000000000.0:  # Sane timestamp, not 0/unset
+            if cb_timestamp > 0.0:
                 current_time = time.time()
+                # Robust unit detection: milliseconds-since-epoch are > 1e10;
+                # seconds-since-epoch are ~1.7e9.  Relative timestamps (< 1e9
+                # seconds) are also accepted and treated as seconds.
+                if cb_timestamp > 1e10:
+                    cb_timestamp = cb_timestamp / 1000.0
+
                 signal_age = current_time - cb_timestamp
                 cb_age_ms = signal_age * 1000.0
 
-                if signal_age < 120.0 and cb_signal_type != 'none':
+                # Reject obviously bogus future timestamps (> 5 min ahead) or
+                # stale snapshots (> 120 s old).  signal_type='none' means the
+                # upstream source has no directional signal this cycle.
+                if -300.0 < signal_age < 120.0 and cb_signal_type != 'none':
                     # Coinbase snapshot is fresh - use it as the authoritative source.
                     source = "coinbase"
                     final_velocity = cb_velocity
@@ -15519,9 +15584,41 @@ class LeanAgentGrid15m:
 
         agents: list[LeanAgent15m],
 
+        allowed_assets: Optional[set] = None,
+
     ):
 
-        self._agents = agents
+        # Run-cycle asset whitelist.  Build filters the agent list, but this
+        # second-line-of-defense set lets run_cycle skip any agent whose asset
+        # is not in the profile's coarse asset_whitelist.  Defaults to the
+        # coarse filter's configured allowed assets.
+        if allowed_assets is None:
+            try:
+                from merid.event_venues.kalshi.coarse_filter import get_coarse_filter
+
+                self._allowed_assets = set(get_coarse_filter().allowed_assets)
+            except Exception:
+                logger.warning(
+                    "[AGENT-GRID-INIT] Could not load coarse filter assets; "
+                    "defaulting to all 5 crypto assets"
+                )
+                self._allowed_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+        else:
+            self._allowed_assets = set(allowed_assets)
+
+        # Filter out any non-whitelisted agents at instantiation time as well.
+        self._agents = [
+            a for a in agents
+            if a.config.name.split("_")[0] in self._allowed_assets
+        ]
+
+        skipped = [a.config.name for a in agents if a not in self._agents]
+        if skipped:
+            logger.info(
+                "[AGENT-GRID-INIT] Skipped non-whitelisted agents: %s | allowed=%s",
+                skipped,
+                sorted(self._allowed_assets),
+            )
 
         self._running = False
 
@@ -17047,6 +17144,7 @@ AgentGrid15M = LeanAgent15m
 
 # Tests expect a fee function with signature (contracts, price_cents) returning an int.
 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as canonical_calculate_kalshi_fee_cents
+from merid.event_venues.kalshi.parabolic_fees import kalshi_maker_fee_cents as _kalshi_maker_fee_cents
 from merid.prediction.trade_decision import compute_trade_decision
 from merid.prediction.shadow_side_telemetry import write_shadow_side_record, write_model_decomposition_record
 

@@ -1009,47 +1009,43 @@ confidence:
 # 4. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
 edge_bands:
   enabled: true  # Enable tiered edge band logic
-  # 2026-07-28: CRITICAL FIX - Restored to 2.5% minimum to match global_allocator and industry standards
-  # Previous 1.0% was temporary for testing but created mismatch with allocator (2.5%)
-  # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
-  # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
-  # Practical minimum: +2¢ to +3¢ per contract after fees
-  # Reference: https://marketmath.io/blog/prediction-market-strategy
-  # 2026-07-17: Added per-asset edge thresholds based on MQL5 research (universal models fail across different statistical regimes)
-  # Higher volatility assets (DOGE, XRP) need wider thresholds to avoid noise-triggered trades
+  # 2026-09 cost-driven edge: 5% absolute floor (5¢ on a $1 notional) with
+  # 7% BTC and 10% alts as the durable target.  A 5¢ floor barely clears the
+  # corrected 0.0175 maker round-trip fee + 5¢ model-uncertainty reserve; 7-10¢
+  # is required for a positive margin after adverse-selection and exit costs.
   watch_band:
-    min_edge_pct: 0.025  # 2.5% minimum edge for watch band (industry standard)
-    max_edge_pct: 0.025  # 2.5% maximum edge for watch band (unified with min for consistency)
+    min_edge_pct: 0.05  # 5% minimum edge for watch band (log only)
+    max_edge_pct: 0.05  # 5% maximum edge for watch band (unified with min for consistency)
     action: "log_only"  # Log candidates but don't trade
     kelly_multiplier: 0.0  # No sizing in watch band
   small_band:
-    min_edge_pct: 0.025  # 2.5% minimum edge for small band (industry standard)
-    max_edge_pct: 0.05  # 5% maximum edge for small band
+    min_edge_pct: 0.05  # 5% minimum edge for small band
+    max_edge_pct: 0.10  # 10% maximum edge for small band
     action: "trade_small"  # Trade with reduced size
     kelly_multiplier: 0.25  # 0.25x Kelly for small band
   standard_band:
-    min_edge_pct: 0.025  # 2.5% minimum edge for standard band (industry standard)
+    min_edge_pct: 0.07  # 7% minimum edge for standard band
     max_edge_pct: 1.0  # No upper limit
     action: "trade_standard"  # Trade with standard size
     kelly_multiplier: 0.50  # 0.5x Kelly for standard band
-  # Per-asset edge thresholds (2026-07-17: Based on MQL5 research - asset-specific tuning required)
-  # Higher volatility assets need wider thresholds to avoid noise-triggered trades
-  # 2026-07-28: Restored to 2.5% for all assets to match global_allocator
+  # BTC-only live trading: per-asset thresholds retained for paper/shadow tests
+  # of other assets; alt thresholds are raised to 10% because their realized
+  # vol and adverse-selection cost demand a larger edge buffer.
   per_asset:
     BTC:
-      min_edge_pct: 0.025  # 2.5% - industry standard
+      min_edge_pct: 0.07
       max_edge_pct: 1.0
     ETH:
-      min_edge_pct: 0.025  # 2.5% - industry standard
+      min_edge_pct: 0.07
       max_edge_pct: 1.0
     SOL:
-      min_edge_pct: 0.025  # 2.5% - industry standard
+      min_edge_pct: 0.10
       max_edge_pct: 1.0
     XRP:
-      min_edge_pct: 0.025  # 2.5% - industry standard
+      min_edge_pct: 0.10
       max_edge_pct: 1.0
     DOGE:
-      min_edge_pct: 0.025  # 2.5% - industry standard
+      min_edge_pct: 0.10
       max_edge_pct: 1.0
   
   # Optional: Override Kelly multipliers for this profile
@@ -1139,7 +1135,10 @@ coarse_filters:
       max_minutes: 1440  # Maximum time to expiry (24 hours)
     - name: "asset_whitelist"
       enabled: true
-      assets: ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+      # BTC-only live trading per 2026-09 research: restrict to the most liquid,
+      # best-calibrated 15m crypto asset until the model passes the required
+      # out-of-sample Brier/reliability/PBO audit on additional assets.
+      assets: ["BTC"]
     - name: "price_range_gate"
       enabled: true
       dynamic: true  # Uses dynamic thresholds based on regime
@@ -1462,7 +1461,10 @@ edge_lag_filter:
 # Research findings: profitable systems trade edges down to 1-2%, 53% accuracy minimum
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 strategy_policy:
-  min_edge: 0.05  # RAISED: 5% global minimum edge (research: 3-5% net edge is the practical Kalshi floor after fees)
+  # 2026-09 cost-driven edge: 7% global minimum (5-10¢ after the corrected
+  # Kalshi 0.0175 maker fee, 0.07 taker fee, and model-uncertainty reserve).
+  # 5% is the absolute floor; 7-10% is the durable target.
+  min_edge: 0.07
   min_confidence: 0.50  # LEGACY VALUE: Not actively used - primary confidence threshold is in confidence.min_confidence_threshold (0.65)
   max_md_staleness_sec: 20.0  # RELAXED: Strategy-specific MD staleness threshold (increased from 15s to 20s for more opportunities)
   
@@ -1477,20 +1479,23 @@ strategy_policy:
   # Based on research: Claw Arbs and Turbine recommend 2-4% net edge after fees
   # Previous 52-62% thresholds were unrealistically high, causing 0.0% fill rate
   edge_thresholds:
+    # 2026-09 cost-driven edge: maker-only resting threshold 5% (floor),
+    # taker/cross threshold 7% BTC, 10% alts.  Taker fees dominate below 10¢,
+    # so crossing the spread should require a large edge buffer.
     # Market entry thresholds (cross spread if edge >= threshold)
     market_entry:
-      BTC: 0.04  # BTC: cross spread if edge >= 4% (industry standard upper bound)
-      ETH: 0.04  # ETH: cross spread if edge >= 4% (industry standard upper bound)
-      SOL: 0.04  # SOL: cross spread if edge >= 4% (industry standard upper bound)
-      XRP: 0.04  # XRP: cross spread if edge >= 4% (industry standard upper bound)
-      DOGE: 0.04  # DOGE: cross spread if edge >= 4% (industry standard upper bound)
+      BTC: 0.07
+      ETH: 0.07
+      SOL: 0.10
+      XRP: 0.10
+      DOGE: 0.10
     # Resting entry thresholds (join spread if edge >= threshold)
     resting_entry:
-      BTC: 0.02  # BTC: join spread if edge >= 2% (industry standard floor)
-      ETH: 0.02  # ETH: join spread if edge >= 2% (industry standard floor)
-      SOL: 0.02  # SOL: join spread if edge >= 2% (industry standard floor)
-      XRP: 0.02  # XRP: join spread if edge >= 2% (industry standard floor)
-      DOGE: 0.02  # DOGE: join spread if edge >= 2% (industry standard floor)
+      BTC: 0.05
+      ETH: 0.05
+      SOL: 0.07
+      XRP: 0.07
+      DOGE: 0.07
     # Cancel thresholds (cancel resting orders if edge decays below threshold)
     cancel_threshold:
       BTC: 0.50
@@ -1781,25 +1786,28 @@ strategies:
     enabled: true
     # Policy configuration for this strategy
     policy:
-      min_edge: 0.01  # 1% minimum edge (aligned with realistic velocity-based edges 0.02-0.08%)
+      # 2026-09 cost-driven edge: strategy policy must not undercut the
+      # edge_bands / strategy_policy minima. 0.05 is the floor; 0.07 BTC / 0.10 alts
+      # match the maker-only, fee-aware threshold target.
+      min_edge: 0.05
       min_confidence: 0.50  # 50% minimum confidence (from strategy_policy, industry-aligned)
       max_md_staleness_sec: 15.0  # MD staleness threshold
       # Per-asset overrides (optional)
       asset_overrides:
         BTC:
-          min_edge: 0.01
+          min_edge: 0.07
           min_confidence: 0.50
         ETH:
-          min_edge: 0.01
+          min_edge: 0.07
           min_confidence: 0.50
         SOL:
-          min_edge: 0.01
+          min_edge: 0.10
           min_confidence: 0.50
         XRP:
-          min_edge: 0.01
+          min_edge: 0.10
           min_confidence: 0.50
         DOGE:
-          min_edge: 0.01
+          min_edge: 0.10
           min_confidence: 0.50
 
 # ── Metadata ──────────────────────────────────────────────────────────────

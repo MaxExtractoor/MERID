@@ -46,7 +46,7 @@ def test_environment_override_lowers_min_required_edge_is_rejected(monkeypatch):
     """A lower edge floor is unsafe and is ignored; the profile floor wins."""
     monkeypatch.setenv("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.01")
     resolved = resolve_live_config()
-    assert resolved.min_required_edge == Decimal("0.05")
+    assert resolved.min_required_edge == Decimal("0.07")
     assert any(
         "Min required edge override rejected" in c for c in resolved.conflicts_caught
     )

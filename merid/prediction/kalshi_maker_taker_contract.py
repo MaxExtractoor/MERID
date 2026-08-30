@@ -163,7 +163,7 @@ DEFAULT_FEE_SCHEDULE = FeeSchedule(
     schedule_id="kalshi-standard-2026",
     version="1",
     taker_coefficient=Decimal("0.07"),
-    maker_coefficient=Decimal("0.0"),
+    maker_coefficient=Decimal("0.0175"),
 )
 
 

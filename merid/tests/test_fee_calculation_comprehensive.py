@@ -164,7 +164,7 @@ class TestEdgeCalculationSeparation:
         import merid.prediction.agent_grid_15m as agent_grid_module
         # Check if the module has edge calculation logic by looking for key variables
         source_code = agent_grid_module.__file__
-        with open(source_code, 'r') as f:
+        with open(source_code, 'r', encoding='utf-8') as f:
             code = f.read()
             assert 'executable_edge_maker_pct' in code, "Code should have maker edge calculation"
             assert 'executable_edge_taker_pct' in code, "Code should have taker edge calculation"

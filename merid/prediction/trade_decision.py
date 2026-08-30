@@ -33,9 +33,10 @@ MIN_REGIME_POSTERIOR = Decimal(os.environ.get("MERID_MIN_REGIME_POSTERIOR", "0.5
 TRADE_DECISION_MIN_P_SELECTED = float(os.environ.get("MERID_TRADE_DECISION_MIN_P_SELECTED", "0.5"))
 
 # Minimum net edge (as a fraction of notional) for a side to be selected.
-# Can be lowered to loosen the edge filter, e.g. for cost-basis or momentum
-# strategies, without changing the call-sites.
-TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.03"))
+# 2026-09: raised to 0.05 (5¢) as the cost-driven floor.  The resolved live
+# profile can raise this further (target 0.07-0.10).  Never lower without a
+# documented Brier/reliability/PBO audit.
+TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.05"))
 
 # Hard entry-price floor for the held side.  Contracts with a held-side price
 # below this (in cents) are rejected because the 7-day data showed 0/16 wins in
