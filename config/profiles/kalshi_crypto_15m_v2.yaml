@@ -1135,10 +1135,11 @@ coarse_filters:
       max_minutes: 1440  # Maximum time to expiry (24 hours)
     - name: "asset_whitelist"
       enabled: true
-      # BTC-only live trading per 2026-09 research: restrict to the most liquid,
-      # best-calibrated 15m crypto asset until the model passes the required
-      # out-of-sample Brier/reliability/PBO audit on additional assets.
-      assets: ["BTC"]
+      # Operator override (2026-08-30): whitelist all 15m crypto assets for live
+      # entry/exit observation.  Previous BTC-only restriction was a research
+      # safety gate; re-enable additional assets only when bankroll and model
+      # audit allow.
+      assets: ["BTC", "ETH", "SOL", "XRP", "DOGE"]
     - name: "price_range_gate"
       enabled: true
       dynamic: true  # Uses dynamic thresholds based on regime
