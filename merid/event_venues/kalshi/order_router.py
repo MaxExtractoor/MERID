@@ -43,7 +43,7 @@ from enum import Enum
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from merid.data.ingress_replay import replay_seed_for_intent
 from merid.intent_types import ExposureChange
@@ -9074,6 +9074,147 @@ def _compute_net_edge_at_fill(intent: OrderIntent, fill_price_cents: int) -> Opt
         return None
 
 
+def _compute_fill_quality(
+    ticker: str,
+    side: str,
+    action: str,
+    fill_price_cents: int,
+) -> Optional[Dict[str, Any]]:
+    """Compute signed fill quality relative to the on-fill book snapshot.
+
+    FQ = (p_exec - p_mid) / (p_ask - p_bid) for the selected outcome side.
+    Negative for buys means the fill was inside the spread (better than mid).
+    Positive for sells means the fill was inside the spread.  Returns None when
+    the market state is not available or the book is one-sided.
+    """
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+
+        store = get_kalshi_market_state_store()
+        if store is None:
+            return None
+        state = store.get(ticker)
+        if state is None:
+            return None
+
+        yes_bid = getattr(state, "best_bid_cents", None)
+        yes_ask = getattr(state, "best_ask_cents", None)
+        if yes_bid is None or yes_ask is None or yes_bid <= 0 or yes_ask <= 0:
+            return None
+
+        # Derive NO book from YES duality.
+        no_bid = 100 - yes_ask
+        no_ask = 100 - yes_bid
+
+        is_yes = "yes" in side
+        bid_cents = yes_bid if is_yes else no_bid
+        ask_cents = yes_ask if is_yes else no_ask
+
+        spread_cents = ask_cents - bid_cents
+        if spread_cents <= 0:
+            return None
+
+        mid_cents = (bid_cents + ask_cents) / 2.0
+
+        # For a buy, paying below mid is good -> FQ negative.
+        # For a sell, receiving above mid is good -> FQ positive.
+        # The raw formula (fill - mid) / spread already has this sign if we
+        # interpret the book as the held outcome.  A buy fill inside the spread
+        # (below ask, possibly below mid) is negative -> good.  A sell fill inside
+        # the spread (above bid, possibly above mid) is positive -> good.
+        fill_quality = (float(fill_price_cents) - mid_cents) / float(spread_cents)
+
+        return {
+            "bid_cents": bid_cents,
+            "ask_cents": ask_cents,
+            "mid_cents": mid_cents,
+            "spread_cents": spread_cents,
+            "fill_quality": fill_quality,
+        }
+    except Exception:
+        return None
+
+
+def _schedule_markouts(
+    decision_id: str,
+    ticker: str,
+    side: str,
+    action: str,
+    fill_price_cents: int,
+    qty_contracts: int,
+    horizons: Tuple[int, ...] = (1, 5, 15, 30, 60),
+) -> None:
+    """Fire-and-forget markout observations at fixed horizons after a fill.
+
+    Each observation records the mid/bid/ask of the held-outcome side and the
+    unrealized P&L in cents relative to the fill price.  The function is
+    intentionally defensive: exceptions are swallowed so a markout failure does
+    not disrupt the order lifecycle.
+    """
+    if os.environ.get("MERID_ENABLE_MARKOUTS", "1").lower() not in ("1", "true", "yes"):
+        return
+
+    async def _observe(horizon_s: int) -> None:
+        await asyncio.sleep(horizon_s)
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            from merid.execution.order_decision_ledger import get_order_decision_ledger
+            from merid.execution.order_decision_schema import MarkoutEvent
+
+            store = get_kalshi_market_state_store()
+            if store is None:
+                return
+            state = store.get(ticker)
+            if state is None:
+                return
+
+            yes_bid = getattr(state, "best_bid_cents", None)
+            yes_ask = getattr(state, "best_ask_cents", None)
+            if yes_bid is None or yes_ask is None or yes_bid <= 0 or yes_ask <= 0:
+                return
+
+            no_bid = 100 - yes_ask
+            no_ask = 100 - yes_bid
+            is_yes = "yes" in side
+            bid_cents = yes_bid if is_yes else no_bid
+            ask_cents = yes_ask if is_yes else no_ask
+            mid_cents = (bid_cents + ask_cents) / 2.0
+
+            # P&L in cents per contract for the held outcome.
+            if action == "buy":
+                pnl_per_contract = mid_cents - fill_price_cents
+            else:
+                pnl_per_contract = fill_price_cents - mid_cents
+            pnl_cents = int(round(pnl_per_contract * qty_contracts))
+
+            ledger = get_order_decision_ledger()
+            ledger.record_markout(
+                decision_id,
+                MarkoutEvent(
+                    horizon_s=horizon_s,
+                    observed_at=datetime.now(timezone.utc),
+                    mid_cents=int(round(mid_cents)),
+                    own_side_bid_cents=bid_cents,
+                    own_side_ask_cents=ask_cents,
+                    pnl_cents=pnl_cents,
+                ),
+            )
+            logger.info(
+                "[MARKOUT] decision_id=%s ticker=%s side=%s action=%s horizon=%ds "
+                "mid_cents=%s fill_cents=%s pnl_cents=%s",
+                decision_id, ticker, side, action, horizon_s,
+                int(round(mid_cents)), fill_price_cents, pnl_cents,
+            )
+        except Exception as e:
+            logger.debug("[MARKOUT] failed for decision_id=%s horizon=%ds: %s", decision_id, horizon_s, e)
+
+    for h in horizons:
+        try:
+            asyncio.create_task(_observe(h))
+        except Exception:
+            pass
+
+
 async def _apply_order_result_to_canonical_state(
     intent: OrderIntent, result: OrderResult
 ) -> None:
@@ -16210,6 +16351,58 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         (result.reason or result.error or "")[:80],
         result.latency_ms,
     )
+
+    # 2026-08-29: Log fill quality (signed distance from mid, normalized by
+    # spread) for every executed order.  This is the observability the strategy
+    # needs to detect adverse selection on maker fills.  Markout observations at
+    # fixed horizons are recorded by the order decision ledger via
+    # ``_schedule_markouts`` (see below).
+    if result and result.has_execution:
+        _fill = result.fill or {}
+        _fill_price = (
+            _fill.get("price_cents")
+            or _fill.get("avg_price_cents")
+            or getattr(intent, "price_cents", 0)
+            or 0
+        )
+        _fq = _compute_fill_quality(
+            ticker=intent.ticker,
+            side=(getattr(intent, "side", "") or "").lower(),
+            action=(getattr(intent, "action", "") or "").lower(),
+            fill_price_cents=int(_fill_price),
+        )
+        if _fq:
+            logger.info(
+                "[FILL-QUALITY] decision_id=%s ticker=%s side=%s action=%s "
+                "fill_price_cents=%s bid_cents=%s ask_cents=%s mid_cents=%s "
+                "spread_cents=%s fill_quality=%.4f",
+                getattr(intent, "decision_id", ""),
+                intent.ticker,
+                intent.side,
+                intent.action,
+                _fill_price,
+                _fq.get("bid_cents"),
+                _fq.get("ask_cents"),
+                _fq.get("mid_cents"),
+                _fq.get("spread_cents"),
+                _fq.get("fill_quality"),
+            )
+
+        # 2026-08-29: Schedule markout observations at fixed horizons after a fill.
+        _decision_id = getattr(intent, "decision_id", None)
+        _qty_contracts = max(
+            _filled_count,
+            getattr(result, "executed_quantity_cc", 0) // 100,
+        )
+        if _decision_id and _qty_contracts > 0:
+            _schedule_markouts(
+                decision_id=_decision_id,
+                ticker=intent.ticker,
+                side=(getattr(intent, "side", "") or "").lower(),
+                action=(getattr(intent, "action", "") or "").lower(),
+                fill_price_cents=int(_fill_price),
+                qty_contracts=_qty_contracts,
+            )
 
     # 2026-08-29: Append the order lifecycle to the durable decision ledger.
     # The ledger record was started in compute_trade_decision before any order
