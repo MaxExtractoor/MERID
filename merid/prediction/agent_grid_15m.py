@@ -15577,6 +15577,23 @@ class LeanAgent15m:
 
             # Construct order candidate
 
+            # CRITICAL FIX (2026-08-30): gross_edge and net_edge must be
+            # probability fractions (0.0-1.0), not the edge_pct percentage
+            # points.  Compute them from the signal's own model_prob and
+            # price so the order construction audit matches the trade
+            # decision formula: p_selected - price = gross_edge; gross_edge
+            # - all_in_costs = net_edge.
+            _signal_price = signal.get("price_cents", 0) / 100.0
+            _signal_prob = signal.get("model_prob", 0.5)
+            _signal_gross = _signal_prob - _signal_price
+            _signal_ev_net = signal.get("ev_net_cents")
+            if _signal_ev_net is not None:
+                _signal_net = float(_signal_ev_net) / 100.0
+            elif signal.get("all_in_cost_cents") is not None:
+                _signal_net = _signal_gross - (float(signal.get("all_in_cost_cents")) / 100.0)
+            else:
+                _signal_net = _signal_gross
+
             candidate = {
 
                 "agent_id": self.config.name,
@@ -15661,9 +15678,9 @@ class LeanAgent15m:
                 "regime_probability": signal.get("hmm_regime_confidence", 1.0) or 1.0,
                 "p_yes": (signal.get("model_prob", 0.5) if signal.get("side") == "yes" else 1.0 - signal.get("model_prob", 0.5)),
                 "p_no": (1.0 - signal.get("model_prob", 0.5) if signal.get("side") == "yes" else signal.get("model_prob", 0.5)),
-                "p_selected": signal.get("model_prob", 0.5),
-                "gross_edge": signal.get("edge_pct", 0.0),
-                "net_edge": (signal.get("ev_net_cents") / 100.0) if signal.get("ev_net_cents") is not None else signal.get("edge_pct", 0.0),
+                "p_selected": _signal_prob,
+                "gross_edge": _signal_gross,
+                "net_edge": _signal_net,
                 "selected_outcome_price": int(signal.get("price_cents", 0)),
                 "settlement_reference": signal.get("settlement_reference") or "cf_rti_unavailable:unknown",
                 "confidence_valid": "cfb_rti_live" in (signal.get("settlement_reference") or ""),
