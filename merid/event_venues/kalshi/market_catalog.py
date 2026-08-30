@@ -1566,7 +1566,13 @@ class KalshiMarketCatalog:
             
             # If validation fails, trigger WS bridge sync
             if not validation_result["valid"]:
-                logger.error("[CATALOG-REFRESH] Universe invariant violated, triggering WS bridge sync")
+                if validation_result.get("grace_only"):
+                    logger.warning(
+                        "[CATALOG-REFRESH] Universe invariant violated during grace period, "
+                        "triggering WS bridge sync"
+                    )
+                else:
+                    logger.error("[CATALOG-REFRESH] Universe invariant violated, triggering WS bridge sync")
                 try:
                     # Rollover hook: request immediate resync so the bridge can
                     # add/remove tickers via its existing sync_to_catalog path.

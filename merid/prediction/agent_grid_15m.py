@@ -4722,7 +4722,7 @@ class LeanAgent15m:
                 market_id=getattr(market, 'market_id', None) if hasattr(market, 'market_id') else getattr(getattr(market, 'market', None), 'market_id', None),
                 market_time_remaining_s=minutes_to_expiry * 60.0,
                 reference_price=spot_price,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} error={e}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} error={e}",
             )
 
             return None
@@ -4786,7 +4786,7 @@ class LeanAgent15m:
                     market_id=getattr(market, 'market_id', None) if hasattr(market, 'market_id') else getattr(getattr(market, 'market', None), 'market_id', None),
                     market_time_remaining_s=minutes_to_expiry * 60.0,
                     reference_price=spot_price,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} error={e}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} error={e}",
                 )
                 return None
 
@@ -4838,7 +4838,7 @@ class LeanAgent15m:
                         market_time_remaining_s=minutes_to_expiry * 60.0,
                         reference_price=spot_price,
                         candles_available=indicator_snap.bars_available,
-                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} min_bars_required={min_bars_required} bars_needed={bars_needed}",
+                        feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} min_bars_required={min_bars_required} bars_needed={bars_needed}",
                     )
                     return None
 
@@ -5334,7 +5334,7 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 velocity=velocity,
                 threshold=velocity_threshold,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} macd_histogram={macd_histogram} macd_dead_zone={macd_dead_zone}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} macd_histogram={macd_histogram} macd_dead_zone={macd_dead_zone}",
             )
 
             return None
@@ -5445,7 +5445,7 @@ class LeanAgent15m:
                     reference_price=spot_price,
                     velocity=velocity,
                     threshold=velocity_threshold,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} long_score={long_score} short_score={short_score} min_score={min_score}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={thesis_side} long_score={long_score} short_score={short_score} min_score={min_score}",
                 )
                 return None
         else:
@@ -5468,7 +5468,7 @@ class LeanAgent15m:
                     reference_price=spot_price,
                     velocity=velocity,
                     threshold=velocity_threshold,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} long_score={long_score} short_score={short_score} min_score={min_score}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} long_score={long_score} short_score={short_score} min_score={min_score}",
                 )
                 return None
 
@@ -5630,7 +5630,7 @@ class LeanAgent15m:
                 market_id=market_id,
                 market_time_remaining_s=minutes_to_expiry * 60.0,
                 reference_price=spot_price,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} yes_price={yes_price_cents} no_price={no_price_cents} range={range_str}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={thesis_side} yes_price={yes_price_cents} no_price={no_price_cents} range={range_str}",
             )
             return None
 
@@ -5646,7 +5646,7 @@ class LeanAgent15m:
                 market_id=market_id,
                 market_time_remaining_s=minutes_to_expiry * 60.0,
                 reference_price=spot_price,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} thesis_price={thesis_price_cents} range={range_str}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={thesis_side} thesis_price={thesis_price_cents} range={range_str}",
             )
             return None
 
@@ -5667,7 +5667,7 @@ class LeanAgent15m:
                     market_id=market_id,
                     market_time_remaining_s=minutes_to_expiry * 60.0,
                     reference_price=spot_price,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={thesis_side} thesis_price={thesis_price_cents} strict_mode={strict_mode_enabled}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={thesis_side} thesis_price={thesis_price_cents} strict_mode={strict_mode_enabled}",
                 )
                 return None
 
@@ -5734,7 +5734,7 @@ class LeanAgent15m:
                     market_id=market_id,
                     market_time_remaining_s=minutes_to_expiry * 60.0,
                     reference_price=spot_price,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} yes_price={yes_price_cents} no_price={no_price_cents}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
                 )
                 return None
 
@@ -5755,7 +5755,7 @@ class LeanAgent15m:
                     market_id=market_id,
                     market_time_remaining_s=minutes_to_expiry * 60.0,
                     reference_price=spot_price,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} yes_price={yes_price_cents} no_price={no_price_cents}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
                 )
                 return None
 
@@ -5827,7 +5827,7 @@ class LeanAgent15m:
                 market_id=market_id,
                 market_time_remaining_s=minutes_to_expiry * 60.0,
                 reference_price=spot_price,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} long_score={long_score} short_score={short_score}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} long_score={long_score} short_score={short_score}",
             )
 
             return None
@@ -5869,7 +5869,7 @@ class LeanAgent15m:
                 market_id=market_id,
                 market_time_remaining_s=minutes_to_expiry * 60.0,
                 reference_price=spot_price,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={signal_side} thesis_source={thesis_source} edge={selected_edge}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={signal_side} thesis_source={thesis_source} edge={selected_edge}",
             )
             return None
 
@@ -5884,7 +5884,7 @@ class LeanAgent15m:
                 market_id=market_id,
                 market_time_remaining_s=minutes_to_expiry * 60.0,
                 reference_price=spot_price,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} thesis_side={signal_side} price_cents={thesis_price}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={signal_side} price_cents={thesis_price}",
             )
             return None
 
@@ -6019,7 +6019,7 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 velocity=velocity,
                 threshold=velocity_threshold,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} selected_edge={selected_edge} signal_side={signal_side}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} selected_edge={selected_edge} signal_side={signal_side}",
             )
             return None
 
@@ -6213,7 +6213,7 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 velocity=velocity,
                 threshold=velocity_threshold,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={price_cents} ev_net_cents={ev_net_cents} liquidity_role={liquidity_role}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} price_cents={price_cents} ev_net_cents={ev_net_cents} liquidity_role={liquidity_role}",
             )
             return None
 
@@ -6248,7 +6248,7 @@ class LeanAgent15m:
                     reference_price=spot_price,
                     velocity=velocity,
                     threshold=velocity_threshold,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={price_cents} ev_net_cents={ev_net_cents} min_ev_cents={min_ev_cents}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} price_cents={price_cents} ev_net_cents={ev_net_cents} min_ev_cents={min_ev_cents}",
                 )
                 return None
 
@@ -6377,7 +6377,7 @@ class LeanAgent15m:
                                 reference_price=spot_price,
                                 velocity=velocity,
                                 threshold=velocity_threshold,
-                                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} range={range_min}-{range_max}",
+                                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} range={range_min}-{range_max}",
                             )
 
                             return None  # Drop candidate - no valid price in side-aware range
@@ -6399,7 +6399,7 @@ class LeanAgent15m:
                             reference_price=spot_price,
                             velocity=velocity,
                             threshold=velocity_threshold,
-                            feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                            feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side}",
                         )
 
                         return None
@@ -6421,7 +6421,7 @@ class LeanAgent15m:
                         reference_price=spot_price,
                         velocity=velocity,
                         threshold=velocity_threshold,
-                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                        feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side}",
                     )
 
                     return None
@@ -6443,7 +6443,7 @@ class LeanAgent15m:
                     reference_price=spot_price,
                     velocity=velocity,
                     threshold=velocity_threshold,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} error={e}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} error={e}",
                 )
 
                 return None
@@ -6482,7 +6482,7 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 velocity=velocity,
                 threshold=velocity_threshold,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
             )
 
             return None
@@ -6840,6 +6840,36 @@ class LeanAgent15m:
 
 
 
+    def _resolve_runtime_signal_mode(self, bachelier_only: bool = False) -> str:
+        """Return the runtime signal mode: 'bachelier' or 'hybrid'.
+
+        The profile's ``signal_mode`` is only a request; production runtime gating
+        requires explicit ``MERID_HYBRID_ENABLE_DELTAS=1`` and no Bachelier-only
+        override.  This is the single source of truth for both the probability
+        computation and rejection telemetry.
+        """
+        if bachelier_only:
+            return "bachelier"
+
+        hybrid_enabled = os.environ.get("MERID_HYBRID_ENABLE_DELTAS", "").strip().lower() in (
+            "1", "true", "yes"
+        )
+        if not hybrid_enabled:
+            return "bachelier"
+
+        if os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in (
+            "1", "true", "yes"
+        ):
+            return "bachelier"
+
+        if os.environ.get("MERID_HYBRID_DISABLE_ALL_DELTAS", "").strip().lower() in (
+            "1", "true", "yes"
+        ):
+            return "bachelier"
+
+        return "hybrid"
+
+
     def _compute_hybrid_p_yes(
         self,
         asset: str,
@@ -6879,13 +6909,8 @@ class LeanAgent15m:
         # calibration notes).  Re-enablement requires explicit
         # MERID_HYBRID_ENABLE_DELTAS=1; MERID_HYBRID_BACHELIER_ONLY and
         # MERID_HYBRID_DISABLE_ALL_DELTAS still force Bachelier-only.
-        if not bachelier_only:
-            hybrid_enabled = os.environ.get("MERID_HYBRID_ENABLE_DELTAS", "").strip().lower() in ("1", "true", "yes")
-            bachelier_only = (
-                not hybrid_enabled
-                or os.environ.get("MERID_HYBRID_BACHELIER_ONLY", "").strip().lower() in ("1", "true", "yes")
-                or os.environ.get("MERID_HYBRID_DISABLE_ALL_DELTAS", "").strip().lower() in ("1", "true", "yes")
-            )
+        # Single source of truth for runtime signal gating.
+        bachelier_only = self._resolve_runtime_signal_mode(bachelier_only) == "bachelier"
 
         # Bachelier baseline.
         t_years = max(seconds_to_expiry, 1.0) / (365.0 * 24.0 * 60.0 * 60.0)
@@ -8534,7 +8559,7 @@ class LeanAgent15m:
                                 reference_price=spot_price,
                                 velocity=velocity,
                                 threshold=velocity_threshold,
-                                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} range={range_min}-{range_max}",
+                                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} range={range_min}-{range_max}",
                             )
 
                             return None  # Drop candidate - no valid price in side-aware range
@@ -8556,7 +8581,7 @@ class LeanAgent15m:
                             reference_price=spot_price,
                             velocity=velocity,
                             threshold=velocity_threshold,
-                            feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                            feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side}",
                         )
 
                         return None
@@ -8578,7 +8603,7 @@ class LeanAgent15m:
                         reference_price=spot_price,
                         velocity=velocity,
                         threshold=velocity_threshold,
-                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                        feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side}",
                     )
 
                     return None
@@ -8600,7 +8625,7 @@ class LeanAgent15m:
                     reference_price=spot_price,
                     velocity=velocity,
                     threshold=velocity_threshold,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} error={e}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} error={e}",
                 )
 
                 return None
@@ -8639,7 +8664,7 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 velocity=velocity,
                 threshold=velocity_threshold,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
             )
 
             return None
@@ -8812,12 +8837,13 @@ class LeanAgent15m:
         and logs stop showing N/A when a candidate fails on edge, depth, or
         data quality.
         """
+        signal_type = self._resolve_runtime_signal_mode()
         context: Dict[str, Any] = {
             "reference_price": settlement_input_price if settlement_input_price is not None else spot_price,
             "market_time_remaining_s": seconds_to_expiry,
             "candles_available": self._get_candles_available(asset),
-            "signal_type": "hybrid",
-            "feature_flags": f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} trade_decision_v2",
+            "signal_type": signal_type,
+            "feature_flags": f"signal_mode={signal_type} trade_decision_v2",
             "settlement_reference": settlement_reference,
             "velocity": getattr(self, '_last_velocity_value', None),
             "velocity_source": getattr(self, '_last_velocity_source', "trade_decision_v2"),
@@ -10604,7 +10630,7 @@ class LeanAgent15m:
                 "trading_session_not_active",
                 market_id=getattr(market, 'market_id', None) or getattr(market, 'market', None),
                 market_time_remaining_s=minutes_to_expiry * 60.0 if minutes_to_expiry else None,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
             )
 
             return None
@@ -10655,7 +10681,7 @@ class LeanAgent15m:
                 "asset_extraction_failed",
                 market_id=getattr(market, 'market_id', None) or getattr(market, 'market', None),
                 market_time_remaining_s=minutes_to_expiry * 60.0,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
             )
 
             return None
@@ -10756,7 +10782,7 @@ class LeanAgent15m:
                 f"hard_tte_cutoff:<{MERID_HARD_MIN_ENTRY_TTE_SECONDS}s",
                 market_id=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
             )
             return None
 
@@ -10792,7 +10818,7 @@ class LeanAgent15m:
                 f"too_early:>{max_entry_mins}min",
                 market_id=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
             )
 
             return None
@@ -10825,7 +10851,7 @@ class LeanAgent15m:
                 f"terminal_phase:<{cutoff_mins}min",
                 market_id=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
             )
 
             return None
@@ -10858,7 +10884,7 @@ class LeanAgent15m:
                 f"too_early:<{min_entry_mins}min",
                 market_id=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
             )
 
             return None
@@ -11022,7 +11048,7 @@ class LeanAgent15m:
                 market_id=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
                 reference_price=spot_price,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} yes_price={yes_price_cents} no_price={no_price_cents}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
             )
 
             return None
@@ -13725,7 +13751,7 @@ class LeanAgent15m:
                                 reference_price=spot_price,
                                 velocity=velocity,
                                 threshold=velocity_threshold,
-                                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} range={range_min}-{range_max}",
+                                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} range={range_min}-{range_max}",
                             )
 
                             return None  # Drop candidate - no valid price in side-aware range
@@ -13747,7 +13773,7 @@ class LeanAgent15m:
                             reference_price=spot_price,
                             velocity=velocity,
                             threshold=velocity_threshold,
-                            feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                            feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side}",
                         )
 
                         return None
@@ -13769,7 +13795,7 @@ class LeanAgent15m:
                         reference_price=spot_price,
                         velocity=velocity,
                         threshold=velocity_threshold,
-                        feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side}",
+                        feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side}",
                     )
 
                     return None
@@ -13791,7 +13817,7 @@ class LeanAgent15m:
                     reference_price=spot_price,
                     velocity=velocity,
                     threshold=velocity_threshold,
-                    feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} error={e}",
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} error={e}",
                 )
 
                 return None
@@ -13830,7 +13856,7 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 velocity=velocity,
                 threshold=velocity_threshold,
-                feature_flags=f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
+                feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} signal_side={signal_side} price_cents={clamped_price_cents} range={range_str}",
             )
 
             return None
@@ -15307,7 +15333,7 @@ class LeanAgent15m:
                     context.get("velocity_threshold", "N/A"),
                     context.get("market_time_remaining_s", f"{minutes_to_expiry * 60:.0f}"),
                     context.get("candles_available", "N/A"),
-                    context.get("feature_flags", f"signal_mode={getattr(self.config, 'signal_mode', 'unknown')}"),
+                    context.get("feature_flags", f"signal_mode={self._resolve_runtime_signal_mode()}"),
                 )
 
                 self._record_waterfall("signal_generated", False, reason)
