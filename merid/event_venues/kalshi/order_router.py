@@ -9112,6 +9112,11 @@ def _compute_fill_quality(
 
         spread_cents = ask_cents - bid_cents
         if spread_cents <= 0:
+            logger.warning(
+                "[FILL-QUALITY] one-sided/locked book for %s side=%s: bid=%s ask=%s; "
+                "skipping fill quality to avoid divide-by-zero",
+                ticker, side, bid_cents, ask_cents,
+            )
             return None
 
         mid_cents = (bid_cents + ask_cents) / 2.0
@@ -9156,6 +9161,10 @@ def _schedule_markouts(
 
     async def _observe(horizon_s: int) -> None:
         await asyncio.sleep(horizon_s)
+        # Allow mid-process disable to drop in-flight markouts instead of
+        # recording stale observations.
+        if os.environ.get("MERID_ENABLE_MARKOUTS", "1").lower() not in ("1", "true", "yes"):
+            return
         try:
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
             from merid.execution.order_decision_ledger import get_order_decision_ledger
@@ -9178,6 +9187,14 @@ def _schedule_markouts(
             is_yes = "yes" in side
             bid_cents = yes_bid if is_yes else no_bid
             ask_cents = yes_ask if is_yes else no_ask
+            if ask_cents <= bid_cents:
+                # Locked or crossed book; a markout against an invalid mid would
+                # be misleading, so drop it.
+                logger.debug(
+                    "[MARKOUT] locked/crossed book for %s side=%s bid=%s ask=%s; skipping",
+                    ticker, side, bid_cents, ask_cents,
+                )
+                return
             mid_cents = (bid_cents + ask_cents) / 2.0
 
             # P&L in cents per contract for the held outcome.
