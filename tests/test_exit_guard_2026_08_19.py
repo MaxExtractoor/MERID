@@ -272,3 +272,21 @@ def test_quote_freshness_uses_age_threshold():
     )
     assert approved is False
     assert record["reject_reason"] == "stale_quote"
+
+
+def test_current_edge_reversal_approved_on_profitable_exit():
+    """A current_edge_reversal exit must be canonicalized to signal_reversal and allowed."""
+    position = _make_position()
+    state = _make_state(no_bid=84, no_ask=86)
+    state.book_updated_ts = time.monotonic()  # avoid stale quote after slow module import
+
+    approved, price, record, _did = _run_guard(
+        position, "current_edge_reversal", exit_price_cents=84, state=state
+    )
+
+    assert approved is True
+    assert record["exit_reason_canonical"] == "signal_reversal"
+    assert record["exit_reason_original"] == "current_edge_reversal"
+    assert record["limit_cents"] == 82  # signal_reversal applies 2c slippage to best_bid=84
+    assert record["projected_net_pnl_cents"] == 4  # worst-case (82-74) - 4c round-trip fee
+    assert price == 82
