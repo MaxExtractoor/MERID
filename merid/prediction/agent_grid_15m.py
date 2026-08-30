@@ -6927,18 +6927,48 @@ class LeanAgent15m:
         # Single source of truth for runtime signal gating.
         bachelier_only = self._resolve_runtime_signal_mode(bachelier_only) == "bachelier"
 
-        # Bachelier baseline.
-        t_years = max(seconds_to_expiry, 1.0) / (365.0 * 24.0 * 60.0 * 60.0)
-        log_moneyness = math.log(settlement_input_price / strike) if strike > 0 else 0.0
-        # Same vol lookup the trade_decision path uses by default.
+        # Bachelier baseline.  Resolve and sanity-clamp the vol, then compute
+        # z-score, log-moneyness and p_yes.  Clamping is fail-open to the band
+        # floor so the model stays defensively conservative rather than
+        # overconfident when a bad env override or stale input is supplied.
+        effective_seconds = max(float(seconds_to_expiry), 1.0)
+        yes_bid_cents = max(0.0, 100.0 - no_ask) if no_ask > 0 else 0.0
+        yes_mid_cents = (
+            (yes_bid_cents + yes_ask) / 2.0
+            if yes_bid_cents > 0 and yes_ask > 0
+            else max(yes_ask, 100.0 - no_ask, 50.0)
+        )
+        yes_mid_cents = max(1.0, min(99.0, yes_mid_cents))
+        market_prob = yes_mid_cents / 100.0
+
         _vol_defaults = {"BTC": 0.60, "ETH": 0.80, "SOL": 1.00, "XRP": 1.00, "DOGE": 1.20}
-        annualized_vol = float(
+        requested_vol = float(
             os.environ.get(f"MERID_ANNUALIZED_VOL_{asset.upper()}")
             or _vol_defaults.get(asset.upper(), 0.80)
         )
-        sigma = max(annualized_vol, 1e-6)
-        z = log_moneyness / (sigma * math.sqrt(t_years))
-        p_yes_bachelier = max(0.0, min(1.0, 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))))
+        resolved_vol, vol_source, _band_min, _band_max, components = _resolve_annualized_vol(
+            asset=asset,
+            requested_vol=requested_vol,
+            spot_price=float(settlement_input_price),
+            strike_price=float(strike),
+            seconds_to_expiry=effective_seconds,
+            market_prob=market_prob,
+        )
+        if components is None:
+            components = _compute_bachelier_components(
+                float(settlement_input_price), float(strike), effective_seconds, resolved_vol
+            ) or {
+                "log_moneyness": 0.0,
+                "z_score": 0.0,
+                "p_yes_raw": 0.5,
+                "t_years": effective_seconds / (365.0 * 24.0 * 60.0 * 60.0),
+                "sigma": resolved_vol,
+            }
+        log_moneyness = components["log_moneyness"]
+        z = components["z_score"]
+        t_years = components["t_years"]
+        p_yes_bachelier = components["p_yes_raw"]
+        annualized_vol = resolved_vol
 
         # Indicator-independent fallback: no shift when the stack is missing.
         if not getattr(self, "_indicator_stacks", None):
@@ -7778,12 +7808,19 @@ class LeanAgent15m:
 
         if decision.selected_outcome is None:
             bd = decision.edge_breakdown
+            _ind = decision.indicators or {}
             logger.info(
                 "[TRADE-DECISION] asset=%s no_trade reason=%s p_yes=%.3f p_no=%.3f "
-                "yes_edge=%.3f no_edge=%.3f edge_threshold=%.4f confidence_valid=%s confidence_reasons=%s",
+                "yes_edge=%.3f no_edge=%.3f edge_threshold=%.4f "
+                "annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
+                "confidence_valid=%s confidence_reasons=%s",
                 asset, decision.no_trade_reason, float(decision.p_yes_calibrated),
                 float(decision.p_no_calibrated), float(decision.yes_net_edge),
                 float(decision.no_net_edge), float(decision.edge_threshold),
+                float(_ind.get("annualized_vol", 0.0)),
+                _ind.get("annualized_vol_source", "unknown"),
+                float(_ind.get("z_score", 0.0)),
+                float(_ind.get("log_moneyness", 0.0)),
                 decision.confidence_valid,
                 ",".join(decision.confidence_reasons),
             )
@@ -7864,11 +7901,13 @@ class LeanAgent15m:
 
         # Explicit edge breakdown in the log.  No hidden deductions.
         bd = decision.edge_breakdown
+        _ind = decision.indicators or {}
         logger.info(
             "[TRADE-DECISION] asset=%s side=%s action=%s price=%dc "
             "p_yes=%.3f p_no=%.3f p_selected=%.3f "
             "entry_price=%.3f entry_fee=%.3f exit_reserve=%.3f risk_reserve=%.3f "
-            "gross_edge=%.3f net_edge=%.3f confidence=%s confidence_valid=%s confidence_source=%s",
+            "gross_edge=%.3f net_edge=%.3f annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
+            "confidence=%s confidence_valid=%s confidence_source=%s",
             asset, side, action, price_cents,
             float(decision.p_yes_calibrated), float(decision.p_no_calibrated), model_prob,
             float(bd.executable_entry_price) if bd else 0.0,
@@ -7877,6 +7916,10 @@ class LeanAgent15m:
             float(bd.model_risk_reserve) if bd else 0.0,
             float(decision.gross_edge) if decision.gross_edge is not None else 0.0,
             edge_pct,
+            float(_ind.get("annualized_vol", 0.0)),
+            _ind.get("annualized_vol_source", "unknown"),
+            float(_ind.get("z_score", 0.0)),
+            float(_ind.get("log_moneyness", 0.0)),
             str(decision.confidence),
             decision.confidence_valid,
             decision.confidence_source,
@@ -8869,6 +8912,7 @@ class LeanAgent15m:
         }
         if decision is not None:
             edge_threshold = float(decision.edge_threshold) if decision.edge_threshold is not None else None
+            _ind = decision.indicators or {}
             context.update({
                 "p_yes": float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
                 "p_no": float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
@@ -8877,6 +8921,10 @@ class LeanAgent15m:
                 "gross_edge": float(decision.gross_edge) if decision.gross_edge is not None else None,
                 "net_edge": float(decision.net_edge) if decision.net_edge is not None else None,
                 "edge_threshold": edge_threshold,
+                "annualized_vol": float(_ind.get("annualized_vol", 0.0)),
+                "annualized_vol_source": _ind.get("annualized_vol_source", "unknown"),
+                "z_score": float(_ind.get("z_score", 0.0)),
+                "log_moneyness": float(_ind.get("log_moneyness", 0.0)),
                 "data_state": getattr(decision, "data_state", None),
                 "regime": getattr(decision, "regime", None),
                 "confidence_valid": getattr(decision, "confidence_valid", None),
@@ -15332,6 +15380,7 @@ class LeanAgent15m:
                     "[SIGNAL-GENERATION-REJECT] asset=%s market=%s reason=%s spot_price=%s reference_price=%s "
                     "velocity=%s velocity_source=%s velocity_age_ms=%s signal_type=%s "
                     "threshold=%s threshold_type=%s edge_threshold=%s velocity_threshold=%s "
+                    "annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
                     "market_time_remaining_s=%s candles_available=%s feature_flags=%s",
                     self.config.name,
                     getattr(market, 'market_id', None) or getattr(market, 'market', None),
@@ -15346,6 +15395,10 @@ class LeanAgent15m:
                     context.get("threshold_type", "N/A"),
                     context.get("edge_threshold", "N/A"),
                     context.get("velocity_threshold", "N/A"),
+                    float(context.get("annualized_vol", 0.0)),
+                    context.get("annualized_vol_source", "N/A"),
+                    float(context.get("z_score", 0.0)),
+                    float(context.get("log_moneyness", 0.0)),
                     context.get("market_time_remaining_s", f"{minutes_to_expiry * 60:.0f}"),
                     context.get("candles_available", "N/A"),
                     context.get("feature_flags", f"signal_mode={self._resolve_runtime_signal_mode()}"),
@@ -17342,7 +17395,11 @@ AgentGrid15M = LeanAgent15m
 # Tests expect a fee function with signature (contracts, price_cents) returning an int.
 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as canonical_calculate_kalshi_fee_cents
 from merid.event_venues.kalshi.parabolic_fees import kalshi_maker_fee_cents as _kalshi_maker_fee_cents
-from merid.prediction.trade_decision import compute_trade_decision
+from merid.prediction.trade_decision import (
+    compute_trade_decision,
+    _resolve_annualized_vol,
+    _compute_bachelier_components,
+)
 from merid.prediction.shadow_side_telemetry import write_shadow_side_record, write_model_decomposition_record
 
 

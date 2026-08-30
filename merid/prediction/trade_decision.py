@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -84,6 +85,260 @@ MERID_EV_GATE_AUTHORITATIVE = os.environ.get("MERID_EV_GATE_AUTHORITATIVE", "1")
 # 2026-08-29: Order decision ledger collection.  When enabled, every trade
 # decision is persisted before any order is submitted.
 MERID_ORDER_DECISION_LEDGER_ENABLED = os.environ.get("MERID_ORDER_DECISION_LEDGER_ENABLED", "1").lower() in ("1", "true", "yes")
+
+# 2026-08-30: Annualized-volatility sanity controls.  The Bachelier baseline is
+# only defensible when sigma is in a TWAP-appropriate band for the asset.
+# Values below the band produce overconfident p_yes (e.g. 0.95 for a 30-80c
+# spot-strike move) and can create false edges.  Values above the band are
+# economically implausible for 15m crypto.  Env vars override the band per asset
+# or globally; MERID_ANNUALIZED_VOL_{ASSET} is still the primary requested value
+# when set, but it is clamped to this band unless an explicit override is given.
+_ANNUALIZED_VOL_BANDS = {
+    "BTC": (0.30, 0.90),
+    "ETH": (0.35, 1.00),
+    "SOL": (0.40, 1.10),
+    "XRP": (0.40, 1.10),
+    "DOGE": (0.45, 1.20),
+}
+_ANNUALIZED_VOL_GLOBAL_MIN = float(os.environ.get("MERID_MIN_ANNUALIZED_VOL", "0.25"))
+_ANNUALIZED_VOL_GLOBAL_MAX = float(os.environ.get("MERID_MAX_ANNUALIZED_VOL", "1.20"))
+
+# Optional vol sources (off by default).  Realized vol is preferred when fresh;
+# market-implied vol is a cross-check against the Kalshi price.  Both are sanity
+# clamped before use.
+MERID_USE_REALIZED_VOL = os.environ.get("MERID_USE_REALIZED_VOL", "").strip().lower() in ("1", "true", "yes")
+MERID_REALIZED_VOL_MAX_AGE_S = float(os.environ.get("MERID_REALIZED_VOL_MAX_AGE_S", "300"))
+MERID_REALIZED_VOL_MIN_CONFIDENCE = float(os.environ.get("MERID_REALIZED_VOL_MIN_CONFIDENCE", "0.5"))
+MERID_ANCHOR_VOL_TO_MARKET = os.environ.get("MERID_ANCHOR_VOL_TO_MARKET", "").strip().lower() in ("1", "true", "yes")
+
+
+def _inverse_normal_cdf(p: float) -> float:
+    """Return the inverse CDF of the standard normal distribution.
+
+    Uses the standard-library ``statistics.NormalDist`` so no external
+    dependencies are required.  Values are clamped to (epsilon, 1-epsilon) to
+    avoid divergence at the tails.
+    """
+    p = max(1e-9, min(1.0 - 1e-9, p))
+    return statistics.NormalDist().inv_cdf(p)
+
+
+def _compute_bachelier_components(
+    spot_price: float,
+    strike_price: float,
+    seconds_to_expiry: float,
+    annualized_vol: float,
+) -> Optional[Dict[str, float]]:
+    """Return Bachelier z-score, log-moneyness, and raw p_yes.
+
+    ``p_yes_raw`` is not clipped to the [0.05, 0.95] venue band so callers can
+    see the model's unclipped opinion.
+    """
+    if not all(math.isfinite(x) for x in (spot_price, strike_price, seconds_to_expiry, annualized_vol)):
+        return None
+    if seconds_to_expiry <= 0 or strike_price <= 0 or annualized_vol <= 0:
+        return None
+    t_years = seconds_to_expiry / (365.0 * 24.0 * 60.0 * 60.0)
+    log_moneyness = math.log(spot_price / strike_price) if strike_price > 0 else 0.0
+    sigma = max(annualized_vol, 1e-6)
+    z = log_moneyness / (sigma * math.sqrt(t_years))
+    p_yes_raw = max(0.0, min(1.0, 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))))
+    return {
+        "log_moneyness": log_moneyness,
+        "z_score": z,
+        "p_yes_raw": p_yes_raw,
+        "t_years": t_years,
+        "sigma": sigma,
+    }
+
+
+def _compute_market_implied_vol(
+    spot_price: float,
+    strike_price: float,
+    seconds_to_expiry: float,
+    market_prob: float,
+) -> Optional[float]:
+    """Back out annualized vol from the Kalshi market price via the Bachelier model.
+
+    This is a diagnostic/anchor, not the primary p_yes.  Returns None when the
+    market is at-the-money, the price is too close to 0/1, or spot and market
+    disagree on direction, in which case the caller falls back to the configured
+    default.
+    """
+    if not all(math.isfinite(x) for x in (spot_price, strike_price, seconds_to_expiry, market_prob)):
+        return None
+    if seconds_to_expiry <= 0 or strike_price <= 0:
+        return None
+    if market_prob <= 1e-4 or market_prob >= 1.0 - 1e-4:
+        return None
+    t_years = seconds_to_expiry / (365.0 * 24.0 * 60.0 * 60.0)
+    if t_years <= 0:
+        return None
+    log_moneyness = math.log(spot_price / strike_price)
+    if abs(log_moneyness) < 1e-9:
+        return None
+    z_target = _inverse_normal_cdf(market_prob)
+    if z_target == 0.0:
+        return None
+    # Market price and spot must agree on direction.  If they disagree, the
+    # quoted price is stale or the strike is stale; do not trust the implied vol.
+    if log_moneyness * z_target <= 0:
+        return None
+    sigma = log_moneyness / (z_target * math.sqrt(t_years))
+    if not math.isfinite(sigma) or sigma <= 0:
+        return None
+    return sigma
+
+
+def _clamp_annualized_vol(asset: str, vol: float, source: str = "default") -> float:
+    """Clamp annualized vol to the per-asset sanity band and log drift.
+
+    A value outside the band is a config/input-drift red flag.  The band can be
+    widened via ``MERID_MIN_ANNUALIZED_VOL`` / ``MERID_MAX_ANNUALIZED_VOL`` or
+    per-asset env overrides.  Non-finite or non-positive values fallback to the
+    band minimum.
+    """
+    asset = asset.upper() if asset else ""
+    band = _ANNUALIZED_VOL_BANDS.get(asset, (_ANNUALIZED_VOL_GLOBAL_MIN, _ANNUALIZED_VOL_GLOBAL_MAX))
+    env_min = os.environ.get(f"MERID_MIN_ANNUALIZED_VOL_{asset}")
+    env_max = os.environ.get(f"MERID_MAX_ANNUALIZED_VOL_{asset}")
+    if env_min is not None:
+        try:
+            band = (float(env_min), band[1])
+        except ValueError:
+            pass
+    if env_max is not None:
+        try:
+            band = (band[0], float(env_max))
+        except ValueError:
+            pass
+    mn, mx = band
+    mn = max(mn, _ANNUALIZED_VOL_GLOBAL_MIN)
+    mx = min(mx, _ANNUALIZED_VOL_GLOBAL_MAX)
+
+    if not math.isfinite(vol) or vol <= 0:
+        logger.warning(
+            "[VOL-SANITY-CLAMP] asset=%s source=%s vol=%s is non-finite or non-positive; falling back to %.4f",
+            asset, source, vol, mn,
+        )
+        return mn
+    if vol < mn:
+        logger.warning(
+            "[VOL-SANITY-CLAMP] asset=%s source=%s vol=%.4f below band [%.4f, %.4f]; clamping to %.4f",
+            asset, source, vol, mn, mx, mn,
+        )
+        return mn
+    if vol > mx:
+        logger.warning(
+            "[VOL-SANITY-CLAMP] asset=%s source=%s vol=%.4f above band [%.4f, %.4f]; clamping to %.4f",
+            asset, source, vol, mn, mx, mx,
+        )
+        return mx
+    return vol
+
+
+def _fetch_realized_vol(asset: str) -> Optional[float]:
+    """Return the canonical realized vol if it is fresh and confident."""
+    if not MERID_USE_REALIZED_VOL:
+        return None
+    try:
+        from merid.prediction.risk.sentiment_vol_service import get_current_volatility
+        scalar = get_current_volatility(asset)
+        if scalar is None:
+            return None
+        if scalar.value <= 0 or scalar.confidence < MERID_REALIZED_VOL_MIN_CONFIDENCE:
+            return None
+        age_s = (datetime.now(timezone.utc) - scalar.timestamp).total_seconds()
+        if age_s > MERID_REALIZED_VOL_MAX_AGE_S:
+            logger.warning(
+                "[VOL-REALIZED] asset=%s realized vol stale (age=%.0fs > %.0fs); ignoring",
+                asset, age_s, MERID_REALIZED_VOL_MAX_AGE_S,
+            )
+            return None
+        return float(scalar.value)
+    except Exception as exc:
+        logger.warning("[VOL-REALIZED] asset=%s failed to fetch realized vol: %s", asset, exc)
+        return None
+
+
+def _resolve_annualized_vol(
+    asset: str,
+    requested_vol: float,
+    spot_price: Optional[float] = None,
+    strike_price: Optional[float] = None,
+    seconds_to_expiry: Optional[float] = None,
+    market_prob: Optional[float] = None,
+) -> Tuple[float, str, float, float, Optional[Dict[str, float]]]:
+    """Resolve the final annualized vol for the Bachelier model.
+
+    Priority:
+      1. Explicit env override ``MERID_ANNUALIZED_VOL_{ASSET}`` (legacy).
+      2. Realized vol from SentimentVolService (if ``MERID_USE_REALIZED_VOL=1`` and fresh).
+      3. Market-implied vol backed out of the Kalshi price (if ``MERID_ANCHOR_VOL_TO_MARKET=1``).
+      4. The caller-supplied ``requested_vol`` (usually the code default).
+
+    The chosen value is sanity-clamped and returned along with the source, the
+    band min/max, and the Bachelier components computed with the clamped vol.
+    If spot/strike/TTE are not supplied, the Bachelier components are None.
+    """
+    asset = asset.upper() if asset else ""
+    source = "requested"
+    env_override = os.environ.get(f"MERID_ANNUALIZED_VOL_{asset}")
+    if env_override is not None:
+        try:
+            requested_vol = float(env_override)
+            source = "env_override"
+        except ValueError:
+            logger.warning("[VOL-RESOLVE] asset=%s invalid MERID_ANNUALIZED_VOL_%s=%s; ignoring", asset, asset, env_override)
+
+    resolved_vol: Optional[float] = None
+    tried: List[str] = []
+
+    realized = _fetch_realized_vol(asset)
+    if realized is not None:
+        resolved_vol = realized
+        source = "realized"
+        tried.append("realized")
+
+    if resolved_vol is None and MERID_ANCHOR_VOL_TO_MARKET:
+        if market_prob is not None and spot_price is not None and strike_price is not None and seconds_to_expiry is not None:
+            implied = _compute_market_implied_vol(spot_price, strike_price, seconds_to_expiry, market_prob)
+            if implied is not None:
+                resolved_vol = implied
+                source = "market_implied"
+            tried.append("market_implied")
+
+    if resolved_vol is None:
+        resolved_vol = requested_vol
+        source = source if source != "requested" else "default"
+
+    band = _ANNUALIZED_VOL_BANDS.get(asset, (_ANNUALIZED_VOL_GLOBAL_MIN, _ANNUALIZED_VOL_GLOBAL_MAX))
+    env_min = os.environ.get(f"MERID_MIN_ANNUALIZED_VOL_{asset}")
+    env_max = os.environ.get(f"MERID_MAX_ANNUALIZED_VOL_{asset}")
+    if env_min is not None:
+        try:
+            band = (float(env_min), band[1])
+        except ValueError:
+            pass
+    if env_max is not None:
+        try:
+            band = (band[0], float(env_max))
+        except ValueError:
+            pass
+    mn, mx = band
+    mn = max(mn, _ANNUALIZED_VOL_GLOBAL_MIN)
+    mx = min(mx, _ANNUALIZED_VOL_GLOBAL_MAX)
+
+    clamped = _clamp_annualized_vol(asset, resolved_vol, source)
+    if clamped != resolved_vol:
+        source = f"{source}_clamped"
+
+    components: Optional[Dict[str, float]] = None
+    if spot_price is not None and strike_price is not None and seconds_to_expiry is not None:
+        components = _compute_bachelier_components(spot_price, strike_price, seconds_to_expiry, clamped)
+
+    return clamped, source, mn, mx, components
+
 
 def _get_resolved_live_config() -> Optional[Any]:
     """Return the resolved live config if available, otherwise None."""
@@ -668,6 +923,11 @@ def compute_trade_decision(
     min_p_selected = _get_resolved_min_p_selected(TRADE_DECISION_MIN_P_SELECTED)
     min_held_price_cents = _get_resolved_min_held_price_cents(MERID_MIN_HELD_PRICE_CENTS)
 
+    # Initialize mutable indicators dict for provenance/telemetry.  Vol and
+    # z-score are attached below after the quote and vol resolution.
+    indicators = dict(indicators) if indicators else {}
+    indicators.setdefault("annualized_vol_requested", float(annualized_vol))
+
     def _no_trade(reason: str) -> TradeDecision:
         decision = TradeDecision(
             run_id=run_id,
@@ -700,6 +960,7 @@ def compute_trade_decision(
             policy_version=policy_version,
             config_hash=_config_hash,
             build_sha=_build_sha,
+            indicators=dict(indicators),
         )
         record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
         return decision
@@ -740,27 +1001,6 @@ def compute_trade_decision(
     if p_no_model is not None and not math.isfinite(p_no_model):
         return _no_trade("non_finite_p_no_model")
 
-    t_years = seconds_to_expiry / (365.0 * 24.0 * 60.0 * 60.0)
-    if t_years <= 0:
-        t_years = 1e-8
-
-    log_moneyness = math.log(spot_price / strike_price) if strike_price > 0 else 0.0
-    sigma = max(annualized_vol, 1e-6)
-    z = log_moneyness / (sigma * math.sqrt(t_years))
-    p_yes_raw = _normal_cdf(z)
-    p_yes_raw = max(0.0, min(1.0, p_yes_raw))
-
-    p_yes_calibrated = p_yes_raw
-    # 2026-08-28: accept externally supplied p_yes_model only when hybrid
-    # probabilities are explicitly enabled.  Bachelier-only is the live default.
-    if MERID_TRADE_DECISION_ALLOW_HYBRID_P and p_yes_model is not None and math.isfinite(p_yes_model):
-        p_yes_calibrated = max(0.0, min(1.0, p_yes_model))
-    # P0 FIX: Clamp to Kalshi venue-invariant [0.05, 0.95] so the downstream
-    # order router does not reject high-confidence signals as invalid_model_prob.
-    # This caps tail-risk overconfidence while preserving positive-EV trades.
-    p_yes_calibrated = max(0.05, min(0.95, p_yes_calibrated))
-    p_no_calibrated = 1.0 - p_yes_calibrated
-
     # Kalshi duality: YES ask = 100 - NO bid; NO ask = 100 - YES bid.
     # Prefer the explicit ask if present; otherwise derive it.
     yes_entry = yes_ask_cents / 100.0
@@ -773,6 +1013,52 @@ def compute_trade_decision(
     # Validate executable asks are inside [0,1]; a bad quote is a no-trade.
     if not (0.0 <= yes_entry <= 1.0 and 0.0 <= no_entry <= 1.0):
         return _no_trade("invalid_executable_asks")
+
+    # 2026-08-30: resolve and sanity-clamp the Bachelier volatility.  The
+    # mid-market price is used only as an optional implied-vol cross-check, never
+    # as the p_yes estimate.  Resolved vol, source, band, and z-score are
+    # recorded in indicators for telemetry and audit.
+    yes_mid_cents = (
+        (yes_bid_cents + yes_ask_cents) / 2.0
+        if yes_bid_cents > 0 and yes_ask_cents > 0
+        else (yes_ask_cents if yes_ask_cents > 0 else 100.0 - no_bid_cents)
+    )
+    yes_mid_cents = max(1.0, min(99.0, yes_mid_cents))
+    market_prob = yes_mid_cents / 100.0
+
+    resolved_vol, vol_source, band_min, band_max, components = _resolve_annualized_vol(
+        asset=asset,
+        requested_vol=float(annualized_vol),
+        spot_price=float(spot_price),
+        strike_price=float(strike_price),
+        seconds_to_expiry=float(seconds_to_expiry),
+        market_prob=market_prob,
+    )
+    if components is None:
+        return _no_trade("bachelier_vol_resolution_failed")
+    log_moneyness = components["log_moneyness"]
+    z = components["z_score"]
+    p_yes_raw = components["p_yes_raw"]
+    indicators.update({
+        "annualized_vol": resolved_vol,
+        "annualized_vol_source": vol_source,
+        "annualized_vol_band_min": band_min,
+        "annualized_vol_band_max": band_max,
+        "log_moneyness": log_moneyness,
+        "z_score": z,
+        "market_prob_for_implied_vol": market_prob,
+    })
+
+    p_yes_calibrated = p_yes_raw
+    # 2026-08-28: accept externally supplied p_yes_model only when hybrid
+    # probabilities are explicitly enabled.  Bachelier-only is the live default.
+    if MERID_TRADE_DECISION_ALLOW_HYBRID_P and p_yes_model is not None and math.isfinite(p_yes_model):
+        p_yes_calibrated = max(0.0, min(1.0, p_yes_model))
+    # P0 FIX: Clamp to Kalshi venue-invariant [0.05, 0.95] so the downstream
+    # order router does not reject high-confidence signals as invalid_model_prob.
+    # This caps tail-risk overconfidence while preserving positive-EV trades.
+    p_yes_calibrated = max(0.05, min(0.95, p_yes_calibrated))
+    p_no_calibrated = 1.0 - p_yes_calibrated
 
     # Tail calibration: use the 7-day isotonic calibration to cap model
     # probability at actual_win_rate + buffer for the held-side price.  This
@@ -1042,7 +1328,7 @@ def compute_trade_decision(
         p_no_calibrated=Decimal(str(p_no_calibrated)),
         p_selected=p_selected,
         p_opposite=p_opposite,
-        indicators=indicators or {},
+        indicators=dict(indicators) if indicators else {},
         regime=regime,
         data_quality=data_quality,
         data_state=_data_state,
