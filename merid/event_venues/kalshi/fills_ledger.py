@@ -5233,6 +5233,23 @@ class KalshiFillsLedger:
         settlement_pnl = total_payout - cost_basis - fees
         return Decimal(str(settlement_pnl))
 
+    def get_settlement_pnl_dollars(
+        self, market_ticker: str, outcome: str
+    ) -> Optional[Decimal]:
+        """Return the authoritative realized PnL for a market settlement.
+
+        Uses the internal open-position records (cost basis + all recorded fill
+        fees) without mutating state.  Returns ``None`` when the ledger has no
+        open position for the market, allowing the caller to fall back.
+        """
+        total = Decimal("0")
+        found = False
+        for instrument_key, position in list(self._open_positions.items()):
+            if position["market_ticker"] == market_ticker:
+                found = True
+                total += self._compute_settlement_pnl(position, outcome)
+        return total if found else None
+
     def on_market_price_update(self, market_ticker: str, last_price_cents: int) -> None:
         """Handle market price update for unrealized PnL recompute.
 

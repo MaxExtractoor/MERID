@@ -18,9 +18,9 @@ import json
 import os
 import threading
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Callable, Set
 from enum import Enum
 
@@ -397,8 +397,12 @@ class KalshiSettlement:
             except (TypeError, ValueError):
                 settlement_value = None
 
-        # Realized PnL = gross revenue - entry cost - fees.  Prefer the cost
-        # for the held side (the side with a non-zero position count).
+        # Fallback realized PnL from the API response.  ``fee_cost`` in the
+        # /portfolio/settlements payload is the exchange's settlement-time fee,
+        # which is zero for simple yes/no determinations; it does NOT include
+        # the entry fee paid when the position was opened.  The poller will
+        # overwrite this with the fills-ledger PnL (cost basis + all fill fees)
+        # when an open position exists.
         realized_pnl_cents: Optional[float] = None
         try:
             fee_cost = Decimal(str(item.get("fee_cost") or "0"))
@@ -677,7 +681,13 @@ class KalshiSettlementPoller:
         for settlement in all_settlements:
             # Normalize ticker per Contract §1.2
             settlement = self._normalize_settlement(settlement)
-            
+
+            # CRITICAL FIX (2026-08-29): Tail fee realization.  The API's
+            # `fee_cost` is the settlement fee (zero for binary markets), not the
+            # entry fee.  Use the fills ledger cost-basis + fee record so cheap-
+            # tail PnL reflects the full cost stack.
+            settlement = self._hydrate_pnl_from_ledger(settlement)
+
             # Deduplicate via dedupe_key: (venue, market_id, settled_time)
             dedupe_key = settlement.dedupe_key
             if dedupe_key in self._graded_settlements:
@@ -959,6 +969,43 @@ class KalshiSettlementPoller:
                 realized_pnl_cents=settlement.realized_pnl_cents,
             )
         return settlement
+
+    def _hydrate_pnl_from_ledger(self, settlement: KalshiSettlement) -> KalshiSettlement:
+        """Replace the API-derived PnL with the fills-ledger PnL if available.
+
+        The /portfolio/settlements ``fee_cost`` field is the exchange's
+        settlement-time fee (zero for binary determinations), not the entry fee
+        paid when the position was opened.  For cheap-tail contracts the entry
+        fee is a large percentage of premium, so the ledger's cost-basis + fee
+        record is the authoritative realized PnL.  Falls back to the API value
+        when the ledger has no open position for the market.
+        """
+        if settlement.status != SettlementStatus.SETTLED:
+            return settlement
+        if settlement.settlement_price_cents is None:
+            return settlement
+
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            ledger = get_fills_ledger()
+            outcome = "yes" if settlement.outcome_str == "YES" else "no"
+            pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.market_id, outcome)
+            if pnl_dollars is None:
+                # No local open position; keep the API-derived value.
+                return settlement
+
+            pnl_cents = (pnl_dollars * Decimal("100")).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            return replace(settlement, realized_pnl_cents=float(pnl_cents))
+        except Exception as exc:
+            logger.warning(
+                "[SETTLEMENT-PNL-HYDRATION] Failed to enrich PnL from fills ledger "
+                "for %s: %s",
+                settlement.market_id,
+                exc,
+            )
+            return settlement
     
     def _update_ungraded_backlog(self, settlement: KalshiSettlement) -> None:
         """Track settled-but-ungraded markets for health monitoring."""
