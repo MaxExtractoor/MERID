@@ -4785,25 +4785,40 @@ class KalshiFillsLedger:
                 from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
                 tracker = get_agent_performance_tracker()
 
-                # Calculate predicted edge from price (if not provided)
-                # For YES: edge = (1 - price) if we expect YES to resolve true
-                # For NO: edge = price if we expect NO to resolve false
-                predicted_edge = 0.0
+                # Look up the original OrderIntent for model provenance.
+                # Fall back to fill fields if the intent is not yet indexed.
+                _intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None
+
+                p_selected = None
                 confidence = 0.5
-                if _can_side == "yes":
-                    predicted_edge = (1.0 - float(fill.price_cents) / 100.0)
-                elif _can_side == "no":
-                    predicted_edge = float(fill.price_cents) / 100.0
+                velocity = None
+                if _intent is not None:
+                    p_selected = getattr(_intent, "p_selected", None)
+                    confidence = getattr(_intent, "confidence", 0.5) or 0.5
+                    velocity = getattr(_intent, "velocity", None)
+
+                # CRITICAL FIX (2026-08-30): predicted edge is p_selected - entry price,
+                # not the naive (1 - price) / price heuristic.  This is the same edge
+                # used by the trade decision and must be the edge we use for calibration.
+                predicted_edge = 0.0
+                if p_selected is not None:
+                    predicted_edge = p_selected - float(fill.price_cents) / 100.0
+                else:
+                    # Fallback only when intent provenance is missing.
+                    if _can_side == "yes":
+                        predicted_edge = (1.0 - float(fill.price_cents) / 100.0)
+                    elif _can_side == "no":
+                        predicted_edge = float(fill.price_cents) / 100.0
 
                 # Extract velocity from fill if available (from raw_payload or decision_trace)
-                velocity = None
-                try:
-                    if fill.raw_payload:
-                        import json
-                        payload = json.loads(fill.raw_payload) if isinstance(fill.raw_payload, str) else fill.raw_payload
-                        velocity = payload.get('velocity')
-                except Exception:
-                    pass
+                if velocity is None:
+                    try:
+                        if fill.raw_payload:
+                            import json
+                            payload = json.loads(fill.raw_payload) if isinstance(fill.raw_payload, str) else fill.raw_payload
+                            velocity = payload.get('velocity')
+                    except Exception:
+                        pass
 
                 tracker.record_fill(
                     agent_id=fill.agent_id,
@@ -4813,7 +4828,8 @@ class KalshiFillsLedger:
                     contracts=fill.count_fp,
                     predicted_edge=predicted_edge,
                     confidence=confidence,
-                    velocity=velocity
+                    velocity=velocity,
+                    p_selected=p_selected,
                 )
                 logger.debug(
                     "Recorded fill in agent_performance_tracker: agent=%s market=%s side=%s price=%dc contracts=%d",

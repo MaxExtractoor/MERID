@@ -5395,6 +5395,16 @@ def _mode_value(mode: TradingMode) -> str:
     return getattr(mode, "value", str(mode)).lower()
 
 
+def _fmt_float_or_na(value: Optional[float]) -> str:
+    """Return a formatted float or 'n/a' for missing/None values."""
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 def _is_mock_mode(mode: TradingMode) -> bool:
     # Keep legacy "sim" compatibility while canonical mode is "mock"
     return _mode_value(mode) in {"mock", "sim"}
@@ -9856,10 +9866,18 @@ async def _apply_order_result_to_canonical_state(
 def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
     """Route MOCK/PAPER intents synchronously."""
     # AUDIT-LOG: Structured order construction logging
+    _p_yes = getattr(intent, "p_yes", None)
+    _p_no = getattr(intent, "p_no", None)
+    _p_selected = getattr(intent, "p_selected", None) or getattr(intent, "model_prob", None)
+    _gross_edge = getattr(intent, "gross_edge", None)
+    _net_edge_pretrade = getattr(intent, "net_edge_pretrade", None)
+    _selected_price = getattr(intent, "selected_outcome_price_cents", None)
     logger.info(
         "[ORDER-CONSTRUCTION-AUDIT] "
         "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d "
-        "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s",
+        "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s "
+        "p_yes=%s p_no=%s p_selected=%s selected_price_cents=%s gross_edge=%s net_edge=%s "
+        "edge_audit=\"p_selected - price - all_in_costs = net_edge\"",
         intent.intent_id,
         intent.ticker,
         intent.side,
@@ -9871,6 +9889,12 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         intent.rationale or "none",
         intent.edge_pct or "none",
         _mode_value(mode),
+        _fmt_float_or_na(_p_yes),
+        _fmt_float_or_na(_p_no),
+        _fmt_float_or_na(_p_selected),
+        _selected_price if _selected_price is not None else "n/a",
+        _fmt_float_or_na(_gross_edge),
+        _fmt_float_or_na(_net_edge_pretrade),
     )
     
     # Enforce fixed $1 exposure cap sizing via unified_sizing (global slot allocator model)
@@ -10818,10 +10842,18 @@ async def _route_live(
     _og_debited = False
     
     # AUDIT-LOG: Structured order construction logging for live orders
+    _p_yes = getattr(intent, "p_yes", None)
+    _p_no = getattr(intent, "p_no", None)
+    _p_selected = getattr(intent, "p_selected", None) or getattr(intent, "model_prob", None)
+    _gross_edge = getattr(intent, "gross_edge", None)
+    _net_edge_pretrade = getattr(intent, "net_edge_pretrade", None)
+    _selected_price = getattr(intent, "selected_outcome_price_cents", None)
     logger.info(
         "[ORDER-CONSTRUCTION-AUDIT] "
         "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d "
-        "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s snapshot_age=%.1fs",
+        "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s snapshot_age=%.1fs "
+        "p_yes=%s p_no=%s p_selected=%s selected_price_cents=%s gross_edge=%s net_edge=%s "
+        "edge_audit=\"p_selected - price - all_in_costs = net_edge\"",
         intent.intent_id,
         intent.ticker,
         intent.side,
@@ -10834,6 +10866,12 @@ async def _route_live(
         intent.edge_pct or "none",
         _mode_value(mode),
         replay_time() - intent.snapshot_ts,
+        _fmt_float_or_na(_p_yes),
+        _fmt_float_or_na(_p_no),
+        _fmt_float_or_na(_p_selected),
+        _selected_price if _selected_price is not None else "n/a",
+        _fmt_float_or_na(_gross_edge),
+        _fmt_float_or_na(_net_edge_pretrade),
     )
     
     # Snapshot staleness gate — refuse stale intents regardless of caller path.

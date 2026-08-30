@@ -3995,6 +3995,30 @@ class PositionMonitor:
             bypass_in_flight_check: If True, skip the in-flight check (for expired markets)
             snapshot: Optional ExitPriceSnapshot used for the trigger
         """
+        # CRITICAL FIX (2026-08-30): Use the executable bid for sell-side exits.
+        # The monitor's current_price_cents is often the mid or ask; a SELL IOC
+        # must be placed at the own-side bid to be marketable.  Repricing here
+        # ensures the exit has the best possible chance of filling before the
+        # market moves away (e.g. the canary BTC_NO trade at 50c -> 1c).
+        if (
+            snapshot is not None
+            and snapshot.own_side_bid_cents is not None
+            and 1 <= snapshot.own_side_bid_cents <= 99
+        ):
+            if exit_price_cents != snapshot.own_side_bid_cents:
+                logger.info(
+                    "[EXIT-INTENT-REPRICE] position=%s market=%s side=%s reason=%s "
+                    "requested_price=%dc executable_bid=%dc -> exit_price=%dc",
+                    position.position_id[:8],
+                    position.market_id,
+                    position.side.value,
+                    exit_reason.value,
+                    exit_price_cents,
+                    snapshot.own_side_bid_cents,
+                    snapshot.own_side_bid_cents,
+                )
+                exit_price_cents = snapshot.own_side_bid_cents
+
         # AUDIT: Timing correctness - record trigger timestamp
         trigger_timestamp = __import__('time').monotonic()
 
