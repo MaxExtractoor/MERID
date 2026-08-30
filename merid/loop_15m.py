@@ -78,6 +78,7 @@ _EXIT_REASON_CANONICAL_MAP = {
     "risk": "reconciliation",
     "candle_reversal": "signal_reversal",
     "edge_decay": "signal_reversal",
+    "current_edge_reversal": "signal_reversal",
     "opportunity_cost": "signal_reversal",
     "auto_exit_99c": "expiry_liquidation",
     "settlement_guard": "expiry_liquidation",
