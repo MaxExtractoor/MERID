@@ -2670,6 +2670,21 @@ class LeanAgent15m:
         # Most recent raw spot snapshot per asset, used for feed-alignment telemetry.
         self._last_spot_data: Dict[str, Any] = {}
 
+        # Audit health: requested config mode vs. resolved runtime mode.
+        # Reporting both makes config/runtime drift immediately visible.
+        _signal_mode_requested = getattr(config, 'signal_mode', 'unknown')
+        _signal_mode_runtime = self._resolve_runtime_signal_mode()
+        if _signal_mode_requested != _signal_mode_runtime:
+            logger.warning(
+                "[AGENT-INIT] %s signal_mode drift: requested=%s runtime=%s",
+                config.name, _signal_mode_requested, _signal_mode_runtime
+            )
+        else:
+            logger.info(
+                "[AGENT-INIT] %s signal_mode: requested=%s runtime=%s",
+                config.name, _signal_mode_requested, _signal_mode_runtime
+            )
+
         logger.info("[AGENT-INIT] %s initialized with velocity-based signal strategy", config.name)
 
 
