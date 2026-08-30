@@ -38,33 +38,39 @@ from merid.event_venues.kalshi.canonical_portfolio_reconciler import (
 
 @pytest.fixture(autouse=True)
 def _reset_singletons():
-    """Reset store and reconciler between tests for isolation."""
-    store = get_canonical_portfolio_store()
-    store._current = None
-    store._version = 0
-    store._publish_count = 0
-    reconciler = get_canonical_portfolio_reconciler()
-    reconciler._version = 0
-    reconciler._ws_positions.clear()
-    reconciler._ws_orders.clear()
-    reconciler._ws_fills.clear()
-    reconciler._ws_healthy = True
-    reconciler._kalshi_client = None
-    reconciler._fills_ledger = None
-    reconciler._position_cache = None
-    reconciler._running = False
-    reconciler._task = None
-    reconciler._last_snapshot = None
-    reconciler._last_authoritative_at_mono = 0.0
-    reconciler._first_mismatch_at_mono = None
-    reconciler._last_mismatch_reason = None
-    reconciler._reconcile_attempt = 0
-    reconciler._mismatch_reconcile_attempt = 0
-    reconciler._last_recovery_at_mono = None
-    reconciler._last_mismatch_heartbeat_at_mono = 0.0
-    reconciler._recovery_state = "IDLE"
-    reconciler._store = store
-    yield
+    """Reset store and reconciler between tests for isolation.
+
+    Also disable the market-expiry quarantine for this module so the
+    hard-coded test tickers (which are intentionally static) are not filtered
+    out as expired.
+    """
+    with patch("merid.event_venues.kalshi.canonical_portfolio_reconciler._is_expired_market", return_value=False):
+        store = get_canonical_portfolio_store()
+        store._current = None
+        store._version = 0
+        store._publish_count = 0
+        reconciler = get_canonical_portfolio_reconciler()
+        reconciler._version = 0
+        reconciler._ws_positions.clear()
+        reconciler._ws_orders.clear()
+        reconciler._ws_fills.clear()
+        reconciler._ws_healthy = True
+        reconciler._kalshi_client = None
+        reconciler._fills_ledger = None
+        reconciler._position_cache = None
+        reconciler._running = False
+        reconciler._task = None
+        reconciler._last_snapshot = None
+        reconciler._last_authoritative_at_mono = 0.0
+        reconciler._first_mismatch_at_mono = None
+        reconciler._last_mismatch_reason = None
+        reconciler._reconcile_attempt = 0
+        reconciler._mismatch_reconcile_attempt = 0
+        reconciler._last_recovery_at_mono = None
+        reconciler._last_mismatch_heartbeat_at_mono = 0.0
+        reconciler._recovery_state = "IDLE"
+        reconciler._store = store
+        yield
 
 
 @dataclass
