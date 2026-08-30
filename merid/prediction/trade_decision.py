@@ -1116,39 +1116,87 @@ def compute_trade_decision(
         "market_prob_for_implied_vol": market_prob,
     })
 
-    p_yes_calibrated = p_yes_raw
+    # 2026-08-30: Per-side tail calibration.  The YES and NO held-side
+    # probabilities are calibrated independently from their own tail curves,
+    # then the opposite side is derived for logical consistency.  This fixes
+    # the dual-inflation bug where capping cheap-YES p_yes forced p_no = 0.95,
+    # fabricating large NO edges on expensive NO contracts.
+    p_no_raw = 1.0 - p_yes_raw
+
     # 2026-08-28: accept externally supplied p_yes_model only when hybrid
     # probabilities are explicitly enabled.  Bachelier-only is the live default.
+    p_yes_for_yes = float(p_yes_raw)
+    p_no_for_no = float(p_no_raw)
     if MERID_TRADE_DECISION_ALLOW_HYBRID_P and p_yes_model is not None and math.isfinite(p_yes_model):
-        p_yes_calibrated = max(0.0, min(1.0, p_yes_model))
-    # P0 FIX: Clamp to Kalshi venue-invariant [0.05, 0.95] so the downstream
-    # order router does not reject high-confidence signals as invalid_model_prob.
-    # This caps tail-risk overconfidence while preserving positive-EV trades.
-    p_yes_calibrated = max(0.05, min(0.95, p_yes_calibrated))
-    p_no_calibrated = 1.0 - p_yes_calibrated
+        p_yes_for_yes = max(0.0, min(1.0, p_yes_model))
+        p_no_for_no = 1.0 - p_yes_for_yes
 
-    # Tail calibration: use the 7-day isotonic calibration to cap model
-    # probability at actual_win_rate + buffer for the held-side price.  This
-    # prevents the model from overestimating cheap-tail contracts where the
-    # observed win rate was far below the market-implied probability.
-    # The cap is applied unconditionally whenever the held-side price is below
-    # the floor, not only when the raw model probability is > 0.5.  Cost-basis
-    # and low-confidence trades in the 0-29c tail were the dominant source of
-    # recent losses; the calibrator must gate them regardless of the model's
-    # directional delta.
+    # YES-held curve: calibrate p_yes if YES is in the cheap tail.
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
-        if tail_calibrator is not None:
-            if yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
-                p_yes_calibrated = tail_calibrator.cap_p_yes(
-                    p_yes_calibrated, yes_entry
-                )
-                p_no_calibrated = 1.0 - p_yes_calibrated
-            if no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
-                p_no_calibrated = tail_calibrator.cap_p_no(
-                    p_no_calibrated, no_entry
-                )
-                p_yes_calibrated = 1.0 - p_no_calibrated
+        if tail_calibrator is not None and yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
+            p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry)
+    # Kalshi venue-invariant [0.05, 0.95] so the downstream order router does
+    # not reject high-confidence signals as invalid_model_prob.
+    p_yes_for_yes = max(0.05, min(0.95, p_yes_for_yes))
+    p_no_for_yes = 1.0 - p_yes_for_yes
+
+    # NO-held curve: calibrate p_no if NO is in the cheap tail.
+    # The NO curve in the calibration file is currently a dual, so this is a
+    # stop-gap until a real NO tail curve is refit from NO-held records.
+    if MERID_TAIL_CALIBRATION_ENABLED:
+        tail_calibrator = load_tail_calibrator()
+        if tail_calibrator is not None and no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
+            p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+    p_no_for_no = max(0.05, min(0.95, p_no_for_no))
+    p_yes_for_no = 1.0 - p_no_for_no
+
+    # Deviation guard: fail-closed.  A large move from the raw model probability
+    # on a non-tail held side is a calibration-inflation red flag.  Allow large
+    # moves only when the held-side price is below the tail floor (data-backed
+    # tail adjustment).  The threshold is configurable; default 0.15.
+    tail_calibration_deviation_guard = float(
+        os.environ.get("MERID_TAIL_CALIBRATION_DEVIATION_GUARD", "0.15")
+    )
+    yes_deviation = abs(p_yes_for_yes - p_yes_raw)
+    no_deviation = abs(p_no_for_no - p_no_raw)
+    yes_in_tail = yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR
+    no_in_tail = no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR
+
+    tail_guard_violation_yes = False
+    tail_guard_violation_no = False
+    if yes_entry > 0 and yes_deviation > tail_calibration_deviation_guard and not yes_in_tail:
+        tail_guard_violation_yes = True
+        logger.warning(
+            "[TAIL-CALIBRATION-GUARD] asset=%s ticker=%s YES held_price=%.2f not in tail; "
+            "p_yes deviation %.3f exceeds guard %.3f (raw_p_yes=%.3f, final_p_yes=%.3f)",
+            asset, ticker, yes_entry, yes_deviation, tail_calibration_deviation_guard,
+            p_yes_raw, p_yes_for_yes,
+        )
+    if no_entry > 0 and no_deviation > tail_calibration_deviation_guard and not no_in_tail:
+        tail_guard_violation_no = True
+        logger.warning(
+            "[TAIL-CALIBRATION-GUARD] asset=%s ticker=%s NO held_price=%.2f not in tail; "
+            "p_no deviation %.3f exceeds guard %.3f (raw_p_no=%.3f, final_p_no=%.3f)",
+            asset, ticker, no_entry, no_deviation, tail_calibration_deviation_guard,
+            p_no_raw, p_no_for_no,
+        )
+
+    indicators.update({
+        "p_yes_raw": p_yes_raw,
+        "p_no_raw": p_no_raw,
+        "p_yes_for_yes": p_yes_for_yes,
+        "p_no_for_yes": p_no_for_yes,
+        "p_yes_for_no": p_yes_for_no,
+        "p_no_for_no": p_no_for_no,
+        "tail_cap_yes": yes_in_tail,
+        "tail_cap_no": no_in_tail,
+        "tail_deviation_yes": yes_deviation,
+        "tail_deviation_no": no_deviation,
+        "tail_deviation_guard": tail_calibration_deviation_guard,
+        "tail_guard_violation_yes": tail_guard_violation_yes,
+        "tail_guard_violation_no": tail_guard_violation_no,
+    })
 
     fee = fee_per_contract_cents / 100.0
     expected_exit_cost_yes = fee
@@ -1159,7 +1207,7 @@ def compute_trade_decision(
     )
 
     yes_breakdown = compute_edge(
-        p_yes=p_yes_calibrated,
+        p_yes=p_yes_for_yes,
         selected_side="yes",
         entry_price=yes_entry,
         entry_fee=fee,
@@ -1167,7 +1215,7 @@ def compute_trade_decision(
         model_risk_reserve=model_risk_reserve,
     )
     no_breakdown = compute_edge(
-        p_yes=p_yes_calibrated,
+        p_yes=p_yes_for_no,
         selected_side="no",
         entry_price=no_entry,
         entry_fee=fee,
@@ -1241,10 +1289,12 @@ def compute_trade_decision(
     yes_qualifies = (
         yes_breakdown.net_edge >= yes_min_edge
         and yes_breakdown.p_selected > min_p_selected
+        and not tail_guard_violation_yes
     )
     no_qualifies = (
         no_breakdown.net_edge >= no_min_edge
         and no_breakdown.p_selected > min_p_selected
+        and not tail_guard_violation_no
     )
 
     if yes_qualifies and no_qualifies:
@@ -1421,6 +1471,19 @@ def compute_trade_decision(
         selected_threshold = no_min_edge
     else:
         selected_threshold = min_required_edge
+
+    # Calibrated p_yes/p_no are now side-specific.  Export the selected side's
+    # probabilities; for no-trade telemetry use the best-side (most plausible)
+    # pair so p_yes_calibrated reflects the tail cap on a cheap YES candidate.
+    if selected_outcome == "yes" or best_side == "yes":
+        p_yes_calibrated = p_yes_for_yes
+        p_no_calibrated = p_no_for_yes
+    elif selected_outcome == "no" or best_side == "no":
+        p_yes_calibrated = p_yes_for_no
+        p_no_calibrated = p_no_for_no
+    else:
+        p_yes_calibrated = max(0.05, min(0.95, float(p_yes_raw)))
+        p_no_calibrated = 1.0 - p_yes_calibrated
 
     decision = TradeDecision(
         run_id=run_id,
