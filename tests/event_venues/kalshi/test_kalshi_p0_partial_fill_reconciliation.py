@@ -379,18 +379,20 @@ async def test_ioc_zero_fill_records_zero_exposure(
     )
     client.set_orderbook(
         TICKER, best_bid_cents=45, best_ask_cents=55,
-        bid_size=Decimal("10"), ask_size=Decimal("10"),
+        bid_size=Decimal("10"), ask_size=Decimal("0"),
     )
 
-    # Use a maker/post_only IOC so the order intentionally does not cross the
-    # spread and is cancelled by the venue, exercising the zero-fill path.
+    # Use a taker IOC priced at the displayed ask.  The displayed ask has zero
+    # size, so the order does not fill and is cancelled by the venue, exercising
+    # the zero-fill path.  post_only=True combined with an IOC is invalid and is
+    # coerced to GTC by the execution-mode resolver, so we keep post_only=False.
     intent = _entry_intent(
-        price_cents=40,
+        price_cents=55,
         count=1,
         tif="ioc",
-        aggressiveness=0.0,
-        liquidity_role="maker",
-        post_only=True,
+        aggressiveness=1.0,
+        liquidity_role="taker",
+        post_only=False,
     )
     _reserve_gate(intent, monkeypatch)
 

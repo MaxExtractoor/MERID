@@ -2907,6 +2907,105 @@ def _canonical_yes_book_from_state(state: Optional[Any]) -> Optional[Any]:
         return None
 
 
+def _as_int(value: Any) -> Optional[int]:
+    """Safely coerce a numeric to int, returning None for missing/invalid."""
+    if value is None:
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _snapshot_book(state: Optional[Any]) -> Optional[Any]:
+    """Capture an immutable point-in-time book snapshot from a mutable state.
+
+    The returned snapshot contains all price/depth fields needed for repricing
+    and validation.  Copying lists and reading scalars once prevents WebSocket
+    book updates from racing the repricer against the validator.
+    """
+    if state is None:
+        return None
+    try:
+        _now = replay_time()
+        _wall_ts = getattr(state, 'last_book_update_wall_ts', None)
+        if _wall_ts is None or _wall_ts <= 0.0:
+            _wall_ts = getattr(state, 'last_book_update_ts', None)
+        if _wall_ts is None or _wall_ts <= 0.0:
+            _wall_ts = _now
+        _age_ms = getattr(state, 'age_ms', None)
+        if _age_ms is None and _wall_ts and _wall_ts > 0.0:
+            _age_ms = int((_now - _wall_ts) * 1000)
+
+        yes_bids = list(getattr(state, 'yes_bids', None) or [])
+        no_bids = list(getattr(state, 'no_bids', None) or [])
+
+        # Derive NO BBO from YES duality if explicit NO fields are missing.
+        yes_bid = _as_int(getattr(state, 'best_bid_cents', None))
+        yes_ask = _as_int(getattr(state, 'best_ask_cents', None))
+        no_bid = _as_int(getattr(state, 'best_no_bid_cents', None))
+        no_ask = _as_int(getattr(state, 'best_no_ask_cents', None))
+        if no_bid is None and yes_ask is not None:
+            no_bid = 100 - yes_ask
+        if no_ask is None and yes_bid is not None:
+            no_ask = 100 - yes_bid
+
+        # Executable top-of-book: scan the ladder for the first non-empty level.
+        def _first_non_empty(levels):
+            for price, size in levels:
+                if size and size > 0:
+                    return _as_int(price), int(size)
+            return None, 0
+
+        _yes_bid_price, _yes_bid_size = _first_non_empty(yes_bids)
+        _no_bid_price, _no_bid_size = _first_non_empty(no_bids)
+
+        if _yes_bid_price is not None:
+            yes_bid = _yes_bid_price
+        if _no_bid_price is not None:
+            # NO ask is the cheapest NO you can buy = 100 - best YES bid.
+            no_ask = 100 - _no_bid_price
+            no_ask_size = _no_bid_size
+        else:
+            no_ask_size = int(getattr(state, 'best_bid_size', 0) or 0)
+        yes_bid_size = int(getattr(state, 'best_bid_size', 0) or 0) if _yes_bid_price is None else _yes_bid_size
+        yes_ask_size = int(getattr(state, 'best_ask_size', 0) or 0)
+        no_bid_size = int(getattr(state, 'best_ask_size', 0) or 0)
+
+        if yes_bid is not None and yes_ask is not None and yes_bid > yes_ask:
+            # Crossed book: treat as unavailable.
+            yes_bid = None
+            yes_ask = None
+        if no_bid is not None and no_ask is not None and no_bid > no_ask:
+            no_bid = None
+            no_ask = None
+
+        mid_cents = _as_int(getattr(state, 'mid_cents', None))
+        if mid_cents is None and yes_bid is not None and yes_ask is not None:
+            mid_cents = _as_int((yes_bid + yes_ask) / 2.0)
+
+        return SimpleNamespace(
+            best_bid_cents=yes_bid,
+            best_ask_cents=yes_ask,
+            best_no_bid_cents=no_bid,
+            best_no_ask_cents=no_ask,
+            best_bid_size=yes_bid_size,
+            best_ask_size=yes_ask_size,
+            best_no_bid_size=no_bid_size,
+            best_no_ask_size=no_ask_size,
+            yes_bids=yes_bids,
+            no_bids=no_bids,
+            mid_cents=mid_cents,
+            sequence=int(getattr(state, 'sequence', 0) or 0),
+            last_book_update_wall_ts=float(_wall_ts),
+            age_ms=int(_age_ms or 0),
+            book_initialized=bool(getattr(state, 'book_initialized', False)),
+            observed_at=datetime.now(timezone.utc),
+        )
+    except Exception:
+        return None
+
+
 def _canonical_yes_book_from_port(ob_result: Any) -> Optional[Dict[str, Any]]:
     """Convert a fresh port OrderbookResult into an unambiguous canonical book.
 
@@ -3663,39 +3762,180 @@ def _canonical_signed_yes_delta(intent: OrderIntent) -> Decimal:
     return Decimal(delta)
 
 
+def _intent_price_side(intent: OrderIntent) -> Optional[str]:
+    """Return the price space ("yes" or "no") in which intent.price_cents lives.
+
+    Order side strings like ``BUY_YES``/``SELL_NO`` quote in the named side's
+    price space.  Complement-order forms (``SELL_YES``/``BUY_NO``) quote in the
+    named side's price space too.  The canonical `yes_delta` is used only when
+    the side string is ambiguous.
+    """
+    side = (intent.side or "").lower()
+    has_yes = "yes" in side
+    has_no = "no" in side
+    if has_yes and not has_no:
+        return "yes"
+    if has_no and not has_yes:
+        return "no"
+    # Ambiguous or legacy form: derive from the signed-YES delta.
+    try:
+        from merid.event_venues.kalshi.binary_price_space import yes_delta
+        delta = yes_delta(intent.action or "buy", side, 1)
+        return "yes" if delta > 0 else "no"
+    except Exception:
+        return "yes"
+
+
+def _validate_outcome_price_placement(
+    intent: OrderIntent,
+    role: str,
+    price_cents: int,
+    snapshot: Optional[Any],
+    micro_tolerance_cents: float = 0.5,
+) -> tuple[bool, Optional[str]]:
+    """Validate the order in its own price space using the provided snapshot.
+
+    This fixes the bug where a NO-side order was checked against the YES book
+    and incorrectly rejected.  Prices are evaluated in the side they are quoted
+    in (YES price -> YES book, NO price -> NO book).  A small ``micro_tolerance``
+    prevents one-tick races from causing false rejections.
+    """
+    if snapshot is None:
+        return False, "book_unavailable_or_invalid"
+    if not bool(getattr(snapshot, "book_initialized", False)):
+        return False, "book_unavailable_or_invalid"
+    if not (1 <= int(price_cents) <= 99):
+        return False, f"price_out_of_range:{price_cents}c"
+
+    price_space = _intent_price_side(intent)
+    if price_space == "no":
+        bid = getattr(snapshot, 'best_no_bid_cents', None)
+        ask = getattr(snapshot, 'best_no_ask_cents', None)
+    else:
+        bid = getattr(snapshot, 'best_bid_cents', None)
+        ask = getattr(snapshot, 'best_ask_cents', None)
+
+    if bid is None or ask is None:
+        return False, "book_unavailable_or_invalid"
+    if bid > ask:
+        return False, f"crossed_book:{price_space}_bid={bid}>ask={ask}"
+
+    action = (intent.action or "").lower()
+    role_lower = (role or "").lower()
+    is_taker = role_lower in ("taker", "aggressive")
+
+    if is_taker:
+        if action == "buy" and int(price_cents) < int(ask) - micro_tolerance_cents:
+            return False, f"Taker buy price {price_cents}c below best {price_space} ask {ask}c - won't cross"
+        if action == "sell" and int(price_cents) > int(bid) + micro_tolerance_cents:
+            return False, f"Taker sell price {price_cents}c above best {price_space} bid {bid}c - won't cross"
+    else:
+        if action == "buy" and int(price_cents) >= int(ask) - micro_tolerance_cents:
+            return False, f"Maker buy price {price_cents}c at/above best {price_space} ask {ask}c - would cross"
+        if action == "sell" and int(price_cents) <= int(bid) + micro_tolerance_cents:
+            return False, f"Maker sell price {price_cents}c at/below best {price_space} bid {bid}c - would cross"
+
+    return True, None
+
+
 def _validate_canonical_price_placement(
     intent: OrderIntent,
     role: str,
     price_cents: int,
     state: Optional[Any],
 ) -> tuple[bool, Optional[str]]:
-    """Validate price placement against the canonical YES book.
+    """Validate price placement against the canonical book.
 
-    Fails closed when the book is unavailable or invalid. NO-side prices are
-    translated to their YES equivalent before validation so spread/crossing is
-    always evaluated in a consistent YES-price representation.
+    This wrapper now delegates to outcome-space validation using a single,
+    immutable snapshot of the book.  It is retained for call-site compatibility.
     """
-    try:
-        from merid.prediction.kalshi_maker_taker_contract import (
-            LiquidityRole,
-            validate_price_placement_invariant,
-        )
-        book = _canonical_yes_book_from_state(state)
-        if book is None:
-            return False, "book_unavailable_or_invalid"
-        side_lower = (intent.side or "").lower()
-        if "no" in side_lower:
-            yes_price_cents = 100 - int(price_cents)
-        else:
-            yes_price_cents = int(price_cents)
-        return validate_price_placement_invariant(
-            role=LiquidityRole(role),
-            signed_yes_delta=_canonical_signed_yes_delta(intent),
-            price_cents=yes_price_cents,
-            book=book,
-        )
-    except ImportError:
-        return True, None
+    if isinstance(state, SimpleNamespace):
+        # Already a snapshot; validate in own price space.
+        return _validate_outcome_price_placement(intent, role, price_cents, state)
+    snapshot = _snapshot_book(state)
+    return _validate_outcome_price_placement(intent, role, price_cents, snapshot)
+
+
+def _book_diverged(
+    intent: OrderIntent,
+    snapshot: Optional[Any],
+    state: Optional[Any],
+    threshold_cents: float = 0.5,
+) -> bool:
+    """Return True if the live state BBO has moved more than threshold vs snapshot.
+
+    Compares in the order's own price space.
+    """
+    if snapshot is None or state is None:
+        return True
+    price_space = _intent_price_side(intent)
+    if price_space == "no":
+        snap_bid = getattr(snapshot, 'best_no_bid_cents', None)
+        snap_ask = getattr(snapshot, 'best_no_ask_cents', None)
+        cur_bid = getattr(state, 'best_no_bid_cents', None)
+        cur_ask = getattr(state, 'best_no_ask_cents', None)
+    else:
+        snap_bid = getattr(snapshot, 'best_bid_cents', None)
+        snap_ask = getattr(snapshot, 'best_ask_cents', None)
+        cur_bid = getattr(state, 'best_bid_cents', None)
+        cur_ask = getattr(state, 'best_ask_cents', None)
+
+    if snap_bid is None or snap_ask is None or cur_bid is None or cur_ask is None:
+        return True
+    if (
+        abs(int(cur_bid) - int(snap_bid)) > threshold_cents
+        or abs(int(cur_ask) - int(snap_ask)) > threshold_cents
+    ):
+        return True
+    return False
+
+
+def _maybe_reprice_on_divergence(
+    intent: OrderIntent,
+    state: Optional[Any],
+    t0: float,
+    max_attempts: int = 2,
+    threshold_cents: float = 0.5,
+) -> Optional[str]:
+    """Reprice and re-snapshot the intent if the book has diverged.
+
+    Bounded retry: ``max_attempts`` reprices.  Returns a rejection reason or None.
+
+    If no repricer snapshot exists (e.g., a test calls _route_live directly
+    without _prepare_order_for_gate), we capture the current book once without
+    repricing so the validator uses a consistent snapshot.  In the normal flow
+    _prepare_order_for_gate always produces a snapshot.
+    """
+    if _is_exit_order(intent):
+        return None
+
+    snapshot = getattr(intent, "_book_snapshot", None)
+    if snapshot is None:
+        # No prior snapshot; capture current book and proceed without repricing.
+        intent._book_snapshot = _snapshot_book(state)
+        return None
+
+    for attempt in range(max_attempts):
+        if not _book_diverged(intent, snapshot, state, threshold_cents):
+            return None
+        if attempt == 0:
+            logger.info(
+                "[BOOK-DIVERGENCE] ticker=%s attempt=%d price=%dc repricing on book move",
+                intent.ticker, attempt, intent.price_cents
+            )
+        try:
+            _adjust_order_price_for_fill_rate(intent, state)
+        except RepriceWouldCross as e:
+            logger.error(
+                "[BOOK-DIVERGENCE] ticker=%s repricing failed: %s | price=%dc",
+                intent.ticker, e.reason, e.attempted_price
+            )
+            return f"reprice_would_cross:{e.reason}"
+        snapshot = getattr(intent, "_book_snapshot", None)
+
+    # After max attempts the snapshot should be fresh; if still diverged the
+    # market is moving faster than we can reprice and we fall through.
+    return None
 
 
 def _resolve_self_trade_prevention_type(intent: "OrderIntent") -> str:
@@ -7345,7 +7585,17 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                             )
                         taker_cap = min(fair_cap, edge_cap)
 
-                adjusted_price = taker_cap
+                # 2026-08-30: Reprice a taker BUY to actually cross the ask instead of
+                # conservatively using the slippage/edge cap.  The limit remains bounded
+                # by the cap, but we target the displayed ask (or one tick through an
+                # empty displayed level) so the order is marketable.
+                if side_ask is not None:
+                    target = side_ask
+                    if displayed_ask_size == 0 and (side_ask + 1) <= taker_cap:
+                        target = side_ask + 1
+                    adjusted_price = min(taker_cap, max(target, side_ask))
+                else:
+                    adjusted_price = taker_cap
 
                 try:
                     from merid.prediction.kalshi_maker_taker_contract import (
@@ -7469,7 +7719,16 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         )
                     taker_floor = max(fair_floor, edge_floor)
 
-                adjusted_price = taker_floor
+                # 2026-08-30: Reprice a taker SELL to actually cross the bid, bounded by
+                # the slippage/edge floor.  Empty displayed bid levels are crossed one
+                # tick lower if the floor permits.
+                if side_bid is not None:
+                    target = side_bid
+                    if displayed_bid_size == 0 and (side_bid - 1) >= taker_floor:
+                        target = side_bid - 1
+                    adjusted_price = max(taker_floor, min(target, side_bid))
+                else:
+                    adjusted_price = taker_floor
 
                 try:
                     from merid.prediction.kalshi_maker_taker_contract import (
@@ -7566,33 +7825,69 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             )
             return int(round(original_price))  # Suppress adjustment, return original price as whole cents
 
+    # Build a single, immutable snapshot that the repricer and all downstream
+    # validators will share.  This closes the book race where the repricer and
+    # validator read the mutable state at different wall-clock times.
+    if is_no_side:
+        no_bid = side_bid
+        no_ask = side_ask
+        yes_bid = best_bid_cents
+        yes_ask = best_ask_cents
+        yes_bid_size = displayed_ask_size if (yes_bid is not None and best_bid_cents is not None and best_bid_cents == yes_bid) else int(_snapshot_best_bid_size)
+        yes_ask_size = displayed_bid_size if (yes_ask is not None and best_ask_cents is not None and best_ask_cents == yes_ask) else int(_snapshot_best_ask_size)
+    else:
+        yes_bid = side_bid
+        yes_ask = side_ask
+        no_bid = 100 - yes_ask if yes_ask is not None else _as_int(getattr(state, 'best_no_bid_cents', None))
+        no_ask = 100 - yes_bid if yes_bid is not None else _as_int(getattr(state, 'best_no_ask_cents', None))
+        yes_bid_size = displayed_bid_size
+        yes_ask_size = displayed_ask_size
+
+    # If explicit NO BBO fields are on the state and more current than the
+    # duality-derived values, prefer them.
+    _state_no_bid = _as_int(getattr(state, 'best_no_bid_cents', None))
+    _state_no_ask = _as_int(getattr(state, 'best_no_ask_cents', None))
+    if _state_no_bid is not None:
+        no_bid = _state_no_bid
+    if _state_no_ask is not None:
+        no_ask = _state_no_ask
+
+    snapshot = SimpleNamespace(
+        best_bid_cents=_as_int(yes_bid),
+        best_ask_cents=_as_int(yes_ask),
+        best_no_bid_cents=_as_int(no_bid),
+        best_no_ask_cents=_as_int(no_ask),
+        best_bid_size=int(yes_bid_size or 0),
+        best_ask_size=int(yes_ask_size or 0),
+        best_no_bid_size=int(displayed_bid_size if is_no_side else (yes_ask_size or 0)),
+        best_no_ask_size=int(displayed_ask_size if is_no_side else (yes_bid_size or 0)),
+        yes_bids=_snapshot_yes_bids,
+        no_bids=_snapshot_no_bids,
+        mid_cents=_as_int(mid_cents),
+        sequence=int(getattr(state, 'sequence', 0) or 0),
+        last_book_update_wall_ts=float(getattr(state, 'last_book_update_wall_ts', 0.0) or 0.0),
+        age_ms=int(_snapshot_age_ms if _snapshot_age_ms is not None else 0),
+        book_initialized=_book_initialized,
+    )
+    intent._book_snapshot = snapshot
+
     # Final role-consistent validation after all clamping. Uses the same
     # invariant contract that downstream submission will use, so any repricing
     # that violates the intended role is rejected before sizing/reservation.
-    # CRITICAL FIX (2026-08-10): Validate in canonical YES-price space so the
-    # spread/crossing logic is evaluated consistently for both YES and NO orders.
-    # CRITICAL FIX (2026-08-22): Use the SAME snapshot that the repricer used
-    # instead of the shared mutable state, which can move while this function
-    # runs and cause false "taker buy price below best ask" rejections.
-    if best_bid_cents is not None and best_ask_cents is not None:
-        is_valid, error = _validate_canonical_price_placement(
-            intent, role, adjusted_price,
-            SimpleNamespace(
-                best_bid_cents=best_bid_cents,
-                best_ask_cents=best_ask_cents,
-            )
+    # CRITICAL FIX (2026-08-30): Validate in the order's own price space (YES or
+    # NO) against the single snapshot captured by the repricer.
+    is_valid, error = _validate_outcome_price_placement(intent, role, adjusted_price, snapshot)
+    if not is_valid:
+        raise RepriceWouldCross(
+            ticker=intent.ticker,
+            side=outcome_side,
+            action=intent.action,
+            role=role,
+            attempted_price=adjusted_price,
+            side_bid=side_bid,
+            side_ask=side_ask,
+            reason=error or "final_validate_price_placement_invariant_failed",
         )
-        if not is_valid:
-            raise RepriceWouldCross(
-                ticker=intent.ticker,
-                side=outcome_side,
-                action=intent.action,
-                role=role,
-                attempted_price=adjusted_price,
-                side_bid=side_bid,
-                side_ask=side_ask,
-                reason=error or "final_validate_price_placement_invariant_failed",
-            )
 
     return int(round(adjusted_price))
 
@@ -10181,8 +10476,11 @@ def _prepare_order_for_gate(
     # Liquidity-role price placement invariant
     if intent.liquidity_role and state and not _is_exit:
         try:
-            is_valid, error = _validate_canonical_price_placement(
-                intent, intent.liquidity_role, intent.price_cents, state
+            # 2026-08-30: Use the immutable snapshot produced by the repricer instead
+            # of the mutable market state, so validator and repricer agree on the book.
+            _snapshot = getattr(intent, "_book_snapshot", None) or _snapshot_book(state)
+            is_valid, error = _validate_outcome_price_placement(
+                intent, intent.liquidity_role, intent.price_cents, _snapshot
             )
             if not is_valid:
                 latency = (_time.monotonic() - t0) * 1000
@@ -10500,8 +10798,21 @@ async def _route_live(
             # exits crossing the spread, stop-losses far from mid). Blocking them traps positions.
             if not _is_exit_order(intent):
                 try:
-                    is_valid, error = _validate_canonical_price_placement(
-                        intent, intent.liquidity_role, intent.price_cents, state
+                    # 2026-08-30: Reprice-on-divergence with bounded retry.  If the book moved
+                    # since the repricer snapshot, reprice and re-snapshot before validating.
+                    reprice_error = _maybe_reprice_on_divergence(intent, state, t0)
+                    if reprice_error:
+                        latency = (_time.monotonic() - t0) * 1000
+                        return OrderResult(
+                            status="rejected",
+                            mode=mode,
+                            reason=f"reprice_on_divergence:{reprice_error}",
+                            latency_ms=round(latency, 2),
+                        )
+
+                    _snapshot = getattr(intent, "_book_snapshot", None) or _snapshot_book(state)
+                    is_valid, error = _validate_outcome_price_placement(
+                        intent, intent.liquidity_role, intent.price_cents, _snapshot
                     )
 
                     if not is_valid:
@@ -10599,13 +10910,28 @@ async def _route_live(
         # snapshot (e.g., marketable exits crossing the spread, stop-losses far from mid).
         if state and intent.liquidity_role and not _is_exit_order(intent):
             try:
-                book = _canonical_yes_book_from_state(state)
-                best_bid = book.yes_bid_cents if book else None
-                best_ask = book.yes_ask_cents if book else None
+                # 2026-08-30: Use the repricer's immutable snapshot and reprice on divergence.
+                reprice_error = _maybe_reprice_on_divergence(intent, state, t0)
+                if reprice_error:
+                    latency = (_time.monotonic() - t0) * 1000
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"payload_consistency:{reprice_error}",
+                        latency_ms=round(latency, 2),
+                    )
 
-                # Re-validate price placement with current book
-                is_valid, error = _validate_canonical_price_placement(
-                    intent, intent.liquidity_role, intent.price_cents, state
+                _snapshot = getattr(intent, "_book_snapshot", None) or _snapshot_book(state)
+                price_space = _intent_price_side(intent)
+                if price_space == "no":
+                    best_bid = getattr(_snapshot, 'best_no_bid_cents', None)
+                    best_ask = getattr(_snapshot, 'best_no_ask_cents', None)
+                else:
+                    best_bid = getattr(_snapshot, 'best_bid_cents', None)
+                    best_ask = getattr(_snapshot, 'best_ask_cents', None)
+
+                is_valid, error = _validate_outcome_price_placement(
+                    intent, intent.liquidity_role, intent.price_cents, _snapshot
                 )
 
                 if not is_valid:
