@@ -66,8 +66,9 @@ _ASSET_TO_CFB_SYMBOL = {
 
 # Kalshi crypto contracts settle on a one-minute average of CF RTI per-second
 # observations.  The 60-second average field is required when trading inside the
-# final minute window.
-_MAX_CFB_RTI_AGE_MS = int(os.environ.get("MERID_MAX_CFB_RTI_AGE_MS", "7000"))
+# final minute window.  Short-horizon probability edges need sub-second fresh
+# settlement references; 2s is a conservative fail-closed ceiling.
+_MAX_CFB_RTI_AGE_MS = int(os.environ.get("MERID_MAX_CFB_RTI_AGE_MS", "2000"))
 _FINAL_MINUTE_CUTOFF_S = float(os.environ.get("MERID_FINAL_MINUTE_CUTOFF_S", "60"))
 _REQUEST_TIMEOUT = float(os.environ.get("MERID_CFB_RTI_TIMEOUT_S", "5"))
 

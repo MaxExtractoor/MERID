@@ -106,6 +106,33 @@ def _is_legacy_signal_enabled() -> bool:
 MIN_TIME_TO_EXPIRY_FOR_ENTRY_MIN: float = 5.0
 
 
+# Per-asset maximum age (milliseconds) for a velocity/momentum signal to be
+# used in a short-horizon probability edge model.  These are intentionally
+# separate from the pricing (CF RTI) freshness ceiling.
+_VELOCITY_MAX_AGE_MS_BY_ASSET: Dict[str, float] = {
+    "BTC": 2000.0,
+    "ETH": 2000.0,
+    "SOL": 3000.0,
+    "XRP": 3000.0,
+    "DOGE": 5000.0,
+}
+
+
+def _velocity_max_age_ms(asset: str) -> float:
+    """Return the maximum acceptable age for a velocity signal for ``asset``.
+
+    The default per-asset TTLs can be overridden with
+    ``MERID_VELOCITY_MAX_AGE_MS`` or ``MERID_VELOCITY_MAX_AGE_MS_<ASSET>``.
+    """
+    default = _VELOCITY_MAX_AGE_MS_BY_ASSET.get(asset.upper(), 3000.0)
+    return float(
+        os.environ.get(
+            f"MERID_VELOCITY_MAX_AGE_MS_{asset.upper()}",
+            os.environ.get("MERID_VELOCITY_MAX_AGE_MS", str(default)),
+        )
+    )
+
+
 @dataclass(frozen=True)
 class MarketValidationResult:
     """Fail-closed market-state validation result."""
@@ -372,6 +399,28 @@ def _get_settlement_input_price(
                 spot_decimal = parse_price(spot_price) or Decimal("0")
                 basis_decimal = spot_decimal - settlement_decimal
                 cf_rti_basis = float(basis_decimal)
+                if settlement_decimal > 0:
+                    basis_bps = float(abs(basis_decimal) * Decimal("10000") / settlement_decimal)
+                    max_basis_bps = float(
+                        os.environ.get(
+                            f"MERID_MAX_CFB_RTI_BASIS_BPS_{asset.upper()}",
+                            os.environ.get("MERID_MAX_CFB_RTI_BASIS_BPS", "50.0"),
+                        )
+                    )
+                    if basis_bps > max_basis_bps:
+                        logger.warning(
+                            "[CF-RTI-BASIS] asset=%s basis=%.2fbps exceeds max=%.2fbps "
+                            "settlement=%s public_spot=%s; downgrading settlement reference",
+                            asset, basis_bps, max_basis_bps,
+                            _canonical_format_price(asset, settlement_decimal),
+                            _canonical_format_price(asset, spot_decimal),
+                        )
+                        return (
+                            settlement_price,
+                            cf_rti_basis,
+                            f"cfb_rti_basis_too_wide:{basis_bps:.2f}bps",
+                            obs,
+                        )
                 return settlement_price, cf_rti_basis, "cfb_rti_live", obs
 
     # No authoritative RTI: report the precise rejection reason.  Downstream
@@ -7738,6 +7787,7 @@ class LeanAgent15m:
             "cfb_observed_ts_ms": getattr(cfb_observation, "observed_ts_ms", None),
             "cfb_observed_ts_mono_ns": getattr(cfb_observation, "observed_ts_mono_ns", None),
             "cfb_age_ms": getattr(cfb_observation, "age_ms", None),
+            "pricing_reference_age_ms": getattr(cfb_observation, "age_ms", None),
             "cfb_timestamp_quality": getattr(cfb_observation, "timestamp_quality", None),
             "cfb_price_source_health": getattr(cfb_observation, "price_source_health", None),
         }
@@ -7745,13 +7795,14 @@ class LeanAgent15m:
         logger.info(
             "[FEED-ALIGNMENT] asset=%s spot_source=%s spot_staleness_ms=%s "
             "velocity_source=%s velocity_age_ms=%s velocity=%.6f "
-            "cfb_age_ms=%s cfb_exec_eligible=%s settlement_reference=%s",
+            "pricing_reference_age_ms=%s cfb_age_ms=%s cfb_exec_eligible=%s settlement_reference=%s",
             asset,
             feed_context["spot_source"],
             feed_context["spot_staleness_ms"],
             feed_context["velocity_source"],
             feed_context["velocity_age_ms"],
             getattr(self, "_last_velocity_value", 0.0),
+            feed_context["pricing_reference_age_ms"],
             feed_context["cfb_age_ms"],
             feed_context["cfb_execution_eligible"],
             settlement_reference,
@@ -7818,6 +7869,8 @@ class LeanAgent15m:
                 "annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
                 "raw_p_yes=%.3f raw_p_no=%.3f p_yes_for_yes=%.3f p_no_for_no=%.3f "
                 "tail_cap_yes=%s tail_cap_no=%s tail_cap_yes_reason=%s tail_cap_no_reason=%s "
+                "tail_calibration_yes_configured=%s tail_calibration_yes_applied=%s "
+                "tail_calibration_no_configured=%s tail_calibration_no_applied=%s "
                 "tail_deviation_yes=%.3f tail_deviation_no=%.3f "
                 "confidence_valid=%s confidence_reasons=%s",
                 asset, decision.no_trade_reason, float(decision.p_yes_calibrated),
@@ -7835,6 +7888,10 @@ class LeanAgent15m:
                 _ind.get("tail_cap_no", False),
                 _ind.get("tail_cap_yes_reason", "none"),
                 _ind.get("tail_cap_no_reason", "none"),
+                _ind.get("tail_calibration_yes_configured", False),
+                _ind.get("tail_calibration_yes_applied", False),
+                _ind.get("tail_calibration_no_configured", False),
+                _ind.get("tail_calibration_no_applied", False),
                 float(_ind.get("tail_deviation_yes", 0.0)),
                 float(_ind.get("tail_deviation_no", 0.0)),
                 decision.confidence_valid,
@@ -9092,9 +9149,11 @@ class LeanAgent15m:
                 cb_age_ms = signal_age * 1000.0
 
                 # Reject obviously bogus future timestamps (> 5 min ahead) or
-                # stale snapshots (> 120 s old).  signal_type='none' means the
-                # upstream source has no directional signal this cycle.
-                if -300.0 < signal_age < 120.0 and cb_signal_type != 'none':
+                # stale snapshots (outside the asset-specific velocity TTL).
+                # signal_type='none' means the upstream source has no directional
+                # signal this cycle.
+                max_velocity_age_s = _velocity_max_age_ms(asset) / 1000.0
+                if -300.0 < signal_age < max_velocity_age_s and cb_signal_type != 'none':
                     # Coinbase snapshot is fresh - use it as the authoritative source.
                     source = "coinbase"
                     final_velocity = cb_velocity
@@ -9110,6 +9169,20 @@ class LeanAgent15m:
 
         if source == "internal_fallback":
             final_velocity = self._calculate_internal_multi_window_velocity(asset, current_price)
+            # Treat the internal fallback as stale if the most recent price
+            # history is older than twice the asset-specific velocity TTL.
+            history = list(getattr(self, "_spot_price_history", {}).get(asset, []))
+            if history:
+                now_ms = int(time.time() * 1000)
+                last_ms = history[-1][0] if isinstance(history[-1], (list, tuple)) else now_ms
+                if (now_ms - last_ms) > 2 * _velocity_max_age_ms(asset):
+                    logger.info(
+                        "[VELOCITY-SOURCE] asset=%s source=internal_fallback last_history_ms=%d "
+                        "age_ms=%d exceeds 2x velocity TTL; treating velocity as stale",
+                        asset, last_ms, now_ms - last_ms,
+                    )
+                    source = "stale_velocity"
+                    final_velocity = 0.0
         else:
             final_velocity = cb_velocity
 

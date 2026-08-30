@@ -27,11 +27,13 @@ logger = get_logger("merid.prediction.trade_decision")
 # Minimum posterior for a regime classification to be usable.
 MIN_REGIME_POSTERIOR = Decimal(os.environ.get("MERID_MIN_REGIME_POSTERIOR", "0.5"))
 
-# Minimum model probability for a side to be considered "believed" by the
-# decision engine.  Lowering this below 0.5 allows cost-basis (positive-EV)
-# trades on the less-likely side; raising it makes the engine more
-# directional.  Default 0.5 preserves the existing release-gate invariants.
-TRADE_DECISION_MIN_P_SELECTED = float(os.environ.get("MERID_TRADE_DECISION_MIN_P_SELECTED", "0.5"))
+# Absolute minimum model probability for a side to be considered.  The
+# effective per-side floor is computed in _min_p_for_side and is
+# price-aware: p_selected must exceed executable_entry_price + all-in cost
+# reserve (entry_fee + exit_cost_reserve + model_risk_reserve).  This
+# preserves positive-EV cost-basis trades on cheap contracts without the
+# old unconditional 0.5 directional-confidence veto.
+TRADE_DECISION_MIN_P_SELECTED = float(os.environ.get("MERID_TRADE_DECISION_MIN_P_SELECTED", "0.0"))
 
 # Minimum net edge (as a fraction of notional) for a side to be selected.
 # 2026-08-30: Lowered to 0.02 (2%) as the hard global floor.  The actual
@@ -442,9 +444,26 @@ def _get_resolved_min_p_selected(default: float) -> float:
     """Use the resolved live config p_selected floor if it is stricter."""
     resolved = _get_resolved_live_config()
     if resolved is None:
-        return default
+        return float(default)
     resolved_p = float(resolved.min_p_selected)
-    return max(default, resolved_p)
+    return max(float(default), resolved_p)
+
+
+def _min_p_for_side(breakdown: EdgeBreakdown, floor: float) -> float:
+    """Return the side-aware minimum p_selected for a positive-EV trade.
+
+    The model probability must exceed the all-in cost basis of the held
+    side: executable entry price plus entry fee, expected exit cost, and
+    model-risk reserve.  The absolute ``floor`` (from env / live config) is
+    applied as an additional hard minimum.
+    """
+    cost_basis = (
+        breakdown.executable_entry_price
+        + breakdown.entry_fee
+        + breakdown.exit_cost_reserve
+        + breakdown.model_risk_reserve
+    )
+    return max(floor, cost_basis)
 
 
 def _get_resolved_min_held_price_cents(default: float) -> float:
@@ -977,7 +996,8 @@ def compute_trade_decision(
     A trade is emitted only when:
       1. The data_state is healthy.
       2. The regime_label is known and its posterior is high enough.
-      3. The selected side's calibrated probability is > 0.5.
+      3. The selected side's calibrated probability is > its all-in cost basis
+         (entry price + fee + exit reserve + model-risk reserve).
       4. Its net edge exceeds ``min_required_edge``.
       5. Confidence is valid (produced by the uncertainty engine, not a default).
     """
@@ -1143,11 +1163,16 @@ def compute_trade_decision(
     # YES-held curve: calibrate p_yes if YES is in the cheap tail.
     p_yes_for_yes_pre_cap = p_yes_for_yes
     tail_cap_yes_reason = "none"
+    tail_calibration_yes_configured = False
+    tail_calibration_yes_applied = False
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None and yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
-            p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry)
+            tail_calibration_yes_configured = True
             tail_cap_yes_reason = "real_curve"
+            p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry)
+            if abs(p_yes_for_yes - p_yes_for_yes_pre_cap) > 1e-9:
+                tail_calibration_yes_applied = True
     # Kalshi venue-invariant [0.05, 0.95] so the downstream order router does
     # not reject high-confidence signals as invalid_model_prob.
     p_yes_for_yes = max(0.05, min(0.95, p_yes_for_yes))
@@ -1162,13 +1187,18 @@ def compute_trade_decision(
     # (no_curve_is_dual=False) is applied unconditionally in the cheap-price tail.
     p_no_for_no_pre_cap = p_no_for_no
     tail_cap_no_reason = "none"
+    tail_calibration_no_configured = False
+    tail_calibration_no_applied = False
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None and no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
+            tail_calibration_no_configured = True
             if tail_calibrator.no_curve_is_dual:
                 if p_no_for_no < MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR:
-                    p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
                     tail_cap_no_reason = "dual_raw_cheap"
+                    p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+                    if abs(p_no_for_no - p_no_for_no_pre_cap) > 1e-9:
+                        tail_calibration_no_applied = True
                 else:
                     tail_cap_no_reason = "dual_moderate_skipped"
                     logger.info(
@@ -1178,8 +1208,10 @@ def compute_trade_decision(
                         MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR,
                     )
             else:
-                p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
                 tail_cap_no_reason = "real_curve"
+                p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+                if abs(p_no_for_no - p_no_for_no_pre_cap) > 1e-9:
+                    tail_calibration_no_applied = True
     p_no_for_no = max(0.05, min(0.95, p_no_for_no))
     p_yes_for_no = 1.0 - p_no_for_no
 
@@ -1223,10 +1255,16 @@ def compute_trade_decision(
         "p_no_for_no": p_no_for_no,
         "p_yes_for_yes_pre_cap": p_yes_for_yes_pre_cap,
         "p_no_for_no_pre_cap": p_no_for_no_pre_cap,
-        "tail_cap_yes": yes_in_tail,
-        "tail_cap_no": no_in_tail,
+        "tail_cap_yes": tail_calibration_yes_applied,
+        "tail_cap_no": tail_calibration_no_applied,
         "tail_cap_yes_reason": tail_cap_yes_reason,
         "tail_cap_no_reason": tail_cap_no_reason,
+        "tail_calibration_yes_configured": tail_calibration_yes_configured,
+        "tail_calibration_yes_applied": tail_calibration_yes_applied,
+        "tail_calibration_no_configured": tail_calibration_no_configured,
+        "tail_calibration_no_applied": tail_calibration_no_applied,
+        "tail_calibration_yes_reason": tail_cap_yes_reason,
+        "tail_calibration_no_reason": tail_cap_no_reason,
         "tail_deviation_yes": yes_deviation,
         "tail_deviation_no": no_deviation,
         "tail_deviation_guard": tail_calibration_deviation_guard,
@@ -1310,8 +1348,9 @@ def compute_trade_decision(
     )
 
     # Selection: prefer the side with the higher *qualifying* net edge.
-    # A side qualifies only when its model probability is > 0.5 (no cost-basis
-    # trading) and its net edge clears the threshold.  Ties are no-trade.
+    # A side qualifies only when its model probability clears the side-aware
+    # positive-EV floor (entry + all-in cost reserve) and its net edge clears
+    # the threshold.  Ties are no-trade.
     selected_outcome: Optional[Literal["yes", "no"]] = None
     selected_action: Optional[Literal["buy"]] = None
     no_trade_reason: Optional[str] = None
@@ -1323,14 +1362,17 @@ def compute_trade_decision(
     gross_edge: Optional[Decimal] = None
     net_edge: Optional[Decimal] = None
 
+    yes_min_p = _min_p_for_side(yes_breakdown, min_p_selected)
+    no_min_p = _min_p_for_side(no_breakdown, min_p_selected)
+
     yes_qualifies = (
         yes_breakdown.net_edge >= yes_min_edge
-        and yes_breakdown.p_selected > min_p_selected
+        and yes_breakdown.p_selected > yes_min_p
         and not tail_guard_violation_yes
     )
     no_qualifies = (
         no_breakdown.net_edge >= no_min_edge
-        and no_breakdown.p_selected > min_p_selected
+        and no_breakdown.p_selected > no_min_p
         and not tail_guard_violation_no
     )
 
@@ -1354,14 +1396,19 @@ def compute_trade_decision(
             no_trade_reason = "directional_tie"
         else:
             best_threshold = yes_min_edge if best_side == "yes" else no_min_edge
+            best_min_p = yes_min_p if best_side == "yes" else no_min_p
             if best_net_edge < best_threshold:
                 if best_side == "yes":
                     no_trade_reason = "yes_edge_below_threshold"
                 else:
                     no_trade_reason = "no_edge_below_threshold"
             else:
-                # Edge is sufficient but the model does not believe the side is > 50%.
+                # Edge is sufficient but p_selected does not clear the side-aware
+                # positive-EV floor (entry + all-in cost reserve).
+                best_p = yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
                 no_trade_reason = f"cost_basis_override_{best_side}"
+                indicators[f"cost_basis_override_{best_side}_p"] = best_p
+                indicators[f"cost_basis_override_{best_side}_floor"] = best_min_p
 
     if selected_outcome is not None:
         selected_action = "buy"
