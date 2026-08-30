@@ -470,24 +470,26 @@ class TestOrderRouterIntegration:
                 time_to_expiry_seconds=900,
             )
 
-            # ETH order
-            eth_order = OrderIntent(
-                intent_id="eth-123",
-                ticker="KXETH15M-26JUN022230-30",
+            # Second BTC order with distinct intent_id: the global rate limiter
+            # is the unit under test, not the asset.  With BTC-only trading the
+            # test still exercises per-process rate limiting across intents.
+            btc_order_2 = OrderIntent(
+                intent_id="btc-124",
+                ticker="KXBTC15M-26JUN022230-30",
                 side="yes", action="buy", price_cents=55, count=1,
-                agent_id="ETH_15M",
+                agent_id="BTC_15M",
                 source="merid.prediction.agent_grid_15m",
                 time_to_expiry_seconds=900,
             )
-            
-            # First order (BTC) should succeed
+
+            # First order (BTC) should not be rate-limited
             result_btc = await route_order_async(btc_order)
             assert result_btc.status != "rejected" or "rate_limit" not in result_btc.reason
-            
-            # Second order (ETH) should be rate limited (global limit)
-            result_eth = await route_order_async(eth_order)
-            assert result_eth.status == "rejected"
-            assert "rate_limit:order_rate_exceeded" in result_eth.reason
+
+            # Second order (BTC, different intent) should be rate limited (global limit)
+            result_btc_2 = await route_order_async(btc_order_2)
+            assert result_btc_2.status == "rejected"
+            assert "rate_limit:order_rate_exceeded" in result_btc_2.reason
 
 
 class TestOrderRouterExitOrderBypass:

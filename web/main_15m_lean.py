@@ -1521,8 +1521,10 @@ async def data_flow_validation():
             ws_summary = ws_bridge.summary()
             ws_running = ws_summary.get("running", False)
             
-            # Check if market state store has recent data for critical assets
-            critical_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+            # Check if market state store has recent data for the configured
+            # whitelist assets (exit-only position assets are not entry-critical).
+            from config.trading_scope import get_trading_scope
+            critical_assets = sorted(get_trading_scope().ALLOWED_ASSETS)
             fresh_data_count = 0
             stale_data_count = 0
             
@@ -2664,12 +2666,13 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
         logger.error(f"[WS-REFRESH] Error getting catalog markets: {e}", exc_info=True)
         return
     
-    # SIMPLE 15m WS SUBSCRIPTION: Subscribe to all active 15m markets for our 5 assets
-    # Use simple get_active_markets() instead of complex ET window matching
-    # This keeps the catalog stable and prevents feed loss
-    allowed_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    # SIMPLE 15m WS SUBSCRIPTION: Subscribe to all active 15m markets for the
+    # configured whitelist, and also keep the exact market tickers of any open
+    # positions so residual alt exits are never orphaned.
+    from config.trading_scope import get_trading_scope
+    allowed_assets = sorted(get_trading_scope().ALLOWED_ASSETS)
     active_tickers = set()
-    
+
     try:
         # Get all active 15m markets for our assets using the simple selector
         for asset in allowed_assets:
@@ -2682,13 +2685,18 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                 logger.info(f"[WS-REFRESH] Active 15m market for {asset}: {ticker}")
             else:
                 logger.warning(f"[WS-REFRESH] No active 15m market found for {asset}")
+
+        # Expand with any open position markets (residual exits).
+        from merid.event_venues.kalshi.ws_bridge import get_ws_subscription_tickers
+        active_tickers = set(get_ws_subscription_tickers(list(active_tickers)))
+        logger.info(f"[WS-REFRESH] Expanded tickers with open positions: {list(active_tickers)}")
     except Exception as e:
         logger.error(
             f"[WS-REFRESH] Error getting active markets: {e} - "
             f"active market lookup failed, using existing subscriptions",
             exc_info=True
         )
-    
+
     logger.info(f"[WS-REFRESH] Iteration {iteration}: {len(active_tickers)} current 15m markets to subscribe")
     
     # SIMPLE SUBSCRIPTION: Just log the tickers - auto-reconnect will handle subscription changes
@@ -3761,7 +3769,11 @@ async def _run_startup_phases_v20260530(app):
     max_wait = 60  # CRITICAL FIX: Increased from 15s to 60s for catalog refresh
     # 15m markets have natural gaps between windows; 60s allows catching next window
     initial_tickers = []
-    allowed_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+
+    # Use the same profile-driven whitelist as build_15m_agent_grid and the
+    # WS bridge, so a future whitelist change propagates automatically.
+    from config.trading_scope import get_trading_scope
+    allowed_assets = sorted(get_trading_scope().ALLOWED_ASSETS)
     
     # Retry with exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (total 63s)
     retry_intervals = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
@@ -3824,7 +3836,7 @@ async def _run_startup_phases_v20260530(app):
     if not initial_tickers:
         logger.error(
             f"[STARTUP] Catalog still empty after {total_elapsed:.1f}s and {len(retry_intervals)} attempts - "
-            f"CRITICAL: All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) are missing. "
+            f"CRITICAL: configured assets {allowed_assets} are missing. "
             f"Attempting fallback to direct market lookup via Kalshi REST API."
         )
         # Log detailed catalog state for debugging
@@ -3846,15 +3858,10 @@ async def _run_startup_phases_v20260530(app):
             client = get_kalshi_client()
             fallback_tickers = []
             
-            # Standard series ticker naming convention for 15m crypto
-            # This replaces the legacy kalshi_15m_crypto_config.py dependency
-            series_ticker_map = {
-                "BTC": "KXBTC15M",
-                "ETH": "KXETH15M",
-                "SOL": "KXSOL15M",
-                "XRP": "KXXRP15M",
-                "DOGE": "KXDOGE15M",
-            }
+            # Standard series ticker naming convention for 15m crypto.
+            # Derived from the configured allowed assets so the fallback tracks
+            # the profile whitelist automatically.
+            series_ticker_map = {asset: f"KX{asset}15M" for asset in allowed_assets}
             
             for asset in allowed_assets:
                 series_ticker = series_ticker_map.get(asset)
@@ -3904,10 +3911,11 @@ async def _run_startup_phases_v20260530(app):
     
     
     
-    # WS SUBSCRIPTION CHECK: Log series found but continue with partial set
-    from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers
-    PRIORITY_SERIES = kalshi_agent_grid_catalog_series_tickers()
-    
+    # WS SUBSCRIPTION CHECK: Log series found but continue with partial set.
+    # Expected series are derived from the profile whitelist, not the full
+    # historical universe, so BTC-only mode does not warn about missing alts.
+    expected_series = {f"KX{asset}15M" for asset in allowed_assets}
+
     # Extract series from tickers (e.g., "KXBTC15M-26JUN071415-15" -> "KXBTC15M")
     series_found = set()
     for ticker in initial_tickers:
@@ -3915,8 +3923,7 @@ async def _run_startup_phases_v20260530(app):
         # Series is the first part before the first hyphen
         series = ticker.split("-")[0]
         series_found.add(series)
-    
-    expected_series = set(PRIORITY_SERIES)
+
     missing_series = expected_series - series_found
     
     if missing_series:
