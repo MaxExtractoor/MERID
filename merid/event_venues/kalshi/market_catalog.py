@@ -676,6 +676,26 @@ class KalshiMarketCatalog:
         # Series health tracking (Kalshi alignment: Invariant 5)
         self._series_health: Dict[str, str] = {}  # series_ticker -> "healthy", "lagging", "no_active_tickers", "unknown"
 
+        # 15m market metadata backfill config (Kalshi creates markets before floor_strike is populated)
+        self._metadata_backfill_enabled = os.getenv(
+            "MERID_KALSHI_15M_METADATA_BACKFILL_ENABLED", "true"
+        ).strip().lower() in ("1", "true", "yes")
+        self._metadata_backfill_max_age_s = float(
+            os.getenv("MERID_KALSHI_15M_METADATA_BACKFILL_MAX_AGE_S", "60.0")
+        )
+        self._metadata_backfill_max_attempts = int(
+            os.getenv("MERID_KALSHI_15M_METADATA_BACKFILL_MAX_ATTEMPTS", "10")
+        )
+        self._metadata_backfill_retry_delay_s = float(
+            os.getenv("MERID_KALSHI_15M_METADATA_BACKFILL_RETRY_DELAY_S", "1.0")
+        )
+
+        # Per-asset persistent metadata-failure tracking (alerts after repeated windows)
+        self._metadata_failure_count: Dict[str, int] = {}
+        self._metadata_failure_threshold = int(
+            os.getenv("MERID_KALSHI_15M_METADATA_FAILURE_THRESHOLD", "3")
+        )
+
         # Thread-based refresh loop to avoid event loop contention with WS bridge
         self._refresh_thread: Optional[threading.Thread] = None
         self._refresh_loop_started = threading.Event()
@@ -1297,6 +1317,11 @@ class KalshiMarketCatalog:
                     cm.market.market_id
                 )
 
+        # BACKFILL: 15m markets may be created before floor_strike/cap_strike are populated.
+        # Retry the single-market endpoint for a bounded window while the market is newly
+        # opened, without weakening the fail-closed health_status logic.
+        visible_markets = await self._backfill_15m_metadata(visible_markets, now_utc)
+
         logger.info(
             "[CATALOG-VISIBILITY-FILTER] Post-visibility-filter: %d markets in 0 to 15.5min window (from %d)",
             len(visible_markets), len(filtered_markets)
@@ -1522,7 +1547,12 @@ class KalshiMarketCatalog:
             # Get current ticker sets
             catalog_tickers = {m.market.market_id for m in enriched}
             state_tickers = set(store._states.keys()) if hasattr(store, '_states') else set()
-            
+
+            # Notify the universe manager that the catalog just refreshed so it can
+            # suppress CRITICAL SYNC_* alerts during the normal WS/state bootstrap
+            # window while still triggering a sync.
+            universe.notify_catalog_refresh()
+
             # Validate universe invariant
             # CRITICAL FIX: Use canonical WS bridge from merid.event_venues.kalshi
             # This prevents creating duplicate WS connections during catalog refresh
@@ -1538,11 +1568,12 @@ class KalshiMarketCatalog:
             if not validation_result["valid"]:
                 logger.error("[CATALOG-REFRESH] Universe invariant violated, triggering WS bridge sync")
                 try:
-                    # Set sync flag for WS bridge to pick up in its main event loop
-                    bridge._sync_requested = True
-                    logger.info("[CATALOG-REFRESH] WS bridge sync flag set")
+                    # Rollover hook: request immediate resync so the bridge can
+                    # add/remove tickers via its existing sync_to_catalog path.
+                    bridge.request_immediate_sync("catalog_rollover")
+                    logger.info("[CATALOG-REFRESH] WS bridge immediate sync requested")
                 except Exception as sync_error:
-                    logger.error(f"[CATALOG-REFRESH] Failed to set WS bridge sync flag: {sync_error}")
+                    logger.error(f"[CATALOG-REFRESH] Failed to request WS bridge sync: {sync_error}")
             else:
                 logger.info("[CATALOG-REFRESH] Universe invariant validated, no sync needed")
             
@@ -2455,6 +2486,122 @@ class KalshiMarketCatalog:
             exchange_index=raw.get("exchange_index"),
         )
 
+    async def _backfill_15m_metadata(self, markets: List[CatalogMarket], now: datetime) -> List[CatalogMarket]:
+        """Retry per-market GET /markets/{ticker} for 15m crypto markets missing floor/strike.
+
+        Kalshi creates new 15m markets a few seconds before the prior window closes,
+        but ``floor_strike`` / ``cap_strike`` are not always populated immediately.
+        This backfill retries the single-market endpoint for a bounded window and
+        re-enriches the catalog entry if the metadata appears. It keeps the market
+        fail-closed (``invalid_metadata``) if the metadata does not arrive in time.
+
+        Args:
+            markets: CatalogMarket list after visibility filtering (mutated in place).
+            now: Current UTC datetime.
+
+        Returns:
+            The same list, with any backfilled entries replaced in place.
+        """
+        if not self._metadata_backfill_enabled:
+            return markets
+
+        updated = False
+
+        for idx, cm in enumerate(markets):
+            if cm.timeframe != "15m" or cm.asset not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                continue
+            if cm.health_status != "invalid_metadata":
+                continue
+            if cm.market is None or not getattr(cm.market, "market_id", None):
+                continue
+
+            # Only backfill markets that were created recently. Kalshi opens new 15m
+            # markets ~5 seconds before the prior window closes; if open_time is stale,
+            # the missing metadata is a venue-side data gap rather than rollover lag.
+            open_time = getattr(cm.market, "open_time", None)
+            if open_time is None:
+                # Cannot confirm the market is newly opened; quarantine without retry.
+                logger.warning(
+                    "[CATALOG-METADATA-BACKFILL] market_id=%s asset=%s open_time missing; "
+                    "quarantining as invalid_metadata",
+                    cm.market.market_id, cm.asset,
+                )
+                self._metadata_failure_count[cm.asset] = self._metadata_failure_count.get(cm.asset, 0) + 1
+                continue
+
+            age_s = (now - open_time).total_seconds()
+            if age_s > self._metadata_backfill_max_age_s:
+                logger.debug(
+                    "[CATALOG-METADATA-BACKFILL] market_id=%s asset=%s open_time age=%.1fs > %.1fs; "
+                    "not a rollover transient, leaving invalid_metadata",
+                    cm.market.market_id, cm.asset, age_s, self._metadata_backfill_max_age_s,
+                )
+                continue
+
+            logger.info(
+                "[CATALOG-METADATA-BACKFILL] market_id=%s asset=%s open_time age=%.1fs "
+                "missing floor/strike; starting %d-attempt backfill",
+                cm.market.market_id, cm.asset, age_s, self._metadata_backfill_max_attempts,
+            )
+
+            for attempt in range(1, self._metadata_backfill_max_attempts + 1):
+                try:
+                    result = await self._client.get_market_result(cm.market.market_id)
+                    if not result.success or result.data is None:
+                        logger.warning(
+                            "[CATALOG-METADATA-BACKFILL] market_id=%s attempt=%d/%d "
+                            "get_market failed: %s",
+                            cm.market.market_id, attempt, self._metadata_backfill_max_attempts,
+                            result.error if result else "no result",
+                        )
+                    else:
+                        fresh_cm = self._enrich(result.data, now)
+                        if fresh_cm.health_status == "ok":
+                            logger.info(
+                                "[CATALOG-METADATA-BACKFILL] market_id=%s attempt=%d/%d "
+                                "metadata resolved; floor_strike=%s strike_price=%s",
+                                fresh_cm.market.market_id, attempt, self._metadata_backfill_max_attempts,
+                                fresh_cm.floor_strike, fresh_cm.strike_price,
+                            )
+                            markets[idx] = fresh_cm
+                            # Clear prior failure on successful resolution.
+                            self._metadata_failure_count[cm.asset] = 0
+                            updated = True
+                            break
+                        else:
+                            logger.info(
+                                "[CATALOG-METADATA-BACKFILL] market_id=%s attempt=%d/%d "
+                                "still invalid_metadata: %s",
+                                fresh_cm.market.market_id, attempt, self._metadata_backfill_max_attempts,
+                                fresh_cm.health_status,
+                            )
+
+                    if attempt < self._metadata_backfill_max_attempts:
+                        await asyncio.sleep(self._metadata_backfill_retry_delay_s)
+                except Exception as e:
+                    logger.warning(
+                        "[CATALOG-METADATA-BACKFILL] market_id=%s attempt=%d/%d error: %s",
+                        cm.market.market_id, attempt, self._metadata_backfill_max_attempts, e,
+                    )
+                    if attempt < self._metadata_backfill_max_attempts:
+                        await asyncio.sleep(self._metadata_backfill_retry_delay_s)
+
+            # If we reach here, all attempts failed (or market was already replaced)
+            after = markets[idx]
+            if after.health_status == "invalid_metadata":
+                self._metadata_failure_count[after.asset] = self._metadata_failure_count.get(after.asset, 0) + 1
+                if self._metadata_failure_count[after.asset] >= self._metadata_failure_threshold:
+                    logger.error(
+                        "[CATALOG-METADATA-ALERT] asset=%s has failed metadata backfill for %d consecutive "
+                        "windows; possible Kalshi series/calendar issue. Quarantining.",
+                        after.asset, self._metadata_failure_count[after.asset],
+                    )
+
+        if updated:
+            logger.info("[CATALOG-METADATA-BACKFILL] Completed; at least one market metadata resolved")
+
+        return markets
+
     @staticmethod
     def _detect_strikes(text: str, ticker: str = "") -> Dict[str, float]:
         """Extract strike prices from market text and ticker suffix.
@@ -2800,7 +2947,7 @@ class KalshiMarketCatalog:
             # Only log venue-unavailable if ALL configured whitelist assets have no markets
             if not markets:
                 logger.warning(
-                    "KALSHI-15M-UNIVERSE CRITICAL: No tradeable 15m markets for ANY asset (%s) within 0-30 min; treating venue as unavailable.",
+                    "KALSHI-15M-UNIVERSE: No tradeable 15m markets for ANY asset (%s) within 0-30 min; treating venue as unavailable.",
                     "/".join(sorted(all_assets))
                 )
         

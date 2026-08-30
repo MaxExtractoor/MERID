@@ -15,11 +15,12 @@ Usage:
 """
 
 import asyncio
+import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -360,6 +361,9 @@ def validate_live_trading_safety() -> None:
         logger.debug(
             f"[LIVE-TRADING-VALIDATION] Profile check: env={env} trade_mode={trade_mode} profile={profile}"
         )
+
+    # HYBRID SIGNAL AUDIT: fail-closed in live until Brier/reliability/PBO audit passes.
+    validate_hybrid_signal_audit()
 
 
 def validate_order_safety_controls() -> None:
@@ -1205,6 +1209,181 @@ def validate_no_test_fills_in_database() -> None:
         raise
     except Exception as e:
         logger.warning(f"TEST-FILLS-DB: Failed to validate fills database (non-fatal): {e}")
+
+
+def validate_hybrid_signal_audit() -> None:
+    """
+    CRITICAL SAFETY CHECK: `signal_mode=hybrid` requires out-of-sample audit artifacts.
+
+    Per AGENTS.md 2026-08-28 probability calibration notes, hybrid Bachelier+delta
+    signals (velocity, MACD, RSI, OBI, FVG, regime) are not validated out-of-sample
+    and must be disabled until the model passes a Brier/reliability/PBO audit.
+    Bachelier-only with TWAP-appropriate vol is the only defensible live baseline.
+
+    This validation is fail-closed: in any live trading mode, an active
+    `kalshi_crypto_15m_v2` profile with `signal_mode=hybrid` is rejected unless
+    ``data/hybrid_signal_audit.json`` is present, current, and passes the minimum
+    thresholds. Paper/shadow/canary modes are allowed to run without the artifact
+    (logged as a warning) so the audit can be generated.
+
+    Required audit file (data/hybrid_signal_audit.json):
+    {
+        "model_signature": "pre-registered-parameter-hash-or-name",
+        "hold_out_set_size": int,
+        "brier_score": float,
+        "brier_baseline": str (e.g. "venue_implied"),
+        "expected_calibration_error": float,
+        "reliability_plot": [
+            {"predicted_prob": float, "observed_freq": float, "n_trades": int}
+        ],
+        "pbo": float,
+        "deflated_sharpe_ratio": float,
+        "walk_forward_efficiency": float,
+        "mean_net_edge_per_bucket_cents": float,
+        "generated_at": "ISO-8601",
+        "valid_until": "ISO-8601",
+        "auditor": "human-or-process-name"
+    }
+
+    Raises:
+        StartupValidationError: If hybrid mode is live without a passing audit.
+    """
+    log_startup_phase("validate_hybrid_signal_audit", "merid.startup_validations")
+
+    trade_mode = os.getenv("MERID_TRADE_MODE", "paper").lower()
+    pm_trade_mode = os.getenv("MERID_PM_TRADING_MODE", "paper").lower()
+    allow_live = os.getenv("MERID_ALLOW_LIVE_TRADES", "false").lower() == "true"
+    is_live = trade_mode == "live" or pm_trade_mode == "live" or allow_live
+
+    if not is_kalshi_15m_profile():
+        return
+
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+        profile = get_crypto_15m_profile()
+    except Exception as exc:
+        logger.warning("[HYBRID-SIGNAL-AUDIT] Could not load 15m profile: %s", exc)
+        return
+
+    if profile is None:
+        return
+
+    if profile.signal_mode != "hybrid":
+        logger.info(
+            "[HYBRID-SIGNAL-AUDIT] signal_mode=%s is not hybrid; audit not required",
+            profile.signal_mode,
+        )
+        return
+
+    if not is_live:
+        logger.warning(
+            "[HYBRID-SIGNAL-AUDIT] signal_mode=hybrid in non-live mode. "
+            "Use paper/shadow to generate the required audit before live re-enablement."
+        )
+        return
+
+    # Live trading with hybrid signals: require a passing audit artifact.
+    audit_path = Path(
+        os.getenv("MERID_HYBRID_SIGNAL_AUDIT_PATH", "data/hybrid_signal_audit.json")
+    )
+    if not audit_path.exists():
+        raise StartupValidationError(
+            "CRITICAL SAFETY VIOLATION: signal_mode=hybrid in live trading but "
+            f"audit artifact not found at {audit_path}. "
+            "Per AGENTS.md 2026-08-28, hybrid Bachelier+delta signals require "
+            "out-of-sample audit: Brier<=0.20, reliability gaps within +/-0.10, "
+            "PBO<0.30, DSR>0.95, walk-forward efficiency>0.30, and positive "
+            "mean net edge per price bucket. Switch to Bachelier-only (non-hybrid "
+            "profile) or provide a passing audit."
+        )
+
+    try:
+        with open(audit_path, "r", encoding="utf-8") as f:
+            audit = json.load(f)
+    except Exception as exc:
+        raise StartupValidationError(
+            f"CRITICAL SAFETY VIOLATION: could not parse hybrid signal audit at {audit_path}: {exc}"
+        ) from exc
+
+    if not isinstance(audit, dict):
+        raise StartupValidationError(
+            f"CRITICAL SAFETY VIOLATION: hybrid signal audit at {audit_path} is not a JSON object"
+        )
+
+    def _require(name: str) -> Any:
+        value = audit.get(name)
+        if value is None:
+            raise StartupValidationError(
+                f"CRITICAL SAFETY VIOLATION: hybrid signal audit missing required field '{name}'"
+            )
+        return value
+
+    # Expiration / freshness
+    valid_until = _require("valid_until")
+    try:
+        valid_dt = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+    except Exception as exc:
+        raise StartupValidationError(
+            f"CRITICAL SAFETY VIOLATION: hybrid signal audit 'valid_until' is not ISO-8601: {valid_until}"
+        ) from exc
+    if datetime.now(timezone.utc) > valid_dt:
+        raise StartupValidationError(
+            f"CRITICAL SAFETY VIOLATION: hybrid signal audit at {audit_path} expired on {valid_until}. "
+            "Re-run the paper/shadow audit and refresh the artifact."
+        )
+
+    # Required numeric thresholds per AGENTS.md
+    brier = float(_require("brier_score"))
+    ece = float(_require("expected_calibration_error"))
+    pbo = float(_require("pbo"))
+    dsr = float(_require("deflated_sharpe_ratio"))
+    wfe = float(_require("walk_forward_efficiency"))
+    mean_edge = float(_require("mean_net_edge_per_bucket_cents"))
+    hold_out_size = int(_require("hold_out_set_size"))
+
+    failures: List[str] = []
+    if brier > 0.20:
+        failures.append(f"brier_score={brier} > 0.20")
+    if ece > 0.10:
+        failures.append(f"expected_calibration_error={ece} > 0.10")
+    if pbo >= 0.30:
+        failures.append(f"pbo={pbo} >= 0.30")
+    if dsr <= 0.95:
+        failures.append(f"deflated_sharpe_ratio={dsr} <= 0.95")
+    if wfe <= 0.30:
+        failures.append(f"walk_forward_efficiency={wfe} <= 0.30")
+    if mean_edge <= 0.0:
+        failures.append(f"mean_net_edge_per_bucket_cents={mean_edge} <= 0.0")
+    if hold_out_size < 200:
+        failures.append(f"hold_out_set_size={hold_out_size} < 200")
+
+    # Reliability diagram: per-bucket gaps within +/-0.10
+    reliability = _require("reliability_plot")
+    if not isinstance(reliability, list) or not reliability:
+        failures.append("reliability_plot missing or empty")
+    else:
+        max_gap = 0.0
+        for bucket in reliability:
+            predicted = float(bucket.get("predicted_prob", 0.0))
+            observed = float(bucket.get("observed_freq", 0.0))
+            gap = abs(predicted - observed)
+            max_gap = max(max_gap, gap)
+        if max_gap > 0.10:
+            failures.append(f"reliability_plot max gap={max_gap:.3f} > 0.10")
+
+    if failures:
+        raise StartupValidationError(
+            "CRITICAL SAFETY VIOLATION: signal_mode=hybrid in live trading but "
+            f"audit artifact at {audit_path} does not pass minimum thresholds: "
+            + "; ".join(failures) + ". "
+            "Switch to a non-hybrid profile or provide a passing audit."
+        )
+
+    logger.info(
+        "[HYBRID-SIGNAL-AUDIT] Live hybrid signal mode approved. "
+        "audit=%s brier=%.4f ece=%.4f pbo=%.4f dsr=%.4f wfe=%.4f edge=%.4f valid_until=%s",
+        audit_path, brier, ece, pbo, dsr, wfe, mean_edge, valid_until,
+    )
 
 
 def validate_forbidden_module_imports() -> None:

@@ -2730,6 +2730,23 @@ class KalshiWebSocketBridge:
             len(self._desired_tickers), self._desired_tickers_gen
         )
 
+    def request_immediate_sync(self, reason: str = "catalog_rollover") -> None:
+        """Request an immediate WebSocket subscription sync.
+
+        The catalog refresh path uses this after detecting a rollover or after
+        a metadata backfill resolves, so the bridge can re-subscribe without
+        waiting for the 15m loop's next set_markets() call. This is the
+        concrete rollover hook: it triggers the existing ``sync_to_catalog``
+        path that uses subscribe/unsubscribe (Kalshi's ``update_subscription``
+        equivalent for this codebase) to align the live ticker set.
+        """
+        self._sync_requested = True
+        self._last_sync_attempt_ts = 0.0
+        logger.info(
+            "[WS-REQUEST-IMMEDIATE-SYNC] reason=%s desired_tickers=%d",
+            reason, len(self._desired_tickers)
+        )
+
     async def sync_to_catalog(self) -> bool:
         """Sync WS subscriptions to desired ticker set set by 15m loop.
         

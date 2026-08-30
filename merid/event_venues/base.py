@@ -43,6 +43,7 @@ class EventMarket:
     volume: Optional[Decimal] = None
     open_interest: Optional[Decimal] = None
     liquidity: Optional[Decimal] = None
+    open_time: Optional[datetime] = None
     created_at: Optional[datetime] = None
     resolved: bool = False
     resolution: Optional[str] = None

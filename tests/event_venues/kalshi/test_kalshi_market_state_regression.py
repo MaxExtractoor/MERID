@@ -352,10 +352,81 @@ class TestUniverseConsistency:
         result = manager.validate_universe_invariant(
             catalog_tickers, state_tickers, ws_tickers
         )
-        
+
         assert result["valid"] is False, \
             "Sync mismatch should fail validation"
-        
+
         # Check for sync violations
         assert len(result["violations"]) > 0, \
             "Should have violations for sync mismatch"
+
+    def test_sync_transient_in_grace_does_not_alert(self):
+        """SYNC_* mismatches shortly after a catalog refresh should reconcile but not alert."""
+        manager = UniverseManager()
+        manager.catalog_refresh_grace_seconds = 10.0
+
+        catalog_tickers = {
+            "KXBTC15M-26JUN041100-00",
+            "KXETH15M-26JUN041100-00",
+            "KXSOL15M-26JUN041100-00",
+            "KXXRP15M-26JUN041100-00",
+            "KXDOGE15M-26JUN041100-00",
+        }
+        # Only BTC in state/ws -- normal transient during rollover
+        state_tickers = {"KXBTC15M-26JUN041100-00"}
+        ws_tickers = {"KXBTC15M-26JUN041100-00"}
+
+        # Simulate catalog just refreshed
+        manager.notify_catalog_refresh(time.monotonic())
+
+        # Track whether the critical alert path was invoked
+        alerts_sent = []
+        original_alert = manager._send_invariant_violation_alert
+        manager._send_invariant_violation_alert = lambda result: alerts_sent.append(result)
+
+        try:
+            result = manager.validate_universe_invariant(
+                catalog_tickers, state_tickers, ws_tickers
+            )
+        finally:
+            manager._send_invariant_violation_alert = original_alert
+
+        # Result must still be invalid so the caller triggers a sync
+        assert result["valid"] is False, "SYNC transient must keep valid=False to trigger sync"
+        assert all(v.startswith("SYNC_") for v in result["violations"]), \
+            "Expected only SYNC_* violations"
+        assert not alerts_sent, "SYNC transient inside grace must not send CRITICAL alert"
+        assert manager.violation_count == 0, "SYNC transient inside grace must not increment violation count"
+
+    def test_non_sync_violation_in_grace_still_alerts(self):
+        """ASSET_COVERAGE/UNIVERSE_SIZE violations are not transient and must still alert."""
+        manager = UniverseManager()
+        manager.catalog_refresh_grace_seconds = 10.0
+
+        # Missing DOGE entirely
+        catalog_tickers = {
+            "KXBTC15M-26JUN041100-00",
+            "KXETH15M-26JUN041100-00",
+            "KXSOL15M-26JUN041100-00",
+            "KXXRP15M-26JUN041100-00",
+        }
+        state_tickers = catalog_tickers.copy()
+        ws_tickers = catalog_tickers.copy()
+
+        # Simulate catalog just refreshed
+        manager.notify_catalog_refresh(time.monotonic())
+
+        alerts_sent = []
+        original_alert = manager._send_invariant_violation_alert
+        manager._send_invariant_violation_alert = lambda result: alerts_sent.append(result)
+
+        try:
+            result = manager.validate_universe_invariant(
+                catalog_tickers, state_tickers, ws_tickers
+            )
+        finally:
+            manager._send_invariant_violation_alert = original_alert
+
+        assert result["valid"] is False
+        assert manager.violation_count == 1, "Asset coverage violation must still increment count"
+        assert len(alerts_sent) == 1, "Asset coverage violation must still send CRITICAL alert"

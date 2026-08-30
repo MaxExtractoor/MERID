@@ -5,7 +5,9 @@ contain exactly 5 tickers (BTC, ETH, SOL, XRP, DOGE) with proper regex validatio
 and synchronized state across catalog, WS bridge, and market state store.
 """
 
+import os
 import re
+import time
 from typing import Set, List, Dict, Tuple, Any
 from datetime import datetime, timezone
 
@@ -28,11 +30,27 @@ class UniverseInvariantViolation(Exception):
 
 class UniverseManager:
     """Manages 15m crypto universe with hard invariants."""
-    
+
     def __init__(self):
         self.last_validation_ts: float = 0.0
         self.violation_count: int = 0
-        
+        self.last_catalog_refresh_ts: float = 0.0
+        self.catalog_refresh_grace_seconds: float = float(
+            os.environ.get("MERID_UNIVERSE_CATALOG_GRACE_S", "10.0")
+        )
+
+    def notify_catalog_refresh(self, timestamp: float = None) -> None:
+        """Record that the catalog has just been refreshed.
+
+        Args:
+            timestamp: Optional monotonic timestamp of the refresh. Defaults to
+            the current time.  This timestamp is used to suppress CRITICAL
+            SYNC_STATE/SYNC_WS alerts during the configured grace period, while
+            still returning ``valid = False`` so the WS bridge is triggered to
+            reconcile.
+        """
+        self.last_catalog_refresh_ts = timestamp if timestamp is not None else time.monotonic()
+
     def validate_ticker_format(self, ticker: str) -> bool:
         """Validate ticker matches expected regex pattern."""
         # Check if it's a series ticker (e.g., KXBTC15M) or full market ticker
@@ -67,7 +85,13 @@ class UniverseManager:
         if len(parts) >= 1:
             return parts[0]
         return ticker
-    
+
+    def _in_catalog_refresh_grace(self) -> bool:
+        """Return True if we are within the post-catalog-refresh grace window."""
+        if self.last_catalog_refresh_ts <= 0.0:
+            return False
+        return (time.monotonic() - self.last_catalog_refresh_ts) <= self.catalog_refresh_grace_seconds
+
     def validate_universe_invariant(self, 
                                   catalog_tickers: Set[str],
                                   state_tickers: Set[str],
@@ -167,15 +191,33 @@ class UniverseManager:
                 sorted(catalog_assets)
             )
         else:
-            self.violation_count += 1
-            logger.error(
-                "[UNIVERSE-INVARIANT] VIOLATION #%d: %s",
-                self.violation_count, "; ".join(result["violations"])
+            # During the post-catalog-refresh grace window, SYNC_STATE/SYNC_WS
+            # mismatches are expected while the WS bridge bootstraps and
+            # subscribes to the new series.  Keep result["valid"] = False so the
+            # caller still triggers a sync, but suppress the CRITICAL alert and
+            # violation counter for routine rollover/startup transients.
+            in_grace = self._in_catalog_refresh_grace()
+            only_sync_violations = in_grace and all(
+                v.startswith("SYNC_") for v in result["violations"]
             )
 
-            # CRITICAL FIX 2026-08-03: Add monitoring and alerting for invariant violations
-            # This addresses the universe invariant violation (catalog=5, ws=2, intersection=2)
-            self._send_invariant_violation_alert(result)
+            if only_sync_violations:
+                logger.info(
+                    "[UNIVERSE-INVARIANT] GRACE-PERIOD (catalog refreshed %.1fs ago): "
+                    "SYNC transient, will reconcile: %s",
+                    time.monotonic() - self.last_catalog_refresh_ts,
+                    "; ".join(result["violations"])
+                )
+            else:
+                self.violation_count += 1
+                logger.error(
+                    "[UNIVERSE-INVARIANT] VIOLATION #%d: %s",
+                    self.violation_count, "; ".join(result["violations"])
+                )
+
+                # CRITICAL FIX 2026-08-03: Add monitoring and alerting for invariant violations
+                # This addresses the universe invariant violation (catalog=5, ws=2, intersection=2)
+                self._send_invariant_violation_alert(result)
 
         self.last_validation_ts = now.timestamp()
         return result
