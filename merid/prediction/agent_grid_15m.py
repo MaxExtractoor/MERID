@@ -17298,7 +17298,7 @@ class LeanAgentGrid15m:
                         lifecycle_events.append({
                             "candidate_id": cid,
                             "from_state": "RECEIVED",
-                            "to_state": "EXECUTED",
+                            "to_state": "ADMITTED",
                             "reason": "allocator_selected",
                             "ticker": oc.get("ticker"),
                             "asset": oc.get("asset"),
