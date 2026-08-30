@@ -846,6 +846,29 @@ class KalshiFill:
             return Decimal("0")
         return Decimal(str(self.count_fp)) * price
 
+    def position_side_price_cents(self) -> Optional[int]:
+        """Return the price in the position's own outcome space (the held side).
+
+        For a long YES position this is the YES-leg price; for a long NO
+        position it is the NO-leg price.  This lets counterparty-equivalent
+        fills (e.g. SELL_NO vs BUY_YES) be compared on a single price axis.
+        """
+        yes_cents = _safe_price_to_cents(self.yes_price_dollars)
+        no_cents = _safe_price_to_cents(self.no_price_dollars)
+
+        if self.economic_side == "YES":
+            if yes_cents is not None:
+                return yes_cents
+            if no_cents is not None:
+                return 100 - no_cents
+        elif self.economic_side == "NO":
+            if no_cents is not None:
+                return no_cents
+            if yes_cents is not None:
+                return 100 - yes_cents
+
+        return self.canonical_leg_price_cents or self.price_cents
+
 
 @dataclass
 class OrderIntent:
@@ -4402,17 +4425,26 @@ class KalshiFillsLedger:
 
         Used to match a provisional live-router fill with the later authoritative
         HTTP/WS fill so the two sources collapse to one state mutation.
+
+        The comparison is on the signed-YES economic effect (quantity and
+        canonical signed-YES delta) and the position-side price, not on the
+        literal side/action labels.  Counterparty-equivalent forms such as
+        SELL_NO and BUY_YES have the same effect and price in the held side's
+        space.
         """
         if a.market_ticker != b.market_ticker:
             return False
-        if a.canonical_position_side != b.canonical_position_side:
-            return False
-        if a.canonical_position_action != b.canonical_position_action:
+        if a.order_id and b.order_id and a.order_id != b.order_id:
             return False
         if (a.quantity_cc or 0) != (b.quantity_cc or 0):
             return False
-        a_price = a.canonical_leg_price_cents or a.price_cents or 0
-        b_price = b.canonical_leg_price_cents or b.price_cents or 0
+        if (a.canonical_yes_delta_cc or 0) != (b.canonical_yes_delta_cc or 0):
+            return False
+
+        a_price = a.position_side_price_cents()
+        b_price = b.position_side_price_cents()
+        if a_price is None or b_price is None:
+            return False
         return abs(a_price - b_price) <= 1
 
     def _reindex_fill_id(self, old_id: str, new_id: str, fill: KalshiFill) -> None:
@@ -4479,10 +4511,53 @@ class KalshiFillsLedger:
         existing.client_order_id = getattr(fill, "client_order_id", None) or existing.client_order_id
         existing.client_tag = getattr(fill, "client_tag", None) or existing.client_tag
         existing.liquidity_role = fill.liquidity_role or existing.liquidity_role
-        existing.yes_price_dollars = fill.yes_price_dollars or existing.yes_price_dollars
-        existing.no_price_dollars = fill.no_price_dollars or existing.no_price_dollars
-        existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or existing.canonical_leg_price_cents
-        existing.execution_price_cents = fill.execution_price_cents or existing.execution_price_cents
+
+        # Preserve the existing canonical side/action when they are already set.
+        # The live-router record is derived from the originating intent and keeps
+        # the user's intended contract form.  The authoritative fill may arrive in
+        # the economic counterparty form (e.g. BUY_YES for a SELL_NO); the
+        # canonical side/action must not be flipped, to keep the ledger's
+        # (ticker:side) position key stable.  Only backfill if the existing record
+        # is missing canonical fields.
+        if existing.canonical_position_side not in ("yes", "no") and fill.canonical_position_side in ("yes", "no"):
+            existing.canonical_position_side = fill.canonical_position_side
+        if existing.canonical_position_action not in ("buy", "sell") and fill.canonical_position_action in ("buy", "sell"):
+            existing.canonical_position_action = fill.canonical_position_action
+        if (
+            existing.canonical_position_side in ("yes", "no")
+            and existing.canonical_position_action in ("buy", "sell")
+            and (existing.canonical_yes_delta_cc is None or existing.canonical_yes_delta_cc == 0)
+        ):
+            try:
+                existing.canonical_yes_delta_cc = yes_delta(
+                    existing.canonical_position_action, existing.canonical_position_side, existing.quantity_cc
+                )
+            except Exception:
+                pass
+
+        # Overlay complete price fields from the authoritative fill.  Missing side
+        # prices are not derived via complement here; the canonical leg price is
+        # recomputed below from the existing (preserved) canonical side.
+        if fill.yes_price_dollars is not None:
+            existing.yes_price_dollars = fill.yes_price_dollars
+        if fill.no_price_dollars is not None:
+            existing.no_price_dollars = fill.no_price_dollars
+
+        # Recompute the canonical leg and execution price in the existing
+        # canonical side's own outcome space, using the authoritative fill's
+        # complete price fields.  This prevents a counterparty-form authoritative
+        # fill from overwriting the user's NO-side price with the YES-side price.
+        can_side = existing.canonical_position_side
+        if can_side == "yes" and existing.yes_price_dollars is not None:
+            existing.canonical_leg_price_cents = _safe_price_to_cents(existing.yes_price_dollars)
+            existing.execution_price_cents = existing.canonical_leg_price_cents
+        elif can_side == "no" and existing.no_price_dollars is not None:
+            existing.canonical_leg_price_cents = _safe_price_to_cents(existing.no_price_dollars)
+            existing.execution_price_cents = existing.canonical_leg_price_cents
+        elif fill.canonical_leg_price_cents is not None or fill.execution_price_cents is not None:
+            existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or existing.canonical_leg_price_cents
+            existing.execution_price_cents = fill.execution_price_cents or existing.execution_price_cents
+
         # price_cents is a read-only display property; canonical leg price is already
         # preserved above. Do not assign to the property to avoid AttributeError.
         existing.fee_cost = fill.fee_cost or existing.fee_cost
@@ -5848,13 +5923,16 @@ class KalshiFillsLedger:
         yes_price_dollars = normalize_price(yes_price) if yes_price else None
         no_price_dollars = normalize_price(no_price) if no_price else None
 
-        # CRITICAL FIX (2026-08-09): WebSocket fills (and some HTTP records) only
-        # carry one leg price. Derive the complement so a NO-side fill priced at
-        # YES=68c correctly reports NO=32c.
-        if yes_price_dollars is not None and no_price_dollars is None:
-            no_price_dollars = Decimal("1") - yes_price_dollars
-        elif no_price_dollars is not None and yes_price_dollars is None:
-            yes_price_dollars = Decimal("1") - no_price_dollars
+        # CRITICAL FIX (2026-08-27): HTTP fills from /portfolio/fills carry both
+        # leg prices.  Use only the side's own price field; do not synthesize the
+        # other leg via complement, which can mask misreported prices.  WebSocket
+        # and legacy payloads may still carry a single price, so the complement is
+        # retained as a fallback for non-HTTP sources.
+        if source != "http_poller":
+            if yes_price_dollars is not None and no_price_dollars is None:
+                no_price_dollars = Decimal("1") - yes_price_dollars
+            elif no_price_dollars is not None and yes_price_dollars is None:
+                yes_price_dollars = Decimal("1") - no_price_dollars
 
         # CRITICAL FIX (2026-07-21): Use outcome_side as canonical direction field per Kalshi's order-direction semantics
         # outcome_side (yes/no) expresses which outcome the user is long - this is the canonical field
@@ -5930,7 +6008,13 @@ class KalshiFillsLedger:
 
         _market_outcome_side = (raw.get("outcome_side") or raw.get("intent_side") or "").lower()
         if _market_outcome_side not in ("yes", "no"):
-            _market_outcome_side = None
+            _book_side = (raw.get("book_side") or "").lower()
+            if _book_side == "bid":
+                _market_outcome_side = "yes"
+            elif _book_side == "ask":
+                _market_outcome_side = "no"
+            else:
+                _market_outcome_side = None
 
         # 2. The user's contract side is the authoritative side; fall back to the
         #    market's reported outcome side when it is the only field available.
@@ -5949,8 +6033,6 @@ class KalshiFillsLedger:
                 _execution_action = "sell" if _raw_action == "buy" else "buy"
             else:
                 _execution_action = _raw_action
-
-        _book_side = (raw.get("book_side") or "").lower()
 
         # 2. Resolve the agent's intent and keep its original target side/action.
         _intent_target_side: Optional[str] = None

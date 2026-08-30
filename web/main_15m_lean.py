@@ -3349,15 +3349,15 @@ async def _run_full_startup_in_lifespan(app):
                 if hedge_config.enabled and hedge_config.auto_exit.enabled:
                     # Price provider function for hedge auto-exit loop
                     def hedge_price_provider():
-                        """Get current prices for all assets from market state store."""
+                        """Get current prices for assets within the active trading scope."""
                         try:
                             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                            from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
-                            
+                            from config.trading_scope import get_trading_scope
+
                             store = get_kalshi_market_state_store()
                             prices = {}
-                            
-                            for asset in ACTIVE_CRYPTO_ASSETS:
+
+                            for asset in get_trading_scope().ALLOWED_ASSETS:
                                 # Get current 15m market for this asset
                                 try:
                                     from merid.event_venues.kalshi.market_catalog import get_market_catalog

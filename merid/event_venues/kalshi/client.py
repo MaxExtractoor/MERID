@@ -5323,29 +5323,62 @@ class KalshiVenueClient(EventVenueClient):
             elif "unrealized_pnl" in data:
                 unrealized_pnl = Decimal(str(data.get("unrealized_pnl", 0)))
 
-            # Handle avg_price - new format may not include it, calculate from exposure/position
-            # CRITICAL FIX (2026-08-03): exposure/count is in DOLLARS; convert to cents
-            # (was divided by 100 again downstream -> 100x too small entry prices).
+            # Handle avg_price - derive from the Kalshi MarketPosition cost fields.
+            # CRITICAL FIX (2026-08-27): `market_exposure_dollars` (or `total_traded_dollars`)
+            # is the cost paid for the position in the position's own outcome space. Dividing
+            # by the absolute position size yields the average entry price in cents. The
+            # legacy `avg_price` field is treated as a fallback only; when it is the
+            # complement of the cost-derived price (e.g. 42c vs 58c) it is rejected.
             avg_price = Decimal("0")
+            avg_price_cents = None
+
+            for exposure_field in ("market_exposure_dollars", "total_traded_dollars"):
+                if exposure_field in data:
+                    try:
+                        exposure = Decimal(str(data.get(exposure_field, 0)))
+                        if exposure > 0 and count > 0:
+                            avg_price_cents = (exposure / Decimal(count)) * 100
+                            break
+                    except Exception:
+                        pass
+
             if "avg_price" in data:
-                avg_price = Decimal(str(data.get("avg_price", 0)))
-            elif "market_exposure_dollars" in data and count > 0:
-                # Calculate avg_price from exposure and position count
-                exposure = Decimal(str(data.get("market_exposure_dollars", 0)))
-                avg_price = (exposure / Decimal(count)) * 100 if count > 0 else Decimal("0")
-            
-            # Handle total_cost - new format uses total_cost_dollars
+                try:
+                    raw_avg = Decimal(str(data.get("avg_price", 0)))
+                    if raw_avg > 0 and avg_price_cents is not None:
+                        # Reject an avg_price that is the YES-complement of the cost basis.
+                        if abs(raw_avg + avg_price_cents - Decimal("100")) <= Decimal("1"):
+                            logger.warning(
+                                "[KALSHI-POSITION-AVG-COMPLEMENT] ticker=%s raw_avg=%s cost_avg=%s - "
+                                "ignoring API avg_price because it is the complement of the cost-derived price",
+                                ticker, raw_avg, avg_price_cents
+                            )
+                        elif abs(raw_avg - avg_price_cents) <= Decimal("1"):
+                            # API avg_price is consistent with cost; use it.
+                            avg_price_cents = raw_avg
+                        # else keep the cost-derived value.
+                    elif raw_avg > 0:
+                        avg_price_cents = raw_avg
+                except Exception:
+                    pass
+
+            if avg_price_cents is not None and avg_price_cents > 0:
+                avg_price = avg_price_cents
+
+            # Handle total_cost - new format uses total_traded_dollars or total_cost_dollars
             total_cost = Decimal("0")
             if "total_cost" in data:
                 total_cost = Decimal(str(data.get("total_cost", 0)))
+            elif "total_traded_dollars" in data:
+                total_cost = Decimal(str(data.get("total_traded_dollars", 0)))
             elif "total_cost_dollars" in data:
                 total_cost = Decimal(str(data.get("total_cost_dollars", 0)))
-            
+
             # CRITICAL FIX (2026-08-13): Do NOT invert the average price for NO positions.
-            # Kalshi's MarketPosition exposes market_exposure_dollars (positive cost) and
-            # a signed position_fp. Dividing cost by the absolute position size yields the
-            # price in the position's own outcome space (NO price for a NO position).
-            # Legacy raw `avg_price` fields, when present, are also outcome-side.
+            # `market_exposure_dollars` / `total_traded_dollars` are positive costs in the
+            # position's own outcome space, and `position_fp` is signed (positive=YES,
+            # negative=NO). Dividing cost by the absolute position size yields the correct
+            # own-side average entry price.
             pass
 
             return KalshiPosition(
