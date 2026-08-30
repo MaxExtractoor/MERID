@@ -553,6 +553,19 @@ async def lifespan(app: FastAPI):
             )
             raise
 
+        # Start the authoritative CF Benchmarks RTI stream as early as possible.
+        # The stream is non-blocking; starting it before the rest of the trading
+        # stack gives it time to connect and produce a fresh observation before
+        # the first cycle.  It is also idempotent, so the P1.0.3 call later in
+        # _run_startup_phases is a no-op.
+        logger.info("[LIFESPAN] Step 1e: Starting CF-RTI stream early")
+        try:
+            from merid.data.cf_rti_adapter import start_kalshi_rti_stream
+            start_kalshi_rti_stream()
+            logger.info("[LIFESPAN] Step 1e: CF-RTI stream start requested")
+        except Exception as e:
+            logger.warning("[LIFESPAN] Step 1e: CF-RTI stream start failed: %s - continuing", e)
+
         # Startup
         logger.info("[LIFESPAN] Step 2: ENTER lifespan startup - RUNNING STARTUP")
         

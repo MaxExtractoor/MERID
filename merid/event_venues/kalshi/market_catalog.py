@@ -2514,7 +2514,7 @@ class KalshiMarketCatalog:
         updated = False
 
         for idx, cm in enumerate(markets):
-            if cm.timeframe != "15m" or cm.asset not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            if cm.timeframe != "15m" or cm.asset not in _get_trading_allowed_assets():
                 continue
             if cm.health_status != "invalid_metadata":
                 continue

@@ -16,10 +16,27 @@ All alerts use the rate-limited tg_send system to avoid spam.
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import os
 
 logger = logging.getLogger(__name__)
+
+# Production scope validation
+try:
+    from config.trading_scope import get_trading_scope
+    TRADING_SCOPE_AVAILABLE = True
+except ImportError:
+    TRADING_SCOPE_AVAILABLE = False
+
+
+def _get_allowed_assets() -> List[str]:
+    """Return the configured profile whitelist, or the legacy five-asset fallback."""
+    if TRADING_SCOPE_AVAILABLE:
+        try:
+            return sorted(get_trading_scope().ALLOWED_ASSETS)
+        except Exception:
+            pass
+    return ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 class IntegrityMonitor:
     """Monitors critical system invariants for live trading safety."""
@@ -184,9 +201,9 @@ class IntegrityMonitor:
             catalog = get_market_catalog()
             snapshot = catalog.snapshot()
             
-            # Get current 15m markets for all 5 crypto assets (BTC, ETH, SOL, XRP, DOGE)
+            # Get current 15m markets for the configured trading-scope assets.
             key_tickers = []
-            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            for asset in _get_allowed_assets():
                 market = snapshot.get_current_15m_market(asset)
                 if market:
                     ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
