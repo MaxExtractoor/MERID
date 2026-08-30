@@ -908,6 +908,16 @@ class Kalshi15mLoop:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         self._catalog = get_market_catalog()
         self._ws_bridge = ws_bridge  # Store shared WS bridge reference
+
+        # Use the configured trading scope (profile-driven asset whitelist) instead
+        # of a hardcoded five-asset list.  This keeps the loop, the agent grid, and
+        # the WebSocket subscription universe in sync when the whitelist is BTC-only.
+        from config.trading_scope import get_trading_scope
+        self._allowed_assets = sorted(get_trading_scope().ALLOWED_ASSETS)
+        logger.info(
+            "[15m-LOOP] Trading scope assets: %s",
+            self._allowed_assets,
+        )
         # CRITICAL FIX: Initialize market_state_store for dynamic sizing
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
         self.market_state_store = get_kalshi_market_state_store()
@@ -1036,25 +1046,25 @@ class Kalshi15mLoop:
         # CRITICAL FIX: 2026-08-02 - Add lifecycle event logging helper
         self._log_candidate_lifecycle_event = self._create_lifecycle_logger()
         
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        for asset in self._allowed_assets:
             self._best_edge_per_asset[asset] = None
         
         # Swing mode tracking: allows YES/NO reversal after trailing exit
         # When trailing stop exits in profit, enable swing mode to allow opposite-side entry
         self._swing_mode: Dict[str, Dict] = {}  # asset -> {enabled: bool, exited_side: str, exit_time: datetime}
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        for asset in self._allowed_assets:
             self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
         
         # Per-asset position tracking for risk enforcement (use Decimal to match position.notional_value type)
         from decimal import Decimal
         self._asset_positions: Dict[str, Decimal] = {}  # asset -> current notional exposure
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        for asset in self._allowed_assets:
             self._asset_positions[asset] = Decimal('0.0')
         
         # Coinbase WebSocket client for external spot velocity signals (Turbine research #1 winner)
         self._coinbase_client = None
         self._coinbase_velocity_signals: Dict[str, Dict] = {}  # asset -> {velocity, timestamp, signal_type}
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        for asset in self._allowed_assets:
             self._coinbase_velocity_signals[asset] = {"velocity": 0.0, "timestamp": 0.0, "signal_type": "none"}
         
         if COINBASE_WS_AVAILABLE:
@@ -1094,7 +1104,7 @@ class Kalshi15mLoop:
                 # BUG FIX: get_asset_exposure doesn't exist - calculate exposure manually
                 # Initialize all assets to 0 (use Decimal to match position.notional_value type)
                 from decimal import Decimal
-                for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                for asset in self._allowed_assets:
                     self._asset_positions[asset] = Decimal('0.0')
                 
                 # Get all positions and calculate exposure per asset
@@ -1107,7 +1117,7 @@ class Kalshi15mLoop:
                 catalog = get_market_catalog()
                 current_window_tickers = {}
                 if catalog:
-                    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                    for asset in self._allowed_assets:
                         try:
                             current_market = catalog.get_current_15m_market(asset)
                             if current_market:
@@ -1153,13 +1163,13 @@ class Kalshi15mLoop:
                                          market_id, asset, position.contracts)
                 
                 # Log final exposure for each asset
-                for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                for asset in self._allowed_assets:
                     logger.info("[15m-LOOP] Loaded position from cache: asset=%s exposure=%.2f (attempt %d/%d)", 
                                asset, self._asset_positions[asset], attempt + 1, max_retries)
                 
                 # Validate that all assets were loaded
                 loaded_assets = set(self._asset_positions.keys())
-                expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+                expected_assets = set(self._allowed_assets)
                 if loaded_assets == expected_assets:
                     logger.info("[15m-LOOP] Position tracking loaded from position cache: %s (attempt %d/%d)", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions), attempt + 1, max_retries)
                     break  # Success, exit retry loop
@@ -1184,7 +1194,7 @@ class Kalshi15mLoop:
                     # Fallback to default Decimal values
                     logger.warning("[15m-LOOP] Position cache failed after %d retries, using default Decimal values", max_retries)
                     from decimal import Decimal
-                    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                    for asset in self._allowed_assets:
                         self._asset_positions[asset] = Decimal('0.0')
                     logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions))
         
@@ -1845,9 +1855,10 @@ class Kalshi15mLoop:
                         if exit_reason == ExitReason.TRAIL:
                             # Extract asset from market_id (e.g., KXBTC15M-TEST -> BTC)
                             asset = None
-                            for prefix in ["KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"]:
+                            for a in self._allowed_assets:
+                                prefix = f"KX{a}"
                                 if position.market_id.startswith(prefix):
-                                    asset = prefix.replace("KX", "")
+                                    asset = a
                                     break
                             
                             if asset:
@@ -2468,7 +2479,8 @@ async def _execute_exit_order(
     # Use the same asset-prefixed agent_id as entry orders for audit consistency
     # and to avoid leaking a module name into the agent_id field.
     lifecycle_asset = "unknown"
-    for _prefix, _asset_name in (("KXBTC", "BTC"), ("KXETH", "ETH"), ("KXSOL", "SOL"), ("KXXRP", "XRP"), ("KXDOGE", "DOGE")):
+    for _asset_name in self._allowed_assets:
+        _prefix = f"KX{_asset_name}"
         if position.market_id.startswith(_prefix):
             lifecycle_asset = _asset_name
             break
@@ -3634,7 +3646,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         except Exception:
             spot_service = None
 
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        for asset in self._allowed_assets:
             current_market = catalog.get_current_15m_market(asset)
             if current_market is None:
                 continue
@@ -4078,7 +4090,7 @@ async def _run_loop(self) -> None:
                 
                 # Initialize all assets to 0 (use Decimal to match position.notional_value type)
                 from decimal import Decimal
-                for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                for asset in self._allowed_assets:
                     self._asset_positions[asset] = Decimal('0.0')
                 
                 # Get all positions and calculate exposure per asset
@@ -4186,12 +4198,12 @@ async def _run_loop(self) -> None:
                         logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
                     
                     # Reset best-edge tracking for new window
-                    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                    for asset in self._allowed_assets:
                         self._best_edge_per_asset[asset] = None
                     logger.info("[15m-LOOP] Reset best-edge tracking for new window")
                     
                     # Reset swing mode for new window (swing mode only valid within same 15m window)
-                    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                    for asset in self._allowed_assets:
                         self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
                     logger.info("[15m-LOOP] Reset swing mode for new window")
                     
@@ -4371,14 +4383,10 @@ async def _run_loop(self) -> None:
                             
                             # Remove "KX" prefix if present
                             asset = asset_part.replace("KX", "")
-                            
-                            # Normalize asset name
-                            asset_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "XRP": "XRP", "DOGE": "DOGE"}
-                            asset = asset_map.get(asset, asset)
-                            
+
                             logger.info("[15m-LOOP] Extracted asset=%s from ticker=%s", asset, ticker)
-                            
-                            if asset not in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+
+                            if asset not in self._allowed_assets:
                                 logger.warning("[15m-LOOP] Unknown asset from ticker %s: extracted=%s - skipping", ticker, asset)
                                 continue
                             
@@ -5267,14 +5275,14 @@ async def _run_one_cycle(self, tick: int) -> None:
         # This bypasses the health snapshot which may not be correctly tracking spot status
         spot_fresh_count = 0
         try:
-            assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+            assets = self._allowed_assets
             for asset in assets:
                 spot_data = spot_service.get(asset)
                 if spot_data and spot_data.price > 0:
                     # Check freshness - spot service tracks age internally
                     # If we can get data and it's valid, consider it fresh
                     spot_fresh_count += 1
-            logger.debug("[SPOT-FRESHNESS-COUNT] cycle=%d fresh=%d/5", tick, spot_fresh_count)
+            logger.debug("[SPOT-FRESHNESS-COUNT] cycle=%d fresh=%d/%d", tick, spot_fresh_count, len(self._allowed_assets))
         except Exception as e:
             logger.warning("[SPOT-FRESHNESS-COUNT] Failed to calculate: %s", e)
     except Exception as e:
@@ -5356,7 +5364,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                         if self._ws_bridge and catalog_snapshot:
                             # Extract current 15m market tickers from catalog (one per asset)
                             initial_tickers = []
-                            for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                            for asset in self._allowed_assets:
                                 current = catalog_snapshot.get_current_15m_market(asset)
                                 if current:
                                     initial_tickers.append(current.market.market_id)
@@ -5388,7 +5396,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                     if self._ws_bridge and catalog_snapshot:
                         # Extract current 15m market tickers from catalog (one per asset)
                         initial_tickers = []
-                        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                        for asset in self._allowed_assets:
                             current = catalog_snapshot.get_current_15m_market(asset)
                             if current:
                                 initial_tickers.append(current.market.market_id)
@@ -5461,7 +5469,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                 # Detect catalog roll (market IDs changed) for WS warmup grace period
                 current_market_ids = set()
                 if catalog_snapshot:
-                    for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                    for asset in self._allowed_assets:
                         current = catalog_snapshot.get_current_15m_market(asset)
                         if current:
                             current_market_ids.add(current.market.market_id)
@@ -5510,7 +5518,7 @@ async def _run_one_cycle(self, tick: int) -> None:
             if hasattr(self, '_catalog') and self._catalog and not in_warmup:
                 catalog_snapshot = self._catalog.snapshot()
                 if catalog_snapshot:
-                    for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                    for asset in self._allowed_assets:
                         current = catalog_snapshot.get_current_15m_market(asset)
                         if not current:
                             continue
@@ -5552,7 +5560,7 @@ async def _run_one_cycle(self, tick: int) -> None:
             # catalog market presence (assets with >=1 active 15m strip in catalog)
             ready_assets_count = 0
             markets_present_count = 0
-            assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+            assets = self._allowed_assets
             # store already initialized above for per-ticker health checks
             
             # LAG-TRACKER: Get spot service for lag correlation
@@ -5927,11 +5935,12 @@ async def _run_one_cycle(self, tick: int) -> None:
                     len(markets) > 0
                 )
                 
-                # FALLBACK: If MD is fresh for all 5 assets, consider WS healthy
-                # This handles cases where WS bridge stats() might be stale but data is flowing
-                if not is_healthy and md_fresh_count >= 5:
+                # FALLBACK: If MD is fresh for all configured assets, consider WS healthy.
+                # This handles cases where WS bridge stats() might be stale but data is flowing.
+                if not is_healthy and md_fresh_count >= num_allowed_assets:
                     logger.warning(
-                        "[WS-FORWARD-HEALTH-GATE] WS bridge stats indicate unhealthy, but MD is fresh (5/5). Overriding to healthy to prevent false HALT."
+                        "[WS-FORWARD-HEALTH-GATE] WS bridge stats indicate unhealthy, but MD is fresh (%d/%d). Overriding to healthy to prevent false HALT.",
+                        md_fresh_count, num_allowed_assets,
                     )
                     is_healthy = True
                 
@@ -5965,8 +5974,12 @@ async def _run_one_cycle(self, tick: int) -> None:
         # P0 FIX: Only halt if ALL assets are stale (md_fresh_count == 0)
         # Allow trading in DEGRADED mode with partial coverage (>=1 asset fresh)
         MIN_MD_COVERAGE_FOR_READY = 1  # At least 1 asset must have fresh MD (diagnostic)
-        # LOOP-STATE: ready-asset count required for NORMAL vs DEGRADED within ACTIVE
-        MIN_READY_ASSETS_FOR_NORMAL = 2  # >=2 ready -> NORMAL, ==1 -> DEGRADED, ==0 (markets present) -> ACTIVE-HALT
+        # LOOP-STATE: ready-asset count required for NORMAL vs DEGRADED within ACTIVE.
+        # With a BTC-only whitelist, a single ready asset is the full scope, so NORMAL
+        # must be attainable with 1/1.
+        num_allowed_assets = len(self._allowed_assets)
+        MIN_READY_ASSETS_FOR_NORMAL = min(2, num_allowed_assets)
+        MIN_READY_ASSETS_FOR_NORMAL = max(1, MIN_READY_ASSETS_FOR_NORMAL)
         
         # Determine catalog health state
         if catalog_age_s <= CATALOG_STALE_WARN_SECONDS:
@@ -6213,12 +6226,12 @@ async def _run_one_cycle(self, tick: int) -> None:
         logger.info(
             "[15M-LOOP-STATE] loop_state=%s execution_mode=%s execution_ready=%s allow_new_entries=%s "
             "pipeline_ready=%s trading_ready=%s spot_ready=%s "
-            "infra_ready=%s markets_expected=%s markets_present=%s(%d/5) "
-            "ready_assets=%d/5 md_fresh=%d/5 depth_sufficient=%d/5 in_maintenance=%s",
+            "infra_ready=%s markets_expected=%s markets_present=%s(%d/%d) "
+            "ready_assets=%d/%d md_fresh=%d/%d depth_sufficient=%d/%d in_maintenance=%s",
             loop_state, execution_mode, execution_ready, allow_new_entries,
             pipeline_ready, trading_ready, spot_ready,
-            infra_ready, markets_expected, markets_present, markets_present_count,
-            ready_assets_count, md_fresh_count, depth_sufficient_count,
+            infra_ready, markets_expected, markets_present, markets_present_count, num_allowed_assets,
+            ready_assets_count, num_allowed_assets, md_fresh_count, num_allowed_assets, depth_sufficient_count, num_allowed_assets,
             in_scheduled_maintenance,
         )
         
@@ -6264,14 +6277,14 @@ async def _run_one_cycle(self, tick: int) -> None:
         if self._previous_execution_mode in ("NO_NEW_ENTRIES", "RUN_DEGRADED", "HALT_CRITICAL") and execution_mode == "RUN_NORMAL":
             logger.info(
                 "[15M-EXECUTION-RECOVERY] mode=RUN_NORMAL previous_mode=%s reason=md_spot_recovered "
-                "md_fresh=%d/5 spot_fresh=%d/5 ready_assets=%d/5",
-                self._previous_execution_mode, md_fresh_count, spot_fresh_count, ready_assets_count
+                "md_fresh=%d/%d spot_fresh=%d/%d ready_assets=%d/%d",
+                self._previous_execution_mode, md_fresh_count, num_allowed_assets, spot_fresh_count, num_allowed_assets, ready_assets_count, num_allowed_assets
             )
             with _diag_open() as f:
                 f.write(
                     f"[{datetime.now(timezone.utc)}] 15M-EXECUTION-RECOVERY: mode=RUN_NORMAL "
                     f"previous_mode={self._previous_execution_mode} reason=md_spot_recovered "
-                    f"md_fresh={md_fresh_count}/5 spot_fresh={spot_fresh_count}/5 ready_assets={ready_assets_count}/5\n"
+                    f"md_fresh={md_fresh_count}/{num_allowed_assets} spot_fresh={spot_fresh_count}/{num_allowed_assets} ready_assets={ready_assets_count}/{num_allowed_assets}\n"
                 )
                 f.flush()
         
@@ -6279,14 +6292,14 @@ async def _run_one_cycle(self, tick: int) -> None:
         if execution_mode == "HALT_CRITICAL" and self._consecutive_critical_cycles == self._max_consecutive_critical_cycles:
             logger.warning(
                 "[15M-EXECUTION-ESCALATION] mode=HALT_CRITICAL consecutive_cycles=%d "
-                "reason=sustained_md_spot_failure md_fresh=%d/5 spot_fresh=%d/5",
-                self._consecutive_critical_cycles, md_fresh_count, spot_fresh_count
+                "reason=sustained_md_spot_failure md_fresh=%d/%d spot_fresh=%d/%d",
+                self._consecutive_critical_cycles, md_fresh_count, num_allowed_assets, spot_fresh_count, num_allowed_assets
             )
             with _diag_open() as f:
                 f.write(
                     f"[{datetime.now(timezone.utc)}] 15M-EXECUTION-ESCALATION: mode=HALT_CRITICAL "
                     f"consecutive_cycles={self._consecutive_critical_cycles} "
-                    f"reason=sustained_md_spot_failure md_fresh={md_fresh_count}/5 spot_fresh={spot_fresh_count}/5\n"
+                    f"reason=sustained_md_spot_failure md_fresh={md_fresh_count}/{num_allowed_assets} spot_fresh={spot_fresh_count}/{num_allowed_assets}\n"
                 )
                 f.flush()
         
@@ -6415,24 +6428,24 @@ async def _run_one_cycle(self, tick: int) -> None:
         with _diag_open() as f:
             status = "READY" if execution_ready else "NOT_READY"
             halt_str = ",".join(halt_components) if halt_components else "none"
-            f.write(f"[{datetime.now(timezone.utc)}] 15M-EXECUTION-{status}: mode={execution_mode} loop_state={loop_state} ready_assets={ready_assets_count}/5 markets_present={markets_present_count}/5 cycle={tick} no_trade_reason={no_trade_reason} halt_components={halt_str} catalog_fresh={catalog_fresh} catalog_health={catalog_health} catalog_age={catalog_age_s:.1f}s catalog_age_ok={catalog_age_ok} md_fresh={md_fresh_count}/5 depth_sufficient={depth_sufficient_count}/5 ws_forwarder_healthy={ws_forwarder_healthy} bankroll_valid={live_bankroll_valid} bankroll={live_bankroll or 0:.2f} bankroll_source={live_bankroll_source} bankroll_source_valid={bankroll_source_valid} fake_bankroll_used={fake_bankroll_used} risk_profile_loaded={risk_profile_loaded} top3_gate_available={top3_gate_available} in_scheduled_maintenance={in_scheduled_maintenance}\n")
+            f.write(f"[{datetime.now(timezone.utc)}] 15M-EXECUTION-{status}: mode={execution_mode} loop_state={loop_state} ready_assets={ready_assets_count}/{num_allowed_assets} markets_present={markets_present_count}/{num_allowed_assets} cycle={tick} no_trade_reason={no_trade_reason} halt_components={halt_str} catalog_fresh={catalog_fresh} catalog_health={catalog_health} catalog_age={catalog_age_s:.1f}s catalog_age_ok={catalog_age_ok} md_fresh={md_fresh_count}/{num_allowed_assets} depth_sufficient={depth_sufficient_count}/{num_allowed_assets} ws_forwarder_healthy={ws_forwarder_healthy} bankroll_valid={live_bankroll_valid} bankroll={live_bankroll or 0:.2f} bankroll_source={live_bankroll_source} bankroll_source_valid={bankroll_source_valid} fake_bankroll_used={fake_bankroll_used} risk_profile_loaded={risk_profile_loaded} top3_gate_available={top3_gate_available} in_scheduled_maintenance={in_scheduled_maintenance}\n")
             f.flush()
         
         
         logger.info(
-            "[15M-EXECUTION-%s] mode=%s loop_state=%s ready_assets=%d/5 cycle=%d no_trade_reason=%s catalog_fresh=%s catalog_health=%s catalog_age=%.1fs catalog_age_ok=%s md_fresh=%d/5 depth_sufficient=%d/5 ws_forwarder_healthy=%s bankroll_valid=%s bankroll=%.2f bankroll_source=%s bankroll_source_valid=%s fake_bankroll_used=%s risk_profile_loaded=%s top3_gate_available=%s",
+            "[15M-EXECUTION-%s] mode=%s loop_state=%s ready_assets=%d/%d cycle=%d no_trade_reason=%s catalog_fresh=%s catalog_health=%s catalog_age=%.1fs catalog_age_ok=%s md_fresh=%d/%d depth_sufficient=%d/%d ws_forwarder_healthy=%s bankroll_valid=%s bankroll=%.2f bankroll_source=%s bankroll_source_valid=%s fake_bankroll_used=%s risk_profile_loaded=%s top3_gate_available=%s",
             "READY" if execution_ready else "NOT_READY",
             execution_mode,
             loop_state,
-            ready_assets_count,
+            ready_assets_count, num_allowed_assets,
             tick,
             no_trade_reason,
             catalog_fresh,
             catalog_health,
             catalog_age_s,
             catalog_age_ok,
-            md_fresh_count,
-            depth_sufficient_count,
+            md_fresh_count, num_allowed_assets,
+            depth_sufficient_count, num_allowed_assets,
             ws_forwarder_healthy,
             live_bankroll_valid,
             live_bankroll or 0,
@@ -6457,11 +6470,11 @@ async def _run_one_cycle(self, tick: int) -> None:
         # In WAITING/IDLE, md/depth are 0 by design (no strips) and must NOT be flagged.
         if loop_state == "ACTIVE":
             if not md_coverage_ok:
-                reasons.append(f"md_coverage({md_fresh_count}/5)")
+                reasons.append(f"md_coverage({md_fresh_count}/{num_allowed_assets})")
             if execution_mode == "ACTIVE-HALT":
-                reasons.append("no_assets_ready(0/5)")
+                reasons.append(f"no_assets_ready(0/{num_allowed_assets})")
             elif execution_mode == "DEGRADED":
-                reasons.append(f"mode_degraded({ready_assets_count}/5)")
+                reasons.append(f"mode_degraded({ready_assets_count}/{num_allowed_assets})")
         if not ws_forwarder_healthy:
             reasons.append("ws_forwarder")
         if not live_bankroll_valid:
@@ -6477,14 +6490,14 @@ async def _run_one_cycle(self, tick: int) -> None:
         
         
         logger.info(
-            "[E2E-AUDIT-SNAPSHOT] ready=%s loop_state=%s mode=%s reasons=%s catalog_age=%.1fs md_fresh=%d/5 depth=%d/5 ws=%s bankroll=%.2f bankroll_source=%s bankroll_source_valid=%s fake_bankroll_used=%s risk=%s top3=%s in_scheduled_maintenance=%s",
+            "[E2E-AUDIT-SNAPSHOT] ready=%s loop_state=%s mode=%s reasons=%s catalog_age=%.1fs md_fresh=%d/%d depth=%d/%d ws=%s bankroll=%.2f bankroll_source=%s bankroll_source_valid=%s fake_bankroll_used=%s risk=%s top3=%s in_scheduled_maintenance=%s",
             execution_ready,
             loop_state,
             execution_mode,
             ",".join(reasons) if reasons else "none",
             catalog_age_s,
-            md_fresh_count,
-            depth_sufficient_count,
+            md_fresh_count, num_allowed_assets,
+            depth_sufficient_count, num_allowed_assets,
             ws_forwarder_healthy,
             live_bankroll or 0.0,
             live_bankroll_source,
@@ -6505,12 +6518,12 @@ async def _run_one_cycle(self, tick: int) -> None:
             if not catalog_age_ok:
                 violations.append(f"catalog_too_old({catalog_age_s:.1f}s>{CATALOG_STALE_BLOCK_SECONDS}s)")
             if not md_coverage_ok:
-                violations.append(f"md_coverage_insufficient({md_fresh_count}/5)")
+                violations.append(f"md_coverage_insufficient({md_fresh_count}/{num_allowed_assets})")
             if not depth_coverage_ready:
                 if in_scheduled_maintenance:
                     violations.append("scheduled_maintenance")
                 else:
-                    violations.append(f"depth_coverage_insufficient({depth_sufficient_count}/5)")
+                    violations.append(f"depth_coverage_insufficient({depth_sufficient_count}/{num_allowed_assets})")
             if not ws_forwarder_healthy:
                 violations.append("ws_forwarder_unhealthy")
             if not live_bankroll_valid:
@@ -6525,11 +6538,11 @@ async def _run_one_cycle(self, tick: int) -> None:
                 violations.append("top3_gate_missing")
             
             logger.error(
-                "[E2E-GUARDRAIL-TRIP] cycle=%d loop_state=%s execution_mode=%s violations=%s catalog_age=%.1fs md_fresh=%d/5 depth_sufficient=%d/5 ws_forwarder_healthy=%s bankroll_valid=%s bankroll=%.2f bankroll_source=%s bankroll_source_valid=%s fake_bankroll_used=%s risk_profile_loaded=%s top3_gate_available=%s",
+                "[E2E-GUARDRAIL-TRIP] cycle=%d loop_state=%s execution_mode=%s violations=%s catalog_age=%.1fs md_fresh=%d/%d depth_sufficient=%d/%d ws_forwarder_healthy=%s bankroll_valid=%s bankroll=%.2f bankroll_source=%s bankroll_source_valid=%s fake_bankroll_used=%s risk_profile_loaded=%s top3_gate_available=%s",
                 tick, loop_state, execution_mode, ",".join(violations),
                 catalog_age_s,
-                md_fresh_count,
-                depth_sufficient_count,
+                md_fresh_count, num_allowed_assets,
+                depth_sufficient_count, num_allowed_assets,
                 ws_forwarder_healthy,
                 live_bankroll_valid,
                 live_bankroll or 0.0,
@@ -6724,7 +6737,7 @@ async def _run_one_cycle(self, tick: int) -> None:
             logger.warning("[POSITION-CACHE-CHECK] cycle=%d last_sync=NEVER (cache never synced)", tick)
         
         # Log per-asset exposure
-        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        assets = self._allowed_assets
         for asset in assets:
             exposure = position_cache.get_asset_exposure(asset)
             logger.info(
@@ -7056,7 +7069,7 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
             
             # Initialize all assets to 0 (use Decimal to match position.notional_value type)
             from decimal import Decimal
-            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            for asset in self._allowed_assets:
                 self._asset_positions[asset] = Decimal('0.0')
             
             # Get all positions and calculate exposure per asset
@@ -7136,12 +7149,12 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                     logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
                 
                 # Reset best-edge tracking for new window
-                for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                for asset in self._allowed_assets:
                     self._best_edge_per_asset[asset] = None
                 logger.info("[15m-LOOP] Reset best-edge tracking for new window")
                 
                 # Reset swing mode for new window (swing mode only valid within same 15m window)
-                for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                for asset in self._allowed_assets:
                     self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
                 logger.info("[15m-LOOP] Reset swing mode for new window")
                 

@@ -241,6 +241,15 @@ try:
 except ImportError:
     TRADING_SCOPE_AVAILABLE = False
 
+def _get_trading_allowed_assets():
+    """Return the configured profile whitelist, or the legacy five-asset fallback."""
+    if TRADING_SCOPE_AVAILABLE:
+        try:
+            return set(get_trading_scope().ALLOWED_ASSETS)
+        except Exception:
+            pass
+    return {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+
 logger = get_logger("merid.event_venues.kalshi.market_catalog")
 
 def log_market_catalog_version() -> None:
@@ -468,9 +477,10 @@ class CatalogSnapshot:
         Returns:
             CatalogMarket if found in current ET window, None otherwise
         """
-        # CRITICAL FIX: Validate asset is in allowed list
-        if asset not in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            logger.warning("[GET-CURRENT-15M] Invalid asset=%s - returning None", asset)
+        # CRITICAL FIX: Validate asset is in configured trading scope
+        allowed_assets = _get_trading_allowed_assets()
+        if asset not in allowed_assets:
+            logger.warning("[GET-CURRENT-15M] Invalid asset=%s (scope=%s) - returning None", asset, sorted(allowed_assets))
             return None
         
         from datetime import datetime, timezone
@@ -705,8 +715,8 @@ class KalshiMarketCatalog:
         # Catalog is stale if refresh interval is 5s but no refresh for >15s
         is_stale = time_since_refresh > (self._refresh_interval * 3)
         
-        # CRITICAL: Check health of 5 crypto assets
-        critical_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        # CRITICAL: Check health of configured whitelist assets
+        critical_assets = sorted(_get_trading_allowed_assets())
         asset_health = {}
         missing_assets = []
         
@@ -1433,9 +1443,10 @@ class KalshiMarketCatalog:
         self._by_timeframe = tf_idx
         self._by_ticker = ticker_idx
         
-        # Enforce catalog invariants: exactly 5 assets (BTC, ETH, SOL, XRP, DOGE) with 15m tickers
+        # Enforce catalog invariants: all configured whitelist assets have 15m tickers.
+        # The legacy five-asset set is a fail-visible fallback if trading scope is unavailable.
         from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
-        expected_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        expected_assets = sorted(_get_trading_allowed_assets())
         assets_with_tickers = set()
         assets_missing_tickers = []
         
@@ -1450,7 +1461,7 @@ class KalshiMarketCatalog:
         # Log invariant check results
         if len(assets_with_tickers) == len(expected_assets):
             logger.info(
-                "[CATALOG-INVARIANT] PASS: All 5 assets have active 15m tickers: %s",
+                "[CATALOG-INVARIANT] PASS: All configured assets have active 15m tickers: %s",
                 sorted(assets_with_tickers)
             )
         else:
@@ -2689,7 +2700,8 @@ class KalshiMarketCatalog:
             results = [m for m in results if m.timeframe == timeframe]
         
         # Production scope filter: only allow 15m crypto markets
-        if TRADING_SCOPE_AVAILABLE and asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        allowed_assets = _get_trading_allowed_assets()
+        if TRADING_SCOPE_AVAILABLE and asset in allowed_assets:
             results = [m for m in results if m.timeframe == "15m"]
             logger.debug(
                 f"[SCOPE_FILTER] Filtered {asset} to 15m markets only: {len(results)} results"
@@ -2755,9 +2767,11 @@ class KalshiMarketCatalog:
         # CRITICAL: Compute per-asset availability instead of aggregate universe
         # This allows exits on assets that DO have active tickers even when others don't
         if timeframe == "15m":
-            # Check availability per asset
+            # Check availability per asset against the configured trading whitelist,
+            # not the legacy five-asset set, so a BTC-only profile doesn't generate
+            # routine "missing" logs for ETH/SOL/XRP/DOGE.
             assets_with_markets = set(m.asset for m in markets)
-            all_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+            all_assets = _get_trading_allowed_assets()
             assets_without_markets = all_assets - assets_with_markets
             
             if assets_without_markets:
@@ -2783,10 +2797,11 @@ class KalshiMarketCatalog:
                         sorted(assets_without_markets)
                     )
             
-            # Only log venue-unavailable if ALL 5 assets have no markets
+            # Only log venue-unavailable if ALL configured whitelist assets have no markets
             if not markets:
                 logger.warning(
-                    "KALSHI-15M-UNIVERSE CRITICAL: No tradeable 15m markets for ANY asset (BTC/ETH/SOL/XRP/DOGE) within 0-30 min; treating venue as unavailable."
+                    "KALSHI-15M-UNIVERSE CRITICAL: No tradeable 15m markets for ANY asset (%s) within 0-30 min; treating venue as unavailable.",
+                    "/".join(sorted(all_assets))
                 )
         
         # CRITICAL: Assert max one tradeable 15m market per asset at a time
@@ -3173,9 +3188,10 @@ class KalshiMarketCatalog:
         Returns:
             CatalogMarket if found in current window, None otherwise
         """
-        # CRITICAL FIX: Validate asset is in allowed list
-        if asset not in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            logger.warning("[GET-CURRENT-15M] Invalid asset=%s - returning None", asset)
+        # CRITICAL FIX: Validate asset is in configured trading scope
+        allowed_assets = _get_trading_allowed_assets()
+        if asset not in allowed_assets:
+            logger.warning("[GET-CURRENT-15M] Invalid asset=%s (scope=%s) - returning None", asset, sorted(allowed_assets))
             return None
         
         from merid.event_venues.kalshi.kalshi_15m_time import select_live_markets_by_ts
@@ -3245,7 +3261,7 @@ class KalshiMarketCatalog:
 
 async def validate_catalog_against_kalshi_api(
     catalog: "KalshiMarketCatalog",
-    assets: List[str] = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    assets: Optional[List[str]] = None
 ) -> dict:
     """
     Validate catalog's view of 15m crypto markets against Kalshi's Get Markets API.
@@ -3264,7 +3280,10 @@ async def validate_catalog_against_kalshi_api(
         Dict with validation results per asset
     """
     from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
-    
+
+    if assets is None:
+        assets = sorted(_get_trading_allowed_assets())
+
     results = {}
     
     for asset in assets:
