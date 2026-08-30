@@ -4302,6 +4302,26 @@ async def _run_loop(self) -> None:
                 else:
                     total_candidates = len(candidates)
 
+                # CRITICAL FIX (2026-08-28): Counter-reconciliation bridge.  Verify that
+                # the agent_grid accounting is internally consistent before the loop
+                # adds its own layer of rejections.
+                if isinstance(candidates, CycleResult):
+                    agent_generated = candidates.total_generated
+                    agent_returned = len(candidates)
+                    agent_rejected = sum(candidates.rejection_breakdown.values())
+                    if agent_returned + agent_rejected != agent_generated:
+                        logger.warning(
+                            "[COUNTER-RECONCILIATION-MISMATCH] tick=%d "
+                            "agent_generated=%d agent_returned=%d agent_rejected=%d",
+                            tick_id, agent_generated, agent_returned, agent_rejected,
+                        )
+                    else:
+                        logger.info(
+                            "[COUNTER-RECONCILIATION] tick=%d "
+                            "agent_generated=%d agent_returned=%d agent_rejected=%d",
+                            tick_id, agent_generated, agent_returned, agent_rejected,
+                        )
+
                 # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m._select_best_edge_per_asset
                 # This ensures up to 2 contracts per asset per window (cheapest with best edge, capped by $1 exposure) is selected
                 # before candidates are passed to the global allocator. The loop_15m execution logic
