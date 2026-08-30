@@ -31,6 +31,31 @@ def _disable_persistence_and_fees(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _seed_canonical_position_cache():
+    """Seed the canonical cache with an open position for the test market.
+
+    The exit guard now rejects exits when the canonical position cache reports
+    a flat or missing position. These tests call the guard directly with a
+    monitor-side Position snapshot, so the canonical cache must be seeded to
+    satisfy the new safety contract.
+    """
+    from merid.event_venues.kalshi.position_cache import CachedPosition, get_position_cache
+
+    market_id = "KXBTC15M-26AUG100000-00"
+    cache = get_position_cache()
+    cache._positions[market_id] = CachedPosition(
+        market_id=market_id,
+        agent_id="test",
+        contracts=1,
+        side="no",
+        thesis_side="no",
+        avg_price_cents=74,
+    )
+    yield
+    cache._positions.pop(market_id, None)
+
+
 def _make_state(*, no_bid=None, no_ask=None, yes_bid=None, yes_ask=None,
                 age_ms=1000, seconds_to_expiry=300.0, source="ws"):
     """Build a minimal market state for the exit guard."""
@@ -198,22 +223,23 @@ def test_unknown_exit_reason_rejected():
     assert record["reject_reason"] == "exit_reason_not_allowed"
 
 
-def test_time_exit_with_small_loss_rejected():
-    """A time exit with even a small gross loss is rejected by the profit floor."""
+def test_time_exit_with_small_loss_allowed():
+    """A time exit is a forced exit and is allowed to realize a bounded loss."""
     position = _make_position()
-    # 1c gross loss -> net -5 with mocked 4c round-trip fee; below 5c min profit.
+    # 1c gross loss -> net -7 with mocked 4c round-trip fee; forced exit still approves.
     state = _make_state(no_bid=73, no_ask=75)
 
-    approved, price, record, _did = _run_guard(
+    approved, _price, record, _did = _run_guard(
         position, "time_stop", exit_price_cents=73, state=state
     )
 
-    assert approved is False
-    assert record["reject_reason"] == "profit_exit_not_profitable"
+    assert approved is True
+    assert record["exit_reason_canonical"] == "time_exit"
+    assert record["projected_net_pnl_cents"] < 0
 
 
 def test_time_exit_break_even_with_zero_slippage():
-    """Break-even time exit is still rejected by the profit floor."""
+    """Break-even time exit is allowed as a forced exit but still pays round-trip fees."""
     position = _make_position()
     state = _make_state(no_bid=74, no_ask=76)
 
@@ -221,8 +247,9 @@ def test_time_exit_break_even_with_zero_slippage():
         position, "time_stop", exit_price_cents=74, state=state
     )
 
-    assert approved is False
-    assert record["reject_reason"] == "profit_exit_not_profitable"
+    assert approved is True
+    assert record["exit_reason_canonical"] == "time_exit"
+    assert record["projected_net_pnl_cents"] == -6
     assert record["projected_net_pnl_cents"] == -6  # gross -2 - 4c fee
 
 

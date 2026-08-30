@@ -631,6 +631,27 @@ class IdempotentOrderStore:
                     return True
             return False
 
+    def has_in_flight_order_for_side(self, contract_id: str, side: str) -> bool:
+        """Check for any in-flight (non-terminal, not yet FILLED) order on contract+side.
+
+        Unlike ``has_live_order``, this ignores ``strategy_group`` and excludes
+        terminal states (including FILLED) so it only matches orders that are
+        still unresolved (PENDING/SUBMITTED/LIVE/PARTIAL).  Used to close the
+        race where a second entry intent on the same contract+side is submitted
+        before the first order's fill/resting state has settled.  Once the first
+        order is FILLED (terminal), this returns False and the normal
+        position/scaling gates govern re-entry.
+        """
+        with self._lock:
+            for rec in self._orders.values():
+                if (
+                    rec.contract_id == contract_id
+                    and rec.side == side
+                    and rec.status not in _TERMINAL_STATES
+                ):
+                    return True
+            return False
+
     def check_price_repeat(
         self,
         contract_id: str,
@@ -1014,6 +1035,33 @@ class PreTradeGate:
                 reason=f"resting_duplicate:{resting_duplicate.client_order_id}",
                 is_duplicate=True,
                 existing_status=resting_duplicate.status.value,
+            )
+
+        # 3b-ii. In-flight entry race guard: block a second ENTRY intent on the same
+        # contract+side while a prior entry is still unresolved (PENDING/SUBMITTED/
+        # LIVE/PARTIAL).  position_cache only reflects fills, and resting_order_monitor
+        # only tracks GTC orders, so an aggressive IOC entry is invisible to both
+        # during its in-flight window - a trailing intent a few seconds later would
+        # otherwise pass all gates and double-enter.  FILLED is terminal, so once the
+        # first entry fills this check no longer blocks and the normal position /
+        # scaling gates govern re-entry.  Exits (reduce_only / entry_or_exit="exit")
+        # are never blocked here.
+        is_entry = (
+            entry_or_exit == "entry"
+            or (entry_or_exit is None and action == "buy" and not reduce_only)
+        )
+        if is_entry and self._store.has_in_flight_order_for_side(contract_id, side):
+            self._store._metrics.blocked_duplicate += 1
+            logger.warning(
+                "[GATE-ALERT] in_flight_entry_blocked contract=%s side=%s action=%s price=%dc "
+                "coid=%s agent=%s strategy=%s intent_id=%s",
+                contract_id, side, action, price_cents, coid, agent_id, strategy_group, intent_id,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason="in_flight_entry_exists",
+                is_duplicate=True,
             )
 
         # 3c. CRITICAL: Price repeat check - prevent executing same price multiple times
@@ -1506,6 +1554,33 @@ class PreTradeGate:
                 reason=f"resting_duplicate:{resting_duplicate.client_order_id}",
                 is_duplicate=True,
                 existing_status=resting_duplicate.status.value,
+            )
+
+        # 3b-ii. In-flight entry race guard: block a second ENTRY intent on the same
+        # contract+side while a prior entry is still unresolved (PENDING/SUBMITTED/
+        # LIVE/PARTIAL).  position_cache only reflects fills, and resting_order_monitor
+        # only tracks GTC orders, so an aggressive IOC entry is invisible to both
+        # during its in-flight window - a trailing intent a few seconds later would
+        # otherwise pass all gates and double-enter.  FILLED is terminal, so once the
+        # first entry fills this check no longer blocks and the normal position /
+        # scaling gates govern re-entry.  Exits (reduce_only / entry_or_exit="exit")
+        # are never blocked here.
+        is_entry = (
+            entry_or_exit == "entry"
+            or (entry_or_exit is None and action == "buy" and not reduce_only)
+        )
+        if is_entry and self._store.has_in_flight_order_for_side(contract_id, side):
+            self._store._metrics.blocked_duplicate += 1
+            logger.warning(
+                "[GATE-ALERT] in_flight_entry_blocked contract=%s side=%s action=%s price=%dc "
+                "coid=%s agent=%s strategy=%s intent_id=%s",
+                contract_id, side, action, price_cents, coid, agent_id, strategy_group, intent_id,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason="in_flight_entry_exists",
+                is_duplicate=True,
             )
 
         # 3c. CRITICAL: Price repeat check - prevent executing same price multiple times

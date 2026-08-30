@@ -7635,11 +7635,12 @@ class KalshiFillsLedger:
                             canonical_leg_price_cents, canonical_yes_delta_cc,
                             ledger_schema_version, canonicalization_version, canonicalization_state,
                             client_order_id, client_tag, liquidity_role, subaccount_number, created_time,
+                            created_at,
                             ingestion_source, ingested_at, agent_id, intent_id,
                             reconciled, raw_payload, decision_trace_id, fill_source,
                             hedge_reason, hedge_pnl_cents, related_alpha_fill_id,
                             is_exit, reduce_only, entry_or_exit
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         fill.fill_id, fill.trade_id, fill.order_id, fill.market_ticker,
                         fill.side, fill.action, str(fill.count_fp), fill.quantity_cc or int(fill.count_fp * 100),
@@ -7659,6 +7660,7 @@ class KalshiFillsLedger:
                         fill.canonicalization_state,
                         fill.client_order_id, fill.client_tag, fill.liquidity_role,
                         fill.subaccount_number,
+                        fill.created_time.isoformat(),
                         fill.created_time.isoformat(),
                         fill.ingestion_source,
                         fill.ingested_at.isoformat(),
