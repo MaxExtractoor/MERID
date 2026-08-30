@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from merid.startup_validations import StartupValidationError, validate_production_startup
+from merid.startup_validations import StartupValidationError, validate_production_startup, validate_hybrid_signal_audit
 
 
 # ---------------------------------------------------------------------------
@@ -354,3 +355,100 @@ async def test_direct_place_order_allowed_in_testing_with_explicit_capability(
     result = await _prod_client.place_order_result(order)
     assert result.success
     assert _prod_client._http_client.request.called
+
+
+# ---------------------------------------------------------------------------
+# Hybrid signal audit gate
+# ---------------------------------------------------------------------------
+
+def test_hybrid_signal_audit_allows_non_live_without_artifact(monkeypatch):
+    """Paper/shadow modes may run signal_mode=hybrid to generate the audit."""
+    monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+    monkeypatch.setenv("MERID_TRADE_MODE", "paper")
+    monkeypatch.delenv("MERID_ALLOW_LIVE_TRADES", raising=False)
+
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    with patch(
+        "merid.risk.profiles.crypto_15m_profile.get_crypto_15m_profile",
+        return_value=SimpleNamespace(signal_mode="hybrid"),
+    ):
+        validate_hybrid_signal_audit()
+
+
+def test_hybrid_signal_audit_blocks_live_without_artifact(monkeypatch):
+    """Live signal_mode=hybrid without an audit artifact must fail closed."""
+    monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    with patch(
+        "merid.risk.profiles.crypto_15m_profile.get_crypto_15m_profile",
+        return_value=SimpleNamespace(signal_mode="hybrid"),
+    ):
+        with pytest.raises(StartupValidationError, match="audit artifact not found"):
+            validate_hybrid_signal_audit()
+
+
+def test_hybrid_signal_audit_blocks_live_expired_artifact(monkeypatch, tmp_path):
+    """Live signal_mode=hybrid with an expired audit must fail closed."""
+    monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+
+    audit = tmp_path / "expired_audit.json"
+    from datetime import datetime, timedelta, timezone
+    expired = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    audit.write_text(json.dumps({"valid_until": expired}))
+    monkeypatch.setenv("MERID_HYBRID_SIGNAL_AUDIT_PATH", str(audit))
+
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    with patch(
+        "merid.risk.profiles.crypto_15m_profile.get_crypto_15m_profile",
+        return_value=SimpleNamespace(signal_mode="hybrid"),
+    ):
+        with pytest.raises(StartupValidationError, match="expired"):
+            validate_hybrid_signal_audit()
+
+
+def test_hybrid_signal_audit_passes_live_with_passing_artifact(monkeypatch, tmp_path):
+    """Live signal_mode=hybrid with a passing audit artifact is approved."""
+    monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+
+    from datetime import datetime, timedelta, timezone
+    valid_until = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    audit = tmp_path / "passing_audit.json"
+    audit.write_text(json.dumps({
+        "model_signature": "pre-registered-v1",
+        "hold_out_set_size": 500,
+        "brier_score": 0.18,
+        "brier_baseline": "venue_implied",
+        "expected_calibration_error": 0.05,
+        "reliability_plot": [
+            {"predicted_prob": 0.1, "observed_freq": 0.08, "n_trades": 100},
+            {"predicted_prob": 0.5, "observed_freq": 0.52, "n_trades": 100},
+            {"predicted_prob": 0.9, "observed_freq": 0.91, "n_trades": 100},
+        ],
+        "pbo": 0.25,
+        "deflated_sharpe_ratio": 0.96,
+        "walk_forward_efficiency": 0.35,
+        "mean_net_edge_per_bucket_cents": 1.5,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "valid_until": valid_until,
+        "auditor": "risk-committee",
+    }))
+    monkeypatch.setenv("MERID_HYBRID_SIGNAL_AUDIT_PATH", str(audit))
+
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    with patch(
+        "merid.risk.profiles.crypto_15m_profile.get_crypto_15m_profile",
+        return_value=SimpleNamespace(signal_mode="hybrid"),
+    ):
+        validate_hybrid_signal_audit()

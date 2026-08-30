@@ -5060,6 +5060,7 @@ class KalshiVenueClient(EventVenueClient):
             outcomes=[_to_outcome(o) for o in market.outcomes],
             category=market.category,
             tags=market.tags,
+            open_time=market.open_time,
             end_date=market.close_time or market.expiration_time,
             active=market.active,
             volume=market.volume,
