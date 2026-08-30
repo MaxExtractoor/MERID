@@ -5242,7 +5242,30 @@ async def _run_one_cycle(self, tick: int) -> None:
     logger.debug("[15M-LOOP-CYCLE] ENTER cycle=%d", tick)
     cycle_start = time.time()
     self._last_cycle_at = datetime.now(timezone.utc)
-    
+
+    # Reset per-tick rejection counters so [COUNTER-SANITY-CHECK] only reports
+    # this cycle's reasons and does not accumulate every unique time_to_expiry
+    # string from previous cycles.
+    self._rejection_counters = Counter({
+        "parity_blocked": 0,
+        "parity_edge_threshold": 0,
+        "parity_winner_mismatch": 0,
+        "parity_price_violation": 0,
+        "edge_below_threshold": 0,
+        "duplicate_order": 0,
+        "edge_improvement_cancel_failed": 0,
+        "price_out_of_range": 0,
+        "position_exists": 0,
+        "resting_order_exists": 0,
+        "edge_validation_failed": 0,
+        "exit_policy_failed": 0,
+        "router_rejected": 0,
+        "router_exception": 0,
+        "other": 0,
+        "ENTRIES_DISABLED": 0,
+        "signal_rejected": 0,
+    })
+
     # Initialize timing variables at cycle start to ensure they're always defined
     catalog_elapsed = 0.0
     bankroll_elapsed = 0.0
