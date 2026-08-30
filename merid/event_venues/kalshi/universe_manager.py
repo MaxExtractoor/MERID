@@ -118,6 +118,7 @@ class UniverseManager:
             "timestamp": now.isoformat(),
             "valid": True,
             "violations": [],
+            "grace_only": False,
             "catalog": {
                 "count": len(catalog_tickers),
                 "tickers": sorted(catalog_tickers),
@@ -200,6 +201,7 @@ class UniverseManager:
             only_sync_violations = in_grace and all(
                 v.startswith("SYNC_") for v in result["violations"]
             )
+            result["grace_only"] = bool(only_sync_violations)
 
             if only_sync_violations:
                 logger.info(
