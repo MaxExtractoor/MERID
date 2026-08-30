@@ -186,6 +186,11 @@ def _ensure_kalshi_stream() -> Optional[Any]:
         if _kalshi_stream is not None:
             return _kalshi_stream
 
+        # Starting a new stream is a clean restart: clear any stale cached
+        # observations so the first post-reconnect frame isn't rejected against
+        # an old wall/monotonic clock.
+        reset_state()
+
         if not _env_bool("MERID_CFB_RTI_ADAPTER"):
             return None
 
