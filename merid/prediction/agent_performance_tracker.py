@@ -42,6 +42,7 @@ class TradeRecord:
     predicted_edge: float
     confidence: float
     velocity: Optional[float] = None  # Spot velocity at signal time (used for side accuracy analysis)
+    p_selected: Optional[float] = None  # model probability of the selected/held side (0-1)
     exit_price_cents: Optional[int] = None
     exit_ts: Optional[float] = None
     profit_usd: Optional[Decimal] = None
@@ -137,6 +138,7 @@ class AgentPerformanceTracker:
         predicted_edge: float = 0.0,
         confidence: float = 0.5,
         velocity: Optional[float] = None,
+        p_selected: Optional[float] = None,
     ) -> None:
         """Record an order fill (trade entry).
         
@@ -149,6 +151,7 @@ class AgentPerformanceTracker:
             predicted_edge: Agent's predicted edge (0.0 to 1.0)
             confidence: Agent's confidence in signal (0.0 to 1.0)
             velocity: Spot velocity at signal time (used for side accuracy analysis)
+            p_selected: Model probability of the selected/held side (0.0 to 1.0)
         """
         # P0 FIX: Thread-safe fill recording with RLock (BUG-UPSTREAM-2)
         with self._fill_lock:
@@ -162,6 +165,7 @@ class AgentPerformanceTracker:
                 predicted_edge=predicted_edge,
                 confidence=confidence,
                 velocity=velocity,
+                p_selected=p_selected,
             )
             
             # BUG-W fix: composite key prevents multi-agent same-market collision
@@ -503,6 +507,65 @@ class AgentPerformanceTracker:
                 metrics.sharpe_ratio = avg_pnl / std_dev if std_dev > 0 else 0.0
         
         logger.debug(f"Recalculated metrics for {len(trades_by_agent)} agents")
+
+    def get_probability_bucket_report(
+        self,
+        bucket_width: float = 0.05,
+        min_trades: int = 1,
+    ) -> Dict[str, Any]:
+        """Return realized win rate by model-probability bucket.
+
+        Trades are bucketed by ``p_selected`` (the model probability of the
+        side that was held).  For each bucket we report count, win rate, total
+        PnL, and average predicted/realized edge so we can empirically verify
+        calibration of the newly-admitted cheap-side EV trades.
+
+        Args:
+            bucket_width: Width of each probability bucket (default 0.05 = 5%).
+            min_trades: Minimum number of trades required to report a bucket.
+
+        Returns:
+            Dict with bucket list and summary counts.
+        """
+        from collections import defaultdict
+
+        buckets: Dict[int, List[TradeRecord]] = defaultdict(list)
+        for trade in self._closed_trades:
+            if trade.p_selected is None:
+                continue
+            bucket_idx = int(trade.p_selected / bucket_width)
+            buckets[bucket_idx].append(trade)
+
+        report = []
+        for idx, trades in sorted(buckets.items()):
+            if len(trades) < min_trades:
+                continue
+            wins = sum(1 for t in trades if t.outcome == "win")
+            losses = sum(1 for t in trades if t.outcome == "loss")
+            total = wins + losses
+            win_rate = wins / total if total > 0 else 0.0
+            total_pnl = sum(t.profit_usd or Decimal("0") for t in trades)
+            avg_pred_edge = sum(t.predicted_edge for t in trades) / len(trades)
+            realized_edges = [t.realized_edge for t in trades if t.realized_edge is not None]
+            avg_real_edge = sum(realized_edges) / len(realized_edges) if realized_edges else 0.0
+            lo = idx * bucket_width
+            hi = lo + bucket_width
+            report.append({
+                "bucket": f"{lo:.2f}-{hi:.2f}",
+                "count": len(trades),
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(win_rate, 4),
+                "total_pnl_usd": str(total_pnl),
+                "avg_predicted_edge": round(avg_pred_edge, 4),
+                "avg_realized_edge": round(avg_real_edge, 4),
+            })
+
+        return {
+            "bucket_width": bucket_width,
+            "total_trades_with_p_selected": sum(len(v) for v in buckets.values()),
+            "buckets": report,
+        }
 
     def compute_brier_score(self, agent_id: Optional[str] = None) -> Optional[float]:
         """Compute Brier score for an agent (or all agents if agent_id is None).

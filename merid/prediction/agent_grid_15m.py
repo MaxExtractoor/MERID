@@ -7975,11 +7975,14 @@ class LeanAgent15m:
         # Explicit edge breakdown in the log.  No hidden deductions.
         bd = decision.edge_breakdown
         _ind = decision.indicators or {}
+        net_edge_pct = edge_pct * 100.0
         logger.info(
             "[TRADE-DECISION] asset=%s side=%s action=%s price=%dc "
             "p_yes=%.3f p_no=%.3f p_selected=%.3f "
             "entry_price=%.3f entry_fee=%.3f exit_reserve=%.3f risk_reserve=%.3f "
-            "gross_edge=%.3f net_edge=%.3f annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
+            "gross_edge=%.3f net_edge=%.3f edge_pct=%.4f%% "
+            "edge_formula=\"p_selected - entry_price - entry_fee - exit_reserve - risk_reserve = net_edge\" "
+            "annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
             "raw_p_yes=%.3f raw_p_no=%.3f p_yes_for_yes=%.3f p_no_for_no=%.3f "
             "tail_cap_yes=%s tail_cap_no=%s tail_deviation_yes=%.3f tail_deviation_no=%.3f "
             "confidence=%s confidence_valid=%s confidence_source=%s",
@@ -7991,6 +7994,7 @@ class LeanAgent15m:
             float(bd.model_risk_reserve) if bd else 0.0,
             float(decision.gross_edge) if decision.gross_edge is not None else 0.0,
             edge_pct,
+            net_edge_pct,
             float(_ind.get("annualized_vol", 0.0)),
             _ind.get("annualized_vol_source", "unknown"),
             float(_ind.get("z_score", 0.0)),
