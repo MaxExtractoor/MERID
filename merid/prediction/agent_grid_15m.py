@@ -1235,11 +1235,13 @@ async def build_15m_agent_grid(
         resolved_live.profile_name,
         resolved_live.min_required_edge,
     )
-    # Safety floor: the resolved edge must not be below the hard 0.05 default.
-    if resolved_live.min_required_edge < Decimal("0.05"):
+    # Safety floor: the resolved edge must not be below the profile's 0.07
+    # target.  A value of 0.05 means the code default won (profile unresolved),
+    # which is the exact bug this assertion is meant to prevent.
+    if resolved_live.min_required_edge < Decimal("0.07"):
         raise RuntimeError(
             f"Resolved min_required_edge {resolved_live.min_required_edge} is below "
-            "the 0.05 safety floor. Refuse to build agent grid."
+            "the 0.07 profile floor. Refuse to build agent grid."
         )
 
     # Get the profile for configuration
