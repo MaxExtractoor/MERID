@@ -4754,6 +4754,30 @@ class KalshiPositionCache:
                                 market_id, avg_price_from_rest, market_exposure_dollars, position_fp
                             )
 
+                    # CRITICAL FIX (2026-08-27): Guard against REST reporting the
+                    # average price as the complement of the position's own price.
+                    # If the ledger has a fill for this market and
+                    #   REST_avg + fill.position_side_price ~= 100,
+                    # the REST value is the wrong side's price and must be rejected.
+                    if avg_price_cents is not None and self._fills_ledger:
+                        try:
+                            fills = self._fills_ledger.get_fills_by_market(market_id)
+                            if fills:
+                                latest_fill = fills[-1]
+                                fill_pos_price = latest_fill.position_side_price_cents()
+                                if fill_pos_price and fill_pos_price > 0:
+                                    if abs(avg_price_cents + fill_pos_price - 100) <= 1:
+                                        logger.warning(
+                                            "[POSITION-CACHE-AVG-COMPLEMENT] market=%s rest_avg=%d fill_pos_price=%d - "
+                                            "overriding with fills_ledger position-side price",
+                                            market_id, avg_price_cents, fill_pos_price,
+                                        )
+                                        avg_price_cents = fill_pos_price
+                                        avg_price_source = "fills_ledger_guard"
+                                        entry_price_state = "known"
+                        except Exception as guard_err:
+                            logger.debug("[POSITION-CACHE] avg complement guard failed for %s: %s", market_id, guard_err)
+
                     # CRITICAL FIX (2026-07-21): Use preserved thesis_side from fill-based cache instead of REST API
                     # Kalshi REST API reports positions from a YES-side perspective, which can
                     # invert the side for NO positions. We preserve the thesis_side (immutable strategy thesis).
