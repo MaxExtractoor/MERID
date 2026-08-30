@@ -378,9 +378,12 @@ def test_hybrid_signal_audit_allows_non_live_without_artifact(monkeypatch):
 
 
 def test_hybrid_signal_audit_blocks_live_without_artifact(monkeypatch):
-    """Live signal_mode=hybrid without an audit artifact must fail closed."""
+    """Live signal_mode=hybrid with deltas enabled requires an audit artifact."""
     monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
     monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setenv("MERID_HYBRID_ENABLE_DELTAS", "1")
+    monkeypatch.delenv("MERID_HYBRID_BACHELIER_ONLY", raising=False)
+    monkeypatch.delenv("MERID_HYBRID_DISABLE_ALL_DELTAS", raising=False)
 
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -394,9 +397,12 @@ def test_hybrid_signal_audit_blocks_live_without_artifact(monkeypatch):
 
 
 def test_hybrid_signal_audit_blocks_live_expired_artifact(monkeypatch, tmp_path):
-    """Live signal_mode=hybrid with an expired audit must fail closed."""
+    """Live signal_mode=hybrid with deltas enabled and an expired audit must fail closed."""
     monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
     monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setenv("MERID_HYBRID_ENABLE_DELTAS", "1")
+    monkeypatch.delenv("MERID_HYBRID_BACHELIER_ONLY", raising=False)
+    monkeypatch.delenv("MERID_HYBRID_DISABLE_ALL_DELTAS", raising=False)
 
     audit = tmp_path / "expired_audit.json"
     from datetime import datetime, timedelta, timezone
@@ -416,9 +422,12 @@ def test_hybrid_signal_audit_blocks_live_expired_artifact(monkeypatch, tmp_path)
 
 
 def test_hybrid_signal_audit_passes_live_with_passing_artifact(monkeypatch, tmp_path):
-    """Live signal_mode=hybrid with a passing audit artifact is approved."""
+    """Live signal_mode=hybrid with deltas enabled and a passing audit artifact is approved."""
     monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
     monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.setenv("MERID_HYBRID_ENABLE_DELTAS", "1")
+    monkeypatch.delenv("MERID_HYBRID_BACHELIER_ONLY", raising=False)
+    monkeypatch.delenv("MERID_HYBRID_DISABLE_ALL_DELTAS", raising=False)
 
     from datetime import datetime, timedelta, timezone
     valid_until = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
@@ -443,6 +452,22 @@ def test_hybrid_signal_audit_passes_live_with_passing_artifact(monkeypatch, tmp_
         "auditor": "risk-committee",
     }))
     monkeypatch.setenv("MERID_HYBRID_SIGNAL_AUDIT_PATH", str(audit))
+
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    with patch(
+        "merid.risk.profiles.crypto_15m_profile.get_crypto_15m_profile",
+        return_value=SimpleNamespace(signal_mode="hybrid"),
+    ):
+        validate_hybrid_signal_audit()
+
+
+def test_hybrid_signal_audit_allows_live_bachelier_only(monkeypatch):
+    """Live signal_mode=hybrid is allowed without an artifact when deltas are disabled."""
+    monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+    monkeypatch.setenv("MERID_TRADE_MODE", "live")
+    monkeypatch.delenv("MERID_HYBRID_ENABLE_DELTAS", raising=False)
 
     from types import SimpleNamespace
     from unittest.mock import patch
