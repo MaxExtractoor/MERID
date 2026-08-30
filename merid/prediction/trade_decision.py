@@ -62,6 +62,15 @@ MERID_CHEAP_TAIL_P_EXCEPTION = float(os.environ.get("MERID_CHEAP_TAIL_P_EXCEPTIO
 MERID_TAIL_CALIBRATION_ENABLED = os.environ.get("MERID_TAIL_CALIBRATION_ENABLED", "1").lower() in ("1", "true", "yes")
 MERID_TAIL_CALIBRATION_BUFFER = float(os.environ.get("MERID_TAIL_CALIBRATION_BUFFER", "0.05"))
 MERID_TAIL_CALIBRATION_PRICE_FLOOR = float(os.environ.get("MERID_TAIL_CALIBRATION_PRICE_FLOOR", "0.35"))
+# 2026-08-30: When the NO tail curve is still the YES dual (not re-fit on
+# real NO-held records), only apply the dual tail cap if the raw NO model
+# probability is itself in the cheap-tail region.  Capping a moderate or
+# high raw p_no down to 0.05 based on a derived dual is an over-correction
+# that structurally suppresses the NO side.  This is a stop-gap until the
+# real NO curve is fit.
+MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR = float(
+    os.environ.get("MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR", "0.20")
+)
 
 # Fail-closed gate for externally supplied hybrid p_yes.  Bachelier-only is the
 # live baseline; a hybrid probability is only accepted when this flag is
@@ -1132,10 +1141,13 @@ def compute_trade_decision(
         p_no_for_no = 1.0 - p_yes_for_yes
 
     # YES-held curve: calibrate p_yes if YES is in the cheap tail.
+    p_yes_for_yes_pre_cap = p_yes_for_yes
+    tail_cap_yes_reason = "none"
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None and yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
             p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry)
+            tail_cap_yes_reason = "real_curve"
     # Kalshi venue-invariant [0.05, 0.95] so the downstream order router does
     # not reject high-confidence signals as invalid_model_prob.
     p_yes_for_yes = max(0.05, min(0.95, p_yes_for_yes))
@@ -1144,10 +1156,30 @@ def compute_trade_decision(
     # NO-held curve: calibrate p_no if NO is in the cheap tail.
     # The NO curve in the calibration file is currently a dual, so this is a
     # stop-gap until a real NO tail curve is refit from NO-held records.
+    # 2026-08-30: To avoid over-correcting moderate NO beliefs, only apply the
+    # dual NO cap when the raw NO model probability is itself in the cheap-tail
+    # region (below MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR).  A real NO curve
+    # (no_curve_is_dual=False) is applied unconditionally in the cheap-price tail.
+    p_no_for_no_pre_cap = p_no_for_no
+    tail_cap_no_reason = "none"
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None and no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
-            p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+            if tail_calibrator.no_curve_is_dual:
+                if p_no_for_no < MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR:
+                    p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+                    tail_cap_no_reason = "dual_raw_cheap"
+                else:
+                    tail_cap_no_reason = "dual_moderate_skipped"
+                    logger.info(
+                        "[TAIL-CALIBRATION-NO-DUAL] asset=%s ticker=%s no_entry=%.3f "
+                        "raw_p_no=%.3f >= dual_raw_floor=%.3f; skipping dual NO tail cap",
+                        asset, ticker, no_entry, p_no_for_no,
+                        MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR,
+                    )
+            else:
+                p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+                tail_cap_no_reason = "real_curve"
     p_no_for_no = max(0.05, min(0.95, p_no_for_no))
     p_yes_for_no = 1.0 - p_no_for_no
 
@@ -1189,13 +1221,18 @@ def compute_trade_decision(
         "p_no_for_yes": p_no_for_yes,
         "p_yes_for_no": p_yes_for_no,
         "p_no_for_no": p_no_for_no,
+        "p_yes_for_yes_pre_cap": p_yes_for_yes_pre_cap,
+        "p_no_for_no_pre_cap": p_no_for_no_pre_cap,
         "tail_cap_yes": yes_in_tail,
         "tail_cap_no": no_in_tail,
+        "tail_cap_yes_reason": tail_cap_yes_reason,
+        "tail_cap_no_reason": tail_cap_no_reason,
         "tail_deviation_yes": yes_deviation,
         "tail_deviation_no": no_deviation,
         "tail_deviation_guard": tail_calibration_deviation_guard,
         "tail_guard_violation_yes": tail_guard_violation_yes,
         "tail_guard_violation_no": tail_guard_violation_no,
+        "tail_calibration_no_dual_raw_floor": MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR,
     })
 
     fee = fee_per_contract_cents / 100.0
