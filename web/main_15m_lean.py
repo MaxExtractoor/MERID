@@ -2005,8 +2005,10 @@ async def _agents_status_impl():
             continue
 
     # P1 HARDENING: Make missing agent status a first-class health failure with MISSING_AGENT log
-    # Expected assets for 15m crypto trading
-    expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+    # Expected assets are the configured production scope (profile-driven whitelist),
+    # not a hardcoded five-asset list.
+    from config.trading_scope import get_trading_scope
+    expected_assets = set(get_trading_scope().ALLOWED_ASSETS)
     missing_assets = expected_assets - set(agents_by_asset.keys())
     if missing_assets:
         logger.warning(
