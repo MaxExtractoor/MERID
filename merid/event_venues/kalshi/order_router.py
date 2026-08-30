@@ -202,6 +202,9 @@ try:
 except ImportError:
     BOOK_FRESHNESS_AVAILABLE = False
 
+# WS/REST divergence guard source-aware health state machine
+from merid.event_venues.kalshi.market_state import BookHealth
+
 
 def _dedup_cache():
     """Helper to get the global order deduplication cache singleton."""
@@ -3503,30 +3506,153 @@ async def reconcile_submission_unknown_client_order_id(
     )
 
 
-async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t0: float) -> Optional[OrderResult]:
-    """Fetch a fresh REST book, verify snapshot coherence, and compare to WS.
+def _is_marketable_against_book(intent: OrderIntent, book_side: Dict[str, Any]) -> bool:
+    """Return True if the intent price is marketable against the supplied BBO.
 
-    The guard is fail-closed for entries: if the REST snapshot is stale or the
-    two feeds diverge persistently, it returns a rejected ``OrderResult``.
-    Exit/reduce-only orders are allowed through when they remain marketable
-    against the fresh REST book, because closing a position on stale WS data is
-    preferable to leaving risk unhedged.
-
-    Coherence rules:
-      1. REST snapshot must be no older than ``MERID_WS_REST_MAX_REST_AGE_MS``
-         (default 500ms).  Older snapshots are non-authoritative and the guard
-         is skipped rather than used to reject.
-      2. On first divergence, fetch REST a second time.  If the divergence
-         disappears, the first snapshot was transient/stale; allow the order.
-      3. If the second fresh snapshot still diverges, reject (or allow exits if
-         marketable).
+    Resolution respects the canonical execution mode (maker/passive vs
+    taker/staged_ioc).  A taker order must cross the spread: buy >= ask,
+    sell <= bid.  A maker order must rest without crossing: buy <= bid,
+    sell >= ask.
     """
+    order_price = getattr(intent, "price_cents", None)
+    bid_cents = book_side.get("bid_cents")
+    ask_cents = book_side.get("ask_cents")
+    if order_price is None or bid_cents is None or ask_cents is None:
+        return False
+
+    try:
+        order_price = int(order_price)
+        bid_cents = int(bid_cents)
+        ask_cents = int(ask_cents)
+    except Exception:
+        return False
+
+    action = (getattr(intent, "action", "") or "").lower()
+    if action not in ("buy", "sell"):
+        return False
+
+    execution_mode = _resolve_execution_mode(intent)
+    is_maker = execution_mode in ("maker", "passive_quote")
+
+    if is_maker:
+        if action == "buy":
+            return order_price <= bid_cents
+        else:
+            return order_price >= ask_cents
+    else:
+        if action == "buy":
+            return order_price >= ask_cents
+        else:
+            return order_price <= bid_cents
+
+
+def _is_ws_authoritative(state: KalshiMarketState) -> bool:
+    """Return True when the WebSocket feed is the live, trusted primary book."""
+    if state is None:
+        return False
+
+    REST_DERIVED_SOURCES = {
+        "REST_FULL_ORDERBOOK",
+        "REST_BOOTSTRAP",
+        "rest_polling",
+        "BOOTSTRAP_VALID_BUT_UNCONFIRMED",
+    }
+    if getattr(state, "data_source", "UNKNOWN") in REST_DERIVED_SOURCES:
+        return False
+    if not getattr(state, "snapshot_complete", False):
+        return False
+    if not getattr(state, "live_sequence_confirmed", False):
+        return False
+    if not getattr(state, "book_initialized", False):
+        return False
+
+    health = getattr(state, "book_health", "NO_SNAPSHOT")
+    if health not in {
+        BookHealth.LIVE,
+        BookHealth.RECOVERED,
+        BookHealth.SNAPSHOT_RECEIVED,
+        BookHealth.SEQUENCE_VALIDATING,
+    }:
+        return False
+
+    source = (getattr(state, "data_source", "UNKNOWN") or "UNKNOWN").upper()
+    return (
+        source in {
+            "WS",
+            "WS_LIVE",
+            "WS_QUOTE",
+            "WS_ORDERBOOK_DELTA_LIVE",
+            "WS_ORDERBOOK_SNAPSHOT",
+            "WS_CLEAN_SNAPSHOT",
+            "ORDERBOOK_DELTA_LIVE",
+        }
+        or source.startswith("WS")
+    )
+
+
+def _ws_age_ms(state: KalshiMarketState) -> float:
+    """Return milliseconds since the last WebSocket orderbook update.
+
+    ``last_ws_update_ts`` and ``last_book_update_ts`` are set from
+    ``time.monotonic()`` in the market-state store, so we must compare them
+    against ``time.monotonic()``, not wall-clock ``replay_time()``.
+    """
+    if state is None:
+        return float("inf")
+    ws_ts = getattr(state, "last_ws_update_ts", 0.0) or getattr(state, "last_book_update_ts", 0.0)
+    if ws_ts <= 0:
+        return float("inf")
+    return max(0.0, (_time.monotonic() - ws_ts) * 1000.0)
+
+
+def _book_internal_consistent(market_state_store: Any, book: Dict[str, Any], ticker: str) -> bool:
+    """Check that YES/NO invariants hold for the given side-aware book."""
+    if market_state_store is None:
+        return False
+    yes_bid = book.get("yes_bid_cents")
+    yes_ask = book.get("yes_ask_cents")
+    no_bid = book.get("no_bid_cents")
+    no_ask = book.get("no_ask_cents")
+    try:
+        return bool(market_state_store._validate_yes_no_invariants(ticker, yes_bid, yes_ask, no_bid, no_ask))
+    except Exception:
+        return False
+
+
+async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t0: float) -> Optional[OrderResult]:
+    """Source-aware WS/REST divergence guard.
+
+    WebSocket is the authoritative live pricing source. REST is used for
+    reconciliation and recovery only. Divergence is classified by freshness and
+    source so that ordinary market moves do not block marketable orders, while
+    genuine integrity problems (stale/corrupted WS, rollover race, crossed book)
+    still fail closed.
+
+    Decision reasons logged:
+      - ``coherent``: feeds agree within tolerance.
+      - ``ws_authoritative``: WS is live and the order is marketable against WS.
+      - ``rest_authoritative``: WS is stale but a fresh REST book exists and the
+        order is marketable against REST.
+      - ``stale_rest``: REST is stale/lagging while WS is live; order marketable
+        against WS.
+      - ``stale_ws``: WS is stale; REST is fresh and the order is marketable.
+      - ``natural_move``: both feeds are fresh and divergent within the hard
+        limit, but the order remains marketable against the authoritative WS.
+      - ``integrity_failure``: crossed/inconsistent book or divergence exceeds
+        the hard limit (rollover/corruption).
+      - ``not_marketable``: divergence cannot be ignored because the order price
+        would not fill against the best available fresh feed.
+      - ``rest_snapshot_stale`` / ``rest_unavailable``: REST cannot be trusted;
+        WS is used as primary.
+    """
+    ws_state: Optional[KalshiMarketState] = None
+    market_state_store: Optional[Any] = None
     try:
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
         market_state_store = get_kalshi_market_state_store()
         ws_state = market_state_store.get(intent.ticker) if market_state_store else None
 
-        if not (ws_state and ws_state.best_bid_cents and ws_state.best_ask_cents):
+        if not (ws_state and ws_state.best_bid_cents is not None and ws_state.best_ask_cents is not None):
             logger.info(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_NO_CROSSFEED decision=ALLOW "
                 "reason=no_ws_bid_ask ws_state=%s",
@@ -3535,66 +3661,6 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             )
             return None
 
-        # When the cached book is itself from a REST source, the cross-feed
-        # WS-vs-REST comparison is comparing two REST snapshots of different
-        # ages. That is not a useful divergence check; the STALENESS-SLO gate
-        # already enforces the data-age budget. Skip to avoid rejecting on
-        # fast markets when Kalshi is not sending live WS orderbook snapshots.
-        REST_DERIVED_SOURCES = {
-            "REST_FULL_ORDERBOOK",
-            "REST_BOOTSTRAP",
-            "rest_polling",
-            "BOOTSTRAP_VALID_BUT_UNCONFIRMED",
-        }
-        if getattr(ws_state, "data_source", "UNKNOWN") in REST_DERIVED_SOURCES:
-            logger.info(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=REST_DERIVED_SKIPPED decision=ALLOW "
-                "reason=rest_derived_book data_source=%s ws_snapshot_complete=%s",
-                intent.ticker, ws_state.data_source,
-                getattr(ws_state, "snapshot_complete", False),
-            )
-            return None
-
-        # ---- fetch fresh REST snapshot -----------------------------------------
-        ob_result = await asyncio.wait_for(
-            port.get_orderbook(intent.ticker),
-            timeout=3.0,
-        )
-        if not ob_result.success:
-            logger.warning(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_UNAVAILABLE decision=ALLOW "
-                "reason=rest_orderbook_fetch_failed error=%s ws_snapshot_complete=%s rest_timeout_ms=3000",
-                intent.ticker, ob_result.error,
-                getattr(ws_state, "snapshot_complete", False),
-            )
-            return None
-
-        rest_book = _canonical_yes_book_from_port(ob_result)
-        if rest_book is None:
-            logger.warning(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_INCOMPLETE decision=ALLOW "
-                "reason=rest_book_incomplete ws_snapshot_complete=%s",
-                intent.ticker,
-                getattr(ws_state, "snapshot_complete", False),
-            )
-            return None
-
-        now = replay_time()
-        rest_age_ms = (now - rest_book["timestamp"]) * 1000.0
-        max_rest_age_ms = float(os.environ.get("MERID_WS_REST_MAX_REST_AGE_MS", "500"))
-
-        if rest_age_ms > max_rest_age_ms:
-            # Non-authoritative REST: do not use it to reject the order, but do
-            # not trust the comparison either.
-            logger.warning(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_STALE decision=ALLOW "
-                "reason=rest_snapshot_stale rest_age_ms=%.0f ws_snapshot_complete=%s",
-                intent.ticker, rest_age_ms,
-                getattr(ws_state, "snapshot_complete", False),
-            )
-            return None
-
-        # ---- side-aware comparison ----------------------------------------------
         ws_book = _side_aware_book_for_intent(
             {
                 "yes_bid_cents": int(round(ws_state.best_bid_cents)),
@@ -3604,21 +3670,86 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             },
             intent.side,
         )
+
+        ws_authoritative = _is_ws_authoritative(ws_state)
+        ws_age_ms = _ws_age_ms(ws_state)
+        ws_marketable = _is_marketable_against_book(intent, ws_book)
+
+        max_ws_age_ms = float(os.environ.get("MERID_WS_REST_DIVERGENCE_WS_FRESH_MS", "5000.0"))
+        max_rest_age_ms = float(os.environ.get("MERID_WS_REST_MAX_REST_AGE_MS", "500.0"))
+        tolerance_cents = int(os.environ.get("MERID_WS_REST_DIVERGENCE_TOLERANCE_CENTS", "2"))
+        hard_limit_cents = int(os.environ.get("MERID_WS_REST_DIVERGENCE_HARD_LIMIT_CENTS", "25"))
+
+        # ---- fetch a REST book for reconciliation ------------------------------
+        ob_result = None
+        rest_book: Optional[Dict[str, Any]] = None
+        rest_age_ms = float("inf")
+        try:
+            ob_result = await asyncio.wait_for(
+                port.get_orderbook(intent.ticker),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            ob_result = None
+
+        if ob_result and getattr(ob_result, "success", False):
+            rest_book = _canonical_yes_book_from_port(ob_result)
+            if rest_book:
+                rest_ts = rest_book.get("timestamp")
+                if rest_ts:
+                    rest_age_ms = max(0.0, (replay_time() - float(rest_ts)) * 1000.0)
+
+        rest_usable = rest_book is not None and rest_age_ms <= max_rest_age_ms
+
+        # If REST is unusable, WS is primary by default.  Allow only when the
+        # WS book is fresh enough and the order is marketable.
+        if not rest_usable:
+            if ws_authoritative and ws_age_ms <= max_ws_age_ms and ws_marketable:
+                logger.info(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_AUTHORITATIVE decision=ALLOW "
+                    "reason=rest_unavailable_ws_marketable ws_age_ms=%.0f "
+                    "ws_bid=%d ws_ask=%d order_price=%dc action=%s",
+                    intent.ticker, ws_age_ms,
+                    ws_book["bid_cents"], ws_book["ask_cents"],
+                    getattr(intent, "price_cents", None),
+                    getattr(intent, "action", ""),
+                )
+                return None
+            if ws_authoritative and ws_age_ms <= max_ws_age_ms:
+                logger.error(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_AUTHORITATIVE decision=BLOCKED "
+                    "reason=rest_unavailable_not_marketable ws_age_ms=%.0f "
+                    "ws_bid=%d ws_ask=%d order_price=%dc action=%s",
+                    intent.ticker, ws_age_ms,
+                    ws_book["bid_cents"], ws_book["ask_cents"],
+                    getattr(intent, "price_cents", None),
+                    getattr(intent, "action", ""),
+                )
+            else:
+                logger.error(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=NO_FRESH_FEED decision=BLOCKED "
+                    "reason=no_fresh_feed ws_age_ms=%.0f rest_age_ms=%.0f",
+                    intent.ticker, ws_age_ms, rest_age_ms,
+                )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="ws_rest_divergence:no_fresh_feed",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
         rest_book_side = _side_aware_book_for_intent(rest_book, intent.side)
+        rest_marketable = _is_marketable_against_book(intent, rest_book_side)
 
         bid_divergence_cents = abs(ws_book["bid_cents"] - rest_book_side["bid_cents"])
         ask_divergence_cents = abs(ws_book["ask_cents"] - rest_book_side["ask_cents"])
         max_divergence_cents = max(bid_divergence_cents, ask_divergence_cents)
 
-        try:
-            tolerance_cents = int(os.environ.get("MERID_WS_REST_DIVERGENCE_TOLERANCE_CENTS", "2"))
-        except Exception:
-            tolerance_cents = 2
-
         logger.info(
             "[WS-REST-DIVERGENCE-CANONICAL] ticker=%s intent_id=%s side=%s "
             "WS yes=%s/%s no=%s/%s | REST yes=%s/%s no=%s/%s | "
-            "side=%s WS=%s/%s REST=%s/%s max_divergence=%dc tolerance=%dc rest_age_ms=%.0f",
+            "side=%s WS=%s/%s REST=%s/%s max_divergence=%dc tolerance=%dc "
+            "ws_age_ms=%.0f rest_age_ms=%.0f ws_authoritative=%s",
             intent.ticker, intent.intent_id, intent.side,
             ws_state.best_bid_cents, ws_state.best_ask_cents,
             100 - ws_state.best_ask_cents, 100 - ws_state.best_bid_cents,
@@ -3626,113 +3757,142 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             rest_book["no_bid_cents"], rest_book["no_ask_cents"],
             ws_book["space"], ws_book["bid_cents"], ws_book["ask_cents"],
             rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-            max_divergence_cents, tolerance_cents, rest_age_ms,
+            max_divergence_cents, tolerance_cents,
+            ws_age_ms, rest_age_ms, ws_authoritative,
         )
 
+        # ---- check internal consistency of both feeds --------------------------
+        ws_full_book = {
+            "yes_bid_cents": int(round(ws_state.best_bid_cents)),
+            "yes_ask_cents": int(round(ws_state.best_ask_cents)),
+            "no_bid_cents": 100 - int(round(ws_state.best_ask_cents)),
+            "no_ask_cents": 100 - int(round(ws_state.best_bid_cents)),
+        }
+        ws_consistent = _book_internal_consistent(market_state_store, ws_full_book, intent.ticker)
+        rest_consistent = _book_internal_consistent(market_state_store, rest_book, intent.ticker)
+
+        if ws_book["bid_cents"] > ws_book["ask_cents"] or (not ws_consistent):
+            logger.critical(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_INCONSISTENT decision=BLOCKED "
+                "reason=ws_book_inconsistent ws_bid=%d ws_ask=%d",
+                intent.ticker, ws_book["bid_cents"], ws_book["ask_cents"],
+            )
+            if market_state_store is not None:
+                market_state_store._set_snapshot_complete(intent.ticker, False, "ws_book_inconsistent")
+                market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "ws_book_inconsistent")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="ws_rest_divergence:ws_book_inconsistent",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
+        if rest_book_side["bid_cents"] > rest_book_side["ask_cents"] or (not rest_consistent):
+            logger.error(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=REST_INCONSISTENT decision=BLOCKED "
+                "reason=rest_book_inconsistent rest_bid=%d rest_ask=%d",
+                intent.ticker, rest_book_side["bid_cents"], rest_book_side["ask_cents"],
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="ws_rest_divergence:rest_book_inconsistent",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
+        # ---- coherent: within tolerance ---------------------------------------
         if max_divergence_cents <= tolerance_cents:
             logger.info(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_COHERENT decision=ALLOW "
-                "reason=within_tolerance max_divergence=%dc tolerance=%dc rest_age_ms=%.0f "
-                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
-                intent.ticker, max_divergence_cents, tolerance_cents, rest_age_ms,
+                "reason=coherent max_divergence=%dc tolerance=%dc "
+                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d",
+                intent.ticker, max_divergence_cents, tolerance_cents,
                 ws_book["bid_cents"], ws_book["ask_cents"],
                 rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                getattr(ws_state, "snapshot_complete", False),
             )
             return None
 
-        # ---- first divergence: re-fetch to confirm it is persistent ------------
-        ob_result2 = await asyncio.wait_for(
-            port.get_orderbook(intent.ticker),
-            timeout=3.0,
-        )
-        if ob_result2.success:
-            rest_book2 = _canonical_yes_book_from_port(ob_result2)
-            if rest_book2 is not None:
-                rest_age2_ms = (replay_time() - rest_book2["timestamp"]) * 1000.0
-                if rest_age2_ms <= max_rest_age_ms:
-                    rest_book2_side = _side_aware_book_for_intent(rest_book2, intent.side)
-                    bid_div2 = abs(ws_book["bid_cents"] - rest_book2_side["bid_cents"])
-                    ask_div2 = abs(ws_book["ask_cents"] - rest_book2_side["ask_cents"])
-                    max_div2 = max(bid_div2, ask_div2)
-                    if max_div2 <= tolerance_cents:
-                        logger.info(
-                            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_REFETCH_COHERENT decision=ALLOW "
-                            "reason=divergence_resolved_on_refetch initial_divergence=%dc final_divergence=%dc "
-                            "ws_snapshot_complete=%s",
-                            intent.ticker,
-                            max_divergence_cents, max_div2,
-                            getattr(ws_state, "snapshot_complete", False),
-                        )
-                        return None
-
-        # ---- persistent divergence: decide --------------------------------------
-        is_exit_or_reduce = (
-            _is_exit_order(intent)
-            or getattr(intent, "entry_or_exit", "") == "exit"
-            or getattr(intent, "reduce_only", False)
-            or (getattr(intent, "source", "") or "").startswith("position_monitor")
-        )
-
-        if is_exit_or_reduce:
-            order_price = getattr(intent, "price_cents", None)
-            action = (getattr(intent, "action", "") or "").lower()
-            is_marketable = (
-                order_price is not None
-                and order_price > 0
-                and (
-                    (action == "buy" and order_price >= rest_book_side["ask_cents"])
-                    or (action == "sell" and order_price <= rest_book_side["bid_cents"])
-                )
+        # ---- classify divergence and decide -----------------------------------
+        # 1) Hard limit / rollover / corruption.
+        if max_divergence_cents > hard_limit_cents:
+            logger.critical(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=HARD_DIVERGENCE decision=BLOCKED "
+                "reason=integrity_failure max_divergence=%dc hard_limit=%dc "
+                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d",
+                intent.ticker, max_divergence_cents, hard_limit_cents,
+                ws_book["bid_cents"], ws_book["ask_cents"],
+                rest_book_side["bid_cents"], rest_book_side["ask_cents"],
             )
-            if is_marketable:
+            if market_state_store is not None:
+                market_state_store._set_snapshot_complete(intent.ticker, False, "divergence_hard_limit")
+                market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_hard_limit")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"ws_rest_divergence:integrity_failure:{max_divergence_cents}c",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
+        # 2) WebSocket is stale; trust REST if it is fresh and marketable.
+        if ws_age_ms > max_ws_age_ms:
+            if rest_age_ms <= max_rest_age_ms and rest_marketable:
                 logger.warning(
-                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_EXIT_MARKETABLE decision=ALLOW "
-                    "reason=exit_marketable_against_rest max_divergence=%dc tolerance=%dc order_price=%dc action=%s "
-                    "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
-                    intent.ticker, max_divergence_cents, tolerance_cents,
-                    order_price, action,
-                    ws_book["bid_cents"], ws_book["ask_cents"],
-                    rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                    getattr(ws_state, "snapshot_complete", False),
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=REST_AUTHORITATIVE decision=ALLOW "
+                    "reason=stale_ws_rest_marketable ws_age_ms=%.0f rest_age_ms=%.0f "
+                    "order_price=%dc action=%s",
+                    intent.ticker, ws_age_ms, rest_age_ms,
+                    getattr(intent, "price_cents", None),
+                    getattr(intent, "action", ""),
                 )
                 return None
-
             logger.error(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_EXIT_NOT_MARKETABLE decision=BLOCKED "
-                "reason=exit_not_marketable_against_rest max_divergence=%dc tolerance=%dc order_price=%dc action=%s "
-                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
-                intent.ticker, max_divergence_cents, tolerance_cents,
-                order_price, action,
-                ws_book["bid_cents"], ws_book["ask_cents"],
-                rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                getattr(ws_state, "snapshot_complete", False),
+                "EXECUTION-QUOTE-MODE ticker=%s mode=STALE_WS decision=BLOCKED "
+                "reason=stale_ws_or_not_marketable ws_age_ms=%.0f rest_age_ms=%.0f "
+                "rest_marketable=%s",
+                intent.ticker, ws_age_ms, rest_age_ms, rest_marketable,
             )
-        else:
-            logger.error(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_DIVERGENT decision=BLOCKED "
-                "reason=divergence_exceeds_tolerance max_divergence=%dc tolerance=%dc "
-                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d ws_snapshot_complete=%s",
-                intent.ticker, max_divergence_cents, tolerance_cents,
-                ws_book["bid_cents"], ws_book["ask_cents"],
-                rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-                getattr(ws_state, "snapshot_complete", False),
+            if market_state_store is not None:
+                market_state_store._set_snapshot_complete(intent.ticker, False, "ws_stale_at_order")
+                market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "ws_stale_at_order")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="ws_rest_divergence:stale_ws",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
+        # 3) Both feeds are fresh; the market may have moved between snapshots.
+        #    Allow if the live WS is authoritative and the order is marketable.
+        if ws_authoritative and ws_marketable:
+            logger.info(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_AUTHORITATIVE decision=ALLOW "
+                "reason=natural_move ws_age_ms=%.0f rest_age_ms=%.0f max_divergence=%dc "
+                "order_price=%dc action=%s",
+                intent.ticker, ws_age_ms, rest_age_ms, max_divergence_cents,
+                getattr(intent, "price_cents", None),
+                getattr(intent, "action", ""),
+            )
+            return None
+
+        # 5) Cannot ignore divergence: the order is not marketable against the
+        #    best fresh source or there is no live WS.
+        logger.error(
+            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_DIVERGENT decision=BLOCKED "
+            "reason=not_marketable max_divergence=%dc tolerance=%dc "
+            "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d "
+            "ws_age_ms=%.0f rest_age_ms=%.0f ws_authoritative=%s ws_marketable=%s rest_marketable=%s",
+            intent.ticker, max_divergence_cents, tolerance_cents,
+            ws_book["bid_cents"], ws_book["ask_cents"],
+            rest_book_side["bid_cents"], rest_book_side["ask_cents"],
+            ws_age_ms, rest_age_ms, ws_authoritative, ws_marketable, rest_marketable,
+        )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"ws_rest_divergence:{max_divergence_cents}c",
+            reason=f"ws_rest_divergence:not_marketable:{max_divergence_cents}c",
             latency_ms=round((_time.monotonic() - t0) * 1000, 2),
         )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_TIMEOUT decision=ALLOW "
-            "reason=rest_fetch_timeout rest_timeout_ms=3000 ws_snapshot_complete=%s",
-            intent.ticker,
-            getattr(ws_state, "snapshot_complete", False) if ws_state else False,
-        )
-        return None
+
     except Exception as divergence_err:
         logger.warning(
             "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_ERROR decision=ALLOW "
