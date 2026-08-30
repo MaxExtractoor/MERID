@@ -8843,6 +8843,7 @@ class LeanAgent15m:
         self._last_velocity_source = "internal_fallback"
         self._last_velocity_age_ms = -1.0
         self._last_velocity_signal_type = "none"
+        self._last_signal_vol_context = {}
 
     def _record_signal_rejection(self, reason: str, **context) -> None:
         """Record the specific reason signal generation returned None.
@@ -8863,11 +8864,57 @@ class LeanAgent15m:
         if (context.get("threshold") is None or "threshold" not in context) and hasattr(self, '_last_velocity_threshold'):
             context["threshold"] = self._last_velocity_threshold
 
+        # Backfill vol/strike telemetry for early rejections (e.g. canonical price
+        # filter) that fire before compute_trade_decision resolves the Bachelier
+        # context, so logs stop showing annualized_vol=0.0000 vol_source=N/A.
+        vol_ctx = getattr(self, "_last_signal_vol_context", None) or {}
+        for key in ("annualized_vol", "annualized_vol_source", "z_score", "log_moneyness"):
+            if (context.get(key) is None or key not in context) and key in vol_ctx:
+                context[key] = vol_ctx[key]
+
         self._last_signal_rejection = {
             "reason": reason,
             "context": context,
         }
         self._telemetry_update(rejection_reason=reason, **context)
+
+    def _compute_signal_vol_context(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: Optional[float]) -> None:
+        """Resolve strike + annualized vol early so pre-decision rejections carry telemetry.
+
+        Early rejection paths (canonical price filter, session/warmup gates) fire
+        before ``compute_trade_decision`` builds the Bachelier context, leaving
+        ``annualized_vol``/``vol_source``/``z_score``/``log_moneyness`` as 0/N/A.
+        This computes the same resolved values up front (market_prob is not yet
+        available, so market-implied anchoring is not applied here) and stores
+        them for ``_record_signal_rejection`` to backfill.  Purely observational;
+        never affects the trade decision itself.
+        """
+        self._last_signal_vol_context = {}
+        try:
+            seconds_to_expiry = max(float(minutes_to_expiry or 0.0) * 60.0, 1.0)
+            strike, _strike_src, _diag = _resolve_trade_decision_strike(asset, None, market, float(spot_price))
+            strike_f = float(strike) if strike is not None else float(spot_price)
+            _vol_defaults = {"BTC": 0.60, "ETH": 0.80, "SOL": 1.00, "XRP": 1.00, "DOGE": 1.20}
+            requested_vol = _vol_defaults.get(str(asset).upper(), 0.80)
+            resolved_vol, vol_source, _mn, _mx, components = _resolve_annualized_vol(
+                asset=asset,
+                requested_vol=requested_vol,
+                spot_price=float(spot_price),
+                strike_price=strike_f,
+                seconds_to_expiry=seconds_to_expiry,
+                market_prob=None,
+            )
+            if components is None:
+                components = _compute_bachelier_components(float(spot_price), strike_f, seconds_to_expiry, resolved_vol) or {}
+            self._last_signal_vol_context = {
+                "annualized_vol": float(resolved_vol),
+                "annualized_vol_source": vol_source,
+                "z_score": float(components.get("z_score", 0.0)),
+                "log_moneyness": float(components.get("log_moneyness", 0.0)),
+            }
+        except Exception as exc:
+            logger.debug("[SIGNAL-VOL-CONTEXT] asset=%s early vol context failed: %s", asset, exc)
+            self._last_signal_vol_context = {}
 
     def _get_candles_available(self, asset: str) -> Optional[int]:
         """Return the number of available 1m bars for an asset, if known."""
@@ -10748,6 +10795,13 @@ class LeanAgent15m:
             )
 
             return None
+
+
+
+        # Resolve strike + annualized vol now so early rejection paths (canonical
+        # price filter, warmup, session gates) carry vol/z-score telemetry instead
+        # of 0.0000/N/A.  Observational only; the decision recomputes its own.
+        self._compute_signal_vol_context(asset, spot_price, market, minutes_to_expiry)
 
 
 

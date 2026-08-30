@@ -2055,6 +2055,35 @@ def _run_exit_price_guard(
         "ts": time.time(),
     }
 
+    # Canonical flatness check: the monitor's Position snapshot can lag the
+    # canonical position cache after a close fill, causing the guard to approve
+    # exits on an already-flat market (which the intent contract then rejects as
+    # close_with_zero_position).  Read the same canonical state the intent
+    # contract will use, and refuse to approve a close on a flat/missing position.
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        market_id = getattr(position, "market_id", None)
+        canonical_pos = get_position_cache().get_position(market_id) if market_id else None
+        canonical_cc = canonical_pos._yes_exposure() if canonical_pos is not None else 0
+        record["exchange_position_cc"] = canonical_cc
+        if canonical_pos is None or canonical_cc == 0:
+            record.update({"status": "rejected", "reject_reason": "canonical_position_zero_or_stale"})
+            persist_order_decision(record)
+            logger.critical(
+                "[EXIT-GUARD-REJECT] position=%s market=%s - "
+                "Canonical position is flat or missing (exchange_position_cc=%s); "
+                "refusing to approve close",
+                (getattr(position, "position_id", "") or "")[:8],
+                market_id,
+                canonical_cc,
+            )
+            return False, exit_price_cents, record, decision_id
+    except Exception as exc:
+        # Fail open to the existing downstream gates rather than blocking a real
+        # exit when the cache is momentarily unavailable.
+        logger.debug("[EXIT-GUARD] canonical position check unavailable: %s", exc)
+
     original, canonical = _canonicalize_exit_reason(exit_reason)
     record["exit_reason_original"] = original
     record["exit_reason_canonical"] = canonical

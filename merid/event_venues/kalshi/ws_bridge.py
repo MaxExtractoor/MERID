@@ -687,6 +687,11 @@ class KalshiWebSocketBridge:
         self._reconnect_count: int = 0
         self._last_connect_time: Optional[float] = None
         self._reconnect_in_progress: bool = False  # Flag to prevent concurrent reconnect attempts
+        # Consecutive-stall hysteresis: require several stalled health checks before
+        # auto-reconnecting so a single quiet sample (e.g. 15m contract rollover gap)
+        # does not flap the connection.  Reset to 0 on any healthy check.
+        self._consecutive_stall_count: int = 0
+        self._CONSECUTIVE_STALL_THRESHOLD: int = 3  # 3 x 5s health checks = ~15s stalled
         
         # Bridge liveness metric - last_message_at tracking
         # NOTE: This is WS LIVENESS SLA, not per-contract MD SLA
@@ -4302,10 +4307,44 @@ class KalshiWebSocketBridge:
                         # WS RECONNECTION POLICY: Only reconnect if we have subscriptions (markets present)
                         # This prevents unnecessary reconnects during idle periods
                         if not self._shutdown.is_set() and not self._reconnect_in_progress and has_subscriptions:
-                            logger.critical("[WS-AUTO-RECONNECT] Stall detected with %d subscriptions - triggering automatic reconnection", len(self._subscribed_tickers))
-                            self._reconnect_in_progress = True
-                            # Schedule reconnect as background task to avoid blocking forward loop
-                            self._spawn_task(self._auto_reconnect_on_stall(), name="kalshi-bridge-auto-reconnect")
+                            # Rollover/quiet-window guard: during a 15m contract rollover the
+                            # desired set is empty, a catalog sync is pending, or the live
+                            # subscriptions have not yet moved to the new contract.  No market
+                            # data is expected then, so a stalled sample is not a dead socket -
+                            # do not churn a reconnect; wait for set_markets()/sync to catch up.
+                            desired = set(getattr(self, "_desired_tickers", None) or [])
+                            subscribed = set(self._subscribed_tickers or [])
+                            in_rollover_quiet = (
+                                not desired
+                                or getattr(self, "_sync_requested", False)
+                                or subscribed.isdisjoint(desired)
+                            )
+                            if in_rollover_quiet:
+                                self._consecutive_stall_count = 0
+                                logger.warning(
+                                    "[WS-FORWARD-HEALTH] STALLED (%.1fs) during rollover/quiet window "
+                                    "(desired=%d subscribed=%d sync_requested=%s) - not reconnecting",
+                                    time_since_last_event, len(desired), len(subscribed),
+                                    getattr(self, "_sync_requested", False),
+                                )
+                            else:
+                                self._consecutive_stall_count += 1
+                                if self._consecutive_stall_count >= self._CONSECUTIVE_STALL_THRESHOLD:
+                                    logger.critical(
+                                        "[WS-AUTO-RECONNECT] Stall detected for %d consecutive checks "
+                                        "with %d subscriptions - triggering automatic reconnection",
+                                        self._consecutive_stall_count, len(self._subscribed_tickers),
+                                    )
+                                    self._consecutive_stall_count = 0
+                                    self._reconnect_in_progress = True
+                                    # Schedule reconnect as background task to avoid blocking forward loop
+                                    self._spawn_task(self._auto_reconnect_on_stall(), name="kalshi-bridge-auto-reconnect")
+                                else:
+                                    logger.warning(
+                                        "[WS-FORWARD-HEALTH] STALLED (%d/%d consecutive) - "
+                                        "waiting for confirmation before reconnect",
+                                        self._consecutive_stall_count, self._CONSECUTIVE_STALL_THRESHOLD,
+                                    )
                     elif _ws_forward_events_per_sec == 0.0:
                         # CRITICAL SAFETY ALERT: Zero events processing
                         if time_since_last_event > 60.0:
@@ -4344,6 +4383,7 @@ class KalshiWebSocketBridge:
                             )
                     else:
                         _ws_forward_stalled = False
+                        self._consecutive_stall_count = 0  # healthy check resets stall hysteresis
                         logger.debug(
                             "[WS-FORWARD-HEALTH] OK: last_event=%.1fs ago events/sec=%.1f queue_size=%d subscriptions=%d",
                             time_since_last_event, _ws_forward_events_per_sec, _ws_forward_queue_size, len(self._subscribed_tickers)

@@ -67,7 +67,7 @@ async def test_exit_not_submitted_resubmits_with_same_client_order_id(
             fill={
                 "quantity_cc": 500,
                 "count": 5,
-                "price_cents": 50,
+                "price_cents": 60,
                 "client_tag": intent.client_order_id,
                 "order_id": "order-resubmit-01",
             },
@@ -83,7 +83,7 @@ async def test_exit_not_submitted_resubmits_with_same_client_order_id(
     monkeypatch.setattr("merid.event_venues.kalshi.order_intent_contract.persist_order_decision", lambda *a, **k: None)
     monkeypatch.setattr(
         "merid.loop_15m._run_exit_price_guard",
-        lambda *a, **k: (True, 50, MagicMock(), "guard-1"),
+        lambda *a, **k: (True, 60, MagicMock(), "guard-1"),
     )
     async def _fake_post_position_cc(*a, **k):
         return 0
@@ -103,7 +103,7 @@ async def test_exit_not_submitted_resubmits_with_same_client_order_id(
         lambda: MagicMock(get_orders_by_ticker=MagicMock(return_value=[])),
     )
 
-    await _execute_exit_order(self_mock, position, ExitReason.TAKE_PROFIT, 50)
+    await _execute_exit_order(self_mock, position, ExitReason.TAKE_PROFIT, 60)
 
     # The same idempotency key was used for both attempts.
     assert len(route_calls) == 2
