@@ -1074,7 +1074,11 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
     # non-reduce-only GTC exit can still rest its unfilled remainder.
     explicit_mode = getattr(intent, "execution_mode", None)
     if _is_exit_order(intent) and explicit_mode in ("maker", "passive_quote"):
+        # Exits must be aggressive and terminal; override any resting/maker flags.
         intent.execution_mode = "taker"
+        intent.post_only = False
+        intent.aggressiveness = 1.0
+        intent.time_in_force = "ioc"
         resolved_tif = _resolve_tif(intent)
         return False, 1.0, "limit", resolved_tif.tif
 
@@ -1083,21 +1087,50 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
 
     if execution_mode == "maker":
         post_only, aggressiveness = True, 0.0
+        intent.time_in_force = "gtc"
     elif execution_mode == "taker":
         post_only, aggressiveness = False, 1.0
+        intent.time_in_force = "ioc"
     elif execution_mode == "staged_ioc":
         # CRITICAL FIX 2026-08-09: staged_ioc is routed as IOC taker until the
         # two-stage maker-then-taker state machine exists.  See _adjust_order_price_for_fill_rate
         # and _validate_price_against_orderbook for the matching placement logic.
         post_only, aggressiveness = False, 0.5
+        intent.time_in_force = "ioc"
     elif execution_mode == "passive_quote":
         post_only, aggressiveness = True, 0.0
+        intent.time_in_force = "gtc"
     else:
         # Unknown mode: respect existing values but never default to GTC when aggressive.
         post_only = bool(getattr(intent, "post_only", False))
         aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
         if aggressiveness > 0.0:
             post_only = False
+        # Derive a coherent TIF from the inferred posture.
+        if post_only:
+            intent.time_in_force = "gtc"
+        elif aggressiveness > 0.0:
+            intent.time_in_force = "ioc"
+
+    # Hard invariant: post_only requires a resting TIF (gtc/gtt); aggressive/terminal
+    # TIFs (ioc/fok) require post_only=False.  This prevents the Kalshi 400
+    # "Post_only_but_execution_type_can't_rest" rejection.
+    _tif = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
+    if post_only and _tif in ("ioc", "fok"):
+        logger.warning(
+            "[EXECUTION-MODE-INVARIANT] execution_mode=%s post_only=True but time_in_force=%s; "
+            "coercing time_in_force to gtc (ticker=%s)",
+            execution_mode, _tif, intent.ticker,
+        )
+        intent.time_in_force = "gtc"
+    elif not post_only and _tif in ("gtc", "gtt") and aggressiveness > 0.0:
+        # An aggressive order that was going to rest should not sit on the book.
+        logger.warning(
+            "[EXECUTION-MODE-INVARIANT] execution_mode=%s post_only=False aggressiveness=%.2f "
+            "but time_in_force=%s; coercing time_in_force to ioc (ticker=%s)",
+            execution_mode, aggressiveness, _tif, intent.ticker,
+        )
+        intent.time_in_force = "ioc"
 
     resolved_tif = _resolve_tif(intent)
     return post_only, aggressiveness, "limit", resolved_tif.tif
@@ -4660,10 +4693,11 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
             pass
 
     # 2026-08-29: If the intent still has the legacy "gtc" default and a resolved
-    # live config is active, pick the canonical entry/exit TIF.  Explicit caller
-    # values and execution_mode take precedence later.
+    # live config is active, pick the canonical entry/exit TIF *only when we have
+    # no execution-mode posture yet*.  Once an execution mode is resolved, it is
+    # the single source of truth for the TIF.
     raw_tif = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
-    if resolved is not None and resolved.resolved and raw_tif == "gtc":
+    if resolved is not None and resolved.resolved and raw_tif == "gtc" and not getattr(intent, "execution_mode", None):
         if _is_exit_order(intent):
             intent.time_in_force = resolved.exit_tif_default
         else:
@@ -4686,15 +4720,10 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
     if secs is not None and secs <= ioc_threshold:
         return ResolvedTIF("IOC")
 
-    # Explicit legacy time_in_force takes precedence over execution-mode inference
-    # for IOC/FOK, because these are terminal TIF choices from the caller.
-    raw = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
-    if raw == "ioc":
-        return ResolvedTIF("IOC")
-    if raw == "fok":
-        return ResolvedTIF("FOK")
-
     # Resolve execution mode: explicit -> aggressiveness/post_only heuristic.
+    # Execution mode is the primary TIF authority; a post-only/maker intent must
+    # never be forced into an IOC/FOK TIF even if the legacy time_in_force field
+    # still carries an old value.
     execution_mode = getattr(intent, "execution_mode", None)
     if not execution_mode:
         post_only = bool(getattr(intent, "post_only", False))
@@ -4714,13 +4743,13 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
     if execution_mode in ("maker", "passive_quote"):
         return ResolvedTIF("GTC", _resolve_gtc_expiration(intent))
 
-    # Legacy time_in_force fallback.
+    # Legacy time_in_force fallback (no execution mode resolved).
     raw = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
     if raw == "ioc":
         return ResolvedTIF("IOC")
     if raw == "fok":
         return ResolvedTIF("FOK")
-    if raw == "gtc" or raw == "gtt" or raw == "good_till_time":
+    if raw in ("gtc", "gtt", "good_till_canceled", "good_till_time"):
         return ResolvedTIF("GTC", _resolve_gtc_expiration(intent))
 
     # Unknown TIF -> safe GTC with a short rest horizon, log a warning.

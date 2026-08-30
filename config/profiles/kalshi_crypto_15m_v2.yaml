@@ -1009,43 +1009,40 @@ confidence:
 # 4. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
 edge_bands:
   enabled: true  # Enable tiered edge band logic
-  # 2026-09 cost-driven edge: 5% absolute floor (5¢ on a $1 notional) with
-  # 7% BTC and 10% alts as the durable target.  A 5¢ floor barely clears the
-  # corrected 0.0175 maker round-trip fee + 5¢ model-uncertainty reserve; 7-10¢
-  # is required for a positive margin after adverse-selection and exit costs.
+  # 2026-08-30: Base thresholds are now the dynamic trade_decision floors:
+  # BTC 3%, ETH/SOL 4%, XRP/DOGE 5%, plus price/spread convexity.  These band
+  # bounds are kept for telemetry/sizing compatibility; the gate itself is in
+  # trade_decision.py.
   watch_band:
-    min_edge_pct: 0.05  # 5% minimum edge for watch band (log only)
-    max_edge_pct: 0.05  # 5% maximum edge for watch band (unified with min for consistency)
+    min_edge_pct: 0.02  # 2% global hard floor (log only)
+    max_edge_pct: 0.03  # up to BTC base
     action: "log_only"  # Log candidates but don't trade
     kelly_multiplier: 0.0  # No sizing in watch band
   small_band:
-    min_edge_pct: 0.05  # 5% minimum edge for small band
-    max_edge_pct: 0.10  # 10% maximum edge for small band
+    min_edge_pct: 0.03  # BTC base
+    max_edge_pct: 0.05  # up to DOGE/XRP base
     action: "trade_small"  # Trade with reduced size
     kelly_multiplier: 0.25  # 0.25x Kelly for small band
   standard_band:
-    min_edge_pct: 0.07  # 7% minimum edge for standard band
+    min_edge_pct: 0.05  # XRP/DOGE base
     max_edge_pct: 1.0  # No upper limit
     action: "trade_standard"  # Trade with standard size
     kelly_multiplier: 0.50  # 0.5x Kelly for standard band
-  # BTC-only live trading: per-asset thresholds retained for paper/shadow tests
-  # of other assets; alt thresholds are raised to 10% because their realized
-  # vol and adverse-selection cost demand a larger edge buffer.
   per_asset:
     BTC:
-      min_edge_pct: 0.07
+      min_edge_pct: 0.03
       max_edge_pct: 1.0
     ETH:
-      min_edge_pct: 0.07
+      min_edge_pct: 0.04
       max_edge_pct: 1.0
     SOL:
-      min_edge_pct: 0.10
+      min_edge_pct: 0.04
       max_edge_pct: 1.0
     XRP:
-      min_edge_pct: 0.10
+      min_edge_pct: 0.05
       max_edge_pct: 1.0
     DOGE:
-      min_edge_pct: 0.10
+      min_edge_pct: 0.05
       max_edge_pct: 1.0
   
   # Optional: Override Kelly multipliers for this profile
@@ -1462,10 +1459,11 @@ edge_lag_filter:
 # Research findings: profitable systems trade edges down to 1-2%, 53% accuracy minimum
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 strategy_policy:
-  # 2026-09 cost-driven edge: 7% global minimum (5-10¢ after the corrected
-  # Kalshi 0.0175 maker fee, 0.07 taker fee, and model-uncertainty reserve).
-  # 5% is the absolute floor; 7-10% is the durable target.
-  min_edge: 0.07
+  # 2026-08-30: Lowered to 0.02 global floor.  The effective per-asset
+  # threshold is computed dynamically by trade_decision.py using asset tier,
+  # price, and spread.  This value is the hard lower bound, not the active
+  # trade threshold.
+  min_edge: 0.02
   min_confidence: 0.50  # LEGACY VALUE: Not actively used - primary confidence threshold is in confidence.min_confidence_threshold (0.65)
   max_md_staleness_sec: 20.0  # RELAXED: Strategy-specific MD staleness threshold (increased from 15s to 20s for more opportunities)
   
