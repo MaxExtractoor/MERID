@@ -237,16 +237,6 @@ class BankrollServiceV2:
             os.getenv("MERID_BANKROLL_CIRCUIT_WINDOW_S", "120.0")
         )
 
-    def _jittered_circuit_duration(self) -> float:
-        """Circuit-open duration with +/-25% jitter.
-
-        Without jitter every caller's circuit expires at the same instant and
-        the half-open probes stampede the API together (thundering herd),
-        which can re-trip the circuit during a marginal connectivity window.
-        """
-        base = self._circuit_breaker_duration_seconds
-        return base + random.uniform(-0.25 * base, 0.25 * base)
-
         # Bankroll drawdown / consecutive-loss circuit breaker state.
         # CRITICAL FIX (2026-08-27): Protects the live bankroll from drawdown spirals
         # independent of the API-fetch circuit breaker above.
@@ -272,10 +262,20 @@ class BankrollServiceV2:
         self._fetch_lock: Optional[asyncio.Lock] = None
         self._refresh_task: Optional[asyncio.Task] = None
         self._shutdown = False
-        
+
         # Subscriber callbacks for bankroll updates
         self._subscribers: List[Callable[[BankrollSummary], None]] = []
-    
+
+    def _jittered_circuit_duration(self) -> float:
+        """Circuit-open duration with +/-25% jitter.
+
+        Without jitter every caller's circuit expires at the same instant and
+        the half-open probes stampede the API together (thundering herd),
+        which can re-trip the circuit during a marginal connectivity window.
+        """
+        base = self._circuit_breaker_duration_seconds
+        return base + random.uniform(-0.25 * base, 0.25 * base)
+
     def _get_lock(self) -> asyncio.Lock:
         """Get or create the lock in the current event loop.
         
