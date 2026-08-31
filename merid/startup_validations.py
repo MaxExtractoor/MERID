@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -105,6 +106,40 @@ def _is_live_trading_intent() -> bool:
     return trade_mode == "live" or pm_trade_mode == "live" or allow_live
 
 
+def _run_git_with_retry(args: List[str], cwd: Path, timeout: float = 10.0, attempts: int = 3) -> str:
+    """Run a git command, retrying transient stalls, fail-closed.
+
+    A single subprocess timeout is almost always a transient machine-level
+    stall (AV scan, CPU saturation during startup, a dying prior process)
+    rather than a missing git or repo - observed in production on 2026-08-31
+    where a 10s ``git rev-parse`` timeout aborted startup while git answered
+    in ~100ms immediately after.  Retry with a short backoff; if every attempt
+    fails, raise the LAST error so the caller still fails closed.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            return subprocess.check_output(
+                ["git", *args],
+                cwd=cwd,
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            last_exc = exc
+            if isinstance(exc, (subprocess.CalledProcessError, FileNotFoundError)):
+                # Not transient: git missing or the repo is genuinely broken.
+                raise
+            logger.warning(
+                "[DIRTY-TREE-GATE] git %s timed out (attempt %d/%d); retrying",
+                args[0], attempt + 1, attempts,
+            )
+            time.sleep(1.0 + attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
 def _get_repo_root() -> Path:
     """Discover the repository root, fail-closed.
 
@@ -119,13 +154,7 @@ def _get_repo_root() -> Path:
 
     module_dir = Path(__file__).resolve().parent
     try:
-        output = subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=module_dir,
-            text=True,
-            stderr=subprocess.STDOUT,
-            timeout=10,
-        ).strip()
+        output = _run_git_with_retry(["rev-parse", "--show-toplevel"], cwd=module_dir).strip()
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
         detail = str(exc)
         if isinstance(exc, subprocess.CalledProcessError):
@@ -146,12 +175,9 @@ def _get_live_path_git_status() -> List[Tuple[str, str]]:
     """
     repo_root = _get_repo_root()
     try:
-        output = subprocess.check_output(
-            ["git", "status", "--porcelain", "--", *LIVE_MONEY_PATH_FILES],
+        output = _run_git_with_retry(
+            ["status", "--porcelain", "--", *LIVE_MONEY_PATH_FILES],
             cwd=repo_root,
-            text=True,
-            stderr=subprocess.STDOUT,
-            timeout=10,
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
         detail = str(exc)
