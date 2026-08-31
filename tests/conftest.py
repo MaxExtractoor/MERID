@@ -537,6 +537,31 @@ def reset_scalper_env_vars(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_replay_dispatcher_for_isolation(monkeypatch):
+    """Reset the replay dispatcher singleton before/after every test.
+
+    The replay dispatcher is created lazily and is global state; a test that
+    sets MERID_REPLAY_TAPE and creates a dispatcher can otherwise leak it into
+    unrelated tests that then see `is_replay_active()` as true and a zeroed
+    replay clock.  Replay tests re-create the dispatcher when needed.
+    """
+    from merid.data.ingress_replay import reset_replay_dispatcher_for_tests
+    from merid.settings import settings
+
+    # Snapshot and clear replay settings so a replay test's settings mutation
+    # does not leak into non-replay tests (settings is a process singleton).
+    old_settings_tape = settings.MERID_REPLAY_TAPE
+    settings.MERID_REPLAY_TAPE = None
+    reset_replay_dispatcher_for_tests(None)
+    # Prevent .env or earlier replay tests from leaving the tape active.
+    monkeypatch.delenv("MERID_REPLAY_TAPE", raising=False)
+    monkeypatch.delenv("MERID_REPLAY", raising=False)
+    yield
+    reset_replay_dispatcher_for_tests(None)
+    settings.MERID_REPLAY_TAPE = old_settings_tape
+
+
+@pytest.fixture(autouse=True)
 def _reset_merid_profile_for_non_15m_tests(request, monkeypatch):
     """Clear the .env-loaded MERID_PROFILE for tests outside 15m directories.
 

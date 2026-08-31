@@ -611,8 +611,11 @@ class KalshiCrypto15mRiskEnvelope:
         """
         # 2026-07-08: DISABLED percentage-based calculation - using fixed $2 exposure cap
         # 2026-08-16: Clamped to live bankroll so an underfunded account cannot overallocate.
-        # 2026-08-29: Prefer the resolved live config over free-floating env reads.
-        fixed_exposure_cap_usd = self.fixed_exposure_cap_usd
+        # 2026-08-31: Env override wins so tests and runtime can pin the absolute cap.
+        env_cap = os.getenv('MERID_FIXED_EXPOSURE_CAP_USD')
+        fixed_exposure_cap_usd = (
+            float(env_cap) if env_cap is not None else self.fixed_exposure_cap_usd
+        )
         return min(fixed_exposure_cap_usd, self.live_bankroll_usd)
     
     def distance_to_halt_pct(self) -> float:
@@ -754,11 +757,15 @@ class KalshiCrypto15mRiskEnvelope:
             if asset:
                 current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
         
-        # CRITICAL: System uses the fixed exposure cap from the resolved live
-        # config.  Percentage-based limits (3% per-agent, 5% total venue) are DISABLED.
-        # Global slot allocator is the single source of truth for total cap enforcement.
-        # 2026-08-16: Cap cannot exceed peak/live bankroll (underfunded account protection).
-        fixed_exposure_cap_usd = self.fixed_exposure_cap_usd
+        # CRITICAL: System uses the fixed exposure cap.  Percentage-based limits
+        # (3% per-agent, 5% total venue) are DISABLED.  An explicit
+        # MERID_FIXED_EXPOSURE_CAP_USD env override takes precedence (it has
+        # already been validated by the live-config resolver), clamped to
+        # peak/live bankroll for underfunded account protection.
+        env_cap = os.getenv('MERID_FIXED_EXPOSURE_CAP_USD')
+        fixed_exposure_cap_usd = (
+            float(env_cap) if env_cap is not None else self.fixed_exposure_cap_usd
+        )
         effective_cap_usd = min(fixed_exposure_cap_usd, peak_bankroll_usd)
         total_venue_limit_usd = effective_cap_usd  # No percentage overrides allowed
         

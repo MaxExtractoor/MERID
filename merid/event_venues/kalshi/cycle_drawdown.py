@@ -71,15 +71,19 @@ class CycleDrawdownConfig:
     
     # Drawdown thresholds — now sourced from UnifiedDrawdownConfig
     # These are set dynamically based on unified config in __post_init__
-    cycle_drawdown_pct_small: float = 0.05   # Will be overridden by unified.hedge_active_pct
-    cycle_drawdown_pct_medium: float = 0.05  # Will be overridden by unified.hedge_active_pct
-    cycle_drawdown_pct_large: float = 0.05   # Will be overridden by unified.hedge_active_pct
+    cycle_drawdown_pct_small: float = 0.07   # small bankroll (< $70)
+    cycle_drawdown_pct_medium: float = 0.05  # medium bankroll ($70-$100)
+    cycle_drawdown_pct_large: float = 0.03   # large bankroll (>$100)
     
     # Absolute halt threshold from unified config (full_halt_pct = 15%)
     absolute_halt_pct: float = 0.15  # Will be overridden by unified.full_halt_pct
     
     # Minimum notional to consider for profit reset (ignore dust)
     cycle_min_notional_to_reset_usd: float = 0.50  # 50 cents
+    
+    # Bankroll regime thresholds in cents used to choose the cycle drawdown pct.
+    small_bankroll_threshold_cents: int = 7000      # $70
+    medium_bankroll_threshold_cents: int = 10000    # $100
     
     # De-risk curve parameters
     derisk_start_pct: float = 0.25  # Start de-risking at 25% of max DD

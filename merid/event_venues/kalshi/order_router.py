@@ -5120,25 +5120,29 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
     if secs is not None and secs <= ioc_threshold:
         return ResolvedTIF("IOC")
 
-    # Resolve execution mode: explicit -> aggressiveness/post_only heuristic.
-    # Execution mode is the primary TIF authority; a post-only/maker intent must
-    # never be forced into an IOC/FOK TIF even if the legacy time_in_force field
-    # still carries an old value.
+    # Resolve execution mode: explicit -> legacy TIF / aggressiveness/post_only heuristic.
+    # Execution mode is the primary TIF authority, but an explicit terminal TIF
+    # (ioc/fok) without other posture must stay terminal.
     execution_mode = getattr(intent, "execution_mode", None)
     if not execution_mode:
         post_only = bool(getattr(intent, "post_only", False))
         aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
+        raw_post = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
         if post_only:
             execution_mode = "passive_quote"
-        elif aggressiveness == 0.0:
-            execution_mode = "maker"
-        elif aggressiveness >= 1.0:
+        elif aggressiveness > 0.0:
+            execution_mode = "taker" if aggressiveness >= 1.0 else "staged_ioc"
+        elif raw_post in ("ioc", "fok"):
+            # Explicit ioc/fok and no other posture -> aggressive immediate fill.
             execution_mode = "taker"
         else:
-            execution_mode = "staged_ioc"
+            execution_mode = "maker"
 
     # Explicit execution-mode mapping.
     if execution_mode in ("taker", "staged_ioc"):
+        _tif = (getattr(intent, "time_in_force", None) or "gtc").strip().lower()
+        if _tif == "fok":
+            return ResolvedTIF("FOK")
         return ResolvedTIF("IOC")
     if execution_mode in ("maker", "passive_quote"):
         return ResolvedTIF("GTC", _resolve_gtc_expiration(intent))

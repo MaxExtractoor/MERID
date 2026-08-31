@@ -26,18 +26,16 @@ class TestCrypto15mProfileWiring:
 
         config = get_kalshi_risk()._config
 
-        # Profile values from kalshi_crypto_15m.yaml with capital_usd=50.0
-        # max_single_order_notional_usd = capital_usd * venue_max_single_order_pct (5%)
-        # = 50.0 * 0.05 = 2.5
-        assert config.max_single_order_notional_usd == 2.5
-        # max_total_notional_usd = capital_usd * venue_max_total_notional_pct (30%)
-        # = 50.0 * 0.30 = 15.0
-        assert config.max_total_notional_usd == 15.0
+        # The v2 profile uses capital_usd=0 (live bankroll) and percentage venue
+        # caps are intentionally removed. USD notional limits are therefore 0.0
+        # and derived at runtime from the live bankroll / risk envelope.
+        assert config.max_single_order_notional_usd == 0.0
+        assert config.max_total_notional_usd == 0.0
         assert config.max_daily_loss_usd == 200.0
         assert config.max_contracts_total == 5000
         assert config.max_contracts_per_asset == 1750
         assert config.max_contracts_per_cluster == 750
-        assert config.group_notional_cap_usd == 2000.0
+        assert config.group_notional_cap_usd == 50.0
         assert config.group_limits_enabled is True
 
         # Reset singleton
@@ -55,7 +53,7 @@ class TestCrypto15mProfileWiring:
 
         # Default values from KalshiRiskConfig dataclass
         assert config.max_total_notional_usd == 0.0  # Default: derive from live bankroll
-        assert config.max_daily_loss_usd == 1000.0  # Default
+        assert config.max_daily_loss_usd == 0.0  # Default: derive from profile/envelope at runtime
 
         # Reset singleton
         kalshi_risk._risk = None
@@ -89,8 +87,9 @@ class TestCrypto15mProfileWiring:
         crypto_15m_profile._adapter = None
 
         adapter = crypto_15m_profile.get_active_profile()
-        # The profile should have a valid capital_usd value from the YAML
-        assert adapter._profile.capital_usd > 0
+        # The v2 profile uses capital_usd=0 as a live-bankroll sentinel.
+        # A valid profile should load and the sentinel is the expected value.
+        assert adapter._profile.capital_usd == 0.0
 
         # Reset
         crypto_15m_profile._adapter = None
@@ -116,22 +115,22 @@ class TestProfileToKalshiRiskConfigMapping:
         assert "max_contracts_per_cluster" in config_dict
         assert config_dict["max_contracts_per_cluster"] == 750
         assert "group_notional_cap_usd" in config_dict
-        assert config_dict["group_notional_cap_usd"] == 2000.0
+        assert config_dict["group_notional_cap_usd"] == 50.0
         assert "group_limits_enabled" in config_dict
         assert config_dict["group_limits_enabled"] is True
 
         # Reset
         crypto_15m_profile._adapter = None
 
-    def test_to_kalshi_risk_config_includes_max_concurrent_trades(self, monkeypatch):
-        """Profile should include max_concurrent_trades in agent_defaults."""
+    def test_to_kalshi_risk_config_agent_max_concurrent_trades_removed(self, monkeypatch):
+        """Profile intentionally removed agent_max_concurrent_trades in v2."""
         monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
 
         from merid.risk.profiles import crypto_15m_profile
         crypto_15m_profile._adapter = None
 
         adapter = crypto_15m_profile.get_active_profile()
-        assert adapter._profile.agent_max_concurrent_trades == 3
+        assert not hasattr(adapter._profile, "agent_max_concurrent_trades")
 
         # Reset
         crypto_15m_profile._adapter = None

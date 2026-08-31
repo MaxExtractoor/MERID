@@ -23,11 +23,19 @@ def mock_client():
 
 
 @pytest.fixture
-def venue_adapter(mock_client):
-    """Create KalshiVenueAdapter with mocked client."""
+def venue_adapter(mock_client, monkeypatch):
+    """Create KalshiVenueAdapter with mocked client and live gate."""
+    monkeypatch.setenv("MERID_PM_TRADING_MODE", "live")
+    monkeypatch.setenv("MERID_ALLOW_LIVE_TRADES", "true")
+
     adapter = KalshiVenueAdapter(mode="live")
     adapter._client = mock_client
-    return adapter
+
+    with patch("merid.prediction.venue_gate.get_venue_gate") as mock_gate:
+        mock_gate_instance = MagicMock()
+        mock_gate_instance.should_simulate_fill.return_value = False
+        mock_gate.return_value = mock_gate_instance
+        yield adapter
 
 
 class TestKalshiBusinessRejectRefund:

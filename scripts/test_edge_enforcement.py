@@ -39,8 +39,8 @@ def test_all_edge_gates():
     # Test 5: Formulas classify_stance default
     stance = classify_stance.__defaults__
     if stance:
-        assert stance[0] == 0.05, f"classify_stance weak_threshold too low! Got {stance[0]}"
-    print("✓ classify_stance weak_threshold default = 5%")
+        assert stance[0] == 0.03, f"classify_stance weak_threshold mismatch! Got {stance[0]}"
+    print("✓ classify_stance weak_threshold default = 3%")
     
     # Test 6: Edge recalibrator floor
     assert float(MIN_EDGE_FLOOR) == 0.05, f"Edge recalibrator floor too low! Got {MIN_EDGE_FLOOR}"

@@ -473,7 +473,8 @@ class TestApplySizingConstraints:
         """Tight tier applies 0.5x factor"""
         contracts, constraints = apply_sizing_constraints(
             raw_contracts=100,
-            drawdown_tier="tight"
+            drawdown_tier="tight",
+            max_contracts_per_order=200,
         )
         assert contracts == 50
         assert "TIGHT_TIER" in constraints[0]
