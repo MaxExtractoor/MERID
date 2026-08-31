@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
+from merid.prediction.rejection_counterfactual import log_rejected_candidate
 from merid.data.ingress_replay import replay_time
 from merid.audit.replay_state_diff import record_state_checksum
 from utils.logger import get_logger
@@ -1412,6 +1413,28 @@ def compute_trade_decision(
                 indicators[f"cost_basis_override_{best_side}_p"] = best_p
                 indicators[f"cost_basis_override_{best_side}_floor"] = best_min_p
 
+            # Counterfactual logging: record the rejected candidate so a
+            # post-settlement join can classify saved/missed/flat per bucket.
+            _rej_bd = yes_breakdown if best_side == "yes" else no_breakdown
+            log_rejected_candidate(
+                reason=no_trade_reason,
+                run_id=run_id,
+                decision_id=decision_id,
+                asset=asset,
+                ticker=ticker,
+                side=best_side,
+                model_p_selected=float(_rej_bd.p_selected),
+                held_price_cents=float(_rej_bd.executable_entry_price) * 100.0,
+                gross_edge=float(_rej_bd.gross_edge),
+                net_edge=float(_rej_bd.net_edge),
+                edge_threshold=float(best_threshold),
+                min_p_selected=float(best_min_p),
+                tte_seconds=float(seconds_to_expiry),
+                spot_price=float(spot_price),
+                strike_price=float(strike_price),
+                fee_cents=float(fee) * 100.0,
+            )
+
     if selected_outcome is not None:
         selected_action = "buy"
         # 2026-08-29: Use the resolved live-config per-order contract cap as the
@@ -1435,6 +1458,24 @@ def compute_trade_decision(
         _pi_star = (_held_price_cents + _fee_cents + _risk_premium_cents) / 100.0
         if edge_breakdown.p_selected < _pi_star - 1e-9:
             _pi_star_p = edge_breakdown.p_selected
+            log_rejected_candidate(
+                reason=f"p_selected_below_pi_star:{_pi_star_p:.3f}<{_pi_star:.3f}",
+                run_id=run_id,
+                decision_id=decision_id,
+                asset=asset,
+                ticker=ticker,
+                side=selected_outcome,
+                model_p_selected=float(_pi_star_p),
+                held_price_cents=float(_held_price_cents),
+                gross_edge=float(edge_breakdown.gross_edge),
+                net_edge=float(edge_breakdown.net_edge),
+                edge_threshold=float(yes_min_edge if selected_outcome == "yes" else no_min_edge),
+                pi_star=float(_pi_star),
+                tte_seconds=float(seconds_to_expiry),
+                spot_price=float(spot_price),
+                strike_price=float(strike_price),
+                fee_cents=float(_fee_cents),
+            )
             selected_outcome = None
             selected_action = None
             approved_size_cc = Decimal("0")
@@ -1457,6 +1498,23 @@ def compute_trade_decision(
             and edge_breakdown.p_selected < MERID_CHEAP_TAIL_P_EXCEPTION - 1e-9
         ):
             _floor_p = edge_breakdown.p_selected
+            log_rejected_candidate(
+                reason=f"held_entry_price_below_floor:{held_price:.2f}<{min_held_price_cents/100.0:.2f}|p={_floor_p:.3f}",
+                run_id=run_id,
+                decision_id=decision_id,
+                asset=asset,
+                ticker=ticker,
+                side=selected_outcome,
+                model_p_selected=float(_floor_p),
+                held_price_cents=held_price * 100.0,
+                gross_edge=float(edge_breakdown.gross_edge),
+                net_edge=float(edge_breakdown.net_edge),
+                edge_threshold=float(yes_min_edge if selected_outcome == "yes" else no_min_edge),
+                tte_seconds=float(seconds_to_expiry),
+                spot_price=float(spot_price),
+                strike_price=float(strike_price),
+                fee_cents=float(fee) * 100.0,
+            )
             selected_outcome = None
             selected_action = None
             approved_size_cc = Decimal("0")

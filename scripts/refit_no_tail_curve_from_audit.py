@@ -298,22 +298,91 @@ def _load_closed_trades(csv_path: Path) -> List[Tuple[str, float, int, str]]:
     return trades
 
 
-def _fit_no_curve(no_trades: List[Tuple[str, float, int, str]]) -> Tuple[List[float], List[float], int, int]:
+def _wilson_interval(wins: int, n: int, z: float = 1.96) -> Tuple[float, float]:
+    """Wilson score interval for a binomial proportion."""
+    if n <= 0:
+        return (0.0, 1.0)
+    p = wins / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2 * n)) / denom
+    margin = (z / denom) * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))
+    return (max(0.0, center - margin), min(1.0, center + margin))
+
+
+def _bin_no_trades(
+    no_trades: List[Tuple[str, float, int, str]],
+    shrink_k: float,
+) -> Tuple[List[float], List[float], List[float], List[Dict[str, Any]]]:
+    """Aggregate NO-held trades into 1c held-price bins with shrinkage + Wilson CI.
+
+    Shrinkage pulls each bin's empirical win rate toward the market-implied
+    probability (the bin's held price) with strength ``shrink_k`` pseudo-
+    observations::
+
+        p_shrunk = (wins + k * prior) / (n + k),  prior = bin price
+
+    This prevents a handful of longshot losses from producing a hard 0.0 curve
+    point (small-sample artifact) while leaving well-sampled bins essentially
+    untouched.  With k=10 and n=50 zero-win trades at 10c, p_shrunk = 1/60 ~
+    0.017 - still near zero, but honestly uncertain rather than exactly 0.0.
+
+    Returns (bin_prices, shrunk_rates, weights, bin_stats).
+    """
+    bins: Dict[int, List[int]] = {}
+    for _, held_price, _, market_result in no_trades:
+        cents = int(round(held_price * 100.0))
+        cents = max(1, min(99, cents))
+        bins.setdefault(cents, []).append(1 if market_result == "no" else 0)
+
+    prices: List[float] = []
+    rates: List[float] = []
+    weights: List[float] = []
+    stats: List[Dict[str, Any]] = []
+    for cents in sorted(bins):
+        outcomes = bins[cents]
+        n = len(outcomes)
+        wins = sum(outcomes)
+        raw = wins / n
+        prior = cents / 100.0
+        if shrink_k > 0:
+            shrunk = (wins + shrink_k * prior) / (n + shrink_k)
+        else:
+            shrunk = raw
+        lo, hi = _wilson_interval(wins, n)
+        prices.append(cents / 100.0)
+        rates.append(shrunk)
+        weights.append(float(n))
+        stats.append({
+            "held_price_cents": cents,
+            "n": n,
+            "wins": wins,
+            "raw_win_rate": round(raw, 4),
+            "shrunk_win_rate": round(shrunk, 4),
+            "wilson_lo": round(lo, 4),
+            "wilson_hi": round(hi, 4),
+        })
+    return prices, rates, weights, stats
+
+
+def _fit_no_curve(
+    no_trades: List[Tuple[str, float, int, str]],
+    shrink_k: float = 10.0,
+) -> Tuple[List[float], List[float], int, int, List[Dict[str, Any]]]:
     """Fit PAVA isotonic NO curve from (held_side, held_price_dollars, quantity_cc, market_result).
 
-    Returns (held_prices, actual_probs, n_no_wins, n_no_trades).
+    Trades are first aggregated into 1c price bins with market-prior shrinkage
+    (see ``_bin_no_trades``); PAVA is then run on the shrunk bin rates weighted
+    by bin sample count.  Returns (held_prices, actual_probs, n_no_wins,
+    n_no_trades, bin_stats).
     """
-    prices: List[float] = []
-    wins: List[int] = []
-    for _, held_price, _, market_result in no_trades:
-        prices.append(held_price)
-        wins.append(1 if market_result == "no" else 0)
+    if len(no_trades) < 5:
+        raise ValueError(f"Need at least 5 NO-held trades to fit, got {len(no_trades)}")
 
-    if len(prices) < 5:
-        raise ValueError(f"Need at least 5 NO-held trades to fit, got {len(prices)}")
-
-    xs, ys = _pava_isotonic(prices, wins)
-    return xs, ys, sum(wins), len(prices)
+    prices, rates, weights, stats = _bin_no_trades(no_trades, shrink_k)
+    xs, ys = _pava_isotonic(prices, rates, weights=weights)
+    n_wins = sum(s["wins"] for s in stats)
+    return xs, ys, n_wins, len(no_trades), stats
 
 
 def _build_calibrator(
@@ -321,12 +390,13 @@ def _build_calibrator(
     no_trades: List[Tuple[float, int, str]],
     buffer: float,
     source_csv: Path,
+    shrink_k: float = 10.0,
 ) -> TailProbabilityCalibrator:
     """Load YES from existing calibration and replace NO with the newly fit curve."""
     with open(yes_cal_path, "r", encoding="utf-8") as f:
         old = TailProbabilityCalibrator.from_dict(json.load(f))
 
-    no_xs, no_ys, no_wins, no_n = _fit_no_curve(no_trades)
+    no_xs, no_ys, no_wins, no_n, no_bin_stats = _fit_no_curve(no_trades, shrink_k=shrink_k)
 
     return TailProbabilityCalibrator(
         yes_held_prices=old.yes_held_prices,
@@ -339,12 +409,16 @@ def _build_calibrator(
             "source": "refit_no_tail_curve_from_audit",
             "yes_source": str(old.metadata.get("source", "unknown")),
             "no_source": str(source_csv),
-            "fit_method": "per_side_pava_isotonic_regression",
+            "fit_method": "per_side_pava_isotonic_regression_with_market_prior_shrinkage",
+            "shrink_k": shrink_k,
             "held_side": "both",
             "yes_n_trades": old.n_trades,
             "no_n_trades": no_n,
             "no_wins": no_wins,
             "buffer": buffer,
+            # Per-bin counts + Wilson 95% CIs so a 0.0 from 3 observations is
+            # visibly different from a 0.0 from 50.
+            "no_bin_stats": no_bin_stats,
             "refit_at_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         },
     )
@@ -487,6 +561,12 @@ def main() -> int:
         help="Output audit JSON path (default: reports/no_tail_refit_audit_<ts>.json)",
     )
     parser.add_argument("--buffer", type=float, default=0.05, help="Calibration cap buffer")
+    parser.add_argument(
+        "--shrink-k",
+        type=float,
+        default=10.0,
+        help="Market-prior shrinkage strength in pseudo-observations (0 disables shrinkage)",
+    )
     parser.add_argument("--min-no-trades", type=int, default=50, help="Minimum NO trades to proceed without --force")
     parser.add_argument("--force", action="store_true", help="Proceed even with small NO sample")
     parser.add_argument(
@@ -518,7 +598,7 @@ def main() -> int:
         )
         return 2
 
-    cal = _build_calibrator(args.yes_cal, no_trades, args.buffer, args.audit_csv)
+    cal = _build_calibrator(args.yes_cal, no_trades, args.buffer, args.audit_csv, shrink_k=args.shrink_k)
     yes_items, no_items = _side_items(trades, cal)
 
     # Fail-closed promotion validation.  Even without --promote we compute it
@@ -584,6 +664,8 @@ def main() -> int:
             },
         },
         "per_side_summary": per_side,
+        "no_bin_stats": cal.metadata.get("no_bin_stats", []),
+        "shrink_k": args.shrink_k,
         "yes_buckets": yes_buckets,
         "no_buckets": no_buckets,
         "yes_full_reliability": yes_full_buckets,
