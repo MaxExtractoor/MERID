@@ -43,7 +43,7 @@ class MockKalshiClient:
     error_type: str = "temporary"  # "temporary" or "permanent"
     max_riskable_frac: Decimal = Decimal("0.5")  # Allow overriding for testing
 
-    async def get_balance(self):
+    async def get_balance(self, timeout=None, **kwargs):
         """Mock get_balance method."""
         if self.should_timeout:
             await asyncio.sleep(10)  # Simulate timeout
@@ -668,6 +668,8 @@ class TestBankrollDrawdownCircuitBreaker:
 
         mock_client = MockKalshiClient(balance_response=100.0)
         service = BankrollServiceV2(mock_client, refresh_interval_seconds=10.0)
+        # Test the contract, not whatever env override is present in .env.
+        service._bankroll_stale_after_seconds = 20.0
 
         original_service = bankroll_service_v2._BANKROLL_SERVICE_V2
         bankroll_service_v2._BANKROLL_SERVICE_V2 = service

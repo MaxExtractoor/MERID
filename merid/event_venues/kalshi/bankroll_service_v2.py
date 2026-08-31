@@ -172,7 +172,7 @@ class BankrollServiceV2:
     def __init__(
         self,
         client: Optional[KalshiClientV2] = None,
-        refresh_interval_seconds: float = 10.0,  # PRODUCTION AUDIT: Explicit 10s cache window
+        refresh_interval_seconds: Optional[float] = None,
         max_riskable_frac: Optional[Decimal] = None,
         max_position_cap_usd: Optional[Decimal] = None,
     ):
@@ -193,8 +193,15 @@ class BankrollServiceV2:
         else:
             logger.info("[BANKROLL-CLIENT] Using provided KalshiClientV2 instance")
             self._client = client
+
+        # Allow the refresh cadence to be tuned from the environment.  With a
+        # slow /portfolio/balance endpoint a 30s cadence is more stable than 10s.
+        if refresh_interval_seconds is None:
+            refresh_interval_seconds = float(
+                os.getenv("MERID_BANKROLL_REFRESH_INTERVAL_S", "30.0")
+            )
         self._refresh_interval = refresh_interval_seconds
-        
+
         logger.info(
             "[BANKROLL_ALIGNMENT] BankrollServiceV2 cache config: "
             f"refresh_interval={refresh_interval_seconds}s, "
@@ -219,7 +226,6 @@ class BankrollServiceV2:
         self._circuit_open_count = 0
 
         # Circuit-breaker thresholds (env-tunable)
-        import os
         self._circuit_breaker_timeout_threshold = int(
             os.getenv("MERID_BANKROLL_CIRCUIT_TIMEOUT_THRESHOLD", "3")
         )
@@ -467,15 +473,20 @@ class BankrollServiceV2:
         result: Optional[Any] = None
         try:
             # Serialize fetches so a slow response cannot create overlapping calls,
-            # and bound the API call so it cannot starve the strategy cadence.
+            # and rely on httpx's per-request timeout rather than asyncio.wait_for.
+            # httpx/anyio has been observed to ignore asyncio.wait_for cancellation,
+            # letting requests run 15-30s past their 10s deadline and starving the
+            # event loop/RTI stream.
             async with self._get_fetch_lock():
-                result = await asyncio.wait_for(
-                    self._client.get_balance(),
+                result = await self._client.get_balance(
                     timeout=_BANKROLL_BALANCE_API_TIMEOUT_S,
                 )
             elapsed_ms = (time.time() - start_time) * 1000
             self._last_fetch_latency_ms = elapsed_ms
             logger.info("[BANKROLL-API] get_balance() completed in %.1fms, result_type=%s", elapsed_ms, type(result).__name__)
+
+            if not isinstance(result, (BalanceSuccess, BalanceTemporaryError, BalancePermanentError)):
+                raise RuntimeError(f"Unexpected get_balance result type: {type(result)}")
 
             # CRITICAL FIX: Properly access nested equity structure
             # result is BalanceSuccess with .bankroll attribute containing .equity_usd
@@ -530,7 +541,9 @@ class BankrollServiceV2:
                         self._circuit_open_count,
                     )
 
-            raise
+            # Prevent the post-except result type dispatch from re-using a stale result.
+            result = None
+
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
             self._last_fetch_latency_ms = elapsed_ms
@@ -548,6 +561,8 @@ class BankrollServiceV2:
                     # for diagnostics.
                     self._current = self._current.with_state(BalanceState.ERROR)
 
+            # Prevent the post-except result type dispatch from re-using a stale result.
+            result = None
             raise
         
         async with self._get_lock():
@@ -619,22 +634,41 @@ class BankrollServiceV2:
                 )
                 
             elif isinstance(result, BalanceTemporaryError):
-                # Temporary error - FAIL-CLOSED: transition to ERROR to block trading
-                # BUG-FIX: Previously fell back to STALE/cached data which caused bankroll=0 bug
-                # Now blocks trading when live API fails instead of using stale data
-                self._error_count += 1
+                # Temporary error - keep the last known equity and degrade to DEGRADED
+                # so the cached snapshot remains usable within the staleness window.
+                # Fail-closed is enforced by is_bankroll_fresh() once the cache ages out.
+                self._consecutive_timeout_count += 1
+                self._consecutive_error_count = 0
                 self._last_error = result.reason
                 self._last_error_time = datetime.now(timezone.utc)
-                
+
                 if self._current:
-                    # Transition to ERROR (not STALE) to block trading
-                    self._current = self._current.with_state(BalanceState.ERROR)
-                    logger.error(
-                        f"[bankroll_refresh] ERROR (fail-closed): {result.reason}, "
-                        f"trading BLOCKED - not using cached equity=${self._current.equity_usd}"
+                    self._current = self._current.with_state(BalanceState.DEGRADED)
+                    self._cached_usage_count += 1
+                    logger.warning(
+                        "[bankroll_refresh] DEGRADED: %s, using cached equity=$%s",
+                        result.reason,
+                        self._current.equity_usd,
                     )
                 else:
                     logger.error(f"[bankroll_refresh] ERROR (no cache): {result.reason}")
+
+                # Open the fetch circuit if timeouts are clustered.
+                if (
+                    self._consecutive_timeout_count
+                    >= self._circuit_breaker_timeout_threshold
+                ):
+                    self._circuit_open_until = (
+                        time.time() + self._circuit_breaker_duration_seconds
+                    )
+                    self._circuit_open_count += 1
+                    logger.critical(
+                        "[BANKROLL-CIRCUIT-OPEN] %d consecutive timeouts; "
+                        "skipping API calls until %.1fs. circuit_open_count=%d",
+                        self._consecutive_timeout_count,
+                        self._circuit_open_until,
+                        self._circuit_open_count,
+                    )
                     
             elif isinstance(result, BalancePermanentError):
                 # Permanent error - disable trading
