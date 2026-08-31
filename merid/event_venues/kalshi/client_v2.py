@@ -308,22 +308,42 @@ class KalshiClientV2:
             logger.error("[RSA] Signing failed: %s", e)
             return {}
     
-    async def _request(self, method: str, path: str, is_write: bool = False, **kwargs) -> httpx.Response:
-        """Make authenticated request with RSA signing, centralized rate-limiting, and retry/backoff."""
-        # Determine endpoint name for rate limiting
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        is_write: bool = False,
+        skip_rate_limiter: bool = False,
+        allow_retry: bool = True,
+        **kwargs,
+    ) -> httpx.Response:
+        """Make authenticated request with RSA signing, centralized rate-limiting, and retry/backoff.
+
+        Args:
+            skip_rate_limiter: If True, do not acquire or consume a token from the
+                centralized rate limiter.  Use only for infrequent, latency-sensitive
+                calls such as /portfolio/balance that must not queue behind other
+                REST traffic.
+            allow_retry: If False, return the first non-success response/exception
+                instead of backing off and retrying.  Callers (e.g. get_balance)
+                are responsible for classifying the result and choosing the next
+                refresh cadence.
+        """
         endpoint = "write" if is_write else "read"
-        
-        # Use centralized rate limiter
-        rate_limiter = get_rate_limiter()
-        
-        # Wait for rate limiter permission
-        max_wait_time = 30.0  # Maximum time to wait for rate limiter
-        wait_start = time.time()
-        while not await rate_limiter.acquire(endpoint):
-            if time.time() - wait_start > max_wait_time:
-                logger.error(f"[KalshiClientV2] Rate limiter timeout after {max_wait_time}s for {endpoint}")
-                raise httpx.TimeoutException("Rate limiter timeout")
-            await asyncio.sleep(0.1)
+
+        # Use centralized rate limiter unless this is a latency-sensitive call
+        # that must not queue behind other REST traffic (e.g. bankroll balance).
+        if not skip_rate_limiter:
+            rate_limiter = get_rate_limiter()
+
+            # Wait for rate limiter permission
+            max_wait_time = 30.0  # Maximum time to wait for rate limiter
+            wait_start = time.time()
+            while not await rate_limiter.acquire(endpoint):
+                if time.time() - wait_start > max_wait_time:
+                    logger.error(f"[KalshiClientV2] Rate limiter timeout after {max_wait_time}s for {endpoint}")
+                    raise httpx.TimeoutException("Rate limiter timeout")
+                await asyncio.sleep(0.1)
         
         client = await self._get_client()
         headers = kwargs.pop("headers", {})
@@ -346,8 +366,11 @@ class KalshiClientV2:
                 
                 # Handle 429 rate limit responses with centralized backoff
                 if response.status_code == 429:
+                    if not allow_retry:
+                        return response
+
                     self._rate_limit_hits += 1
-                    
+
                     # Extract Retry-After header if present
                     retry_after = None
                     if "Retry-After" in response.headers:
@@ -355,7 +378,7 @@ class KalshiClientV2:
                             retry_after = float(response.headers["Retry-After"])
                         except ValueError:
                             logger.warning("[KalshiClientV2] Invalid Retry-After header value")
-                    
+
                     # ALERT THRESHOLDS MONITORING: Track 429 rate limit hits
                     try:
                         from merid.event_venues.kalshi.monitoring import get_monitor
@@ -367,15 +390,16 @@ class KalshiClientV2:
                         )
                     except Exception as monitor_err:
                         pass
-                    
+
                     # Get recommended backoff from rate limiter
+                    rate_limiter = get_rate_limiter()
                     backoff = rate_limiter.handle_429(endpoint, retry_after)
-                    
+
                     logger.warning(
                         f"[KalshiClientV2] Rate limit hit (429) on attempt {attempt + 1}/{KALSHI_MAX_RETRIES + 1}, "
                         f"backing off for {backoff:.1f}s"
                     )
-                    
+
                     if attempt < KALSHI_MAX_RETRIES:
                         await asyncio.sleep(backoff)
                         continue
@@ -385,6 +409,9 @@ class KalshiClientV2:
                 
                 # Handle other retryable status codes
                 if response.status_code in KALSHI_RETRY_STATUSES and response.status_code != 429:
+                    if not allow_retry:
+                        return response
+
                     last_error = f"HTTP {response.status_code}"
                     if attempt < KALSHI_MAX_RETRIES:
                         backoff = KALSHI_BACKOFF_BASE ** attempt
@@ -398,12 +425,15 @@ class KalshiClientV2:
                         logger.error(f"[KalshiClientV2] Max retries exceeded for {response.status_code}")
                         return response
                 
-                # Successful response - notify rate limiter
-                rate_limiter.handle_success(endpoint)
+                # Successful response - notify rate limiter (unless skipped)
+                if not skip_rate_limiter:
+                    get_rate_limiter().handle_success(endpoint)
                 return response
                     
             except httpx.TimeoutException as e:
                 last_error = f"Timeout: {e}"
+                if not allow_retry:
+                    raise
                 if attempt < KALSHI_MAX_RETRIES:
                     backoff = KALSHI_BACKOFF_BASE ** attempt
                     logger.warning(f"[KalshiClientV2] Timeout on attempt {attempt + 1}/{KALSHI_MAX_RETRIES + 1}, retrying in {backoff:.1f}s")
@@ -411,9 +441,11 @@ class KalshiClientV2:
                 else:
                     logger.error(f"[KalshiClientV2] Max retries exceeded for timeout")
                     raise
-                    
+
             except httpx.ConnectError as e:
                 last_error = f"Connect error: {e}"
+                if not allow_retry:
+                    raise
                 if attempt < KALSHI_MAX_RETRIES:
                     backoff = KALSHI_BACKOFF_BASE ** attempt
                     logger.warning(f"[KalshiClientV2] Connect error on attempt {attempt + 1}/{KALSHI_MAX_RETRIES + 1}, retrying in {backoff:.1f}s")
@@ -482,12 +514,37 @@ class KalshiClientV2:
 
         try:
             logger.info(f"[KALSHI-CLIENT-INSTRUMENT] About to call _request() for {operation}")
-            response = await self._request("GET", "/portfolio/balance", timeout=req_timeout)
+            response = await self._request(
+                "GET",
+                "/portfolio/balance",
+                timeout=req_timeout,
+                skip_rate_limiter=True,
+                allow_retry=False,
+            )
             latency_ms = time.time() * 1000 - start_ms
             
             logger.info(f"[KALSHI-CLIENT-INSTRUMENT] _request() completed in {latency_ms:.1f}ms, status={response.status_code}")
             
             # Check HTTP status
+            if response.status_code == 429:
+                # Kalshi rate limit - fail fast and let the bankroll refresh loop
+                # back off rather than spin through retries inside the client.
+                retry_after = 60.0
+                if "Retry-After" in response.headers:
+                    try:
+                        retry_after = float(response.headers["Retry-After"])
+                    except ValueError:
+                        pass
+                logger.warning(
+                    "[%s] Kalshi 429: retry_after=%.1fs", operation, retry_after
+                )
+                return BalanceTemporaryError(
+                    reason="Kalshi rate limit (429)",
+                    details={"status_code": 429, "retry_after": retry_after},
+                    last_known=None,
+                    retry_after_seconds=retry_after,
+                )
+
             if response.status_code >= 500:
                 # Server error - temporary
                 logger.warning(f"[{operation}] Kalshi 5xx error: {response.status_code}")
@@ -497,7 +554,7 @@ class KalshiClientV2:
                     last_known=None,  # Will need to fetch from cache
                     retry_after_seconds=30,
                 )
-            
+
             if response.status_code == 401:
                 # Auth error - permanent
                 error_body = response.text[:500] if response.text else "No response body"
