@@ -49,7 +49,13 @@ from merid.risk.probability.calibration_diagnostics import (
     calibration_summary,
     expected_calibration_error,
     reliability_curve,
+    roc_auc_score,
 )
+
+try:
+    from merid.risk.probability.platt_scaler import PlattScaler
+except Exception:
+    PlattScaler = None  # type: ignore
 
 REPORT_SCHEMA_VERSION = 1
 
@@ -172,10 +178,31 @@ def _edge_stats(values: Sequence[float], label: str) -> Dict[str, Any]:
 def _predicted_cost_prob(row: Dict[str, Any]) -> float:
     """Model-predicted round-trip cost in probability units (0-1) per contract.
 
-    Uses all_in_cost_cents when available; otherwise falls back to the sum of
-    entry/exit fees and impact reserves recorded in the telemetry row.
+    ``all_in_cost_cents`` in telemetry is the full cost basis
+    (held_price + exchange fee + impact reserve).  The round-trip *cost*
+    is that basis minus the held price.  We prefer explicit fee/impact
+    fields when present, then fall back to subtracting the recorded market
+    probability in cents, and finally use the raw all_in_cost_cents only
+    as a last resort (which may overstate cost if the held price is included).
     """
+    # Explicit fee/impact breakdown is the most accurate cost.
+    entry_fee = float(row.get("entry_fee_cents") or 0.0)
+    exit_fee = float(row.get("exit_fee_reserve_cents") or row.get("exit_cost_reserve_cents") or 0.0)
+    entry_impact = float(row.get("expected_entry_impact_cents") or row.get("impact_reserve_cents") or 0.0)
+    exit_impact = float(row.get("expected_exit_impact_reserve_cents") or row.get("exit_impact_reserve_cents") or 0.0)
+    if any((entry_fee, exit_fee, entry_impact, exit_impact)):
+        return (entry_fee + exit_fee + entry_impact + exit_impact) / 100.0
+
     all_in = row.get("all_in_cost_cents")
+    market_p = _market_p(row)
+    if all_in is not None and market_p is not None:
+        try:
+            v = float(all_in) - float(market_p) * 100.0
+            if math.isfinite(v) and v >= 0:
+                return v / 100.0
+        except (TypeError, ValueError):
+            pass
+
     if all_in is not None:
         try:
             v = float(all_in)
@@ -183,11 +210,8 @@ def _predicted_cost_prob(row: Dict[str, Any]) -> float:
                 return v / 100.0
         except (TypeError, ValueError):
             pass
-    entry_fee = float(row.get("entry_fee_cents") or 0.0)
-    exit_fee = float(row.get("exit_fee_reserve_cents") or 0.0)
-    entry_impact = float(row.get("expected_entry_impact_cents") or 0.0)
-    exit_impact = float(row.get("exit_impact_reserve_cents") or 0.0)
-    return (entry_fee + exit_fee + entry_impact + exit_impact) / 100.0
+
+    return 0.0
 
 
 def _actual_cost_prob(row: Dict[str, Any]) -> Optional[float]:
@@ -217,6 +241,48 @@ def _cost_prob(row: Dict[str, Any]) -> float:
     if actual is not None:
         return actual
     return _predicted_cost_prob(row)
+
+
+def _platt_recalibration(probs: List[float], outcomes: List[int]) -> Dict[str, Any]:
+    """Fit Platt scaling and report before/after metrics.
+
+    Uses the logit of the raw probability as the input to the Platt scaler.
+    AUC is reported separately because a monotonic Platt transform cannot
+    change the ranking of the probabilities (discrimination is preserved).
+    """
+    if PlattScaler is None or len(probs) < 10 or len(set(outcomes)) < 2:
+        return {"error": "insufficient_data_or_missing_dependency"}
+
+    logits = []
+    for p in probs:
+        # Bounded logit to avoid infinities at the boundary.
+        pclip = max(0.01, min(0.99, float(p)))
+        logits.append(math.log(pclip / (1.0 - pclip)))
+
+    try:
+        scaler = PlattScaler(min_samples=5)
+        scaler.fit(logits, outcomes)
+        cal_probs = scaler.predict(logits)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    a, b = scaler.get_parameters() or (None, None)
+    return {
+        "platt_a": float(a) if a is not None else None,
+        "platt_b": float(b) if b is not None else None,
+        "n_samples": len(probs),
+        "brier_raw": brier_score(probs, outcomes),
+        "brier_calibrated": brier_score(cal_probs, outcomes),
+        "ece_raw": expected_calibration_error(probs, outcomes, n_bins=5),
+        "ece_calibrated": expected_calibration_error(cal_probs, outcomes, n_bins=5),
+        "auc_raw": roc_auc_score(probs, outcomes),
+        "auc_calibrated": roc_auc_score(cal_probs, outcomes),
+        "note": (
+            "Platt scaling improves Brier/ECE (calibration) but leaves AUC "
+            "unchanged because it is a monotonic transform.  If AUC does not "
+            "exceed the market reference, recalibration will not create edge."
+        ),
+    }
 
 
 def _bucket(value: Optional[float], buckets: Sequence[Tuple[str, float, float]]) -> Optional[str]:
@@ -511,6 +577,24 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
     if brier_mkt is not None and brier_mkt > 0 and brier_model is not None and math.isfinite(brier_model):
         brier_skill = 1.0 - (brier_model / brier_mkt)
 
+    auc_model = cal_model.get("auc_roc")
+    auc_mkt = cal_market.get("auc_roc")
+    auc_skill = None
+    if (
+        auc_model is not None and math.isfinite(auc_model)
+        and auc_mkt is not None and math.isfinite(auc_mkt)
+    ):
+        auc_skill = auc_model - auc_mkt
+
+    res_model = cal_model.get("resolution")
+    res_mkt = cal_market.get("resolution")
+    res_skill = None
+    if (
+        res_model is not None and math.isfinite(res_model)
+        and res_mkt is not None and math.isfinite(res_mkt) and res_mkt > 0
+    ):
+        res_skill = res_model / res_mkt
+
     # Cost: prefer actual fee cost for filled records, predicted otherwise.
     mean_actual_cost_cents = _mean(c * 100.0 for c in actual_costs) if actual_costs else None
     mean_predicted_cost_cents = _mean(c * 100.0 for c in predicted_costs) if predicted_costs else None
@@ -540,6 +624,16 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
             "bin_observed_rates": cal_model["bin_observed_rates"],
             "bin_counts": cal_model["bin_counts"],
         },
+        # Discrimination: AUC and Murphy resolution (independent of calibration)
+        "auc_roc_model": auc_model,
+        "auc_roc_market": auc_mkt,
+        "auc_roc_skill": auc_skill,
+        "resolution_model": res_model,
+        "resolution_market": res_mkt,
+        "resolution_skill": res_skill,
+        "brier_reliability_model": cal_model.get("reliability"),
+        "brier_reliability_market": cal_market.get("reliability"),
+        "brier_uncertainty_model": cal_model.get("uncertainty"),
         # Edge calibration: gross edge (all resolved) and net-of-cost edge
         # (filled records only, using actual fees).  predicted_edge_net uses the
         # model's own all_in cost estimate; realized_edge_net uses realized cost.
@@ -898,6 +992,12 @@ def build_report(
     # Rename edge slice keys so they are clearly distinct from calibration slices.
     edge_slices = {f"{k}_admission": v for k, v in edge_slices.items()}
 
+    # Recalibration demonstration: Platt scaling on the calibration cohort.
+    # This is a monotonic transform; it can fix calibration but not discrimination.
+    recal_probs = [_model_p(r) for r in resolved_rows if _model_p(r) is not None]
+    recal_outs = [r["y"] for r in resolved_rows if _model_p(r) is not None]
+    recalibration = _platt_recalibration(recal_probs, recal_outs)
+
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "terminology": {
@@ -916,6 +1016,13 @@ def build_report(
                 "slicing by the sign and magnitude of (model_p - market_p) on the "
                 "selected side. Tests whether the model's directional deviation "
                 "from the market predicts the realized deviation."
+            ),
+            "discrimination": (
+                "AUC/ROC and Murphy resolution measure whether the model ranks "
+                "outcomes better than the market reference, independent of whether "
+                "its probabilities are calibrated. A model with AUC and resolution "
+                "similar to the market has no tradable discrimination; one that "
+                "clearly exceeds the market may have real edge after recalibration."
             ),
             "edge_admission_cohort": (
                 "first candidate-generating row per (ticker, side). Edge tests "
@@ -953,6 +1060,7 @@ def build_report(
         },
         "slices": slices,
         "edge_slices": edge_slices,
+        "recalibration": recalibration,
     }
 
 
@@ -1020,6 +1128,18 @@ def render_text(report: Dict[str, Any]) -> str:
             parts.append(f"ece={metrics['expected_calibration_error']:.4f}")
         if metrics.get("calibration_bias") is not None:
             parts.append(f"bias={metrics['calibration_bias']:+.4f}")
+        if metrics.get("auc_roc_model") is not None and math.isfinite(metrics["auc_roc_model"]):
+            parts.append(f"auc={metrics['auc_roc_model']:.3f}")
+        if metrics.get("auc_roc_market") is not None and math.isfinite(metrics["auc_roc_market"]):
+            parts.append(f"mkt_auc={metrics['auc_roc_market']:.3f}")
+        if metrics.get("auc_roc_skill") is not None and math.isfinite(metrics["auc_roc_skill"]):
+            parts.append(f"auc_skill={metrics['auc_roc_skill']:+.3f}")
+        if metrics.get("resolution_model") is not None and math.isfinite(metrics["resolution_model"]):
+            parts.append(f"res={metrics['resolution_model']:.4f}")
+        if metrics.get("resolution_market") is not None and math.isfinite(metrics["resolution_market"]):
+            parts.append(f"mkt_res={metrics['resolution_market']:.4f}")
+        if metrics.get("resolution_skill") is not None and math.isfinite(metrics["resolution_skill"]):
+            parts.append(f"res_skill={metrics['resolution_skill']:.3f}")
         if metrics.get("mean_predicted_edge") is not None:
             parts.append(f"pred_edge={metrics['mean_predicted_edge']:+.4f}")
         if metrics.get("mean_realized_edge") is not None:
@@ -1079,6 +1199,26 @@ def render_text(report: Dict[str, Any]) -> str:
             lines.append(f"-- {section} " + "-" * max(0, 55 - len(section)))
             for name in sorted(group):
                 _emit(name, group[name])
+
+    # Recalibration: Platt scaling demonstration.
+    rec = report.get("recalibration") or {}
+    lines.append("")
+    lines.append("RECALIBRATION (Platt scaling)")
+    if not rec or rec.get("error"):
+        lines.append(f"  unavailable: {rec.get('error', 'insufficient_data')}")
+    else:
+        lines.append(f"  n={rec['n_samples']}  a={rec['platt_a']:.4f}  b={rec['platt_b']:.4f}")
+        lines.append(
+            f"  Brier raw={rec['brier_raw']:.4f} -> cal={rec['brier_calibrated']:.4f}"
+        )
+        lines.append(
+            f"  ECE   raw={rec['ece_raw']:.4f} -> cal={rec['ece_calibrated']:.4f}"
+        )
+        lines.append(
+            f"  AUC   raw={rec['auc_raw']:.4f} -> cal={rec['auc_calibrated']:.4f}  (monotonic; unchanged)"
+        )
+        lines.append(f"  NOTE: {rec['note']}")
+
     return "\n".join(lines)
 
 
