@@ -80,6 +80,9 @@ class Eth15mAgent(BaseKalshiAgent):
             product=self.product,
         )
 
+        # Regime signal - not available in lean 15m mode, use None
+        eth_15m_regime_signal = None
+
         return Eth15mInputs(
             rti_current=rti["rti_current"],
             rti_60s_sma=rti["rti_60s_sma"],
@@ -92,6 +95,7 @@ class Eth15mAgent(BaseKalshiAgent):
             best_ask=market.best_ask,
             is_crypto_vol_elevated=is_vol_elevated,
             current_exposure_pct=exposure_pct,
+            eth_15m_regime_signal=eth_15m_regime_signal,
         )
 
     @trace_agent_step()
