@@ -67,9 +67,14 @@ _ASSET_TO_CFB_SYMBOL = {
 
 # Kalshi crypto contracts settle on a one-minute average of CF RTI per-second
 # observations.  The 60-second average field is required when trading inside the
-# final minute window.  Short-horizon probability edges need sub-second fresh
-# settlement references; 2s is a conservative fail-closed ceiling.
-_MAX_CFB_RTI_AGE_MS = int(os.environ.get("MERID_MAX_CFB_RTI_AGE_MS", "2000"))
+# final minute window.  Short-horizon probability edges need fresh settlement
+# references, but the RTI cadence is ~1 tick/second and the CME CF RTI
+# methodology itself allows a 10s retrieval-lag threshold; the previous 2s
+# default was below two publication intervals plus network/processing jitter and
+# produced continuous false cfb_rti_stale rejections (wall_age ~2.3-2.8s) on a
+# healthy stream.  5s (5 missed ticks) remains fail-closed against genuinely
+# stale or frozen streams while tolerating normal 1s-cadence jitter.
+_MAX_CFB_RTI_AGE_MS = int(os.environ.get("MERID_MAX_CFB_RTI_AGE_MS", "5000"))
 _FINAL_MINUTE_CUTOFF_S = float(os.environ.get("MERID_FINAL_MINUTE_CUTOFF_S", "60"))
 _REQUEST_TIMEOUT = float(os.environ.get("MERID_CFB_RTI_TIMEOUT_S", "5"))
 
