@@ -364,24 +364,34 @@ class KalshiSettlement:
         dataclass expects.  Map the authoritative fields so the downstream
         grading pipeline receives a correctly-typed settlement event.
         """
-        market_id = item.get("ticker") or item.get("market_id") or ""
-        # market_id is the full market ticker (e.g. KXSOL15M-26AUG291100-00).
-        # ticker is the series root used for bus-publish validation
-        # (e.g. KXSOL15M, later normalized to KXSOL-15M).
-        if market_id and "-" in market_id:
-            ticker = market_id.split("-")[0]
+        # The API may return the full market ticker in either ``market_id``
+        # or ``ticker``.  Prefer ``market_id`` when present; otherwise use
+        # ``ticker`` as the full market ticker and derive the series root.
+        market_id = item.get("market_id") or item.get("ticker") or ""
+        if "market_id" in item:
+            ticker = item.get("ticker") or (market_id.split("-")[0] if market_id and "-" in market_id else market_id)
         else:
-            ticker = market_id
+            ticker = market_id.split("-")[0] if market_id and "-" in market_id else market_id
 
         market_result = str(item.get("market_result") or "").lower().strip()
+        # Fallback to the status field when market_result is absent (e.g. mocks
+        # or older API responses).
+        status_field = str(item.get("status") or "").lower().strip()
         if market_result in ("yes", "no"):
             status = SettlementStatus.SETTLED
         elif market_result in ("cancelled", "void", "invalid"):
             status = SettlementStatus.CANCELLED
+        elif status_field in ("settled", "finalized"):
+            status = SettlementStatus.SETTLED
+        elif status_field in ("cancelled", "void", "invalid"):
+            status = SettlementStatus.CANCELLED
         else:
             status = SettlementStatus.PENDING
 
-        settlement_price_cents = item.get("value")
+        # Kalshi uses ``value`` for the settled price in cents; tests and some
+        # older payloads use ``settlement_price``.
+        raw_price = item.get("value") if "value" in item else item.get("settlement_price")
+        settlement_price_cents = raw_price
         if settlement_price_cents is not None:
             try:
                 settlement_price_cents = int(settlement_price_cents)
@@ -442,8 +452,8 @@ class KalshiSettlement:
             status=status,
             settlement_price_cents=settlement_price_cents,
             settlement_value=settlement_value,
-            expiry_time=item.get("settled_time"),
-            settlement_time=item.get("settled_time"),
+            expiry_time=item.get("settled_time") or item.get("settlement_time"),
+            settlement_time=item.get("settled_time") or item.get("settlement_time"),
             position_count=_parse_count(item.get("yes_count_fp")) + _parse_count(item.get("no_count_fp")),
             yes_count=_parse_count(item.get("yes_count_fp")),
             no_count=_parse_count(item.get("no_count_fp")),
@@ -792,10 +802,13 @@ class KalshiSettlementPoller:
         for attempt in range(self.config.max_retries):
             try:
                 # BUG-FIX (2026-05-12): Add timeout to API calls to prevent indefinite blocking
-                # Wrap in asyncio.wait_for to prevent 30s timeout from blocking the event loop
-                if hasattr(self.client, '_request_with_resilience'):
+                # Wrap in asyncio.wait_for to prevent 30s timeout from blocking the event loop.
+                # Also guard against MagicMock clients where hasattr is True but the attribute
+                # is not a real coroutine (iscoroutinefunction is False for plain mocks).
+                client = self.client
+                if hasattr(client, '_request_with_resilience') and asyncio.iscoroutinefunction(client._request_with_resilience):
                     result = await asyncio.wait_for(
-                        self.client._request_with_resilience(
+                        client._request_with_resilience(
                             method, endpoint, params=params, operation_name="settlement_poll"
                         ),
                         timeout=15.0  # 15 second timeout for settlement API calls
@@ -803,21 +816,21 @@ class KalshiSettlementPoller:
                     if result.success:
                         return result.data or {}
                     raise RuntimeError(f"Settlement API request failed: {result.error}")
-                elif hasattr(self.client, 'request'):
+                elif hasattr(client, 'request') and asyncio.iscoroutinefunction(client.request):
                     response = await asyncio.wait_for(
-                        self.client.request(method, endpoint, params=params),
+                        client.request(method, endpoint, params=params),
                         timeout=15.0
                     )
                     return response
-                elif hasattr(self.client, '_request'):
+                elif hasattr(client, '_request') and asyncio.iscoroutinefunction(client._request):
                     response = await asyncio.wait_for(
-                        self.client._request(method, endpoint, params=params),
+                        client._request(method, endpoint, params=params),
                         timeout=15.0
                     )
                     return response
                 else:
                     raise AttributeError(
-                        f"{type(self.client).__name__!r} has no known request method "
+                        f"{type(client).__name__!r} has no known awaitable request method "
                         f"(tried: _request_with_resilience, request, _request)"
                     )
                     
@@ -1283,6 +1296,30 @@ class SettlementToGradingBridge:
         except Exception as exc:
             logger.warning(f"Failed to notify position_cache of settlement: {exc}")
         
+        # Durable settlement-outcome log for offline calibration.  Polled
+        # outcomes are written as they arrive so the calibration report does
+        # not require a separate manual backfill run.
+        try:
+            from merid.analysis.settlement_outcome_exporter import (
+                DEFAULT_OUT_PATH,
+                SERIES_TO_ASSET,
+                OutcomeEvent,
+                record_outcome,
+            )
+            if settlement.outcome_str in ("YES", "NO"):
+                series = settlement.ticker.upper()
+                event = OutcomeEvent(
+                    ticker=settlement.market_id,
+                    series_ticker=series,
+                    asset=SERIES_TO_ASSET.get(series, ""),
+                    outcome=settlement.outcome_str.lower(),
+                    resolved_yes=1 if settlement.outcome_str == "YES" else 0,
+                    settlement_timestamp_utc=settlement.settlement_time,
+                )
+                record_outcome(event, out_path=DEFAULT_OUT_PATH)
+        except Exception as exc:
+            logger.warning("[SETTLEMENT-POLLER] Failed to record settlement outcome: %s", exc)
+
         # Notify grading callback
         if self.grading_callback:
             try:

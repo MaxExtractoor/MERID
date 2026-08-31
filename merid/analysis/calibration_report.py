@@ -169,13 +169,11 @@ def _edge_stats(values: Sequence[float], label: str) -> Dict[str, Any]:
     }
 
 
-def _cost_prob(row: Dict[str, Any]) -> float:
-    """Round-trip cost in probability units (0-1) for the selected side.
+def _predicted_cost_prob(row: Dict[str, Any]) -> float:
+    """Model-predicted round-trip cost in probability units (0-1) per contract.
 
-    Uses the canonical all_in_cost_cents from trade_decision if available;
-    otherwise falls back to entry fee + exit reserves.  The cost is per
-    contract in cents and must be subtracted from gross edge to judge
-    tradeable net edge.
+    Uses all_in_cost_cents when available; otherwise falls back to the sum of
+    entry/exit fees and impact reserves recorded in the telemetry row.
     """
     all_in = row.get("all_in_cost_cents")
     if all_in is not None:
@@ -190,6 +188,35 @@ def _cost_prob(row: Dict[str, Any]) -> float:
     entry_impact = float(row.get("expected_entry_impact_cents") or 0.0)
     exit_impact = float(row.get("exit_impact_reserve_cents") or 0.0)
     return (entry_fee + exit_fee + entry_impact + exit_impact) / 100.0
+
+
+def _actual_cost_prob(row: Dict[str, Any]) -> Optional[float]:
+    """Realized cost per contract in probability units from the fills ledger.
+
+    Returns None if no fills are recorded for the ticker.
+    """
+    actual = row.get("actual_cost_per_contract_dollars")
+    if actual is not None:
+        try:
+            v = float(actual)
+            if math.isfinite(v) and v >= 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _cost_prob(row: Dict[str, Any]) -> float:
+    """Best available round-trip cost in probability units for the selected side.
+
+    Prefers the realized fee cost per contract from actual fills; falls back to
+    the model's predicted cost otherwise.  The cost is per contract in cents and
+    is subtracted from gross edge to judge tradeable net edge.
+    """
+    actual = _actual_cost_prob(row)
+    if actual is not None:
+        return actual
+    return _predicted_cost_prob(row)
 
 
 def _bucket(value: Optional[float], buckets: Sequence[Tuple[str, float, float]]) -> Optional[str]:
@@ -289,9 +316,17 @@ def load_outcomes(path: str | Path) -> Dict[str, int]:
 def load_fill_pnls(fills_db_path: str | Path) -> Dict[str, Dict[str, float]]:
     """Realized fee-inclusive P&L per ticker from the fills SQLite ledger.
 
-    Returns {ticker: {"realized_pnl_dollars": float, "fees_dollars": float,
-                      "fills": int}}. Read-only connection; returns {} if the
-    DB is missing or unreadable.
+    Returns a dict keyed by market_ticker with:
+        - realized_pnl_dollars: legacy cash-flow sum (proceeds, net of fee for sells)
+        - settlement_pnl_linear_a, settlement_pnl_linear_b: coefficients for
+          computing settlement PnL = a + b * outcome_yes from canonical fills
+        - cash_flow_dollars: gross proceeds sum
+        - fees_dollars: total fees paid
+        - fills: number of fill rows
+        - contracts: total contracts (count_fp) traded
+        - actual_cost_per_contract_dollars: fees / contracts (None if unknown)
+
+    Read-only connection; returns {} if the DB is missing or unreadable.
     """
     p = Path(fills_db_path)
     if not p.exists():
@@ -301,28 +336,86 @@ def load_fill_pnls(fills_db_path: str | Path) -> Dict[str, Dict[str, float]]:
         conn = sqlite3.connect(uri, uri=True)
     except sqlite3.Error:
         return {}
+
+    # Try the canonical fill query first.  Older test DBs may not have all
+    # columns; fall back to a simple proceeds/fee/count aggregate in that case.
+    detailed_sql = """
+        SELECT market_ticker,
+               SUM(CASE
+                       WHEN side = 'yes' AND action = 'sell'
+                           THEN COALESCE(yes_price_dollars, 0.0) - COALESCE(fee_cost, 0.0)
+                       WHEN side = 'yes' AND action = 'buy'
+                           THEN -COALESCE(yes_price_dollars, 0.0) - COALESCE(fee_cost, 0.0)
+                       WHEN side = 'no' AND action = 'buy'
+                           THEN 1.0 - COALESCE(no_price_dollars, 0.0) - COALESCE(fee_cost, 0.0)
+                       WHEN side = 'no' AND action = 'sell'
+                           THEN COALESCE(no_price_dollars, 0.0) - 1.0 - COALESCE(fee_cost, 0.0)
+                       ELSE 0.0
+                   END),
+               SUM(CASE
+                       WHEN side = 'yes' AND action = 'buy' THEN 1
+                       WHEN side = 'yes' AND action = 'sell' THEN -1
+                       WHEN side = 'no' AND action = 'buy' THEN -1
+                       WHEN side = 'no' AND action = 'sell' THEN 1
+                       ELSE 0
+                   END),
+               COALESCE(SUM(CAST(fee_cost AS REAL)), 0.0),
+               COUNT(*),
+               COALESCE(SUM(CAST(count_fp AS INTEGER)), 0)
+        FROM kalshi_fills
+        GROUP BY market_ticker
+    """
+    simple_sql = """
+        SELECT market_ticker,
+               COALESCE(SUM(CAST(proceeds_dollars AS REAL)), 0.0),
+               COALESCE(SUM(CAST(fee_cost AS REAL)), 0.0),
+               COUNT(*)
+        FROM kalshi_fills
+        GROUP BY market_ticker
+    """
+
+    detailed = True
     try:
-        rows = conn.execute(
-            """
-            SELECT market_ticker,
-                   COALESCE(SUM(CAST(proceeds_dollars AS REAL)), 0.0),
-                   COALESCE(SUM(CAST(fee_cost AS REAL)), 0.0),
-                   COUNT(*)
-            FROM kalshi_fills
-            GROUP BY market_ticker
-            """
-        ).fetchall()
+        rows = conn.execute(detailed_sql).fetchall()
     except sqlite3.Error:
-        conn.close()
-        return {}
+        try:
+            rows = conn.execute(simple_sql).fetchall()
+            detailed = False
+        except sqlite3.Error:
+            conn.close()
+            return {}
     conn.close()
+
     result: Dict[str, Dict[str, float]] = {}
-    for ticker, pnl, fees, n in rows:
-        if ticker:
+    if detailed:
+        for ticker, a, b, fees, n, contracts in rows:
+            if not ticker:
+                continue
+            fees = float(fees or 0.0)
+            contracts = int(contracts or 0)
+            result[str(ticker)] = {
+                "settlement_pnl_linear_a": float(a or 0.0),
+                "settlement_pnl_linear_b": float(b or 0.0),
+                "cash_flow_dollars": float(a or 0.0),  # legacy alias
+                "fees_dollars": fees,
+                "fills": int(n),
+                "contracts": contracts,
+                "actual_cost_per_contract_dollars": (
+                    fees / contracts if contracts > 0 else None
+                ),
+                "realized_pnl_dollars": None,  # computed in join_rows from outcome
+            }
+    else:
+        for ticker, pnl, fees, n in rows:
+            if not ticker:
+                continue
             result[str(ticker)] = {
                 "realized_pnl_dollars": float(pnl or 0.0),
+                "cash_flow_dollars": float(pnl or 0.0),
                 "fees_dollars": float(fees or 0.0),
                 "fills": int(n),
+                "contracts": 0,
+                "actual_cost_per_contract_dollars": None,
             }
     return result
 
@@ -348,6 +441,7 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
     """
     n = len(rows)
     resolved = [r for r in rows if r.get("y") is not None]
+    filled = [r for r in resolved if r.get("fill_count", 0) > 0]
     probs_model = [_model_p(r) for r in resolved if _model_p(r) is not None]
     outs_model = [r["y"] for r in resolved if _model_p(r) is not None]
     probs_market = [_market_p(r) for r in resolved if _market_p(r) is not None]
@@ -356,30 +450,55 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
     candidates = [r for r in rows if r.get("candidate_generated")]
     selected = [r for r in rows if r.get("allocator_selected")]
 
-    # Edge: predicted = model - market; realized = y - market.
-    edge_pred, edge_pred_net, edge_real, edge_real_net = [], [], [], []
+    # Gross edge: predicted = model - market; realized = y - market.
+    edge_pred, edge_real = [], []
     for r in resolved:
         mp = _model_p(r)
         mkt = _market_p(r)
         if mkt is None:
             continue
-        cost = _cost_prob(r)
         pred = (mp - mkt) if mp is not None else None
         real = r["y"] - mkt
         if pred is not None:
             edge_pred.append(pred)
-            edge_pred_net.append(pred - cost)
         edge_real.append(real)
-        edge_real_net.append(real - cost)
     edge_gaps = [p - r for p, r in zip(edge_pred, edge_real)]
-    edge_gaps_net = [p - r for p, r in zip(edge_pred_net, edge_real_net)]
+
+    # Net-of-cost edge: predicted uses the model's telemetry cost, realized uses
+    # the actual fee cost from fills (only for trades that actually executed).
+    edge_pred_net_all, predicted_costs = [], []
+    for r in resolved:
+        mp = _model_p(r)
+        mkt = _market_p(r)
+        if mkt is None:
+            continue
+        pred = (mp - mkt) if mp is not None else None
+        cost_pred = _predicted_cost_prob(r)
+        predicted_costs.append(cost_pred)
+        if pred is not None:
+            edge_pred_net_all.append(pred - cost_pred)
+
+    edge_real_net_filled, actual_costs, filled_gaps_net = [], [], []
+    for r in filled:
+        mkt = _market_p(r)
+        if mkt is None:
+            continue
+        real = r["y"] - mkt
+        cost_actual = _actual_cost_prob(r)
+        if cost_actual is None:
+            cost_actual = _predicted_cost_prob(r)
+        edge_real_net_filled.append(real - cost_actual)
+        actual_costs.append(cost_actual)
+        mp = _model_p(r)
+        if mp is not None:
+            filled_gaps_net.append((mp - mkt - _predicted_cost_prob(r)) - (real - cost_actual))
 
     pred_stats = _edge_stats(edge_pred, "predicted_edge") if edge_pred else {}
     real_stats = _edge_stats(edge_real, "realized_edge") if edge_real else {}
-    real_net_stats = _edge_stats(edge_real_net, "realized_edge_net") if edge_real_net else {}
-    pred_net_stats = _edge_stats(edge_pred_net, "predicted_edge_net") if edge_pred_net else {}
+    pred_net_stats = _edge_stats(edge_pred_net_all, "predicted_edge_net") if edge_pred_net_all else {}
+    real_net_stats = _edge_stats(edge_real_net_filled, "realized_edge_net") if edge_real_net_filled else {}
     gap_stats = _edge_stats(edge_gaps, "predicted_minus_realized_edge") if edge_gaps else {}
-    gap_net_stats = _edge_stats(edge_gaps_net, "predicted_minus_realized_edge_net") if edge_gaps_net else {}
+    gap_net_stats = _edge_stats(filled_gaps_net, "predicted_minus_realized_edge_net") if filled_gaps_net else {}
 
     # Canonical calibration diagnostics in side space.
     n_bins = min(n_bins, len(probs_model)) if probs_model else n_bins
@@ -392,6 +511,10 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
     if brier_mkt is not None and brier_mkt > 0 and brier_model is not None and math.isfinite(brier_model):
         brier_skill = 1.0 - (brier_model / brier_mkt)
 
+    # Cost: prefer actual fee cost for filled records, predicted otherwise.
+    mean_actual_cost_cents = _mean(c * 100.0 for c in actual_costs) if actual_costs else None
+    mean_predicted_cost_cents = _mean(c * 100.0 for c in predicted_costs) if predicted_costs else None
+
     return {
         "slice": name,
         "evaluated": n,
@@ -400,6 +523,8 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
         "candidate_rate": _rate(len(candidates), n),
         "selected": len(selected),
         "selected_rate": _rate(len(selected), n),
+        "filled": len(filled),
+        "fill_rate": _rate(len(filled), len(resolved)) if resolved else None,
         "mean_derived_model_probability": _mean(_model_p(r) for r in rows),
         "mean_market_probability": _mean(_market_p(r) for r in rows),
         "mean_raw_edge_cents": _mean(r.get("raw_edge_cents") for r in rows),
@@ -415,20 +540,21 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
             "bin_observed_rates": cal_model["bin_observed_rates"],
             "bin_counts": cal_model["bin_counts"],
         },
-        # Edge calibration: does the model's deviation from market price predict
-        # the realized deviation from market price?  Include both gross and
-        # net-of-cost edges, with n/std/se/t-stat so small cells are not mistaken
-        # for significant edge.  Keep legacy mean_* names for backward compatibility.
+        # Edge calibration: gross edge (all resolved) and net-of-cost edge
+        # (filled records only, using actual fees).  predicted_edge_net uses the
+        # model's own all_in cost estimate; realized_edge_net uses realized cost.
         "mean_predicted_edge": _mean(edge_pred),
         "mean_realized_edge": _mean(edge_real),
-        "mean_realized_edge_net": _mean(edge_real_net),
+        "mean_predicted_edge_net": _mean(edge_pred_net_all),
+        "mean_realized_edge_net": _mean(edge_real_net_filled),
         "mean_predicted_minus_realized_edge": _mean(edge_gaps),
-        "mean_predicted_minus_realized_edge_net": _mean(edge_gaps_net),
-        "mean_round_trip_cost_cents": _mean(_cost_prob(r) * 100.0 for r in resolved),
+        "mean_predicted_minus_realized_edge_net": _mean(filled_gaps_net),
+        "mean_round_trip_cost_cents": mean_actual_cost_cents,
+        "mean_predicted_cost_cents": mean_predicted_cost_cents,
         **pred_stats,
         **real_stats,
-        **real_net_stats,
         **pred_net_stats,
+        **real_net_stats,
         **gap_stats,
         **gap_net_stats,
         "trades_with_pnl": len(pnls),
@@ -520,6 +646,7 @@ def join_rows(
         ticker = rec.get("ticker")
         side = str(rec.get("selected_side") or "").lower()
         y: Optional[int] = None
+        outcome_yes: Optional[int] = None
         if ticker in outcomes and side in ("yes", "no"):
             outcome_yes = outcomes[ticker]
             y = outcome_yes if side == "yes" else 1 - outcome_yes
@@ -527,7 +654,34 @@ def join_rows(
         row = dict(rec)
         row["y"] = y
         row["resolved"] = y is not None
-        row["realized_pnl_dollars"] = pnl_info["realized_pnl_dollars"] if pnl_info else None
+        row["outcome_yes"] = outcome_yes
+
+        if pnl_info:
+            row["fill_count"] = pnl_info.get("fills", 0)
+            row["contracts"] = pnl_info.get("contracts", 0)
+            row["fees_dollars"] = pnl_info.get("fees_dollars")
+            row["cash_flow_dollars"] = pnl_info.get("cash_flow_dollars")
+            row["actual_cost_per_contract_dollars"] = pnl_info.get(
+                "actual_cost_per_contract_dollars"
+            )
+
+            # Prefer an explicit settlement PnL (from callers/tests), then compute
+            # it from the canonical A/B coefficients and the YES outcome.
+            pnl = pnl_info.get("realized_pnl_dollars")
+            if pnl is None and outcome_yes is not None:
+                a = pnl_info.get("settlement_pnl_linear_a")
+                b = pnl_info.get("settlement_pnl_linear_b")
+                if a is not None and b is not None:
+                    pnl = float(a) + float(b) * float(outcome_yes)
+            row["realized_pnl_dollars"] = pnl
+        else:
+            row["realized_pnl_dollars"] = None
+            row["fill_count"] = 0
+            row["contracts"] = 0
+            row["fees_dollars"] = None
+            row["cash_flow_dollars"] = None
+            row["actual_cost_per_contract_dollars"] = None
+
         row["spread_cents"] = _spread_cents(rec)
         rows.append(row)
     return rows
@@ -854,6 +1008,8 @@ def render_text(report: Dict[str, Any]) -> str:
         parts = [f"[{section}] n={metrics['evaluated']} resolved={metrics['resolved']}"]
         if metrics.get("insufficient_sample"):
             parts.append(f"insufficient_sample=true min_required={metrics.get('min_required_resolved', 50)}")
+        if metrics.get("filled"):
+            parts.append(f"filled={metrics['filled']}")
         if metrics.get("brier_derived_model") is not None:
             parts.append(f"brier={metrics['brier_derived_model']:.4f}")
         if metrics.get("brier_market_reference") is not None:
@@ -869,11 +1025,13 @@ def render_text(report: Dict[str, Any]) -> str:
         if metrics.get("mean_realized_edge") is not None:
             n = metrics.get("realized_edge_n")
             parts.append(f"real_edge={metrics['mean_realized_edge']:+.4f}(n={n})")
+        if metrics.get("mean_predicted_edge_net") is not None:
+            parts.append(f"pred_net={metrics['mean_predicted_edge_net']:+.4f}")
         if metrics.get("mean_realized_edge_net") is not None:
             n = metrics.get("realized_edge_net_n")
             t = metrics.get("realized_edge_net_t_stat")
             t_str = f" t={t:+.2f}" if t is not None else ""
-            parts.append(f"net_real_edge={metrics['mean_realized_edge_net']:+.4f}(n={n}){t_str}")
+            parts.append(f"real_net={metrics['mean_realized_edge_net']:+.4f}(n={n}){t_str}")
         if metrics.get("mean_predicted_minus_realized_edge") is not None:
             t = metrics.get("predicted_minus_realized_edge_t_stat")
             t_str = f" t={t:+.2f}" if t is not None else ""
@@ -881,7 +1039,9 @@ def render_text(report: Dict[str, Any]) -> str:
         if metrics.get("fee_inclusive_expectancy_dollars") is not None:
             parts.append(f"expectancy=${metrics['fee_inclusive_expectancy_dollars']:+.4f}")
         if metrics.get("mean_round_trip_cost_cents") is not None:
-            parts.append(f"cost={metrics['mean_round_trip_cost_cents']:.2f}c")
+            parts.append(f"act_cost={metrics['mean_round_trip_cost_cents']:.2f}c")
+        if metrics.get("mean_predicted_cost_cents") is not None:
+            parts.append(f"pred_cost={metrics['mean_predicted_cost_cents']:.2f}c")
         if metrics.get("candidate_rate") is not None:
             parts.append(f"cand_rate={metrics['candidate_rate']:.2f}")
         lines.append(" ".join(parts))

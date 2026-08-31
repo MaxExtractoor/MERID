@@ -374,6 +374,26 @@ def append_rows(path: str | Path, rows: List[Dict[str, Any]]) -> None:
         os.fsync(f.fileno())
 
 
+def record_outcome(
+    event: OutcomeEvent,
+    out_path: str | Path = DEFAULT_OUT_PATH,
+    run_log_path: Optional[str | Path] = None,
+) -> bool:
+    """Idempotently append a single definitive settlement outcome.
+
+    Used by the live settlement poller so calibration and grading pipelines
+    see outcomes without a separate backfill.  Existing matching outcomes are
+    skipped; conflicting ones append a ``settlement_correction`` row.
+    Returns True if a new row was appended.
+    """
+    existing, _ = load_existing_outcomes(out_path)
+    rows, _ = plan_appends([event], existing)
+    if rows:
+        append_rows(out_path, rows)
+        return True
+    return False
+
+
 async def run_export(
     *,
     out_path: str | Path,

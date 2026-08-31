@@ -10687,12 +10687,22 @@ def _prepare_order_for_gate(
             logger.warning("[LIQUIDITY-ROLE] kalshi_maker_taker_contract not available - skipping price placement invariant")
 
     # Staleness SLO checks: use live orderbook age, not intent creation time.
+    # Authoritative source is the wall-clock time of the last orderbook update.
+    # state.age_ms is snapshot-time and can lag the freshness tracker; the
+    # last_book_update_wall_ts is the canonical timestamp set when the exchange
+    # orderbook was actually last processed.
     STALENESS_SLO_MS = float(os.getenv("MERID_STALENESS_SLO_MS", "5000.0"))
-    if state and hasattr(state, "age_ms") and state.age_ms is not None:
-        book_age_ms = float(state.age_ms)
-    else:
-        book_age_ms = 0.0
-    if book_age_ms == 0.0 and intent.snapshot_ts:
+    book_age_ms = 0.0
+    if state is not None:
+        wall_ts = getattr(state, "last_book_update_wall_ts", 0.0) or 0.0
+        mono_ts = getattr(state, "last_book_update_ts", 0.0) or 0.0
+        if wall_ts:
+            book_age_ms = (replay_time() - wall_ts) * 1000.0
+        elif mono_ts:
+            book_age_ms = (_time.monotonic() - mono_ts) * 1000.0
+        elif hasattr(state, "age_ms") and state.age_ms is not None:
+            book_age_ms = float(state.age_ms)
+    if book_age_ms <= 0.0 and intent.snapshot_ts:
         book_age_ms = (replay_time() - intent.snapshot_ts) * 1000.0
 
     if book_age_ms > STALENESS_SLO_MS and not _is_exit:
