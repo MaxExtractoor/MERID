@@ -404,6 +404,29 @@ def build_asset_record(
         "fvg_influenced": _resolve(candidate, decision, ["fvg_influenced"], ["fvg_influenced"]),
         "fvg_size_scale": _resolve(candidate, decision, ["fvg_size_scale"], ["fvg_size_scale"]),
         "order_book_imbalance": _resolve(candidate, decision, ["order_book_imbalance"], ["order_book_imbalance"]),
+        # Microstructure features (additive telemetry, gated in live)
+        "microstructure_delta_pp": _first_float(
+            _resolve(candidate, decision, ["microstructure_delta_pp"], ["microstructure_delta_pp"])
+        ),
+        "microstructure_book_delta_pp": _first_float(
+            _resolve(candidate, decision, ["microstructure_book_delta_pp"], ["microstructure_book_delta_pp"])
+        ),
+        "microstructure_cross_delta_pp": _first_float(
+            _resolve(candidate, decision, ["microstructure_cross_delta_pp"], ["microstructure_cross_delta_pp"])
+        ),
+        "microstructure_yes_edge_pp": _first_float(
+            _resolve(candidate, decision, ["microstructure_yes_edge_pp"], ["microstructure_yes_edge_pp"])
+        ),
+        "microstructure_no_edge_pp": _first_float(
+            _resolve(candidate, decision, ["microstructure_no_edge_pp"], ["microstructure_no_edge_pp"])
+        ),
+        "microstructure_yes_book_imbalance": None,
+        "microstructure_no_book_imbalance": None,
+        "microstructure_yes_ofi": None,
+        "microstructure_no_ofi": None,
+        "microstructure_yes_spread_cents": None,
+        "microstructure_no_spread_cents": None,
+        "microstructure_btc_log_return": None,
         # Gate outcomes
         "signal_generated": bool((waterfall.get("stages", {}).get("signal_generated") or {}).get("status", False)),
         "candidate_generated": candidate is not None,
@@ -448,6 +471,22 @@ def build_asset_record(
             _resolve(candidate, decision, ["rationale"], ["rationale"]),
         ),
     }
+
+    # Flatten microstructure feature dictionaries when present.
+    _yes_features = _resolve(candidate, decision, ["microstructure_yes_features"], ["microstructure_yes_features"]) or {}
+    _no_features = _resolve(candidate, decision, ["microstructure_no_features"], ["microstructure_no_features"]) or {}
+    if isinstance(_yes_features, dict):
+        record["microstructure_yes_book_imbalance"] = _first_float(_yes_features.get("book_imbalance"))
+        record["microstructure_yes_ofi"] = _first_float(_yes_features.get("ofi"))
+        record["microstructure_yes_spread_cents"] = _first_float(_yes_features.get("spread_cents"))
+    if isinstance(_no_features, dict):
+        record["microstructure_no_book_imbalance"] = _first_float(_no_features.get("book_imbalance"))
+        record["microstructure_no_ofi"] = _first_float(_no_features.get("ofi"))
+        record["microstructure_no_spread_cents"] = _first_float(_no_features.get("spread_cents"))
+    record["microstructure_btc_log_return"] = _first_float(
+        _resolve(candidate, decision, ["microstructure_btc_log_return"], ["microstructure_btc_log_return"])
+    )
+
     return sanitize(record)
 
 

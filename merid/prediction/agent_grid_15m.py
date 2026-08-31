@@ -50,6 +50,21 @@ except ImportError:
     compute_ev_net = None  # type: ignore
     compute_fee_cents = None  # type: ignore
 
+# Microstructure features for order-flow, book-imbalance, and cross-asset lead-lag.
+# Loaded defensively; if missing, the live path falls back to Bachelier-only.
+try:
+    from merid.prediction.microstructure_features import (
+        compute_microstructure_signals,
+        kalshi_state_book_levels,
+        SpotHistory,
+    )
+    _MICROSTRUCTURE_AVAILABLE = True
+except ImportError:
+    _MICROSTRUCTURE_AVAILABLE = False
+    compute_microstructure_signals = None  # type: ignore
+    kalshi_state_book_levels = None  # type: ignore
+    SpotHistory = None  # type: ignore
+
 # CF-RTI settlement input: authoritative settlement reference.
 # This is the only source permitted to set settlement_reference="cfb_rti_live".
 try:
@@ -2062,6 +2077,12 @@ class LeanAgent15m:
         self._coinbase_velocity_signals: Dict[str, Dict] = {}  # asset -> {velocity, timestamp, signal_type}
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             self._coinbase_velocity_signals[asset] = {"velocity": 0.0, "timestamp": 0.0, "signal_type": "none"}
+
+        # Microstructure ring buffers.  Per-asset book snapshots for OFI and a
+        # shared BTC spot history for cross-asset lead-lag.  These are only used
+        # for telemetry and for gated hybrid deltas; live defaults to Bachelier.
+        self._microstructure_book_history: Dict[str, Any] = {}
+        self._cross_asset_spot_history: Dict[str, Any] = {}
 
         # Per-cycle rejection waterfall for diagnostics.  Tracks which gate eliminated
         # the asset each cycle so we can measure before tuning thresholds.
@@ -15818,6 +15839,70 @@ class LeanAgent15m:
                             logger.warning("[CANDIDATE-DISTANCE-BAND] Failed to calculate distance band: %s", db_err)
                             candidate["distance_band"] = "unknown"
                             candidate["distance_pct"] = None
+
+                        # Microstructure logging (additive telemetry, fail-closed for live).
+                        if _MICROSTRUCTURE_AVAILABLE:
+                            try:
+                                asset_name = self.config.name.split("_")[0].upper()
+                                book_history = self._microstructure_book_history.setdefault(
+                                    asset_name, collections.deque(maxlen=1000)
+                                )
+                                for side in ("yes", "no"):
+                                    snap = kalshi_state_book_levels(market_state, side)
+                                    if snap is not None:
+                                        book_history.append(snap)
+
+                                # Update BTC spot history once per cycle for cross-asset lead-lag.
+                                btc_history = self._cross_asset_spot_history.setdefault(
+                                    "BTC", SpotHistory(window_s=300.0)
+                                )
+                                if self.market_state_store is not None:
+                                    for ms in self.market_state_store.get_all().values():
+                                        if "BTC" in (
+                                            getattr(ms, "series_ticker", "") or ""
+                                        ) or "BTC" in (getattr(ms, "ticker", "") or ""):
+                                            btc_spot = getattr(ms, "external_spot", None)
+                                            if btc_spot is None:
+                                                btc_spot = getattr(ms, "spot_price", None)
+                                            if btc_spot is not None:
+                                                btc_ts = getattr(ms, "last_book_update_ts", None) or time.time()
+                                                btc_history.update(float(btc_ts), float(btc_spot))
+                                            break
+
+                                target_spot = candidate.get("spot_price")
+                                if target_spot is None:
+                                    target_spot = signal.get("spot_price")
+
+                                signals = compute_microstructure_signals(
+                                    state=market_state,
+                                    history=list(book_history),
+                                    ofi_window_s=float(
+                                        os.environ.get("MERID_MICRO_OFI_WINDOW_S", "60.0") or "60.0"
+                                    ),
+                                    max_edge_pct=float(
+                                        os.environ.get("MERID_MICRO_MAX_EDGE_PCT", "2.0") or "2.0"
+                                    ),
+                                    base_spot_history=btc_history,
+                                    target_spot=target_spot,
+                                )
+                                if signals:
+                                    candidate["microstructure_yes_features"] = signals.get("yes_features")
+                                    candidate["microstructure_no_features"] = signals.get("no_features")
+                                    candidate["microstructure_yes_edge_pp"] = signals.get("yes_edge_pp")
+                                    candidate["microstructure_no_edge_pp"] = signals.get("no_edge_pp")
+                                    candidate["microstructure_book_delta_pp"] = signals.get("book_delta_pp")
+                                    candidate["microstructure_cross_delta_pp"] = signals.get("cross_delta_pp")
+                                    candidate["microstructure_delta_pp"] = signals.get("total_delta_pp")
+                                    candidate["microstructure_btc_log_return"] = (
+                                        btc_history.log_return()
+                                        if len(btc_history.spots) >= 2
+                                        else 0.0
+                                    )
+                            except Exception as micro_err:
+                                logger.debug(
+                                    "[CANDIDATE-MICROSTRUCTURE] asset=%s failed: %s",
+                                    self.config.name, micro_err,
+                                )
 
             except Exception as e:
 
