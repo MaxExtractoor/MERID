@@ -381,8 +381,28 @@ def build_asset_record(
         "capped_edge_pct": _resolve(candidate, decision, ["capped_edge_pct"], ["capped_edge_pct"]),
         # Signal indicators
         "velocity": _resolve(candidate, decision, ["velocity"], ["velocity"]),
+        "velocity_source": _first_str(
+            _resolve(candidate, decision, ["velocity_source"], ["velocity_source"])
+        ),
+        "velocity_age_ms": _first_float(
+            _resolve(candidate, decision, ["velocity_age_ms"], ["velocity_age_ms"])
+        ),
         "velocity_threshold": _resolve(candidate, decision, ["velocity_threshold"], ["velocity_threshold"]),
         "spot_price": _spot_price,
+        "rti_value": _first_float(
+            _resolve(candidate, decision, ["rti_value"], ["rti_value"])
+        ),
+        "rti_age_ms": _first_float(
+            _resolve(candidate, decision, ["rti_age_ms"], ["rti_age_ms"])
+        ),
+        "rti_returns": _resolve(candidate, decision, ["rti_returns"], ["rti_returns"]) or {},
+        "feature_age_ms": _first_float(
+            _resolve(candidate, decision, ["feature_age_ms"], ["feature_age_ms"])
+        ),
+        "feature_valid": _first_bool(
+            _resolve(candidate, decision, ["feature_valid"], ["feature_valid"])
+        ),
+        "feature_missing_reasons": _resolve(candidate, decision, ["feature_missing_reasons"], ["feature_missing_reasons"]) or [],
         "macd_histogram": _resolve(candidate, decision, ["macd_histogram"], ["macd_histogram"]),
         "macd_hist_pct": _resolve(candidate, decision, ["macd_hist_pct"], ["macd_hist_pct"]),
         "base_edge_yes": _resolve(candidate, decision, ["base_edge_yes"], ["base_edge_yes"]),
