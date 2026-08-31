@@ -27,7 +27,7 @@ class TestExecutionModeRouting:
         assert post_only is True
         assert aggressiveness == 0.0
         assert order_type == "limit"
-        assert tif == "gtc"
+        assert tif == "GTC"
     
     def test_taker_execution_mode(self):
         """Test taker execution mode parameters."""
@@ -45,7 +45,7 @@ class TestExecutionModeRouting:
         assert post_only is False
         assert aggressiveness == 1.0
         assert order_type == "limit"
-        assert tif == "ioc"
+        assert tif == "IOC"
     
     def test_staged_ioc_execution_mode(self):
         """Test staged IOC execution mode parameters."""
@@ -63,7 +63,7 @@ class TestExecutionModeRouting:
         assert post_only is False
         assert aggressiveness == 0.5
         assert order_type == "limit"
-        assert tif == "ioc"
+        assert tif == "IOC"
     
     def test_passive_quote_execution_mode(self):
         """Test passive quote execution mode parameters."""
@@ -81,7 +81,7 @@ class TestExecutionModeRouting:
         assert post_only is True
         assert aggressiveness == 0.0
         assert order_type == "limit"
-        assert tif == "gtc"
+        assert tif == "GTC"
     
     def test_none_execution_mode(self):
         """Test default behavior when execution_mode is None."""
@@ -100,11 +100,11 @@ class TestExecutionModeRouting:
         
         post_only, aggressiveness, order_type, tif = _apply_execution_mode(intent)
         
-        # Should use existing intent values
+        # Aggressiveness > 0 overrides the default gtc TIF to IOC.
         assert post_only is False
         assert aggressiveness == 0.5
         assert order_type == "limit"
-        assert tif == "gtc"
+        assert tif == "IOC"
     
     def test_invalid_execution_mode(self):
         """Test default behavior when execution_mode is invalid."""
@@ -127,7 +127,7 @@ class TestExecutionModeRouting:
         assert post_only is True
         assert aggressiveness == 0.0
         assert order_type == "limit"
-        assert tif == "gtc"
+        assert tif == "GTC"
     
     def test_execution_mode_field_in_order_intent(self):
         """Test that OrderIntent has execution_mode field."""

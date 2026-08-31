@@ -244,16 +244,16 @@ def test_profile_per_trade_risk_pct_3_percent():
     with open(profile_path, 'r', encoding='utf-8') as f:
         profile = yaml.safe_load(f)
 
-    # 2026-07-15: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $2 exposure cap
+    # 2026-07-15: Percentage-based per_trade_risk_pct DISABLED in favor of fixed exposure cap
     # This field is NOT present in the YAML anymore
     guardrails = profile.get('guardrails', {})
     assert 'per_trade_risk_pct' not in guardrails, \
-        "per_trade_risk_pct should be DISABLED (removed from YAML - fixed $2 model used instead)"
+        "per_trade_risk_pct should be DISABLED (removed from YAML - fixed exposure model used instead)"
 
-    # Verify fixed exposure cap is present
+    # Verify fixed exposure cap is present (profile is the source of truth)
     risk_policy = profile.get('risk_policy', {})
-    assert risk_policy.get('fixed_exposure_cap_usd') == 2.00, \
-        "fixed_exposure_cap_usd should be $2.00"
+    assert risk_policy.get('fixed_exposure_cap_usd') == 0.75, \
+        "fixed_exposure_cap_usd should be $0.75"
 
 
 def test_profile_dynamic_sizing_multipliers():

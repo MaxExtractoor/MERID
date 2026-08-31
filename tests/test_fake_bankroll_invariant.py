@@ -237,11 +237,12 @@ class TestFakeBankrollInLoop:
 
 
 class TestProfileDetection:
-    """Test profile detection logic."""
-    
-    @patch('config.settings.Settings')
-    def test_live_profile_detection(self, mock_settings_class):
+    """Test profile detection logic via merid.settings.Settings."""
+
+    def test_live_profile_detection(self, monkeypatch):
         """Test live profile detection patterns."""
+        from merid.settings import Settings
+
         live_profiles = [
             "kalshi_crypto_15m_v2",
             "kalshi_crypto_prod",
@@ -249,16 +250,16 @@ class TestProfileDetection:
             "prod_env",
             "production_system"
         ]
-        
+
         for profile in live_profiles:
-            mock_settings = Mock()
-            mock_settings.MERID_PROFILE = profile
-            mock_settings_class.return_value = mock_settings
-            assert mock_settings.PROFILE_IS_LIVE is True, f"Profile {profile} should be detected as live"
-    
-    @patch('config.settings.Settings')
-    def test_test_profile_detection(self, mock_settings_class):
+            monkeypatch.setenv("MERID_PROFILE", profile)
+            s = Settings(_env_file=None)
+            assert s.PROFILE_IS_LIVE is True, f"Profile {profile} should be detected as live"
+
+    def test_test_profile_detection(self, monkeypatch):
         """Test test profile detection patterns."""
+        from merid.settings import Settings
+
         test_profiles = [
             "kalshi_crypto_test",
             "kalshi_crypto_sim",
@@ -267,28 +268,27 @@ class TestProfileDetection:
             "demo_mode",
             "paper_trading"
         ]
-        
+
         for profile in test_profiles:
-            mock_settings = Mock()
-            mock_settings.MERID_PROFILE = profile
-            mock_settings_class.return_value = mock_settings
-            assert mock_settings.PROFILE_IS_LIVE is False, f"Profile {profile} should be detected as test"
-    
-    @patch('config.settings.Settings')
-    def test_unknown_profile_defaults_to_live(self, mock_settings_class):
+            monkeypatch.setenv("MERID_PROFILE", profile)
+            s = Settings(_env_file=None)
+            assert s.PROFILE_IS_LIVE is False, f"Profile {profile} should be detected as test"
+
+    def test_unknown_profile_defaults_to_live(self, monkeypatch):
         """Test that unknown profiles default to live for safety."""
+        from merid.settings import Settings
+
         unknown_profiles = [
             "unknown_profile",
             "custom_config",
             "experimental",
             ""
         ]
-        
+
         for profile in unknown_profiles:
-            mock_settings = Mock()
-            mock_settings.MERID_PROFILE = profile
-            mock_settings_class.return_value = mock_settings
-            assert mock_settings.PROFILE_IS_LIVE is True, f"Unknown profile {profile} should default to live"
+            monkeypatch.setenv("MERID_PROFILE", profile)
+            s = Settings(_env_file=None)
+            assert s.PROFILE_IS_LIVE is True, f"Unknown profile {profile} should default to live"
 
 
 if __name__ == "__main__":

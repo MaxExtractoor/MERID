@@ -522,28 +522,27 @@ class TestEdgeBandConfiguration:
         
         edge_bands = profile_config.get('edge_bands', {})
         
-        # 2026-07-14: Verify edge bands updated to industry standard (2.5% based on Market Math, Beatpoly)
-        # Industry standard for Kalshi: 3% raw edge minimum
-        # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
-        # Verify watch band: 2.5% (industry standard)
-        assert edge_bands['watch_band']['min_edge_pct'] == 0.025, \
-            "Watch band min edge should be 2.5% (industry standard for Kalshi)"
-        assert edge_bands['watch_band']['max_edge_pct'] == 0.025, \
-            "Watch band max edge should be 2.5% (unified with min for consistency)"
+        # 2026-08-30: Edge bands now use dynamic trade_decision floors; the
+        # profile values below are the current source of truth in the YAML.
+        # Verify watch band: 2% global hard floor, up to BTC base (3%).
+        assert edge_bands['watch_band']['min_edge_pct'] == 0.02, \
+            "Watch band min edge should be 2% (global hard floor)"
+        assert edge_bands['watch_band']['max_edge_pct'] == 0.03, \
+            "Watch band max edge should be 3% (up to BTC base)"
         assert edge_bands['watch_band']['action'] == "log_only"
         assert edge_bands['watch_band']['kelly_multiplier'] == 0.0
-        
-        # Verify small band: 2.5-5% (industry standard with better band separation)
-        assert edge_bands['small_band']['min_edge_pct'] == 0.025, \
-            "Small band min edge should be 2.5% (industry standard for Kalshi)"
+
+        # Verify small band: 3-5% (BTC base up to DOGE/XRP base).
+        assert edge_bands['small_band']['min_edge_pct'] == 0.03, \
+            "Small band min edge should be 3% (BTC base)"
         assert edge_bands['small_band']['max_edge_pct'] == 0.05, \
-            "Small band max edge should be 5% (better band separation)"
+            "Small band max edge should be 5% (DOGE/XRP base)"
         assert edge_bands['small_band']['action'] == "trade_small"
         assert edge_bands['small_band']['kelly_multiplier'] == 0.25
-        
-        # Verify standard band: ≥2.5% (industry standard)
-        assert edge_bands['standard_band']['min_edge_pct'] == 0.025, \
-            "Standard band min edge should be 2.5% (industry standard for Kalshi)"
+
+        # Verify standard band: ≥5% (no upper limit).
+        assert edge_bands['standard_band']['min_edge_pct'] == 0.05, \
+            "Standard band min edge should be 5% (XRP/DOGE base)"
         assert edge_bands['standard_band']['max_edge_pct'] == 1.0, \
             "Standard band max edge should be unlimited (1.0)"
         assert edge_bands['standard_band']['action'] == "trade_standard"
@@ -572,10 +571,11 @@ class TestEdgeBandConfiguration:
             profile_config = yaml.safe_load(f)
         
         strategy_policy = profile_config.get('strategy_policy', {})
-        
-        # Profile sets min_edge to 5% (current documented threshold).
-        assert strategy_policy['min_edge'] == 0.05, \
-            "Strategy policy min edge should match the current profile (0.05)"
+
+        # Profile sets min_edge to 2% (global hard lower bound; effective per-asset
+        # thresholds are computed dynamically by trade_decision.py).
+        assert strategy_policy['min_edge'] == 0.02, \
+            "Strategy policy min edge should match the current profile (0.02)"
 
 
 class TestWindowBasedRiskLimitEnforcement:

@@ -56,16 +56,21 @@ class TestBankrollServiceV2FetchTimeout:
 
         client = MagicMock()
 
-        # Simulate a get_balance that never returns.
-        async def _slow_get_balance():
-            await asyncio.sleep(60.0)
+        # Simulate a get_balance that exceeds the per-request timeout.
+        # The service passes the timeout kwarg through; the client is responsible
+        # for enforcing it.  A real client would raise asyncio.TimeoutError.
+        async def _slow_get_balance(timeout=None):
+            await asyncio.sleep(float(timeout or 0.1))
+            raise asyncio.TimeoutError("Kalshi get_balance timed out")
 
         client.get_balance = _slow_get_balance
 
         service = BankrollServiceV2(client=client, refresh_interval_seconds=1.0)
 
-        with pytest.raises(asyncio.TimeoutError):
-            await service._fetch_and_update()
+        # The service must degrade, not propagate, so the refresh task survives.
+        await service._fetch_and_update()
+        assert service._consecutive_timeout_count == 1
+        assert service._last_error is not None
 
     @pytest.mark.asyncio
     async def test_get_equity_for_risk_calc_async_returns_cached_value(self):

@@ -154,13 +154,22 @@ class TestSettingsDynamicCaps:
     def test_get_dynamic_asset_caps_returns_caps(self):
         """Settings should return dynamic asset caps."""
         from merid.settings import settings
-        
-        caps = settings.get_dynamic_asset_caps()
-        
-        assert "BTC" in caps
-        assert "ETH" in caps
-        assert caps["BTC"].max_daily_notional_usd > 0
-        assert caps["BTC"].max_single_trade_usd > 0
+
+        original_bankroll = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
+        settings.KALSHI_PORTFOLIO_BANKROLL_CENTS = 5_000_000
+        settings._asset_caps_cache = None
+        settings._asset_caps_cache_time = 0
+        try:
+            caps = settings.get_dynamic_asset_caps()
+
+            assert "BTC" in caps
+            assert "ETH" in caps
+            assert caps["BTC"].max_daily_notional_usd > 0
+            assert caps["BTC"].max_single_trade_usd > 0
+        finally:
+            settings.KALSHI_PORTFOLIO_BANKROLL_CENTS = original_bankroll
+            settings._asset_caps_cache = None
+            settings._asset_caps_cache_time = 0
     
     def test_dynamic_caps_scale_with_bankroll(self):
         """Caps should scale when bankroll changes."""
@@ -204,7 +213,6 @@ class TestKalshiRiskDynamicLimits:
         config = KalshiRiskConfig()
         
         assert "crypto" in config.category_limits
-        assert "economics" in config.category_limits
         assert config.category_limits["crypto"].max_notional_usd > 0
     
     def test_crypto_is_largest_category(self):

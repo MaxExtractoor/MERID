@@ -206,7 +206,7 @@ class PositionSizingInputs:
     bankroll_cents: int
     edge: float           # Range: [-1, 1], typically small (0.01-0.10)
     price_cents: int      # Current market price in cents
-    fractional_kelly: float  # Kelly fraction from profile (single source of truth)
+    fractional_kelly: float = 0.25  # Kelly fraction; quarter-Kelly default
 
 
 @dataclass(frozen=True)
@@ -360,7 +360,7 @@ def confidence_weighted_swarm_probability(
     return swarm_prob, total_confidence, None
 
 
-def classify_stance(edge: float, weak_threshold: float = 0.05, strong_threshold: float = 0.10) -> str:
+def classify_stance(edge: float, weak_threshold: float = 0.03, strong_threshold: float = 0.10) -> str:
     """Classify stance from edge (swarm_prob - market_prob).
 
     Args:

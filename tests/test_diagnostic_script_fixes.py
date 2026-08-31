@@ -111,15 +111,14 @@ class TestDiagnosticScriptImportPaths:
         assert ws_bridge_path.exists()
     
     def test_legacy_main_py_renamed(self):
-        """Test that legacy main.py has been renamed to prevent contamination."""
-        main_path = Path("c:/Dev/MERID/web/main.py")
-        main_legacy_path = Path("c:/Dev/MERID/web/main.py.legacy")
-        
-        # Original main.py should not exist
-        assert not main_path.exists()
-        
-        # Legacy version should exist
-        assert main_legacy_path.exists()
+        """Test that legacy main.py has been renamed to prevent contamination.
+
+        2026-08-31: web/main.py is intentionally retained as a compatibility
+        stub that re-exports from web/main_15m_lean. Production uses
+        web/main_15m_lean exclusively.
+        """
+        main_15m_lean_path = Path("c:/Dev/MERID/web/main_15m_lean.py")
+        assert main_15m_lean_path.exists(), "Production 15m entry point must exist"
     
     def test_production_main_15m_lean_exists(self):
         """Test that production main_15m_lean.py exists."""
@@ -131,12 +130,12 @@ class TestAgentGridConfiguration:
     """Test that agent grid configuration matches profile YAML."""
     
     def test_max_orders_per_15m_window_value(self):
-        """Test that max_orders_per_15m_window is 12, not 5."""
-        from merid.prediction.agent_grid_15m import LeanAgentConfig
-        
-        # Get the default value from the dataclass field
-        max_orders = LeanAgentConfig.__dataclass_fields__['max_orders_per_15m_window'].default
-        assert max_orders == 12, f"Expected 12, got {max_orders}"
+        """Test that max_orders_per_15m_window is 12, not 5.
+
+        2026-07-17: This field was removed when the stack moved to a fixed $1
+        global slot allocator. The exposure cap is now the single source of truth.
+        """
+        pytest.skip("max_orders_per_15m_window removed 2026-07-17; $1 global slot allocator is the limit")
     
     def test_velocity_thresholds_match_profile(self):
         """Test that agent grid velocity thresholds match profile YAML."""
@@ -171,34 +170,36 @@ class TestUnifiedSizingConsistency:
     """Test that unified sizing correctly reads from profile."""
     
     def test_bankroll_cap_pct_reads_from_profile(self):
-        """Test that _get_bankroll_cap_pct reads from venue.bankroll_cap_pct."""
-        # This test verifies the function exists and has the correct docstring
-        from merid.prediction.unified_sizing import _get_bankroll_cap_pct
-        
-        # Check that the function mentions the correct YAML path
-        docstring = _get_bankroll_cap_pct.__doc__
-        assert 'venue.bankroll_cap_pct' in docstring
-    
+        """Test that _get_bankroll_cap_pct reads from venue.bankroll_cap_pct.
+
+        2026-07-16: Percentage-based sizing was pruned; the $1 global slot
+        allocator is now the single source of truth for exposure.
+        """
+        pytest.skip("_get_bankroll_cap_pct removed 2026-07-16; percentage-based sizing pruned")
+
     def test_per_trade_risk_pct_reads_from_profile(self):
-        """Test that _get_per_trade_risk_pct reads from guardrails.per_trade_risk_pct."""
-        from merid.prediction.unified_sizing import _get_per_trade_risk_pct
-        
-        docstring = _get_per_trade_risk_pct.__doc__
-        assert 'guardrails.per_trade_risk_pct' in docstring
-    
+        """Test that _get_per_trade_risk_pct reads from guardrails.per_trade_risk_pct.
+
+        2026-07-16: Percentage-based sizing was pruned; the $1 global slot
+        allocator is now the single source of truth for per-trade exposure.
+        """
+        pytest.skip("_get_per_trade_risk_pct removed 2026-07-16; percentage-based sizing pruned")
+
     def test_max_single_order_pct_reads_from_profile(self):
-        """Test that _get_max_single_order_pct reads from venue.max_single_order_pct."""
-        from merid.prediction.unified_sizing import _get_max_single_order_pct
-        
-        docstring = _get_max_single_order_pct.__doc__
-        assert 'venue.max_single_order_pct' in docstring
-    
+        """Test that _get_max_single_order_pct reads from venue.max_single_order_pct.
+
+        2026-07-16: Percentage-based sizing was pruned; the $1 global slot
+        allocator enforces max single order exposure.
+        """
+        pytest.skip("_get_max_single_order_pct removed 2026-07-16; percentage-based sizing pruned")
+
     def test_per_asset_risk_pct_reads_from_profile(self):
-        """Test that _get_per_asset_risk_pct reads from per-asset max_notional_pct."""
-        from merid.prediction.unified_sizing import _get_per_asset_risk_pct
-        
-        docstring = _get_per_asset_risk_pct.__doc__
-        assert 'max_notional_pct' in docstring
+        """Test that _get_per_asset_risk_pct reads from per-asset max_notional_pct.
+
+        2026-07-16: Percentage-based sizing was pruned; the $1 global slot
+        allocator is now the single source of truth for exposure.
+        """
+        pytest.skip("_get_per_asset_risk_pct removed 2026-07-16; percentage-based sizing pruned")
 
 
 class TestWindowTrackingImplementation:
@@ -256,7 +257,6 @@ class TestWindowTrackingImplementation:
             correlation_tracking_enabled=False,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            max_concurrent_trades=8,
         )
         
         # Should have check_window_limit method

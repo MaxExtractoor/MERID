@@ -8,6 +8,20 @@ from merid.prediction.agent_grid_config import PortfolioRiskConfig
 from unittest.mock import MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _seed_portfolio_bankroll():
+    """Provide a $50k settings-derived bankroll for these regression tests.
+
+    The live bankroll service is not available in unit tests, so we seed the
+    settings-derived fallback that the portfolio-risk summary uses.
+    """
+    from merid.settings import settings
+    original = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
+    settings.KALSHI_PORTFOLIO_BANKROLL_CENTS = 5_000_000
+    yield
+    settings.KALSHI_PORTFOLIO_BANKROLL_CENTS = original
+
+
 class TestPortfolioRiskConfigBankrollDriven:
     """Regression tests ensuring portfolio risk limits are bankroll-driven, not hardcoded.
     
@@ -25,12 +39,15 @@ class TestPortfolioRiskConfigBankrollDriven:
         # Verify settings math with actual defaults
         assert settings.KALSHI_PORTFOLIO_BANKROLL_CENTS == 5_000_000  # $50,000 default
         assert settings.kalshi_portfolio_max_notional_cents == 2_500_000  # 50% of $50K = $25K
-        assert settings.kalshi_portfolio_max_daily_loss_cents == 500_000  # 10% of $50K = $5K
+        assert settings.kalshi_portfolio_max_daily_loss_cents == 1_000_000  # 20% of $50K = $10K
         assert settings.kalshi_portfolio_max_per_asset_cents == 800_000  # 16% of $50K = $8K
 
-    def test_portfolio_risk_config_post_init_derives_correctly(self):
-        """PortfolioRiskConfig.__post_init__ should compute from settings when zeros passed."""
-        # Uses actual default settings (bankroll = $50,000)
+    @patch("merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync")
+    def test_portfolio_risk_config_post_init_derives_correctly(self, mock_get_equity):
+        """PortfolioRiskConfig.__post_init__ should compute from live bankroll when zeros passed."""
+        # Uses a $50,000 live-equity fixture so the bankroll path is exercised.
+        mock_get_equity.return_value = 50000.0
+
         # Create config with zeros (triggers __post_init__ derivation)
         config = PortfolioRiskConfig(
             max_total_notional_usd=Decimal("0"),
@@ -39,11 +56,12 @@ class TestPortfolioRiskConfigBankrollDriven:
             max_margin_utilization_pct=Decimal("0"),
             rebalance_check_interval_seconds=0,
         )
-        
-        # Verify derivation math (bankroll $50K × percentages)
-        assert config.max_total_notional_usd == Decimal("25000"), f"Expected $25,000, got ${config.max_total_notional_usd}"  # 50% of $50K
-        assert config.max_daily_loss_usd == Decimal("5000"), f"Expected $5,000, got ${config.max_daily_loss_usd}"    # 10% of $50K
-        assert config.max_notional_per_asset_usd == Decimal("8000"), f"Expected $8,000, got ${config.max_notional_per_asset_usd}"  # 16% of $50K
+
+        # Verify derivation math (bankroll $50K × unified core.settings percentages)
+        # MAX_TOTAL_RISK_PCT=15% ($7.5K), DAILY_LOSS_CAP_PCT=20% ($10K), MAX_CYCLE_RISK_PCT=2% ($1K)
+        assert config.max_total_notional_usd == Decimal("7500"), f"Expected $7,500, got ${config.max_total_notional_usd}"
+        assert config.max_daily_loss_usd == Decimal("10000"), f"Expected $10,000, got ${config.max_daily_loss_usd}"
+        assert config.max_notional_per_asset_usd == Decimal("1000"), f"Expected $1,000, got ${config.max_notional_per_asset_usd}"
 
     def test_explicit_yaml_values_override_settings(self):
         """Explicit non-zero values should take precedence over settings-derived."""
@@ -75,25 +93,26 @@ class TestPortfolioRiskConfigBankrollDriven:
                 assert f.default == Decimal("0"), \
                     f"Hardcoded {f.default} default detected for max_notional_per_asset_usd - should be Decimal('0')"
 
-    def test_summary_includes_bankroll_and_percentages(self):
+    @patch("merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync")
+    def test_summary_includes_bankroll_and_percentages(self, mock_get_equity):
         """Agent.summary() should expose bankroll and percentages for UI verification."""
-        # Uses actual default settings (bankroll = $50,000)
-        from merid.settings import settings
-        
+        # Uses a $50,000 live-equity fixture so the bankroll path is exercised.
+        mock_get_equity.return_value = 50000.0
+
         config = PortfolioRiskConfig(max_total_notional_usd=Decimal("0"))
         agent = PortfolioRiskAgent(config)
-        
+
         summary = agent.summary()
-        
+
         # Verify bankroll exposed
         assert "bankroll_cents" in summary["config"], "summary should include bankroll_cents"
-        assert summary["config"]["bankroll_cents"] == 5_000_000  # Default $50K
-        
-        # Verify percentages exposed for UI
+        assert summary["config"]["bankroll_cents"] == 5_000_000  # $50K live bankroll
+
+        # Verify percentages exposed for UI (unified core.settings canonical values)
         assert "max_total_notional_pct" in summary["config"], "summary should include max_total_notional_pct"
-        assert summary["config"]["max_total_notional_pct"] == 0.5  # Default 50%
+        assert summary["config"]["max_total_notional_pct"] == 0.15  # MAX_TOTAL_RISK_PCT
         assert "max_daily_loss_pct" in summary["config"], "summary should include max_daily_loss_pct"
-        assert summary["config"]["max_daily_loss_pct"] == 0.1  # Default 10%
+        assert summary["config"]["max_daily_loss_pct"] == 0.20  # DAILY_LOSS_CAP_PCT
 
 
 @pytest.mark.asyncio

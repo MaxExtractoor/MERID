@@ -26,6 +26,10 @@ def _replay_env(tmp_path: Path):
     os.environ["MERID_REPLAY"] = "true"
 
     # Reset settings latches to keep the test replay-safe.
+    old_settings_tape = settings.MERID_REPLAY_TAPE
+    old_settings_allow_live = settings.MERID_ALLOW_LIVE_TRADES
+    old_settings_trading = settings.TRADING_ENABLED
+    settings.MERID_REPLAY_TAPE = str(tape_dir)
     settings.MERID_ALLOW_LIVE_TRADES = False
     settings.TRADING_ENABLED = False
 
@@ -43,6 +47,11 @@ def _replay_env(tmp_path: Path):
         os.environ.pop("MERID_INGRESS_RECORDING", None)
     else:
         os.environ["MERID_INGRESS_RECORDING"] = old_record
+
+    settings.MERID_REPLAY_TAPE = old_settings_tape
+    settings.MERID_ALLOW_LIVE_TRADES = old_settings_allow_live
+    settings.TRADING_ENABLED = old_settings_trading
+    reset_replay_dispatcher_for_tests(None)
     reset_replay_dispatcher_for_tests(None)
 
 

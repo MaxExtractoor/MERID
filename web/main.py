@@ -56,11 +56,15 @@ def create_app() -> FastAPI:
 
     kalshi_api_router = _si("web.api.kalshi_api")
     sidebar_config_router = _si("web.api.sidebar_config")
+    # Continuous-trader API wiring is optional and guarded; do not fail the app.
+    kalshi_continuous_trader_api_router = _si("web.api.kalshi_continuous_trader_api")
 
     if kalshi_api_router is not None:
         _reg(kalshi_api_router)
     if sidebar_config_router is not None:
         _reg(sidebar_config_router)
+    if kalshi_continuous_trader_api_router is not None:
+        _reg(kalshi_continuous_trader_api_router)
 
     return app
 

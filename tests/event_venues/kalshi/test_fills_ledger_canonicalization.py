@@ -70,20 +70,20 @@ class TestDerivePositionEffect:
         assert effect["canonicalization_state"] == "TRUSTED_LIVE_V1"
 
     def test_sell_no_long_yes(self):
-        # SELL NO is an entry into a long YES position.
-        # execution_outcome_side is the HELD side (YES), leg price is YES price.
+        # Raw user execution: SELL NO -> canonical position side/action are the
+        # user's order side/action, yes_delta is positive (long YES).
         effect = derive_position_effect(
-            execution_outcome_side="yes",
+            execution_outcome_side="no",
             execution_action="sell",
-            execution_price_cents=60,
+            execution_price_cents=40,
             yes_price_cents=60,
             no_price_cents=40,
             quantity_cc=100,
             is_exit=False,
         )
-        assert effect["canonical_position_side"] == "yes"
-        assert effect["canonical_position_action"] == "buy"
-        assert effect["canonical_leg_price_cents"] == 60
+        assert effect["canonical_position_side"] == "no"
+        assert effect["canonical_position_action"] == "sell"
+        assert effect["canonical_leg_price_cents"] == 40
         assert effect["canonical_yes_delta_cc"] == 100
         assert effect["canonicalization_state"] == "TRUSTED_LIVE_V1"
 
@@ -104,20 +104,20 @@ class TestDerivePositionEffect:
         assert effect["canonicalization_state"] == "TRUSTED_LIVE_V1"
 
     def test_sell_yes_long_no(self):
-        # SELL YES is an entry into a long NO position.
-        # execution_outcome_side is the HELD side (NO), leg price is NO price.
+        # Raw user execution: SELL YES -> canonical position side/action are the
+        # user's order side/action, yes_delta is negative (long NO).
         effect = derive_position_effect(
-            execution_outcome_side="no",
+            execution_outcome_side="yes",
             execution_action="sell",
-            execution_price_cents=30,
+            execution_price_cents=70,
             yes_price_cents=70,
             no_price_cents=30,
             quantity_cc=100,
             is_exit=False,
         )
-        assert effect["canonical_position_side"] == "no"
-        assert effect["canonical_position_action"] == "buy"
-        assert effect["canonical_leg_price_cents"] == 30
+        assert effect["canonical_position_side"] == "yes"
+        assert effect["canonical_position_action"] == "sell"
+        assert effect["canonical_leg_price_cents"] == 70
         assert effect["canonical_yes_delta_cc"] == -100
         assert effect["canonicalization_state"] == "TRUSTED_LIVE_V1"
 

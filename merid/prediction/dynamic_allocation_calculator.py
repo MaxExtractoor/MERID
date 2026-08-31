@@ -93,6 +93,7 @@ class DynamicAllocationCalculator:
         self._cached_allocations: Dict[str, Decimal] = {}
         # LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
         # Single-threaded FastAPI startup doesn't need lock protection
+        self._cache_lock = None  # Guard variable for compatibility with existing branches
         self._cache_ttl_seconds = 600  # 10 minute TTL
         
     def _fetch_risk_metrics(self, asset: str) -> AssetRiskMetrics:
