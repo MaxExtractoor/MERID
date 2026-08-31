@@ -345,7 +345,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
         return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
+    return raw.strip().lower() in ("1", "true", "yes", "on", "live")
 
 
 def _asset_symbol_valid(asset: str) -> Optional[str]:
