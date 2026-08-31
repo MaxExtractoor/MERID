@@ -1143,6 +1143,8 @@ def compute_trade_decision(
         "log_moneyness": log_moneyness,
         "z_score": z,
         "market_prob_for_implied_vol": market_prob,
+        "bachelier_spot": float(spot_price),
+        "strike": float(strike_price),
     })
 
     # 2026-08-30: Per-side tail calibration.  The YES and NO held-side

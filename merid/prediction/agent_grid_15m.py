@@ -731,10 +731,14 @@ def _is_valid_strike_target(price, asset: str) -> bool:
 def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, spot_price: float) -> Tuple[Optional[float], Optional[str], Dict[str, Any]]:
     """Resolve the canonical strike for a 15m binary trade decision.
 
-    Tries market_state, the supplied market/catalog object, the live catalog,
-    and finally the current public spot as a degraded fallback.  Returns the
-    resolved strike, the source provenance, and a structured diagnostic payload
-    for logging and rejection telemetry.
+    Tries market_state, the supplied market/catalog object, and the live catalog.
+    Returns the resolved strike, the source provenance, and a structured diagnostic
+    payload for logging and rejection telemetry.
+
+    The contemporaneous public spot is intentionally NOT used as a strike fallback;
+    using a live price as the target would force the Bachelier model to p_yes ~ 0.5
+    and silently erase the edge.  Callers must fail-closed when no authoritative
+    strike is found.
 
     The returned strike is quantized to the market's ``settlement_digits`` (from
     Kalshi ``custom_strike.round_digits``) exactly once before it is used for
@@ -787,15 +791,10 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
     except Exception as exc:
         logger.warning("[STRIKE-RESOLUTION] asset=%s catalog lookup failed: %s", asset, exc)
 
-    # 3. Final degraded fallback: the contemporaneous public spot.  This keeps
-    #    the engine alive for threshold/unknown markets but is explicitly flagged
-    #    so downstream confidence/edge logic can treat it as degraded.
-    if _is_valid_strike_target(spot_price, asset):
-        diagnostic["spot_fallback"] = True
-        price = _quantize_strike(spot_price)
-        if price is not None:
-            return float(price), "spot_fallback", diagnostic
-
+    # No authoritative strike found.  Fail closed: do not fabricate a strike
+    # from the contemporaneous public spot.  Using a live price as the target
+    # would make the Bachelier model see spot ~= strike and p_yes ~ 0.5,
+    # silently destroying edge and producing coin-flip trades.
     return None, None, diagnostic
 
 
@@ -8955,7 +8954,7 @@ class LeanAgent15m:
         # filter) that fire before compute_trade_decision resolves the Bachelier
         # context, so logs stop showing annualized_vol=0.0000 vol_source=N/A.
         vol_ctx = getattr(self, "_last_signal_vol_context", None) or {}
-        for key in ("annualized_vol", "annualized_vol_source", "z_score", "log_moneyness"):
+        for key in ("annualized_vol", "annualized_vol_source", "z_score", "log_moneyness", "bachelier_spot", "strike"):
             if (context.get(key) is None or key not in context) and key in vol_ctx:
                 context[key] = vol_ctx[key]
 
@@ -8998,6 +8997,8 @@ class LeanAgent15m:
                 "annualized_vol_source": vol_source,
                 "z_score": float(components.get("z_score", 0.0)),
                 "log_moneyness": float(components.get("log_moneyness", 0.0)),
+                "bachelier_spot": float(spot_price) if strike is not None else None,
+                "strike": strike_f if strike is not None else None,
             }
         except Exception as exc:
             logger.debug("[SIGNAL-VOL-CONTEXT] asset=%s early vol context failed: %s", asset, exc)
@@ -9030,8 +9031,16 @@ class LeanAgent15m:
         data quality.
         """
         signal_type = self._resolve_runtime_signal_mode()
+        # Pre-decision rejections may not have resolved strike/bachelier_spot yet.
+        # The actual Bachelier spot is the settlement_input_price (CF-RTI 60s avg).
+        # The public spot_price is retained only for basis telemetry.
+        bachelier_spot = settlement_input_price if settlement_input_price is not None else spot_price
+        vol_ctx = getattr(self, "_last_signal_vol_context", None) or {}
         context: Dict[str, Any] = {
-            "reference_price": settlement_input_price if settlement_input_price is not None else spot_price,
+            "reference_price": bachelier_spot,
+            "bachelier_spot": bachelier_spot,
+            "public_spot": spot_price,
+            "strike": vol_ctx.get("strike"),
             "market_time_remaining_s": seconds_to_expiry,
             "candles_available": self._get_candles_available(asset),
             "signal_type": signal_type,
@@ -9059,6 +9068,8 @@ class LeanAgent15m:
                 "annualized_vol_source": _ind.get("annualized_vol_source", "unknown"),
                 "z_score": float(_ind.get("z_score", 0.0)),
                 "log_moneyness": float(_ind.get("log_moneyness", 0.0)),
+                "bachelier_spot": float(_ind.get("bachelier_spot", bachelier_spot)),
+                "strike": float(_ind.get("strike", context.get("strike"))),
                 "data_state": getattr(decision, "data_state", None),
                 "regime": getattr(decision, "regime", None),
                 "confidence_valid": getattr(decision, "confidence_valid", None),
@@ -15534,7 +15545,8 @@ class LeanAgent15m:
                 context = self._last_signal_rejection.get("context") or {}
 
                 logger.info(
-                    "[SIGNAL-GENERATION-REJECT] asset=%s market=%s reason=%s spot_price=%s reference_price=%s "
+                    "[SIGNAL-GENERATION-REJECT] asset=%s market=%s reason=%s "
+                    "spot_price=%s reference_price=%s bachelier_spot=%s strike=%s "
                     "velocity=%s velocity_source=%s velocity_age_ms=%s signal_type=%s "
                     "threshold=%s threshold_type=%s edge_threshold=%s velocity_threshold=%s "
                     "annualized_vol=%.4f vol_source=%s z_score=%.4f log_moneyness=%.6f "
@@ -15544,6 +15556,8 @@ class LeanAgent15m:
                     reason,
                     spot_price,
                     context.get("reference_price", "N/A"),
+                    context.get("bachelier_spot", "N/A"),
+                    context.get("strike", "N/A"),
                     context.get("velocity", "N/A"),
                     context.get("velocity_source", "N/A"),
                     context.get("velocity_age_ms", "N/A"),

@@ -413,29 +413,24 @@ class TestDualSourceStrikePriceCapture:
         assert strike_price == 58697.0
         assert strike_source == "kalshi_floor_strike"
     
-    def test_fallback_to_spot_when_window_strike_unavailable(self):
-        """Should fallback to spot price when window_strike_price is unavailable."""
+    def test_no_spot_fallback_when_window_strike_unavailable(self):
+        """_resolve_trade_decision_strike must fail closed and never use public spot as a strike."""
+        from merid.prediction.agent_grid_15m import _resolve_trade_decision_strike
         from merid.event_venues.kalshi.models import KalshiMarketState
-        
-        # Create market state without window_strike_price
+
         state = KalshiMarketState(ticker="KXBTC15M-26JUN302230-30")
         state.window_strike_price = None
         state.window_strike_source = ""
-        
-        spot_price = 58741.1
-        
-        # Simulate fallback logic
-        window_strike = getattr(state, 'window_strike_price', None)
-        if window_strike is not None and window_strike > 0:
-            strike_price = window_strike
-            strike_source = state.window_strike_source
-        else:
-            strike_price = spot_price
-            strike_source = "spot_fallback"
-        
-        # Verify fallback to spot
-        assert strike_price == 58741.1
-        assert strike_source == "spot_fallback"
+        state.floor_strike = None
+        state.strike_price = None
+
+        strike, strike_source, diagnostic = _resolve_trade_decision_strike(
+            "BTC", state, None, 58741.1
+        )
+
+        assert strike is None
+        assert strike_source is None
+        assert diagnostic["asset"] == "BTC"
 
 
 class TestEdgeModelWindowStrikeUsage:
