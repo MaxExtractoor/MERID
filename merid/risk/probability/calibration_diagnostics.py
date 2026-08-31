@@ -1,4 +1,4 @@
-"""Probability calibration diagnostics (ECE, Brier, reliability curve).
+"""Probability calibration diagnostics (ECE, Brier, reliability curve, AUC).
 
 These utilities are intentionally dependency-light (no scikit-learn/plotting)
 and are used by both the offline calibration script and release-gate tests to
@@ -102,13 +102,87 @@ def expected_calibration_error(
     return sum(abs(c - o) * n for c, o, n in zip(centers, observed, counts)) / total
 
 
+def roc_auc_score(probs: List[float], outcomes: List[int]) -> Optional[float]:
+    """Compute the area under the ROC curve using the Mann-Whitney U statistic.
+
+    ``probs`` are predicted probabilities of the positive class; ``outcomes``
+    are 0/1.  Ties use the standard correction where pairs with equal
+    probabilities contribute 0.5.  Returns ``None`` for degenerate input
+    (empty, single class, or len mismatch).
+    """
+    if not probs or not outcomes or len(probs) != len(outcomes):
+        return None
+    if len(probs) < 2:
+        return None
+
+    n_pos = sum(outcomes)
+    n_neg = len(outcomes) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return None
+
+    # Sort ascending; higher probabilities should get larger ranks.
+    sorted_idx = sorted(range(len(probs)), key=lambda i: probs[i])
+    sorted_probs = [probs[i] for i in sorted_idx]
+    sorted_outs = [outcomes[i] for i in sorted_idx]
+
+    # Average ranks for ties.
+    ranks: List[float] = []
+    i = 0
+    n = len(sorted_probs)
+    while i < n:
+        j = i + 1
+        while j < n and sorted_probs[j] == sorted_probs[i]:
+            j += 1
+        # indices i..j-1 have the same probability.
+        avg_rank = (i + 1 + j) / 2.0  # 1-indexed rank average
+        for _ in range(i, j):
+            ranks.append(avg_rank)
+        i = j
+
+    sum_pos_ranks = sum(r for r, o in zip(ranks, sorted_outs) if o == 1)
+    # Mann-Whitney U = sum_pos_ranks - n_pos*(n_pos+1)/2
+    # AUC = U / (n_pos * n_neg)
+    return (sum_pos_ranks - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def murphy_decomposition(
+    probs: List[float], outcomes: List[int], n_bins: int = 10
+) -> Dict[str, Optional[float]]:
+    """Return the Murphy Brier decomposition (reliability, resolution, uncertainty).
+
+    ``reliability`` measures calibration misfit within bins.
+    ``resolution`` measures how much the bin rates vary from the base rate.
+    ``uncertainty`` is the base-rate variance (irreducible error).
+    The signed identity is ``brier = reliability - resolution + uncertainty``.
+    """
+    if not probs or not outcomes or len(probs) != len(outcomes):
+        return {"reliability": None, "resolution": None, "uncertainty": None}
+
+    n = len(outcomes)
+    overall_rate = sum(outcomes) / n
+    uncertainty = overall_rate * (1.0 - overall_rate)
+
+    centers, observed, counts = reliability_curve(probs, outcomes, n_bins)
+    total = sum(counts)
+    if total == 0:
+        return {"reliability": None, "resolution": None, "uncertainty": uncertainty}
+
+    reliability = sum(c * (c - o) ** 2 for c, o, ccount in zip(centers, observed, counts)) / total
+    resolution = sum(ccount * (o - overall_rate) ** 2 for o, ccount in zip(observed, counts)) / total
+    return {
+        "reliability": reliability,
+        "resolution": resolution,
+        "uncertainty": uncertainty,
+    }
+
+
 def calibration_summary(
     probs: List[float],
     outcomes: List[int],
     n_bins: int = 10,
     label: str = "",
 ) -> Dict[str, float]:
-    """Return a dict with Brier, ECE, and max absolute calibration gap.
+    """Return a dict with Brier, ECE, AUC, and Murphy decomposition.
 
     ``probs`` must already be in the correct side space (p_yes or p_no).
     """
@@ -116,12 +190,18 @@ def calibration_summary(
     ece = expected_calibration_error(probs, outcomes, n_bins)
     centers, observed, counts = reliability_curve(probs, outcomes, n_bins)
     max_gap = max((abs(c - o) for c, o in zip(centers, observed)), default=0.0)
+    auc = roc_auc_score(probs, outcomes)
+    murphy = murphy_decomposition(probs, outcomes, n_bins)
     return {
         "label": label,
         "n_samples": len(probs),
         "brier_score": brier if brier is not None else math.nan,
         "expected_calibration_error": ece if ece is not None else math.nan,
         "max_calibration_gap": max_gap,
+        "auc_roc": auc if auc is not None else math.nan,
+        "reliability": murphy["reliability"] if murphy["reliability"] is not None else math.nan,
+        "resolution": murphy["resolution"] if murphy["resolution"] is not None else math.nan,
+        "uncertainty": murphy["uncertainty"] if murphy["uncertainty"] is not None else math.nan,
         "n_bins": n_bins,
         "bin_centers": centers,
         "bin_observed_rates": observed,
