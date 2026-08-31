@@ -39,6 +39,7 @@ import argparse
 import json
 import math
 import sqlite3
+import statistics
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -66,6 +67,15 @@ TTE_BUCKETS: Sequence[Tuple[str, float, float]] = (
     ("3-7min", 3.0, 7.0),
     ("7-11min", 7.0, 11.0),
     ("11-15min", 11.0, 15.001),
+)
+
+# TTE band for the edge-admission cohort.  The edge test should focus on the
+# TTE at which the candidate was first admitted, before convergence near expiry
+# erodes the signal.  5-10 min is the primary capturable window.
+TTE_ADMISSION_BUCKETS: Sequence[Tuple[str, float, float]] = (
+    ("0-5min", 0.0, 5.0),
+    ("5-10min", 5.0, 10.0),
+    ("10-15min", 10.0, 15.001),
 )
 
 SPREAD_BUCKETS: Sequence[Tuple[str, float, float]] = (
@@ -125,6 +135,61 @@ def expectancy(pnls: Sequence[float]) -> Optional[float]:
     if not pnls:
         return None
     return sum(pnls) / len(pnls)
+
+
+def _std(values: Sequence[float]) -> Optional[float]:
+    """Sample standard deviation. Returns None for fewer than 2 points."""
+    if len(values) < 2:
+        return None
+    try:
+        return statistics.stdev(values)
+    except statistics.StatisticsError:
+        return None
+
+
+def _t_stat(mean: Optional[float], std: Optional[float], n: int) -> Optional[float]:
+    """One-sample t-statistic: mean / (std / sqrt(n)). None if not computable."""
+    if mean is None or std is None or n <= 1 or std <= 0:
+        return None
+    return mean / (std / math.sqrt(n))
+
+
+def _edge_stats(values: Sequence[float], label: str) -> Dict[str, Any]:
+    """Mean, std, standard error, t-stat, and n for an edge sample."""
+    n = len(values)
+    mean = sum(values) / n if n else None
+    std = _std(values)
+    se = std / math.sqrt(n) if std is not None and n > 1 else None
+    return {
+        f"{label}_n": n,
+        f"{label}_mean": mean,
+        f"{label}_std": std,
+        f"{label}_se": se,
+        f"{label}_t_stat": _t_stat(mean, std, n),
+    }
+
+
+def _cost_prob(row: Dict[str, Any]) -> float:
+    """Round-trip cost in probability units (0-1) for the selected side.
+
+    Uses the canonical all_in_cost_cents from trade_decision if available;
+    otherwise falls back to entry fee + exit reserves.  The cost is per
+    contract in cents and must be subtracted from gross edge to judge
+    tradeable net edge.
+    """
+    all_in = row.get("all_in_cost_cents")
+    if all_in is not None:
+        try:
+            v = float(all_in)
+            if math.isfinite(v) and v >= 0:
+                return v / 100.0
+        except (TypeError, ValueError):
+            pass
+    entry_fee = float(row.get("entry_fee_cents") or 0.0)
+    exit_fee = float(row.get("exit_fee_reserve_cents") or 0.0)
+    entry_impact = float(row.get("expected_entry_impact_cents") or 0.0)
+    exit_impact = float(row.get("exit_impact_reserve_cents") or 0.0)
+    return (entry_fee + exit_fee + entry_impact + exit_impact) / 100.0
 
 
 def _bucket(value: Optional[float], buckets: Sequence[Tuple[str, float, float]]) -> Optional[str]:
@@ -292,17 +357,29 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
     selected = [r for r in rows if r.get("allocator_selected")]
 
     # Edge: predicted = model - market; realized = y - market.
-    edge_pred = [
-        _model_p(r) - _market_p(r)
-        for r in resolved
-        if _model_p(r) is not None and _market_p(r) is not None
-    ]
-    edge_real = [
-        r["y"] - _market_p(r)
-        for r in resolved
-        if _market_p(r) is not None
-    ]
+    edge_pred, edge_pred_net, edge_real, edge_real_net = [], [], [], []
+    for r in resolved:
+        mp = _model_p(r)
+        mkt = _market_p(r)
+        if mkt is None:
+            continue
+        cost = _cost_prob(r)
+        pred = (mp - mkt) if mp is not None else None
+        real = r["y"] - mkt
+        if pred is not None:
+            edge_pred.append(pred)
+            edge_pred_net.append(pred - cost)
+        edge_real.append(real)
+        edge_real_net.append(real - cost)
     edge_gaps = [p - r for p, r in zip(edge_pred, edge_real)]
+    edge_gaps_net = [p - r for p, r in zip(edge_pred_net, edge_real_net)]
+
+    pred_stats = _edge_stats(edge_pred, "predicted_edge") if edge_pred else {}
+    real_stats = _edge_stats(edge_real, "realized_edge") if edge_real else {}
+    real_net_stats = _edge_stats(edge_real_net, "realized_edge_net") if edge_real_net else {}
+    pred_net_stats = _edge_stats(edge_pred_net, "predicted_edge_net") if edge_pred_net else {}
+    gap_stats = _edge_stats(edge_gaps, "predicted_minus_realized_edge") if edge_gaps else {}
+    gap_net_stats = _edge_stats(edge_gaps_net, "predicted_minus_realized_edge_net") if edge_gaps_net else {}
 
     # Canonical calibration diagnostics in side space.
     n_bins = min(n_bins, len(probs_model)) if probs_model else n_bins
@@ -339,10 +416,21 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Di
             "bin_counts": cal_model["bin_counts"],
         },
         # Edge calibration: does the model's deviation from market price predict
-        # the realized deviation from market price?
+        # the realized deviation from market price?  Include both gross and
+        # net-of-cost edges, with n/std/se/t-stat so small cells are not mistaken
+        # for significant edge.  Keep legacy mean_* names for backward compatibility.
         "mean_predicted_edge": _mean(edge_pred),
         "mean_realized_edge": _mean(edge_real),
+        "mean_realized_edge_net": _mean(edge_real_net),
         "mean_predicted_minus_realized_edge": _mean(edge_gaps),
+        "mean_predicted_minus_realized_edge_net": _mean(edge_gaps_net),
+        "mean_round_trip_cost_cents": _mean(_cost_prob(r) * 100.0 for r in resolved),
+        **pred_stats,
+        **real_stats,
+        **real_net_stats,
+        **pred_net_stats,
+        **gap_stats,
+        **gap_net_stats,
         "trades_with_pnl": len(pnls),
         "fee_inclusive_expectancy_dollars": expectancy(pnls),
         "total_realized_pnl_dollars": sum(pnls) if pnls else None,
@@ -468,6 +556,43 @@ def dedupe_latest_per_market(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return [latest[k] for k in order] + passthrough
 
 
+def dedupe_admission_per_market(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse to the earliest candidate-generating row per (ticker, side).
+
+    The edge question is about the moment a candidate was first admitted,
+    before TTE convergence compresses the market-implied probability.  If no
+    row for a market has ``candidate_generated=True``, fall back to the
+    earliest row with a side.  Rows without ticker/side are kept as-is.
+    """
+    earliest: Dict[Any, Dict[str, Any]] = {}
+    earliest_candidate: Dict[Any, Dict[str, Any]] = {}
+    order: List[Any] = []
+    passthrough: List[Dict[str, Any]] = []
+    for row in rows:
+        key = (row.get("ticker"), str(row.get("selected_side") or "").lower())
+        if not key[0] or not key[1]:
+            passthrough.append(row)
+            continue
+        if key not in earliest:
+            order.append(key)
+            earliest[key] = row
+        if row.get("candidate_generated"):
+            if key not in earliest_candidate:
+                earliest_candidate[key] = row
+            # Keep the earliest candidate, not the first one seen in this loop
+            # (rows may not be chronologically sorted, so compare timestamps).
+            elif _parse_iso_ts(row.get("event_ts_utc")) is not None and (
+                _parse_iso_ts(earliest_candidate[key].get("event_ts_utc")) is None
+                or _parse_iso_ts(row.get("event_ts_utc")) < _parse_iso_ts(earliest_candidate[key].get("event_ts_utc"))
+            ):
+                earliest_candidate[key] = row
+    # Prefer earliest candidate, then earliest row if no candidate.
+    chosen: Dict[Any, Dict[str, Any]] = {}
+    for key in order:
+        chosen[key] = earliest_candidate.get(key) or earliest[key]
+    return [chosen[k] for k in order] + passthrough
+
+
 MIN_SAMPLE_REQUIRED = 50
 SETTLEMENT_GRACE_MINUTES = 30.0
 
@@ -512,6 +637,37 @@ def _resolution_state(row: Dict[str, Any], now_ts: float,
     return "unresolvable", "no_outcome_record_past_grace"
 
 
+def _build_slice_set(
+    rows: List[Dict[str, Any]],
+    n_bins: int = 5,
+    tte_buckets: Sequence[Tuple[str, float, float]] = TTE_BUCKETS,
+) -> Dict[str, Any]:
+    """Compute all report slices for a given row set."""
+    slices: Dict[str, Any] = {"overall": _slice_metrics("overall", rows, n_bins=n_bins)}
+    for key, key_fn, buckets in [
+        ("by_asset", lambda r: r.get("asset"), None),
+        ("by_side", lambda r: (str(r.get("selected_side") or "").lower() or None), None),
+        ("by_price_bucket", lambda r: _bucket(
+            _market_p(r) * 100 if _market_p(r) is not None else None,
+            PRICE_BUCKETS), PRICE_BUCKETS),
+        ("by_time_to_expiry", lambda r: _bucket(r.get("minutes_to_expiry"), tte_buckets), tte_buckets),
+        ("by_spread_bucket", lambda r: _bucket(r.get("spread_cents"), SPREAD_BUCKETS), SPREAD_BUCKETS),
+        ("by_depth_bucket", lambda r: _bucket(
+            r.get("yes_depth") if str(r.get("selected_side") or "").lower() != "no" else r.get("no_depth"),
+            DEPTH_BUCKETS), DEPTH_BUCKETS),
+        ("by_edge_sign", _edge_sign, None),
+        ("by_edge_magnitude", _edge_magnitude, EDGE_MAGNITUDE_BUCKETS),
+    ]:
+        groups = _group(rows, key_fn)
+        ordered = [b[0] for b in buckets] if buckets else sorted(groups)
+        slices[key] = {
+            name: _slice_metrics(name, groups[name], n_bins=n_bins)
+            for name in ordered
+            if name in groups
+        }
+    return slices
+
+
 def build_report(
     records: List[Dict[str, Any]],
     outcomes: Dict[str, int],
@@ -520,11 +676,14 @@ def build_report(
 ) -> Dict[str, Any]:
     """Build the full calibration audit report as a JSON-safe dict.
 
-    Two-section output:
+    Three-section output:
     - decision_funnel: raw cycle accounting from evaluation to execution.
       Pre-side rejections are counted here and NEVER enter calibration.
     - calibration cohort: one row per (ticker, side) market decision with a
       formed side; Brier/bias/edge-gap computed on resolved records only.
+    - edge_admission cohort: the first candidate-generating row per market,
+      used for the edge-sign/magnitude/TTE tests where TTE convergence would
+      otherwise dilute the signal.
     """
     import time as _time
     if now_ts is None:
@@ -532,6 +691,7 @@ def build_report(
 
     raw_rows = join_rows(records, outcomes, fill_pnls)
     deduped = dedupe_latest_per_market(raw_rows)
+    edge_deduped = dedupe_admission_per_market(raw_rows)
 
     # --- Funnel -------------------------------------------------------------
     pre_side = [r for r in deduped if not r.get("ticker") or not r.get("selected_side")]
@@ -568,29 +728,21 @@ def build_report(
     rows = eligible  # calibration cohort
     unresolved = sum(1 for r in rows if not r["resolved"])
 
-    slices: Dict[str, Any] = {"overall": _slice_metrics("overall", rows)}
+    slices = _build_slice_set(rows, n_bins=5, tte_buckets=TTE_BUCKETS)
 
-    for key, key_fn, buckets in [
-        ("by_asset", lambda r: r.get("asset"), None),
-        ("by_side", lambda r: (str(r.get("selected_side") or "").lower() or None), None),
-        ("by_price_bucket", lambda r: _bucket(
-            _market_p(r) * 100 if _market_p(r) is not None else None,
-            PRICE_BUCKETS), PRICE_BUCKETS),
-        ("by_time_to_expiry", lambda r: _bucket(r.get("minutes_to_expiry"), TTE_BUCKETS), TTE_BUCKETS),
-        ("by_spread_bucket", lambda r: _bucket(r.get("spread_cents"), SPREAD_BUCKETS), SPREAD_BUCKETS),
-        ("by_depth_bucket", lambda r: _bucket(
-            r.get("yes_depth") if str(r.get("selected_side") or "").lower() != "no" else r.get("no_depth"),
-            DEPTH_BUCKETS), DEPTH_BUCKETS),
-        ("by_edge_sign", _edge_sign, None),
-        ("by_edge_magnitude", _edge_magnitude, EDGE_MAGNITUDE_BUCKETS),
-    ]:
-        groups = _group(rows, key_fn)
-        ordered = [b[0] for b in buckets] if buckets else sorted(groups)
-        slices[key] = {
-            name: _slice_metrics(name, groups[name])
-            for name in ordered
-            if name in groups
-        }
+    # Edge-admission cohort: first candidate-generating row per market.
+    edge_pre_side = [r for r in edge_deduped if not r.get("ticker") or not r.get("selected_side")]
+    edge_sided = [r for r in edge_deduped if r.get("ticker") and r.get("selected_side")]
+    edge_eligible = [
+        r for r in edge_sided
+        if _model_p(r) is not None
+        and _market_p(r) is not None
+        and (r.get("decision_id") or r.get("ticker"))
+        and (r.get("resolved") or r.get("event_ts_utc"))
+    ]
+    edge_slices = _build_slice_set(edge_eligible, n_bins=5, tte_buckets=TTE_ADMISSION_BUCKETS)
+    # Rename edge slice keys so they are clearly distinct from calibration slices.
+    edge_slices = {f"{k}_admission": v for k, v in edge_slices.items()}
 
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
@@ -611,10 +763,16 @@ def build_report(
                 "selected side. Tests whether the model's directional deviation "
                 "from the market predicts the realized deviation."
             ),
+            "edge_admission_cohort": (
+                "first candidate-generating row per (ticker, side). Edge tests "
+                "use this cohort because the latest row per window is near expiry, "
+                "where convergence erodes the edge signal."
+            ),
         },
         "counts": {
             "evaluated_records": len(raw_rows),
             "unique_decision_markets": len(deduped),
+            "edge_admission_unique_markets": len(edge_deduped),
             "outcomes_loaded": len(outcomes),
             "tickers_with_fills": len(fill_pnls),
         },
@@ -629,12 +787,18 @@ def build_report(
             "unresolvable_records": len(unresolvable),
             "executed_records": len(executed),
         },
+        "edge_admission_funnel": {
+            "sided_decision_records": len(edge_sided),
+            "calibration_eligible_records": len(edge_eligible),
+            "resolved_records": sum(1 for r in edge_eligible if r.get("resolved")),
+        },
         "resolution_reconciliation": {
             "settlement_grace_minutes": SETTLEMENT_GRACE_MINUTES,
             "pending": pending,
             "unresolvable": unresolvable,
         },
         "slices": slices,
+        "edge_slices": edge_slices,
     }
 
 
@@ -703,11 +867,21 @@ def render_text(report: Dict[str, Any]) -> str:
         if metrics.get("mean_predicted_edge") is not None:
             parts.append(f"pred_edge={metrics['mean_predicted_edge']:+.4f}")
         if metrics.get("mean_realized_edge") is not None:
-            parts.append(f"real_edge={metrics['mean_realized_edge']:+.4f}")
+            n = metrics.get("realized_edge_n")
+            parts.append(f"real_edge={metrics['mean_realized_edge']:+.4f}(n={n})")
+        if metrics.get("mean_realized_edge_net") is not None:
+            n = metrics.get("realized_edge_net_n")
+            t = metrics.get("realized_edge_net_t_stat")
+            t_str = f" t={t:+.2f}" if t is not None else ""
+            parts.append(f"net_real_edge={metrics['mean_realized_edge_net']:+.4f}(n={n}){t_str}")
+        if metrics.get("mean_predicted_minus_realized_edge") is not None:
+            t = metrics.get("predicted_minus_realized_edge_t_stat")
+            t_str = f" t={t:+.2f}" if t is not None else ""
+            parts.append(f"pred-real_edge={metrics['mean_predicted_minus_realized_edge']:+.4f}{t_str}")
         if metrics.get("fee_inclusive_expectancy_dollars") is not None:
             parts.append(f"expectancy=${metrics['fee_inclusive_expectancy_dollars']:+.4f}")
-        if metrics.get("mean_predicted_minus_realized_edge") is not None:
-            parts.append(f"pred-real_edge={metrics['mean_predicted_minus_realized_edge']:+.4f}")
+        if metrics.get("mean_round_trip_cost_cents") is not None:
+            parts.append(f"cost={metrics['mean_round_trip_cost_cents']:.2f}c")
         if metrics.get("candidate_rate") is not None:
             parts.append(f"cand_rate={metrics['candidate_rate']:.2f}")
         lines.append(" ".join(parts))
@@ -726,6 +900,25 @@ def render_text(report: Dict[str, Any]) -> str:
         lines.append(f"-- {section} " + "-" * max(0, 55 - len(section)))
         for name in sorted(group):
             _emit(name, group[name])
+
+    # Edge-admission cohort: first candidate-generating row per market.
+    edge_slices = report.get("edge_slices") or {}
+    if edge_slices:
+        lines.append("")
+        lines.append("EDGE-ADMISSION COHORT (first candidate row per market)")
+        edge_overall = edge_slices.get("overall_admission")
+        if edge_overall:
+            _emit("overall_admission", edge_overall)
+        for section in ("by_asset_admission", "by_side_admission", "by_price_bucket_admission",
+                        "by_time_to_expiry_admission", "by_edge_sign_admission",
+                        "by_edge_magnitude_admission"):
+            group = edge_slices.get(section) or {}
+            if not group:
+                continue
+            lines.append("")
+            lines.append(f"-- {section} " + "-" * max(0, 55 - len(section)))
+            for name in sorted(group):
+                _emit(name, group[name])
     return "\n".join(lines)
 
 
