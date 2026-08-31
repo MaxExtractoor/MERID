@@ -922,6 +922,14 @@ class Kalshi15mLoop:
         # CRITICAL FIX: Initialize market_state_store for dynamic sizing
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
         self.market_state_store = get_kalshi_market_state_store()
+        # Centralized per-tick feature snapshot.  Built once per cycle and shared
+        # by all agents; it is the single source of truth for RTI returns,
+        # microstructure, and cross-asset lead-lag on this tick.
+        from merid.prediction.feature_snapshot import FeatureSnapshotBuilder
+        self._feature_snapshot_builder = FeatureSnapshotBuilder(
+            assets=self._allowed_assets,
+            market_state_store=self.market_state_store,
+        )
         # Watchdog: fixed wall-clock budget per cycle (2x cadence as safety margin)
         self._watchdog_budget = self.cadence_seconds * 2.0
         self._last_cycle_wall_time = time.time()
@@ -7287,6 +7295,16 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
             # Pass Coinbase velocity signals to agent grid for external spot velocity integration
             # (Turbine research #1 winner: Coinbase 1-minute velocity)
             coinbase_velocity = self._coinbase_velocity_signals if hasattr(self, '_coinbase_velocity_signals') else {}
+
+            # Build one centralized feature snapshot per cycle, before any agent
+            # is evaluated.  This guarantees all five assets see the same
+            # time-aligned CF-RTI and microstructure features.
+            try:
+                feature_snapshot = self._feature_snapshot_builder.build()
+            except Exception as fs_err:
+                logger.warning("[15M-LOOP] Feature snapshot build failed: %s", fs_err, exc_info=True)
+                feature_snapshot = None
+
             # CRITICAL FIX (2026-08-11): Halt gating - stop signal generation, sizing,
             # allocation, and entry execution when the TradingCircuitBreaker is tripped.
             # Exchange reconciliation (sync_from_rest) and position monitoring remain alive;
@@ -7352,7 +7370,12 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 return []
 
             logger.info("[15M-LOOP] About to call agent_grid.run_cycle tick=%d", tick)
-            candidates = await self.agent_grid.run_cycle(tick, allow_new_entries=allow_new_entries, coinbase_velocity=coinbase_velocity)
+            candidates = await self.agent_grid.run_cycle(
+                tick,
+                allow_new_entries=allow_new_entries,
+                coinbase_velocity=coinbase_velocity,
+                feature_snapshot=feature_snapshot,
+            )
             logger.info("[15M-LOOP] Generated %d candidates in cycle %d", len(candidates), tick)
             
             # CRITICAL: Return candidates to caller for processing
