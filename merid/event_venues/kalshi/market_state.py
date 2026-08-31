@@ -316,6 +316,13 @@ _WS_HEALTH_WATCHDOG_SECONDS = float(os.getenv("KALSHI_WS_HEALTH_WATCHDOG_SECONDS
 # a snapshot timeout and actively requesting a fresh one.
 _SNAPSHOT_TIMEOUT_SECONDS = float(os.getenv("MERID_KALSHI_SNAPSHOT_TIMEOUT_SECONDS", "10.0"))
 
+# Minimum interval between snapshot-recovery triggers per ticker.  Without this
+# throttle, a saturated delta queue schedules a REST invariant sync plus a WS
+# snapshot request for every dropped delta (potentially thousands/second),
+# exhausting the HTTP connection pool and starving unrelated calls (bankroll,
+# RTI) - observed in production on 2026-08-31.
+_RECOVERY_TRIGGER_MIN_INTERVAL_S = float(os.getenv("KALSHI_RECOVERY_TRIGGER_MIN_INTERVAL_S", "15.0"))
+
 # ── Regime-Aware Staleness Thresholds ───────────────────────────────────────
 # Based on time-to-expiry and market conditions
 _STALENESS_REGIME_RELAXED_SECONDS = float(os.getenv("KALSHI_STALENESS_REGIME_RELAXED_SECONDS", "120.0"))  # 120s far from expiry
@@ -666,7 +673,17 @@ class KalshiMarketStateStore:
         # This eliminates LOCK BUSY drops by buffering deltas and applying them in batches
         self._delta_queues: Dict[str, deque] = {}  # Per-ticker queues for orderbook deltas
         self._delta_queue_locks: Dict[str, threading.Lock] = {}  # Per-ticker locks for the queues
-        self._MAX_PER_TICKER_QUEUE = 50000  # Max deltas per ticker before overflow (increased to handle extreme WS volume)
+        # Max deltas per ticker before overflow.  The queue buffers at most a few
+        # seconds of flow; a deeper queue only means the worker applies deltas that
+        # are already too stale to trade on.  On overflow the correct strategy for a
+        # sequenced channel is drop-all + snapshot re-bootstrap (never silently
+        # drop individual deltas - that breaks sequence contiguity and livelocks
+        # the book in RESYNC_REQUIRED, which only a live delta can clear).
+        self._MAX_PER_TICKER_QUEUE = int(os.getenv("KALSHI_MAX_PER_TICKER_QUEUE", "10000"))
+        # Per-ticker throttle for snapshot-recovery triggers so a sustained delta
+        # burst cannot schedule thousands of REST/WS recovery coroutines per second
+        # and starve the event loop / HTTP connection pool.
+        self._last_recovery_trigger_ts: Dict[str, float] = {}
         self._batch_worker_running = False
         self._batch_worker_thread: Optional[threading.Thread] = None
         # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume.
@@ -1026,8 +1043,10 @@ class KalshiMarketStateStore:
                             if not queue:
                                 continue
 
-                            # Check for overflow
-                            if len(queue) > self._MAX_PER_TICKER_QUEUE:
+                            # Check for overflow (>= because the enqueue path caps
+                            # the queue at exactly _MAX_PER_TICKER_QUEUE; a plain >
+                            # comparison is unreachable).
+                            if len(queue) >= self._MAX_PER_TICKER_QUEUE:
                                 self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
                                 logger.error(
                                     f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
@@ -1038,13 +1057,15 @@ class KalshiMarketStateStore:
                                 state = self._states.get(ticker)
                                 if state:
                                     state.book_consistency = "SUSPECT"
+                                    # A queue overflow is a full-book rebuild case:
+                                    # require an authoritative FULL_SNAPSHOT (REST
+                                    # orderbook or clean WS snapshot) rather than a
+                                    # live delta, which cannot arrive contiguously
+                                    # while the queue is saturated.
+                                    state.recovery_required_source = "FULL_SNAPSHOT"
                                     self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow")
                                     self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow")
-                                    self._schedule_on_main_loop(
-                                        lambda: self._sync_invariant_violation_with_rest(ticker),
-                                        "BATCH-WORKER",
-                                        ticker,
-                                    )
+                                    self._maybe_trigger_book_recovery(ticker, "queue_overflow_worker")
                                 queue.clear()
                                 continue
 
@@ -1164,13 +1185,23 @@ class KalshiMarketStateStore:
                 # Increment overflow counter for metrics
                 self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
 
-                # P1 FIX: Trigger immediate snapshot recovery instead of just marking for resync
-                # This prevents selective staleness by requesting fresh data immediately
+                # Drop-all + re-bootstrap (2026-08-31): orderbook deltas are a
+                # sequenced stateful channel.  The previous behaviour kept the
+                # queue pinned at the cap and rejected every new delta one at a
+                # time, which (a) guaranteed sequence gaps so the required
+                # LIVE_DELTA recovery could never arrive, livelocking the book in
+                # RESYNC_REQUIRED until market expiry, and (b) scheduled an
+                # unthrottled REST sync + WS snapshot request per dropped delta,
+                # exhausting the HTTP connection pool (bankroll starved for
+                # hours) and flooding the event loop.  Clearing the queue and
+                # requiring an attested FULL_SNAPSHOT lets the throttled REST/WS
+                # snapshot rebuild heal the book.
                 logger.error(
                     f"[BOOK-OVERFLOW] ticker={ticker} asset={asset} queue_len={len(queue)} "
                     f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count[ticker]} "
-                    f"triggering_immediate_snapshot_recovery"
+                    f"dropping_stale_deltas_and_triggering_throttled_snapshot_recovery"
                 )
+                queue.clear()
 
                 state = self._states.get(ticker)
                 if state:
@@ -1178,20 +1209,18 @@ class KalshiMarketStateStore:
                     state.data_quality = "INVALID"
                     state.transition = "RESYNC_REQUIRED"
                     state.executable = False
+                    # A full authoritative snapshot (REST orderbook or clean WS
+                    # snapshot) is sufficient to rebuild after overflow; live
+                    # deltas then re-confirm sequence for new-entry gating.
+                    state.recovery_required_source = "FULL_SNAPSHOT"
                     self._set_snapshot_complete(ticker, False, "delta_queue_overflow")
                     self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow_enqueue")
                     self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow_enqueue")
 
-                # Trigger immediate snapshot recovery via WebSocket
+                # Trigger throttled snapshot recovery (WS + REST), at most once
+                # per _RECOVERY_TRIGGER_MIN_INTERVAL_S per ticker.
                 try:
-                    import asyncio
-                    loop = self._main_event_loop
-                    if loop and loop.is_running():
-                        # Schedule snapshot request on the event loop
-                        asyncio.run_coroutine_threadsafe(
-                            self._trigger_snapshot_recovery(ticker),
-                            loop
-                        )
+                    self._maybe_trigger_book_recovery(ticker, "queue_overflow_enqueue")
                 except Exception as e:
                     logger.error(f"[BOOK-OVERFLOW] Failed to trigger snapshot recovery for {ticker}: {e}")
 
@@ -1566,6 +1595,29 @@ class KalshiMarketStateStore:
             if ticker in self._delta_queues:
                 self._delta_queues[ticker].clear()
                 logger.info(f"[RESYNC-COMPLETE] ticker={ticker} cleared delta queue")
+
+    def _maybe_trigger_book_recovery(self, ticker: str, reason: str) -> bool:
+        """Schedule WS + REST snapshot recovery for ``ticker``, throttled.
+
+        Returns True if a recovery was scheduled.  At most one recovery is
+        scheduled per ticker per ``_RECOVERY_TRIGGER_MIN_INTERVAL_S`` so a
+        sustained delta burst cannot flood the event loop / REST pool.
+        """
+        now = time.monotonic()
+        if now - self._last_recovery_trigger_ts.get(ticker, 0.0) < _RECOVERY_TRIGGER_MIN_INTERVAL_S:
+            return False
+        self._last_recovery_trigger_ts[ticker] = now
+        import asyncio
+        loop = self._main_event_loop
+        if not (loop and loop.is_running()):
+            logger.warning(
+                "[BOOK-RECOVERY-THROTTLED] Event loop not available for %s (reason=%s)", ticker, reason
+            )
+            return False
+        asyncio.run_coroutine_threadsafe(self._trigger_snapshot_recovery(ticker), loop)
+        asyncio.run_coroutine_threadsafe(self._sync_invariant_violation_with_rest(ticker), loop)
+        logger.info("[BOOK-RECOVERY-TRIGGERED] ticker=%s reason=%s", ticker, reason)
+        return True
 
     async def _trigger_snapshot_recovery(self, ticker: str) -> None:
         """P1 FIX: Trigger immediate snapshot recovery via WebSocket.
@@ -2631,18 +2683,14 @@ class KalshiMarketStateStore:
             # Enqueue delta for batch processing
             enqueued = self._enqueue_delta(ticker, payload)
             if not enqueued:
-                # Queue overflow - mark as SUSPECT and trigger REST bootstrap
+                # Queue overflow - _enqueue_delta already marked the book
+                # SUSPECT/INVALID and scheduled throttled snapshot recovery;
+                # do not schedule another unthrottled REST sync here.
                 state = self._states.get(ticker)
                 if state:
-                    state.book_consistency = "SUSPECT"
                     logger.warning(
-                        "[BOOK-CONSISTENCY] ticker=%s marked as SUSPECT due to queue overflow - will trigger REST bootstrap",
+                        "[BOOK-CONSISTENCY] ticker=%s marked as SUSPECT due to queue overflow - throttled recovery handled by enqueue path",
                         ticker
-                    )
-                    self._schedule_on_main_loop(
-                        lambda: self._sync_invariant_violation_with_rest(ticker),
-                        "market-state",
-                        ticker,
                     )
             else:
                 # DIAGNOSTIC: Log successful enqueue

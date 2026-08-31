@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import threading
 import asyncio
+import random
 import inspect
 import os
 import time
@@ -235,6 +236,16 @@ class BankrollServiceV2:
         self._circuit_breaker_window_seconds = float(
             os.getenv("MERID_BANKROLL_CIRCUIT_WINDOW_S", "120.0")
         )
+
+    def _jittered_circuit_duration(self) -> float:
+        """Circuit-open duration with +/-25% jitter.
+
+        Without jitter every caller's circuit expires at the same instant and
+        the half-open probes stampede the API together (thundering herd),
+        which can re-trip the circuit during a marginal connectivity window.
+        """
+        base = self._circuit_breaker_duration_seconds
+        return base + random.uniform(-0.25 * base, 0.25 * base)
 
         # Bankroll drawdown / consecutive-loss circuit breaker state.
         # CRITICAL FIX (2026-08-27): Protects the live bankroll from drawdown spirals
@@ -531,7 +542,7 @@ class BankrollServiceV2:
 
                 # Open the circuit if we have crossed the threshold.
                 if self._consecutive_timeout_count >= self._circuit_breaker_timeout_threshold:
-                    self._circuit_open_until = time.time() + self._circuit_breaker_duration_seconds
+                    self._circuit_open_until = time.time() + self._jittered_circuit_duration()
                     self._circuit_open_count += 1
                     logger.critical(
                         "[BANKROLL-CIRCUIT-OPEN] %d consecutive timeouts within window; "
@@ -659,7 +670,7 @@ class BankrollServiceV2:
                     >= self._circuit_breaker_timeout_threshold
                 ):
                     self._circuit_open_until = (
-                        time.time() + self._circuit_breaker_duration_seconds
+                        time.time() + self._jittered_circuit_duration()
                     )
                     self._circuit_open_count += 1
                     logger.critical(
