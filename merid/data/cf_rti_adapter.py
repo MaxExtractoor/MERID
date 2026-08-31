@@ -17,6 +17,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import collections
 import json
 import math
 import os
@@ -25,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 import httpx
 
@@ -171,9 +172,12 @@ class _AdapterState:
     last_failure_ts_ms: int = 0
     last_failure_reason_by_asset: Dict[str, str] = field(default_factory=dict)
     consecutive_failures_by_asset: Dict[str, int] = field(default_factory=dict)
+    rti_history_by_asset: Dict[str, Deque[CfbRtiObservation]] = field(default_factory=dict)
 
 
 _state = _AdapterState()
+_rti_history_lock = threading.RLock()
+_RTI_HISTORY_MAX_LEN = int(os.environ.get("MERID_CFB_RTI_HISTORY_MAX_LEN", "120"))
 
 # Kalshi authenticated ``cfbenchmarks_value`` WebSocket stream.
 _kalshi_stream: Optional[Any] = None
@@ -259,6 +263,7 @@ def _ensure_kalshi_stream() -> Optional[Any]:
             _state.last_source_ts_ms_by_asset[asset] = validated.source_ts_ms
             _state.consecutive_failures_by_asset[asset] = 0
             _state.last_failure_reason_by_asset[asset] = ""
+            _record_rti_history(asset, validated)
             logger.info(
                 "[CF-RTI-ADAPTER] stream_observation_accepted "
                 "asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s "
@@ -757,6 +762,7 @@ def get_live_rti(asset: str) -> Optional[CfbRtiObservation]:
                     _state.last_source_ts_ms_by_asset[asset] = obs.source_ts_ms
                     _state.consecutive_failures_by_asset[asset] = 0
                     _state.last_failure_reason_by_asset[asset] = ""
+                    _record_rti_history(asset, obs)
                     logger.info(
                         "[CF-RTI-ADAPTER] cfb_rti_live asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s source_ts_ms=%s age_ms=%s source=direct_cfb",
                         asset, obs.cfb_symbol, _format_price(asset, obs.value_decimal),
@@ -769,6 +775,62 @@ def get_live_rti(asset: str) -> Optional[CfbRtiObservation]:
     if not _state.last_failure_reason_by_asset.get(asset):
         _state.last_failure_reason_by_asset[asset] = "cfb_rti_unavailable"
     return None
+
+
+def _record_rti_history(asset: str, obs: CfbRtiObservation) -> None:
+    """Append a validated observation to the per-asset RTI ring buffer."""
+    with _rti_history_lock:
+        history = _state.rti_history_by_asset.setdefault(asset, collections.deque(maxlen=_RTI_HISTORY_MAX_LEN))
+        # Drop duplicates by source timestamp (WebSocket may replay identical frames).
+        if history and history[-1].source_ts_ms == obs.source_ts_ms:
+            return
+        history.append(obs)
+
+
+def get_rti_history(asset: str, max_age_s: Optional[float] = None) -> List[CfbRtiObservation]:
+    """Return recent validated RTI observations for ``asset``.
+
+    If ``max_age_s`` is given, only observations within that many seconds of
+    the most recent are returned.  The list is in chronological order.
+    """
+    with _rti_history_lock:
+        history = _state.rti_history_by_asset.get(asset)
+        if not history:
+            return []
+        observations = list(history)
+    if max_age_s is not None and observations:
+        cutoff_ts_ms = observations[-1].source_ts_ms - int(max_age_s * 1000)
+        observations = [o for o in observations if o.source_ts_ms is not None and o.source_ts_ms >= cutoff_ts_ms]
+    return observations
+
+
+def get_rti_return(asset: str, lookback_s: float) -> Optional[float]:
+    """Return the log return of the RTI over ``lookback_s`` seconds.
+
+    Uses source timestamps and the most recent observation that is at least
+    ``lookback_s`` old.  Returns ``None`` if no suitable pair exists.
+    """
+    observations = get_rti_history(asset)
+    if len(observations) < 2:
+        return None
+    current = observations[-1]
+    if current.source_ts_ms is None:
+        return None
+    cutoff_ms = current.source_ts_ms - int(lookback_s * 1000)
+    # Find the most recent observation at or before the cutoff.
+    prior = None
+    for obs in reversed(observations[:-1]):
+        if obs.source_ts_ms is not None and obs.source_ts_ms <= cutoff_ms:
+            prior = obs
+            break
+    if prior is None:
+        # Insufficient history for the requested lookback.  Do not fabricate a
+        # shorter-horizon return or substitute the oldest sample; return None so
+        # callers can flag the feature as missing.
+        return None
+    if prior.value <= 0 or current.value <= 0:
+        return None
+    return math.log(current.value / prior.value)
 
 
 def get_last_rejection_reason(asset: str) -> str:
@@ -786,6 +848,7 @@ def reset_state() -> None:
     _state.last_failure_ts_ms = 0
     _state.last_failure_reason_by_asset.clear()
     _state.consecutive_failures_by_asset.clear()
+    _state.rti_history_by_asset.clear()
 
 
 def final_minute_cutoff_seconds() -> float:

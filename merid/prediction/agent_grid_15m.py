@@ -2084,6 +2084,11 @@ class LeanAgent15m:
         self._microstructure_book_history: Dict[str, Any] = {}
         self._cross_asset_spot_history: Dict[str, Any] = {}
 
+        # Centralized per-tick feature snapshot, built by the loop once per cycle
+        # and shared across all agents.  Replaces per-agent public-spot velocity
+        # and stale recompute of microstructure features.
+        self._feature_snapshot: Optional[Any] = None
+
         # Per-cycle rejection waterfall for diagnostics.  Tracks which gate eliminated
         # the asset each cycle so we can measure before tuning thresholds.
         self._rejection_waterfall: Dict[str, Dict[str, Any]] = {
@@ -8933,6 +8938,19 @@ class LeanAgent15m:
             self.config.name, len(self._coinbase_velocity_signals)
         )
 
+    def set_feature_snapshot(self, snapshot: Optional[Any]) -> None:
+        """Inject the authoritative per-cycle ``FeatureSnapshot`` into this agent.
+
+        The snapshot is built once per loop tick, before any agent is evaluated,
+        so all agents share the same time-aligned RTI and microstructure view.
+        """
+        self._feature_snapshot = snapshot
+        logger.debug(
+            "[FEATURE-SNAPSHOT] agent=%s received snapshot with %d assets",
+            self.config.name,
+            len(getattr(snapshot, "by_asset", {})) if snapshot is not None else 0,
+        )
+
     def _reset_rejection_waterfall(self, asset: str) -> None:
         """Reset the per-cycle rejection waterfall for a new collection cycle."""
         self._rejection_waterfall = {
@@ -9156,8 +9174,11 @@ class LeanAgent15m:
         self._last_velocity_threshold = velocity_threshold
 
         # Determine the authoritative velocity source for this cycle.
-        # Coinbase velocity is preferred when fresh; otherwise fall back to the
-        # internal multi-window velocity computed from the agent's price history.
+        # 1. CF-RTI returns (settlement-aligned, loop-owned snapshot).
+        # 2. Coinbase velocity when fresh.
+        # 3. Internal fallback from the agent's price history, but only as a
+        #    diagnostic; stale internal samples are not substituted as a neutral
+        #    0.0 observation.
         cb_velocity = 0.0
         cb_age_ms = -1.0
         cb_signal_type = "none"
@@ -9166,6 +9187,39 @@ class LeanAgent15m:
         self._last_velocity_source = source
         self._last_velocity_age_ms = cb_age_ms
         self._last_velocity_signal_type = cb_signal_type
+
+        # 1. Prefer the centralized loop-level FeatureSnapshot.  It uses CF-RTI
+        # log returns (10s/30s/60s) aligned to the settlement index, so all five
+        # agents evaluate the same time-stamped feature vector.
+        if hasattr(self, '_feature_snapshot') and self._feature_snapshot is not None:
+            try:
+                snap = self._feature_snapshot.by_asset.get(asset)
+            except Exception:
+                snap = None
+            if snap is not None:
+                rti_returns = snap.rti_returns or {}
+                weighted_velocity = 0.0
+                total_weight = 0.0
+                for window_sec, weight in zip(self._velocity_windows, self._momentum_weights):
+                    key = f"rti_return_{int(window_sec)}s"
+                    ret = rti_returns.get(key)
+                    if ret is not None and math.isfinite(ret):
+                        weighted_velocity += float(ret) * weight
+                        total_weight += weight
+                if total_weight > 0:
+                    final_velocity = weighted_velocity
+                    source = "rti_feature_snapshot"
+                    cb_age_ms = snap.feature_age_ms
+                    cb_signal_type = "rti_returns"
+                    self._last_velocity_source = source
+                    self._last_velocity_age_ms = cb_age_ms
+                    self._last_velocity_signal_type = cb_signal_type
+                    logger.info(
+                        "[VELOCITY-SOURCE] asset=%s source=rti_feature_snapshot age_ms=%s value=%.6f threshold=%.6f",
+                        asset, cb_age_ms, final_velocity, velocity_threshold,
+                    )
+                    self._last_velocity_value = final_velocity
+                    return final_velocity
 
         if hasattr(self, '_coinbase_velocity_signals') and asset in self._coinbase_velocity_signals:
             cb_signal = self._coinbase_velocity_signals[asset]
@@ -15841,16 +15895,42 @@ class LeanAgent15m:
                             candidate["distance_pct"] = None
 
                         # Microstructure logging (additive telemetry, fail-closed for live).
-                        if _MICROSTRUCTURE_AVAILABLE:
+                        # Prefer the centralized FeatureSnapshot built once per loop tick;
+                        # it is time-aligned across all assets and uses CF-RTI for the
+                        # cross-asset lead-lag signal.  Fallback to per-agent compute only
+                        # when the snapshot is not present (tests, isolated calls).
+                        asset_name = self.config.name.split("_")[0].upper()
+                        snap = None
+                        if self._feature_snapshot is not None:
                             try:
-                                asset_name = self.config.name.split("_")[0].upper()
+                                snap = self._feature_snapshot.by_asset.get(asset_name)
+                            except Exception:
+                                snap = None
+
+                        if snap is not None:
+                            candidate["microstructure_yes_features"] = snap.microstructure_yes_features
+                            candidate["microstructure_no_features"] = snap.microstructure_no_features
+                            candidate["microstructure_yes_edge_pp"] = snap.microstructure_yes_edge_pp
+                            candidate["microstructure_no_edge_pp"] = snap.microstructure_no_edge_pp
+                            candidate["microstructure_book_delta_pp"] = snap.microstructure_book_delta_pp
+                            candidate["microstructure_cross_delta_pp"] = snap.microstructure_cross_delta_pp
+                            candidate["microstructure_delta_pp"] = snap.microstructure_total_delta_pp
+                            candidate["microstructure_btc_log_return"] = snap.btc_log_return
+                            candidate["rti_value"] = snap.rti_value
+                            candidate["rti_age_ms"] = snap.rti_age_ms
+                            candidate["rti_returns"] = snap.rti_returns
+                            candidate["feature_age_ms"] = snap.feature_age_ms
+                            candidate["feature_valid"] = snap.feature_valid
+                            candidate["feature_missing_reasons"] = snap.missing_reasons
+                        elif _MICROSTRUCTURE_AVAILABLE:
+                            try:
                                 book_history = self._microstructure_book_history.setdefault(
                                     asset_name, collections.deque(maxlen=1000)
                                 )
                                 for side in ("yes", "no"):
-                                    snap = kalshi_state_book_levels(market_state, side)
-                                    if snap is not None:
-                                        book_history.append(snap)
+                                    snap_obj = kalshi_state_book_levels(market_state, side)
+                                    if snap_obj is not None:
+                                        book_history.append(snap_obj)
 
                                 # Update BTC spot history once per cycle for cross-asset lead-lag.
                                 btc_history = self._cross_asset_spot_history.setdefault(
@@ -16652,7 +16732,13 @@ class LeanAgentGrid15m:
 
 
 
-    async def run_cycle(self, tick: int, allow_new_entries: bool = True, coinbase_velocity: Dict = None) -> list[Dict[str, Any]]:
+    async def run_cycle(
+        self,
+        tick: int,
+        allow_new_entries: bool = True,
+        coinbase_velocity: Dict = None,
+        feature_snapshot: Optional[Any] = None,
+    ) -> list[Dict[str, Any]]:
 
         # Run a single trading cycle across all agents.
 
@@ -16818,6 +16904,11 @@ class LeanAgentGrid15m:
             # into each agent before collection.  The grid owns the live signal; the agent
             # must not rely on a stale or unset agent-local copy.
             agent.set_velocity_snapshot(self._coinbase_velocity_signals.copy())
+
+            # Inject the centralized per-tick feature snapshot.  This gives every
+            # agent the same time-aligned view of RTI returns, OFI, book
+            # imbalance, spread, depth, and BTC cross-asset lead-lag.
+            agent.set_feature_snapshot(feature_snapshot)
 
             agent_tasks.append(agent.collect_order_candidate(tick))
 
