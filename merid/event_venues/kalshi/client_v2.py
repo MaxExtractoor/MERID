@@ -28,7 +28,7 @@ import json
 import os
 import time
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import httpx
 
@@ -430,14 +430,23 @@ class KalshiClientV2:
         # Should not reach here, but just in case
         raise RuntimeError(f"Request failed after retries: {last_error}")
     
-    async def get_balance(self) -> BalanceResult:
+    async def get_balance(
+        self,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
+    ) -> BalanceResult:
         """Fetch balance from Kalshi /portfolio/balance.
-        
+
+        Args:
+            timeout: Optional per-request timeout. A float is converted to an
+                httpx.Timeout with a tight connect/pool cap so the call cannot
+                exceed the strategy cadence even if the event loop cannot cancel
+                an in-flight httpx/anyio request.
+
         Returns:
             BalanceSuccess: Fresh data available
             BalanceTemporaryError: Network/timeout issue - use stale if available
             BalancePermanentError: Auth/account issue - STOP
-            
+
         NO ASSERTIONS. NO "error -> 0". NO "locked bankroll" nonsense.
         """
         # CRITICAL INSTRUMENTATION: Capture environment and client details
@@ -454,10 +463,26 @@ class KalshiClientV2:
         
         start_ms = time.time() * 1000
         operation = "get_balance"
-        
+
+        # Bound each phase so the request cannot outrun the strategy cadence.
+        # Using httpx's native timeout is more reliable than asyncio.wait_for
+        # because httpx/anyio cancellation has been observed to ignore external
+        # cancel scopes, causing calls to run for 15-30s despite a 10s deadline.
+        if timeout is None:
+            req_timeout = httpx.Timeout(
+                10.0, connect=5.0, read=10.0, write=5.0, pool=5.0
+            )
+        elif isinstance(timeout, (int, float)):
+            cap = float(timeout)
+            req_timeout = httpx.Timeout(
+                cap, connect=min(cap, 5.0), read=cap, write=min(cap, 5.0), pool=min(cap, 5.0)
+            )
+        else:
+            req_timeout = timeout
+
         try:
             logger.info(f"[KALSHI-CLIENT-INSTRUMENT] About to call _request() for {operation}")
-            response = await self._request("GET", "/portfolio/balance")
+            response = await self._request("GET", "/portfolio/balance", timeout=req_timeout)
             latency_ms = time.time() * 1000 - start_ms
             
             logger.info(f"[KALSHI-CLIENT-INSTRUMENT] _request() completed in {latency_ms:.1f}ms, status={response.status_code}")
