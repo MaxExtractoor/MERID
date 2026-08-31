@@ -43,6 +43,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from merid.risk.probability.calibration_diagnostics import (
+    brier_score,
+    calibration_summary,
+    expected_calibration_error,
+    reliability_curve,
+)
+
 REPORT_SCHEMA_VERSION = 1
 
 PRICE_BUCKETS: Sequence[Tuple[str, float, float]] = (
@@ -73,6 +80,25 @@ DEPTH_BUCKETS: Sequence[Tuple[str, float, float]] = (
     ("10-49", 10.0, 49.999),
     ("50-199", 50.0, 199.999),
     (">=200", 200.0, math.inf),
+)
+
+# Model-predicted edge vs. the market price of the selected side.  Positive
+# means the model thinks the selected side is underpriced by the market;
+# negative means the model thinks it is overpriced.  The edge-calibration
+# question is whether the model's directional deviation from the market beats
+# the market's implied probability.
+EDGE_SIGN_BUCKETS: Sequence[Tuple[str, float, float]] = (
+    ("underpriced", 0.0, math.inf),      # model_p > market_p
+    ("overpriced", -math.inf, 0.0),       # model_p < market_p
+    ("no_edge", -1e-12, 1e-12),           # model_p ~= market_p
+)
+
+EDGE_MAGNITUDE_BUCKETS: Sequence[Tuple[str, float, float]] = (
+    ("0-2c", 0.0, 2.0),
+    ("2-5c", 2.0, 5.0),
+    ("5-10c", 5.0, 10.0),
+    ("10-20c", 10.0, 20.0),
+    (">20c", 20.0, math.inf),
 )
 
 
@@ -248,23 +274,46 @@ def _market_p(row: Dict[str, Any]) -> Optional[float]:
     return row.get("market_p_selected")
 
 
-def _slice_metrics(name: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Metrics for one slice of joined (telemetry + outcome + pnl) rows."""
+def _slice_metrics(name: str, rows: List[Dict[str, Any]], n_bins: int = 5) -> Dict[str, Any]:
+    """Metrics for one slice of joined (telemetry + outcome + pnl) rows.
+
+    The canonical calibration metrics (Brier, ECE, reliability) are computed
+    by merid.risk.probability.calibration_diagnostics on the exact
+    (predicted probability, realized outcome, market reference price) triple.
+    """
     n = len(rows)
     resolved = [r for r in rows if r.get("y") is not None]
-    pairs_model = [(_model_p(r), r["y"]) for r in resolved if _model_p(r) is not None]
-    pairs_market = [(_market_p(r), r["y"]) for r in resolved if _market_p(r) is not None]
+    probs_model = [_model_p(r) for r in resolved if _model_p(r) is not None]
+    outs_model = [r["y"] for r in resolved if _model_p(r) is not None]
+    probs_market = [_market_p(r) for r in resolved if _market_p(r) is not None]
+    outs_market = [r["y"] for r in resolved if _market_p(r) is not None]
     pnls = [r["realized_pnl_dollars"] for r in rows if r.get("realized_pnl_dollars") is not None]
     candidates = [r for r in rows if r.get("candidate_generated")]
     selected = [r for r in rows if r.get("allocator_selected")]
 
-    # Predicted vs realized edge on resolved rows: predicted = model - market
-    # probability of the selected side; realized = y - market probability.
-    edge_gaps = [
-        (_model_p(r) - _market_p(r)) - (r["y"] - _market_p(r))
+    # Edge: predicted = model - market; realized = y - market.
+    edge_pred = [
+        _model_p(r) - _market_p(r)
         for r in resolved
         if _model_p(r) is not None and _market_p(r) is not None
     ]
+    edge_real = [
+        r["y"] - _market_p(r)
+        for r in resolved
+        if _market_p(r) is not None
+    ]
+    edge_gaps = [p - r for p, r in zip(edge_pred, edge_real)]
+
+    # Canonical calibration diagnostics in side space.
+    n_bins = min(n_bins, len(probs_model)) if probs_model else n_bins
+    cal_model = calibration_summary(probs_model, outs_model, n_bins=n_bins, label="model")
+    cal_market = calibration_summary(probs_market, outs_market, n_bins=n_bins, label="market")
+
+    brier_model = cal_model["brier_score"]
+    brier_mkt = cal_market["brier_score"]
+    brier_skill = None
+    if brier_mkt is not None and brier_mkt > 0 and brier_model is not None and math.isfinite(brier_model):
+        brier_skill = 1.0 - (brier_model / brier_mkt)
 
     return {
         "slice": name,
@@ -279,9 +328,20 @@ def _slice_metrics(name: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "mean_raw_edge_cents": _mean(r.get("raw_edge_cents") for r in rows),
         "mean_robust_ev_cents": _mean(r.get("robust_ev_cents") for r in rows),
         # settlement_calibration: Brier/bias of the DERIVED probability vs outcome
-        "brier_derived_model": brier(pairs_model),
-        "brier_market_reference": brier(pairs_market),
-        "calibration_bias": calibration_bias(pairs_model),
+        "brier_derived_model": brier_model,
+        "brier_market_reference": brier_mkt,
+        "brier_skill_score": brier_skill,
+        "calibration_bias": calibration_bias(list(zip(probs_model, outs_model))),
+        "expected_calibration_error": cal_model["expected_calibration_error"],
+        "reliability_curve": {
+            "bin_centers": cal_model["bin_centers"],
+            "bin_observed_rates": cal_model["bin_observed_rates"],
+            "bin_counts": cal_model["bin_counts"],
+        },
+        # Edge calibration: does the model's deviation from market price predict
+        # the realized deviation from market price?
+        "mean_predicted_edge": _mean(edge_pred),
+        "mean_realized_edge": _mean(edge_real),
         "mean_predicted_minus_realized_edge": _mean(edge_gaps),
         "trades_with_pnl": len(pnls),
         "fee_inclusive_expectancy_dollars": expectancy(pnls),
@@ -332,6 +392,33 @@ def _spread_cents(row: Dict[str, Any]) -> Optional[float]:
         return float(ask) - float(bid)
     except (TypeError, ValueError):
         return None
+
+
+def _edge_sign(row: Dict[str, Any]) -> Optional[str]:
+    """Return 'underpriced' if model_p > market_p, 'overpriced' if <, else None.
+
+    The sign of (model_p - market_p) is the model's directional call: positive
+    means the selected side is cheaper than the model's fair value, negative
+    means it is richer.
+    """
+    mp = _model_p(row)
+    mkt = _market_p(row)
+    if mp is None or mkt is None:
+        return None
+    if mp > mkt + 1e-9:
+        return "underpriced"
+    if mp < mkt - 1e-9:
+        return "overpriced"
+    return "no_edge"
+
+
+def _edge_magnitude(row: Dict[str, Any]) -> Optional[str]:
+    """Bucket the absolute model-market edge in probability space (0-1)."""
+    mp = _model_p(row)
+    mkt = _market_p(row)
+    if mp is None or mkt is None:
+        return None
+    return _bucket(abs(mp - mkt) * 100.0, EDGE_MAGNITUDE_BUCKETS)
 
 
 def join_rows(
@@ -494,6 +581,8 @@ def build_report(
         ("by_depth_bucket", lambda r: _bucket(
             r.get("yes_depth") if str(r.get("selected_side") or "").lower() != "no" else r.get("no_depth"),
             DEPTH_BUCKETS), DEPTH_BUCKETS),
+        ("by_edge_sign", _edge_sign, None),
+        ("by_edge_magnitude", _edge_magnitude, EDGE_MAGNITUDE_BUCKETS),
     ]:
         groups = _group(rows, key_fn)
         ordered = [b[0] for b in buckets] if buckets else sorted(groups)
@@ -516,6 +605,11 @@ def build_report(
                 "resolution. A good Brier score is not proof of tradable edge; the "
                 "decisive metrics are fee_inclusive_expectancy and "
                 "mean_predicted_minus_realized_edge."
+            ),
+            "edge_calibration": (
+                "slicing by the sign and magnitude of (model_p - market_p) on the "
+                "selected side. Tests whether the model's directional deviation "
+                "from the market predicts the realized deviation."
             ),
         },
         "counts": {
@@ -586,9 +680,10 @@ def render_text(report: Dict[str, Any]) -> str:
         f"tickers_with_fills={c['tickers_with_fills']}"
     )
     lines.append("")
-    lines.append("NOTE: model probabilities are DERIVED (quoted market price + capped edge),")
-    lines.append("not independent forecasts. Judge edge by fee-inclusive expectancy")
-    lines.append("and predicted-vs-realized edge, not Brier score alone.")
+    lines.append("NOTE: model probabilities are DERIVED (quoted market price + capped edge).")
+    lines.append("Judge edge by fee-inclusive expectancy, predicted-vs-realized edge,")
+    lines.append("and by_edge_sign/magnitude slices. Brier/ECE only prove calibration;")
+    lines.append("a calibrated model that agrees with the market has no tradable edge.")
     lines.append("")
 
     def _emit(section: str, metrics: Dict[str, Any]) -> None:
@@ -597,8 +692,18 @@ def render_text(report: Dict[str, Any]) -> str:
             parts.append(f"insufficient_sample=true min_required={metrics.get('min_required_resolved', 50)}")
         if metrics.get("brier_derived_model") is not None:
             parts.append(f"brier={metrics['brier_derived_model']:.4f}")
+        if metrics.get("brier_market_reference") is not None:
+            parts.append(f"mkt_brier={metrics['brier_market_reference']:.4f}")
+        if metrics.get("brier_skill_score") is not None:
+            parts.append(f"skill={metrics['brier_skill_score']:+.4f}")
+        if metrics.get("expected_calibration_error") is not None:
+            parts.append(f"ece={metrics['expected_calibration_error']:.4f}")
         if metrics.get("calibration_bias") is not None:
             parts.append(f"bias={metrics['calibration_bias']:+.4f}")
+        if metrics.get("mean_predicted_edge") is not None:
+            parts.append(f"pred_edge={metrics['mean_predicted_edge']:+.4f}")
+        if metrics.get("mean_realized_edge") is not None:
+            parts.append(f"real_edge={metrics['mean_realized_edge']:+.4f}")
         if metrics.get("fee_inclusive_expectancy_dollars") is not None:
             parts.append(f"expectancy=${metrics['fee_inclusive_expectancy_dollars']:+.4f}")
         if metrics.get("mean_predicted_minus_realized_edge") is not None:
@@ -612,7 +717,8 @@ def render_text(report: Dict[str, Any]) -> str:
 
     _emit("overall", report["slices"]["overall"])
     for section in ("by_asset", "by_side", "by_price_bucket", "by_time_to_expiry",
-                    "by_spread_bucket", "by_depth_bucket"):
+                    "by_spread_bucket", "by_depth_bucket",
+                    "by_edge_sign", "by_edge_magnitude"):
         group = report["slices"].get(section) or {}
         if not group:
             continue

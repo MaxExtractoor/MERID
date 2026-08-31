@@ -283,3 +283,30 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert report["decision_funnel"]["calibration_eligible_records"] == 1
     captured = capsys.readouterr()
     assert "DERIVED" in captured.out
+
+
+def test_calibration_report_uses_calibration_diagnostics_and_edge_slices():
+    """The canonical brier/ece/reliability metrics come from calibration_diagnostics,
+    and the edge-sign/magnitude slices are present for edge calibration."""
+    records = [
+        _telemetry_row(asset="BTC", ticker="B1", side="yes", model=0.42, market=0.40),
+        _telemetry_row(asset="BTC", ticker="B2", side="yes", model=0.60, market=0.62),
+    ]
+    outcomes = {"B1": 1, "B2": 0}
+    report = cr.build_report(records, outcomes, {})
+
+    overall = report["slices"]["overall"]
+    assert "brier_skill_score" in overall
+    assert "expected_calibration_error" in overall
+    assert "reliability_curve" in overall
+    assert "mean_predicted_edge" in overall
+    assert "mean_realized_edge" in overall
+
+    by_edge = report["slices"]["by_edge_sign"]
+    assert "underpriced" in by_edge
+    assert "overpriced" in by_edge
+    assert by_edge["underpriced"]["mean_predicted_edge"] == pytest.approx(0.02)
+    assert by_edge["overpriced"]["mean_predicted_edge"] == pytest.approx(-0.02)
+
+    by_mag = report["slices"]["by_edge_magnitude"]
+    assert "0-2c" in by_mag or "2-5c" in by_mag
