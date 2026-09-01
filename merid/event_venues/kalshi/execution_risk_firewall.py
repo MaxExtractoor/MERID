@@ -520,11 +520,12 @@ class ExecutionRiskFirewall:
             expected_position_after=expected_after,
             expected_realized_pnl_cents=expected_pnl,
         )
+        # _re_validate is only used for exits; use the permissive exit budget.
         validate_canonical_intent(
             fresh,
             exchange_position_cc=pos.position_cc,
             position_avg_price_cents=pos.avg_price_cents,
-            max_adverse_pnl_cents=self._max_adverse_pnl_cents(),
+            max_adverse_pnl_cents=_max_exit_adverse_pnl_cents(),
         )
         return fresh
 

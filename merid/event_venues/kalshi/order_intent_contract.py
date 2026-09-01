@@ -1175,7 +1175,10 @@ def validate_canonical_intent(
     if not i.allow_short and i.action == "sell" and i.expected_position_after < 0 and i.expected_position_before >= 0:
         raise OrderIntentValidationError("sell_to_short_prohibited")
 
-    # PnL guard: reject exits that would lose more than the configured budget.
+    # PnL guard: reject orders whose predicted realized PnL is worse than the
+    # configured adverse-PnL budget.  Callers are expected to supply the
+    # entry-specific or exit-specific budget; risk-reducing exits should use the
+    # much larger ``MERID_MAX_EXIT_ADVERSE_PNL_CENTS`` budget (default 5000c).
     if max_adverse_pnl_cents is not None and i.expected_realized_pnl_cents is not None:
         if i.expected_realized_pnl_cents < -max_adverse_pnl_cents:
             raise OrderIntentValidationError(
@@ -1276,6 +1279,23 @@ def persist_order_decision(record: dict) -> None:
 def max_adverse_pnl_cents() -> int | None:
     """Return the configured adverse-PnL budget in cents, or ``None`` to disable."""
     raw = os.getenv("MERID_MAX_ADVERSE_PNL_CENTS", "")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def max_exit_adverse_pnl_cents(default: int = 5000) -> int | None:
+    """Return the adverse-PnL budget for risk-reducing exits in cents.
+
+    Exits may need to close at a loss to honor stop-loss or model-reversal
+    signals, so they use a separate, much larger default budget than entries.
+    Set ``MERID_MAX_EXIT_ADVERSE_PNL_CENTS`` to override.  ``None`` disables
+    the bound entirely.
+    """
+    raw = os.getenv("MERID_MAX_EXIT_ADVERSE_PNL_CENTS", str(default))
     if not raw:
         return None
     try:
