@@ -4200,23 +4200,37 @@ async def _run_startup_phases_v20260530(app):
     from merid.risk.unified_risk_manager import get_unified_risk_manager
     logger.info("[STARTUP] P1.7.3: Loading profile bankroll_cap_pct for bankroll service")
     
-    # CRITICAL FIX: Load the fixed absolute exposure cap from the active profile.
-    # The 15m crypto stack uses a fixed $2 exposure cap, not a percentage of equity.
+    # CRITICAL FIX: Load the fixed absolute exposure cap from the resolved live
+    # config (single source of truth).  Falls back to the active profile or the
+    # canonical $2 cap if resolution is not yet available.
     from decimal import Decimal
     max_riskable_frac = None
     max_position_cap_usd: Optional[Decimal] = None
     try:
-        from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
-        if is_profile_active():
-            adapter = get_active_profile()
-            if adapter:
-                profile = adapter.profile
-                max_position_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
-                logger.info(f"[STARTUP] P1.7.3: Loaded fixed exposure cap from profile: ${max_position_cap_usd}")
+        from merid.config.live_config import get_resolved_live_config
+        _resolved = get_resolved_live_config(allow_unresolved=True)
+        if _resolved.resolved:
+            max_position_cap_usd = Decimal(str(_resolved.fixed_exposure_cap_usd))
+            logger.info(
+                "[STARTUP] P1.7.3: Loaded fixed exposure cap from resolved live config: ${}",
+                max_position_cap_usd,
+            )
     except Exception as e:
-        logger.warning(f"[STARTUP] P1.7.3: Failed to load fixed exposure cap from profile: {e}")
+        logger.warning("[STARTUP] P1.7.3: Failed to load fixed exposure cap from resolved live config: %s", e)
 
-    # Fail closed to the canonical $2 cap if the profile did not provide one.
+    if max_position_cap_usd is None:
+        try:
+            from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+            if is_profile_active():
+                adapter = get_active_profile()
+                if adapter:
+                    profile = adapter.profile
+                    max_position_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
+                    logger.info("[STARTUP] P1.7.3: Loaded fixed exposure cap from profile: ${}", max_position_cap_usd)
+        except Exception as e:
+            logger.warning("[STARTUP] P1.7.3: Failed to load fixed exposure cap from profile: %s", e)
+
+    # Fail closed to the canonical $2 cap if no resolved config or profile provided one.
     if max_position_cap_usd is None:
         _env_cap = os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "2.00")
         try:
