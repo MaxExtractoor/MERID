@@ -4211,12 +4211,9 @@ async def _run_startup_phases_v20260530(app):
         _resolved = get_resolved_live_config(allow_unresolved=True)
         if _resolved.resolved:
             max_position_cap_usd = Decimal(str(_resolved.fixed_exposure_cap_usd))
-            logger.info(
-                "[STARTUP] P1.7.3: Loaded fixed exposure cap from resolved live config: ${}",
-                max_position_cap_usd,
-            )
+            logger.info(f"[STARTUP] P1.7.3: Loaded fixed exposure cap from resolved live config: ${max_position_cap_usd}")
     except Exception as e:
-        logger.warning("[STARTUP] P1.7.3: Failed to load fixed exposure cap from resolved live config: %s", e)
+        logger.warning(f"[STARTUP] P1.7.3: Failed to load fixed exposure cap from resolved live config: {e}")
 
     if max_position_cap_usd is None:
         try:
@@ -4226,9 +4223,9 @@ async def _run_startup_phases_v20260530(app):
                 if adapter:
                     profile = adapter.profile
                     max_position_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
-                    logger.info("[STARTUP] P1.7.3: Loaded fixed exposure cap from profile: ${}", max_position_cap_usd)
+                    logger.info(f"[STARTUP] P1.7.3: Loaded fixed exposure cap from profile: ${max_position_cap_usd}")
         except Exception as e:
-            logger.warning("[STARTUP] P1.7.3: Failed to load fixed exposure cap from profile: %s", e)
+            logger.warning(f"[STARTUP] P1.7.3: Failed to load fixed exposure cap from profile: {e}")
 
     # Fail closed to the canonical $2 cap if no resolved config or profile provided one.
     if max_position_cap_usd is None:

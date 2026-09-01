@@ -152,7 +152,7 @@ class ProductionAuditHarness:
             if resolved.resolved:
                 return float(resolved.fixed_exposure_cap_usd)
         except Exception as e:
-            logger.warning("[AUDIT-HARNESS] Failed to load resolved exposure cap: %s", e)
+            logger.warning(f"[AUDIT-HARNESS] Failed to load resolved exposure cap: {e}")
         return self.FIXED_EXPOSURE_CAP_USD
     
     def __init__(self):
