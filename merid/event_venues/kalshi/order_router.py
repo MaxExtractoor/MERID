@@ -13780,6 +13780,12 @@ async def _route_live(
                 decision_id=getattr(intent, "decision_id", None),
                 decision_trace_id=getattr(intent, "decision_trace_id", None) or getattr(intent, "decision_id", None),
             )
+            # Bind the exchange order_id before recording, so the durable index
+            # preserves it even if a subsequent ``record_intent`` or restart
+            # overwrites the full in-memory object.
+            if placed_res and placed_res.success and placed_res.order_id:
+                fills_intent.order_id = placed_res.order_id
+                fills_intent.status = "submitted"
             ledger.record_intent(fills_intent)
             # Once the intent is durably recorded, bind the exchange order_id so
             # fills arriving without a client_order_id can still resolve back.
