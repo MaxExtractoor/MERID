@@ -2996,6 +2996,120 @@ class KalshiFillsLedger:
         )
         return True
 
+    async def _resolve_intent_for_unmatched_fill_via_exchange(
+        self,
+        fill: KalshiFill,
+    ) -> Optional[str]:
+        """Last-resort lookaside: query Kalshi for the order_id to recover client_order_id.
+
+        Kalshi's HTTP /portfolio/fills payload omits ``client_order_id``.  When the
+        order-router timeout or a process restart prevented the local
+        ``order_id -> client_order_id`` mapping from being recorded, an unmatched fill
+        can be healed by fetching the original order detail and using our durable
+        ``OrderAttemptStore`` to recover the ``intent_id``.
+
+        This is intentionally bounded: it makes a single ``GET /portfolio/orders/{id}``
+        call and only updates the in-memory/durable correlation indices.  It does not
+        place, cancel, or modify any live order.
+        """
+        if not fill.order_id:
+            return None
+
+        # Avoid repeated exchange lookaside for the same fill within a short window.
+        _last_attempt = getattr(fill, "_exchange_resolve_attempted_at", 0.0)
+        _now = time.time()
+        if _now - _last_attempt < 30.0:
+            return None
+        fill._exchange_resolve_attempted_at = _now
+
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+
+            client = get_kalshi_client()
+            _LOOKASIDE_TIMEOUT = float(
+                os.environ.get("MERID_FILL_RESOLVE_EXCHANGE_TIMEOUT_SECONDS", "5.0")
+            )
+
+            order_result = await asyncio.wait_for(
+                client.get_order_result(fill.order_id),
+                timeout=_LOOKASIDE_TIMEOUT,
+            )
+            if not order_result or not order_result.success or not order_result.data:
+                return None
+
+            placed = order_result.data
+            raw = getattr(placed, "raw_data", {}) or {}
+            exchange_client_order_id = raw.get("client_order_id")
+            if not exchange_client_order_id:
+                return None
+
+            # Recover intent_id from the durable attempt store.
+            attempt = OrderAttemptStore().get_by_client_order_id(exchange_client_order_id)
+            if not attempt:
+                # We at least know the client_order_id now, so record the order_id
+                # mapping for downstream correlation even without the intent.
+                self.record_pending_order(
+                    client_order_id=exchange_client_order_id,
+                    order_id=fill.order_id,
+                )
+                try:
+                    cache = get_position_cache()
+                    if cache is not None:
+                        cache.register_order_id_mapping(
+                            fill.order_id, exchange_client_order_id
+                        )
+                except Exception:
+                    pass
+                return None
+
+            # Register all known identity aliases so the fill can be reclassified.
+            _client_tag = attempt.client_tag or exchange_client_order_id
+            self.record_pending_order(
+                client_order_id=exchange_client_order_id,
+                client_order_ids=[exchange_client_order_id, _client_tag],
+                order_id=fill.order_id,
+                intent_id=attempt.intent_id,
+            )
+
+            try:
+                cache = get_position_cache()
+                if cache is not None:
+                    cache.register_order_id_mapping(
+                        fill.order_id,
+                        exchange_client_order_id,
+                        client_tag=_client_tag,
+                    )
+            except Exception:
+                pass
+
+            logger.info(
+                "[FILLS-LEDGER-RESOLVE] Recovered unmatched fill from exchange "
+                "fill_id=%s order_id=%s client_order_id=%s intent_id=%s",
+                fill.fill_id,
+                fill.order_id,
+                exchange_client_order_id,
+                attempt.intent_id,
+            )
+            return attempt.intent_id
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[FILLS-LEDGER-RESOLVE] Exchange lookaside timeout for fill_id=%s order_id=%s",
+                fill.fill_id,
+                fill.order_id,
+            )
+            return None
+        except Exception as exc:
+            logger.debug(
+                "[FILLS-LEDGER-RESOLVE] Exchange lookaside failed for fill_id=%s order_id=%s: %s",
+                fill.fill_id,
+                fill.order_id,
+                exc,
+            )
+            return None
+
     async def get_fill_resolution_state(self, fill_id: str) -> Optional[Dict[str, Any]]:
         """Return the resolution state of a fill for the trading-circuit-breaker.
 
@@ -3004,6 +3118,11 @@ class KalshiFillsLedger:
         the ledger is updated and the fill is reclassified as matched.  The
         canonical side/action/price are preserved; only the identity link and
         quarantine flag are corrected.
+
+        As a last resort before declaring a fill unresolved, this method queries the
+        exchange for the order detail by ``order_id``.  This heals the common race
+        where a create-order response is lost but the order was actually placed and
+        filled.
         """
         fill = self._fills.get(fill_id)
         if not fill:
@@ -3017,6 +3136,12 @@ class KalshiFillsLedger:
                 "unmatched_reason": None,
                 "intent_id": fill.intent_id,
             }
+
+        # AGENTS invariant: before declaring a fill unmatched, perform durable intent
+        # lookup and a bounded pending-intent grace lookup.  Extend that with a
+        # bounded exchange-order lookaside so that lost-ack fills can be recovered.
+        if not fill.client_order_id:
+            await self._resolve_intent_for_unmatched_fill_via_exchange(fill)
 
         resolved = self._maybe_reclassify_unmatched(fill)
         if not resolved:

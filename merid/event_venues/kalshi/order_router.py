@@ -3322,13 +3322,18 @@ async def _reconcile_submission_unknown(
     )
 
     _reconcile_timeout = float(
-        os.environ.get("MERID_SUBMISSION_UNKNOWN_RECONCILE_TIMEOUT_SECONDS", "3.0")
+        os.environ.get("MERID_SUBMISSION_UNKNOWN_RECONCILE_TIMEOUT_SECONDS", "5.0")
     )
 
     try:
+        # CRITICAL FIX (2026-09-01): Do not filter the client_order_id lookup by
+        # ticker.  Kalshi's /portfolio/orders list may omit a filled/cancelled order
+        # when a ticker filter is present, and the order may already be closed by the
+        # time we reconcile.  Searching the whole portfolio is bounded by the
+        # client_order_id and the 10-item limit.
         _order_data, _fills_resp = await asyncio.wait_for(
             asyncio.gather(
-                port.get_order(client_order_id=_client_order_id, market_id=_ticker),
+                port.get_order(client_order_id=_client_order_id, market_id=None),
                 port.get_fills(market_id=_ticker, since_ts=_since_ts, limit=50),
                 return_exceptions=True,
             ),
@@ -3381,6 +3386,54 @@ async def _reconcile_submission_unknown(
         )
         if _resolved is not None:
             return _apply_reconciled_order(_resolved, intent, mode, _latency)
+
+    # CRITICAL FIX (2026-09-01): Kalshi's fill payload does not echo
+    # client_order_id.  When a fill exists for this ticker but carries no identity,
+    # query the exchange for the order record by order_id.  This recovers the common
+    # lost-ack scenario where the create response was dropped but the order landed and
+    # filled immediately.
+    _unmatched_order_ids = {
+        getattr(f, "order_id", None)
+        for f in _recent_fills
+        if getattr(f, "order_id", None)
+        and not getattr(f, "client_order_id", None)
+        and not getattr(f, "client_tag", None)
+    }
+    for _fill_order_id in _unmatched_order_ids:
+        try:
+            _resolved_order = await asyncio.wait_for(
+                port.get_order(order_id=_fill_order_id, market_id=None),
+                timeout=2.0,
+            )
+            if _resolved_order is None:
+                continue
+            _recovered_coid = getattr(_resolved_order, "client_order_id", None)
+            _recovered_tag = getattr(_resolved_order, "client_tag", None)
+            if _recovered_coid in (_client_order_id, _client_tag) or _recovered_tag in (_client_order_id, _client_tag):
+                logger.info(
+                    "[SUBMISSION-RECONCILE-FAST] intent_id=%s ticker=%s client_order_id=%s "
+                    "resolved via fill order_id=%s",
+                    intent.intent_id, _ticker, _client_order_id, _fill_order_id,
+                )
+                _matching_fills_for_order = [
+                    f for f in _recent_fills
+                    if getattr(f, "order_id", None) == _fill_order_id
+                ]
+                _resolved = _resolve_from_broker_evidence(
+                    _resolved_order, [], _matching_fills_for_order, _client_order_id, _client_tag
+                )
+                if _resolved is not None:
+                    return _apply_reconciled_order(_resolved, intent, mode, _latency)
+        except asyncio.TimeoutError:
+            logger.debug(
+                "[SUBMISSION-RECONCILE-FAST] order-by-id timeout order_id=%s", _fill_order_id
+            )
+            break
+        except Exception as _order_lookup_err:
+            logger.debug(
+                "[SUBMISSION-RECONCILE-FAST] order-by-id failed order_id=%s: %s",
+                _fill_order_id, _order_lookup_err,
+            )
 
     logger.info(
         "[SUBMISSION-RECONCILE-FAST] client_order_id=%s ticker=%s not found; authoritative empty",
@@ -3438,16 +3491,19 @@ async def reconcile_submission_unknown_client_order_id(
     _since_ts = int((replay_time() - 300.0) * 1000)
 
     _RECONCILE_QUERY_TIMEOUT = float(
-        os.environ.get("MERID_SUBMISSION_UNKNOWN_RECONCILE_TIMEOUT_SECONDS", "5.0")
+        os.environ.get("MERID_SUBMISSION_UNKNOWN_RECONCILE_TIMEOUT_SECONDS", "8.0")
     )
 
     _order_data: Optional[Any] = None
     _fills_resp: Optional[Any] = None
 
     try:
+        # CRITICAL FIX (2026-09-01): Search by client_order_id across all markets.
+        # A filled/cancelled IOC may not appear under the ticker filter, so the
+        # unbounded client_order_id lookup is the safer first query.
         _order_data, _fills_resp = await asyncio.wait_for(
             asyncio.gather(
-                client.get_order(client_order_id=client_order_id, market_id=ticker),
+                client.get_order(client_order_id=client_order_id, market_id=None),
                 client.get_fills(since_ts=_since_ts, limit=50, market_id=ticker),
                 return_exceptions=True,
             ),
@@ -3476,6 +3532,45 @@ async def reconcile_submission_unknown_client_order_id(
     _recent_fills: List[Any] = []
     if _fills_resp is not None:
         _recent_fills = getattr(_fills_resp, "fills", []) or []
+
+    # CRITICAL FIX (2026-09-01): Same recovery as the in-route fast path.  Fills
+    # without client_order_id are common; the order_id in the fill lets us query
+    # the order record and confirm it belongs to this client_order_id.
+    if _order_data is None:
+        _unmatched_order_ids = {
+            getattr(f, "order_id", None)
+            for f in _recent_fills
+            if getattr(f, "order_id", None)
+            and not getattr(f, "client_order_id", None)
+        }
+        for _fill_order_id in _unmatched_order_ids:
+            try:
+                _resolved_order = await asyncio.wait_for(
+                    client.get_order(order_id=_fill_order_id, market_id=None),
+                    timeout=2.0,
+                )
+                if _resolved_order is None:
+                    continue
+                _recovered_coid = getattr(_resolved_order, "client_order_id", None)
+                _recovered_tag = getattr(_resolved_order, "client_tag", None)
+                if _recovered_coid == client_order_id or _recovered_tag == client_order_id:
+                    logger.info(
+                        "[SUBMISSION-RECONCILE-FULL] client_order_id=%s ticker=%s "
+                        "resolved via fill order_id=%s",
+                        client_order_id, ticker, _fill_order_id,
+                    )
+                    _order_data = _resolved_order
+                    break
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "[SUBMISSION-RECONCILE-FULL] order-by-id timeout order_id=%s", _fill_order_id
+                )
+                break
+            except Exception as _order_lookup_err:
+                logger.debug(
+                    "[SUBMISSION-RECONCILE-FULL] order-by-id failed order_id=%s: %s",
+                    _fill_order_id, _order_lookup_err,
+                )
 
     _resolved_order = _resolve_from_broker_evidence(
         _order_data,

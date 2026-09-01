@@ -46,6 +46,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _max_exit_adverse_pnl_cents(default: int = 5000) -> int:
     """Adverse-PnL budget for risk-reducing exits, distinct from the entry budget."""
     return _env_int("MERID_MAX_EXIT_ADVERSE_PNL_CENTS", default)
@@ -184,6 +191,18 @@ class ExecutionRiskFirewall:
         # so we fail closed before any position or book check.
         if not self._market_active_and_before_deadline(ticker):
             return self._rejected("market_not_active_or_after_deadline", canonical)
+
+        # CRITICAL FIX (2026-09-01): Reject the exit if there is already an unresolved
+        # exit attempt for this ticker in flight.  This prevents the duplicate-exit race
+        # that produced the 2026-09-01 KXSOL unmatched fill: the first create-order ack
+        # was lost, the local position snapshot was still stale, and a second exit was
+        # approved and submitted before the first fill was ingested.
+        _in_flight = self._has_in_flight_exit(canonical)
+        if _in_flight is not None:
+            return self._rejected(
+                f"in_flight_exit:client_order_id={_in_flight.client_order_id}:status={_in_flight.status}",
+                canonical,
+            )
 
         # 1. Fresh exchange position (authoritative).
         pos = await self._fetch_position(ticker)
@@ -862,6 +881,71 @@ class ExecutionRiskFirewall:
             and canonical.qty_cc > 0
             and not canonical.allow_short
         )
+
+    def _in_flight_exit_lookback_seconds(self) -> float:
+        return _env_float("MERID_EXIT_IN_FLIGHT_LOOKBACK_SECONDS", 120.0)
+
+    def _has_in_flight_exit(
+        self, canonical: "CanonicalOrderIntent"
+    ) -> Optional[Any]:
+        """Detect an unresolved exit attempt for the same ticker within the lookback.
+
+        Returns the most recent matching ``OrderAttemptRecord`` or ``None``.
+        This is intentionally defensive: it also rejects an ``ACKNOWLEDGED`` resting
+        exit because two concurrent exits can over-close a position.
+        """
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+
+            lookback = self._in_flight_exit_lookback_seconds()
+            attempts = OrderAttemptStore().get_unresolved(lookback_seconds=lookback)
+            if not attempts:
+                return None
+
+            # get_unresolved returns oldest-first; the newest unresolved is the
+            # relevant one because it is most likely to still be in flight.
+            for attempt in reversed(attempts):
+                if self._attempt_is_exit_for(attempt, canonical.market_ticker):
+                    return attempt
+            return None
+        except Exception as exc:
+            logger.debug("[FIREWALL] in_flight_exit check failed: %s", exc)
+            return None
+
+    def _attempt_is_exit_for(
+        self, attempt: Any, ticker: str
+    ) -> bool:
+        """Return True when an unresolved attempt is an exit for ``ticker``."""
+        # If the payload contains an explicit ticker, prefer it.
+        try:
+            if attempt.payload_json:
+                payload = json.loads(attempt.payload_json) if isinstance(attempt.payload_json, str) else attempt.payload_json
+            else:
+                payload = {}
+        except Exception:
+            payload = {}
+
+        attempt_ticker = (
+            payload.get("ticker")
+            or payload.get("market_ticker")
+            or payload.get("market_id")
+            or ""
+        )
+
+        # Fall back to the client_tag / intent_id naming convention used by the router.
+        is_exit = (
+            payload.get("entry_or_exit") == "exit"
+            or payload.get("is_exit") is True
+            or (attempt.intent_id or "").startswith("intent_exit_")
+            or (attempt.client_tag or "").startswith("exit_")
+        )
+
+        # When the payload contains a ticker, it must match exactly.  When it does
+        # not, we require a strong exit label match and assume the caller already
+        # scoped by the canonical ticker.
+        if attempt_ticker:
+            return attempt_ticker == ticker and is_exit
+        return is_exit and (ticker in (attempt.intent_id or "") or ticker in (attempt.client_tag or ""))
 
     def _market_active_and_before_deadline(self, ticker: str) -> bool:
         try:
