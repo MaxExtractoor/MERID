@@ -520,10 +520,13 @@ except ImportError:
     DIRECTIONAL_BREAKER_AVAILABLE = False
     logger.debug("[DIRECTIONAL-BREAKER] Not available - parity guard disabled")
 
-# Import canonical price range from binary price space (single source of truth)
+# Import canonical price range and tail-band A/B helpers from binary price space.
 try:
     from merid.event_venues.kalshi.binary_price_space import (
         is_price_in_canonical_range,
+        is_price_in_tail_experiment_band,
+        is_price_in_longshot_exclusion_band,
+        classify_tail_band_shadow_state,
         require_outcome_side,
         SideValidationError,
     )
@@ -531,6 +534,17 @@ try:
 except ImportError:
     PRICE_SPACE_AVAILABLE = False
     logger.debug("[PRICE-SPACE] binary_price_space not available - using fallback manual ranges")
+
+# Tail-band shadow A/B logging (read-only, no live order flow).
+try:
+    from merid.prediction.tail_band_shadow import (
+        TailBandShadowRecord,
+        write_tail_band_shadow_record,
+    )
+    TAIL_BAND_SHADOW_AVAILABLE = True
+except ImportError:
+    TAIL_BAND_SHADOW_AVAILABLE = False
+    logger.debug("[TAIL-BAND-SHADOW] tail_band_shadow module not available")
 
 # Import global allocator types used for live-position canonicalization.
 # Local imports inside run_cycle are not visible to helper methods such as
@@ -5723,6 +5737,31 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={thesis_side} yes_price={yes_price_cents} no_price={no_price_cents} range={range_str}",
             )
+
+            # SHADOW A/B (read-only): both sides out of canonical 10-75c, but the
+            # thesis side may be in the tail-band experiment.  Log the counterfactual.
+            _run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
+            _decision_id = f"{_run_id}_{ticker}_{thesis_side}_{thesis_price_cents}_{int(time.time() * 1000)}"
+            self._log_tail_band_shadow(
+                run_id=_run_id,
+                decision_id=_decision_id,
+                asset=asset,
+                ticker=ticker or market_id,
+                side=thesis_side,
+                price_cents=thesis_price_cents,
+                model_prob=None,
+                gross_edge_cents=0.0,
+                net_edge_cents=0.0,
+                fee_cents=0.0,
+                canonical_rejection_reason="both_sides_out_of_range",
+                timestamp_utc=dt.utcnow(),
+                extra={
+                    "pre_decision": True,
+                    "yes_price_cents": yes_price_cents,
+                    "no_price_cents": no_price_cents,
+                },
+            )
+
             return None
 
         if not thesis_in_range:
@@ -5739,6 +5778,31 @@ class LeanAgent15m:
                 reference_price=spot_price,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} thesis_side={thesis_side} thesis_price={thesis_price_cents} range={range_str}",
             )
+
+            # SHADOW A/B (read-only): thesis side is outside canonical but may be
+            # in the research-backed tail band.  Log the counterfactual.
+            _run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
+            _decision_id = f"{_run_id}_{ticker}_{thesis_side}_{thesis_price_cents}_{int(time.time() * 1000)}"
+            self._log_tail_band_shadow(
+                run_id=_run_id,
+                decision_id=_decision_id,
+                asset=asset,
+                ticker=ticker or market_id,
+                side=thesis_side,
+                price_cents=thesis_price_cents,
+                model_prob=None,
+                gross_edge_cents=0.0,
+                net_edge_cents=0.0,
+                fee_cents=0.0,
+                canonical_rejection_reason="thesis_side_out_of_range",
+                timestamp_utc=dt.utcnow(),
+                extra={
+                    "pre_decision": True,
+                    "yes_price_cents": yes_price_cents,
+                    "no_price_cents": no_price_cents,
+                },
+            )
+
             return None
 
         # STRICT MODE: Reject suspiciously cheap thesis_side prices
@@ -8046,6 +8110,37 @@ class LeanAgent15m:
                 "[TRADE-DECISION] asset=%s side=%s price=%dc outside canonical range -> NO TRADE",
                 asset, side, price_cents,
             )
+
+            # SHADOW A/B (read-only): log a counterfactual tail-band decision
+            # for post-settlement statistical gating.  Never submit an order.
+            fee_cents_shadow = float(
+                getattr(decision, f"entry_fee_{side}", None) or fee_cents or 0.0
+            ) * 100.0
+            self._log_tail_band_shadow(
+                run_id=run_id,
+                decision_id=decision.decision_id,
+                asset=asset,
+                ticker=getattr(decision, "ticker", ticker),
+                side=side,
+                price_cents=price_cents,
+                model_prob=float(model_prob or 0.0),
+                gross_edge_cents=float(decision.gross_edge or 0.0) * 100.0,
+                net_edge_cents=float(decision.net_edge or 0.0) * 100.0,
+                fee_cents=fee_cents_shadow,
+                canonical_rejection_reason="price_out_of_canonical_range",
+                timestamp_utc=decision.timestamp_utc,
+                extra={
+                    "yes_bid_cents": yes_bid,
+                    "yes_ask_cents": yes_ask,
+                    "no_bid_cents": no_bid,
+                    "no_ask_cents": no_ask,
+                    "tail_cap_yes": _ind.get("tail_cap_yes"),
+                    "tail_cap_no": _ind.get("tail_cap_no"),
+                    "p_yes": float(decision.p_yes_calibrated),
+                    "p_no": float(decision.p_no_calibrated),
+                },
+            )
+
             self._record_signal_rejection(
                 "price_out_of_canonical_range",
                 **self._build_trade_decision_rejection_context(
@@ -9002,6 +9097,57 @@ class LeanAgent15m:
             "context": context,
         }
         self._telemetry_update(rejection_reason=reason, **context)
+
+    def _log_tail_band_shadow(
+        self,
+        *,
+        run_id: str,
+        decision_id: Optional[str],
+        asset: str,
+        ticker: str,
+        side: str,
+        price_cents: int,
+        model_prob: Optional[float],
+        gross_edge_cents: float,
+        net_edge_cents: float,
+        fee_cents: float,
+        canonical_rejection_reason: str,
+        timestamp_utc: Optional[datetime] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Log a read-only shadow A/B record for a canonical-rejected price.
+
+        This is the counterfactual observation path for the tail-band experiment.
+        It never touches order routing, position state, or the bankroll.
+        """
+        if not (TAIL_BAND_SHADOW_AVAILABLE and PRICE_SPACE_AVAILABLE):
+            return
+        try:
+            tail_band_state = classify_tail_band_shadow_state(price_cents, side)
+            if tail_band_state == "out_of_band":
+                return
+            write_tail_band_shadow_record(
+                TailBandShadowRecord(
+                    run_id=run_id,
+                    cycle_id=0,
+                    decision_id=decision_id or f"{run_id}_shadow",
+                    ticker=ticker,
+                    asset=asset,
+                    side=side,
+                    price_cents=price_cents,
+                    model_prob=float(model_prob or 0.0),
+                    gross_edge_cents=float(gross_edge_cents or 0.0),
+                    net_edge_cents=float(net_edge_cents or 0.0),
+                    fee_cents=float(fee_cents or 0.0),
+                    tail_band_state=tail_band_state,
+                    canonical_rejection_reason=canonical_rejection_reason,
+                    count=1,
+                    timestamp_utc=timestamp_utc.isoformat() if timestamp_utc else None,
+                    extra=extra,
+                )
+            )
+        except Exception as _shadow_err:
+            logger.debug("[TAIL-BAND-SHADOW] logging failed (non-fatal): %s", _shadow_err)
 
     def _compute_signal_vol_context(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: Optional[float]) -> None:
         """Resolve strike + annualized vol early so pre-decision rejections carry telemetry.

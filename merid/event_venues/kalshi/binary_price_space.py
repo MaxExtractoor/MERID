@@ -1244,6 +1244,59 @@ def is_price_in_flb_edge_band(price_cents: int, side: str) -> bool:
         return False  # YES contracts don't have documented edge band
 
 
+# ── Shadow A/B Tail Band (read-only, no live trading) ───────────────────────────
+#
+# These ranges are for the paper/shadow A/B test that resolves the open
+# research question: is the 85-95c favorite side exploitable after the
+# current canonical 10-75c filter rejects it?  Nothing here changes live
+# execution unless explicitly promoted via the statistical gate in
+# scripts/tail_band_ab_evaluation.py.
+
+TAIL_AB_YES_MIN_CENTS = 85
+TAIL_AB_YES_MAX_CENTS = 95
+TAIL_AB_NO_MIN_CENTS = 88
+TAIL_AB_NO_MAX_CENTS = 95
+TAIL_AB_LONGSHOT_MAX_CENTS = 15  # exclude 1-15c for both sides (FLB capital destruction)
+
+
+def is_price_in_tail_experiment_band(price_cents: int, side: str) -> bool:
+    """Return True for the shadow A/B favorite band (85-95c YES / 88-95c NO).
+
+    This is the research-backed tail edge the A/B tests against the live
+    10-75c canonical control.  It does NOT permit live trading.
+    """
+    if side == "yes":
+        return TAIL_AB_YES_MIN_CENTS <= price_cents <= TAIL_AB_YES_MAX_CENTS
+    return TAIL_AB_NO_MIN_CENTS <= price_cents <= TAIL_AB_NO_MAX_CENTS
+
+
+def is_price_in_longshot_exclusion_band(price_cents: int, side: str) -> bool:
+    """Return True for the cheap longshot band we explicitly do not trade.
+
+    YES/NO contracts below ~15c have a documented negative realized EV; the
+    A/B must exclude them so we do not shadow-bet on the losing side.
+    """
+    return price_cents < TAIL_AB_LONGSHOT_MAX_CENTS
+
+
+def classify_tail_band_shadow_state(price_cents: int, side: str) -> str:
+    """Classify a canonical-rejected price into an A/B bucket.
+
+    Returns one of:
+        - ``favorite_yes``       : YES 85-95c (experimental favorite side)
+        - ``favorite_no``        : NO 88-95c (documented inverse-FLB edge band)
+        - ``excluded_longshot``  : YES/NO < 15c (do not trade)
+        - ``out_of_band``        : neither favorite nor longshot (e.g. 76-87 NO)
+    """
+    if is_price_in_longshot_exclusion_band(price_cents, side):
+        return "excluded_longshot"
+    if is_price_in_tail_experiment_band(price_cents, side):
+        if side == "yes":
+            return "favorite_yes"
+        return "favorite_no"
+    return "out_of_band"
+
+
 def is_price_in_side_aware_range(price_cents: int, side: str) -> bool:
     """Check if price is in side-aware range (accounts for YES/NO duality).
 
