@@ -4822,6 +4822,7 @@ async def _canonical_order_intent_validation(
             OrderIntentValidationError,
             fetch_fresh_signed_yes_exposure,
             max_adverse_pnl_cents,
+            max_exit_adverse_pnl_cents,
             normalize_order,
             persist_order_decision,
             validate_canonical_intent,
@@ -4862,11 +4863,13 @@ async def _canonical_order_intent_validation(
             position_side=position_side,
         )
 
+        # Exits may need to close at a loss; use the permissive exit budget.
+        adverse_pnl_budget = max_exit_adverse_pnl_cents() if is_exit else max_adverse_pnl_cents()
         validate_canonical_intent(
             canonical,
             exchange_position_cc=exchange_position_cc,
             position_avg_price_cents=position_avg_price_cents,
-            max_adverse_pnl_cents=max_adverse_pnl_cents(),
+            max_adverse_pnl_cents=adverse_pnl_budget,
         )
 
         # Back-fill derived fields on the mutable intent so downstream code
@@ -4974,6 +4977,7 @@ def _sync_canonical_order_intent_validation(
         from merid.event_venues.kalshi.order_intent_contract import (
             OrderIntentValidationError,
             max_adverse_pnl_cents,
+            max_exit_adverse_pnl_cents,
             normalize_order,
             persist_order_decision,
             validate_canonical_intent,
@@ -4992,11 +4996,14 @@ def _sync_canonical_order_intent_validation(
             position_side=position_side,
         )
 
+        # Exits may need to close at a loss; use the permissive exit budget.
+        is_exit = _is_exit_order(intent)
+        adverse_pnl_budget = max_exit_adverse_pnl_cents() if is_exit else max_adverse_pnl_cents()
         validate_canonical_intent(
             canonical,
             exchange_position_cc=exchange_position_cc,
             position_avg_price_cents=position_avg_price_cents,
-            max_adverse_pnl_cents=max_adverse_pnl_cents(),
+            max_adverse_pnl_cents=adverse_pnl_budget,
         )
 
         if intent.pre_position_size is None:
