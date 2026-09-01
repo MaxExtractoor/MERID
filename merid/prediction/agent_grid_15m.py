@@ -7660,7 +7660,7 @@ class LeanAgent15m:
             return compute_trade_decision(
                 run_id=run_id,
                 decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
-                ticker=getattr(market, "ticker", asset),
+                ticker=ticker,
                 asset=asset,
                 spot_price=settlement_input_price,
                 strike_price=float(strike),
@@ -7836,7 +7836,7 @@ class LeanAgent15m:
         _write_shadow_telemetry(
             run_id=run_id,
             decision_id=decision.decision_id,
-            ticker=getattr(market, "ticker", asset),
+            ticker=ticker,
             asset=asset,
             target_price=float(strike),
             seconds_to_expiry=seconds_to_expiry,
@@ -7903,7 +7903,7 @@ class LeanAgent15m:
         write_shadow_side_record(
             run_id=run_id,
             decision_id=decision.decision_id,
-            ticker=getattr(market, "ticker", asset),
+            ticker=ticker,
             asset=asset,
             spot_price=float(settlement_input_price),
             strike_price=float(strike),
@@ -7932,7 +7932,7 @@ class LeanAgent15m:
         write_model_decomposition_record(
             run_id=run_id,
             decision_id=decision.decision_id,
-            ticker=getattr(market, "ticker", asset),
+            ticker=ticker,
             asset=asset,
             spot_price=float(settlement_input_price),
             strike_price=float(strike),
