@@ -73,16 +73,20 @@ class TestQueueOverflowDetection:
         """Test that multiple overflows increment counter correctly."""
         store = KalshiMarketStateStore()
         ticker = "KXETH15M-TEST"
-        
-        # Fill queue
-        for i in range(store._MAX_PER_TICKER_QUEUE):
-            store._enqueue_delta(ticker, {"sequence": i})
-        
-        # Trigger multiple overflows
+
+        # Use a small queue so each overflow cycle is fast.  The overflow
+        # handler clears the queue, so each overflow must be preceded by a
+        # fresh fill to the cap.
+        store._MAX_PER_TICKER_QUEUE = 5
+        store._delta_queues[ticker] = []
+        store._overflow_count[ticker] = 0
+
         for i in range(3):
-            result = store._enqueue_delta(ticker, {"sequence": store._MAX_PER_TICKER_QUEUE + i})
+            for j in range(store._MAX_PER_TICKER_QUEUE):
+                store._enqueue_delta(ticker, {"sequence": j})
+            result = store._enqueue_delta(ticker, {"sequence": store._MAX_PER_TICKER_QUEUE})
             assert result is False
-        
+
         # Verify counter incremented to 3
         assert store._overflow_count.get(ticker, 0) == 3
 
@@ -178,7 +182,7 @@ class TestQueueOverflowMetrics:
             assert len(error_calls) > 0, "Should log error on overflow"
             
             log_str = str(error_calls[0])
-            assert "triggering_immediate_snapshot_recovery" in log_str
+            assert "dropping_stale_deltas_and_triggering_throttled_snapshot_recovery" in log_str
             assert "BTC" in log_str
             assert "overflow_count=" in log_str
 

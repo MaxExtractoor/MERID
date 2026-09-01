@@ -628,12 +628,16 @@ class TestIntegrationFlows:
     @pytest.mark.asyncio
     async def test_normal_flow_with_consistent_data(self):
         """Test normal flow with consistent YES/NO data."""
-        # Apply consistent orderbook snapshot (YES + NO = 100 cents)
+        # Apply a consistent orderbook snapshot.  LocalOrderbook treats both
+        # ``yes`` and ``no`` lists as BID levels: YES_bid = max(yes) and
+        # YES_ask = 100 - max(no).  To avoid a crossed/locked book we need
+        # max(yes) < 100 - max(no); the simplest valid case is YES bid 60c,
+        # NO bid 39c, giving YES ask 61c and a 1c spread.
         msg = {
             "type": "orderbook_snapshot",
             "ticker": "KXBTC15M-25JUN-T100000",
-            "yes": [[0.60, 10], [0.61, 5]],  # YES prices in dollars
-            "no": [[0.40, 8], [0.39, 3]]     # NO prices in dollars (1.00 - YES)
+            "yes": [[0.60, 10]],  # YES bid in dollars
+            "no": [[0.39, 3]]     # NO bid in dollars; YES ask = 100 - 39 = 61c
         }
         
         result = self.store.apply_orderbook_message(msg)

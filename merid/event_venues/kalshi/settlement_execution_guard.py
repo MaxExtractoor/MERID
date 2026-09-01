@@ -92,7 +92,7 @@ def evaluate_settlement_order(
     filled_count = buf.filled_count if buf else 0
     
     # Extended guard: if data is not settlement-grade, use longer buffer
-    if not is_grade and ste <= extended:
+    if not is_grade and ste < extended:
         logger.warning(
             "Extended settlement guard active: ticker=%s seconds_to_expiry=%.0f "
             "filled_count=%d/60 grade=false",

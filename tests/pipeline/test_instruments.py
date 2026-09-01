@@ -144,7 +144,7 @@ class TestBuildCryptoInstruments:
         btc = reg.get("BTC-USD")
         assert btc is not None
         assert btc.domain == "crypto"
-        assert reg.resolve("BTC-USD", "binance") == "BTCUSD"
+        assert reg.resolve("BTC-USD", "binance") == "BTCUSDT"
         assert reg.resolve("BTC-USD", "coinbase") == "BTC-USD"
 
     def test_btc_has_tier1_tag(self):

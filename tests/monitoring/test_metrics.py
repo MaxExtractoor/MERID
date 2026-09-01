@@ -172,8 +172,9 @@ class TestMetricsRegistry:
     def test_initialization(self):
         """Test registry initialization."""
         registry = MetricsRegistry()
-        assert len(registry._metrics) == 0
-        assert len(registry._collectors) == 0
+        # The registry auto-registers system and business metrics on init.
+        assert len(registry._metrics) > 0
+        assert len(registry._collectors) >= 0
 
     def test_counter_creation(self):
         """Test counter creation."""

@@ -333,11 +333,16 @@ class PortfolioOptimizer:
         self.num_frontier_points = self.config.get("num_frontier_points", 50)
         
         # Global risk budget as percent of equity (default: 3 assets × 3% = 9%)
-        self.max_risk_pct_global = self.config.get("max_risk_pct_global", 
+        self.max_risk_pct_global = self.config.get("max_risk_pct_global",
                                                     self.max_concurrent_assets * self.max_risk_pct)
-        
+
         # Current equity for percent-based calculations (must be set via set_equity)
         self._current_equity: float = 0.0
+
+        # Legacy USD fields (kept for backward compatibility with older tests/callers)
+        self.min_risk_usd = self.config.get("min_risk_usd_per_trade", 0.0)
+        self.max_risk_usd = self.config.get("max_risk_usd_per_trade", 0.0)
+        self.global_risk_budget = self.config.get("global_risk_budget", 0.0)
         
         # Momentum scalping enforcement (no hold-to-expiry)
         self.enforce_mean_reversion = self.config.get("enforce_mean_reversion_only", True)
@@ -662,48 +667,74 @@ class PortfolioOptimizer:
         weights = portfolio["weights"]
         use_percent_mode = equity is not None and equity > 0
 
-        # Calculate per-asset risk allocation (percent-of-equity mode only)
+        # Calculate per-asset risk allocation
         asset_risks = {}
         feasible = True
         total_risk = 0.0
-        
+
+        # Resolve budget (percent-of-equity takes precedence; fall back to legacy USD budget)
+        budget = equity if use_percent_mode else (global_budget or self.global_risk_budget)
+
         for asset, weight in weights.items():
             if weight < MIN_WEIGHT_EPSILON:
                 continue
-            
-            if equity is not None and equity > 0:
+
+            if use_percent_mode:
                 # Percent-of-equity mode with edge-aware sizing
                 edge = edge_by_asset.get(asset, 0.05) if edge_by_asset else 0.05  # Default 5% edge
                 risk_usd = self.compute_risk_amount(equity, edge)
-                
+
                 # Scale by portfolio weight
                 risk_usd = risk_usd * weight
+            elif budget and budget > 0:
+                # Legacy USD mode: allocate budget by weight
+                risk_usd = budget * weight
+
+                # Apply per-trade min/max USD caps
+                if self.min_risk_usd > 0:
+                    risk_usd = max(risk_usd, self.min_risk_usd)
+                if self.max_risk_usd > 0:
+                    risk_usd = min(risk_usd, self.max_risk_usd)
             else:
-                # No equity provided, cannot size
-                feasible = False
-                break
-            
+                # No equity or budget provided: zero-risk placeholder (unconstrained selection)
+                risk_usd = 0.0
+
             asset_risks[asset] = risk_usd
             total_risk += risk_usd
-        
+
         if not feasible:
             return None
-        
+
         # Check global budget constraint
-        if equity is not None:
+        if use_percent_mode:
             max_total = equity * self.max_risk_pct_global
             if total_risk > max_total:
                 # Scale down proportionally
                 scale = max_total / total_risk if total_risk > 0 else 0
                 asset_risks = {a: r * scale for a, r in asset_risks.items()}
                 total_risk = max_total
-        
+        elif budget and budget > 0 and total_risk > budget:
+            # Legacy mode: total risk cannot exceed global budget
+            scale = budget / total_risk if total_risk > 0 else 0
+            asset_risks = {a: r * scale for a, r in asset_risks.items()}
+            total_risk = budget
+
+        # Re-check per-asset min cap after scaling
+        if not use_percent_mode:
+            for asset, risk in asset_risks.items():
+                if self.min_risk_usd > 0 and risk < self.min_risk_usd:
+                    feasible = False
+                    break
+
+        if not feasible:
+            return None
+
         # Create adjusted portfolio
         adjusted = portfolio.copy()
         adjusted["asset_risks_usd"] = asset_risks
         adjusted["total_risk_usd"] = total_risk
         adjusted["sizing_mode"] = "percent_equity" if use_percent_mode else "legacy_usd"
-        
+
         return adjusted
     
     def select_optimal_portfolios(
@@ -744,9 +775,10 @@ class PortfolioOptimizer:
                 if result is None:
                     continue
                 
-                # Apply risk caps with current equity if available
+                # Apply risk caps with current equity if available; otherwise legacy USD budget
                 equity = self._current_equity if self._current_equity > 0 else None
-                adjusted = self._apply_risk_caps(result, equity=equity)
+                global_budget = self.global_risk_budget if equity is None and self.global_risk_budget > 0 else None
+                adjusted = self._apply_risk_caps(result, equity=equity, global_budget=global_budget)
                 if adjusted is None:
                     continue
                 
@@ -863,14 +895,21 @@ class PortfolioOptimizer:
                 action_type = "hold"
                 reason = "Allocation within tolerance"
             
-            # Calculate trade risk (percent-of-equity mode only)
+            # Calculate trade risk (percent-of-equity or legacy USD mode)
             if current_value > 0:
                 # Percent-of-equity mode: use compute_risk_amount for edge-aware sizing
                 # Default 5% edge for rebalancing (conservative)
                 trade_risk = self.compute_risk_amount(current_value, 0.05) * abs(target_w - current_w)
-                # Clamp to min/max per-trade limits
-                min_trade = current_value * self.min_risk_pct
-                max_trade = current_value * self.max_risk_pct
+
+                if self.min_risk_usd > 0 or self.max_risk_usd > 0:
+                    # Legacy USD caps take precedence when configured
+                    min_trade = self.min_risk_usd if self.min_risk_usd > 0 else 0.0
+                    max_trade = self.max_risk_usd if self.max_risk_usd > 0 else float("inf")
+                else:
+                    # Clamp to percent-based per-trade limits
+                    min_trade = current_value * self.min_risk_pct
+                    max_trade = current_value * self.max_risk_pct
+
                 trade_risk = max(min_trade, min(max_trade, trade_risk))
             else:
                 # No current value, skip sizing

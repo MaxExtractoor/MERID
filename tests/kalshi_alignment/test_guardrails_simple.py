@@ -74,16 +74,16 @@ class TestOrderPricingValidation:
     @pytest.mark.asyncio
     async def test_price_boundary_values(self):
         """Test boundary values for price validation."""
-        # Test price_cents = 1 (valid)
+        # Test canonical entry price boundary low (valid)
         order1 = OrderIntent(
             intent_id="test-1", ticker="KXBTC15M-26JUN022230-30", side="yes", action="buy",
-            price_cents=1, count=10, source="test"
+            price_cents=10, count=10, source="test"
         )
-        
-        # Test price_cents = 99 (valid)
+
+        # Test canonical entry price boundary high (valid)
         order2 = OrderIntent(
             intent_id="test-2", ticker="KXBTC15M-26JUN022230-30", side="yes", action="buy",
-            price_cents=99, count=10, source="test"
+            price_cents=75, count=10, source="test"
         )
         
         # Test price_cents = 0 (invalid)

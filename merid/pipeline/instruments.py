@@ -147,7 +147,7 @@ def _build_crypto_instruments(reg: InstrumentRegistry) -> None:
         merid_sym = f"{base}-USD"
         if reg.get(merid_sym):
             continue  # already registered (e.g. from duplicate key)
-        kraken_sym = _KRAKEN_LEGACY.get(base, f"{base}USDT")
+        kraken_sym = _KRAKEN_LEGACY.get(base, f"{base}USD")
         tags = [
             "tier1" if asset.liquidity_tier == 1 else
             "tier2" if asset.liquidity_tier == 2 else "tier3"

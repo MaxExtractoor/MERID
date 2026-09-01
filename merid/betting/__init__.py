@@ -46,12 +46,13 @@ from merid.betting.live_odds_cache import (
     OddsPushManager,
     get_live_odds_cache_manager,
 )
-from merid.betting.sports_debate import (
-    SportsDebateCoordinator,
-    SportsDebateSession,
-    SportsDebateLiftTracker,
-    get_sports_debate_coordinator,
-)
+# NOTE: sports_debate module removed from the active 15m crypto surface.
+# from merid.betting.sports_debate import (
+#     SportsDebateCoordinator,
+#     SportsDebateSession,
+#     SportsDebateLiftTracker,
+#     get_sports_debate_coordinator,
+# )
 from merid.betting.anomaly_detection import (
     AnomalyEngine,
     AnomalyRecord,
@@ -94,10 +95,10 @@ __all__ = [
     "OddsLatencyTracker",
     "OddsPushManager",
     "get_live_odds_cache_manager",
-    "SportsDebateCoordinator",
-    "SportsDebateSession",
-    "SportsDebateLiftTracker",
-    "get_sports_debate_coordinator",
+    # "SportsDebateCoordinator",
+    # "SportsDebateSession",
+    # "SportsDebateLiftTracker",
+    # "get_sports_debate_coordinator",
     "AnomalyEngine",
     "AnomalyRecord",
     "AnomalyType",

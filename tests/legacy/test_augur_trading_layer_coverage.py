@@ -124,7 +124,7 @@ class TestFetchMarkets:
         assert markets[0]["id"].startswith("mock-augur")
 
     def test_fetch_markets_no_outcomes(self, layer):
-        """Test fetch_markets with market having no outcomes."""
+        """Test fetch_markets fails closed when a market has no outcomes."""
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "data": {
@@ -139,11 +139,10 @@ class TestFetchMarkets:
             }
         }
         layer._client.post.return_value = mock_response
-        
-        markets = layer.fetch_markets()
-        
-        assert len(markets) == 1
-        assert markets[0]["yes_price"] == 0.5  # Default when no outcomes
+
+        # Missing price data is rejected instead of silently defaulting to 0.5.
+        with pytest.raises(ValueError, match="Missing yes_price or no_price"):
+            layer.fetch_markets()
 
 
 # =============================================================================

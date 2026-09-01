@@ -64,7 +64,7 @@ class PhantomDetectionConfig:
     """Configuration for phantom detection rules."""
     
     # Time thresholds
-    LATENCY_THRESHOLD_SECONDS: int = 60  # Position expected within 60s for 15m crypto
+    LATENCY_THRESHOLD_SECONDS: int = 120  # Position expected within 120s for 15m crypto
     INGESTION_LAG_THRESHOLD_SECONDS: int = 30  # Fill ingestion expected within 30s
     MAX_WAIT_SECONDS: int = 300  # Max wait before flagging (5 minutes)
     

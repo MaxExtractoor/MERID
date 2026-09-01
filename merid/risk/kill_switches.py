@@ -51,9 +51,19 @@ except ImportError:
 
 # Prometheus metrics for daily loss limit tracking
 try:
-    from prometheus_client import Counter
-    
-    daily_loss_limit_hits_total = Counter(
+    from prometheus_client import Counter, REGISTRY
+
+    def _get_or_create_counter(name: str, doc: str, labelnames: list):
+        try:
+            return Counter(name, doc, labelnames)
+        except ValueError:
+            # Already registered (e.g. module reloaded in tests) — reuse existing.
+            existing = REGISTRY._names_to_collectors.get(name)
+            if existing is not None:
+                return existing
+            raise
+
+    daily_loss_limit_hits_total = _get_or_create_counter(
         'merid_daily_loss_limit_hits_total',
         'Total daily loss limit hits by operation mode',
         ['mode']  # mode: test, prod
@@ -542,8 +552,10 @@ class RiskController:
                 except Exception as e:
                     logger.warning("[DAILY-LOSS-CALC] Failed to compute from fills: %s", e)
             
-            # Update internal daily PnL state
-            self._daily_pnl = daily_pnl_dollars
+            # Update internal daily PnL state only if a live source provided a value;
+            # otherwise keep the value recorded by record_pnl()/ledger sync.
+            if pnl_source != "legacy":
+                self._daily_pnl = daily_pnl_dollars
 
             # Compute bankroll-aware daily loss limit (percentage of equity)
             # This makes limits scale with bankroll instead of being hardcoded
@@ -1105,7 +1117,7 @@ class RiskController:
                 else:
                     if warning:
                         logger.info(f"[VALIDATION] {warning}")
-                    self._daily_pnl = float(_s.get("daily_realized_pnl_usd", 0.0))
+                    self._daily_pnl = float(_s.get("daily_realized_pnl_usd", 0.0)) + pnl
             except Exception:
                 self._daily_pnl += pnl
             if self._daily_pnl < 0 and abs(self._daily_pnl) >= self.daily_loss_limit:
