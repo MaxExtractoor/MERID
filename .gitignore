@@ -418,3 +418,11 @@ data/*_provenance.json
 data/kalshi_*.json
 data/trading_circuit_breaker_http_watermark.json
 data/final_state_output.txt
+
+# Devin/live monitoring artifacts
+.devin_monitor.py
+.devin_monitor_state.json
+.live_monitor.py
+live_monitor.txt
+.git_commit_msg.txt
+data/fvg_kill_switch.json
