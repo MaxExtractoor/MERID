@@ -684,6 +684,10 @@ class KalshiMarketStateStore:
         # burst cannot schedule thousands of REST/WS recovery coroutines per second
         # and starve the event loop / HTTP connection pool.
         self._last_recovery_trigger_ts: Dict[str, float] = {}
+        # LOG-STORM-FIX: throttle the per-delta STATE-RECOVERY-REJECTED critical log
+        # so a single stuck ticker cannot flood the log handlers and starve the event
+        # loop (observed on 2026-09-01 after restart, ~150% CPU from log calls).
+        self._last_recovery_reject_log_ts: Dict[str, float] = {}
         self._batch_worker_running = False
         self._batch_worker_thread: Optional[threading.Thread] = None
         # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume.
@@ -933,16 +937,24 @@ class KalshiMarketStateStore:
             # occurred) wins; otherwise derive from the transition label.
             required = state.recovery_required_source or _recovery_required_for_transition(prior_transition)
             if not _source_satisfies_recovery(source, required):
-                logger.critical(
-                    "[STATE-RECOVERY-REJECTED] ticker=%s prior_quality=%s prior_transition=%s "
-                    "attempted_source=%s required=%s - non-attested source tried to clear INVALID/CIRCUIT_BREAKER; "
-                    "keeping state invalid",
-                    state.ticker,
-                    prior_quality,
-                    prior_transition,
-                    source,
-                    required,
-                )
+                # LOG-STORM-FIX: throttle per-delta critical log to once per second per
+                # ticker. A stuck invalid state can receive thousands of WS deltas/sec,
+                # and emitting a critical log for each one can consume an entire core
+                # and starve the health endpoint (observed 2026-09-01).
+                now = time.monotonic()
+                last_log = self._last_recovery_reject_log_ts.get(state.ticker, 0.0)
+                if now - last_log >= 1.0:
+                    self._last_recovery_reject_log_ts[state.ticker] = now
+                    logger.critical(
+                        "[STATE-RECOVERY-REJECTED] ticker=%s prior_quality=%s prior_transition=%s "
+                        "attempted_source=%s required=%s - non-attested source tried to clear INVALID/CIRCUIT_BREAKER; "
+                        "keeping state invalid",
+                        state.ticker,
+                        prior_quality,
+                        prior_transition,
+                        source,
+                        required,
+                    )
                 # Re-assert the invalid state in case a previous line softened it.
                 state.data_quality = "INVALID"
                 state.executable = False
