@@ -345,3 +345,104 @@ class TestFillFeeAudit:
         assert audit["net_price_cents"] == 62.0
         assert audit["order_id"] == "order-fee-audit-01"
         assert audit["client_order_id"] == "coid-fee-audit-01"
+
+
+class TestXRPReplayEndToEnd:
+    """End-to-end XRP replay: BUY_NO at 41c, SELL_NO at 5c, verify PnL and flat ledger."""
+
+    @pytest.mark.asyncio
+    async def test_xrp_sell_no_exit_canonicalizes_and_pnl(self, ledger, cache):
+        # Link cache to the ledger so the live fill path uses canonical records.
+        cache._fills_ledger = ledger
+
+        # Entry intent: long NO 1 contract @ 41c (yes=59, no=41).
+        entry_intent = OrderIntent(
+            intent_id="coid-xrp-entry",
+            client_order_id="coid-xrp-entry",
+            ticker="KXXRP15M-TEST",
+            side="BUY_NO",
+            action="buy",
+            count=1,
+            price_cents=41,
+            entry_or_exit="entry",
+        )
+        ledger.record_intent(entry_intent)
+
+        raw_entry = _make_fill_dict(
+            "xrp-entry-1",
+            "coid-xrp-entry",
+            "no",
+            "buy",
+            "1",
+            yes_price_dollars="0.5900",
+            no_price_dollars="0.4100",
+        )
+        fill_entry = ledger._parse_fill(raw_entry, "http_poller")
+        ledger._fills[fill_entry.fill_id] = fill_entry
+        ledger._index_fill(fill_entry)
+
+        # Cache should open a long NO position with entry price in NO space.
+        await cache.on_fill(
+            market_id="KXXRP15M-TEST",
+            contracts=1,
+            quantity_cc=100,
+            price_cents=fill_entry.price_cents,
+            fee_cents=0,
+            side="no",
+            action="buy",
+            fill_id=fill_entry.fill_id,
+            canonicalization_state="TRUSTED_LIVE_V1",
+        )
+        pos = cache.get_position("KXXRP15M-TEST")
+        assert pos is not None
+        assert pos.side == "no"
+        assert pos.avg_price_cents == 41
+        assert pos.quantity_cc == 100
+
+        # Exit intent: SELL_NO 1 contract @ 5c (yes=95, no=5) to close the long NO.
+        exit_intent = OrderIntent(
+            intent_id="coid-xrp-exit",
+            client_order_id="coid-xrp-exit",
+            ticker="KXXRP15M-TEST",
+            side="SELL_NO",
+            action="sell",
+            count=1,
+            price_cents=5,
+            entry_or_exit="exit",
+            reduce_only=True,
+        )
+        ledger.record_intent(exit_intent)
+
+        raw_exit = _make_fill_dict(
+            "xrp-exit-1",
+            "coid-xrp-exit",
+            "no",
+            "sell",
+            "1",
+            yes_price_dollars="0.9500",
+            no_price_dollars="0.0500",
+        )
+        fill_exit = ledger._parse_fill(raw_exit, "http_poller")
+        ledger._fills[fill_exit.fill_id] = fill_exit
+        ledger._index_fill(fill_exit)
+
+        await cache.on_fill(
+            market_id="KXXRP15M-TEST",
+            contracts=1,
+            quantity_cc=100,
+            price_cents=fill_exit.price_cents,
+            fee_cents=0,
+            side="no",
+            action="sell",
+            fill_id=fill_exit.fill_id,
+            is_exit=True,
+            canonicalization_state="TRUSTED_LIVE_V1",
+        )
+
+        # Position should be fully closed; realized PnL is the NO-side loss.
+        assert pos.quantity_cc == 0
+        assert pos.realized_pnl_usd == Decimal("-0.36")
+
+        # Ledger-derived position must be flat after the exit.
+        ledger_pos = ledger.compute_position_from_fills("KXXRP15M-TEST")
+        assert ledger_pos is None
