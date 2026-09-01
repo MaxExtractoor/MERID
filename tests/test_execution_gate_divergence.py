@@ -10,10 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from merid.loop_15m import _run_exit_price_guard
+from merid.event_venues.kalshi.position_cache import get_position_cache
 
 
 def _make_position(market_id="KXBTC15M-TEST", entry_price=50, size=1, outcome_side="yes"):
-    return SimpleNamespace(
+    pos = SimpleNamespace(
         position_id="pos-1",
         market_id=market_id,
         avg_entry_price_cents=entry_price,
@@ -21,6 +22,13 @@ def _make_position(market_id="KXBTC15M-TEST", entry_price=50, size=1, outcome_si
         outcome_side=outcome_side,
         thesis_side=outcome_side,
     )
+
+    # 2026-08-30: _run_exit_price_guard is fail-closed on the canonical position
+    # cache.  Unit tests must seed the cache with the same position the guard is
+    # asked to evaluate, otherwise it rejects every close as flat/missing.
+    pos._yes_exposure = lambda: int(size * 100) if outcome_side == "yes" else -int(size * 100)
+    get_position_cache()._positions[market_id] = pos
+    return pos
 
 
 def _make_state(best_bid_cents: int, age_ms: int = 0, seconds_to_expiry: float = 600.0):
@@ -59,16 +67,17 @@ def test_exit_guard_allows_profitable_take_profit(monkeypatch):
     assert record["best_bid_cents"] == 60
 
 
-def test_exit_guard_rejects_expiry_liquidation_beyond_emergency_max_loss(monkeypatch):
-    """An emergency exit whose worst-case net PnL exceeds the emergency max loss is rejected."""
-    # Near expiry, best bid has collapsed far below the entry.
-    state = _make_state(best_bid_cents=30, seconds_to_expiry=30.0)
+def test_exit_guard_rejects_stop_loss_beyond_max_loss(monkeypatch):
+    """A discretionary stop whose worst-case net PnL exceeds the max loss bound is rejected."""
+    # The market has fallen far below the entry; without a stop_price on the
+    # position the guard falls back to the global max-loss bound.
+    state = _make_state(best_bid_cents=30)
     _patch_get_market_state(monkeypatch, state)
 
     position = _make_position(entry_price=50)
     approved, approved_price, record, _ = _run_exit_price_guard(
         position=position,
-        exit_reason="expiry_liquidation",
+        exit_reason="stop_loss",
         exit_price_cents=30,
         count=1,
     )
@@ -76,7 +85,6 @@ def test_exit_guard_rejects_expiry_liquidation_beyond_emergency_max_loss(monkeyp
     assert approved is False
     assert record["status"] == "rejected"
     assert record["reject_reason"] == "max_loss_exceeded"
-    assert record["is_emergency"] is True
 
 
 def test_exit_guard_rejects_stale_quote(monkeypatch):

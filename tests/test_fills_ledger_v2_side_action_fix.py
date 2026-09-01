@@ -190,8 +190,8 @@ class TestV2FillSideActionDerivation:
         assert fill.unmatched is True
 
     @pytest.mark.asyncio
-    async def test_ws_fill_price_complement(self, ledger):
-        """WS fills only carry yes_price_dollars; no_price must be derived."""
+    async def test_ws_fill_price_uses_stored_no_leg(self, ledger):
+        """WS fills must carry the traded-side leg price; it is not derived via complement."""
         raw = {
             "fill_id": "fill-ws-no-1",
             "market_ticker": "KXETH15M-TEST",
@@ -199,6 +199,7 @@ class TestV2FillSideActionDerivation:
             "book_side": "ask",
             "action": "buy",
             "yes_price_dollars": "0.6800",
+            "no_price_dollars": "0.3200",
             "count_fp": "1",
             "fee_cost": "0",
         }
@@ -317,7 +318,8 @@ class TestEquivalentOrderPairCanonicalization:
         cache._applied_fill_ids.clear()
         cache._reconciliation_halted.clear()
 
-        # SELL NO at 38c (NO-side) is a long-YES entry.  YES equivalent price = 62c.
+        # SELL NO at 38c (NO-side) is a long-YES entry.  The stored YES/NO leg
+        # prices (62c YES, 38c NO) let the cache keep the held-side price.
         await cache.on_fill(
             market_id="KXETH15M-SELL-NO-ENTRY",
             contracts=1,
@@ -328,6 +330,8 @@ class TestEquivalentOrderPairCanonicalization:
             fill_id="f-sell-no-entry",
             action="sell",
             canonicalization_state="TRUSTED_LIVE_V1",
+            yes_price_cents=62,
+            no_price_cents=38,
         )
         pos = cache._positions["KXETH15M-SELL-NO-ENTRY"]
         assert pos.side == "yes"
@@ -344,7 +348,8 @@ class TestEquivalentOrderPairCanonicalization:
         cache._applied_fill_ids.clear()
         cache._reconciliation_halted.clear()
 
-        # SELL YES at 64c (YES-side) is a long-NO entry.  NO equivalent price = 36c.
+        # SELL YES at 64c (YES-side) is a long-NO entry.  The stored YES/NO leg
+        # prices (64c YES, 36c NO) let the cache keep the held-side price.
         await cache.on_fill(
             market_id="KXETH15M-SELL-YES-ENTRY",
             contracts=1,
@@ -355,6 +360,8 @@ class TestEquivalentOrderPairCanonicalization:
             fill_id="f-sell-yes-entry",
             action="sell",
             canonicalization_state="TRUSTED_LIVE_V1",
+            yes_price_cents=64,
+            no_price_cents=36,
         )
         pos = cache._positions["KXETH15M-SELL-YES-ENTRY"]
         assert pos.side == "no"
@@ -371,7 +378,7 @@ class TestEquivalentOrderPairCanonicalization:
         cache._applied_fill_ids.clear()
         cache._reconciliation_halted.clear()
 
-        # Open long YES at 40c
+        # Open long YES at 40c.
         await cache.on_fill(
             market_id="KXETH15M-BUY-NO-CLOSE",
             contracts=1,
@@ -382,12 +389,14 @@ class TestEquivalentOrderPairCanonicalization:
             fill_id="f-entry-yes",
             action="buy",
             canonicalization_state="TRUSTED_LIVE_V1",
+            yes_price_cents=40,
+            no_price_cents=60,
         )
         pos = cache._positions["KXETH15M-BUY-NO-CLOSE"]
         assert pos.side == "yes"
 
-        # Close via BUY NO at 32c (NO-side).  We are paying 32c for NO, i.e. selling YES at 68c.
-        # PnL in YES space: 68 - 40 = +28c.
+        # Close via BUY NO at 32c (NO-side).  The held side is YES, so the
+        # stored YES leg price (68c) is used for PnL: 68 - 40 = +28c.
         await cache.on_fill(
             market_id="KXETH15M-BUY-NO-CLOSE",
             contracts=1,
@@ -398,6 +407,8 @@ class TestEquivalentOrderPairCanonicalization:
             fill_id="f-exit-buy-no",
             action="buy",
             canonicalization_state="TRUSTED_LIVE_V1",
+            yes_price_cents=68,
+            no_price_cents=32,
         )
         assert pos.contracts == 0
         assert float(pos.realized_pnl_usd) == pytest.approx(0.28)
@@ -450,7 +461,7 @@ class TestEquivalentOrderPairCanonicalization:
         cache._applied_fill_ids.clear()
         cache._reconciliation_halted.clear()
 
-        # Open long NO at 30c
+        # Open long NO at 30c.
         await cache.on_fill(
             market_id="KXETH15M-BUY-YES-CLOSE",
             contracts=1,
@@ -461,12 +472,14 @@ class TestEquivalentOrderPairCanonicalization:
             fill_id="f-entry-no",
             action="buy",
             canonicalization_state="TRUSTED_LIVE_V1",
+            yes_price_cents=70,
+            no_price_cents=30,
         )
         pos = cache._positions["KXETH15M-BUY-YES-CLOSE"]
         assert pos.side == "no"
 
-        # Close via BUY YES at 55c.  YES price = 55c -> NO price = 45c.
-        # PnL in NO space: 45 - 30 = +15c.
+        # Close via BUY YES at 55c.  The held side is NO, so the stored NO leg
+        # price (45c) is used for PnL: 45 - 30 = +15c.
         await cache.on_fill(
             market_id="KXETH15M-BUY-YES-CLOSE",
             contracts=1,
@@ -477,6 +490,8 @@ class TestEquivalentOrderPairCanonicalization:
             fill_id="f-exit-buy-yes",
             action="buy",
             canonicalization_state="TRUSTED_LIVE_V1",
+            yes_price_cents=55,
+            no_price_cents=45,
         )
         assert pos.contracts == 0
         assert float(pos.realized_pnl_usd) == pytest.approx(0.15)

@@ -94,14 +94,14 @@ class TestAvgPriceCalculationFromREST:
             pass
     
     @pytest.mark.asyncio
-    async def test_calculate_avg_price_below_range_rejected(self, position_cache):
-        """Test that calculated avg_price_cents below 10c is rejected."""
+    async def test_calculate_avg_price_in_cheap_tail_accepted(self, position_cache):
+        """Test that calculated avg_price_cents in the cheap-tail range is accepted."""
         from datetime import datetime, timezone, timedelta
         future_date = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%d%b")
         future_time = "2000"
         market_id = f"KXBTC15M-{future_date}{future_time}-30"
 
-        # Mock REST position with market_exposure that would calculate to 5c (out of range)
+        # Mock REST position with market_exposure that would calculate to 5c (cheap tail)
         rest_positions = [
             {
                 "ticker": market_id,  # Use ticker field
@@ -116,15 +116,11 @@ class TestAvgPriceCalculationFromREST:
 
         await position_cache.sync_from_rest(rest_positions, force=True)
 
-        # Should reject calculated price (5c out of range)
-        # Position may still be added but with invalid price
-        if market_id in position_cache._positions:
-            position = position_cache._positions[market_id]
-            assert position.avg_price_cents is None  # Rejected
-            assert position.entry_price_state == "invalid"
-        else:
-            # Position was filtered out entirely (acceptable behavior)
-            pass
+        # 5c is a valid Kalshi binary price (cheap-tail 0-19c) and must be accepted
+        assert market_id in position_cache._positions
+        position = position_cache._positions[market_id]
+        assert position.avg_price_cents == 5
+        assert position.entry_price_state == "known"
     
     @pytest.mark.asyncio
     async def test_use_api_provided_avg_price_when_available(self, position_cache):
@@ -184,21 +180,21 @@ class TestAvgPriceCalculationFromREST:
         assert position.entry_price_state == "unknown"
     
     @pytest.mark.asyncio
-    async def test_zero_position_fp_rejected(self, position_cache):
-        """Test that position_fp=0 is rejected (division by zero protection)."""
+    async def test_zero_position_fp_skipped(self, position_cache):
+        """Test that position_fp=0 is treated as a closed position and skipped."""
         from datetime import datetime, timezone, timedelta
         future_date = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%d%b")
         future_time = "2000"
         market_id = f"KXBTC15M-{future_date}{future_time}-30"
 
-        # Mock REST position with position_fp=0
+        # Mock REST position with position_fp=0 (closed)
         rest_positions = [
             {
                 "market_id": market_id,
                 "contracts": 10,
                 "side": "yes",
                 "market_exposure_dollars": "5.00",
-                "position_fp": "0.00",  # Invalid
+                "position_fp": "0.00",  # Closed position
                 "realized_pnl": 0.0,
                 "unrealized_pnl": 0.5
             }
@@ -206,11 +202,8 @@ class TestAvgPriceCalculationFromREST:
 
         await position_cache.sync_from_rest(rest_positions, force=True)
 
-        # Should reject due to division by zero
-        assert len(position_cache._positions) == 1
-        position = position_cache._positions[market_id]
-        assert position.avg_price_cents is None
-        assert position.entry_price_state == "invalid"
+        # A zero position_fp means the position is closed; it must not remain in cache
+        assert market_id not in position_cache._positions
 
 
 class TestAutoFixInvalidPositions:
@@ -416,9 +409,15 @@ class TestPositionMonitorValidation:
     @pytest.mark.asyncio
     async def test_add_valid_position(self, position_cache):
         """Test that valid positions are added to monitor during startup."""
+        from datetime import datetime, timezone, timedelta
+
+        # Use a future, year-first Kalshi ticker so the monitor does not skip it as expired
+        future_date = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d%H%M")
+        market_id = f"KXBTC15M-{future_date}-30"
+
         # Add valid position to cache
-        position_cache._positions["KXBTC15M-26JUL012015-30"] = CachedPosition(
-            market_id="KXBTC15M-26JUL012015-30",
+        position_cache._positions[market_id] = CachedPosition(
+            market_id=market_id,
             agent_id="BTC_15M",
             contracts=10,
             side="yes",
@@ -440,7 +439,7 @@ class TestPositionMonitorValidation:
             
             # Position SHOULD be added to monitor
             assert len(monitor.get_open_positions()) == 1
-            position = monitor.get_position_by_market("KXBTC15M-26JUL012015-30")
+            position = monitor.get_position_by_market(market_id)
             assert position is not None
             assert position.avg_entry_price_cents == 50
 
