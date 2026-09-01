@@ -1097,15 +1097,16 @@ class RiskController:
         Returns True if trading can continue, False if killed.
         """
         with self._lock:
-            # Sync from fills_ledger (canonical) before checking limit.
-            # Naive accumulation from individual callers can drift from
-            # the fills_ledger total and cause false kill switches.
+            # Accumulate the reported PnL; can_trade() reconciles with
+            # fills_ledger using the canonical source on its next check.
+            # We only read the ledger here to detect stale/corrupted data
+            # that would poison the running daily PnL total.
             try:
                 from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
                 _ledger = get_fills_ledger()
                 _s = _ledger.summary()
-                
-                # Validate fills_ledger data to detect test data pollution
+
+                # Validate fills_ledger data to detect stale/test data pollution
                 is_valid, warning = self._validate_fills_ledger_data(_s)
                 if not is_valid:
                     logger.warning(f"[VALIDATION] Rejecting fills_ledger data: {warning}")
@@ -1113,13 +1114,11 @@ class RiskController:
                     if self._daily_pnl != 0.0:
                         logger.warning(f"[VALIDATION] Resetting corrupted daily_pnl from {self._daily_pnl:.2f} to 0.0 before recording new PnL")
                         self._daily_pnl = 0.0
-                    self._daily_pnl += pnl
-                else:
-                    if warning:
-                        logger.info(f"[VALIDATION] {warning}")
-                    self._daily_pnl = float(_s.get("daily_realized_pnl_usd", 0.0)) + pnl
+                elif warning:
+                    logger.info(f"[VALIDATION] {warning}")
             except Exception:
-                self._daily_pnl += pnl
+                pass
+            self._daily_pnl += pnl
             if self._daily_pnl < 0 and abs(self._daily_pnl) >= self.daily_loss_limit:
                 self._trigger_kill_locked(
                     KillSwitchReason.DAILY_LOSS,
