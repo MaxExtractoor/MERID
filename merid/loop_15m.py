@@ -59,6 +59,7 @@ MERID_EXIT_ALLOWED_REASONS = frozenset({
     "take_profit",
     "time_exit",
     "signal_reversal",
+    "model_invalidation",
     "expiry_liquidation",
     "reconciliation",
     "manual",
@@ -80,6 +81,8 @@ _EXIT_REASON_CANONICAL_MAP = {
     "edge_decay": "signal_reversal",
     "current_edge_reversal": "signal_reversal",
     "opportunity_cost": "signal_reversal",
+    "model_invalidation": "model_invalidation",
+    "model_invalidation_loss_exit": "model_invalidation",
     "auto_exit_99c": "expiry_liquidation",
     "settlement_guard": "expiry_liquidation",
     "ratchet_floor": "take_profit",
@@ -95,6 +98,11 @@ _MERID_EXIT_EMERGENCY_REASONS = frozenset({"expiry_liquidation"})
 # Reasons that are allowed to take a bounded loss (they are loss-seeking by
 # construction) but are not unrestricted emergency exits.
 _MERID_EXIT_STOP_REASONS = frozenset({"stop_loss", "trailing_stop", "loss_cut_40pct"})
+
+# Hard-risk / model-invalidation exits may realize the full position premium
+# if the thesis has broken.  They bypass the discretionary profit floor and
+# are bounded by the position cost basis, not the tight default loss cap.
+_MERID_EXIT_RISK_INVALIDATION_REASONS = frozenset({"signal_reversal", "model_invalidation"})
 
 # CRITICAL FIX (2026-08-23): Statuses that prove the exchange terminally processed
 # the order and either accepted it or executed it.  ``request_completed`` alone is
@@ -2298,6 +2306,10 @@ def _run_exit_price_guard(
                 max_loss = trail_distance + slippage + fees
         else:
             max_loss = MERID_EXIT_MAX_LOSS_CENTS
+    elif canonical in _MERID_EXIT_RISK_INVALIDATION_REASONS:
+        # Signal-reversal / model-invalidation exits may have to realize the full
+        # position premium.  Bound the loss by the position's own cost basis.
+        max_loss = max(MERID_EXIT_MAX_LOSS_CENTS, entry_price) if entry_price > 0 else MERID_EXIT_MAX_LOSS_CENTS
     else:
         max_loss = MERID_EXIT_MAX_LOSS_CENTS
 
@@ -2306,7 +2318,15 @@ def _run_exit_price_guard(
     # Discretionary (non-stop, non-emergency, non-forced) exits must be profitable after
     # fees and must clear a per-contract minimum profit floor.  Forced exits (expiry_liquidation, time_exit)
     # are allowed to realize a loss to prevent holding losers to settlement.
-    is_stop_or_emergency = canonical in _MERID_EXIT_STOP_REASONS or is_emergency or is_forced
+    # Hard-risk / model-invalidation exits are also allowed to realize a loss
+    # because the thesis has already broken; the profit floor applies only to
+    # profit-taking or opportunity-cost exits.
+    is_stop_or_emergency = (
+        canonical in _MERID_EXIT_STOP_REASONS
+        or canonical in _MERID_EXIT_RISK_INVALIDATION_REASONS
+        or is_emergency
+        or is_forced
+    )
     if not is_stop_or_emergency:
         min_profit_total = MERID_EXIT_MIN_PROFIT_CENTS * closed_count
         if net_expected < min_profit_total or net_worst < 0:

@@ -47,7 +47,11 @@ class TestPositionCacheCanonicalBinaryHandling:
     def test_sell_no_opens_long_yes(self):
         """SELL_NO is economically BUY_YES (long YES)."""
         position = self._make_position("yes")
-        position.apply_fill(contracts=1, price_cents=50, fee_cents=2, side="no", action="sell")
+        # SELL_NO at 50c NO = 50c YES from the stored leg prices.
+        position.apply_fill(
+            contracts=1, price_cents=50, fee_cents=2, side="no", action="sell",
+            yes_price_cents=50, no_price_cents=50,
+        )
 
         assert position.contracts == 1
         assert position.side == "yes"
@@ -63,11 +67,15 @@ class TestPositionCacheCanonicalBinaryHandling:
     def test_sell_yes_opens_long_no(self):
         """SELL_YES is economically BUY_NO (long NO)."""
         position = self._make_position("no")
-        position.apply_fill(contracts=1, price_cents=59, fee_cents=2, side="yes", action="sell")
+        # SELL_YES at 59c YES with stored leg prices (YES=59, NO=41).
+        position.apply_fill(
+            contracts=1, price_cents=59, fee_cents=2, side="yes", action="sell",
+            yes_price_cents=59, no_price_cents=41,
+        )
 
         assert position.contracts == 1
         assert position.side == "no"
-        # Price must be converted from YES space (59c) to NO space (41c).
+        # Position keeps the NO-side price from the stored leg prices.
         assert position.avg_price_cents == 41
 
     # ------------------------------------------------------------------
@@ -84,7 +92,11 @@ class TestPositionCacheCanonicalBinaryHandling:
     def test_buy_no_closes_long_yes(self):
         """BUY_NO is economically SELL_YES and closes a long YES position."""
         position = self._make_position("yes", contracts=1, price=50)
-        position.apply_fill(contracts=1, price_cents=40, fee_cents=2, side="no", action="buy")
+        # BUY_NO at 40c NO with stored leg prices (YES=60, NO=40).
+        position.apply_fill(
+            contracts=1, price_cents=40, fee_cents=2, side="no", action="buy",
+            yes_price_cents=60, no_price_cents=40,
+        )
 
         assert position.contracts == 0
 
@@ -98,7 +110,11 @@ class TestPositionCacheCanonicalBinaryHandling:
     def test_buy_yes_closes_long_no(self):
         """BUY_YES is economically SELL_NO and closes a long NO position."""
         position = self._make_position("no", contracts=1, price=50)
-        position.apply_fill(contracts=1, price_cents=40, fee_cents=2, side="yes", action="buy")
+        # BUY_YES at 40c YES with stored leg prices (YES=40, NO=60).
+        position.apply_fill(
+            contracts=1, price_cents=40, fee_cents=2, side="yes", action="buy",
+            yes_price_cents=40, no_price_cents=60,
+        )
 
         assert position.contracts == 0
 

@@ -99,6 +99,8 @@ try:
         held_outcome_from_legacy,
         traded_side_from_held,
         to_signed_yes_exposure,
+        v2_to_legacy,
+        book_from_outcome,
         SideValidationError,
     )
     BINARY_PRICE_SPACE_AVAILABLE = True
@@ -456,6 +458,39 @@ def _safe_price_to_cents(p) -> Optional[int]:
     return None
 
 
+def _fill_position_side_price_cents(fill: Any, side: str) -> Optional[int]:
+    """Return the price for ``side`` from a fill's stored leg prices.
+
+    Prefers ``yes_price_dollars`` / ``no_price_dollars``, then the
+    canonical/legacy price only if it is already tagged for ``side``.
+    No missing leg is synthesized via 100 - other_side.
+    """
+    side = (side or "").lower()
+    if side not in ("yes", "no"):
+        return None
+
+    yes_cents = _safe_price_to_cents(getattr(fill, "yes_price_dollars", None))
+    no_cents = _safe_price_to_cents(getattr(fill, "no_price_dollars", None))
+
+    if side == "yes" and yes_cents is not None:
+        return yes_cents
+    if side == "no" and no_cents is not None:
+        return no_cents
+
+    can_side = getattr(fill, "canonical_position_side", None) or getattr(fill, "side", None)
+    if can_side and can_side.lower() == side:
+        canon = getattr(fill, "canonical_leg_price_cents", None)
+        if canon is not None:
+            return int(canon)
+        prop = getattr(fill, "price_cents", None)
+        if prop is not None:
+            try:
+                return int(prop)
+            except Exception:
+                return None
+    return None
+
+
 def _derive_liquidity_role(raw: Dict[str, Any], intent: Optional[Any]) -> Optional[str]:
     """Extract the liquidity role from the raw fill or the originating intent.
 
@@ -573,7 +608,9 @@ def derive_position_effect(
             "canonicalization_state": "UNTRUSTED_RAW",
         }
 
-    # Reconstruct both leg prices from whatever execution facts we have.
+    # Use the stored leg prices if available.  The canonical leg price is the
+    # price on the executed contract side; a missing opposite leg is not
+    # synthesized via 100 - side_price.
     _yes = yes_price_cents
     _no = no_price_cents
     if _yes is None and _no is None and execution_price_cents is not None:
@@ -581,10 +618,6 @@ def derive_position_effect(
             _yes = execution_price_cents
         elif side == "no":
             _no = execution_price_cents
-    if _yes is not None and _no is None:
-        _no = 100 - _yes
-    elif _no is not None and _yes is None:
-        _yes = 100 - _no
 
     # The canonical leg price is the price on the executed contract side.
     canonical_leg_price_cents = _yes if side == "yes" else _no
@@ -850,6 +883,8 @@ class KalshiFill:
 
         Prefers the explicit canonical_leg_price_cents when set by _parse_fill.
         Uses canonical_position_side (falling back to side) to select the leg.
+        A missing leg is never synthesized via 100 - other_side, and the wrong
+        leg is never used when the side is known.
         """
         if self.canonical_leg_price_cents is not None:
             return self.canonical_leg_price_cents
@@ -863,15 +898,16 @@ class KalshiFill:
             cents = _safe_price_to_cents(self.no_price_dollars)
             if cents is not None:
                 return cents
-        # Legacy / WS: side missing or mis-set — use whichever leg has a price
-        if self.yes_price_dollars is not None:
-            cents = _safe_price_to_cents(self.yes_price_dollars)
-            if cents is not None:
-                return cents
-        if self.no_price_dollars is not None:
-            cents = _safe_price_to_cents(self.no_price_dollars)
-            if cents is not None:
-                return cents
+        # Legacy / WS: side not known and only one leg reported — use it.
+        if _side not in ("yes", "no"):
+            if self.yes_price_dollars is not None:
+                cents = _safe_price_to_cents(self.yes_price_dollars)
+                if cents is not None:
+                    return cents
+            if self.no_price_dollars is not None:
+                cents = _safe_price_to_cents(self.no_price_dollars)
+                if cents is not None:
+                    return cents
         return 0
 
     @property
@@ -917,20 +953,17 @@ class KalshiFill:
         For a long YES position this is the YES-leg price; for a long NO
         position it is the NO-leg price.  This lets counterparty-equivalent
         fills (e.g. SELL_NO vs BUY_YES) be compared on a single price axis.
+
+        No missing leg is synthesized via 100 - other_side.  If a side-tagged
+        price is not available, falls back to the stored canonical/legacy price.
         """
         yes_cents = _safe_price_to_cents(self.yes_price_dollars)
         no_cents = _safe_price_to_cents(self.no_price_dollars)
 
-        if self.economic_side == "YES":
-            if yes_cents is not None:
-                return yes_cents
-            if no_cents is not None:
-                return 100 - no_cents
-        elif self.economic_side == "NO":
-            if no_cents is not None:
-                return no_cents
-            if yes_cents is not None:
-                return 100 - yes_cents
+        if self.economic_side == "YES" and yes_cents is not None:
+            return yes_cents
+        if self.economic_side == "NO" and no_cents is not None:
+            return no_cents
 
         return self.canonical_leg_price_cents or self.price_cents
 
@@ -3557,12 +3590,20 @@ class KalshiFillsLedger:
             total_fees += fill.fee_cost
 
             # Determine the price in the current thesis side's price space.
-            fill_price = fill.price_cents
+            # Use the stored YES/NO leg prices; never derive via 100 - side_price.
+            if thesis_side is not None:
+                fill_price = _fill_position_side_price_cents(fill, thesis_side)
+            else:
+                fill_price = None
             if fill_price is None:
-                fill_price = 0
-            if thesis_side is not None and can_side != thesis_side:
-                # Opposite-side fill price is the dual complement in thesis space.
-                fill_price = 100 - fill_price
+                fill_price = fill.price_cents
+                if fill_price is None:
+                    fill_price = 0
+                if thesis_side is not None and can_side != thesis_side:
+                    logger.warning(
+                        "[FILLS-LEDGER-COMPUTE] Cannot determine %s-side price for %s fill_id=%s; using raw price",
+                        thesis_side, market_ticker, fill.fill_id,
+                    )
 
             abs_exposure = abs(signed_yes)
             if abs_exposure == 0:
@@ -5222,11 +5263,10 @@ class KalshiFillsLedger:
             realized_r = 0.0
             avg_price = position.get("avg_price_cents", 0)
             if avg_price and avg_price > 0:
-                # Risk is max loss (entry - 0 for YES, 100 - entry for NO)
-                if position.get("side") == "yes":
-                    risk_cents = avg_price
-                else:
-                    risk_cents = 100 - avg_price
+                # Risk is the premium paid (held-side price) for both YES and NO.
+                # Using 100 - avg_price for NO would incorrectly flip the NO price
+                # into YES-space and understate the actual capital at risk.
+                risk_cents = avg_price
                 total_contracts = position.get("total_contracts", 1)
                 if risk_cents > 0 and total_contracts > 0:
                     realized_r = float(trade_pnl) / (float(risk_cents) * float(total_contracts))
@@ -6246,16 +6286,24 @@ class KalshiFillsLedger:
         yes_price_dollars = normalize_price(yes_price) if yes_price else None
         no_price_dollars = normalize_price(no_price) if no_price else None
 
-        # CRITICAL FIX (2026-08-27): HTTP fills from /portfolio/fills carry both
-        # leg prices.  Use only the side's own price field; do not synthesize the
-        # other leg via complement, which can mask misreported prices.  WebSocket
-        # and legacy payloads may still carry a single price, so the complement is
-        # retained as a fallback for non-HTTP sources.
-        if source != "http_poller":
-            if yes_price_dollars is not None and no_price_dollars is None:
-                no_price_dollars = Decimal("1") - yes_price_dollars
-            elif no_price_dollars is not None and yes_price_dollars is None:
-                yes_price_dollars = Decimal("1") - no_price_dollars
+        # 2026-08-30: An explicitly-tagged *_dollars price is in its own side's
+        # price space.  Because YES + NO = $1, the missing leg can be derived
+        # exactly.  This preserves correct price selection for fills that only
+        # report one leg (common for WebSocket and router-immediate fills).
+        if (yes_price_dollars is not None) != (no_price_dollars is not None):
+            _known_price = yes_price_dollars if yes_price_dollars is not None else no_price_dollars
+            if _known_price is not None and Decimal("0") <= _known_price <= Decimal("1"):
+                _derived_price = (Decimal("1") - _known_price).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                if yes_price_dollars is None:
+                    yes_price_dollars = _derived_price
+                else:
+                    no_price_dollars = _derived_price
+                logger.debug(
+                    "[FILLS-LEDGER] Derived missing leg price from %s: %s -> %s",
+                    "yes_price_dollars" if no_price_dollars == _derived_price else "no_price_dollars",
+                    str(_known_price),
+                    str(_derived_price),
+                )
 
         # CRITICAL FIX (2026-07-21): Use outcome_side as canonical direction field per Kalshi's order-direction semantics
         # outcome_side (yes/no) expresses which outcome the user is long - this is the canonical field
@@ -6303,7 +6351,7 @@ class KalshiFillsLedger:
             resolved_client_order_id = resolved_intent_id
 
         # ------------------------------------------------------------------
-        # CANONICAL SIDE / ACTION / PRICE DERIVATION (2026-08-27)
+        # CANONICAL SIDE / ACTION / PRICE DERIVATION (2026-08-30)
         # ------------------------------------------------------------------
         # Kalshi V2+ reports the trade from the book's perspective: `outcome_side`
         # is the contract on the book that was traded, `book_side` is bid/ask, and
@@ -6317,7 +6365,7 @@ class KalshiFillsLedger:
         #
         # Legacy payloads may only have side+action; we use those directly.
 
-        # 1. Capture the user's traded side and the market's reported outcome side.
+        # 1. Capture raw fields.
         _raw_traded_side = (raw.get("side") or raw.get("purchased_side") or "").lower()
         if _raw_traded_side not in ("yes", "no"):
             _raw_traded_side = None
@@ -6330,20 +6378,20 @@ class KalshiFillsLedger:
         _raw_action = _raw_action if _raw_action in ("buy", "sell") else None
 
         _market_outcome_side = (raw.get("outcome_side") or raw.get("intent_side") or "").lower()
-        if _market_outcome_side not in ("yes", "no"):
-            _book_side = (raw.get("book_side") or "").lower()
-            if _book_side == "bid":
-                _market_outcome_side = "yes"
-            elif _book_side == "ask":
-                _market_outcome_side = "no"
-            else:
-                _market_outcome_side = None
+        _book_side = (raw.get("book_side") or "").lower()
 
-        # 2. The user's contract side is the authoritative side; fall back to the
-        #    market's reported outcome side when it is the only field available.
+        # 2. The market's reported traded outcome side is the canonical traded side.
+        #    In V2, ``outcome_side`` / ``book_side`` (bid=yes, ask=no) describe the
+        #    contract that changed hands; the user's own ``side``/``purchased_side``
+        #    may differ when the fill is a cross-leg form (SELL_NO/SELL_YES).
+        if _market_outcome_side not in ("yes", "no") and _book_side in ("bid", "ask"):
+            _market_outcome_side = "yes" if _book_side == "bid" else "no"
+
+        # 3. The user's contract side is the authoritative side; fall back to the
+        #    market's reported traded side when it is the only field available.
         _execution_outcome_side = _raw_traded_side if _raw_traded_side in ("yes", "no") else _market_outcome_side
 
-        # 3. If the market reported the trade on a different contract than the
+        # 4. If the market reported the trade on a different contract than the
         #    user's contract, the action is on that other leg and must be flipped
         #    to get the user's action on their own contract.
         _execution_action: Optional[str] = None
@@ -6356,6 +6404,11 @@ class KalshiFillsLedger:
                 _execution_action = "sell" if _raw_action == "buy" else "buy"
             else:
                 _execution_action = _raw_action
+
+        if _execution_outcome_side is None:
+            # Legacy fallback: use raw side/action directly.
+            _execution_outcome_side = _raw_traded_side
+            _execution_action = _execution_action or _raw_action
 
         # 2. Resolve the agent's intent and keep its original target side/action.
         _intent_target_side: Optional[str] = None
@@ -6455,6 +6508,17 @@ class KalshiFillsLedger:
                 yes_price_dollars = normalize_price(price)
             elif _price_side == "no":
                 no_price_dollars = normalize_price(price)
+
+        # Ensure both leg prices are available after all explicit/derived sources.
+        # If the generic `price` left us with exactly one leg, derive the other.
+        if (yes_price_dollars is not None) != (no_price_dollars is not None):
+            _known_price = yes_price_dollars if yes_price_dollars is not None else no_price_dollars
+            if _known_price is not None and Decimal("0") <= _known_price <= Decimal("1"):
+                _derived_price = (Decimal("1") - _known_price).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                if yes_price_dollars is None:
+                    yes_price_dollars = _derived_price
+                else:
+                    no_price_dollars = _derived_price
 
         # Parse fee.  Kalshi V2 ``fee_cost`` / ``fee_paid`` are dollars and are
         # used exactly as Decimal; only the legacy ``fee`` key may be
@@ -6633,21 +6697,62 @@ class KalshiFillsLedger:
                 fill_id, _execution_outcome_side, _execution_action, _execution_price_cents, _quantity_cc
             )
 
-        # Calculate proceeds_dollars (net cash flow after fees) using the raw
-        # traded side and exchange action, not the canonical position.  A SELL
-        # YES fill is still a sale of YES at the YES price even though the
-        # resulting position is long NO.
+        # 2026-08-30: Calculate and assert proceeds_dollars (net cash flow after
+        # fees).  For Kalshi fills the economic identity is:
+        #   proceeds + fee = -(price * count) for a buy
+        #   proceeds + fee = +(price * count) for a sell
+        # If Kalshi also reports proceeds independently, it must agree within a
+        # 1.5c tolerance; otherwise the fill is quarantined as price/count cannot
+        # be trusted.
         proceeds: Optional[Decimal] = None
-        if _count_fp > 0 and _canonicalization_state in TRUSTED_CANONICALIZATION_STATES:
-            _proceeds_side = _raw_traded_side or _execution_outcome_side
-            _proceeds_price = (
-                yes_price_dollars if _proceeds_side == "yes" else no_price_dollars
-            )
-            if _proceeds_price is not None and _execution_action in ("buy", "sell"):
-                if _execution_action == "buy":
-                    proceeds = -(_proceeds_price * _count_fp) - fee_decimal
-                else:  # sell
-                    proceeds = (_proceeds_price * _count_fp) - fee_decimal
+        _proceeds_side = _execution_outcome_side or _raw_traded_side
+        _proceeds_price = (
+            yes_price_dollars if _proceeds_side == "yes" else no_price_dollars
+        )
+        if (
+            _count_fp > 0
+            and _canonicalization_state in TRUSTED_CANONICALIZATION_STATES
+            and _proceeds_price is not None
+            and _execution_action in ("buy", "sell")
+        ):
+            _gross_dollars = _proceeds_price * _count_fp
+            if _execution_action == "buy":
+                _expected_proceeds = -_gross_dollars - fee_decimal
+            else:  # sell
+                _expected_proceeds = _gross_dollars - fee_decimal
+
+            _raw_proceeds = raw.get("proceeds") or raw.get("proceeds_dollars")
+            if _raw_proceeds is not None:
+                try:
+                    _reported_proceeds = Decimal(str(_raw_proceeds))
+                    if abs(_reported_proceeds - _expected_proceeds) > Decimal("0.015"):
+                        logger.critical(
+                            "[FILL-PROCEEDS-MISMATCH] fill_id=%s reported_proceeds=%s "
+                            "expected_proceeds=%s side=%s action=%s price=%s count=%s fee=%s - "
+                            "Quarantining; count/price/proceeds are inconsistent.",
+                            fill_id,
+                            str(_reported_proceeds),
+                            str(_expected_proceeds),
+                            _execution_outcome_side,
+                            _execution_action,
+                            str(_proceeds_price),
+                            str(_count_fp),
+                            str(fee_decimal),
+                        )
+                        is_unmatched = True
+                        if not unmatched_reason:
+                            unmatched_reason = "proceeds_price_count_mismatch"
+                        _canonicalization_state = "UNTRUSTED_RAW"
+                        _action = None
+                        _canonical_side = None
+                        _canonical_leg_price_cents = None
+                        _canonical_yes_delta_cc = None
+                    else:
+                        proceeds = _reported_proceeds
+                except Exception:
+                    proceeds = _expected_proceeds
+            else:
+                proceeds = _expected_proceeds
 
         # Determine if this is a LIVE trade (real money)
         # This is critical for bankroll reconciliation
@@ -6753,7 +6858,7 @@ class KalshiFillsLedger:
             # `side` is the TRADED contract side; `execution_outcome_side` is the
             # HELD (long) outcome side.  The canonical fields below are the
             # single source of truth for position/exposure/PnL accounting.
-            side=_raw_traded_side,
+            side=_execution_outcome_side or _raw_traded_side or "",
             action=_execution_action,
             count_fp=_count_fp,
             quantity_cc=_quantity_cc,
@@ -7308,10 +7413,7 @@ class KalshiFillsLedger:
                         UPDATE kalshi_fills
                         SET canonical_position_side = side,
                             canonical_position_action = action,
-                            canonical_leg_price_cents = COALESCE(
-                                CASE WHEN side = 'yes' THEN price_cents ELSE 100 - price_cents END,
-                                0
-                            ),
+                            canonical_leg_price_cents = COALESCE(price_cents, 0),
                             canonical_yes_delta_cc = (count * 100) * (
                                 CASE WHEN action = 'buy' AND side = 'yes' THEN 1
                                      WHEN action = 'buy' AND side = 'no' THEN -1
@@ -8153,16 +8255,13 @@ class KalshiFillsLedger:
                     if _needs_derive and _raw_side in ("yes", "no") and _raw_action in ("buy", "sell"):
                         _yes_cents = _safe_price_to_cents(row["yes_price_dollars"]) if row["yes_price_dollars"] is not None else None
                         _no_cents = _safe_price_to_cents(row["no_price_dollars"]) if row["no_price_dollars"] is not None else None
-                        # The DB ``side`` column in legacy rows is the TRADED
-                        # contract side.  Convert it to the held outcome side
-                        # before canonicalizing.
-                        try:
-                            _held_side = held_outcome_from_legacy(_raw_side, _raw_action)
-                        except Exception:
-                            _held_side = _raw_side
-                        _exec_price_cents = _yes_cents if _held_side == "yes" else _no_cents
+                        # The DB ``side`` column is the TRADED contract side and
+                        # the ``action`` column is the user's action.  The
+                        # canonicalization uses (traded_side, user_action) so that
+                        # ``yes_delta`` produces the correct signed-YES exposure.
+                        _exec_price_cents = _yes_cents if _raw_side == "yes" else _no_cents
                         _derived = derive_position_effect(
-                            execution_outcome_side=_held_side,
+                            execution_outcome_side=_raw_side,
                             execution_action=_raw_action,
                             execution_price_cents=_exec_price_cents,
                             yes_price_cents=_yes_cents,
