@@ -18,7 +18,16 @@ from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union, Tuple
-from merid.position_management.position import Position, PositionSide, TrailingType, TrailingState, RiskParamsState, TAKE_PROFIT_MIN_PROFIT_CENTS, canonical_position_key
+from merid.position_management.position import (
+    Position,
+    PositionSide,
+    TrailingType,
+    TrailingState,
+    RiskParamsState,
+    TAKE_PROFIT_MIN_PROFIT_CENTS,
+    SIDE_SPACE_TOTAL_CENTS,
+    canonical_position_key,
+)
 from merid.position_management.exit_policy import ExitAction, ExitReason, is_position_quarantined, is_exit_reason_allowed_for_quarantine
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver
 from merid.position_management.exit_decision import ExitDecision, ExitSourceLayer, get_priority_for_reason
@@ -2249,9 +2258,10 @@ class PositionMonitor:
                     )
                     if fallback_tp is not None and fallback_tp > entry_ref:
                         position.take_profit_price_cents = fallback_tp
+                        max_gain = SIDE_SPACE_TOTAL_CENTS - entry_ref
                         position.take_profit_r_multiple = (
-                            (fallback_tp - entry_ref) / (100.0 - entry_ref)
-                            if (100 - entry_ref) > 0
+                            (fallback_tp - entry_ref) / max_gain
+                            if max_gain > 0
                             else 0.0
                         )
                         position.risk_params_schema_version = max(
@@ -2481,7 +2491,7 @@ class PositionMonitor:
                                 # profit = own-side price rising. A target at or below entry would
                                 # trigger at a loss or breakeven.
                                 if base_target <= entry_price:
-                                    fallback_target = min(99, entry_price + max(1, (100 - entry_price) * 3 // 5))
+                                    fallback_target = min(99, entry_price + max(1, (SIDE_SPACE_TOTAL_CENTS - entry_price) * 3 // 5))
                                     logger.error(
                                         "[DYNAMIC-TP-CONFIG] Zone target %dc <= entry %dc for position=%s - "
                                         "INVALID (would trigger at breakeven/loss). Using fallback target=%dc. "
