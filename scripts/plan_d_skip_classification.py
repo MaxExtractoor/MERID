@@ -154,6 +154,23 @@ def main(argv: Optional[Any] = None) -> int:
         default=None,
         help="Path to golden_records.db for selected/ordered cross-check (default: data/golden_records.db)",
     )
+    parser.add_argument(
+        "--infrastructure-alert-threshold",
+        type=float,
+        default=None,
+        help="If the infrastructure_skip share exceeds this percent, exit non-zero and emit an alert (default: 20.0)",
+    )
+    parser.add_argument(
+        "--infrastructure-absolute-threshold",
+        type=int,
+        default=None,
+        help="If the absolute infrastructure_skip count exceeds this value, exit non-zero (default: 500)",
+    )
+    parser.add_argument(
+        "--fail-on-alert",
+        action="store_true",
+        help="Exit with code 2 when an infrastructure alert fires",
+    )
     args = parser.parse_args(argv)
 
     telemetry_path = Path(args.telemetry or ROOT / "logs" / "decision_telemetry.jsonl")
@@ -275,6 +292,54 @@ def main(argv: Optional[Any] = None) -> int:
         "golden_records_cross_check": golden_summary,
     }
 
+    # Infrastructure-skip alarm: this is the operational guard that signals
+    # when the system is silently missing tradable windows because markets are
+    # unavailable, stale, illiquid, or in warmup.
+    infra_count = bucket_counts.get("infrastructure_skip", 0)
+    infra_pct = (100.0 * infra_count / skipped) if skipped else 0.0
+    infra_threshold_pct = args.infrastructure_alert_threshold
+    infra_threshold_abs = args.infrastructure_absolute_threshold
+    if infra_threshold_pct is None and infra_threshold_abs is None:
+        infra_threshold_pct = 20.0
+        infra_threshold_abs = 500
+    if infra_threshold_pct is not None and infra_pct > infra_threshold_pct:
+        alert_msg = (
+            f"[INFRASTRUCTURE-SKIP-ALERT] infrastructure_skip={infra_count} "
+            f"({infra_pct:.1f}% of skipped) exceeds threshold "
+            f"{infra_threshold_pct:.1f}%"
+        )
+        print(alert_msg, file=sys.stderr)
+        report["infrastructure_alert"] = {
+            "fired": True,
+            "type": "percentage",
+            "threshold_pct": infra_threshold_pct,
+            "actual_pct": round(infra_pct, 2),
+            "actual_count": infra_count,
+            "message": alert_msg,
+        }
+    elif infra_threshold_abs is not None and infra_count > infra_threshold_abs:
+        alert_msg = (
+            f"[INFRASTRUCTURE-SKIP-ALERT] infrastructure_skip={infra_count} "
+            f"exceeds absolute threshold {infra_threshold_abs}"
+        )
+        print(alert_msg, file=sys.stderr)
+        report["infrastructure_alert"] = {
+            "fired": True,
+            "type": "absolute",
+            "threshold_abs": infra_threshold_abs,
+            "actual_count": infra_count,
+            "actual_pct": round(infra_pct, 2),
+            "message": alert_msg,
+        }
+    else:
+        report["infrastructure_alert"] = {
+            "fired": False,
+            "threshold_pct": infra_threshold_pct,
+            "threshold_abs": infra_threshold_abs,
+            "actual_pct": round(infra_pct, 2),
+            "actual_count": infra_count,
+        }
+
     with out_report.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, default=str, sort_keys=True)
 
@@ -285,6 +350,8 @@ def main(argv: Optional[Any] = None) -> int:
         print(f"  {bucket}: {count} ({pct:.1f}%)")
     print(f"  Report: {out_report}")
 
+    if report["infrastructure_alert"]["fired"] and args.fail_on_alert:
+        return 2
     return 0
 
 
