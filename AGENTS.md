@@ -299,3 +299,55 @@ the concrete execution sequence that causes the failure.
   Promote the output to `data/probability_tail_calibration.json` only after a
   hold-out paper/shadow window (>= 5 days, >= 200 NO-held trades) shows Brier
   <= 0.20 and reliability gaps within +/- 0.10 per bucket.
+
+## Golden-record and bankroll alert thresholds
+
+The golden-record audit classifies divergences by severity:
+
+- **Critical** (page/Slack immediately, halt new entries if unresolved):
+  `side_mismatch`, `action_mismatch`, `qty_mismatch`, `overfill`,
+  `missing_order`, `unmatched_fill`, `settlement_mismatch`,
+  `missing_settlement_for_settled_market`, `missing_pnl`.
+- **Warning** (review same day): `rejected_without_reason`.
+- **Price slippage**: a `price_slippage_Nc` flag is emitted when the economic
+  fill price is worse than the intended price by more than
+  `MERID_GOLDEN_RECORD_SLIPPAGE_THRESHOLD_CENTS` (default 2c).  Slippage flags
+  are warnings by default and should be reviewed for execution-quality issues.
+
+The bankroll/equity reconciler uses:
+
+- `MERID_BANKROLL_DRIFT_WARNING_PCT` / `MERID_BANKROLL_DRIFT_WARNING_USD`
+  (default 0.5% / $1.00)
+- `MERID_BANKROLL_DRIFT_CRITICAL_PCT` / `MERID_BANKROLL_DRIFT_CRITICAL_USD`
+  (default 1.0% / $5.00)
+
+Any `critical` bankroll record should trigger an immediate manual reconciliation
+and a circuit-breaker review; `warning` records should be reviewed at end of day.
+
+## Audit plan: C (fill/settlement triage) and D (model drift + skip classification)
+
+C. Fill/settlement triage:
+1. Investigate every `unmatched_fill`/`missing_order` within 24h.  Confirm the
+   fill is quarantined and did not mutate exposure, and trace the parent
+   `client_order_id`/`order_id` from exchange fills.
+2. Add settlement provenance: ensure each `record_settlement` row captures the
+   `entry_intent_id`, `fill_id`, and `avg_price_cents` from the closed position.
+3. Cross-check `settlement_outcomes.jsonl` against the fact table: every settled
+   market with a MERID position must have a settlement row, and every settlement
+   row with non-zero P&L must trace to an order/fill.
+4. Add an `unexplained_settlement_pnl` flag for records that have settlement
+   P&L but no linked order/fill (after the settlement-only noise filter).
+
+D. Model drift + skip classification:
+1. Join `golden_records.db` with `logs/decision_telemetry.jsonl` by
+   `decision_id`/`decision_trace_id` to get `p_selected` and the held side.
+2. For each price bucket (0-19c, 20-39c, 40-59c, 60-79c, 80-99c), compute
+   Brier score, reliability diagram gaps, and realized win rate per bucket.
+3. Compare realized win rate against `p_selected`; flag a bucket as miscalibrated
+   when the gap exceeds 0.10 for two consecutive days.
+4. Classify skipped/abandoned signals: `selected` -> no order, `ordered` ->
+   rejected/unfilled, `filled` -> not settled.  Correlate skip rate with
+   market width, time-of-day, model edge, and asset.
+5. Promote/refit `data/probability_tail_calibration.json` only after a
+   hold-out paper/shadow window passes the thresholds in the probability
+   calibration notes above.

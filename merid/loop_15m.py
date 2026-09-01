@@ -1969,6 +1969,24 @@ class Kalshi15mLoop:
             logger.error("[15m-LOOP] CRITICAL: PositionMonitor is None - exit policies will not execute!")
             raise RuntimeError("PositionMonitor is None - exit policies will not execute")
 
+        # P2.7.1: Start the trade attribution fact table (non-fatal, best-effort).
+        try:
+            from merid.monitoring.trade_attribution_fact_table import TradeAttributionTable
+            trade_attribution = TradeAttributionTable.get_instance()
+            await trade_attribution.start()
+            logger.info("[STARTUP-STACK] P2.7.1: TradeAttributionTable started")
+        except Exception as e:
+            logger.warning("[STARTUP-STACK] P2.7.1: TradeAttributionTable start failed (non-fatal): %s", e)
+
+        # P2.7.2: Start the bankroll reconciler (non-fatal, best-effort).
+        try:
+            from merid.monitoring.bankroll_reconciler import BankrollReconciler
+            bankroll_reconciler = BankrollReconciler.get_instance()
+            await bankroll_reconciler.start()
+            logger.info("[STARTUP-STACK] P2.7.2: BankrollReconciler started")
+        except Exception as e:
+            logger.warning("[STARTUP-STACK] P2.7.2: BankrollReconciler start failed (non-fatal): %s", e)
+
 
 def _safe_int_cents(value: Any) -> Optional[int]:
     """Convert a value to an integer number of cents, rejecting non-integral values."""
@@ -5251,6 +5269,26 @@ async def stop(self) -> None:
             await self._loop_task
         except asyncio.CancelledError:
             pass
+
+    # Stop audit services.
+    try:
+        from merid.monitoring.trade_attribution_fact_table import TradeAttributionTable
+        trade_attribution = TradeAttributionTable.get_instance()
+        if trade_attribution is not None:
+            await trade_attribution.stop()
+            logger.info("[15m-LOOP] Stopped TradeAttributionTable")
+    except Exception as e:
+        logger.warning("[15m-LOOP] Failed to stop TradeAttributionTable: %s", e)
+
+    try:
+        from merid.monitoring.bankroll_reconciler import BankrollReconciler
+        bankroll_reconciler = BankrollReconciler.get_instance()
+        if bankroll_reconciler is not None:
+            await bankroll_reconciler.stop()
+            logger.info("[15m-LOOP] Stopped BankrollReconciler")
+    except Exception as e:
+        logger.warning("[15m-LOOP] Failed to stop BankrollReconciler: %s", e)
+
     logger.info("[15m-LOOP] Stop requested")
 
 async def _run_one_cycle(self, tick: int) -> None:

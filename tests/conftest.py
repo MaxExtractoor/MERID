@@ -20,6 +20,10 @@ _os.environ["MERID_CFB_RTI_SHADOW_TELEMETRY"] = "0"
 # guards that require full production stack are not enforced.
 _os.environ["MERID_PM_TRADING_MODE"] = "mock"
 _os.environ["MERID_ALLOW_LIVE_TRADES"] = "false"
+# 2026-09-01: Force the high-level trade mode to paper so the dirty-tree/live-money
+# safety gate does not fire on every dev test run with an uncommitted tree.
+# Tests that explicitly exercise live-trading startup validation set this to live.
+_os.environ["MERID_TRADE_MODE"] = "paper"
 # 2026-08-28: The archived crypto15mallocator gate is not available in the
 # lean 15m stack; disable it so order-gate unit tests do not fail-closed.
 _os.environ["MERID_DISABLE_CRYPTO15M_GATE"] = "1"
@@ -29,6 +33,10 @@ _os.environ["MERID_DISABLE_SHARED_RISK_GUARD"] = "true"
 # httpx, otherwise repo .env (MERID_CFB_RTI_SOURCE=kalshi_ws) causes the tests
 # to start the live Kalshi WebSocket stream and fail.
 _os.environ["MERID_CFB_RTI_SOURCE"] = "direct"
+# 2026-09-01: Disable the event-driven bankroll reconciler in unit tests.
+# It is tested in tests/monitoring with an explicit instance; live call sites
+# must not attempt to fetch a real bankroll service during unrelated tests.
+_os.environ["MERID_BANKROLL_RECONCILER_ENABLED"] = "0"
 # 2026-08-20: Force the order-router test slippage budget to the default 5c so
 # repo .env overrides (e.g. MERID_MAX_SLIPPAGE_CENTS=15) do not break the
 # required test suite.

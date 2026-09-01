@@ -5981,6 +5981,20 @@ class KalshiPositionCache:
         except Exception as e:
             logger.warning("[POSITION-CACHE] trade attribution record_settlement failed: %s", e)
 
+        # Event-driven bankroll reconciliation after settlement.
+        try:
+            from merid.monitoring.bankroll_reconciler import get_bankroll_reconciler
+            reconciler = get_bankroll_reconciler()
+            if reconciler is not None:
+                reconciler.record_settlement(
+                    ticker=market_ticker,
+                    outcome=outcome,
+                    settlement_price_cents=settlement_price_cents,
+                    realized_pnl_cents=realized_pnl_cents,
+                )
+        except Exception as e:
+            logger.warning("[POSITION-CACHE] bankroll reconciler record_settlement failed: %s", e)
+
     async def _lookup_fill_source(
         self,
         fill_id: Optional[str],
