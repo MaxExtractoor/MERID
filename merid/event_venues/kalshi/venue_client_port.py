@@ -119,6 +119,25 @@ class KalshiVenueClientExecutionPort:
                     table.record_order(request, response, None)
             except Exception as e:
                 logger.warning("[VENUE-CLIENT-PORT] trade attribution record_order failed: %s", e)
+
+            # Event-driven bankroll reconciliation after order rejection.
+            try:
+                from merid.monitoring.bankroll_reconciler import get_bankroll_reconciler
+                reconciler = get_bankroll_reconciler()
+                if reconciler is not None:
+                    reconciler.record_order(
+                        client_order_id=request.client_order_id,
+                        ticker=request.ticker,
+                        side=request.outcome,
+                        action=request.side,
+                        quantity_cc=int(request.size * 100) if request.size is not None else None,
+                        price_cents=request.price_cents,
+                        status="rejected",
+                        error=str(response.error),
+                    )
+            except Exception as e:
+                logger.warning("[VENUE-CLIENT-PORT] bankroll reconciler record_order failed: %s", e)
+
             return response
 
         placed: PlacedOrder = result.data
@@ -130,6 +149,25 @@ class KalshiVenueClientExecutionPort:
                 table.record_order(request, response, placed)
         except Exception as e:
             logger.warning("[VENUE-CLIENT-PORT] trade attribution record_order failed: %s", e)
+
+        # Event-driven bankroll reconciliation after order placement.
+        try:
+            from merid.monitoring.bankroll_reconciler import get_bankroll_reconciler
+            reconciler = get_bankroll_reconciler()
+            if reconciler is not None:
+                reconciler.record_order(
+                    client_order_id=request.client_order_id,
+                    order_id=placed.order_id,
+                    ticker=request.ticker,
+                    side=request.outcome,
+                    action=request.side,
+                    quantity_cc=int(request.size * 100) if request.size is not None else None,
+                    price_cents=request.price_cents,
+                    status=placed.status,
+                )
+        except Exception as e:
+            logger.warning("[VENUE-CLIENT-PORT] bankroll reconciler record_order failed: %s", e)
+
         return response
 
     async def get_order(

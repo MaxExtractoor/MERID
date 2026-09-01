@@ -1998,6 +1998,25 @@ class KalshiFillsLedger:
                 except Exception as e:
                     logger.warning("[FILLS-LEDGER] trade attribution record_fill failed: %s", e)
 
+                # Event-driven bankroll reconciliation after a fill.
+                try:
+                    from merid.monitoring.bankroll_reconciler import get_bankroll_reconciler
+                    reconciler = get_bankroll_reconciler()
+                    if reconciler is not None:
+                        reconciler.record_fill(
+                            client_order_id=fill.client_order_id,
+                            order_id=fill.order_id,
+                            fill_id=fill.fill_id,
+                            ticker=fill.market_ticker,
+                            side=fill.canonical_position_side or fill.side,
+                            action=fill.canonical_position_action or fill.action,
+                            quantity_cc=fill.quantity_cc,
+                            price_cents=fill.canonical_leg_price_cents or fill.price_cents,
+                            fee_cents=fee_dollars_to_cents(fill.fee_cost),
+                        )
+                except Exception as e:
+                    logger.warning("[FILLS-LEDGER] bankroll reconciler record_fill failed: %s", e)
+
                 # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
                 intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None
                 # 2026-08-12: Log canonical side for accounting traceability.
@@ -2307,6 +2326,25 @@ class KalshiFillsLedger:
                     await table.flush()
             except Exception as e:
                 logger.warning("[FILLS-LEDGER] trade attribution record_fill failed: %s", e)
+
+            # Event-driven bankroll reconciliation after a fill.
+            try:
+                from merid.monitoring.bankroll_reconciler import get_bankroll_reconciler
+                reconciler = get_bankroll_reconciler()
+                if reconciler is not None:
+                    reconciler.record_fill(
+                        client_order_id=fill.client_order_id,
+                        order_id=fill.order_id,
+                        fill_id=fill.fill_id,
+                        ticker=fill.market_ticker,
+                        side=fill.canonical_position_side or fill.side,
+                        action=fill.canonical_position_action or fill.action,
+                        quantity_cc=fill.quantity_cc,
+                        price_cents=fill.canonical_leg_price_cents or fill.price_cents,
+                        fee_cents=fee_dollars_to_cents(fill.fee_cost),
+                    )
+            except Exception as e:
+                logger.warning("[FILLS-LEDGER] bankroll reconciler record_fill failed: %s", e)
 
             # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
             intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None

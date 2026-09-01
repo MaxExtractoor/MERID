@@ -986,6 +986,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[LIFESPAN] Step 9k0: Error stopping trade attribution: {e}")
 
+    # Stop bankroll reconciler
+    try:
+        bankroll_reconciler = getattr(app.state, "bankroll_reconciler", None)
+        if bankroll_reconciler is not None:
+            logger.info("[LIFESPAN] Step 9k0b: Stopping bankroll reconciler")
+            await bankroll_reconciler.stop()
+            logger.info("[LIFESPAN] Step 9k0b: Bankroll reconciler stopped")
+    except AttributeError as e:
+        logger.warning(f"[LIFESPAN] Step 9k0b: Bankroll reconciler missing stop method: {e}")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9k0b: Error stopping bankroll reconciler: {e}")
+
     # CRITICAL FIX: Close database connections if any
     try:
         logger.info("[LIFESPAN] Step 9k: Closing database connections")
@@ -3349,6 +3361,17 @@ async def _run_full_startup_in_lifespan(app):
                 logger.info("[STARTUP-STACK] P2.7.1: TradeAttributionTable started")
             except Exception as e:
                 logger.warning("[STARTUP-STACK] P2.7.1: TradeAttributionTable start failed (non-fatal): %s", e)
+
+            # P2.7.2: Start the bankroll reconciler (non-fatal, best-effort).
+            # This forces a bankroll-vs-exchange check after every order, fill, and settlement.
+            try:
+                from merid.monitoring.bankroll_reconciler import BankrollReconciler
+                bankroll_reconciler = BankrollReconciler.get_instance()
+                await bankroll_reconciler.start()
+                app.state.bankroll_reconciler = bankroll_reconciler
+                logger.info("[STARTUP-STACK] P2.7.2: BankrollReconciler started")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.7.2: BankrollReconciler start failed (non-fatal): %s", e)
 
             # CRITICAL FIX: Start CryptoHedgeEngine auto-exit loop for hedge position TP/SL
             # This ensures hedge positions are automatically exited when TP/SL levels are hit
