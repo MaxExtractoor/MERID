@@ -49,7 +49,7 @@ class TestPerformanceCalculator:
     def test_calculate_prediction_time_metrics(self):
         times = [0.01, 0.02, 0.03, 0.04, 0.05]
         metrics = PerformanceCalculator.calculate_prediction_time_metrics(times)
-        assert metrics["avg_time"] == 0.03
+        assert metrics["avg_time"] == pytest.approx(0.03)
         assert "p95_time" in metrics
 
 

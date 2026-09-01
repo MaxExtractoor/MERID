@@ -9264,7 +9264,9 @@ class LeanAgent15m:
             history = list(getattr(self, "_spot_price_history", {}).get(asset, []))
             if history:
                 now_ms = int(time.time() * 1000)
-                last_ms = history[-1][0] if isinstance(history[-1], (list, tuple)) else now_ms
+                last_ts = history[-1][0] if isinstance(history[-1], (list, tuple)) else now_ms
+                # Normalize seconds timestamps to milliseconds for age comparison
+                last_ms = int(last_ts * 1000.0) if last_ts < 1e10 else int(last_ts)
                 if (now_ms - last_ms) > 2 * _velocity_max_age_ms(asset):
                     logger.info(
                         "[VELOCITY-SOURCE] asset=%s source=internal_fallback last_history_ms=%d "
@@ -9302,6 +9304,12 @@ class LeanAgent15m:
 
         weighted_velocity = 0.0
 
+        def _to_ms(ts):
+            # Detect seconds-since-epoch timestamps and normalize to milliseconds
+            if ts < 1e10:
+                return int(ts * 1000.0)
+            return int(ts)
+
         for window_sec, weight in zip(self._velocity_windows, self._momentum_weights):
 
             target_time = current_time - int(window_sec * 1000)
@@ -9311,7 +9319,7 @@ class LeanAgent15m:
             # Handle OHLC format: (timestamp, close, open, high, low)
             for entry in reversed(history):
                 if len(entry) >= 2:
-                    ts = entry[0]
+                    ts = _to_ms(entry[0])
                     price = entry[1]  # Use close price for velocity
                     if ts <= target_time:
                         prev_price = price

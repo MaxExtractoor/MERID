@@ -12,6 +12,9 @@ import os
 from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
+from utils.logger import get_logger
+
+logger = get_logger("augur_trading_layer")
 
 
 class AugurTradingLayer:

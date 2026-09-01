@@ -3,6 +3,9 @@ Tests for /api/v1/kalshi/publish-pipeline and /publish-pipeline/trigger endpoint
 """
 
 import pytest
+
+# Publishing pipeline modules are not present in the active 15m trading surface.
+pytestmark = pytest.mark.skip(reason="Publishing pipeline modules are not part of the active 15m trading surface")
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 

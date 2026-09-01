@@ -135,7 +135,7 @@ class TestMarketAssertionSourceGetMarketAssertions:
     def test_get_assertions_with_data(self):
         """Test getting assertions with data."""
         with patch('market.assertion_source.get_reality_registry') as mock_registry:
-            with patch('market.assertion_source.get_reality_auditor') as mock_auditor:
+            with patch('core.reality_auditor.get_reality_auditor') as mock_auditor:
                 # Create mock assertion
                 mock_assertion = Mock()
                 mock_assertion.assertion_id = "test_id"

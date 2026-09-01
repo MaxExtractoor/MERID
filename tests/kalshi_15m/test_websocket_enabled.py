@@ -19,8 +19,11 @@ class TestWebSocketEnabledByDefault:
         This verifies the fix for the IDLE issue where _rest_fallback_mode was
         forced to True, preventing WebSocket from being used.
         """
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        
+        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge, reset_bridge
+
+        # Allow a fresh instance even if another test already created the singleton.
+        reset_bridge()
+
         # Create a new bridge instance
         bridge = KalshiWebSocketBridge()
         
@@ -36,24 +39,24 @@ class TestWebSocketEnabledByDefault:
         This verifies the fix for the 4+ second callback latency issue caused
         by excessive diagnostic logging.
         """
+        import asyncio
         from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        
+
         # Reset singleton to allow test instantiation
         KalshiWebSocketBridge._instance_created = False
-        
+
         # Create a new bridge instance
         bridge = KalshiWebSocketBridge()
-        
+
         # Verify callback exists and is callable
         assert callable(bridge._enqueue_event), "_enqueue_event should be callable"
-        
+
         # Verify it can handle events without excessive logging
         test_event = {"type": "orderbook_delta", "ticker": "KXBTC15M-TEST"}
-        
-        # This should not raise an exception and should be fast
-        # (no excessive logging that caused 4+ second latency)
-        bridge._enqueue_event(test_event)
-        
+
+        # _enqueue_event is an async coroutine in the low-latency path.
+        asyncio.run(bridge._enqueue_event(test_event))
+
         # Verify event was tracked
         assert bridge._events_seen == 1, "Event should be tracked"
         assert bridge._type_counts.get("orderbook_delta", 0) == 1, "Event type should be counted"

@@ -18,6 +18,7 @@ import collections
 import concurrent.futures
 import statistics
 import sys
+
 import threading
 import time
 import unittest
@@ -26,6 +27,9 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Sports/live-betting modules are legacy and not part of the active 15m crypto surface.
+pytestmark = pytest.mark.skip(reason="Sports/live betting integration is legacy, not part of active 15m crypto system")
 
 sys.path.insert(0, ".")
 

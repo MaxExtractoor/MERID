@@ -352,7 +352,12 @@ class TestRateLimitHandling:
             action="buy",
             price_cents=55,
             count=10,
-            source="test"
+            source="test",
+            time_to_expiry_seconds=600,
+            exit_policy_id="test",
+            window_resolution_id="test",
+            risk_tier="A",
+            max_hold_seconds=600,
         )
         
         # Simulate rate limit hit

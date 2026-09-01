@@ -32,6 +32,16 @@ from merid.event_venues.kalshi.position_cache import KalshiPositionCache, _is_ex
 
 
 @pytest.fixture(autouse=True)
+def _expire_grace_window(monkeypatch):
+    """Use a 15-minute settlement buffer for expired-ticker assertions.
+
+    The repo .env sets MERID_POSITION_EXPIRY_GRACE_SECONDS=60; the
+    TestExpiredTickerFiltering cases are written against a 15-minute buffer.
+    """
+    monkeypatch.setenv("MERID_POSITION_EXPIRY_GRACE_SECONDS", "900")
+
+
+@pytest.fixture(autouse=True)
 async def clear_cache():
     """Clear cache before each test to prevent state leakage."""
     cache = KalshiPositionCache()

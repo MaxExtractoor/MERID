@@ -138,20 +138,20 @@ class TestPortfolioOptimizerBasics(unittest.TestCase):
         self.assertEqual(opt.global_risk_budget, 0)
     
     def test_custom_initialization(self):
-        """Test optimizer with custom config."""
+        """Test optimizer with custom percent-of-equity config."""
         config = {
             "assets": ["BTC", "ETH"],
             "max_concurrent_assets": 2,
-            "min_risk_usd_per_trade": 2,
-            "max_risk_usd_per_trade": 5,
+            "min_risk_pct_per_trade": 0.005,
+            "max_risk_pct_per_trade": 0.02,
             "risk_free_rate": 0.02,
         }
         opt = PortfolioOptimizer(config)
-        
+
         self.assertEqual(opt.assets, ["BTC", "ETH"])
         self.assertEqual(opt.max_concurrent_assets, 2)
-        self.assertEqual(opt.min_risk_usd, 2)
-        self.assertEqual(opt.max_risk_usd, 5)
+        self.assertEqual(opt.min_risk_pct, 0.005)
+        self.assertEqual(opt.max_risk_pct, 0.02)
         self.assertEqual(opt.risk_free_rate, 0.02)
     
     def test_invalid_asset_raises(self):

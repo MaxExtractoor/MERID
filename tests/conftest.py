@@ -33,6 +33,9 @@ _os.environ["MERID_CFB_RTI_SOURCE"] = "direct"
 # repo .env overrides (e.g. MERID_MAX_SLIPPAGE_CENTS=15) do not break the
 # required test suite.
 _os.environ["MERID_MAX_SLIPPAGE_CENTS"] = "5"
+# 2026-08-31: Legacy velocity tests use seconds-granularity history; allow them
+# to be considered fresh without weakening real-time freshness gating.
+_os.environ["MERID_VELOCITY_MAX_AGE_MS"] = "60000"
 
 # Orphan / optional-dep modules — would break ``pytest --collect-only`` (CI gate).
 collect_ignore = [

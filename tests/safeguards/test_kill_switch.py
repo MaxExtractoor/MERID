@@ -35,7 +35,7 @@ def _fresh_controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """
     ks_file = tmp_path / "kill_switch.json"
     monkeypatch.setenv("MERID_RISK_KS_FILE", str(ks_file))
-    ctrl = RiskController(daily_loss_limit=100.0)
+    ctrl = RiskController(daily_loss_limit=100.0, daily_loss_enabled=True)
     return ctrl, ks_file
 
 

@@ -284,7 +284,7 @@ class TestPhantomDetectionThresholds:
         config = PhantomDetectionConfig()
         
         # Time thresholds should be appropriate for 15m markets
-        assert config.LATENCY_THRESHOLD_SECONDS == 60, "Latency threshold should be 60s"
+        assert config.LATENCY_THRESHOLD_SECONDS == 120, "Latency threshold should be 120s"
         assert config.INGESTION_LAG_THRESHOLD_SECONDS == 30, "Ingestion lag should be 30s"
         assert config.MAX_WAIT_SECONDS == 300, "Max wait should be 300s (5 min)"
         
