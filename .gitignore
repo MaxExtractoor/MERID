@@ -418,6 +418,7 @@ data/*_provenance.json
 data/kalshi_*.json
 data/trading_circuit_breaker_http_watermark.json
 data/exit_intents*.json
+data/backup_*/
 data/final_state_output.txt
 
 # Devin/live monitoring artifacts

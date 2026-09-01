@@ -127,11 +127,19 @@ MERID_TP_DEBOUNCE_MS = int(os.getenv("MERID_TP_DEBOUNCE_MS", "0"))
 # below it.  Override with MERID_FALLBACK_STOP_LOSS_BUFFER_CENTS.
 FALLBACK_STOP_LOSS_BUFFER_CENTS = int(os.getenv("MERID_FALLBACK_STOP_LOSS_BUFFER_CENTS", "5"))
 
+# SIDE-SPACE constant: a binary contract's price space spans 0-100 cents in the
+# contract's own side (YES or NO).  No 100-cent mirroring is used.
+SIDE_SPACE_TOTAL_CENTS = 100
+
 
 @dataclass
 class Position:
     """
     Position model for swing trading exit management.
+
+    SIDE-SPACE semantics: prices live in the contract's own side price space
+    (YES cents for long YES, NO cents for long NO).  Both sides are treated as
+    long their own side; no mirroring via the one-dollar complement.
 
     Separated from orders to track PnL and exit logic independently.
     Populated from OrderIntent once a fill is confirmed via RestingOrderMonitor.
@@ -480,7 +488,8 @@ class Position:
                     )
                     if fallback_tp > entry_ref and max_executable_tp_cents > entry_ref:
                         self.take_profit_price_cents = fallback_tp
-                        self.take_profit_r_multiple = (fallback_tp - entry_ref) / (100.0 - entry_ref) if (100 - entry_ref) > 0 else 0.0
+                        max_gain = SIDE_SPACE_TOTAL_CENTS - entry_ref
+                        self.take_profit_r_multiple = (fallback_tp - entry_ref) / max_gain if max_gain > 0 else 0.0
                         if self.risk_params_state == RiskParamsState.UNKNOWN:
                             self.risk_params_state = RiskParamsState.FALLBACK
                 except Exception:
@@ -503,9 +512,10 @@ class Position:
                         )
                         if fallback_tp is not None and fallback_tp > entry_ref:
                             self.take_profit_price_cents = fallback_tp
+                            max_gain = SIDE_SPACE_TOTAL_CENTS - entry_ref
                             self.take_profit_r_multiple = (
-                                (fallback_tp - entry_ref) / (100.0 - entry_ref)
-                                if (100 - entry_ref) > 0
+                                (fallback_tp - entry_ref) / max_gain
+                                if max_gain > 0
                                 else 0.0
                             )
                             self.risk_params_schema_version = max(
