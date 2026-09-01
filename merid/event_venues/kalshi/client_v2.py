@@ -501,14 +501,15 @@ class KalshiClientV2:
         # because httpx/anyio cancellation has been observed to ignore external
         # cancel scopes, causing calls to run for 15-30s despite a 10s deadline.
         if timeout is None:
-            req_timeout = httpx.Timeout(
-                10.0, connect=5.0, read=10.0, write=5.0, pool=5.0
-            )
+            # Use a uniform phase timeout for balance fetches.  Keep write tight
+            # because this is a GET with no request body.
+            req_timeout = httpx.Timeout(timeout=10.0, write=5.0)
         elif isinstance(timeout, (int, float)):
             cap = float(timeout)
-            req_timeout = httpx.Timeout(
-                cap, connect=min(cap, 5.0), read=cap, write=min(cap, 5.0), pool=min(cap, 5.0)
-            )
+            # Balance fetches must not be starved of connection/pool time under
+            # load.  Use the configured cap for connect/read/pool, and keep
+            # write tight because this is a GET with no body.
+            req_timeout = httpx.Timeout(timeout=cap, write=min(cap, 5.0))
         else:
             req_timeout = timeout
 
