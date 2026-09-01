@@ -12714,39 +12714,37 @@ async def _route_live(
         except Exception as dedup_err:
             logger.warning("[ORDER-ATTEMPT-DEDUP-ERROR] Durable dedup check failed (non-fatal): %s", dedup_err)
         
-        # Convert Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO) to simple outcome_id (yes/no)
-        # VenueOrder expects outcome_id to be "yes" or "no" for price field mapping
+        # Convert Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO) to
+        # simple outcome_id (yes/no).  ``parse_kalshi_side`` is the canonical
+        # authority for this mapping; string matching is a fallback only.
+        # For SELL_NO: traded outcome = "no", action = "sell".
         outcome_id = intent.side
-        if "YES" in intent.side:
-            outcome_id = "yes"
-        elif "NO" in intent.side:
-            outcome_id = "no"
-        
-        # CRITICAL FIX: Extract action from Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
-        # The intent.action field contains the lowercase action ("buy"/"sell") from signal generation
-        # But after conversion in loop_15m.py, intent.side contains the full Kalshi format (BUY_YES, etc.)
-        # We need to extract the action from the Kalshi-formatted side, not use intent.action
-        # This prevents side inversion when intent.action doesn't match the Kalshi side format
-        if "BUY" in intent.side:
-            order_action = "buy"
-        elif "SELL" in intent.side:
-            order_action = "sell"
-        else:
-            # Fallback to intent.action if not in Kalshi format
-            order_action = intent.action.lower() if intent.action else "buy"
+        order_action = (intent.action or "buy").lower()
+        try:
+            _kalshi_outcome, _kalshi_action = parse_kalshi_side(
+                (intent.side or "").upper()
+            )
+            outcome_id = _kalshi_outcome
+            order_action = _kalshi_action
+        except Exception:
+            if "YES" in (intent.side or ""):
+                outcome_id = "yes"
+            elif "NO" in (intent.side or ""):
+                outcome_id = "no"
 
-        # CRITICAL DEBUG: Log action extraction to diagnose side inversion bugs
+        # SELL_NO exits a long NO position.  Its economic equivalent is BUY_YES,
+        # but it executes on the NO book: it sells NO at the NO bid.  The
+        # subsequent fill is canonicalized to a long-YES delta, which reduces the
+        # long-NO position in signed-YES exposure.
         logger.info(
             "[VENUE-ORDER-MAPPING-DEBUG] intent.side=%s intent.action=%s -> outcome_id=%s order_action=%s source=%s",
             intent.side, intent.action, outcome_id, order_action, intent.source
         )
-        # CRITICAL: Alert if action extraction might be wrong
         if intent.action and intent.action.lower() != order_action:
-            logger.critical(
-                "[VENUE-ORDER-MAPPING-ALERT] ACTION MISMATCH DETECTED! "
-                "intent.action=%s but extracted order_action=%s from intent.side=%s. "
-                "This indicates a side/action inversion bug.",
-                intent.action, order_action, intent.side
+            logger.warning(
+                "[VENUE-ORDER-MAPPING] action mismatch resolved by canonical side string: "
+                "intent.action=%s order_action=%s",
+                intent.action, order_action,
             )
 
         logger.info(

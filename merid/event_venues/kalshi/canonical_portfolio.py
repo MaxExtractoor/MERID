@@ -253,8 +253,8 @@ class CanonicalPortfolioSnapshot:
 
     @property
     def is_authoritative(self) -> bool:
-        """Return True only when the snapshot is matched *and* all paginated
-        sources that were queried are complete.
+        """Return True only when the snapshot is matched, all paginated sources
+        are complete, and no active ticker has a latched reconciliation break.
 
         New entries must use this; exits remain available when ``is_matched`` is
         false for the individual position.
@@ -263,14 +263,34 @@ class CanonicalPortfolioSnapshot:
             return False
         if not self.pagination_complete:
             return False
-        return all(
+        if not all(
             src is None or src.complete
             for src in (
                 self.positions_source_complete,
                 self.orders_source_complete,
                 self.fills_source_complete,
             )
-        )
+        ):
+            return False
+
+        # Latch portfolio authority false when the position cache has recorded an
+        # unresolved exchange/ledger/cache exposure break for any active ticker.
+        # REST-syncing the cache does not repair the ledger; only a subsequent
+        # three-way match may clear the halt.
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+
+            cache = get_position_cache()
+            if cache is not None:
+                for ticker in self.positions_by_ticker:
+                    if cache.is_reconciliation_halted(ticker):
+                        return False
+        except Exception:
+            # If the cache cannot be consulted, preserve the existing matched
+            # decision rather than fail-closed on a diagnostic lookup.
+            pass
+
+        return True
 
     def exchange_position_fp(self, position_key: str) -> Decimal:
         """Return the signed whole-contract position for a market, or zero."""

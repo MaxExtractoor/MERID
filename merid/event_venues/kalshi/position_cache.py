@@ -356,6 +356,26 @@ def _get_market_price_fallback(ticker: str) -> int:
     return 50
 
 
+def _position_current_price_cents(position) -> Optional[int]:
+    """Return the current executable price in the position's own side space.
+
+    Kalshi ``UnifiedMarketState.mid_cents`` is the YES mid.  For a long NO
+    position the own-side price is ``100 - YES_mid``.
+    """
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        state = get_kalshi_market_state_store().get_unified(position.market_id)
+        if state is None or state.mid_cents is None:
+            return None
+        yes_mid = int(round(state.mid_cents))
+        if position.side == "no":
+            return 100 - yes_mid
+        return yes_mid
+    except Exception as _exc:
+        logger.debug("position_cache: failed to fetch market state for %s: %s", position.market_id, _exc)
+        return None
+
+
 def _get_fallback_price_for_market(market_id: str) -> Optional[int]:
     """Get fallback price for a market based on asset.
 
@@ -4322,6 +4342,11 @@ class KalshiPositionCache:
                 if position.contracts > 0:
                     total_contracts += position.contracts
                     total_notional_usd += position.notional_usd
+                    # Refresh unrealized PnL from the current market price so the
+                    # health log shows an accurate mark-to-market, not a stale value.
+                    current_price = _position_current_price_cents(position)
+                    if current_price is not None:
+                        position.update_unrealized_pnl(current_price)
                     total_unrealized_pnl += position.unrealized_pnl_usd
                     position_count += 1
 

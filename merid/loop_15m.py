@@ -104,6 +104,27 @@ _MERID_EXIT_STOP_REASONS = frozenset({"stop_loss", "trailing_stop", "loss_cut_40
 # are bounded by the position cost basis, not the tight default loss cap.
 _MERID_EXIT_RISK_INVALIDATION_REASONS = frozenset({"signal_reversal", "model_invalidation"})
 
+# Single policy owner for "is a loss exit permitted?"  The guard layer decides
+# *whether* a loss is allowed by reason; the price validator only checks quote
+# quality, reduction, bounds, and (for profit exits) the net-profit floor.
+# A hard-risk exit must never be rejected solely because exit_price < entry.
+MERID_HARD_RISK_EXIT_REASONS = frozenset({
+    "stop_loss",
+    "trailing_stop",
+    "loss_cut_40pct",
+    "signal_reversal",
+    "model_invalidation",
+    "time_exit",
+    "reconciliation",
+    "expiry_liquidation",
+    "manual",
+})
+MERID_PROFIT_EXIT_REASONS = frozenset({
+    "take_profit",
+    "ratchet_floor",
+    "scale_out",
+})
+
 # CRITICAL FIX (2026-08-23): Statuses that prove the exchange terminally processed
 # the order and either accepted it or executed it.  ``request_completed`` alone is
 # not enough because it also includes rejected/canceled/expired statuses.
@@ -413,6 +434,7 @@ class EntryReadiness:
     quote_coherent: bool
     market_state_applied: bool
     portfolio_authoritative: bool
+    reconciliation_halted: bool
     intent_state_clean: bool
     queue_healthy: bool
     queue_lock_wait_ms: float
@@ -433,6 +455,7 @@ class EntryReadiness:
             f"quote_coherent={self.quote_coherent} "
             f"market_state_applied={self.market_state_applied} "
             f"portfolio_authoritative={self.portfolio_authoritative} "
+            f"reconciliation_halted={self.reconciliation_halted} "
             f"intent_state_clean={self.intent_state_clean} "
             f"queue_healthy={self.queue_healthy} "
             f"queue_lock_wait_ms={self.queue_lock_wait_ms:.2f} "
@@ -2832,21 +2855,15 @@ async def _execute_exit_order(
         # Position sizes already calculated and validated in invariant checks above
         # pre_position_size and expected_post_position_size are available from invariant section
         
-        # CRITICAL FIX (2026-08-27): Pre-trade profitability check is now fee-aware.
-        # It uses the canonical taker fee schedule and the position size to compute
-        # the minimum exit price that produces a positive net profit per contract.
-        # Risk-management exits (STOP_LOSS, SETTLEMENT_GUARD, TRAILING_STOP, TIME_STOP,
-        # RISK, EDGE_DECAY, etc.) bypass this check to prevent runaway losses.
+        # EXIT PRICE VALIDATION (2026-09-01): a single policy owner for "is a
+        # loss exit permitted?"  The exit guard above has already enforced reason,
+        # trusted provenance, quote freshness, max-loss/slippage, and reduction.
+        # This layer only checks: reason classification, price bounds, and (for
+        # discretionary profit exits) the configured net-profit floor.  It must
+        # never reject a hard-risk reduce-only exit solely because the price is
+        # below the average entry.
         entry_price = position.avg_entry_price_cents
-
-        # Reasons that must always execute, regardless of exit price vs entry.
-        exit_reason_str = str(getattr(exit_reason, 'value', exit_reason)).lower()
-        bypass_profit_check_reasons = {
-            'stop_loss', 'settlement_guard', 'auto_exit_99c', 'trail', 'trailing_stop',
-            'time_stop', 'edge_decay', 'risk', 'stale_data', 'candle_reversal',
-            'adaptive_timing', 'opportunity_cost', 'loss_cut_40pct', 'manual'
-        }
-        enforce_profit_check = exit_reason_str not in bypass_profit_check_reasons
+        _, canonical_exit_reason = _canonicalize_exit_reason(exit_reason)
 
         # Bid-ask spread warning (illiquid markets).
         MAX_SPREAD_THRESHOLD_CENTS = 5
@@ -2881,99 +2898,86 @@ async def _execute_exit_order(
                 spread_err
             )
 
-        if entry_price > 0:
-            profit_margin_cents = exit_price_cents - entry_price
-            if exit_price_cents < entry_price:
-                if enforce_profit_check:
-                    logger.error(
-                        "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s exit_price=%dc < entry_price=%dc "
-                        "REJECTING exit order - would sell below entry price causing loss. "
-                        "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                        position.position_id[:8],
-                        position.market_id,
-                        exit_price_cents,
-                        entry_price,
-                        exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                        position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                        profit_margin_cents,
-                        current_spread_cents
-                    )
-                    _clear_in_flight()
-                    return
-                else:
-                    logger.warning(
-                        "[EXIT-PRICE-VALIDATION-SKIP] position=%s market=%s exit_price=%dc < entry_price=%dc "
-                        "bypassing profitability check for risk exit. "
-                        "exit_reason=%s current_price=%dc profit_margin=%dc spread=%dc",
-                        position.position_id[:8],
-                        position.market_id,
-                        exit_price_cents,
-                        entry_price,
-                        exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                        position.current_price_cents if hasattr(position, 'current_price_cents') else 0,
-                        profit_margin_cents,
-                        current_spread_cents
-                    )
-            elif enforce_profit_check:
-                from merid.event_venues.kalshi.fees import (
-                    min_profitable_exit_price_cents,
-                    TAKE_PROFIT_MIN_PROFIT_CENTS,
-                )
-                min_profitable = min_profitable_exit_price_cents(
-                    entry_price,
-                    requested_exit_contracts,
-                    gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
-                )
-                if min_profitable is None:
-                    min_profitable = entry_price + TAKE_PROFIT_MIN_PROFIT_CENTS
-
-                if exit_price_cents < min_profitable:
-                    logger.error(
-                        "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s exit_price=%dc < min_profitable=%dc "
-                        "REJECTING exit order - would not be net profitable after round-trip taker fees. "
-                        "exit_reason=%s entry=%dc profit_margin=%dc spread=%dc",
-                        position.position_id[:8],
-                        position.market_id,
-                        exit_price_cents,
-                        min_profitable,
-                        exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                        entry_price,
-                        profit_margin_cents,
-                        current_spread_cents
-                    )
-                    _clear_in_flight()
-                    return
-
-                logger.info(
-                    "[EXIT-PRICE-VALIDATION-PASS] position=%s market=%s exit_price=%dc entry=%dc "
-                    "min_profitable=%dc profit_margin=%dc exit_reason=%s spread=%dc",
-                    position.position_id[:8],
-                    position.market_id,
-                    exit_price_cents,
-                    entry_price,
-                    min_profitable,
-                    profit_margin_cents,
-                    exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                    current_spread_cents
-                )
-            else:
-                logger.info(
-                    "[EXIT-PRICE-VALIDATION-PASS] position=%s market=%s exit_price=%dc entry=%dc "
-                    "risk_exit=true exit_reason=%s spread=%dc",
-                    position.position_id[:8],
-                    position.market_id,
-                    exit_price_cents,
-                    entry_price,
-                    exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-                    current_spread_cents
-                )
-        else:
-            logger.warning(
-                "[EXIT-PRICE-VALIDATION-SKIP] position=%s market=%s entry_price=%dc - cannot validate profitability",
+        # Strict price bounds.  Kalshi binary prices live in [1c, 99c].
+        if not (1 <= exit_price_cents <= 99):
+            logger.error(
+                "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s exit_price=%dc "
+                "outside valid Kalshi price bounds [1c, 99c]; reason=%s",
                 position.position_id[:8],
                 position.market_id,
-                entry_price
+                exit_price_cents,
+                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
             )
+            _clear_in_flight()
+            return
+
+        if canonical_exit_reason in MERID_PROFIT_EXIT_REASONS:
+            from merid.event_venues.kalshi.fees import (
+                min_profitable_exit_price_cents,
+                TAKE_PROFIT_MIN_PROFIT_CENTS,
+            )
+            min_profitable = min_profitable_exit_price_cents(
+                entry_price,
+                requested_exit_contracts,
+                gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
+            )
+            if min_profitable is None:
+                min_profitable = entry_price + TAKE_PROFIT_MIN_PROFIT_CENTS
+
+            if exit_price_cents < min_profitable:
+                logger.error(
+                    "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s exit_price=%dc < min_profitable=%dc "
+                    "REJECTING exit order - would not be net profitable after round-trip taker fees. "
+                    "exit_reason=%s entry=%dc profit_margin=%dc spread=%dc",
+                    position.position_id[:8],
+                    position.market_id,
+                    exit_price_cents,
+                    min_profitable,
+                    exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                    entry_price,
+                    exit_price_cents - entry_price,
+                    current_spread_cents
+                )
+                _clear_in_flight()
+                return
+
+            logger.info(
+                "[EXIT-PRICE-VALIDATION-PASS] position=%s market=%s exit_price=%dc entry=%dc "
+                "min_profitable=%dc profit_margin=%dc exit_reason=%s spread=%dc",
+                position.position_id[:8],
+                position.market_id,
+                exit_price_cents,
+                entry_price,
+                min_profitable,
+                exit_price_cents - entry_price,
+                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                current_spread_cents
+            )
+        elif canonical_exit_reason in MERID_HARD_RISK_EXIT_REASONS:
+            # Hard-risk exits are explicitly allowed to realize a loss.  The guard
+            # has already bounded the loss.  Never reject here for being below
+            # average entry price.
+            logger.info(
+                "[EXIT-PRICE-VALIDATION-PASS] position=%s market=%s exit_price=%dc entry=%dc "
+                "risk_exit=true exit_reason=%s spread=%dc",
+                position.position_id[:8],
+                position.market_id,
+                exit_price_cents,
+                entry_price,
+                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                current_spread_cents
+            )
+        else:
+            logger.error(
+                "[EXIT-PRICE-VALIDATION-FAIL] position=%s market=%s exit_price=%dc "
+                "unknown exit reason classification: %s",
+                position.position_id[:8],
+                position.market_id,
+                exit_price_cents,
+                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+            )
+            _clear_in_flight()
+            return
 
         # TRADE-TRACE LOG: Exit decision to IntentContract conversion
         # Logs direction, pre_size, post_size, and exit_reason on a single line
@@ -3991,6 +3995,22 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 and queue_lock_contention_count < 5
             )
 
+            # Per-ticker reconciliation fault latching.  An unresolved
+            # exchange/ledger/cache break for this ticker must make the
+            # portfolio non-authoritative *for this ticker* and block new
+            # entries.  Exits remain available.
+            reconciliation_halted = False
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+
+                cache = get_position_cache()
+                if cache is not None:
+                    reconciliation_halted = bool(cache.is_reconciliation_halted(ticker))
+            except Exception as cache_err:
+                logger.debug("[15m-LOOP] reconciliation halt check failed for %s: %s", ticker, cache_err)
+
+            ticker_portfolio_authoritative = portfolio_authoritative and not reconciliation_halted
+
             checks = [
                 ("catalog_ready", r["catalog_ready"]),
                 ("selected", r["selected"]),
@@ -3999,16 +4019,26 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 ("quote_fresh", quote_fresh),
                 ("quote_coherent", quote_coherent),
                 ("market_state_applied", market_state_applied),
-                ("portfolio_authoritative", portfolio_authoritative),
+                ("portfolio_authoritative", ticker_portfolio_authoritative),
+                ("reconciliation_halted", not reconciliation_halted),
                 ("intent_state_clean", intent_state_clean),
                 ("queue_healthy", queue_healthy),
             ]
             blocker_name = next((name for name, ok in checks if not ok), None)
             if blocker_name == "quote_coherent" and quote_coherence_reason:
                 blocker = f"{blocker_name}:{quote_coherence_reason}"
+            elif blocker_name == "reconciliation_halted" and reconciliation_halted:
+                blocker = "reconciliation_halted"
             else:
                 blocker = blocker_name
             all_ready = all(ok for _, ok in checks)
+
+            if reconciliation_halted:
+                logger.warning(
+                    "[15m-LOOP] ENTRY_BLOCKED_TICKER: %s has unresolved reconciliation halt; "
+                    "portfolio authority latched false for this ticker.",
+                    ticker,
+                )
 
             readiness_records.append({
                 "r": r,
@@ -4018,7 +4048,8 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 "quote_fresh": quote_fresh,
                 "quote_coherent": quote_coherent,
                 "market_state_applied": market_state_applied,
-                "portfolio_authoritative": portfolio_authoritative,
+                "portfolio_authoritative": ticker_portfolio_authoritative,
+                "reconciliation_halted": reconciliation_halted,
                 "intent_state_clean": intent_state_clean,
                 "queue_healthy": queue_healthy,
                 "queue_lock_wait_ms": queue_lock_wait_ms,
@@ -4073,6 +4104,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 quote_coherent=rec["quote_coherent"],
                 market_state_applied=rec["market_state_applied"],
                 portfolio_authoritative=rec["portfolio_authoritative"],
+                reconciliation_halted=rec["reconciliation_halted"],
                 intent_state_clean=rec["intent_state_clean"],
                 queue_healthy=rec["queue_healthy"],
                 queue_lock_wait_ms=rec["queue_lock_wait_ms"],
@@ -4084,6 +4116,21 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             logger.info(readiness.to_log_message(), extra=readiness.__dict__)
     except Exception as e:
         logger.debug("[15M-LOOP] ENTRY-READINESS log failed: %s", e)
+
+    # 2026-09-01: Latch a global portfolio fault if any active ticker has an
+    # unresolved exchange/ledger/cache break.  A single unresolved break makes
+    # the whole portfolio non-authoritative for new entries until all active
+    # tickers reconcile; exits remain available.
+    any_reconciliation_halted = any(rec.get("reconciliation_halted") for rec in readiness_records)
+    if any_reconciliation_halted:
+        logger.critical(
+            "[15m-LOOP] PORTFOLIO_FAULT_LATCHED: %d ticker(s) have unresolved "
+            "reconciliation halts; forcing portfolio_authoritative=False and "
+            "allow_new_entries=False until the ledger/exposure break is repaired.",
+            sum(1 for rec in readiness_records if rec.get("reconciliation_halted")),
+        )
+        portfolio_authoritative = False
+        allow_new_entries = False
 
     # 2026-08-24: Re-log the final, per-ticker-derived allow_new_entries.  This
     # guarantees the audit line matches the actual return value used to decide

@@ -960,9 +960,13 @@ class KalshiFill:
         yes_cents = _safe_price_to_cents(self.yes_price_dollars)
         no_cents = _safe_price_to_cents(self.no_price_dollars)
 
-        if self.economic_side == "YES" and yes_cents is not None:
+        # 2026-09-01: use the canonical held side, not the signed-YES direction
+        # (which for a sell of NO would incorrectly select the YES-leg price).
+        held_side = (self.canonical_position_side or self.economic_side or "").lower()
+
+        if held_side == "yes" and yes_cents is not None:
             return yes_cents
-        if self.economic_side == "NO" and no_cents is not None:
+        if held_side == "no" and no_cents is not None:
             return no_cents
 
         return self.canonical_leg_price_cents or self.price_cents
@@ -6305,9 +6309,10 @@ class KalshiFillsLedger:
                     str(_derived_price),
                 )
 
-        # CRITICAL FIX (2026-07-21): Use outcome_side as canonical direction field per Kalshi's order-direction semantics
-        # outcome_side (yes/no) expresses which outcome the user is long - this is the canonical field
-        # Legacy action/side are deprecated and should not drive logic
+        # CRITICAL FIX (2026-09-01): Kalshi's ``outcome_side`` is the market/book
+        # side of the matched order, not the user's held side.  The user's held
+        # side is ``side`` (legacy) or ``purchased_side`` (WS) when available, or
+        # derived from ``outcome_side`` + ``action`` using the V2 equivalence table.
         # Reference: https://docs.kalshi.com/getting_started/order_direction
         client_order_id = raw.get("client_order_id")
         order_id = raw.get("order_id")
@@ -6387,23 +6392,54 @@ class KalshiFillsLedger:
         if _market_outcome_side not in ("yes", "no") and _book_side in ("bid", "ask"):
             _market_outcome_side = "yes" if _book_side == "bid" else "no"
 
-        # 3. The user's contract side is the authoritative side; fall back to the
-        #    market's reported traded side when it is the only field available.
-        _execution_outcome_side = _raw_traded_side if _raw_traded_side in ("yes", "no") else _market_outcome_side
+        # 2026-09-01: derive the user s held side and action from the strongest
+        # available source.  In V2 ``outcome_side`` is the market/book side of the
+        # matched order; the user's held side is ``outcome_side`` for a BUY and
+        # the OPPOSITE for a SELL.  Legacy ``side`` + ``action`` are trusted
+        # directly because they already describe the user's contract.
+        def _opposite_outcome(side: Optional[str]) -> Optional[str]:
+            if side == "yes":
+                return "no"
+            if side == "no":
+                return "yes"
+            return None
 
-        # 4. If the market reported the trade on a different contract than the
-        #    user's contract, the action is on that other leg and must be flipped
-        #    to get the user's action on their own contract.
+        _execution_outcome_side: Optional[str] = None
         _execution_action: Optional[str] = None
-        if _raw_action in ("buy", "sell"):
-            if (
-                _market_outcome_side in ("yes", "no")
-                and _execution_outcome_side in ("yes", "no")
-                and _market_outcome_side != _execution_outcome_side
-            ):
-                _execution_action = "sell" if _raw_action == "buy" else "buy"
-            else:
-                _execution_action = _raw_action
+
+        if _raw_traded_side and _raw_action:
+            # The explicit user-side payload (side / purchased_side) tells us
+            # which contract the user traded.  When the exchange's
+            # ``outcome_side`` (the book/matched contract) differs from the
+            # user's side, the reported ``action`` is on the book side and must
+            # be flipped to obtain the user's action on their own contract:
+            #   raw: outcome_side=yes, side=no, action=sell  -> user: BUY_NO
+            #   raw: outcome_side=no,  side=no, action=sell  -> user: SELL_NO
+            _execution_outcome_side = _raw_traded_side
+            _execution_action = _raw_action
+            if _market_outcome_side and _market_outcome_side != _raw_traded_side:
+                _execution_action = "buy" if _raw_action == "sell" else "sell"
+        elif _raw_traded_side and _market_outcome_side:
+            # User side is known but action is missing; infer action from whether
+            # the market side agrees (buy) or opposes (sell) the user's side.
+            _execution_outcome_side = _raw_traded_side
+            _execution_action = "buy" if _market_outcome_side == _raw_traded_side else "sell"
+        elif _market_outcome_side and _raw_action:
+            # V2 payload with market side and action.  The executed contract is
+            # ``outcome_side`` and the action is the taker's action on that
+            # contract (BUY_YES / SELL_YES / BUY_NO / SELL_NO).
+            _execution_action = _raw_action
+            _execution_outcome_side = _market_outcome_side
+        elif _market_outcome_side:
+            # Only the market side is known; default to a buy and warn.
+            _execution_outcome_side = _market_outcome_side
+            _execution_action = "buy"
+            logger.warning(
+                "[FILL-SIDE-CANONICALIZATION] fill_id=%s market=%s - "
+                "Only outcome_side/book_side present; defaulting to BUY %s. "
+                "Verify with exchange trade log.",
+                fill_id, _ticker_for_identity or "", _execution_outcome_side,
+            )
 
         if _execution_outcome_side is None:
             # Legacy fallback: use raw side/action directly.
@@ -6499,10 +6535,11 @@ class KalshiFillsLedger:
         if _execution_action is None and _intent_action in ("buy", "sell"):
             _execution_action = _intent_action
 
-        # If we only have a generic price, it is the traded leg's price.
-        # Prefer the raw traded side; fall back to the held side for legacy
-        # records where the traded side could not be recovered.
-        _price_side = _raw_traded_side or _execution_outcome_side
+        # If we only have a generic price, assign it to the market/book side
+        # (outcome_side) first.  For V2 fills the explicit yes/no legs are both
+        # present and this path is skipped.  For legacy/WS payloads where the
+        # market side is not known, the generic price is in the user's own side.
+        _price_side = _market_outcome_side if _market_outcome_side in ("yes", "no") else _execution_outcome_side
         if price and not yes_price_dollars and not no_price_dollars:
             if _price_side == "yes":
                 yes_price_dollars = normalize_price(price)
@@ -6854,10 +6891,10 @@ class KalshiFillsLedger:
             market_id=raw.get("market_id", ""),  # CRITICAL FIX: Add market_id for position cache validation
             market_ticker=ticker,
             exchange_index=_fill_exchange_index,
-            # 2026-08-12: `side` and `action` are the raw exchange report.
-            # `side` is the TRADED contract side; `execution_outcome_side` is the
-            # HELD (long) outcome side.  The canonical fields below are the
-            # single source of truth for position/exposure/PnL accounting.
+            # 2026-08-12: `side` and `action` are the user s held outcome side
+            # and action (the contract that changed the local position).  The
+            # `execution_outcome_side` field below preserves the same meaning.
+            # The raw exchange outcome_side/book_side are stored in raw_payload.
             side=_execution_outcome_side or _raw_traded_side or "",
             action=_execution_action,
             count_fp=_count_fp,

@@ -16,6 +16,7 @@ import traceback
 import uuid
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Dict, Optional, List, Any, Union, Tuple
 from merid.position_management.position import Position, PositionSide, TrailingType, TrailingState, RiskParamsState, TAKE_PROFIT_MIN_PROFIT_CENTS, canonical_position_key
 from merid.position_management.exit_policy import ExitAction, ExitReason, is_position_quarantined, is_exit_reason_allowed_for_quarantine
@@ -357,6 +358,14 @@ class PositionMonitor:
         # 2026-08-09: state machine (SUBMITTED / SUBMISSION_UNKNOWN / RECONCILED)
         self._exit_intent_in_flight: Dict[str, Dict[str, Any]] = {}  # position_id -> {"state": str, "timestamp": float, "client_order_id": Optional[str]}
         self._exit_intent_timeout_seconds = EXIT_INTENT_TIMEOUT_SECONDS  # 15 seconds timeout for exit intent to complete
+
+        # 2026-09-01: Durable exit-intent registry.  The in-flight state survives
+        # process restarts so exits are not duplicated after a crash/restart.
+        self._exit_intent_persistence_path = (
+            Path(__file__).resolve().parents[2] / "data" / "exit_intents.json"
+        )
+        self._exit_intent_persistence_path.parent.mkdir(parents=True, exist_ok=True)
+        self._load_exit_intent_in_flight()
 
         # CRITICAL FIX (2026-08-09): Durable cleanup queue for capacity/risk/monitor cleanup failures.
         # A position is removed from active trading immediately; any failed bookkeeping is retried.
@@ -1452,6 +1461,7 @@ class PositionMonitor:
                 client_order_id or updated.get("client_order_id"),
                 reason or updated.get("reason") or "unknown",
             )
+        self._save_exit_intent_in_flight()
 
     def _mark_exit_intent_submitted(
         self,
@@ -1467,6 +1477,7 @@ class PositionMonitor:
                 return
             flight["state"] = "SUBMITTED"
             flight["timestamp"] = time.time()
+            flight["submitted_at"] = time.time()
             if exchange_order_id:
                 flight["exchange_order_id"] = exchange_order_id
             if client_order_id:
@@ -1479,6 +1490,7 @@ class PositionMonitor:
                 exchange_order_id,
                 reason or "unknown",
             )
+        self._save_exit_intent_in_flight()
 
     def _mark_exit_intent_retryable(
         self, position_id: str, error_type: str, error: str
@@ -1495,6 +1507,7 @@ class PositionMonitor:
                 "[EXIT-INTENT-IN-FLIGHT] Marked exit intent RETRYABLE_FAILURE: position_id=%s error_type=%s error=%s",
                 position_id[:8], error_type, error
             )
+        self._save_exit_intent_in_flight()
 
     def _mark_exit_intent_reconciliation_required(
         self, position_id: str, error_type: str, error: str
@@ -1511,6 +1524,7 @@ class PositionMonitor:
                 "[EXIT-INTENT-IN-FLIGHT] Marked exit intent RECONCILIATION_REQUIRED: position_id=%s error_type=%s error=%s",
                 position_id[:8], error_type, error
             )
+        self._save_exit_intent_in_flight()
 
     def _mark_exit_intent_reconciled(self, position_id: str, reason: str) -> None:
         """Mark an exit intent as reconciled (terminal). Safe to call idempotently."""
@@ -1523,6 +1537,7 @@ class PositionMonitor:
                 )
             if position_id in self._position_to_client_order:
                 del self._position_to_client_order[position_id]
+        self._save_exit_intent_in_flight()
 
     def _get_unresolved_exit_client_order_id(
         self, position_id: str
@@ -1557,6 +1572,7 @@ class PositionMonitor:
                 "[EXIT-INTENT-IN-FLIGHT] Marked exit intent SUBMISSION_UNKNOWN: position_id=%s reason=%s",
                 position_id[:8], reason,
             )
+        self._save_exit_intent_in_flight()
 
     def _is_exit_intent_in_flight(self, position_id: str) -> bool:
         """
@@ -1908,6 +1924,75 @@ class PositionMonitor:
                 "[EXIT-INTENT-IN-FLIGHT] Cleared exit intent in-flight: position_id=%s",
                 position_id[:8]
             )
+        self._save_exit_intent_in_flight()
+
+    # ── Durable exit-intent persistence (2026-09-01) ───────────────────────────
+
+    def _save_exit_intent_in_flight(self) -> None:
+        """Persist the non-terminal exit-intent state to disk.
+
+        Terminal (RECONCILED) intents and non-serializable objects (asyncio Tasks)
+        are stripped.  The file is fsynced so the intent survives a crash.
+        """
+        try:
+            snapshot: Dict[str, Any] = {}
+            with self._lock:
+                for pid, flight in self._exit_intent_in_flight.items():
+                    state = flight.get("state")
+                    if state == "RECONCILED":
+                        continue
+                    record = {}
+                    for key, value in flight.items():
+                        if key == "task" or isinstance(value, asyncio.Task):
+                            continue
+                        record[key] = value
+                    snapshot[pid] = record
+            data = json.dumps(snapshot, default=str, indent=2)
+            self._exit_intent_persistence_path.write_text(data, encoding="utf-8")
+            self._exit_intent_persistence_path.with_suffix(".tmp").unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("[EXIT-INTENT-PERSISTENCE] failed to save: %s", exc)
+
+    def _load_exit_intent_in_flight(self) -> None:
+        """Load the durable exit-intent registry on startup.
+
+        Any intent that was not in a terminal state is loaded as
+        RECONCILIATION_REQUIRED so the reconciliation loop resolves its true
+        status from the exchange before new exits are allowed for that position.
+        """
+        try:
+            if not self._exit_intent_persistence_path.exists():
+                return
+            data = self._exit_intent_persistence_path.read_text(encoding="utf-8")
+            if not data:
+                return
+            snapshot = json.loads(data)
+            if not isinstance(snapshot, dict):
+                return
+            now = time.time()
+            for pid, flight in snapshot.items():
+                if not isinstance(flight, dict):
+                    continue
+                state = flight.get("state")
+                if state in ("RECONCILED", None):
+                    continue
+                if state not in ("EXECUTION_PENDING", "SUBMITTED", "SUBMISSION_UNKNOWN", "RETRYABLE_FAILURE"):
+                    flight["state"] = "RECONCILIATION_REQUIRED"
+                flight["timestamp"] = flight.get("timestamp", now)
+                flight["reconcile_count"] = flight.get("reconcile_count", 0)
+                flight["last_reconcile_at"] = flight.get("last_reconcile_at", 0.0)
+                self._exit_intent_in_flight[pid] = flight
+                client_order_id = flight.get("client_order_id")
+                if client_order_id:
+                    self._position_to_client_order[pid] = client_order_id
+                    self._recent_exit_submissions[client_order_id] = flight.get("submitted_at", now)
+            logger.info(
+                "[EXIT-INTENT-PERSISTENCE] Loaded %d durable exit intent(s) from %s",
+                len(self._exit_intent_in_flight),
+                self._exit_intent_persistence_path,
+            )
+        except Exception as exc:
+            logger.warning("[EXIT-INTENT-PERSISTENCE] failed to load: %s", exc)
 
     def _get_position_lock(self, position_id: str) -> threading.Lock:
         """
