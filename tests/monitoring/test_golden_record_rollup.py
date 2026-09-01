@@ -465,6 +465,94 @@ def test_golden_record_exits_attach_to_parent(fixture_paths: _FixturePaths):
     assert "fill-exit" in by_intent["intent-entry"].exit_fill_ids
 
 
+def test_golden_record_no_side_exit_slippage_is_signed_correctly(fixture_paths: _FixturePaths):
+    """A SELL_NO exit filled as BUY_YES at a better price is not a slippage warning.
+
+    SELL_NO @ 46 NO is economically a BUY_YES @ 54 YES.  If the fill is
+    BUY_YES @ 47 YES, the trader paid 7c less in YES space — i.e. the fill
+    is better, not worse.  The audit must not emit ``price_slippage_7c``.
+    """
+    ts = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {
+            "event_type": "intent",
+            "event_ts": ts,
+            "intent_id": "intent-entry",
+            "client_order_id": "coid-entry",
+            "ticker": "KXBTC15M-TEST-000000-00",
+            "side": "no",
+            "action": "buy",
+            "price_cents": 45,
+            "quantity_cc": 100,
+            "metadata": json.dumps({"entry_or_exit": "entry"}),
+        },
+        {
+            "event_type": "fill",
+            "event_ts": ts,
+            "intent_id": "intent-entry",
+            "fill_id": "fill-entry",
+            "ticker": "KXBTC15M-TEST-000000-00",
+            "fill_quantity_cc": 100,
+            "avg_fill_price_cents": 45,
+            "fee_cost_cents": 2,
+            "metadata": json.dumps({
+                "canonical_position_side": "no",
+                "canonical_position_action": "buy",
+                "canonical_yes_delta_cc": -100,
+                "entry_or_exit": "entry",
+            }),
+        },
+        {
+            "event_type": "intent",
+            "event_ts": ts,
+            "intent_id": "intent-exit",
+            "client_order_id": "coid-exit",
+            "ticker": "KXBTC15M-TEST-000000-00",
+            "side": "no",
+            "action": "sell",
+            "price_cents": 46,
+            "quantity_cc": 100,
+            "reduce_only": 1,
+            "metadata": json.dumps({
+                "parent_entry_intent_id": "intent-entry",
+                "entry_or_exit": "exit",
+            }),
+        },
+        {
+            "event_type": "fill",
+            "event_ts": ts,
+            "intent_id": "intent-exit",
+            "fill_id": "fill-exit",
+            "ticker": "KXBTC15M-TEST-000000-00",
+            "fill_quantity_cc": 100,
+            "avg_fill_price_cents": 47,
+            "fee_cost_cents": 2,
+            "metadata": json.dumps({
+                "canonical_position_side": "yes",
+                "canonical_position_action": "buy",
+                "canonical_yes_delta_cc": 100,
+                "entry_or_exit": "exit",
+            }),
+        },
+    ]
+    _build_fact_db(fixture_paths.fact_db, rows)
+
+    records, summary = build_golden_records(
+        fact_db=str(fixture_paths.fact_db),
+        decision_telemetry=str(fixture_paths.decision_telemetry),
+        settlement_outcomes=str(fixture_paths.settlement_outcomes),
+        lookback_hours=24,
+        out_jsonl=str(fixture_paths.out_jsonl),
+        out_db=str(fixture_paths.out_db),
+    )
+
+    by_intent = {r.intent_id: r for r in records}
+    assert "intent-exit" in by_intent
+    rec = by_intent["intent-exit"]
+    for flag in rec.divergence_flags:
+        assert not flag.startswith("price_slippage"), f"Expected no slippage flag, got {flag}"
+
+
 def test_golden_record_flags_exit_reversal(fixture_paths: _FixturePaths):
     """An exit that overshoots the parent's signed-YES exposure is critical."""
     ts = datetime.now(timezone.utc).isoformat()

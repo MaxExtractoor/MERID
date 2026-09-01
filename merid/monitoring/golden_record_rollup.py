@@ -985,11 +985,26 @@ class GoldenRecordBuilder:
                 and order_economic_side is not None
                 and fill_economic_side is not None
             ):
-                # For an exit, a higher fill price is better; for an entry, lower is better.
-                if record.is_exit:
-                    slippage = order_economic_price - fill_economic_price
-                else:
+                # For an entry, a lower fill price is always better.
+                if not record.is_exit:
                     slippage = fill_economic_price - order_economic_price
+                else:
+                    # For an exit, the sign of the fill's signed-YES delta tells us
+                    # whether we are buying YES (positive, lower is better) or buying
+                    # NO / selling YES (negative, higher is better).  The previous
+                    # blanket rule "higher fill price is better" mis-flagged NO-side
+                    # exits like SELL_NO filled as BUY_YES.
+                    fill_yes_delta = record.fill_yes_delta_cc
+                    if fill_yes_delta is not None and fill_yes_delta > 0:
+                        # Buying YES to close a long NO position.
+                        slippage = fill_economic_price - order_economic_price
+                    elif fill_yes_delta is not None and fill_yes_delta < 0:
+                        # Selling YES / buying NO to close a long YES position.
+                        slippage = order_economic_price - fill_economic_price
+                    else:
+                        # Cannot determine sign; fall back to the conservative
+                        # previous rule.
+                        slippage = order_economic_price - fill_economic_price
                 if slippage > PRICE_SLIPPAGE_THRESHOLD_CENTS:
                     flags.append(f"price_slippage_{slippage}c")
             else:

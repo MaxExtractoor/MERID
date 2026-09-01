@@ -114,7 +114,72 @@ def _json_default(obj: Any) -> Any:
         return float(obj)
     if isinstance(obj, datetime):
         return obj.isoformat()
+    if isinstance(obj, Enum):
+        return obj.value
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _coerce_datetime(value: Any) -> Optional[datetime]:
+    """Coerce an ISO string or datetime to a timezone-aware datetime."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _merge_intent_from_existing(new_intent: OrderIntent, existing: Any) -> None:
+    """Copy durable submission/fill state from an existing in-memory or durable record.
+
+    Repeated calls to ``record_intent`` (e.g. pre- and post-submit) may construct
+    a fresh ``OrderIntent`` with empty ``order_id``/``status``/``fill_ids``.  This
+    helper preserves the fields we have already learned from a previous recording
+    so the durable index is not reverted to a stale ``pending`` / ``order_id=None``
+    state.  ``existing`` may be an ``OrderIntent`` or a durable dict loaded from
+    disk.
+    """
+    def _get(field: str) -> Any:
+        if isinstance(existing, dict):
+            return existing.get(field)
+        return getattr(existing, field, None)
+
+    # Keep the earliest creation time and the latest update time.
+    existing_created = _coerce_datetime(_get("created_at"))
+    if existing_created is not None and new_intent.created_at is not None:
+        if existing_created < new_intent.created_at:
+            new_intent.created_at = existing_created
+    existing_updated = _coerce_datetime(_get("last_update"))
+    if existing_updated is not None and new_intent.last_update is not None:
+        if existing_updated > new_intent.last_update:
+            new_intent.last_update = existing_updated
+
+    if not new_intent.order_id:
+        new_intent.order_id = _get("order_id")
+
+    if new_intent.status == "pending":
+        existing_status = _get("status")
+        if existing_status and existing_status != "pending":
+            new_intent.status = existing_status
+
+    existing_fill_ids = _get("fill_ids")
+    if not new_intent.fill_ids and existing_fill_ids:
+        new_intent.fill_ids = list(existing_fill_ids)
+
+    if new_intent.filled_count == 0:
+        existing_filled = _get("filled_count")
+        if existing_filled:
+            try:
+                new_intent.filled_count = int(existing_filled)
+            except (TypeError, ValueError):
+                pass
+
+    if not new_intent.client_order_id:
+        new_intent.client_order_id = _get("client_order_id") or ""
+    if not new_intent.client_tag:
+        new_intent.client_tag = _get("client_tag")
 
 
 def _fill_sort_ts(raw: Dict[str, Any]) -> float:
@@ -2468,6 +2533,13 @@ class KalshiFillsLedger:
         side/action. This prevents cross-leg fill misclassification in the
         position cache (e.g. a taker 'sell no' fill that is actually a MERID
         'buy yes' being recorded as raw side=no, action=sell).
+
+        CRITICAL FIX (2026-09-01): Merge with any existing in-memory or durable
+        record so that submission-bound fields (order_id, status, fill_ids) are
+        not lost when the intent is re-recorded after the exchange order_id is
+        known. The post-submit ``record_intent`` in the order router was
+        overwriting the durable index with a fresh ``OrderIntent`` that had no
+        order_id, causing HTTP fills to become ``unmatched`` after restarts.
         """
         # Preserve the original wire-form side/action for canonicalization and
         # immutable exit classification across all fill paths.
@@ -2475,6 +2547,13 @@ class KalshiFillsLedger:
             intent.original_side = intent.side
         if not getattr(intent, "original_action", None):
             intent.original_action = intent.action
+
+        # Merge with any existing record so we do not regress learned state.
+        existing = self._intents.get(intent.intent_id)
+        if existing is None:
+            existing = self._durable_intent_index.get(intent.intent_id)
+        if existing is not None:
+            _merge_intent_from_existing(intent, existing)
 
         self._intents[intent.intent_id] = intent
         if intent.order_id:
@@ -5736,6 +5815,12 @@ class KalshiFillsLedger:
         raced ahead of durable intent persistence.  Multiple client_order_ids
         (e.g. wire client_order_id and internal client_tag) may be supplied so
         that fills from any identity path resolve to the same intent.
+
+        CRITICAL FIX (2026-09-01): When an ``order_id`` is supplied, also update
+        the durable ``kalshi_fills_intent_index.json`` and the in-memory
+        ``_intents_by_order_id`` index.  Without this, a process that restarts
+        before the HTTP fill arrives cannot correlate the fill to its intent,
+        because the ``_pending_orders`` registry is in-memory only.
         """
         keys: List[str] = []
         if client_order_id:
@@ -5759,6 +5844,48 @@ class KalshiFillsLedger:
 
         for key in keys:
             self._pending_orders[key] = record
+
+        # Keep the fast in-memory correlation indices in sync with the durable
+        # index so that HTTP fills arriving after a restart resolve by order_id.
+        if order_id and intent_id:
+            self._intents_by_order_id[order_id] = intent_id
+        if client_order_id and intent_id:
+            self._intents_by_client_order_id[client_order_id] = intent_id
+        if client_order_ids and intent_id:
+            for _coid in client_order_ids:
+                if _coid:
+                    self._intents_by_client_order_id[_coid] = intent_id
+
+        # Update the durable lightweight record as soon as the exchange order_id
+        # is known, so a new process loading this index can resolve HTTP fills.
+        if order_id and intent_id:
+            _canonical_coid = client_order_id or (client_order_ids[0] if client_order_ids else None)
+            _client_tag = None
+            if _canonical_coid:
+                _client_tag = self._durable_intent_index.get(intent_id, {}).get("client_tag") or _canonical_coid
+            _existing = self._intents.get(intent_id)
+            if _existing is not None:
+                _existing.order_id = order_id
+                if _canonical_coid and not _existing.client_order_id:
+                    _existing.client_order_id = _canonical_coid
+                if _existing.status == "pending":
+                    _existing.status = "submitted"
+                _existing.last_update = datetime.now(timezone.utc)
+                self._durable_intent_index[intent_id] = _intent_to_durable(_existing)
+                self._persist_durable_intent_index()
+            else:
+                _durable = self._durable_intent_index.get(intent_id)
+                if _durable is not None:
+                    _durable["order_id"] = order_id
+                    if _canonical_coid and not _durable.get("client_order_id"):
+                        _durable["client_order_id"] = _canonical_coid
+                    if _client_tag and not _durable.get("client_tag"):
+                        _durable["client_tag"] = _client_tag
+                    if _durable.get("status") == "pending":
+                        _durable["status"] = "submitted"
+                    _durable["last_update"] = datetime.now(timezone.utc).isoformat()
+                    self._durable_intent_index[intent_id] = _durable
+                    self._persist_durable_intent_index()
 
         self._prune_pending_orders()
 
