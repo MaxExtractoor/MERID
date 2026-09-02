@@ -575,6 +575,7 @@ class KalshiWebSocketBridge:
         self._forward_task: Optional[asyncio.Task] = None  # DEPRECATED: Now uses dedicated thread
         self._forward_thread: Optional[threading.Thread] = None  # New: Dedicated thread for forward loop
         self._drain_executor: Optional[ThreadPoolExecutor] = None  # Dedicated drain worker pool
+        self._orderbook_executor: Optional[ThreadPoolExecutor] = None  # Dedicated executor for orderbook apply
 
         # 2026-08-23: WebSocket I/O now runs in a dedicated OS thread with its own
         # asyncio event loop. The bridge communicates via run_coroutine_threadsafe()
@@ -2327,28 +2328,29 @@ class KalshiWebSocketBridge:
                     try:
                         # Create new event loop for this thread (thread-local, not global)
                         loop = asyncio.new_event_loop()
-                        # 2026-08-23: Dedicated forwarder thread needs enough workers to drain
-                        # the queue while the main loop and WS thread are busy. The work is
-                        # mostly enqueue/fast book apply, so a larger pool is safe.
-                        from concurrent.futures import ThreadPoolExecutor
-                        # P0 FIX: More workers to apply orderbook deltas concurrently. The
-                        # work is mostly lock-protected enqueue, so extra threads help clear
-                        # burst backlogs without saturating the event loop.
-                        loop.set_default_executor(ThreadPoolExecutor(max_workers=128, thread_name_prefix='kalshi-forward'))
                         # CRITICAL: keep a reference to the forwarder loop so the drain
                         # thread can call_soon_threadsafe into it.
                         self._forward_loop_ref = loop
                         # CRITICAL: Do NOT call asyncio.set_event_loop(loop)
                         # Setting the loop globally causes it to be shared with other threads
-                        # When this loop is closed, it breaks unified_spot_service and market_catalog
-                        # which use loop.run_in_executor(None, ...) with the default loop
                         logger.info("[WS-FORWARD-THREAD] Event loop created (thread-local, not set globally)")
-                        
+
+                        # P0 FIX: Dedicated ThreadPoolExecutor for orderbook apply.  This
+                        # avoids loop.run_in_executor's default executor which can become
+                        # permanently unavailable with "cannot schedule new futures after
+                        # shutdown" on Windows/ProactorEventLoop under reload/shutdown edge
+                        # conditions.  We submit directly to this executor and manage its
+                        # lifecycle ourselves.
+                        from concurrent.futures import ThreadPoolExecutor
+                        self._orderbook_executor = ThreadPoolExecutor(
+                            max_workers=32, thread_name_prefix="kalshi-ob-apply"
+                        )
+
                         # CRITICAL FIX: Create asyncio.Queue in this thread's event loop
                         # This is the async-side queue for the dual-queue bridge pattern
                         self._async_queue = asyncio.Queue(maxsize=_BRIDGE_QUEUE_SIZE)
                         logger.info("[WS-FORWARD-THREAD] asyncio.Queue created for dual-queue bridge")
-                        
+
                         # Run the forward loop with drain task
                         logger.info("[WS-FORWARD-THREAD] About to run forward loop with drain task")
                         loop.run_until_complete(self._forward_loop_with_drain())
@@ -2365,6 +2367,13 @@ class KalshiWebSocketBridge:
                                 logger.info("[WS-FORWARD-THREAD] Drain executor shut down")
                         except Exception as e:
                             logger.error(f"[WS-FORWARD-THREAD] Error shutting down drain executor: {e}")
+                        try:
+                            if getattr(self, '_orderbook_executor', None):
+                                self._orderbook_executor.shutdown(wait=False)
+                                self._orderbook_executor = None
+                                logger.info("[WS-FORWARD-THREAD] Orderbook executor shut down")
+                        except Exception as e:
+                            logger.error(f"[WS-FORWARD-THREAD] Error shutting down orderbook executor: {e}")
                         try:
                             loop.close()
                             logger.info("[WS-FORWARD-THREAD] Event loop closed")
@@ -4814,27 +4823,27 @@ class KalshiWebSocketBridge:
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                     store = get_kalshi_market_state_store()
-                    # P0 FIX: Offload market-state apply to the default ThreadPoolExecutor
-                    # and do NOT await. This keeps the forwarder event loop fully unblocked
-                    # so it can drain the WebSocket queue as fast as messages arrive. The
-                    # thread-pool workers consume and apply deltas in the background.
-                    loop = asyncio.get_running_loop()
-                    if loop.is_closed() or self._ensure_shutdown_event().is_set():
-                        logger.debug("[WS-FORWARD-APPLY-SKIP] event_type=%s ticker=%s shutdown=%s loop_closed=%s", event_type, ticker, self._ensure_shutdown_event().is_set(), loop.is_closed())
-                        return
-                    fut = loop.run_in_executor(None, store.apply_orderbook_message, event, "bridge_queue")
-                    fut.add_done_callback(
-                        lambda f, et=event_type, tk=ticker: (
-                            logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", et, tk, f.exception())
-                            if not f.cancelled() and f.exception() else None
-                        )
-                    )
-                except RuntimeError as apply_exc:
-                    # During interpreter shutdown the executor may reject new work.
-                    if "cannot schedule new futures after interpreter shutdown" in str(apply_exc):
-                        logger.debug("[WS-FORWARD-APPLY-SHUTDOWN] event_type=%s ticker=%s", event_type, ticker)
+                    # P0 FIX: Offload market-state apply to a dedicated bridge-owned
+                    # ThreadPoolExecutor and do NOT await. This keeps the forwarder
+                    # event loop fully unblocked and avoids loop.run_in_executor's
+                    # default executor which can enter a shutdown-only state on
+                    # Windows/ProactorEventLoop.
+                    executor = getattr(self, "_orderbook_executor", None)
+                    if executor is not None:
+                        try:
+                            fut = executor.submit(store.apply_orderbook_message, event, "bridge_queue")
+                            fut.add_done_callback(
+                                lambda f, et=event_type, tk=ticker: (
+                                    logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", et, tk, f.exception())
+                                    if not f.cancelled() and f.exception() else None
+                                )
+                            )
+                        except RuntimeError:
+                            # Executor is shutting down; fall through to direct apply
+                            store.apply_orderbook_message(event, "bridge_queue")
                     else:
-                        logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", event_type, ticker, apply_exc)
+                        # No executor yet / already gone; apply directly to avoid dropping
+                        store.apply_orderbook_message(event, "bridge_queue")
                 except Exception as apply_exc:
                     logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", event_type, ticker, apply_exc)
 
