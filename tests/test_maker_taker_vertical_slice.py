@@ -447,8 +447,9 @@ class TestFeeComputation:
         )
 
         assert maker_est.fee_cents < taker_est.fee_cents
-        # Maker coefficient is 0.0 on the default schedule
-        assert maker_est.fee_cents == Decimal("0")
+        # Maker coefficient is 0.0175 on the default schedule
+        # Maker: ceil(0.0175 * 1 * 0.50 * 0.50 * 100) = 0.44c
+        assert maker_est.fee_cents == Decimal("0.44")
         # Taker: ceil(0.07 * 1 * 0.50 * 0.50 * 100) = 1.75c
         assert taker_est.fee_cents == Decimal("1.75")
         assert taker_est.is_estimate is True
