@@ -1,0 +1,23 @@
+Harden decision audit ledger for production evidence.
+
+- Add provenance columns (record_environment, record_source,
+  is_eligible_for_research, exclusion_reason) so research queries can
+  deterministically exclude test/non-production rows.
+- Add per-side evaluation dimensions (model_evaluated, policy_eligible,
+  executable, passed_net_ev, selected) to separate model output from
+  policy/risk/liquidity gating.
+- Enforce a UNIQUE INDEX on (decision_id, side) so the invariant of exactly
+  one YES and one NO EV row per decision is maintained.
+- Switch SQLite to synchronous=FULL, foreign_keys=ON, and BEGIN IMMEDIATE
+  transactions so every decision is written as one atomic bundle.
+- Add idempotent migration that backfills the new columns and quarantines
+  the known pre-production test artifact.
+- Add merid/research/decision_audit_report.py read-only CLI that runs
+  integrity checks, counts, provenance breakdown, and decision quality
+  summaries without emitting model-quality conclusions until enough
+  settled observations exist.
+- Update unit tests to assert provenance and the new evaluation dimensions.
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>

@@ -45,9 +45,18 @@ def _is_enabled() -> bool:
         "yes",
     )
 
+
+def _is_test_context() -> bool:
+    """Detect pytest/test runtime so research rows are never marked as live."""
+    return (
+        "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("MERID_ENV", "").lower() in ("test", "ci")
+    )
+
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
+PRAGMA synchronous = FULL;
+PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 
 CREATE TABLE IF NOT EXISTS strategy_decisions (
@@ -74,12 +83,17 @@ CREATE TABLE IF NOT EXISTS strategy_decisions (
     decision TEXT NOT NULL,
     primary_reason_code TEXT NOT NULL,
     reason_codes TEXT NOT NULL DEFAULT '[]',
+    record_environment TEXT NOT NULL DEFAULT 'production',
+    record_source TEXT NOT NULL DEFAULT 'live',
+    is_eligible_for_research INTEGER NOT NULL DEFAULT 1,
+    exclusion_reason TEXT,
     created_at REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_ts ON strategy_decisions(decision_ts);
 CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON strategy_decisions(ticker, decision_ts);
 CREATE INDEX IF NOT EXISTS idx_decisions_reason ON strategy_decisions(primary_reason_code, decision_ts);
+CREATE INDEX IF NOT EXISTS idx_decisions_environment ON strategy_decisions(record_environment, decision_ts);
 
 CREATE TABLE IF NOT EXISTS strategy_decision_snapshots (
     decision_id TEXT PRIMARY KEY,
@@ -130,6 +144,11 @@ CREATE TABLE IF NOT EXISTS strategy_decision_side_ev (
     eligible_for_model INTEGER NOT NULL DEFAULT 0,
     eligible_for_policy INTEGER NOT NULL DEFAULT 0,
     exclusion_reason TEXT,
+    model_evaluated INTEGER NOT NULL DEFAULT 0,
+    policy_eligible INTEGER NOT NULL DEFAULT 0,
+    executable INTEGER NOT NULL DEFAULT 0,
+    passed_net_ev INTEGER NOT NULL DEFAULT 0,
+    selected INTEGER NOT NULL DEFAULT 0,
     executable_entry_price_cents INTEGER,
     executable_entry_depth_fp REAL,
     expected_entry_fill_cents INTEGER,
@@ -147,6 +166,8 @@ CREATE TABLE IF NOT EXISTS strategy_decision_side_ev (
     passed_edge_gate INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (decision_id, side)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS strategy_decision_side_once ON strategy_decision_side_ev(decision_id, side);
 
 CREATE TABLE IF NOT EXISTS strategy_decision_outcomes (
     decision_id TEXT PRIMARY KEY,
@@ -197,22 +218,91 @@ class DecisionAuditLedger:
         self._db_ready = False
 
     def _ensure_db(self) -> None:
-        """Create parent directory and schema on first use."""
+        """Create parent directory, schema, and run migrations on first use."""
         if self._db_ready:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with self._lock, self._conn() as conn:
+            with self._lock, self._conn(isolation_level=None) as conn:
                 conn.executescript(_SCHEMA)
+                self._migrate(conn)
             self._db_ready = True
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] schema init failed: %s", exc)
 
-    def _conn(self) -> sqlite3.Connection:
+    def _conn(self, isolation_level: Optional[str] = "IMMEDIATE") -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=10)
+        conn.isolation_level = isolation_level
         conn.row_factory = sqlite3.Row
+        if isolation_level is not None:
+            conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Idempotent migrations for the point-in-time audit ledger."""
+        # Provenance / research-eligibility columns on the decision table.
+        _add_column(conn, "strategy_decisions", "record_environment", "TEXT NOT NULL DEFAULT 'production'")
+        _add_column(conn, "strategy_decisions", "record_source", "TEXT NOT NULL DEFAULT 'live'")
+        _add_column(conn, "strategy_decisions", "is_eligible_for_research", "INTEGER NOT NULL DEFAULT 1")
+        _add_column(conn, "strategy_decisions", "exclusion_reason", "TEXT")
+
+        # Evaluation / eligibility dimensions on side-EV rows.
+        _add_column(conn, "strategy_decision_side_ev", "model_evaluated", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "strategy_decision_side_ev", "policy_eligible", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "strategy_decision_side_ev", "executable", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "strategy_decision_side_ev", "passed_net_ev", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "strategy_decision_side_ev", "selected", "INTEGER NOT NULL DEFAULT 0")
+
+        # Enforce exactly one row per (decision_id, side).
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS strategy_decision_side_once "
+            "ON strategy_decision_side_ev(decision_id, side)"
+        )
+
+        # Backfill new side-EV columns from the existing eligibility/edge fields.
+        conn.execute(
+            "UPDATE strategy_decision_side_ev "
+            "SET model_evaluated = eligible_for_model "
+            "WHERE model_evaluated = 0 AND eligible_for_model = 1"
+        )
+        conn.execute(
+            "UPDATE strategy_decision_side_ev "
+            "SET policy_eligible = eligible_for_policy "
+            "WHERE policy_eligible = 0 AND eligible_for_policy = 1"
+        )
+        conn.execute(
+            "UPDATE strategy_decision_side_ev "
+            "SET passed_net_ev = passed_edge_gate "
+            "WHERE passed_net_ev = 0 AND passed_edge_gate = 1"
+        )
+        conn.execute(
+            "UPDATE strategy_decision_side_ev "
+            "SET executable = 1 "
+            "WHERE executable = 0 "
+            "  AND executable_entry_price_cents IS NOT NULL "
+            "  AND executable_entry_depth_fp > 0"
+        )
+        conn.execute(
+            "UPDATE strategy_decision_side_ev "
+            "SET selected = 1 "
+            "WHERE rowid IN ("
+            "    SELECT ev.rowid "
+            "    FROM strategy_decision_side_ev ev "
+            "    JOIN strategy_decisions d ON d.decision_id = ev.decision_id "
+            "    WHERE d.decision = 'ENTER' AND d.selected_side = ev.side"
+            ")"
+        )
+
+        # Quarantine the known pre-production test fixture leak.
+        conn.execute(
+            "UPDATE strategy_decisions "
+            "SET record_environment = 'test', "
+            "    record_source = 'test_fixture_leak', "
+            "    is_eligible_for_research = 0, "
+            "    exclusion_reason = 'pre-production default-db test artifact' "
+            "WHERE decision_id = 'run_no_edge_below_threshold'"
+        )
 
     # ── Public recording API ───────────────────────────────────────────────
 
@@ -311,6 +401,17 @@ class DecisionAuditLedger:
             close_dt = datetime.fromtimestamp(close_ts, tz=timezone.utc)
             strategy_name = os.environ.get("MERID_PROFILE", "kalshi_crypto_15m_v2")
 
+            test_context = _is_test_context()
+            if test_context and self.db_path == _DB_PATH:
+                logger.critical(
+                    "[DECISION-AUDIT-LEDGER] test context is writing to production db %s",
+                    self.db_path,
+                )
+            record_environment = "test" if test_context else "production"
+            record_source = "test_pre_decision" if test_context else "pre_decision_rejection"
+            is_eligible_for_research = 0 if test_context else 1
+            exclusion_reason = reason
+
             with self._lock, self._conn() as conn:
                 conn.execute(
                     """
@@ -320,8 +421,9 @@ class DecisionAuditLedger:
                         calibration_version, config_version, ticker, asset, market_open_ts,
                         close_ts, close_ts_iso, seconds_to_close, strike, settlement_reference,
                         settlement_rule_version, selected_side, decision, primary_reason_code,
-                        reason_codes, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        reason_codes, record_environment, record_source, is_eligible_for_research,
+                        exclusion_reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -347,6 +449,10 @@ class DecisionAuditLedger:
                         classification.decision,
                         classification.primary_reason_code,
                         json.dumps(classification.reason_codes),
+                        record_environment,
+                        record_source,
+                        is_eligible_for_research,
+                        exclusion_reason,
                         now,
                     ),
                 )
@@ -639,6 +745,20 @@ class DecisionAuditLedger:
         if velocity_source is None:
             velocity_source = indicators.get("velocity_source")
 
+        # Provenance: never let a test run be marked as live research data.
+        test_context = _is_test_context()
+        if test_context and self.db_path == _DB_PATH:
+            logger.critical(
+                "[DECISION-AUDIT-LEDGER] test context is writing to production db %s",
+                self.db_path,
+            )
+        record_environment = "test" if test_context else "production"
+        record_source = "test" if test_context else "live"
+        is_eligible_for_research = 0 if test_context else 1
+        exclusion_reason: Optional[str] = None
+        if decision_type == "NO_TRADE":
+            exclusion_reason = getattr(decision, "no_trade_reason", None) or primary_reason
+
         # Insert core decision row.
         with self._lock, self._conn() as conn:
             conn.execute(
@@ -649,8 +769,9 @@ class DecisionAuditLedger:
                     calibration_version, config_version, ticker, asset, market_open_ts,
                     close_ts, close_ts_iso, seconds_to_close, strike, settlement_reference,
                     settlement_rule_version, selected_side, decision, primary_reason_code,
-                    reason_codes, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reason_codes, record_environment, record_source, is_eligible_for_research,
+                    exclusion_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -676,6 +797,10 @@ class DecisionAuditLedger:
                     decision_type,
                     primary_reason,
                     json.dumps(reason_codes),
+                    record_environment,
+                    record_source,
+                    is_eligible_for_research,
+                    exclusion_reason,
                     time.time(),
                 ),
             )
@@ -748,19 +873,21 @@ class DecisionAuditLedger:
                     side,
                     indicators,
                     quote_age_ms,
+                    market_state,
                 )
                 conn.execute(
                     """
                     INSERT INTO strategy_decision_side_ev (
                         decision_id, side, eligible_for_model, eligible_for_policy,
-                        exclusion_reason, executable_entry_price_cents,
+                        exclusion_reason, model_evaluated, policy_eligible, executable,
+                        passed_net_ev, selected, executable_entry_price_cents,
                         executable_entry_depth_fp, expected_entry_fill_cents,
                         expected_entry_slippage_cents, raw_probability, calibrated_probability,
                         gross_edge_cents, entry_fee_cents, exit_or_settlement_fee_cents,
                         adverse_selection_haircut_cents, model_uncertainty_haircut_cents,
                         expected_net_ev_cents, lower_confidence_bound_ev_cents,
                         required_edge_cents, passed_edge_gate
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -768,6 +895,11 @@ class DecisionAuditLedger:
                         1 if side_row["eligible_for_model"] else 0,
                         1 if side_row["eligible_for_policy"] else 0,
                         side_row["exclusion_reason"],
+                        1 if side_row["model_evaluated"] else 0,
+                        1 if side_row["policy_eligible"] else 0,
+                        1 if side_row["executable"] else 0,
+                        1 if side_row["passed_net_ev"] else 0,
+                        1 if side_row["selected"] else 0,
                         side_row["executable_entry_price_cents"],
                         side_row["executable_entry_depth_fp"],
                         side_row["expected_entry_fill_cents"],
@@ -889,13 +1021,14 @@ def _build_side_ev_row(
     side: str,
     indicators: Dict[str, Any],
     quote_age_ms: Optional[int],
+    market_state: Optional[Any],
 ) -> Dict[str, Any]:
     """Build one side-EV row from a TradeDecision and its EdgeBreakdown."""
     breakdown = getattr(decision, f"{side}_edge_breakdown", None)
 
     # Fallback to legacy net-edge fields if the breakdown dataclass is missing.
     if breakdown is None:
-        return _legacy_side_ev_row(decision, side, indicators)
+        return _legacy_side_ev_row(decision, side, indicators, market_state)
 
     entry_price = _to_float(breakdown.executable_entry_price)
     entry_fee = _to_float(breakdown.entry_fee)
@@ -961,10 +1094,26 @@ def _build_side_ev_row(
     depth_cc = _to_float(getattr(decision, f"{side}_depth_cc", None)) or 0.0
     expected_fill = entry_price_cents
 
+    selected_outcome = getattr(decision, "selected_outcome", None)
+    selected = (
+        selected_outcome == side
+        and not no_trade_reason
+    )
+    executable = (
+        entry_price is not None
+        and depth_cc > 0
+        and _book_is_executable(market_state)
+    )
+
     return {
         "eligible_for_model": bool(eligible_for_model),
         "eligible_for_policy": bool(eligible_for_policy),
         "exclusion_reason": exclusion_reason,
+        "model_evaluated": bool(eligible_for_model),
+        "policy_eligible": bool(eligible_for_policy),
+        "executable": bool(executable),
+        "passed_net_ev": bool(passed_edge),
+        "selected": bool(selected),
         "executable_entry_price_cents": entry_price_cents,
         "executable_entry_depth_fp": float(depth_cc),
         "expected_entry_fill_cents": expected_fill,
@@ -987,6 +1136,7 @@ def _legacy_side_ev_row(
     decision: Any,
     side: str,
     indicators: Dict[str, Any],
+    market_state: Optional[Any],
 ) -> Dict[str, Any]:
     """Fallback for older TradeDecision objects without EdgeBreakdown."""
     entry_price = _to_float(getattr(decision, f"{side}_entry_vwap", None))
@@ -1023,12 +1173,30 @@ def _legacy_side_ev_row(
     if expected_net_ev_cents is not None and math.isfinite(expected_net_ev_cents):
         lcb = expected_net_ev_cents - model_risk_cents
 
+    selected_outcome = getattr(decision, "selected_outcome", None)
+    no_trade_reason = getattr(decision, "no_trade_reason", None) or ""
+    selected = (
+        selected_outcome == side
+        and not no_trade_reason
+    )
+    depth_cc = _to_float(getattr(decision, f"{side}_depth_cc", None)) or 0.0
+    executable = (
+        entry_price is not None
+        and depth_cc > 0
+        and _book_is_executable(market_state)
+    )
+
     return {
         "eligible_for_model": entry_price is not None,
         "eligible_for_policy": entry_price is not None and in_canonical,
         "exclusion_reason": None,
+        "model_evaluated": entry_price is not None,
+        "policy_eligible": entry_price is not None and in_canonical,
+        "executable": bool(executable),
+        "passed_net_ev": bool(passed_edge),
+        "selected": bool(selected),
         "executable_entry_price_cents": entry_price_cents,
-        "executable_entry_depth_fp": _to_float(getattr(decision, f"{side}_depth_cc", None)) or 0.0,
+        "executable_entry_depth_fp": float(depth_cc),
         "expected_entry_fill_cents": entry_price_cents,
         "expected_entry_slippage_cents": None,
         "raw_probability": _to_float(getattr(decision, f"p_{side}_calibrated", None)),
@@ -1169,3 +1337,13 @@ def _safe_attr(obj: Any, name: str) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Add a column to a table if it does not already exist."""
+    existing = {
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({table})")
+    }
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
