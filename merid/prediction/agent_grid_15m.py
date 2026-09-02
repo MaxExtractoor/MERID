@@ -11117,6 +11117,8 @@ class LeanAgent15m:
 
         minutes_to_expiry: float,
 
+        tick: int = 0,
+
     ) -> Optional[Dict[str, Any]]:
 
         # Generate trading signal using Coinbase 1-minute velocity (2026 #1 winning strategy).
@@ -15858,7 +15860,7 @@ class LeanAgent15m:
 
             self._record_waterfall("market_open", True)
 
-            signal = self._generate_signal(spot_price, market, minutes_to_expiry)
+            signal = self._generate_signal(spot_price, market, minutes_to_expiry, tick)
 
             if not signal:
 
