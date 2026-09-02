@@ -283,6 +283,7 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decisions", "record_source", "TEXT NOT NULL DEFAULT 'live'")
         _add_column(conn, "strategy_decisions", "is_eligible_for_research", "INTEGER NOT NULL DEFAULT 1")
         _add_column(conn, "strategy_decisions", "exclusion_reason", "TEXT")
+        _add_column(conn, "strategy_decisions", "shadow_cohort_json", "TEXT")
 
         # Add the research/environment index now that the column is guaranteed to exist.
         conn.execute(
@@ -1095,6 +1096,9 @@ class DecisionAuditLedger:
         with self._lock, self._conn() as conn:
             # One atomic bundle: decision, snapshot, both side-EV rows, pending outcome.
             conn.execute("BEGIN IMMEDIATE")
+            shadow_cohort = (indicators or {}).get("shadow_cohort")
+            shadow_cohort_json = json.dumps(shadow_cohort, default=str) if shadow_cohort is not None else None
+
             conn.execute(
                 """
                 INSERT INTO strategy_decisions (
@@ -1104,8 +1108,8 @@ class DecisionAuditLedger:
                     close_ts, close_ts_iso, seconds_to_close, strike, settlement_reference,
                     settlement_rule_version, selected_side, decision, primary_reason_code,
                     reason_codes, record_environment, record_source, is_eligible_for_research,
-                    exclusion_reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    exclusion_reason, shadow_cohort_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -1135,6 +1139,7 @@ class DecisionAuditLedger:
                     record_source,
                     is_eligible_for_research,
                     exclusion_reason,
+                    shadow_cohort_json,
                     time.time(),
                 ),
             )

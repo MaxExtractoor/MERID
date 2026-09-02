@@ -1334,24 +1334,35 @@ async def unified_health_check():
             overall_status = "degraded"
         else:
             summary = ws_bridge.summary()
-            # CRITICAL FIX (2026-08-24): The canonical bridge summary reports the
-            # WebSocket client state under "ws_client" and REST fallback state
-            # under "rest_polling_active". A bridge is healthy if it is actively
-            # receiving market data by either transport, not only if the legacy
-            # "running" key is True.
+            # Bridge status hierarchy:
+            #   1. Forwarder active (summary.running) -> running / ready
+            #   2. Forwarder down but REST polling active -> degraded / ready (fallback)
+            #   3. Forwarder down but WS client still connected (not forwarding) -> degraded / not ready
+            #   4. Nothing active -> stopped / not ready
             ws_client = summary.get("ws_client", {})
-            ws_running = (
-                summary.get("running", False)
-                or ws_client.get("connected", False)
-                or summary.get("connected", False)
-                or summary.get("rest_polling_active", False)
-            )
+            summary_running = bool(summary.get("running", False))
+            rest_polling_active = bool(summary.get("rest_polling_active", False))
+            ws_client_connected = bool(ws_client.get("connected", False))
+
+            if summary_running:
+                ws_status = "running"
+                ws_ready = True
+            elif rest_polling_active:
+                ws_status = "degraded"
+                ws_ready = True
+            elif ws_client_connected:
+                ws_status = "degraded"
+                ws_ready = False
+            else:
+                ws_status = "stopped"
+                ws_ready = False
+
             services["ws_bridge"] = {
-                "status": "running" if ws_running else "stopped",
-                "ready": ws_running,
+                "status": ws_status,
+                "ready": ws_ready,
                 "summary": summary
             }
-            if not ws_running:
+            if ws_status != "running":
                 overall_status = "degraded"
     except Exception as e:
         services["ws_bridge"] = {"status": "error", "ready": False, "error": str(e)}

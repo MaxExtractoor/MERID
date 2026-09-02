@@ -819,6 +819,7 @@ class KalshiMarketStateStore:
             loop is not None
             and isinstance(loop, asyncio.AbstractEventLoop)
             and loop.is_running()
+            and not loop.is_closed()
         ):
             self._main_event_loop = loop
             logger.info("[MD-STORE-LOOP] Registered main event loop: %s", loop)
@@ -833,16 +834,24 @@ class KalshiMarketStateStore:
         import asyncio
 
         loop = self._main_event_loop
-        if loop is None or not loop.is_running():
+        if loop is None or not loop.is_running() or loop.is_closed():
             logger.warning(
-                "[%s] Event loop not available for %s (loop=%s)",
-                log_label, ticker or "unknown", loop
+                "[%s] Event loop not available for %s (loop=%s running=%s closed=%s)",
+                log_label, ticker or "unknown", loop,
+                loop.is_running() if loop else None,
+                loop.is_closed() if loop else None,
             )
             return
 
         try:
             coro = coro_factory()
             asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError as e:
+            logger.warning(
+                "[%s] Event loop closed while scheduling %s for %s: %s",
+                log_label, coro_factory.__name__ if hasattr(coro_factory, '__name__') else 'coro',
+                ticker or "unknown", e,
+            )
         except Exception as e:
             logger.error(
                 "[%s] Failed to schedule %s on main loop: %s",
@@ -1329,7 +1338,7 @@ class KalshiMarketStateStore:
                 try:
                     import asyncio
                     loop = self._main_event_loop
-                    if loop and loop.is_running():
+                    if loop and loop.is_running() and not loop.is_closed():
                         ws_future = asyncio.run_coroutine_threadsafe(
                             self._trigger_snapshot_recovery(ticker),
                             loop,
@@ -1339,14 +1348,16 @@ class KalshiMarketStateStore:
                             ticker, ws_future,
                         )
                     else:
-                        logger.warning("[WS-SNAPSHOT-RECOVERY] Event loop not available for %s", ticker)
+                        logger.warning("[WS-SNAPSHOT-RECOVERY] Event loop not available/closed for %s", ticker)
+                except RuntimeError as e:
+                    logger.warning("[WS-SNAPSHOT-RECOVERY] Loop closed while scheduling WS snapshot for %s: %s", ticker, e)
                 except Exception as e:
                     logger.error("[WS-SNAPSHOT-RECOVERY] Failed to schedule WS snapshot for %s: %s", ticker, e, exc_info=True)
 
                 try:
                     import asyncio
                     loop = self._main_event_loop
-                    if loop and loop.is_running():
+                    if loop and loop.is_running() and not loop.is_closed():
                         # Use run_coroutine_threadsafe to schedule from a different thread
                         future = asyncio.run_coroutine_threadsafe(
                             self._sync_invariant_violation_with_rest(ticker),
@@ -1365,6 +1376,8 @@ class KalshiMarketStateStore:
                         future.add_done_callback(log_future_result)
                     else:
                         logger.warning("[WS-DELTA-BOOTSTRAP] Event loop not available or not running for %s (loop=%s)", ticker, loop)
+                except RuntimeError as e:
+                    logger.warning("[WS-DELTA-BOOTSTRAP] Loop closed while scheduling REST bootstrap for %s: %s", ticker, e)
                 except Exception as e:
                     logger.error("[WS-DELTA-BOOTSTRAP] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
 
@@ -1625,13 +1638,18 @@ class KalshiMarketStateStore:
         self._last_recovery_trigger_ts[ticker] = now
         import asyncio
         loop = self._main_event_loop
-        if not (loop and loop.is_running()):
+        if not (loop and loop.is_running() and not loop.is_closed()):
             logger.warning(
-                "[BOOK-RECOVERY-THROTTLED] Event loop not available for %s (reason=%s)", ticker, reason
+                "[BOOK-RECOVERY-THROTTLED] Event loop not available for %s (reason=%s, loop=%s)",
+                ticker, reason, loop,
             )
             return False
-        asyncio.run_coroutine_threadsafe(self._trigger_snapshot_recovery(ticker), loop)
-        asyncio.run_coroutine_threadsafe(self._sync_invariant_violation_with_rest(ticker), loop)
+        try:
+            asyncio.run_coroutine_threadsafe(self._trigger_snapshot_recovery(ticker), loop)
+            asyncio.run_coroutine_threadsafe(self._sync_invariant_violation_with_rest(ticker), loop)
+        except RuntimeError as e:
+            logger.warning("[BOOK-RECOVERY-THROTTLED] Loop closed while scheduling recovery for %s: %s", ticker, e)
+            return False
         logger.info("[BOOK-RECOVERY-TRIGGERED] ticker=%s reason=%s", ticker, reason)
         return True
 
@@ -5112,10 +5130,12 @@ class KalshiMarketStateStore:
         # Request a fresh WebSocket snapshot if the event loop is available.
         try:
             loop = self._main_event_loop
-            if loop and loop.is_running():
+            if loop and loop.is_running() and not loop.is_closed():
                 asyncio.run_coroutine_threadsafe(
                     self._trigger_snapshot_recovery(ticker), loop
                 )
+        except RuntimeError as e:
+            logger.warning("[SNAPSHOT-TIMEOUT] Loop closed while scheduling snapshot recovery for %s: %s", ticker, e)
         except Exception as e:
             logger.error("[SNAPSHOT-TIMEOUT] Failed to schedule snapshot recovery for %s: %s", ticker, e)
 
@@ -5489,7 +5509,7 @@ class KalshiMarketStateStore:
         try:
             import asyncio
             loop = getattr(self, "_main_event_loop", None)
-            if loop and loop.is_running():
+            if loop and loop.is_running() and not loop.is_closed():
                 asyncio.run_coroutine_threadsafe(
                     self._sync_invariant_violation_with_rest(ticker), loop
                 )
@@ -5498,7 +5518,9 @@ class KalshiMarketStateStore:
                     ticker, backoff_s
                 )
             else:
-                logger.warning("[DUALITY-RESYNC] Event loop unavailable for %s", ticker)
+                logger.warning("[DUALITY-RESYNC] Event loop unavailable or closed for %s", ticker)
+        except RuntimeError as e:
+            logger.warning("[DUALITY-RESYNC] Loop closed while scheduling REST re-sync for %s: %s", ticker, e)
         except Exception as e:
             logger.error("[DUALITY-RESYNC] Failed to schedule REST re-sync for %s: %s", ticker, e)
 
