@@ -752,6 +752,8 @@ class TestExitClassificationAndIdempotency:
             action=exit_fill.canonical_position_action,
             is_exit=exit_fill.is_exit,
             canonicalization_state="TRUSTED_LIVE_V1",
+            yes_price_cents=70,
+            no_price_cents=30,
         )
         assert pos.contracts == 0
         # Should not have flipped to long NO.

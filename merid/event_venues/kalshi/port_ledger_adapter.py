@@ -123,22 +123,43 @@ def port_fill_to_ledger_dict(fill: Fill) -> Dict[str, Any]:
     # Quantity must be present and positive, in fixed-point contracts.
     quantity_cc = _quantity_cc_from_count_fp(fill.size, "fill.size")
 
-    # Price: prefer exact dollar price from raw_data; fall back to price_cents as display only.
-    price_dollars: Optional[Decimal] = None
+    # Direction fields must be explicit and valid before any side-dependent lookup.
+    action = _validate_side(fill.side, "fill.side", ("buy", "sell"))
+    outcome = _validate_side(fill.outcome, "fill.outcome", ("yes", "no"))
+
+    # Price: prefer explicit per-leg dollar prices from raw_data.  The exchange
+    # reports both the traded (execution) side price and the opposite leg price.
+    # We forward both so the ledger can use the held-side price without deriving
+    # it via 100 - other_side.
     raw = fill.raw_data or {}
+    yes_price_dollars: Optional[Decimal] = None
+    no_price_dollars: Optional[Decimal] = None
     if isinstance(raw, dict):
-        outcome = _validate_side(fill.outcome, "fill.outcome", ("yes", "no"))
-        price_key = "yes_price_dollars" if outcome == "yes" else "no_price_dollars"
-        if raw.get(price_key):
+        if raw.get("yes_price_dollars"):
             try:
-                price_dollars = _coerce_decimal(raw[price_key], price_key)
+                yes_price_dollars = _coerce_decimal(raw["yes_price_dollars"], "yes_price_dollars")
             except PortLedgerAdapterError:
-                price_dollars = None
-        elif raw.get("price_dollars"):
+                yes_price_dollars = None
+        if raw.get("no_price_dollars"):
             try:
-                price_dollars = _coerce_decimal(raw["price_dollars"], "price_dollars")
+                no_price_dollars = _coerce_decimal(raw["no_price_dollars"], "no_price_dollars")
             except PortLedgerAdapterError:
-                price_dollars = None
+                no_price_dollars = None
+
+    # Execution-side price is the traded leg for this fill.  Use the explicit
+    # exchange field for that outcome, then fall back to the top-level price
+    # fields, then to price_cents.  A missing execution-side price is an error.
+    price_dollars: Optional[Decimal] = None
+    if outcome == "yes" and yes_price_dollars is not None:
+        price_dollars = yes_price_dollars
+    elif outcome == "no" and no_price_dollars is not None:
+        price_dollars = no_price_dollars
+    elif isinstance(raw, dict) and raw.get("price_dollars"):
+        try:
+            price_dollars = _coerce_decimal(raw["price_dollars"], "price_dollars")
+        except PortLedgerAdapterError:
+            price_dollars = None
+
     if price_dollars is None:
         if fill.price_cents is None:
             raise PortLedgerAdapterError("fill.price_cents is missing and no exact price_dollars available", field="price_cents", value=fill.price_cents)
@@ -150,10 +171,6 @@ def port_fill_to_ledger_dict(fill: Fill) -> Dict[str, Any]:
                 field="price_cents",
                 value=fill.price_cents,
             ) from exc
-
-    # Direction fields must be explicit and valid.
-    action = _validate_side(fill.side, "fill.side", ("buy", "sell"))
-    outcome = _validate_side(fill.outcome, "fill.outcome", ("yes", "no"))
 
     # Fee: do not default to a number when missing, but the legacy ledger treats a
     # missing fee as zero.  Preserve None explicitly so downstream can distinguish it.
@@ -182,7 +199,9 @@ def port_fill_to_ledger_dict(fill: Fill) -> Dict[str, Any]:
         "count_fp": str(fill.size),
         "size": str(fill.size),
         "quantity_cc": quantity_cc,
-        # Price
+        # Price: explicit per-leg exchange prices plus the execution-side price.
+        "yes_price_dollars": str(yes_price_dollars) if yes_price_dollars is not None else None,
+        "no_price_dollars": str(no_price_dollars) if no_price_dollars is not None else None,
         "price": str(price_dollars),
         "price_dollars": str(price_dollars),
         # Fee

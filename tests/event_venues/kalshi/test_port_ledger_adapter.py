@@ -87,6 +87,30 @@ class TestPortFillToLedgerDict:
         assert result["action"] == "sell"
         assert result["fee"] == "0"  # fee missing is defaulted to "0" for the ledger
 
+    def test_explicit_leg_prices_forwarded(self):
+        """Kalshi V2 fills report both yes_price_dollars and no_price_dollars."""
+        fill = Fill(
+            fill_id="fill-v2",
+            order_id="order-v2",
+            ticker="KXBTC15M-260802",
+            side="sell",
+            outcome="no",
+            size=Decimal("2"),
+            price_cents=38,
+            fee_usd=Decimal("0.01"),
+            timestamp=datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc),
+            raw_data={
+                "yes_price_dollars": "0.6200",
+                "no_price_dollars": "0.3800",
+            },
+        )
+        result = port_fill_to_ledger_dict(fill)
+        assert result["yes_price_dollars"] == "0.6200"
+        assert result["no_price_dollars"] == "0.3800"
+        # Execution side is NO, so the execution price is the NO leg.
+        assert Decimal(result["price"]) == Decimal("0.38")
+        assert Decimal(result["price_dollars"]) == Decimal("0.38")
+
     def test_historical_fill_without_timestamp(self):
         """Historical fills may have no source timestamp; the adapter must not invent one."""
         fill = Fill(
