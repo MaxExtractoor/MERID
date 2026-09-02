@@ -877,15 +877,19 @@ class KalshiMarketStateStore:
         """Map transport provenance to a canonical data-source label.
 
         REST-derived full snapshots are authoritative.  WS snapshots from the
-        real-time bridge are bootstraps that require a contiguous delta to
-        become ``LIVE_SEQUENCE_CONFIRMED``.  Contiguous deltas are the only
-        source that confirms live sequence.
+        real-time bridge are a full book; a contiguous delta is still required
+        to set ``LIVE_SEQUENCE_CONFIRMED`` for new-entry gating.
+        Contiguous deltas are the only source that confirms live sequence.
         """
         if via in ("rest_bootstrap", "ws_fallback", "subscribe_fallback", "rest_polling", "ws_subscribe_bootstrap"):
             return "REST_FULL_ORDERBOOK"
         if via == "bridge_queue":
             if channel == "orderbook_snapshot":
-                return "BOOTSTRAP_VALID_BUT_UNCONFIRMED"
+                # FIX (2026-09-01): A real-time WS orderbook_snapshot is a full
+                # clean book and can attest recovery from SNAPSHOT_TIMEOUT or
+                # other FULL_SNAPSHOT-required states.  New entries remain gated
+                # on a subsequent contiguous live delta via live_sequence_confirmed.
+                return "WS_CLEAN_SNAPSHOT"
             if channel == "orderbook_delta":
                 return "WS_ORDERBOOK_DELTA_LIVE"
             return "UNKNOWN"
