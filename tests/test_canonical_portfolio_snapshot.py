@@ -11,6 +11,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
@@ -69,6 +70,7 @@ def _reset_singletons():
         reconciler._last_recovery_at_mono = None
         reconciler._last_mismatch_heartbeat_at_mono = 0.0
         reconciler._recovery_state = "IDLE"
+        reconciler._build_in_progress = False
         reconciler._store = store
         yield
 
@@ -1056,3 +1058,86 @@ async def test_authority_transition_resets_first_mismatch_on_recovery(caplog):
     assert record.previous_reason == "MISMATCH_LEDGER"  # type: ignore[attr-defined]
     assert record.recovery_latency_ms >= 0  # type: ignore[attr-defined]
     assert record.diff_hash  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_fetch_fills_uses_min_ts_lookback(monkeypatch):
+    """REST fills fetch must bound pagination with a recent look-back window.
+
+    This is the regression guard for the no-trade root cause where
+    `client.get_fills()` without a `since_ts` fetched the entire account
+    history and caused `build_snapshot` to exceed the 5-minute stale threshold.
+    """
+    import os
+    monkeypatch.setenv("MERID_CANONICAL_RECONCILER_FILLS_LOOKBACK_HOURS", "6")
+
+    called_with: Dict[str, Any] = {}
+
+    class _FakeClientWithFills(_FakeKalshiClient):
+        async def get_fills(self, limit=200, since_ts=None, ticker=None, order_id=None):
+            called_with["limit"] = limit
+            called_with["since_ts"] = since_ts
+            called_with["ticker"] = ticker
+            called_with["order_id"] = order_id
+            return OperationResult.ok([])
+
+    client = _FakeClientWithFills(positions=[], open_orders=[])
+    reconciler = _make_reconciler(client=client)
+    _, completeness = await reconciler._fetch_fills()
+
+    assert completeness is not None
+    assert called_with.get("limit") == 200
+    assert called_with.get("since_ts") is not None
+    # since_ts should be ~6 hours ago, within the last 30 minutes of expected.
+    six_hours_ago_ms = int(
+        (datetime.now(timezone.utc) - timedelta(hours=6)).timestamp() * 1000
+    )
+    assert abs(called_with["since_ts"] - six_hours_ago_ms) < 30_000
+    assert called_with.get("ticker") is None
+    assert called_with.get("order_id") is None
+
+    # Default 24h lookback when env is unset.
+    monkeypatch.delenv("MERID_CANONICAL_RECONCILER_FILLS_LOOKBACK_HOURS", raising=False)
+    called_with.clear()
+    client2 = _FakeClientWithFills(positions=[], open_orders=[])
+    reconciler._kalshi_client = client2
+    await reconciler._fetch_fills()
+    assert called_with["since_ts"] is not None
+    one_day_ago_ms = int(
+        (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000
+    )
+    assert abs(called_with["since_ts"] - one_day_ago_ms) < 30_000
+
+
+@pytest.mark.asyncio
+async def test_loop_recovers_from_build_timeout(monkeypatch, caplog):
+    """If build_snapshot exceeds the per-cycle timeout, the loop must abort,
+    release the in-progress guard, and retry on the next cycle.
+    """
+    import os
+    monkeypatch.setenv("MERID_CANONICAL_RECONCILER_BUILD_TIMEOUT_S", "0.05")
+
+    slow_client = _FakeKalshiClient(positions=[], open_orders=[])
+    reconciler = _make_reconciler(client=slow_client)
+
+    original_build_snapshot = reconciler.build_snapshot
+
+    async def slow_build():
+        await asyncio.sleep(0.5)
+        return await original_build_snapshot()
+
+    reconciler.build_snapshot = slow_build
+
+    started = time.monotonic()
+    try:
+        with caplog.at_level(logging.ERROR, logger="merid.event_venues.kalshi.canonical_portfolio_reconciler"):
+            await reconciler.start(interval=3600.0)
+            await asyncio.sleep(0.15)
+    finally:
+        await reconciler.stop()
+
+    elapsed = time.monotonic() - started
+    # We should have observed a timeout much faster than the 0.5s build.
+    assert elapsed < 0.4
+    assert not reconciler._build_in_progress
+    assert "build_snapshot timed out" in caplog.text

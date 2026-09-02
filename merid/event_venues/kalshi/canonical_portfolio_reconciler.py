@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import replace
 from enum import Enum
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -177,6 +177,10 @@ class CanonicalPortfolioReconciler:
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
+        # Build concurrency guard.  Only one build should run at a time; this
+        # prevents a slow/stuck build from piling up overlapping work.
+        self._build_in_progress: bool = False
+
         # 2026-08-24: Authority-transition instrumentation.  Track the previous
         # published snapshot and mismatch timing so we can emit a structured diff
         # every time authority changes.
@@ -202,23 +206,52 @@ class CanonicalPortfolioReconciler:
         async def _loop() -> None:
             while self._running:
                 loop_start = time.monotonic()
+
+                # Guard against overlapping builds.  A stuck build should not
+                # schedule another one while it is still running.
+                if self._build_in_progress:
+                    logger.warning(
+                        "[CANONICAL-RECONCILER] previous build still in progress; "
+                        "skipping cycle to avoid overlap"
+                    )
+                    elapsed = time.monotonic() - loop_start
+                    await asyncio.sleep(max(0.0, interval - elapsed))
+                    continue
+
+                snap: Optional[CanonicalPortfolioSnapshot] = None
                 try:
-                    snap = await self.build_snapshot()
-                    # 2026-08-24: Bounded self-healing.  If the snapshot is non-authoritative
-                    # but has complete pagination, attempt a bounded recovery before publishing.
-                    if (
-                        snap is not None
-                        and not snap.is_authoritative
-                        and snap.pagination_complete
-                    ):
+                    timeout = float(
+                        os.environ.get("MERID_CANONICAL_RECONCILER_BUILD_TIMEOUT_S", "55.0")
+                        or 55.0
+                    )
+                    self._build_in_progress = True
+                    logger.info(
+                        "[CANONICAL-RECONCILER] starting build cycle timeout=%.1fs", timeout
+                    )
+                    snap = await asyncio.wait_for(self.build_snapshot(), timeout=timeout)
+                    if snap is not None and not snap.is_authoritative and snap.pagination_complete:
+                        # 2026-08-24: Bounded self-healing.
                         snap = await self._recover_authority(snap)
                     if snap is not None:
                         self._store.publish(snap)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "[CANONICAL-RECONCILER] build_snapshot timed out after %.1fs; "
+                        "will retry on next cycle",
+                        timeout,
+                    )
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.error("[CANONICAL-RECONCILER] snapshot build failed: %s", e)
+                finally:
+                    self._build_in_progress = False
+                    elapsed = time.monotonic() - loop_start
+                    logger.info(
+                        "[CANONICAL-RECONCILER] build cycle elapsed %.3fs", elapsed
+                    )
                 # P0 FIX: Adaptive sleep so the next cycle starts on the requested
                 # cadence, even if build_snapshot (REST calls) took a long time.
-                elapsed = time.monotonic() - loop_start
                 await asyncio.sleep(max(0.0, interval - elapsed))
 
         try:
@@ -288,27 +321,58 @@ class CanonicalPortfolioReconciler:
     async def build_snapshot(self) -> CanonicalPortfolioSnapshot:
         """Build a new canonical portfolio snapshot."""
         t0 = time.monotonic()
+        logger.info("[CANONICAL-RECONCILER] build_snapshot started")
 
         # 1. Exchange positions (REST, authoritative).
+        t1 = time.monotonic()
         positions_result = await self._fetch_exchange_positions()
         exchange_positions = positions_result[0]
         rest_failed = exchange_positions is None
         exchange_positions = (exchange_positions or {})
         exchange_positions = self._filter_expired_positions(exchange_positions, "exchange")
+        logger.info(
+            "[CANONICAL-RECONCILER] exchange positions fetched in %.3fs count=%d",
+            time.monotonic() - t1,
+            len(exchange_positions),
+        )
 
         # 2. Local ledger positions.
-        ledger_positions = self._fetch_ledger_positions()
+        t1 = time.monotonic()
+        ledger_positions = await self._fetch_ledger_positions()
         ledger_positions = self._filter_expired_positions(ledger_positions, "ledger")
+        logger.info(
+            "[CANONICAL-RECONCILER] ledger positions fetched in %.3fs count=%d",
+            time.monotonic() - t1,
+            len(ledger_positions),
+        )
 
         # 3. Local cache positions.
-        cache_positions = self._fetch_cache_positions()
+        t1 = time.monotonic()
+        cache_positions = await self._fetch_cache_positions()
         cache_positions = self._filter_expired_positions(cache_positions, "cache")
+        logger.info(
+            "[CANONICAL-RECONCILER] cache positions fetched in %.3fs count=%d",
+            time.monotonic() - t1,
+            len(cache_positions),
+        )
 
         # 4. Working orders (REST + WS + order gate).
+        t1 = time.monotonic()
         working_orders, orders_complete = await self._fetch_working_orders()
+        logger.info(
+            "[CANONICAL-RECONCILER] working orders fetched in %.3fs count=%d",
+            time.monotonic() - t1,
+            len(working_orders),
+        )
 
         # 5. Pending fills from WS / HTTP.
+        t1 = time.monotonic()
         pending_fills, fills_complete = await self._fetch_fills()
+        logger.info(
+            "[CANONICAL-RECONCILER] pending fills fetched in %.3fs count=%d",
+            time.monotonic() - t1,
+            len(pending_fills),
+        )
 
         # Build canonical positions.  Start from exchange and merge provenance.
         positions_by_ticker: Dict[str, CanonicalPosition] = {}
@@ -601,6 +665,16 @@ class CanonicalPortfolioReconciler:
         )
 
         self._last_snapshot = snapshot
+        logger.info(
+            "[CANONICAL-RECONCILER] build_snapshot completed in %.3fs status=%s reason=%s "
+            "positions=%d orders=%d fills=%d",
+            time.monotonic() - t0,
+            snapshot.reconciliation_status,
+            snapshot.reconciliation_reason,
+            snapshot.positions_count,
+            len(snapshot.working_orders_by_id),
+            len(snapshot.pending_fills_by_id),
+        )
         return snapshot
 
     # ── Authority transition instrumentation ───────────────────────────────────
@@ -1369,27 +1443,44 @@ class CanonicalPortfolioReconciler:
                 error_code="UNKNOWN_NETWORK",
             )
 
-    def _fetch_ledger_positions(self) -> Dict[str, Dict[str, Any]]:
-        """Fetch positions from local fills ledger."""
+    async def _fetch_ledger_positions(self) -> Dict[str, Dict[str, Any]]:
+        """Fetch positions from local fills ledger.
+
+        Runs the synchronous ledger scan in a thread so the reconciler loop
+        does not stall the event loop if the fill history is large.
+        """
         ledger = self._get_fills_ledger()
         if ledger is None:
             return {}
         try:
-            return ledger.compute_net_positions(since_hours=24)
+            return await asyncio.to_thread(
+                ledger.compute_net_positions,
+                since_hours=24,
+            )
         except Exception as e:
             logger.error("[CANONICAL-RECONCILER] ledger positions fetch failed: %s", e)
             return {}
 
-    def _fetch_cache_positions(self) -> Dict[str, Any]:
-        """Fetch positions from local cache (or test override)."""
+    async def _fetch_cache_positions(self) -> Dict[str, Any]:
+        """Fetch positions from local cache (or test override).
+
+        Runs the synchronous cache scan in a thread so the reconciler loop
+        does not stall the event loop if position health checks are slow.
+        """
         if self._position_cache is not None:
             try:
-                return self._position_cache.get_all_positions(validate_freshness=False)
+                return await asyncio.to_thread(
+                    self._position_cache.get_all_positions,
+                    validate_freshness=False,
+                )
             except Exception:
                 return {}
         try:
             cache = get_position_cache()
-            return cache.get_all_positions(validate_freshness=False)
+            return await asyncio.to_thread(
+                cache.get_all_positions,
+                validate_freshness=False,
+            )
         except Exception as e:
             logger.error("[CANONICAL-RECONCILER] cache positions fetch failed: %s", e)
             return {}
@@ -1480,7 +1571,13 @@ class CanonicalPortfolioReconciler:
     async def _fetch_fills(
         self,
     ) -> Tuple[List[Dict[str, Any]], Optional[SourceCompleteness]]:
-        """Return pending fills (WS events and, when available, REST fills)."""
+        """Return pending fills (WS events and, when available, REST fills).
+
+        REST fills are bounded to a recent look-back window to avoid fetching
+        the entire account trade history every reconciliation cycle.  The
+        default 24-hour window is sufficient to catch any fills missed by the
+        private WebSocket feed while keeping pagination small and the build fast.
+        """
         with self._local_lock:
             ws_fills = list(self._ws_fills.values())
 
@@ -1496,7 +1593,25 @@ class CanonicalPortfolioReconciler:
         if client is not None and hasattr(client, "get_fills"):
             try:
                 started = time.time_ns()
-                result = await client.get_fills()
+                lookback_hours = float(
+                    os.environ.get("MERID_CANONICAL_RECONCILER_FILLS_LOOKBACK_HOURS", "24")
+                    or 24.0
+                )
+                lookback_hours = max(0.0, lookback_hours)
+                if lookback_hours > 0:
+                    since_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+                    since_ts = int(since_dt.timestamp() * 1000)
+                else:
+                    since_ts = None
+                logger.info(
+                    "[CANONICAL-RECONCILER] fetching REST fills lookback_hours=%.1f since_ts=%s",
+                    lookback_hours,
+                    since_ts,
+                )
+                result = await client.get_fills(
+                    limit=200,
+                    since_ts=since_ts,
+                )
                 if result.success:
                     complete = SourceCompleteness(
                         source="exchange_rest_fills",
