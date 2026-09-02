@@ -120,7 +120,7 @@ _ANNUALIZED_VOL_GLOBAL_MAX = float(os.environ.get("MERID_MAX_ANNUALIZED_VOL", "1
 # Optional vol sources (off by default).  Realized vol is preferred when fresh;
 # market-implied vol is a cross-check against the Kalshi price.  Both are sanity
 # clamped before use.
-MERID_USE_REALIZED_VOL = os.environ.get("MERID_USE_REALIZED_VOL", "").strip().lower() in ("1", "true", "yes")
+MERID_USE_REALIZED_VOL = os.environ.get("MERID_USE_REALIZED_VOL", "1").strip().lower() in ("1", "true", "yes")
 MERID_REALIZED_VOL_MAX_AGE_S = float(os.environ.get("MERID_REALIZED_VOL_MAX_AGE_S", "300"))
 MERID_REALIZED_VOL_MIN_CONFIDENCE = float(os.environ.get("MERID_REALIZED_VOL_MIN_CONFIDENCE", "0.5"))
 MERID_ANCHOR_VOL_TO_MARKET = os.environ.get("MERID_ANCHOR_VOL_TO_MARKET", "").strip().lower() in ("1", "true", "yes")

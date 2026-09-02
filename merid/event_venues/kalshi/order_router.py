@@ -7863,11 +7863,12 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
 
                 # 2026-08-30: Reprice a taker BUY to actually cross the ask instead of
                 # conservatively using the slippage/edge cap.  The limit remains bounded
-                # by the cap, but we target the displayed ask (or one tick through an
-                # empty displayed level) so the order is marketable.
+                # by the cap, but we target one tick through the displayed ask whenever
+                # the edge/slippage budget permits, so an IOC limit stays marketable even
+                # if the ask jumps 1c before the order reaches the exchange.
                 if side_ask is not None:
                     target = side_ask
-                    if displayed_ask_size == 0 and (side_ask + 1) <= taker_cap:
+                    if (side_ask + 1) <= taker_cap:
                         target = side_ask + 1
                     adjusted_price = min(taker_cap, max(target, side_ask))
                 else:
@@ -7996,11 +7997,13 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                     taker_floor = max(fair_floor, edge_floor)
 
                 # 2026-08-30: Reprice a taker SELL to actually cross the bid, bounded by
-                # the slippage/edge floor.  Empty displayed bid levels are crossed one
-                # tick lower if the floor permits.
+                # the slippage/edge floor.  Cross one tick below the displayed bid
+                # whenever the edge/slippage budget permits, so an IOC limit remains
+                # marketable even if the bid drops 1c before the order reaches the
+                # exchange.
                 if side_bid is not None:
                     target = side_bid
-                    if displayed_bid_size == 0 and (side_bid - 1) >= taker_floor:
+                    if (side_bid - 1) >= taker_floor:
                         target = side_bid - 1
                     adjusted_price = max(taker_floor, min(target, side_bid))
                 else:
