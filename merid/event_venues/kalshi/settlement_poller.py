@@ -31,6 +31,23 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.settlement_poller")
 
+
+def _kalshi_settlement_close_ts(settlement: "KalshiSettlement") -> Optional[float]:
+    """Convert settlement expiry/settlement time to a Unix close timestamp."""
+    raw = settlement.expiry_time or settlement.settlement_time
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
 # Event bus topic for settlement events (shared with subscribers)
 # NOTE: This is the canonical topic - both publisher (poller) and subscribers
 # (TradingAgent, etc.) must use this exact string.
@@ -1176,7 +1193,28 @@ class KalshiSettlementPoller:
                     settlement_price_cents=settlement.settlement_price_cents,
                 )
                 events.append(event)
-            
+
+            # Join the settlement to the durable decision audit ledger so every
+            # recorded decision gets its counterfactual PnL.  Fail-open.
+            try:
+                from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+                audit_ledger = get_decision_audit_ledger()
+                close_ts = _kalshi_settlement_close_ts(settlement)
+                if close_ts is not None:
+                    audit_ledger.record_settlement(
+                        ticker=settlement.market_id,
+                        close_ts=close_ts,
+                        settled_yes=settlement.settlement_price_cents == 100,
+                        settlement_value_cents=settlement.settlement_price_cents or 0,
+                    )
+            except Exception as audit_exc:
+                logger.warning(
+                    "[SETTLEMENT-POLLER] decision audit join failed for %s: %s",
+                    settlement.market_id,
+                    audit_exc,
+                )
+
             # Measure bus latency (just the publish calls)
             bus_start_time = _time.monotonic()
             

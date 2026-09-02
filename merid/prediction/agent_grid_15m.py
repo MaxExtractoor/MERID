@@ -447,6 +447,70 @@ def _get_settlement_input_price(
     return spot_price, 0.0, f"cf_rti_unavailable:{reason}", obs
 
 
+def _quote_age_ms(market_state: Any) -> Optional[int]:
+    """Return best-guess quote age in ms from the market state clock."""
+    if market_state is None:
+        return None
+    wall_ts = getattr(market_state, "last_book_update_wall_ts", None)
+    if wall_ts is not None and wall_ts:
+        try:
+            return max(0, int((time.time() - float(wall_ts)) * 1000.0))
+        except Exception:
+            pass
+    mono_ts = getattr(market_state, "last_book_update_ts", None)
+    if mono_ts is not None and mono_ts:
+        try:
+            return max(0, int((time.monotonic() - float(mono_ts)) * 1000.0))
+        except Exception:
+            pass
+    return None
+
+
+def _rti_age_ms(obs: Optional[Any]) -> Optional[int]:
+    """Return CF-RTI settlement reference age in ms."""
+    if obs is None:
+        return None
+    observed_ms = getattr(obs, "observed_ts_ms", None)
+    if observed_ms:
+        try:
+            return max(0, int(time.time() * 1000.0 - float(observed_ms)))
+        except Exception:
+            pass
+    return None
+
+
+def _record_decision_audit(
+    decision: Any,
+    market_state: Any,
+    settlement_input_price: Optional[float],
+    settlement_reference: str,
+    cfb_observation: Optional[Any],
+) -> None:
+    """Append the trade/no-trade decision to the durable audit ledger.
+
+    Fail-open: any exception is logged and ignored; trading must never block on
+    the audit recorder.
+    """
+    try:
+        from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+        ledger = get_decision_audit_ledger()
+        ledger.record_trade_decision(
+            decision,
+            market_state=market_state,
+            quote_age_ms=_quote_age_ms(market_state),
+            settlement_reference_price=settlement_input_price,
+            settlement_reference_source=settlement_reference,
+            settlement_reference_age_ms=_rti_age_ms(cfb_observation),
+        )
+    except Exception as audit_exc:
+        logger.warning(
+            "[DECISION-AUDIT] failed to record decision %s: %s",
+            getattr(decision, "decision_id", "unknown"),
+            audit_exc,
+        )
+
+
 # Import unified signal terminology for consistent side selection
 try:
     from merid.prediction.signal_terminology import (
@@ -7666,7 +7730,7 @@ class LeanAgent15m:
                 indicators["p_yes_model"] = p_yes
             if shadow_bachelier_only:
                 indicators["shadow_bachelier_only"] = True
-            return compute_trade_decision(
+            decision = compute_trade_decision(
                 run_id=run_id,
                 decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
                 ticker=ticker,
@@ -7694,6 +7758,14 @@ class LeanAgent15m:
                 settlement_reference=settlement_reference,
                 policy_version="trade_decision_v2",
             )
+            _record_decision_audit(
+                decision,
+                market_state,
+                settlement_input_price,
+                settlement_reference,
+                cfb_observation,
+            )
+            return decision
 
         # Role-aware fee selection.  Start with the conservative taker fee,
         # then prefer maker unless the trade justifies paying the spread (very
