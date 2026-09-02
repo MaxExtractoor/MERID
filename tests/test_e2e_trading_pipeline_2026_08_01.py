@@ -112,7 +112,7 @@ class TestZeroDepthE2E:
         """Test that zero-depth blocking logic exists in agent_grid_15m."""
         import os
         file_path = os.path.join(os.path.dirname(__file__), '..', 'merid', 'prediction', 'agent_grid_15m.py')
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             source = f.read()
 
         # Verify zero-depth blocking is present
@@ -122,7 +122,7 @@ class TestZeroDepthE2E:
         """Test that malformed book uses a fallback spread."""
         import os
         file_path = os.path.join(os.path.dirname(__file__), '..', 'merid', 'prediction', 'agent_grid_15m.py')
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             source = f.read()
 
         # Verify fallback spread logic is present
