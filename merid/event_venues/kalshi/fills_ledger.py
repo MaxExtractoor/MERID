@@ -4737,11 +4737,20 @@ class KalshiFillsLedger:
         Used to match a provisional live-router fill with the later authoritative
         HTTP/WS fill so the two sources collapse to one state mutation.
 
-        The comparison is on the signed-YES economic effect (quantity and
-        canonical signed-YES delta) and the position-side price, not on the
-        literal side/action labels.  Counterparty-equivalent forms such as
-        SELL_NO and BUY_YES have the same effect and price in the held side's
-        space.
+        The comparison is on:
+          - market ticker,
+          - exchange order_id (when present on both),
+          - quantity in centi-contracts,
+          - canonical signed-YES delta (exposure effect), and
+          - the execution price expressed in a single leg (the YES leg by
+            preference) so counterparty-equivalent forms (SELL_NO vs BUY_YES,
+            BUY_NO vs SELL_YES) compare on the same price axis.
+
+        We compare on the YES leg because Kalshi's V2 payloads report both legs
+        and the YES price is the same scalar regardless of which form the taker
+        reports.  If only one leg is present, we compute the complement only for
+        the purpose of this identity check; the derived value is never used as a
+        cost basis.
         """
         if a.market_ticker != b.market_ticker:
             return False
@@ -4752,11 +4761,37 @@ class KalshiFillsLedger:
         if (a.canonical_yes_delta_cc or 0) != (b.canonical_yes_delta_cc or 0):
             return False
 
-        a_price = a.position_side_price_cents()
-        b_price = b.position_side_price_cents()
+        a_price = self._yes_price_cents_for_dedupe(a)
+        b_price = self._yes_price_cents_for_dedupe(b)
         if a_price is None or b_price is None:
             return False
         return abs(a_price - b_price) <= 1
+
+    def _yes_price_cents_for_dedupe(self, fill: KalshiFill) -> Optional[int]:
+        """Return the YES-leg price in cents for identity comparison.
+
+        Prefer an explicit ``yes_price_dollars``.  When it is missing but the
+        NO-leg price is present, compute the YES complement only for deduplication
+        (100c - no_cents).  If neither leg is present and the canonical execution
+        side is known, use ``canonical_leg_price_cents`` and complement it when the
+        canonical side is ``no``.
+        """
+        yes = _safe_price_to_cents(fill.yes_price_dollars)
+        if yes is not None:
+            return yes
+
+        no = _safe_price_to_cents(fill.no_price_dollars)
+        if no is not None:
+            return 100 - no
+
+        canonical = fill.canonical_leg_price_cents
+        if canonical is not None:
+            if fill.canonical_position_side == "yes":
+                return canonical
+            if fill.canonical_position_side == "no":
+                return 100 - canonical
+
+        return None
 
     def _reindex_fill_id(self, old_id: str, new_id: str, fill: KalshiFill) -> None:
         """Move secondary indexes from ``old_id`` to ``new_id`` after promotion."""
@@ -4846,28 +4881,34 @@ class KalshiFillsLedger:
             except Exception:
                 pass
 
-        # Overlay complete price fields from the authoritative fill.  Missing side
-        # prices are not derived via complement here; the canonical leg price is
-        # recomputed below from the existing (preserved) canonical side.
-        if fill.yes_price_dollars is not None:
+        # Enrich price fields only when the existing record is missing them.
+        # The first observed execution (usually the live-router fill) is the
+        # source of truth for cost basis.  A later HTTP/WS observation of the
+        # same execution must not overwrite the leg prices, especially when the
+        # exchange reports the trade in a counterparty form with the price on the
+        # opposite leg.  Missing legs may be backfilled if they are needed for
+        # PnL or audit.
+        if existing.yes_price_dollars is None and fill.yes_price_dollars is not None:
             existing.yes_price_dollars = fill.yes_price_dollars
-        if fill.no_price_dollars is not None:
+        if existing.no_price_dollars is None and fill.no_price_dollars is not None:
             existing.no_price_dollars = fill.no_price_dollars
 
         # Recompute the canonical leg and execution price in the existing
-        # canonical side's own outcome space, using the authoritative fill's
-        # complete price fields.  This prevents a counterparty-form authoritative
-        # fill from overwriting the user's NO-side price with the YES-side price.
+        # canonical side's own outcome space, using the existing (preserved)
+        # canonical side.  Only update if the existing record still lacks a leg
+        # price for that side.
         can_side = existing.canonical_position_side
         if can_side == "yes" and existing.yes_price_dollars is not None:
-            existing.canonical_leg_price_cents = _safe_price_to_cents(existing.yes_price_dollars)
-            existing.execution_price_cents = existing.canonical_leg_price_cents
+            if existing.canonical_leg_price_cents is None:
+                existing.canonical_leg_price_cents = _safe_price_to_cents(existing.yes_price_dollars)
+                existing.execution_price_cents = existing.canonical_leg_price_cents
         elif can_side == "no" and existing.no_price_dollars is not None:
-            existing.canonical_leg_price_cents = _safe_price_to_cents(existing.no_price_dollars)
-            existing.execution_price_cents = existing.canonical_leg_price_cents
-        elif fill.canonical_leg_price_cents is not None or fill.execution_price_cents is not None:
-            existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or existing.canonical_leg_price_cents
-            existing.execution_price_cents = fill.execution_price_cents or existing.execution_price_cents
+            if existing.canonical_leg_price_cents is None:
+                existing.canonical_leg_price_cents = _safe_price_to_cents(existing.no_price_dollars)
+                existing.execution_price_cents = existing.canonical_leg_price_cents
+        elif existing.canonical_leg_price_cents is None and (fill.canonical_leg_price_cents is not None or fill.execution_price_cents is not None):
+            existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or fill.execution_price_cents or existing.canonical_leg_price_cents
+            existing.execution_price_cents = fill.execution_price_cents or fill.canonical_leg_price_cents or existing.execution_price_cents
 
         # price_cents is a read-only display property; canonical leg price is already
         # preserved above. Do not assign to the property to avoid AttributeError.

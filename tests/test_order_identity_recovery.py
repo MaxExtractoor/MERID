@@ -1313,6 +1313,11 @@ async def test_fractional_quantity_wire_and_exposure(
     coid = _reserve_gate(intent, monkeypatch)
     finalize_order_identity(intent, store=attempt_store)
 
+    # The durable attempt record is an immutable snapshot of the intent at
+    # identity-finalization time.  The router may later resize/reprice the
+    # intent in place, so capture the fingerprint now rather than after routing.
+    expected_fingerprint = _compute_fingerprint(intent)
+
     # Spy on the wire request to confirm the exact fractional payload.
     original_create = client.create_order
     sent: List[CreateOrderRequest] = []
@@ -1360,4 +1365,4 @@ async def test_fractional_quantity_wire_and_exposure(
     # Fingerprint must capture the fractional count_fp.
     record = attempt_store.get_by_client_order_id(coid)
     assert record is not None
-    assert record.fingerprint == _compute_fingerprint(intent)
+    assert record.fingerprint == expected_fingerprint
