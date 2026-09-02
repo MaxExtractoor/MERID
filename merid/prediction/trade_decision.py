@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import os
 import statistics
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -124,6 +124,10 @@ MERID_USE_REALIZED_VOL = os.environ.get("MERID_USE_REALIZED_VOL", "1").strip().l
 MERID_REALIZED_VOL_MAX_AGE_S = float(os.environ.get("MERID_REALIZED_VOL_MAX_AGE_S", "300"))
 MERID_REALIZED_VOL_MIN_CONFIDENCE = float(os.environ.get("MERID_REALIZED_VOL_MIN_CONFIDENCE", "0.5"))
 MERID_ANCHOR_VOL_TO_MARKET = os.environ.get("MERID_ANCHOR_VOL_TO_MARKET", "").strip().lower() in ("1", "true", "yes")
+
+# 4c LCB(EV_net) canary threshold experiment.
+MERID_CANARY_4C_LCB = os.environ.get("MERID_CANARY_4C_LCB", "").strip().lower() in ("1", "true", "yes")
+MERID_CANARY_LCB_BASE_CENTS = float(os.environ.get("MERID_CANARY_LCB_BASE_CENTS", "4.0"))
 
 
 def _inverse_normal_cdf(p: float) -> float:
@@ -483,7 +487,13 @@ def _get_resolved_config_hash() -> Optional[str]:
 
 
 def _get_resolved_max_contracts() -> int:
-    """Return the resolved per-order contract cap, falling back to env/default."""
+    """Return the resolved per-order contract cap, falling back to env/default.
+
+    In 4c LCB canary mode the per-order cap is always one contract.  The canary
+    is intentionally tiny and one contract is the minimum non-zero exposure.
+    """
+    if MERID_CANARY_4C_LCB:
+        return 1
     resolved = _get_resolved_live_config()
     if resolved is not None and resolved.max_contracts_per_order is not None:
         return int(resolved.max_contracts_per_order)
@@ -491,6 +501,150 @@ def _get_resolved_max_contracts() -> int:
         return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "2"))
     except Exception:
         return 2
+
+
+def _canary_lcb_threshold_cents(
+    asset: str,
+    price_cents: int,
+    vol_source: str,
+    settlement_reference: str,
+) -> float:
+    """Return the required LCB(EV_net) threshold in cents for the 4c canary.
+
+    The threshold is a function of asset liquidity, price bucket, volatility
+    source, and settlement-reference quality.  It is *never* a single global 4c
+    floor; the floor is 4c for the safest domain (BTC/ETH, 30-70c, validated
+    vol, live RTI settlement reference) and higher everywhere else.
+    """
+    if vol_source in ("default", "requested", "fallback", "unknown"):
+        return float("inf")
+    if settlement_reference != "cfb_rti_live":
+        return float("inf")
+    if price_cents < 10 or price_cents > 75:
+        return float("inf")
+
+    threshold = MERID_CANARY_LCB_BASE_CENTS
+
+    asset_premium = {
+        "BTC": 0.0,
+        "ETH": 0.0,
+        "SOL": 1.0,
+        "XRP": 1.0,
+        "DOGE": 2.0,
+    }.get(asset.upper(), 2.0)
+    threshold += asset_premium
+
+    if 10 <= price_cents <= 19 or 66 <= price_cents <= 75:
+        threshold += 3.0
+    elif 20 <= price_cents <= 29 or 56 <= price_cents <= 65:
+        threshold += 1.0
+
+    return threshold
+
+
+def _threshold_json(threshold: float) -> Any:
+    return threshold if math.isfinite(threshold) else "inf"
+
+
+def apply_canary_lcb_gate(
+    decision: TradeDecision,
+    asset: str,
+    annualized_vol_source: str,
+    settlement_reference: str,
+) -> TradeDecision:
+    """Apply the 4c LCB(EV_net) canary threshold to a TradeDecision.
+
+    This is a fail-closed overlay: if MERID_CANARY_4C_LCB is not set, the
+    decision is returned unchanged.  When set, the selected side must clear the
+    conditional LCB threshold; otherwise the decision is downgraded to a
+    no-trade with a structured shadow-cohort record.  Sizing is capped at one
+    contract for the canary.
+    """
+    if not MERID_CANARY_4C_LCB:
+        return decision
+
+    original_selected = decision.selected_outcome
+
+    def _lcb_cents(side: str) -> float:
+        net_edge = float(getattr(decision, f"{side}_net_edge", Decimal("0")))
+        risk_reserve = float(getattr(decision, f"model_risk_reserve_{side}", Decimal("0")))
+        return (net_edge - risk_reserve) * 100.0
+
+    def _price_cents(side: str) -> int:
+        entry = getattr(decision, f"{side}_entry_vwap", Decimal("0"))
+        if entry is None:
+            return -1
+        return int(round(float(entry) * 100.0))
+
+    yes_price = _price_cents("yes")
+    no_price = _price_cents("no")
+    yes_lcb = _lcb_cents("yes")
+    no_lcb = _lcb_cents("no")
+
+    yes_threshold = _canary_lcb_threshold_cents(asset, yes_price, annualized_vol_source, settlement_reference)
+    no_threshold = _canary_lcb_threshold_cents(asset, no_price, annualized_vol_source, settlement_reference)
+
+    yes_selected = (
+        float(decision.yes_net_edge) > 0
+        and yes_lcb >= yes_threshold - 1e-9
+        and original_selected == "yes"
+    )
+    no_selected = (
+        float(decision.no_net_edge) > 0
+        and no_lcb >= no_threshold - 1e-9
+        and original_selected == "no"
+    )
+
+    would_enter_at_canary = bool(yes_selected or no_selected)
+    would_enter_at_prior = original_selected is not None
+
+    shadow_cohort = {
+        "canary_enabled": True,
+        "canary_base_cents": MERID_CANARY_LCB_BASE_CENTS,
+        "annualized_vol_source": annualized_vol_source,
+        "settlement_reference": settlement_reference,
+        "yes_price_cents": yes_price,
+        "yes_lcb_cents": yes_lcb,
+        "yes_threshold_cents": _threshold_json(yes_threshold),
+        "yes_would_enter": yes_selected,
+        "no_price_cents": no_price,
+        "no_lcb_cents": no_lcb,
+        "no_threshold_cents": _threshold_json(no_threshold),
+        "no_would_enter": no_selected,
+        "would_enter_at_canary": would_enter_at_canary,
+        "would_enter_at_prior_threshold": would_enter_at_prior,
+        "delta_reason": None,
+    }
+
+    new_indicators = dict(decision.indicators or {})
+    new_indicators["shadow_cohort"] = shadow_cohort
+
+    if would_enter_at_canary:
+        size_cc = min(int(decision.approved_size_cc or 0), 100)
+        return replace(
+            decision,
+            indicators=new_indicators,
+            approved_size_cc=Decimal(str(size_cc)) if size_cc > 0 else Decimal("0"),
+        )
+
+    if would_enter_at_prior:
+        shadow_cohort["delta_reason"] = "lcb_below_canary_threshold"
+        new_indicators["shadow_cohort"] = shadow_cohort
+
+    return replace(
+        decision,
+        selected_outcome=None,
+        selected_action=None,
+        selected_side_pre_edge=None,
+        selected_outcome_price=None,
+        gross_edge=None,
+        net_edge=None,
+        p_selected=None,
+        p_opposite=None,
+        approved_size_cc=Decimal("0"),
+        no_trade_reason=shadow_cohort["delta_reason"] or decision.no_trade_reason or "lcb_canary_no_trade",
+        indicators=new_indicators,
+    )
 
 
 def _parse_pi_star_tiers() -> List[Tuple[int, int]]:
@@ -1711,6 +1865,19 @@ def compute_trade_decision(
         config_hash=_config_hash,
         build_sha=_build_sha,
     )
+
+    # 4c LCB(EV_net) canary overlay.  When enabled this is the final authority
+    # for the canary cohort; it may downgrade a selected side to no-trade and
+    # records the shadow-cohort comparison in decision indicators.
+    if MERID_CANARY_4C_LCB:
+        _vol_source_for_canary = indicators.get("annualized_vol_source", "unknown")
+        decision = apply_canary_lcb_gate(
+            decision,
+            asset=asset,
+            annualized_vol_source=_vol_source_for_canary,
+            settlement_reference=settlement_reference,
+        )
+
     record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
 
     # 2026-08-29: Write the decision-time ledger snapshot before any order is

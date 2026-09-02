@@ -2531,8 +2531,20 @@ class KalshiWebSocketBridge:
         self._ws_thread.start()
 
     def is_running(self) -> bool:
-        """Check if the bridge is actively running."""
-        return self._ws_thread is not None and self._ws_thread.is_alive()
+        """Check if the bridge is actively running.
+
+        The bridge is operational if any of its core transport/forward tasks
+        are alive: the WebSocket I/O thread, the forwarder thread, or the
+        REST-polling task.
+        """
+        if self._ws_thread is not None and self._ws_thread.is_alive():
+            return True
+        if self._forward_thread is not None and self._forward_thread.is_alive():
+            return True
+        rest_task = getattr(self, "_rest_polling_task", None)
+        if rest_task is not None and not rest_task.done():
+            return True
+        return False
 
     def is_forward_loop_stalled(self) -> bool:
         """Check if the forward loop is stalled (no events for > 2s).
@@ -4953,8 +4965,7 @@ class KalshiWebSocketBridge:
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serializable bridge status."""
-        task = getattr(self, "_task", None)
-        running = task is not None and not task.done()
+        running = self.is_running()
         start_ts = float(getattr(self, "_start_ts", 0.0) or 0.0)
         uptime = _time.monotonic() - start_ts if start_ts else 0
         queue = getattr(self, "_queue", None)

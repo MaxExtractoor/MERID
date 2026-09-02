@@ -43,6 +43,8 @@ def _make_decision(
     regime: str = "normal",
     min_edge: float = 0.03,
     settlement_reference: str = "cfb_rti_live",
+    p_yes_model: Optional[float] = None,
+    p_no_model: Optional[float] = None,
 ):
     """Helper to create a decision with sensible defaults."""
     return compute_trade_decision(
@@ -66,6 +68,8 @@ def _make_decision(
         regime=regime,
         min_required_edge=min_edge,
         settlement_reference=settlement_reference,
+        p_yes_model=p_yes_model,
+        p_no_model=p_no_model,
     )
 
 
@@ -392,4 +396,94 @@ def test_calibration_diagnostics_uncalibrated_yes_no():
     no_outcomes = [1] * 40 + [0] * 60
     no_summary = calibration_summary(no_probs, no_outcomes, n_bins=1, label="no")
     assert math.isclose(no_summary["expected_calibration_error"], 0.30, abs_tol=1e-9)
+
+
+# 4c LCB(EV_net) canary threshold tests.
+
+def test_canary_selects_when_lcb_clears_4c(monkeypatch):
+    """A side whose LCB clears the conditional 4c floor is selected in canary mode."""
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_CANARY_4C_LCB", True)
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    monkeypatch.setenv("MERID_ANNUALIZED_VOL_BTC", "0.60")
+    d = _make_decision(
+        min_edge=0.02,
+        p_yes_model=0.60,
+        yes_ask=42.0,
+        no_ask=58.0,
+        model_uncertainty=0.02,
+    )
+    assert d.selected_outcome == "yes"
+    shadow = d.indicators["shadow_cohort"]
+    assert shadow["would_enter_at_canary"] is True
+    assert shadow["would_enter_at_prior_threshold"] is True
+    assert int(d.approved_size_cc) == 100
+
+
+def test_canary_blocks_when_lcb_below_4c(monkeypatch):
+    """A side that clears the prior threshold but not the 4c LCB floor is downgraded."""
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_CANARY_4C_LCB", True)
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    monkeypatch.setenv("MERID_ANNUALIZED_VOL_BTC", "0.60")
+    d = _make_decision(
+        min_edge=0.02,
+        p_yes_model=0.55,
+        yes_ask=42.0,
+        no_ask=58.0,
+        model_uncertainty=0.05,
+    )
+    assert d.selected_outcome is None
+    assert d.no_trade_reason == "lcb_below_canary_threshold"
+    shadow = d.indicators["shadow_cohort"]
+    assert shadow["would_enter_at_canary"] is False
+    assert shadow["would_enter_at_prior_threshold"] is True
+    assert shadow["delta_reason"] == "lcb_below_canary_threshold"
+
+
+def test_canary_blocks_unvalidated_vol_source(monkeypatch):
+    """The canary must reject any entry whose volatility source is the unvalidated fallback."""
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_CANARY_4C_LCB", True)
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    # No MERID_ANNUALIZED_VOL_BTC env override -> _resolve_annualized_vol falls to "default".
+    d = _make_decision(
+        min_edge=0.02,
+        p_yes_model=0.60,
+        yes_ask=42.0,
+        no_ask=58.0,
+    )
+    assert d.selected_outcome is None
+    shadow = d.indicators["shadow_cohort"]
+    assert shadow["would_enter_at_canary"] is False
+    assert shadow["yes_threshold_cents"] == "inf"
+
+
+def test_canary_excludes_tail_prices(monkeypatch):
+    """The canary must exclude the 0-9c and 76-99c tail buckets."""
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_CANARY_4C_LCB", True)
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    monkeypatch.setenv("MERID_ANNUALIZED_VOL_BTC", "0.60")
+    d = _make_decision(
+        min_edge=0.02,
+        p_yes_model=0.95,
+        yes_ask=8.0,
+        no_ask=92.0,
+    )
+    assert d.selected_outcome is None
+    shadow = d.indicators["shadow_cohort"]
+    assert shadow["would_enter_at_canary"] is False
+    assert shadow["yes_threshold_cents"] == "inf"
+
+
+def test_canary_off_leaves_decision_unchanged(monkeypatch):
+    """When the canary flag is disabled, compute_trade_decision ignores it entirely."""
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_CANARY_4C_LCB", False)
+    monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    d = _make_decision(
+        min_edge=0.02,
+        p_yes_model=0.60,
+        yes_ask=42.0,
+        no_ask=58.0,
+        model_uncertainty=0.02,
+    )
+    assert d.selected_outcome == "yes"
+    assert "shadow_cohort" not in d.indicators
 
