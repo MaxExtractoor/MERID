@@ -1,0 +1,8 @@
+Ensure DecisionAuditLedger.db_path is always a Path.
+
+The constructor accepts an optional string path; wrap it so later
+_ensure_db can call .parent.mkdir() without an AttributeError.
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>

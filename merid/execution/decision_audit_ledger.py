@@ -213,7 +213,7 @@ class DecisionAuditLedger:
     """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
-        self.db_path = db_path or _DB_PATH
+        self.db_path = Path(db_path) if db_path else _DB_PATH
         self._lock = threading.Lock()
         self._db_ready = False
 
