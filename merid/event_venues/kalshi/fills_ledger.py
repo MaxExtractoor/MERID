@@ -613,10 +613,10 @@ def derive_position_effect(
     # synthesized via 100 - side_price.
     _yes = yes_price_cents
     _no = no_price_cents
-    if _yes is None and _no is None and execution_price_cents is not None:
-        if side == "yes":
+    if execution_price_cents is not None:
+        if _yes is None and side == "yes":
             _yes = execution_price_cents
-        elif side == "no":
+        if _no is None and side == "no":
             _no = execution_price_cents
 
     # The canonical leg price is the price on the executed contract side.
@@ -629,6 +629,29 @@ def derive_position_effect(
             canonical_yes_delta_cc = yes_delta(action, side, int(quantity_cc))
         except Exception:
             canonical_yes_delta_cc = None
+
+    # The held-side price is required for live position accounting.  If the
+    # held side differs from the execution side and the exchange did not report
+    # the held-side leg, the fill cannot safely contribute to cost basis/PnL.
+    held_price_cents: Optional[int] = None
+    if canonical_yes_delta_cc is not None:
+        try:
+            held_side, _ = from_signed_yes_exposure(canonical_yes_delta_cc)
+            if held_side == "yes":
+                held_price_cents = _yes
+            elif held_side == "no":
+                held_price_cents = _no
+        except Exception:
+            held_price_cents = None
+
+    if held_price_cents is None:
+        return {
+            "canonical_position_side": side,
+            "canonical_position_action": action,
+            "canonical_leg_price_cents": None,
+            "canonical_yes_delta_cc": canonical_yes_delta_cc,
+            "canonicalization_state": "UNTRUSTED_RAW",
+        }
 
     return {
         "canonical_position_side": side,
@@ -960,16 +983,19 @@ class KalshiFill:
         yes_cents = _safe_price_to_cents(self.yes_price_dollars)
         no_cents = _safe_price_to_cents(self.no_price_dollars)
 
-        # 2026-09-01: use the canonical held side, not the signed-YES direction
-        # (which for a sell of NO would incorrectly select the YES-leg price).
-        held_side = (self.canonical_position_side or self.economic_side or "").lower()
+        # 2026-09-01: use the held (economic) side, not the raw execution side.
+        # A sell of NO is long YES, so the held side is YES and we need the YES-leg
+        # price, not the NO execution price.
+        held_side = (self.economic_side or self.canonical_position_side or "").lower()
 
         if held_side == "yes" and yes_cents is not None:
             return yes_cents
         if held_side == "no" and no_cents is not None:
             return no_cents
 
-        return self.canonical_leg_price_cents or self.price_cents
+        # No held-side leg price and no execution-side match: do not synthesize
+        # or fall back to a potentially wrong-side execution price.
+        return None
 
 
 @dataclass
@@ -3591,23 +3617,21 @@ class KalshiFillsLedger:
                 )
                 continue
 
-            total_fees += fill.fee_cost
-
             # Determine the price in the current thesis side's price space.
-            # Use the stored YES/NO leg prices; never derive via 100 - side_price.
-            if thesis_side is not None:
-                fill_price = _fill_position_side_price_cents(fill, thesis_side)
-            else:
-                fill_price = None
-            if fill_price is None:
-                fill_price = fill.price_cents
-                if fill_price is None:
-                    fill_price = 0
-                if thesis_side is not None and can_side != thesis_side:
-                    logger.warning(
-                        "[FILLS-LEDGER-COMPUTE] Cannot determine %s-side price for %s fill_id=%s; using raw price",
-                        thesis_side, market_ticker, fill.fill_id,
-                    )
+            # Use the stored YES/NO leg prices; never derive via 100 - side_price
+            # and never fall back to the raw execution price for the held side.
+            this_fill_held_side, _ = from_signed_yes_exposure(fill_yes)
+            _price_side = thesis_side if thesis_side is not None else this_fill_held_side
+            fill_price = _fill_position_side_price_cents(fill, _price_side)
+            if fill_price is None or fill_price <= 0:
+                logger.warning(
+                    "[FILLS-LEDGER-COMPUTE] Cannot determine %s-side price for %s fill_id=%s; skipping fill",
+                    _price_side, market_ticker, fill.fill_id,
+                )
+                excluded_from_live_replay += 1
+                continue
+
+            total_fees += fill.fee_cost
 
             abs_exposure = abs(signed_yes)
             if abs_exposure == 0:
@@ -6290,24 +6314,11 @@ class KalshiFillsLedger:
         yes_price_dollars = normalize_price(yes_price) if yes_price else None
         no_price_dollars = normalize_price(no_price) if no_price else None
 
-        # 2026-08-30: An explicitly-tagged *_dollars price is in its own side's
-        # price space.  Because YES + NO = $1, the missing leg can be derived
-        # exactly.  This preserves correct price selection for fills that only
-        # report one leg (common for WebSocket and router-immediate fills).
-        if (yes_price_dollars is not None) != (no_price_dollars is not None):
-            _known_price = yes_price_dollars if yes_price_dollars is not None else no_price_dollars
-            if _known_price is not None and Decimal("0") <= _known_price <= Decimal("1"):
-                _derived_price = (Decimal("1") - _known_price).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-                if yes_price_dollars is None:
-                    yes_price_dollars = _derived_price
-                else:
-                    no_price_dollars = _derived_price
-                logger.debug(
-                    "[FILLS-LEDGER] Derived missing leg price from %s: %s -> %s",
-                    "yes_price_dollars" if no_price_dollars == _derived_price else "no_price_dollars",
-                    str(_known_price),
-                    str(_derived_price),
-                )
+        # 2026-09-02: Do NOT derive a missing leg via 1 - other_side.  The
+        # held-side cost basis must come from an explicit exchange field.  The
+        # ledger canonicalization will quarantine fills whose held-side price is
+        # absent, so downstream position math never falls back to a synthetic or
+        # raw execution price.
 
         # CRITICAL FIX (2026-09-01): Kalshi's ``outcome_side`` is the market/book
         # side of the matched order, not the user's held side.  The user's held
@@ -6546,16 +6557,9 @@ class KalshiFillsLedger:
             elif _price_side == "no":
                 no_price_dollars = normalize_price(price)
 
-        # Ensure both leg prices are available after all explicit/derived sources.
-        # If the generic `price` left us with exactly one leg, derive the other.
-        if (yes_price_dollars is not None) != (no_price_dollars is not None):
-            _known_price = yes_price_dollars if yes_price_dollars is not None else no_price_dollars
-            if _known_price is not None and Decimal("0") <= _known_price <= Decimal("1"):
-                _derived_price = (Decimal("1") - _known_price).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-                if yes_price_dollars is None:
-                    yes_price_dollars = _derived_price
-                else:
-                    no_price_dollars = _derived_price
+        # 2026-09-02: Do not derive the opposite leg from a single generic
+        # price.  Only the execution side is tagged; the held-side price must be
+        # an explicit exchange field.
 
         # Parse fee.  Kalshi V2 ``fee_cost`` / ``fee_paid`` are dollars and are
         # used exactly as Decimal; only the legacy ``fee`` key may be

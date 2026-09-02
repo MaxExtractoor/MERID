@@ -75,13 +75,19 @@ def test_fill_to_signed_yes_exposure_defensive_on_malformed():
 
 
 def _make_fill(fill_id: str, action: str, side: str, count: int, price_cents: int, ticker: str) -> KalshiFill:
-    """Helper to construct a canonical KalshiFill for testing."""
+    """Helper to construct a canonical KalshiFill for testing.
+
+    The exchange reports both leg prices.  For synthetic data we set the
+    execution-side price to ``price_cents`` and the held-side price to the
+    explicit opposite leg so that cross-leg fills are not quarantined.
+    """
+    exec_price = Decimal(price_cents) / Decimal(100)
     if side == "yes":
-        yes_price = Decimal(price_cents) / Decimal(100)
-        no_price = None
+        yes_price = exec_price
+        no_price = Decimal("1") - exec_price
     else:
-        yes_price = None
-        no_price = Decimal(price_cents) / Decimal(100)
+        no_price = exec_price
+        yes_price = Decimal("1") - exec_price
     return KalshiFill(
         fill_id=fill_id,
         market_ticker=ticker,
@@ -92,6 +98,10 @@ def _make_fill(fill_id: str, action: str, side: str, count: int, price_cents: in
         no_price_dollars=no_price,
         fee_cost=Decimal("0"),
         created_time=datetime.now(timezone.utc),
+        canonical_position_side=side,
+        canonical_position_action=action,
+        canonical_leg_price_cents=price_cents,
+        canonical_yes_delta_cc=yes_delta(action, side, count * 100),
         canonicalization_state="TRUSTED_LIVE_V1",
         ledger_schema_version=3,
         canonicalization_version=1,

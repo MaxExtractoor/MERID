@@ -664,7 +664,9 @@ class CachedPosition:
         position_side_for_price = self.side if new_quantity_cc == 0 else new_side
 
         # Convert fill price from the fill's execution side into the position's
-        # own side space using the stored YES/NO leg prices.  No complement.
+        # own side space using the stored YES/NO leg prices.  No complement and
+        # no fallback to the raw execution price; a missing position-side leg is
+        # a data-integrity failure.
         if side == position_side_for_price:
             adjusted_price_cents = price_cents
         elif position_side_for_price == "yes" and yes_price_cents is not None:
@@ -672,12 +674,11 @@ class CachedPosition:
         elif position_side_for_price == "no" and no_price_cents is not None:
             adjusted_price_cents = no_price_cents
         else:
-            logger.warning(
-                "[POSITION-CACHE-PRICE-MISSING-LEG] market=%s raw_side=%s position_side=%s "
-                "yes_price_cents=%s no_price_cents=%s - cannot convert fill price; using raw price",
-                self.market_id, side, position_side_for_price, yes_price_cents, no_price_cents,
+            raise ValueError(
+                f"[POSITION-CACHE-PRICE-MISSING-LEG] market={self.market_id} raw_side={side} "
+                f"position_side={position_side_for_price} yes_price_cents={yes_price_cents} "
+                f"no_price_cents={no_price_cents} - cannot convert fill price"
             )
-            adjusted_price_cents = price_cents
 
         # Classify the fill by its effect on absolute exposure.
         if pre_yes_exposure == 0:
@@ -4021,16 +4022,17 @@ class KalshiPositionCache:
 
             # Use the price in the position's (thesis) side space.  When the
             # canonical fill side differs from the held side, read the stored
-            # YES/NO leg price instead of computing a complement.
+            # YES/NO leg price.  Never fall back to the raw execution price or
+            # compute a complement.
             if fill_side.lower() != thesis_side.lower():
                 converted = _fill_position_side_price_cents(fill, thesis_side)
-                if converted is not None:
-                    fill_price_cents = converted
-                else:
+                if converted is None or converted <= 0:
                     logger.warning(
-                        "[POSITION-RECOMPUTE] Cannot determine %s-side price for %s fill_id=%s; using raw price",
+                        "[POSITION-RECOMPUTE] Cannot determine %s-side price for %s fill_id=%s; skipping fill",
                         thesis_side, market_id, getattr(fill, 'fill_id', 'unknown'),
                     )
+                    continue
+                fill_price_cents = converted
 
             # Weighted average price update for the new exposure.
             if yes_exposure == 0:
@@ -5781,13 +5783,23 @@ class KalshiPositionCache:
                     if fill_yes == 0:
                         continue
 
-                    # Price in the fill's own outcome space.  For a long-NO position
-                    # this may come from a SELL_YES fill, but the economic held side
-                    # is still NO, so we retrieve the NO price if available.
-                    fill_held_side, _ = from_signed_yes_exposure(fill_yes)
-                    fill_price = _fill_position_side_price_cents(fill, fill_held_side)
+                    # Price in the position's own side space.  For an add this is
+                    # the fill's held side; for a reduce/close it is the side of the
+                    # position being reduced; for a flip it is the new side.  Use the
+                    # post-fill side when exposure is non-zero, otherwise the pre-fill
+                    # side so a full close still prices in the closed position's space.
+                    current_yes_cc = net_yes_cc
+                    new_yes_cc = current_yes_cc + fill_yes
+                    _price_side, _ = from_signed_yes_exposure(
+                        new_yes_cc if new_yes_cc != 0 else current_yes_cc
+                    )
+                    fill_price = _fill_position_side_price_cents(fill, _price_side)
                     if fill_price is None or fill_price <= 0:
-                        fill_price = getattr(fill, 'price_cents', 0) or 0
+                        logger.warning(
+                            "[POSITION-REBUILD] Cannot determine %s-side price for fill_id=%s; skipping fill",
+                            _price_side, getattr(fill, 'fill_id', None),
+                        )
+                        continue
 
                     # Update signed net exposure and weighted-average cost using
                     # fixed-point integer/Decimal arithmetic.  Cost is added only for
