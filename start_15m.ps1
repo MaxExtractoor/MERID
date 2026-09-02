@@ -209,10 +209,14 @@ if ($env:MERID_PM_TRADING_MODE -eq "live") {
 # Consolidated to single environment variable: MERID_KALSHI_ENV
 $env:MERID_KALSHI_ENV = "prod"  # Unified environment variable (prod=demo, prod=live)
 $env:KALSHI_USE_DEMO = "false"  # Explicitly disable demo mode for production safety
-# CRITICAL FIX: Use api.elections.kalshi.com endpoints (elections API, not external-api)
-# The external-api endpoints do not support elections markets
-$env:MERID_KALSHI_HTTP_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-$env:MERID_KALSHI_WS_BASE = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+# 2026-09-02: Use Kalshi's recommended dedicated external Trade API hosts.
+# The docs at https://docs.kalshi.com/getting_started/api_environments state
+# that external-api.kalshi.com and external-api-ws.kalshi.com are the
+# recommended production hosts and support all Kalshi markets, including
+# crypto 15-minute markets. The api.elections.kalshi.com legacy host remains
+# supported for compatibility only and has shown 10-17s connect/read stalls.
+$env:MERID_KALSHI_HTTP_BASE = "https://external-api.kalshi.com/trade-api/v2"
+$env:MERID_KALSHI_WS_BASE = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 
 # 3.0a Derive the legacy KALSHI_ENV from the canonical MERID_KALSHI_ENV.
 # KALSHI_ENV=live is the operational form that the Kalshi client uses to pick

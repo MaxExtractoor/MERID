@@ -33,6 +33,7 @@ class ExitOrderAttempt:
     pre_submit_snapshot_version: int
     submit_started_at_ns: int
     submitted_count_fp: Decimal
+    reduce_only: bool = True
 
 
 def can_finalize_full_exit(
@@ -50,6 +51,30 @@ def can_finalize_full_exit(
     """
     _ = now_ns  # reserved for future freshness/deadline checks
 
+    # Reduce-only exits must be able to close risk even when the broader
+    # portfolio is not authoritative (e.g. a different ticker has a latched
+    # reconciliation break).  If the order is terminal, fully filled, and has
+    # zero remaining quantity, trust the fill and allow finalization.  The
+    # fills ledger and position cache will be reconciled by the next portfolio
+    # build cycle; the important thing is to release the local monitor/allocator
+    # state now that the exit has been confirmed by the exchange.
+    if order_result.status not in TERMINAL_ORDER_STATUSES:
+        return False, "ORDER_NOT_TERMINAL"
+
+    if order_result.remaining_count_fp != Decimal("0"):
+        return False, "ORDER_REMAINS"
+
+    # Reduce-only exits must be able to close risk even when the broader
+    # portfolio is not authoritative.  The full fill is the only safe signal
+    # that the exchange no longer holds the position.
+    if attempt.reduce_only:
+        if order_result.filled_count_fp == attempt.submitted_count_fp:
+            return True, "REDUCE_ONLY_EXIT_FULLY_FILLED"
+        return False, "FILL_COUNT_NOT_EQUAL_SUBMITTED"
+
+    if not snapshot:
+        return False, "SNAPSHOT_UNAVAILABLE"
+
     if not snapshot.is_authoritative:
         return False, "PORTFOLIO_NOT_AUTHORITATIVE"
 
@@ -62,14 +87,8 @@ def can_finalize_full_exit(
     if snapshot.reconciliation_status != "MATCHED":
         return False, "PORTFOLIO_NOT_MATCHED"
 
-    if order_result.status not in TERMINAL_ORDER_STATUSES:
-        return False, "ORDER_NOT_TERMINAL"
-
     if order_result.filled_count_fp != attempt.submitted_count_fp:
         return False, "FILL_COUNT_NOT_EQUAL_SUBMITTED"
-
-    if order_result.remaining_count_fp != Decimal("0"):
-        return False, "ORDER_REMAINS"
 
     if snapshot.working_exit_count_fp(position_key) != Decimal("0"):
         return False, "WORKING_EXIT_REMAINS"

@@ -536,7 +536,8 @@ class KalshiWebSocket(EventVenueStream):
         
         try:
             # Get time from Kalshi server (most reliable source)
-            ws_url = "https://api.elections.kalshi.com/trade-api/v2"
+            # 2026-09-02: use the recommended external-api production host.
+            ws_url = "https://external-api.kalshi.com/trade-api/v2"
             response = requests.head(ws_url, timeout=2)
             if response.status_code == 200:
                 server_date_str = response.headers.get("Date")

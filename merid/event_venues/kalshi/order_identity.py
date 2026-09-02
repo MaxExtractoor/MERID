@@ -66,15 +66,16 @@ def derive_exit_client_order_id(
 
     The id is derived from the authoritative parent ``entry_fill_id`` and
     ``exit_reason`` so it is stable across retries and restarts and does not
-    depend on an in-memory record.  The resubmit count is included in the
-    derivation so each resubmit attempts a distinct client order id when the
-    exchange requires a fresh idempotency key (the unresolved-in-flight path
-    takes precedence, so this only applies to explicit new attempts).
+    depend on an in-memory record.  The ``resubmit_count`` parameter is kept for
+    API compatibility but is intentionally ignored: a timeout or lost ack is a
+    retry of the same economic exit, not a new order.  Reusing the same
+    client_order_id lets Kalshi's idempotency and the durable order-attempt
+    store collapse the retry into the same exchange order.
     """
     if not entry_fill_id or not exit_reason:
         return f"exit_{uuid.uuid4().hex[:20]}"
     payload = (
-        f"client_order_id:{entry_fill_id}:{str(exit_reason).lower()}:{resubmit_count}".encode("utf-8")
+        f"client_order_id:{entry_fill_id}:{str(exit_reason).lower()}".encode("utf-8")
     )
     digest = hashlib.sha256(payload).hexdigest()[:20]
     return f"exit_{digest}"
@@ -226,6 +227,25 @@ def finalize_order_identity(
         # silently minting a new idempotency key for the same coid.
         record = store.get_by_client_order_id(existing_coid)
         if record is not None:
+            # Reuse the durable attempt when the caller has explicitly supplied
+            # the same client_order_id AND the intent matches the stored record.
+            # The intent_id is the authoritative link for retries/reprices of the
+            # same exit (it is derived from the parent fill and reason and is
+            # stable across resubmits); the fingerprint may legitimately drift
+            # when the exit guard reprices between attempts.  Mismatched intent_id
+            # means the coid is being recycled for a different order, which is
+            # disallowed.
+            record_intent_id = record.intent_id
+            caller_intent_id = getattr(intent, "intent_id", None)
+            if record_intent_id and caller_intent_id and record_intent_id == caller_intent_id:
+                logger.info(
+                    "[ORDER-IDENTITY] Reusing client_order_id=%s order_attempt_id=%s for same intent_id=%s",
+                    existing_coid,
+                    record.order_attempt_id,
+                    caller_intent_id,
+                )
+                intent.order_attempt_id = record.order_attempt_id
+                return intent
             if record.fingerprint == fingerprint:
                 logger.info(
                     "[ORDER-IDENTITY] Recovering order_attempt_id=%s from legacy client_order_id=%s",
@@ -234,12 +254,10 @@ def finalize_order_identity(
                 )
                 intent.order_attempt_id = record.order_attempt_id
                 return intent
-            # The coid already exists with a different fingerprint (e.g., the
-            # guard repriced the order or the decision tag changed). Do not reuse
-            # it for a materially different order; fall through and mint a fresh
-            # coid so the durable identity stays accurate.
+            # The coid already belongs to a different order (different intent_id
+            # and different economic fingerprint). Do not reuse it.
             logger.warning(
-                "[ORDER-IDENTITY] coid=%s exists with a different fingerprint; "
+                "[ORDER-IDENTITY] coid=%s belongs to a different order; "
                 "minting a new idempotency key instead of reusing a mismatched attempt",
                 existing_coid,
             )
