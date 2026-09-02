@@ -83,6 +83,13 @@ from merid.validation.regime_gating_invariants import (
 logger = get_logger("merid.prediction.agent_grid_15m")
 
 try:
+    from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+    _DECISION_AUDIT_LEDGER_AVAILABLE = True
+except ImportError:
+    _DECISION_AUDIT_LEDGER_AVAILABLE = False
+    logger.warning("decision_audit_ledger not available - audit heartbeat disabled")
+
+try:
     from merid.event_venues.kalshi.candidate_trace import (
         CandidateTrace,
         CandidateTraceStore,
@@ -485,6 +492,8 @@ def _record_decision_audit(
     settlement_input_price: Optional[float],
     settlement_reference: str,
     cfb_observation: Optional[Any],
+    *,
+    cycle_id: Optional[str] = None,
 ) -> None:
     """Append the trade/no-trade decision to the durable audit ledger.
 
@@ -497,6 +506,7 @@ def _record_decision_audit(
         ledger = get_decision_audit_ledger()
         ledger.record_trade_decision(
             decision,
+            cycle_id=cycle_id,
             market_state=market_state,
             quote_age_ms=_quote_age_ms(market_state),
             settlement_reference_price=settlement_input_price,
@@ -7414,7 +7424,7 @@ class LeanAgent15m:
             fvg_price_staleness_ms=getattr(cfb_observation, "age_ms", None) if cfb_observation is not None else None,
         )
 
-    def _generate_trade_decision_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
+    def _generate_trade_decision_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float, tick: int = 0) -> Optional[Dict[str, Any]]:
         """Unified hybrid decision engine for 15-minute crypto binaries.
 
         Builds a single immutable TradeDecision from external spot, the Kalshi
@@ -7764,6 +7774,7 @@ class LeanAgent15m:
                 settlement_input_price,
                 settlement_reference,
                 cfb_observation,
+                cycle_id=str(tick),
             )
             return decision
 
@@ -11699,7 +11710,7 @@ class LeanAgent15m:
                 if price_signal is not None:
                     logger.warning("[HYBRID-SIGNAL] asset=%s using deprecated price_based signal", asset)
                     return price_signal
-            return self._generate_trade_decision_signal(asset, spot_price, market, minutes_to_expiry)
+            return self._generate_trade_decision_signal(asset, spot_price, market, minutes_to_expiry, tick)
 
 
 
@@ -17868,7 +17879,7 @@ class LeanAgentGrid15m:
                         "side": oc.get("side"),
                     })
                 _emit_cycle_decision_telemetry(chosen_orders=None, allocator_note="allocator_phase_error")
-                _reconcile_cycle_counters(tick, total_generated, [], rejection_breakdown, allow_new_entries)
+                _reconcile_cycle_counters(tick, total_generated, [], rejection_breakdown, allow_new_entries, len(self._agents))
                 return CycleResult([], total_generated, rejection_breakdown, lifecycle_events)
 
         if not telemetry_state["emitted"]:
@@ -17899,12 +17910,12 @@ class LeanAgentGrid15m:
                     "side": c.get("side"),
                 })
             logger.info("[AGENT-GRID] allow_new_entries=False; returning %d filtered candidates (not allocated)", len(candidates))
-            _reconcile_cycle_counters(tick, total_generated, candidates, rejection_breakdown, allow_new_entries)
+            _reconcile_cycle_counters(tick, total_generated, candidates, rejection_breakdown, allow_new_entries, len(self._agents))
             return CycleResult(candidates, total_generated, rejection_breakdown, lifecycle_events)
 
         # CRITICAL FIX: Return candidates list to prevent TypeError in loop_15m
         # loop_15m expects run_cycle to return a list, not None
-        _reconcile_cycle_counters(tick, total_generated, candidates, rejection_breakdown, allow_new_entries)
+        _reconcile_cycle_counters(tick, total_generated, candidates, rejection_breakdown, allow_new_entries, len(self._agents))
         return CycleResult(candidates, total_generated, rejection_breakdown, lifecycle_events)
 
 
@@ -17940,6 +17951,7 @@ def _reconcile_cycle_counters(
     candidates: List[Dict[str, Any]],
     rejection_breakdown: Dict[str, int],
     allow_new_entries: bool,
+    assets_evaluated: int,
 ) -> None:
     """Log a reconciled count of generated, returned, and rejected candidates.
 
@@ -17967,6 +17979,20 @@ def _reconcile_cycle_counters(
             tick, total_generated, returned_count, rejected_count,
             rejection_breakdown,
         )
+
+    # Emit the write-completeness heartbeat once all recording attempts for this
+    # cycle have finished.  This is fail-open: a heartbeat failure must not block
+    # the trading loop.
+    if _DECISION_AUDIT_LEDGER_AVAILABLE:
+        try:
+            ledger = get_decision_audit_ledger()
+            ledger.log_cycle_heartbeat(
+                str(tick),
+                tick=tick,
+                assets_evaluated=assets_evaluated,
+            )
+        except Exception as hb_exc:
+            logger.warning("[DECISION-AUDIT-HEARTBEAT] failed for tick=%d: %s", tick, hb_exc)
 
 
 def _extract_error_message(result) -> str:
