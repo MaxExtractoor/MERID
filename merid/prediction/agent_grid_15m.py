@@ -2854,6 +2854,15 @@ class LeanAgent15m:
         # Update volatility for the completed bar before appending current close
         self._update_volatility_history(asset, close_price)
 
+        # Feed the 1-minute close to the SentimentVolService so it can compute a
+        # canonical realized volatility.  This is the TWAP-appropriate vol source
+        # used by trade_decision when MERID_USE_REALIZED_VOL is enabled.
+        try:
+            from merid.prediction.risk.sentiment_vol_service import get_sentiment_vol_service
+            get_sentiment_vol_service().update_price(asset, close_price)
+        except Exception as e:
+            logger.debug("[VOL-SERVICE-FEED] asset=%s failed to feed realized vol: %s", asset, e)
+
         # Append completed OHLC bar to price history once per minute
         self._spot_price_history[asset].append((candle_time, close_price, open_price, high_price, low_price))
         self._sma_history[asset].append((candle_time, close_price))
