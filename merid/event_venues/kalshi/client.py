@@ -470,6 +470,7 @@ class KalshiVenueClient(EventVenueClient):
         # Sharing/closing a client across the main loop and the catalog daemon
         # thread's loop causes Windows IocpProactor InvalidStateError crashes.
         self._clients_by_loop: Dict[int, httpx.AsyncClient] = {}
+        self._clients_loop_refs: Dict[int, asyncio.AbstractEventLoop] = {}
         self._client_init_locks: Dict[int, asyncio.Lock] = {}
         self._clients_lock = threading.Lock()
 
@@ -556,6 +557,7 @@ class KalshiVenueClient(EventVenueClient):
         if current_loop_id is not None:
             with self._clients_lock:
                 client = self._clients_by_loop.pop(current_loop_id, None)
+                self._clients_loop_refs.pop(current_loop_id, None)
         else:
             client = self._http_client
             self._http_client = None
@@ -583,6 +585,13 @@ class KalshiVenueClient(EventVenueClient):
         try:
             loop = asyncio.get_running_loop()
             return id(loop)
+        except RuntimeError:
+            return None
+
+    def _get_current_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        """Get the current running event loop, or None if no loop running."""
+        try:
+            return asyncio.get_running_loop()
         except RuntimeError:
             return None
 
@@ -646,6 +655,30 @@ class KalshiVenueClient(EventVenueClient):
         except Exception:
             return False
 
+    def _is_healthy_client_for_loop(
+        self,
+        current_loop: asyncio.AbstractEventLoop,
+        current_loop_id: int,
+    ) -> bool:
+        """Check if the cached client is still bound to the current live loop.
+
+        The event-loop object id can be reused after a loop is garbage-collected.
+        We compare the actual loop object and refuse to reuse clients bound to a
+        closed loop to avoid "cannot schedule new futures after shutdown" errors.
+        """
+        with self._clients_lock:
+            stored_loop = self._clients_loop_refs.get(current_loop_id)
+            existing_client = self._clients_by_loop.get(current_loop_id)
+        if existing_client is None:
+            return False
+        if existing_client.is_closed:
+            return False
+        if stored_loop is not current_loop:
+            return False
+        if stored_loop is not None and getattr(stored_loop, 'is_closed', lambda: False)():
+            return False
+        return True
+
     async def _ensure_client(self) -> httpx.AsyncClient:
         """Return an HTTP client bound to the current event loop.
 
@@ -654,16 +687,16 @@ class KalshiVenueClient(EventVenueClient):
         refresh thread; cross-loop aclose() cancelled pending I/O and caused a fatal
         asyncio.exceptions.InvalidStateError in the Windows IocpProactor.
         """
-        current_loop_id = self._get_current_loop_id()
-        if current_loop_id is None:
+        current_loop = self._get_current_loop()
+        if current_loop is None:
             raise RuntimeError("[kalshi] _ensure_client called with no running event loop")
+        current_loop_id = id(current_loop)
 
         # Make sure this loop has its own asyncio.Lock.
         with self._clients_lock:
             if current_loop_id not in self._client_init_locks:
                 self._client_init_locks[current_loop_id] = asyncio.Lock()
             self._client_init_lock = self._client_init_locks[current_loop_id]
-            existing_client = self._clients_by_loop.get(current_loop_id)
 
         # Backward-compatible / test fixture path: honor an externally-injected
         # client (AsyncMock or httpx.AsyncClient) if it claims to be on the
@@ -673,12 +706,15 @@ class KalshiVenueClient(EventVenueClient):
             (self._client_loop_id is None or self._client_loop_id == current_loop_id)):
             with self._clients_lock:
                 self._clients_by_loop[current_loop_id] = self._http_client
+                self._clients_loop_refs[current_loop_id] = current_loop
             self._client_loop_id = current_loop_id
             self._ensure_async_network_resources()
             return self._http_client
 
         # Fast path: healthy client for this loop.
-        if existing_client is not None and not existing_client.is_closed:
+        if self._is_healthy_client_for_loop(current_loop, current_loop_id):
+            with self._clients_lock:
+                existing_client = self._clients_by_loop[current_loop_id]
             self._http_client = existing_client
             self._client_loop_id = current_loop_id
             self._ensure_async_network_resources()
@@ -687,14 +723,21 @@ class KalshiVenueClient(EventVenueClient):
         # Slow path: create a new client for this loop.
         async with self._client_init_lock:
             # Re-check under lock in case another coroutine created it.
-            with self._clients_lock:
-                existing_client = self._clients_by_loop.get(current_loop_id)
-
-            if existing_client is not None and not existing_client.is_closed:
+            if self._is_healthy_client_for_loop(current_loop, current_loop_id):
+                with self._clients_lock:
+                    existing_client = self._clients_by_loop[current_loop_id]
                 self._http_client = existing_client
                 self._client_loop_id = current_loop_id
                 self._ensure_async_network_resources()
                 return existing_client
+
+            # If there is a stale entry for this loop id (e.g. reused loop id of a
+            # closed loop), remove it before creating a fresh client.
+            with self._clients_lock:
+                stale_client = self._clients_by_loop.get(current_loop_id)
+                if stale_client is not None:
+                    self._clients_by_loop.pop(current_loop_id, None)
+                    self._clients_loop_refs.pop(current_loop_id, None)
 
             logger.debug("[kalshi] Initializing new HTTP client for loop %s", current_loop_id)
             new_client = httpx.AsyncClient(
@@ -718,6 +761,7 @@ class KalshiVenueClient(EventVenueClient):
 
             with self._clients_lock:
                 self._clients_by_loop[current_loop_id] = new_client
+                self._clients_loop_refs[current_loop_id] = current_loop
 
             self._http_client = new_client
             self._client_loop_id = current_loop_id
@@ -889,6 +933,7 @@ class KalshiVenueClient(EventVenueClient):
         if current_loop_id is not None:
             with self._clients_lock:
                 client = self._clients_by_loop.pop(current_loop_id, None)
+                self._clients_loop_refs.pop(current_loop_id, None)
         else:
             client = self._http_client
 
@@ -1337,26 +1382,18 @@ class KalshiVenueClient(EventVenueClient):
 
             except RuntimeError as e:
                 msg = str(e).lower()
-                if "event loop is closed" in msg or "different event loop" in msg:
+                # Treat any event-loop/executor lifecycle error as a client lifecycle
+                # issue.  On Windows/ProactorEventLoop, closed/reused loops raise
+                # "cannot schedule new futures after shutdown" or "interpreter shutdown".
+                if ("event loop is closed" in msg or
+                    "different event loop" in msg or
+                    "client has been closed" in msg or
+                    "cannot schedule new futures" in msg):
                     last_error = e
                     if attempt < KALSHI_MAX_RETRIES:
                         await self._reset_http_client_after_loop_error()
                         logger.warning(
-                            "[kalshi] %s event-loop mismatch (%s), HTTP client reset; retry %s/%s",
-                            operation_name,
-                            e,
-                            attempt + 1,
-                            KALSHI_MAX_RETRIES + 1,
-                        )
-                        await asyncio.sleep(0.05)
-                        continue
-                # Handle "client has been closed" error - reset and retry
-                if "client has been closed" in msg:
-                    last_error = e
-                    if attempt < KALSHI_MAX_RETRIES:
-                        await self._reset_http_client_after_loop_error()
-                        logger.warning(
-                            "[kalshi] %s HTTP client was closed (%s), reset; retry %s/%s",
+                            "[kalshi] %s event-loop/executor mismatch (%s), HTTP client reset; retry %s/%s",
                             operation_name,
                             e,
                             attempt + 1,

@@ -2328,12 +2328,15 @@ class KalshiWebSocketBridge:
                     try:
                         # Create new event loop for this thread (thread-local, not global)
                         loop = asyncio.new_event_loop()
+                        # Bind the loop to this thread so that libraries that call
+                        # asyncio.get_event_loop() (e.g. httpx/anyio used by the
+                        # snapshot fallback path) resolve to this live loop instead of a
+                        # closed/reused one from another thread.
+                        asyncio.set_event_loop(loop)
                         # CRITICAL: keep a reference to the forwarder loop so the drain
                         # thread can call_soon_threadsafe into it.
                         self._forward_loop_ref = loop
-                        # CRITICAL: Do NOT call asyncio.set_event_loop(loop)
-                        # Setting the loop globally causes it to be shared with other threads
-                        logger.info("[WS-FORWARD-THREAD] Event loop created (thread-local, not set globally)")
+                        logger.info("[WS-FORWARD-THREAD] Event loop created and bound to thread")
 
                         # P0 FIX: Dedicated ThreadPoolExecutor for orderbook apply.  This
                         # avoids loop.run_in_executor's default executor which can become

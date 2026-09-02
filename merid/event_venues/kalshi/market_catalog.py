@@ -779,45 +779,52 @@ class KalshiMarketCatalog:
     def _run_refresh_loop_in_thread(self) -> None:
         """Run the refresh loop in a separate thread with its own event loop."""
         logger.critical("[CATALOG-THREAD] ENTRY - thread function reached")
-        
+
+        def _new_catalog_loop():
+            """Create a fresh event loop and bind it to this thread."""
+            new_loop = asyncio.new_event_loop()
+            # Setting the thread-local event loop is required so that libraries
+            # (httpx/anyio) that call asyncio.get_event_loop() resolve to this
+            # loop instead of a closed/reused one from another thread.
+            asyncio.set_event_loop(new_loop)
+            return new_loop
+
         try:
-            loop = asyncio.new_event_loop()
-            # CRITICAL FIX: Do NOT call asyncio.set_event_loop(loop) here
-            # Setting the loop globally causes it to be shared with other threads
-            # When this loop is closed, it breaks unified_spot_service and other services
-            # which use loop.run_in_executor(None, ...) with the default loop
-            logger.info("[CATALOG-THREAD] Event loop created (thread-local, not set globally)")
+            loop = _new_catalog_loop()
+            logger.info("[CATALOG-THREAD] Event loop created and bound to thread")
         except Exception as e:
             logger.error(f"[CATALOG-THREAD] Failed to create event loop: {e}", exc_info=True)
             return
-        
+
         # CRITICAL FIX: Initialize shutdown event in this thread's event loop
         # to avoid "bound to a different event loop" errors
         self._shutdown = asyncio.Event()
         logger.info("[CATALOG-THREAD] Shutdown event initialized in thread's event loop")
-        
+
         self._refresh_loop_started.set()
-        
+
         # CRITICAL FIX: Ensure loop never exits - restart on any crash
         while True:
             try:
                 loop.run_until_complete(self._refresh_loop())
                 logger.error("[CATALOG-THREAD] Refresh loop returned unexpectedly - restarting")
-                # Create a new event loop if the old one was closed
-                loop = asyncio.new_event_loop()
-                # CRITICAL FIX: Do NOT call asyncio.set_event_loop(loop) here
-                # Re-initialize shutdown event in new loop
-                self._shutdown = asyncio.Event()
             except Exception as e:
                 logger.error(f"[CATALOG-THREAD] Refresh loop thread crashed: {e}", exc_info=True)
                 # Small backoff before restart
                 import time
                 time.sleep(1.0)
-                # Create a new event loop
-                loop = asyncio.new_event_loop()
-                # CRITICAL FIX: Do NOT call asyncio.set_event_loop(loop) here
-                # Re-initialize shutdown event in new loop
-                self._shutdown = asyncio.Event()
+
+            # Tear down the old loop cleanly (if not already closed) so its
+            # default executor is shut down and clients for it are invalidated.
+            try:
+                if not loop.is_closed():
+                    loop.close()
+            except Exception as close_err:
+                logger.warning("[CATALOG-THREAD] Error closing old event loop: %s", close_err)
+
+            # Create a new event loop and re-initialize shutdown event in new loop
+            loop = _new_catalog_loop()
+            self._shutdown = asyncio.Event()
 
     def start(self) -> None:
         """Start periodic refresh loop with initial refresh."""
