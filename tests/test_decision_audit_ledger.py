@@ -140,6 +140,10 @@ def test_ledger_writes_decision_and_snapshot(tmp_db: Path) -> None:
         assert len(rows) == 1
         assert rows[0]["ticker"] == dec.ticker
         assert rows[0]["primary_reason_code"] == "NO_EDGE"
+        assert rows[0]["record_environment"] == "test"
+        assert rows[0]["record_source"] == "test"
+        assert rows[0]["is_eligible_for_research"] == 0
+        assert rows[0]["exclusion_reason"] == "no_edge_below_threshold"
 
         snaps = conn.execute(
             "SELECT * FROM strategy_decision_snapshots WHERE decision_id = ?",
@@ -159,6 +163,14 @@ def test_ledger_writes_decision_and_snapshot(tmp_db: Path) -> None:
         assert no["executable_entry_price_cents"] == 27
         assert yes["passed_edge_gate"] == 1
         assert no["passed_edge_gate"] == 1
+        assert yes["model_evaluated"] == 1
+        assert no["model_evaluated"] == 1
+        assert yes["policy_eligible"] == 1
+        assert no["policy_eligible"] == 1
+        assert yes["passed_net_ev"] == 1
+        assert no["passed_net_ev"] == 1
+        assert yes["selected"] == 0
+        assert no["selected"] == 0
 
         outcomes = conn.execute(
             "SELECT * FROM strategy_decision_outcomes WHERE decision_id = ?",
@@ -181,12 +193,24 @@ def test_ledger_writes_enter_decision(tmp_db: Path) -> None:
     with sqlite3.connect(str(tmp_db)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT decision, primary_reason_code, selected_side FROM strategy_decisions WHERE decision_id = ?",
+            "SELECT decision, primary_reason_code, selected_side, record_environment, is_eligible_for_research FROM strategy_decisions WHERE decision_id = ?",
             (dec.decision_id,),
         ).fetchall()
         assert rows[0]["decision"] == "ENTER"
         assert rows[0]["primary_reason_code"] == "selected"
         assert rows[0]["selected_side"] == "yes"
+        assert rows[0]["record_environment"] == "test"
+        assert rows[0]["is_eligible_for_research"] == 0
+
+        side_rows = conn.execute(
+            "SELECT side, selected, passed_net_ev FROM strategy_decision_side_ev WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchall()
+        yes = [r for r in side_rows if r["side"] == "yes"][0]
+        no = [r for r in side_rows if r["side"] == "no"][0]
+        assert yes["selected"] == 1
+        assert no["selected"] == 0
+        assert yes["passed_net_ev"] == 1
 
 
 def test_settlement_computes_counterfactuals(tmp_db: Path) -> None:
