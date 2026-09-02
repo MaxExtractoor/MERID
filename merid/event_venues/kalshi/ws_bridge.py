@@ -4819,6 +4819,9 @@ class KalshiWebSocketBridge:
                     # so it can drain the WebSocket queue as fast as messages arrive. The
                     # thread-pool workers consume and apply deltas in the background.
                     loop = asyncio.get_running_loop()
+                    if loop.is_closed() or self._ensure_shutdown_event().is_set():
+                        logger.debug("[WS-FORWARD-APPLY-SKIP] event_type=%s ticker=%s shutdown=%s loop_closed=%s", event_type, ticker, self._ensure_shutdown_event().is_set(), loop.is_closed())
+                        return
                     fut = loop.run_in_executor(None, store.apply_orderbook_message, event, "bridge_queue")
                     fut.add_done_callback(
                         lambda f, et=event_type, tk=ticker: (
@@ -4826,6 +4829,12 @@ class KalshiWebSocketBridge:
                             if not f.cancelled() and f.exception() else None
                         )
                     )
+                except RuntimeError as apply_exc:
+                    # During interpreter shutdown the executor may reject new work.
+                    if "cannot schedule new futures after interpreter shutdown" in str(apply_exc):
+                        logger.debug("[WS-FORWARD-APPLY-SHUTDOWN] event_type=%s ticker=%s", event_type, ticker)
+                    else:
+                        logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", event_type, ticker, apply_exc)
                 except Exception as apply_exc:
                     logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", event_type, ticker, apply_exc)
 
