@@ -93,7 +93,6 @@ CREATE TABLE IF NOT EXISTS strategy_decisions (
 CREATE INDEX IF NOT EXISTS idx_decisions_ts ON strategy_decisions(decision_ts);
 CREATE INDEX IF NOT EXISTS idx_decisions_ticker ON strategy_decisions(ticker, decision_ts);
 CREATE INDEX IF NOT EXISTS idx_decisions_reason ON strategy_decisions(primary_reason_code, decision_ts);
-CREATE INDEX IF NOT EXISTS idx_decisions_environment ON strategy_decisions(record_environment, decision_ts);
 
 CREATE TABLE IF NOT EXISTS strategy_decision_snapshots (
     decision_id TEXT PRIMARY KEY,
@@ -246,6 +245,12 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decisions", "record_source", "TEXT NOT NULL DEFAULT 'live'")
         _add_column(conn, "strategy_decisions", "is_eligible_for_research", "INTEGER NOT NULL DEFAULT 1")
         _add_column(conn, "strategy_decisions", "exclusion_reason", "TEXT")
+
+        # Add the research/environment index now that the column is guaranteed to exist.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_decisions_environment "
+            "ON strategy_decisions(record_environment, decision_ts)"
+        )
 
         # Evaluation / eligibility dimensions on side-EV rows.
         _add_column(conn, "strategy_decision_side_ev", "model_evaluated", "INTEGER NOT NULL DEFAULT 0")
