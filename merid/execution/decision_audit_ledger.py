@@ -53,6 +53,12 @@ def _is_test_context() -> bool:
         or os.environ.get("MERID_ENV", "").lower() in ("test", "ci")
     )
 
+
+def _is_production_db(path: Path) -> bool:
+    """Return True if ``path`` is the live production decision-audit database."""
+    return path.resolve() == _DB_PATH.resolve()
+
+
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
@@ -187,6 +193,36 @@ CREATE TABLE IF NOT EXISTS strategy_decision_outcomes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outcomes_status ON strategy_decision_outcomes(outcome_status);
+
+CREATE TABLE IF NOT EXISTS decision_audit_gaps (
+    gap_id TEXT PRIMARY KEY,
+    start_ts REAL NOT NULL,
+    end_ts REAL NOT NULL,
+    cause TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    affected_decisions_estimate INTEGER,
+    process_version TEXT,
+    detected_ts REAL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gaps_ts ON decision_audit_gaps(start_ts, end_ts);
+
+CREATE TABLE IF NOT EXISTS decision_audit_heartbeats (
+    cycle_id TEXT PRIMARY KEY,
+    tick INTEGER,
+    assets_evaluated INTEGER,
+    decisions_expected INTEGER,
+    decisions_persisted INTEGER,
+    snapshots_persisted INTEGER,
+    side_ev_expected INTEGER,
+    side_ev_persisted INTEGER,
+    ledger_write_latency_ms REAL,
+    ledger_error_count INTEGER,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_heartbeats_tick ON decision_audit_heartbeats(tick, created_at);
 """
 
 # Canonical 10c-75c entry range used by the live strategy.  The floor may be
@@ -215,6 +251,7 @@ class DecisionAuditLedger:
         self.db_path = Path(db_path) if db_path else _DB_PATH
         self._lock = threading.Lock()
         self._db_ready = False
+        self._cycle_stats: Dict[str, Dict[str, Any]] = {}
 
     def _ensure_db(self) -> None:
         """Create parent directory, schema, and run migrations on first use."""
@@ -225,6 +262,7 @@ class DecisionAuditLedger:
             with self._lock, self._conn(isolation_level=None) as conn:
                 conn.executescript(_SCHEMA)
                 self._migrate(conn)
+                self._register_known_gaps(conn)
             self._db_ready = True
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] schema init failed: %s", exc)
@@ -309,12 +347,52 @@ class DecisionAuditLedger:
             "WHERE decision_id = 'run_no_edge_below_threshold'"
         )
 
+    def _register_known_gaps(self, conn: sqlite3.Connection) -> None:
+        """Record known, verified collection discontinuities.
+
+        These are permanent operational metadata, not research rows, and must not
+        be removed or backfilled with synthetic data.
+        """
+        _KNOWN_GAPS = [
+            {
+                "gap_id": "ledger_migration_2026_09_01_0341_0346",
+                "start_ts": 1788320481.0,
+                "end_ts": 1788320813.0,
+                "cause": "schema migration failure: missing provenance column / index ordering in _SCHEMA",
+                "disposition": "exclude from completeness-rate denominator; no synthetic backfill",
+                "affected_decisions_estimate": None,
+                "process_version": os.environ.get("MERID_BUILD_SHA", "unknown"),
+                "detected_ts": 1788320813.0,
+            },
+        ]
+        for gap in _KNOWN_GAPS:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO decision_audit_gaps (
+                    gap_id, start_ts, end_ts, cause, disposition, affected_decisions_estimate,
+                    process_version, detected_ts, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    gap["gap_id"],
+                    gap["start_ts"],
+                    gap["end_ts"],
+                    gap["cause"],
+                    gap["disposition"],
+                    gap["affected_decisions_estimate"],
+                    gap["process_version"],
+                    gap["detected_ts"],
+                    time.time(),
+                ),
+            )
+
     # ── Public recording API ───────────────────────────────────────────────
 
     def record_trade_decision(
         self,
         decision: Any,
         *,
+        cycle_id: Optional[str] = None,
         market_state: Optional[Any] = None,
         spot_source: Optional[str] = None,
         spot_source_ts: Optional[float] = None,
@@ -332,17 +410,27 @@ class DecisionAuditLedger:
         velocity: Optional[float] = None,
         velocity_source: Optional[str] = None,
         velocity_age_ms: Optional[int] = None,
-    ) -> None:
+    ) -> bool:
         """Persist a full trade/no-trade decision with snapshot and side-EV.
 
         The ``decision`` object is expected to expose the same fields as
         :class:`merid.prediction.trade_decision.TradeDecision`.  Extra market
         provenance (spot source/age, quote age, etc.) is supplied as kwargs.
+
+        Returns True if the bundle was durably committed, False otherwise.
+        Fail-open: any exception is logged and not re-raised.
         """
         if not _is_enabled():
-            return
+            return False
+        if _is_test_context() and _is_production_db(self.db_path):
+            logger.critical(
+                "[DECISION-AUDIT-LEDGER] test context is writing to production db %s; refusing",
+                self.db_path,
+            )
+            return False
 
         self._ensure_db()
+        start = time.perf_counter()
         try:
             self._insert_trade_decision(
                 decision,
@@ -364,16 +452,38 @@ class DecisionAuditLedger:
                 velocity_source,
                 velocity_age_ms,
             )
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self._bump_cycle_stats(
+                cycle_id,
+                expected=1,
+                persisted=1,
+                snapshots=1,
+                side_ev=2,
+                latency_ms=latency_ms,
+            )
+            return True
         except Exception as exc:
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self._bump_cycle_stats(
+                cycle_id,
+                expected=1,
+                persisted=0,
+                snapshots=0,
+                side_ev=0,
+                latency_ms=latency_ms,
+                is_error=True,
+            )
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] record_trade_decision failed for %s: %s",
                 getattr(decision, "decision_id", None),
                 exc,
             )
+            return False
 
     def record_pre_decision_rejection(
         self,
         *,
+        cycle_id: Optional[str] = None,
         run_id: str,
         ticker: str,
         asset: str,
@@ -382,17 +492,27 @@ class DecisionAuditLedger:
         spot_price: Optional[float] = None,
         strike_price: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Persist a rejection that occurs before a TradeDecision is created.
 
         Examples: market not entry-ready, missing strike, feed precision
         insufficient.  These carry no side-EV but still become settled
         counterfactuals for calibration/segmentation analysis.
+
+        Returns True if the bundle was durably committed, False otherwise.
+        Fail-open: any exception is logged and not re-raised.
         """
         if not _is_enabled():
-            return
+            return False
+        if _is_test_context() and _is_production_db(self.db_path):
+            logger.critical(
+                "[DECISION-AUDIT-LEDGER] test context is writing to production db %s; refusing",
+                self.db_path,
+            )
+            return False
 
         self._ensure_db()
+        start = time.perf_counter()
         try:
             decision_id = f"{run_id}_{ticker}_{uuid.uuid4().hex[:8]}"
             classification = _classify_no_trade_reason(reason)
@@ -418,6 +538,8 @@ class DecisionAuditLedger:
             exclusion_reason = reason
 
             with self._lock, self._conn() as conn:
+                # Atomic bundle for pre-decision rejections: decision + snapshot + pending outcome.
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     """
                     INSERT INTO strategy_decisions (
@@ -477,10 +599,10 @@ class DecisionAuditLedger:
                         extra.get("spot_source") if extra else None,
                         extra.get("spot_source_ts") if extra else None,
                         extra.get("spot_age_ms") if extra else None,
-                        settlement_reference_price,
-                        settlement_reference_source,
-                        settlement_reference_ts,
-                        settlement_reference_age_ms,
+                        None,
+                        None,
+                        None,
+                        None,
                         extra.get("yes_bid_cents") if extra else None,
                         extra.get("yes_ask_cents") if extra else None,
                         extra.get("no_bid_cents") if extra else None,
@@ -494,12 +616,33 @@ class DecisionAuditLedger:
                     "INSERT INTO strategy_decision_outcomes (decision_id) VALUES (?)",
                     (decision_id,),
                 )
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self._bump_cycle_stats(
+                cycle_id,
+                expected=1,
+                persisted=1,
+                snapshots=1,
+                side_ev=0,
+                latency_ms=latency_ms,
+            )
+            return True
         except Exception as exc:
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self._bump_cycle_stats(
+                cycle_id,
+                expected=1,
+                persisted=0,
+                snapshots=0,
+                side_ev=0,
+                latency_ms=latency_ms,
+                is_error=True,
+            )
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] record_pre_decision_rejection failed for %s: %s",
                 ticker,
                 exc,
             )
+            return False
 
     def record_outcome(
         self,
@@ -643,6 +786,190 @@ class DecisionAuditLedger:
                 exc,
             )
 
+    def record_data_gap(
+        self,
+        *,
+        gap_id: str,
+        start_ts: float,
+        end_ts: float,
+        cause: str,
+        disposition: str,
+        affected_decisions_estimate: Optional[int] = None,
+        process_version: Optional[str] = None,
+    ) -> None:
+        """Record a verified collection discontinuity.
+
+        Gap rows are operational metadata; they are surfaced by the audit report but
+        are never eligible for research or backfill.
+        """
+        if not _is_enabled():
+            return
+        self._ensure_db()
+        try:
+            with self._lock, self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO decision_audit_gaps (
+                        gap_id, start_ts, end_ts, cause, disposition, affected_decisions_estimate,
+                        process_version, detected_ts, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        gap_id,
+                        start_ts,
+                        end_ts,
+                        cause,
+                        disposition,
+                        affected_decisions_estimate,
+                        process_version,
+                        time.time(),
+                        time.time(),
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("[DECISION-AUDIT-LEDGER] record_data_gap failed for %s: %s", gap_id, exc)
+
+    def record_heartbeat(
+        self,
+        *,
+        cycle_id: str,
+        tick: int,
+        assets_evaluated: int,
+        decisions_expected: int,
+        decisions_persisted: int,
+        snapshots_persisted: int,
+        side_ev_expected: int,
+        side_ev_persisted: int,
+        ledger_write_latency_ms: float,
+        ledger_error_count: int,
+    ) -> None:
+        """Persist a per-cycle write-completeness heartbeat.
+
+        Operational counterpart to the append-only decision stream; used for
+        detecting collection gaps without blocking the trading loop.
+        """
+        if not _is_enabled():
+            return
+        self._ensure_db()
+        try:
+            with self._lock, self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO decision_audit_heartbeats (
+                        cycle_id, tick, assets_evaluated, decisions_expected, decisions_persisted,
+                        snapshots_persisted, side_ev_expected, side_ev_persisted,
+                        ledger_write_latency_ms, ledger_error_count, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cycle_id,
+                        tick,
+                        assets_evaluated,
+                        decisions_expected,
+                        decisions_persisted,
+                        snapshots_persisted,
+                        side_ev_expected,
+                        side_ev_persisted,
+                        ledger_write_latency_ms,
+                        ledger_error_count,
+                        time.time(),
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("[DECISION-AUDIT-LEDGER] record_heartbeat failed for %s: %s", cycle_id, exc)
+
+    def _bump_cycle_stats(
+        self,
+        cycle_id: Optional[str],
+        *,
+        expected: int,
+        persisted: int,
+        snapshots: int,
+        side_ev: int,
+        latency_ms: float,
+        is_error: bool = False,
+    ) -> None:
+        """Increment per-cycle write counters for the trading loop heartbeat."""
+        if cycle_id is None:
+            return
+        with self._lock:
+            stats = self._cycle_stats.setdefault(
+                cycle_id,
+                {
+                    "expected": 0,
+                    "persisted": 0,
+                    "snapshots": 0,
+                    "side_ev": 0,
+                    "latency_ms": 0.0,
+                    "error_count": 0,
+                },
+            )
+            stats["expected"] += expected
+            stats["persisted"] += persisted
+            stats["snapshots"] += snapshots
+            stats["side_ev"] += side_ev
+            stats["latency_ms"] += latency_ms
+            if is_error:
+                stats["error_count"] += 1
+
+    def log_cycle_heartbeat(
+        self,
+        cycle_id: str,
+        *,
+        tick: int,
+        assets_evaluated: int,
+    ) -> None:
+        """Log and persist the write-completeness heartbeat for a completed cycle.
+
+        This should be called once per agent-grid cycle after all recording
+        attempts for that cycle have finished.
+        """
+        with self._lock:
+            stats = self._cycle_stats.pop(cycle_id, None)
+        if stats is None:
+            stats = {
+                "expected": 0,
+                "persisted": 0,
+                "snapshots": 0,
+                "side_ev": 0,
+                "latency_ms": 0.0,
+                "error_count": 0,
+            }
+        decisions_expected = stats["expected"]
+        decisions_persisted = stats["persisted"]
+        snapshots_persisted = stats["snapshots"]
+        side_ev_expected = decisions_persisted * 2
+        side_ev_persisted = stats["side_ev"]
+        ledger_write_latency_ms = stats["latency_ms"]
+        ledger_error_count = stats["error_count"]
+        self.record_heartbeat(
+            cycle_id=cycle_id,
+            tick=tick,
+            assets_evaluated=assets_evaluated,
+            decisions_expected=decisions_expected,
+            decisions_persisted=decisions_persisted,
+            snapshots_persisted=snapshots_persisted,
+            side_ev_expected=side_ev_expected,
+            side_ev_persisted=side_ev_persisted,
+            ledger_write_latency_ms=ledger_write_latency_ms,
+            ledger_error_count=ledger_error_count,
+        )
+        logger.info(
+            "[DECISION-AUDIT-HEARTBEAT] cycle_id=%s tick=%d assets=%d "
+            "decisions_expected=%d decisions_persisted=%d "
+            "side_ev_expected=%d side_ev_persisted=%d "
+            "latency_ms=%.2f errors=%d",
+            cycle_id,
+            tick,
+            assets_evaluated,
+            decisions_expected,
+            decisions_persisted,
+            side_ev_expected,
+            side_ev_persisted,
+            ledger_write_latency_ms,
+            ledger_error_count,
+        )
+
     # ── Internal helpers ───────────────────────────────────────────────────
 
     def _insert_trade_decision(
@@ -766,6 +1093,8 @@ class DecisionAuditLedger:
 
         # Insert core decision row.
         with self._lock, self._conn() as conn:
+            # One atomic bundle: decision, snapshot, both side-EV rows, pending outcome.
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO strategy_decisions (

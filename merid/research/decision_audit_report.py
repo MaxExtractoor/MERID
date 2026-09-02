@@ -15,6 +15,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -256,6 +257,71 @@ class DecisionAuditReport:
             return "", []
         return "WHERE " + " AND ".join(clauses), params
 
+    def _gaps(self, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+        """Return registered data collection gaps."""
+        rows = conn.execute(
+            """
+            SELECT gap_id, start_ts, end_ts, cause, disposition,
+                   affected_decisions_estimate, process_version, detected_ts, created_at
+            FROM decision_audit_gaps
+            ORDER BY start_ts
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _latest_heartbeat(self, conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+        """Return the most recent write-completeness heartbeat."""
+        row = conn.execute(
+            """
+            SELECT cycle_id, tick, assets_evaluated, decisions_expected, decisions_persisted,
+                   snapshots_persisted, side_ev_expected, side_ev_persisted,
+                   ledger_write_latency_ms, ledger_error_count, created_at
+            FROM decision_audit_heartbeats
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row else None
+
+    def _wal_health(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        """Return SQLite concurrency/WAL health metrics.
+
+        The checkpoint is PASSIVE so it never blocks readers or writers; a non-zero
+        ``busy`` return means another connection was holding a lock at the moment.
+        """
+        wal_path = Path(str(self.db_path) + "-wal")
+        shm_path = Path(str(self.db_path) + "-shm")
+        wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+        shm_size = shm_path.stat().st_size if shm_path.exists() else 0
+
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+        wal_autocheckpoint = conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+        journal_size_limit = conn.execute("PRAGMA journal_size_limit").fetchone()[0]
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
+
+        # PASSIVE checkpoint returns (busy, log, checkpointed).  busy > 0 means
+        # a writer lock prevented the checkpoint from running.
+        checkpoint = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        busy, log_frames, checkpointed = checkpoint if checkpoint else (None, None, None)
+
+        return {
+            "journal_mode": journal_mode,
+            "synchronous": synchronous,
+            "wal_autocheckpoint": wal_autocheckpoint,
+            "journal_size_limit": journal_size_limit,
+            "page_count": page_count,
+            "page_size": page_size,
+            "freelist_count": freelist_count,
+            "wal_file_bytes": wal_size,
+            "wal_shm_bytes": shm_size,
+            "checkpoint_busy": busy,
+            "checkpoint_log_frames": log_frames,
+            "checkpoint_checkpointed": checkpointed,
+        }
+
     def _reasons(self, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         base, params = self._base_filter()
         rows = conn.execute(
@@ -449,6 +515,36 @@ class DecisionAuditReport:
                     f"eligible={row['is_eligible_for_research']} count={row['count']}"
                 )
 
+            lines.append("\n--- Data gaps ---")
+            gaps = self._gaps(conn)
+            if gaps:
+                for row in gaps:
+                    lines.append(
+                        f"  gap_id={row['gap_id']} "
+                        f"start={_ts_to_iso(row['start_ts'])} "
+                        f"end={_ts_to_iso(row['end_ts'])} "
+                        f"cause={row['cause']} "
+                        f"disposition={row['disposition']}"
+                    )
+            else:
+                lines.append("  No registered data gaps.")
+
+            lines.append("\n--- Latest heartbeat ---")
+            heartbeat = self._latest_heartbeat(conn)
+            if heartbeat:
+                lines.append(
+                    f"  cycle_id={heartbeat['cycle_id']} tick={heartbeat['tick']} "
+                    f"assets={heartbeat['assets_evaluated']} "
+                    f"decisions_expected={heartbeat['decisions_expected']} "
+                    f"decisions_persisted={heartbeat['decisions_persisted']} "
+                    f"side_ev_expected={heartbeat['side_ev_expected']} "
+                    f"side_ev_persisted={heartbeat['side_ev_persisted']} "
+                    f"latency_ms={heartbeat['ledger_write_latency_ms']:.2f} "
+                    f"errors={heartbeat['ledger_error_count']}"
+                )
+            else:
+                lines.append("  No heartbeats recorded.")
+
             if not pending_only:
                 lines.append("\n--- Decision reasons by asset ---")
                 for row in self._reasons(conn):
@@ -485,6 +581,23 @@ class DecisionAuditReport:
                 for col, (nulls_count, total) in nulls["side_nulls"].items():
                     pct = 100.0 * nulls_count / total if total else 0.0
                     lines.append(f"    {col}: {nulls_count}/{total} ({pct:.1f}%)")
+
+        lines.append("\n--- SQLite WAL/lock health ---")
+        wal = self._wal_health(conn)
+        lines.append(f"  journal_mode: {wal['journal_mode']}")
+        lines.append(f"  synchronous: {wal['synchronous']}")
+        lines.append(f"  wal_autocheckpoint: {wal['wal_autocheckpoint']}")
+        lines.append(f"  journal_size_limit: {wal['journal_size_limit']}")
+        lines.append(f"  page_count: {wal['page_count']}")
+        lines.append(f"  page_size: {wal['page_size']}")
+        lines.append(f"  freelist_count: {wal['freelist_count']}")
+        lines.append(f"  wal_file_bytes: {wal['wal_file_bytes']}")
+        lines.append(f"  wal_shm_bytes: {wal['wal_shm_bytes']}")
+        lines.append(
+            f"  checkpoint_passive: busy={wal['checkpoint_busy']} "
+            f"log_frames={wal['checkpoint_log_frames']} "
+            f"checkpointed={wal['checkpoint_checkpointed']}"
+        )
 
         lines.append("\n--- Research readiness ---")
         settled = counts.get("settled_count", 0)
