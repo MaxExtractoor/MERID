@@ -121,6 +121,16 @@ class OrderDecisionLedger:
         if intent_id is not None:
             record.intent_id = intent_id
         record.order_status = "submitted"
+        try:
+            from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+            get_decision_audit_ledger().record_outcome(
+                decision_id=decision_id,
+                order_intent_id=intent_id,
+                exchange_order_id=order_id,
+            )
+        except Exception as audit_exc:
+            logger.warning("[ORDER-DECISION-LEDGER] audit record submission failed: %s", audit_exc)
         self._append_event(decision_id, "submission", {
             "entry_mode": record.entry_mode,
             "submitted_price_cents": record.submitted_price_cents,
@@ -158,6 +168,17 @@ class OrderDecisionLedger:
             record.client_order_id = fill.client_order_id
         if record.order_id is None:
             record.order_id = fill.order_id
+        try:
+            from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+            get_decision_audit_ledger().record_outcome(
+                decision_id=decision_id,
+                fill_id=fill.fill_id,
+                actual_fill_price_cents=fill.price_cents,
+                actual_entry_fee_cents=float(fill.fee_cents),
+            )
+        except Exception as audit_exc:
+            logger.warning("[ORDER-DECISION-LEDGER] audit record fill failed: %s", audit_exc)
         self._append_event(decision_id, "fill", fill.__dict__)
 
     def record_markout(self, decision_id: str, markout: MarkoutEvent) -> None:
@@ -195,6 +216,16 @@ class OrderDecisionLedger:
             record.realized_pnl_cents = realized_pnl_cents
             exit.realized_pnl_cents = realized_pnl_cents
         record.order_status = "exited"
+        try:
+            from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+            get_decision_audit_ledger().record_outcome(
+                decision_id=decision_id,
+                actual_exit_price_cents=exit.exit_price_cents,
+                realized_net_pnl_cents=float(realized_pnl_cents) if realized_pnl_cents is not None else None,
+            )
+        except Exception as audit_exc:
+            logger.warning("[ORDER-DECISION-LEDGER] audit record exit failed: %s", audit_exc)
         self._append_event(decision_id, "exit", exit.__dict__)
 
     def get(self, decision_id: str) -> Optional[OrderDecisionRecord]:
