@@ -4640,40 +4640,41 @@ class KalshiWebSocketBridge:
     async def _publish_event(self, event: Any) -> None:
         """Forward a parsed WS event to the MERID event bus."""
         try:
-            # Extract event_type from top-level or nested msg
-            event_type = event.get("type") or event.get("channel") or ""
-            if not event_type and isinstance(event, dict) and "msg" in event:
-                nested_msg = event["msg"]
-                if isinstance(nested_msg, dict):
-                    event_type = nested_msg.get("type") or nested_msg.get("channel") or ""
-            
-            # Extract ticker for event_id - use actual market instead of UNKNOWN
-            ticker = None
             if isinstance(event, dict):
+                # Extract event_type from top-level or nested msg
+                event_type = event.get("type") or event.get("channel") or ""
+                if not event_type and "msg" in event:
+                    nested_msg = event["msg"]
+                    if isinstance(nested_msg, dict):
+                        event_type = nested_msg.get("type") or nested_msg.get("channel") or ""
+
+                # Extract ticker for event_id - use actual market instead of UNKNOWN
                 ticker = event.get("market_ticker") or event.get("ticker")
                 if not ticker and "msg" in event:
                     nested_msg = event["msg"]
                     if isinstance(nested_msg, dict):
                         ticker = nested_msg.get("market_ticker") or nested_msg.get("ticker")
-            event_id = ticker if ticker else "UNKNOWN"
-            
-            # DISABLED: Excessive logging - 1 log line per event (18K+ events = massive log volume)
-            # logger.info("[WS-APPLY] %s type=%s", event_id, event_type)
-            
-            # DIAGNOSTIC: Log all dict events to understand message routing
-            if isinstance(event, dict):
-                event_keys = list(event.keys()) if isinstance(event, dict) else "N/A"
-                has_bids = "bids" in event if isinstance(event, dict) else False
-                has_asks = "asks" in event if isinstance(event, dict) else False
-                has_delta_fp = "delta_fp" in event if isinstance(event, dict) else False
-                
+                event_id = ticker if ticker else "UNKNOWN"
+
+                # DISABLED: Excessive logging - 1 log line per event (18K+ events = massive log volume)
+                # logger.info("[WS-APPLY] %s type=%s", event_id, event_type)
+
+                # DIAGNOSTIC: Log all dict events to understand message routing
+                event_keys = list(event.keys())
+                has_bids = "bids" in event
+                has_asks = "asks" in event
+                has_delta_fp = "delta_fp" in event
+
                 # Log suspicious events (no bids/asks but has delta_fp)
                 if has_delta_fp and not (has_bids or has_asks):
                     logger.warning(
                         "[WS-BRIDGE] SUSPICIOUS EVENT: type=%s, keys=%s, has_delta_fp=%s, has_bids=%s, has_asks=%s",
                         event_type, event_keys, has_delta_fp, has_bids, has_asks
                     )
-            
+            else:
+                event_type = ""
+                event_id = "UNKNOWN"
+
             if isinstance(event, QuoteEvent):
                 payload = {
                     "market_id": event.market_id,
@@ -4867,11 +4868,7 @@ class KalshiWebSocketBridge:
 
         except Exception as exc:
             self._forward_errors += 1
-            # Reduce log level to DEBUG for non-dict events - these are expected and handled elsewhere
-            if "'QuoteEvent' object has no attribute 'get'" in str(exc) or "'VenueTrade' object has no attribute 'get'" in str(exc):
-                logger.debug(f"WS bridge skipping non-dict event (handled elsewhere): {type(exc).__name__}")
-            else:
-                logger.warning(f"WS bridge event forward error: {exc}")
+            logger.warning(f"WS bridge event forward error: {exc}")
 
     async def _dispatch_ws_message(self, event: Any) -> None:
         """Dispatch WebSocket messages based on type/channel.
