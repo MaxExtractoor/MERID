@@ -398,6 +398,7 @@ merid_audit_bundle.zip
 # Data runtime artifacts
 data/audit/
 data/data/
+data/paper_positions.json
 data/run_summaries/
 data/shadow/cfb_rti/
 data/shadow/cfb_rti_report/
