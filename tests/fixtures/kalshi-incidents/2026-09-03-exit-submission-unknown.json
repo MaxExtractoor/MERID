@@ -1,0 +1,55 @@
+{
+  "id": "2026-09-03-exit-submission-unknown",
+  "description": "Process restart with a take-profit exit that lost its exchange ack. The durable ExitOrderAttemptStore holds the attempt in SUBMISSION_UNKNOWN; on restart the PositionMonitor rehydrates it, a REST lookup first finds the order resting, then later shows it canceled, and the durable FSM resolves to CANCELED.",
+  "time_range": {
+    "start": "2026-09-03T14:00:00Z",
+    "end": "2026-09-03T14:30:00Z"
+  },
+  "positions": [
+    {
+      "market_id": "KXBTC15M-27JAN010000-00",
+      "series_ticker": "KXBTC15M",
+      "side": "yes",
+      "size": 1,
+      "avg_entry_price_cents": 50,
+      "entry_fill_price_cents": 50,
+      "take_profit_price_cents": 80,
+      "stop_loss_price_cents": 40,
+      "risk_params_state": "original_persisted",
+      "risk_params_schema_version": 2,
+      "client_order_id": "entry-abc123",
+      "entry_fill_id": "fill-abc123",
+      "entry_intent_id": "intent-entry-abc123"
+    }
+  ],
+  "exit_attempts": [
+    {
+      "exit_intent_id": "intent-exit-ac7038bd3fc2a8f4fdbe",
+      "position_key": "KXBTC15M-27JAN010000-00",
+      "ticker": "KXBTC15M-27JAN010000-00",
+      "reason": "take_profit",
+      "client_order_id": "exit_ac7038bd3fc2a8f4fdbe",
+      "requested_quantity": 100,
+      "requested_limit_cents": 80,
+      "initial_state": "SUBMISSION_UNKNOWN"
+    }
+  ],
+  "exchange_evidence": [
+    {
+      "client_order_id": "exit_ac7038bd3fc2a8f4fdbe",
+      "order_status": "resting",
+      "order_id": "ord-rehydrated-123",
+      "order_price": 0.80,
+      "open_orders": [],
+      "exchange_position_size": 1
+    },
+    {
+      "client_order_id": "exit_ac7038bd3fc2a8f4fdbe",
+      "order_status": "canceled",
+      "order_id": "ord-rehydrated-123",
+      "order_price": 0.80,
+      "open_orders": [],
+      "exchange_position_size": 1
+    }
+  ]
+}
