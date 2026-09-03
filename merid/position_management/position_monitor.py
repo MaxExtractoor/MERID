@@ -14,7 +14,7 @@ import threading
 import time
 import traceback
 import uuid
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union, Tuple
@@ -30,6 +30,7 @@ from merid.position_management.position import (
 )
 from merid.position_management.exit_policy import ExitAction, ExitReason, is_position_quarantined, is_exit_reason_allowed_for_quarantine
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver
+from merid.position_management.exit_resolver import get_exit_resolver
 from merid.position_management.exit_decision import ExitDecision, ExitSourceLayer, get_priority_for_reason
 from merid.position_management.exit_audit import ExitPriceSnapshot, ExitDecisionRecord
 from merid.event_venues.kalshi.stop_candidate import (
@@ -2462,7 +2463,7 @@ class PositionMonitor:
         position: Position,
         snapshot: ExitPriceSnapshot,
         poll_count: int = 0,
-    ) -> None:
+    ) -> Optional[ExitDecision]:
         """
         Check a single position for exit conditions.
 
@@ -2484,6 +2485,26 @@ class PositionMonitor:
         # Update runtime state using the executable liquidation bid
         position.update_runtime_state(current_price_cents)
 
+        candidates: List[ExitDecision] = []
+
+        def _add_candidate(
+            reason: ExitReason,
+            exit_price_cents: Optional[int] = None,
+            contracts_to_close: Optional[int] = None,
+            source_layer: ExitSourceLayer = ExitSourceLayer.POSITION_LEVEL,
+            metadata: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            candidates.append(
+                ExitDecision(
+                    reason=reason,
+                    priority=get_priority_for_reason(reason),
+                    source_layer=source_layer,
+                    exit_price_cents=exit_price_cents if exit_price_cents is not None else current_price_cents,
+                    contracts_to_close=contracts_to_close,
+                    metadata=metadata or {},
+                )
+            )
+
         # CRITICAL FIX (2026-08-25): Settlement guard - forced exit at T-2min (120s).
         # Previously positions rode into settlement unmanaged (the "settlement trap"):
         # expired markets were simply dropped from monitoring with no exit enforcement.
@@ -2501,8 +2522,8 @@ class PositionMonitor:
                     _secs_to_expiry,
                     _settlement_guard_seconds,
                 )
-                await self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)
-                return
+                _add_candidate(ExitReason.SETTLEMENT_GUARD, current_price_cents, None, metadata={"seconds_to_expiry": _secs_to_expiry, "guard_seconds": _settlement_guard_seconds})
+                # Continue evaluating candidates; the central resolver will choose the final exit.
         except Exception as e:
             logger.warning("[POSITION-MONITOR] Settlement guard check failed: %s", e)
 
@@ -2531,10 +2552,8 @@ class PositionMonitor:
                 position.unrealized_pnl_cents,
                 _hard_loss_cap_cents,
             )
-            await self._emit_exit_intent(position, ExitReason.LOSS_CAP, current_price_cents, snapshot=snapshot)
-            return
-
-        # CRITICAL FIX (2026-08-25): Continuation stop (per-asset, vol-normalized).
+            _add_candidate(ExitReason.LOSS_CAP, current_price_cents)
+            # Continue evaluating candidates; the central resolver will choose the final exit.
         # Wired as a config-driven parameter but DISABLED by default.  The 24h fill
         # set should be used to backtest-calibrate threshold_pct before enabling.
         # When enabled, this will exit if the underlying spot continues moving
@@ -2553,8 +2572,8 @@ class PositionMonitor:
                     cont_threshold_pct,
                     _cont_cfg.get("lookback_minutes", 5),
                 )
-                await self._emit_exit_intent(position, ExitReason.CONTINUATION_STOP, current_price_cents, snapshot=snapshot)
-                return
+                _add_candidate(ExitReason.CONTINUATION_STOP, current_price_cents)
+                # Continue evaluating candidates; the central resolver will choose the final exit.
             else:
                 logger.debug(
                     "[POSITION-MONITOR] CONTINUATION-STOP not triggered: position=%s "
@@ -2688,8 +2707,8 @@ class PositionMonitor:
                     position.avg_entry_price_cents,
                     position.time_since_entry_seconds,
                 )
-                await self._emit_exit_intent(position, ExitReason.CURRENT_EDGE_REVERSAL, current_price_cents, snapshot=snapshot)
-                return
+                _add_candidate(ExitReason.CURRENT_EDGE_REVERSAL, current_price_cents)
+                # Continue evaluating candidates; the central resolver will choose the final exit.
 
         _contract_life_seconds = 900.0
         if (
@@ -2707,10 +2726,8 @@ class PositionMonitor:
                     position.unrealized_pnl_cents,
                     position.time_since_entry_seconds,
                 )
-                await self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, snapshot=snapshot)
-                return
-
-        # Log position state for debugging
+                _add_candidate(ExitReason.TIME_STOP, current_price_cents)
+                # Continue evaluating candidates; the central resolver will choose the final exit.
         logger.debug(
             "[POSITION-MONITOR] Checking position=%s market=%s side=%s entry=%dc current=%dc pnl=%dc R=%.2f "
             "tp=%dc sl=%dc trailing=%s",
@@ -2930,7 +2947,7 @@ class PositionMonitor:
                             )
                             return
                         if current_price_cents >= position.dynamic_tp_target_cents:
-                            position.dynamic_tp_triggered = True
+                            # position.dynamic_tp_triggered will be set if this candidate wins.
                             # AUDIT: Idempotency - generate dedupe key for this trigger
                             dedupe_key = f"{position.position_id[:8]}:dynamic_tp:{poll_count}"
                             # AUDIT: Log trigger evaluation
@@ -2951,8 +2968,8 @@ class PositionMonitor:
                                 current_price_cents,
                                 position.dynamic_tp_target_cents,
                             )
-                            await self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents, snapshot=snapshot)
-                            return
+                            _add_candidate(ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents, None, metadata={"dedupe_key": dedupe_key, "target": position.dynamic_tp_target_cents})
+                            # Continue evaluating candidates; the central resolver will choose the final exit.
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Dynamic take profit check failed: %s", e)
 
@@ -2999,7 +3016,7 @@ class PositionMonitor:
                     if trim_enabled and not position.ratchet_trimmed and not position.exit_triggered:
                         if position.size > trim_to_contracts:
                             if current_price_cents >= trim_threshold:
-                                position.ratchet_trimmed = True
+                                # position.ratchet_trimmed will be set if this candidate wins.
                                 # Emit trim intent (partial close)
                                 contracts_to_close = int(position.size - trim_to_contracts)
                                 logger.info(
@@ -3011,7 +3028,7 @@ class PositionMonitor:
                                     trim_to_contracts,
                                     contracts_to_close,
                                 )
-                                await self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close, snapshot=snapshot)
+                                _add_candidate(ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
                                 # CRITICAL FIX: Do NOT update position.size here - wait for fill callback
                                 # Previous code updated position.size prematurely, creating desync with PositionCache.contracts
                                 # Position.size should only be updated via fill callback to ensure consistency
@@ -3058,8 +3075,8 @@ class PositionMonitor:
                                         current_price_cents,
                                         floor_price,
                                     )
-                                    await self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
-                                    return
+                                    _add_candidate(ExitReason.RATCHET_FLOOR, current_price_cents, None, metadata={"floor_price": floor_price})
+                                    # Continue evaluating candidates; the central resolver will choose the final exit.
                                 elif thesis_validation_enabled:
                                     # Soft exit: only exit if thesis is broken
                                     # For now, we use a simple heuristic: thesis broken if price dropped significantly
@@ -3073,8 +3090,8 @@ class PositionMonitor:
                                             current_price_cents,
                                             floor_price,
                                         )
-                                        await self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents, snapshot=snapshot)
-                                        return
+                                        _add_candidate(ExitReason.RATCHET_FLOOR, current_price_cents, None, metadata={"floor_price": floor_price})
+                                        # Continue evaluating candidates; the central resolver will choose the final exit.
                                     else:
                                         logger.info(
                                             "[POSITION-MONITOR] RATCHET-FLOOR-BREACH: position=%s side=%s price=%dc floor=%dc - holding (thesis intact, hold_period=expired)",
@@ -3122,8 +3139,8 @@ class PositionMonitor:
                 sl_kind,
                 position.r_multiple,
             )
-            await self._emit_exit_intent(position, ExitReason.STOP_LOSS, current_price_cents, snapshot=snapshot)
-            return
+            _add_candidate(ExitReason.STOP_LOSS, current_price_cents, None, metadata={"kind": sl_kind})
+            # Continue evaluating candidates; the central resolver will choose the final exit.
 
         if position.should_trigger_take_profit(current_price_cents):
             # AUDIT: Idempotency - generate dedupe key for this trigger
@@ -3146,10 +3163,8 @@ class PositionMonitor:
                 position.take_profit_price_cents,
                 position.r_multiple,
             )
-            await self._emit_exit_intent(position, ExitReason.TAKE_PROFIT, current_price_cents, snapshot=snapshot)
-            return
-
-        # Research: Check break-even trigger at 1R (capital preservation)
+            _add_candidate(ExitReason.TAKE_PROFIT, current_price_cents)
+            # Continue evaluating candidates; the central resolver will choose the final exit.
         if position.should_trigger_break_even(current_price_cents):
             position.trigger_break_even()
             logger.info(
@@ -3203,7 +3218,12 @@ class PositionMonitor:
                         # Check minimum contracts requirement
                         min_contracts = profile.scale_out_min_contracts_for_scale
                         if position.size >= min_contracts:
-                            contracts_to_close = position.trigger_scale_out()
+                            # Compute scale-out size without mutating position state.
+                            # The resolver will call trigger_scale_out() if this candidate wins.
+                            half = (position.size / Decimal("2")).to_integral_value(rounding=ROUND_HALF_UP)
+                            if half < Decimal("1"):
+                                half = Decimal("1")
+                            contracts_to_close = int(min(position.size, half))
                             logger.info(
                                 "[POSITION-MONITOR] SCALE-OUT triggered: position=%s price=%dc R=%.2f closing %d of %d contracts",
                                 position.position_id[:8],
@@ -3212,9 +3232,8 @@ class PositionMonitor:
                                 contracts_to_close,
                                 position.size,
                             )
-                            # Emit scale-out intent (partial exit)
-                            self._emit_scale_out_intent(position, contracts_to_close, current_price_cents)
-                            # Continue monitoring with reduced size
+                            _add_candidate(ExitReason.SCALE_OUT, current_price_cents, contracts_to_close)
+                            # Continue monitoring; resolver will choose final exit.
                         else:
                             logger.debug(
                                 "[POSITION-MONITOR] SCALE-OUT skipped: position=%s size=%s < min_contracts=%d",
@@ -3380,7 +3399,7 @@ class PositionMonitor:
         # Check trailing stop (only if activated)
         if position.trailing_activated and position.should_trigger_trail(current_price_cents):
             trail_level = position.get_trail_level()
-            position.trailing_state = TrailingState.EXIT
+            # position.trailing_state will be set to TrailingState.EXIT if this candidate wins.
             logger.info(
                 "[POSITION-MONITOR] TRAIL triggered: position=%s price=%dc trail=%dc max_fav=%dc R=%.2f",
                 position.position_id[:8],
@@ -3389,10 +3408,8 @@ class PositionMonitor:
                 position.max_favorable_price_cents,
                 position.r_multiple,
             )
-            await self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents, snapshot=snapshot)
-            return
-
-        # CRITICAL FIX (2026-07-11): Emergency flatten in last 60 seconds
+            _add_candidate(ExitReason.TRAIL, current_price_cents, None, metadata={"trail_level": trail_level})
+            # Continue evaluating candidates; the central resolver will choose the final exit.
         # Force full exit regardless of other conditions to ensure position doesn't expire
         # Get time to expiry from market state
         time_to_expiry_seconds = 900.0  # Default 15 minutes
@@ -3416,8 +3433,8 @@ class PositionMonitor:
                 time_to_expiry_seconds,
                 position.unrealized_pnl_cents
             )
-            await self._emit_exit_intent(position, ExitReason.SETTLEMENT_GUARD, current_price_cents, snapshot=snapshot)  # Full exit
-            return  # Exit immediately, don't check other conditions
+            _add_candidate(ExitReason.SETTLEMENT_GUARD, current_price_cents, None, metadata={"emergency_flatten": True, "time_to_expiry_seconds": time_to_expiry_seconds})
+            # Continue evaluating candidates; the central resolver will choose the final exit.
 
         # CRITICAL FIX: 2026-07-15 - Load staged exit stages from YAML config
         # Previously hardcoded to 5/10/13 minutes with 25/25/50% - now configurable
@@ -3480,6 +3497,8 @@ class PositionMonitor:
         time_since_entry_minutes = time_since_entry_seconds / 60.0
 
         # Check staged exits
+        staged_candidates = []  # type: List[str]
+        staged_contracts_total = 0
         for stage_idx, stage in enumerate(staged_exit_stages):
             stage_minutes = stage.get("minutes", 0)
             stage_percent = stage.get("percent", 0)
@@ -3513,24 +3532,32 @@ class PositionMonitor:
                             time_since_entry_minutes,
                             position.unrealized_pnl_cents,
                         )
-
-                        # Mark stage as executed
-                        setattr(position, stage_executed_attr, True)
-                        setattr(position, f"staged_exit_{stage_key}_timestamp", datetime.utcnow())
-
-                        # Emit partial exit intent
-                        await self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, contracts_to_close, snapshot=snapshot)
-
-                        # CRITICAL FIX: Do NOT update position.size here - wait for fill callback
-                        # Previous code updated position.size prematurely, creating desync with PositionCache.contracts
-                        # Position.size should only be updated via fill callback to ensure consistency
+                        staged_candidates.append(stage_key)
+                        staged_contracts_total += contracts_to_close
+                        # Defer marking stage executed until the resolver selects this exit.
                         logger.info(
-                            "[POSITION-MONITOR] STAGED-EXIT triggered: position=%s closing %d of %d contracts (fill callback will update size)",
+                            "[POSITION-MONITOR] STAGED-EXIT candidate: position=%s stage=%s closing %d of %d contracts (fill callback will update size)",
                             position.position_id[:8],
+                            stage_key,
                             contracts_to_close,
                             position.size,
                         )
-                        # Continue to check other exit conditions (don't return early)
+
+        if staged_candidates and staged_contracts_total > 0:
+            if staged_contracts_total >= int(position.size):
+                _add_candidate(
+                    ExitReason.TIME_STOP,
+                    current_price_cents,
+                    None,
+                    metadata={"staged_stages": staged_candidates},
+                )
+            else:
+                _add_candidate(
+                    ExitReason.TIME_STOP,
+                    current_price_cents,
+                    staged_contracts_total,
+                    metadata={"staged_stages": staged_candidates},
+                )
 
         # Check exit policy (time stop, edge decay, risk, candle reversal)
         resolver = get_exit_policy_resolver()
@@ -3760,50 +3787,67 @@ class PositionMonitor:
         position._last_current_edge_pct = current_edge_pct
 
         # Resolve exit policy
+        resolver = get_exit_policy_resolver()
         policy = resolver.resolve(
             position=position,
             current_price_cents=current_price_cents,
             time_to_expiry_seconds=time_to_expiry,
-            volatility_regime=volatility_regime,  # CRITICAL: Pass volatility regime
+            volatility_regime=volatility_regime,
             candles=candles,
             md_age_ms=md_age_ms,
             max_age_ms=max_age_ms,
-            current_edge_pct=current_edge_pct,  # CRITICAL: Pass real-time edge for edge decay check
+            current_edge_pct=current_edge_pct,
         )
 
         if policy.action == ExitAction.EXIT_MARKET:
-            logger.info(
-                "[POSITION-MONITOR] EXIT-POLICY triggered: position=%s reason=%s R=%.2f",
-                position.position_id[:8],
-                policy.reason.value if policy.reason else "unknown",
-                position.r_multiple,
-            )
-            await self._emit_exit_intent(
-                position,
+            _add_candidate(
                 policy.reason or ExitReason.MANUAL,
                 current_price_cents,
-                snapshot=snapshot,
-            )
-        else:
-            # EXIT_EVAL: the position was evaluated and no trigger fired. This must be
-            # logged even when the entry gate is disabled, the signal is missing, or
-            # the queue is backlogged, so the two paths remain decoupled and observable.
-            self._log_exit_eval(
-                position=position,
-                snapshot=snapshot,
-                decision="EXIT_TARGET_NOT_REACHED",
-                reason_code=policy.reason.value if policy.reason else "NO_TRIGGER",
-                target_hit=False,
+                None,
+                source_layer=ExitSourceLayer.POLICY_LAYER,
+                metadata={"policy_action": policy.action.value},
             )
 
-        return ExitDecision(
-            reason=policy.reason or ExitReason.MANUAL,
-            priority=get_priority_for_reason(policy.reason or ExitReason.MANUAL),
-            source_layer=ExitSourceLayer.POSITION_LEVEL,
-            exit_price_cents=current_price_cents,
-            contracts_to_close=None,
-            metadata={}
+        # Central resolver: choose the single highest-priority exit among all candidates.
+        winning = get_exit_resolver().resolve(candidates, position.position_id)
+
+        if winning is not None:
+            # Apply deferred state mutations for the winning partial exit.
+            if winning.reason == ExitReason.DYNAMIC_TAKE_PROFIT:
+                position.dynamic_tp_triggered = True
+            elif winning.reason == ExitReason.RATCHET_TRIM:
+                position.ratchet_trimmed = True
+            elif winning.reason == ExitReason.SCALE_OUT:
+                winning.contracts_to_close = position.trigger_scale_out()
+            elif winning.reason == ExitReason.TRAIL:
+                position.trailing_state = TrailingState.EXIT
+            elif winning.reason == ExitReason.TIME_STOP:
+                staged = winning.metadata.get("staged_stages")
+                if staged:
+                    for stage_key in staged:
+                        setattr(position, f"staged_exit_{stage_key}_executed", True)
+                        setattr(position, f"staged_exit_{stage_key}_timestamp", datetime.utcnow())
+
+            # Emit the winning exit intent.
+            await self._emit_exit_intent(
+                position,
+                winning.reason,
+                winning.exit_price_cents,
+                contracts_to_close=winning.contracts_to_close,
+                snapshot=snapshot,
+            )
+            return winning
+
+        # No exit candidate won.
+        reason_code = policy.reason.value if policy.reason else "NO_TRIGGER"
+        self._log_exit_eval(
+            position=position,
+            snapshot=snapshot,
+            decision="EXIT_TARGET_NOT_REACHED",
+            reason_code=reason_code,
+            target_hit=False,
         )
+        return None
 
     def _evaluate_stop_loss(
         self,
