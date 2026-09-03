@@ -31,7 +31,8 @@ from __future__ import annotations
 import math
 import os
 from decimal import Decimal, ROUND_CEILING
-from typing import Dict, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Union
 
 from utils.logger import get_logger
 
@@ -458,6 +459,116 @@ def is_exit_net_profitable(
     net = gross - (entry_fee + exit_fee)
     min_net = Decimal(min_net_profit_per_contract_cents) * Decimal(str(size))
     return net >= min_net, net
+
+
+@dataclass
+class ExitTargetsValidation:
+    """Structured result of exit-target validation.
+
+    This is the canonical policy contract for take-profit and stop-loss
+    targets: a target is accepted only if it is on the correct side of the
+    all-in entry basis, lies inside the valid price range, and (for a take
+    profit) yields a non-negative net P&L after round-trip taker fees.
+    """
+
+    valid: bool
+    take_profit_price_cents: Optional[int] = None
+    stop_loss_price_cents: Optional[int] = None
+    reason: str = ""
+    invalid_reasons: List[str] = field(default_factory=list)
+
+
+def validate_exit_policy_targets(
+    entry_price_cents: int,
+    take_profit_price_cents: Optional[int],
+    stop_loss_price_cents: Optional[int],
+    side: str,
+    size: Union[Decimal, int, float, str],
+    gross_min_cents: int = MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS,
+    net_min_cents: int = MERID_EXIT_MIN_PROFIT_CENTS,
+) -> ExitTargetsValidation:
+    """Validate take-profit and stop-loss targets against a canonical basis.
+
+    Prices are in the contract's own side-space (YES cents for long YES,
+    NO cents for long NO).  A long position in either side profits when the
+    own-side price rises, so the same directional check applies to both.
+
+    Args:
+        entry_price_cents: Canonical all-in entry price in cents.
+        take_profit_price_cents: Proposed take-profit price, or None.
+        stop_loss_price_cents: Proposed stop-loss price, or None.
+        side: "yes" or "no"; used for audit/logging, not direction math.
+        size: Number of contracts (Decimal/int/float/str).
+        gross_min_cents: Minimum gross profit required for a take-profit.
+        net_min_cents: Minimum net profit per contract after round-trip fees.
+
+    Returns:
+        ExitTargetsValidation with the accepted (possibly cleared) prices and
+        a machine-readable reason list.
+    """
+    reasons: List[str] = []
+    valid = True
+
+    if not (0 < entry_price_cents < 100):
+        return ExitTargetsValidation(
+            False,
+            take_profit_price_cents,
+            stop_loss_price_cents,
+            "INVALID_ENTRY_PRICE",
+            ["INVALID_ENTRY_PRICE"],
+        )
+
+    if side.lower() not in ("yes", "no"):
+        return ExitTargetsValidation(
+            False,
+            take_profit_price_cents,
+            stop_loss_price_cents,
+            "INVALID_SIDE",
+            ["INVALID_SIDE"],
+        )
+
+    if take_profit_price_cents is not None:
+        if not (0 < take_profit_price_cents < 100):
+            valid = False
+            reasons.append("INVALID_TP_OUT_OF_RANGE")
+            take_profit_price_cents = None
+        elif take_profit_price_cents <= entry_price_cents:
+            valid = False
+            reasons.append("INVALID_TP_WRONG_SIDE_OF_ENTRY")
+            take_profit_price_cents = None
+        elif take_profit_price_cents - entry_price_cents < gross_min_cents:
+            valid = False
+            reasons.append("INVALID_TP_GROSS_INSUFFICIENT")
+            take_profit_price_cents = None
+        else:
+            is_profitable, _ = is_exit_net_profitable(
+                entry_price_cents,
+                take_profit_price_cents,
+                size,
+                min_net_profit_per_contract_cents=net_min_cents,
+            )
+            if not is_profitable:
+                valid = False
+                reasons.append("INVALID_TP_NET_NEGATIVE")
+                take_profit_price_cents = None
+
+    if stop_loss_price_cents is not None:
+        if not (0 < stop_loss_price_cents < 100):
+            valid = False
+            reasons.append("INVALID_SL_OUT_OF_RANGE")
+            stop_loss_price_cents = None
+        elif stop_loss_price_cents >= entry_price_cents:
+            valid = False
+            reasons.append("INVALID_SL_WRONG_SIDE_OF_ENTRY")
+            stop_loss_price_cents = None
+
+    return ExitTargetsValidation(
+        valid,
+        take_profit_price_cents,
+        stop_loss_price_cents,
+        "VALID" if valid else ";".join(reasons),
+        reasons,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

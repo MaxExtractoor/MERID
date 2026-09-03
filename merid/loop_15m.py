@@ -7850,9 +7850,11 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "net_edge_cents": edge_cents,
                     "confidence": float(confidence) if confidence is not None else 0.5,
                 }
+            _side_for_policy = candidate.get("side", "yes") or "yes"
             strip_context = {
                 "entry_price_cents": price_cents,
                 "entry_model_probability": float(model_prob) if model_prob is not None else None,
+                "thesis_side": str(_side_for_policy).lower(),
             }
             exit_policy = resolve_exit_policy(
                 edge_result=edge_result,
@@ -8391,6 +8393,47 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     )
                     stop_loss_enabled = False
                     stop_loss_price_cents = None
+
+        # CRITICAL FIX (2026-09-02): Final TP/SL validation before building the
+        # OrderIntent.  Catches any computed target that is on the wrong side of
+        # the own-side entry price or that does not clear round-trip taker fees.
+        # Invalid targets are cleared rather than submitted; the position cache
+        # will re-derive a fee-aware target at fill time if the entry is trusted.
+        if price_cents and 0 < price_cents < 100 and count and count > 0:
+            _side_for_validate = side_raw.lower() if isinstance(side_raw, str) else "yes"
+            try:
+                from merid.event_venues.kalshi.fees import validate_exit_policy_targets
+                _intent_validation = validate_exit_policy_targets(
+                    entry_price_cents=int(price_cents),
+                    take_profit_price_cents=take_profit_price_cents,
+                    stop_loss_price_cents=stop_loss_price_cents,
+                    side=_side_for_validate,
+                    size=count,
+                )
+                if not _intent_validation.valid:
+                    if take_profit_price_cents != _intent_validation.take_profit_price_cents:
+                        logger.warning(
+                            "[15M-LOOP-TP-VALIDATE] ticker=%s side=%s entry=%dc "
+                            "invalid_tp=%s reasons=%s - clearing",
+                            ticker, _side_for_validate, price_cents,
+                            take_profit_price_cents, _intent_validation.reason,
+                        )
+                        take_profit_price_cents = _intent_validation.take_profit_price_cents
+                        take_profit_r_multiple = None
+                    if stop_loss_price_cents != _intent_validation.stop_loss_price_cents:
+                        logger.warning(
+                            "[15M-LOOP-SL-VALIDATE] ticker=%s side=%s entry=%dc "
+                            "invalid_sl=%s reasons=%s - clearing",
+                            ticker, _side_for_validate, price_cents,
+                            stop_loss_price_cents, _intent_validation.reason,
+                        )
+                        stop_loss_price_cents = _intent_validation.stop_loss_price_cents
+                        stop_loss_enabled = False
+            except Exception as _validate_err:
+                logger.warning(
+                    "[15M-LOOP-TP/SL-VALIDATE] Validation failed for ticker=%s: %s",
+                    ticker, _validate_err,
+                )
 
         # Generate unique trace_id for candidate → order → policy tracking
         import uuid

@@ -107,7 +107,7 @@ class TestPositionPnL:
             side=PositionSide.NO,
             size=10,
             avg_entry_price_cents=50,
-            stop_loss_price_cents=60,  # NO SL is higher
+            stop_loss_price_cents=40,  # NO SL must be below entry (long NO loses when NO price falls)
             risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
             risk_params_schema_version=2,
             client_order_id="client-1",
@@ -263,17 +263,17 @@ class TestPositionTriggers:
             side=PositionSide.NO,
             size=10,
             avg_entry_price_cents=50,
-            take_profit_price_cents=55,
+            take_profit_price_cents=60,
         )
 
-        # Price at TP
-        assert position.should_trigger_take_profit(55) is True
+        # Price below TP (should NOT trigger)
+        assert position.should_trigger_take_profit(55) is False
 
-        # Price above TP (should trigger - long NO profits when NO price rises)
+        # Price at TP (should trigger)
         assert position.should_trigger_take_profit(60) is True
 
-        # Price below TP (should NOT trigger)
-        assert position.should_trigger_take_profit(45) is False
+        # Price above TP (should trigger - long NO profits when NO price rises)
+        assert position.should_trigger_take_profit(65) is True
 
 
 class TestPositionTrailing:
@@ -763,3 +763,81 @@ class TestExitPolicyPropagation:
         )
 
         assert position.get_trail_level() is None
+
+
+class TestPositionExitPolicyValidation:
+    """Test that Position rejects invalid TP/SL and establishes canonical basis."""
+
+    def test_invalid_take_profit_direction_no_is_cleared(self):
+        """A NO TP below entry (a loss target) must be cleared and not used."""
+        position = Position(
+            market_id="KXXRP15M-26SEP022315-15",
+            series_ticker="KXXRP15M",
+            side=PositionSide.NO,
+            size=1,
+            avg_entry_price_cents=55,
+            take_profit_price_cents=40,  # loss target, not profit
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
+            entry_fill_price_cents=55,
+        )
+        # The invalid TP is cleared and replaced by a fee-aware fallback above entry.
+        assert position.take_profit_price_cents is not None
+        assert position.take_profit_price_cents > 55
+        assert position.all_in_entry_basis_cents == 55
+
+    def test_invalid_take_profit_not_net_profitable_is_cleared(self):
+        """A 5c TP on a 50c entry is not net profitable after round-trip fees."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+            take_profit_price_cents=55,
+            entry_fill_price_cents=50,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
+        )
+        # After validator clears, __post_init__ re-derives a fee-aware TP.
+        assert position.take_profit_price_cents is not None
+        assert position.take_profit_price_cents >= 56
+
+    def test_rest_fill_basis_divergence_is_detected(self):
+        """When REST avg and fill price diverge, the position is marked disputed."""
+        position = Position(
+            market_id="KXXRP15M-26SEP022315-15",
+            series_ticker="KXXRP15M",
+            side=PositionSide.NO,
+            size=1,
+            avg_entry_price_cents=55,
+            entry_fill_price_cents=45,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
+        )
+        assert position.basis_state == "BASIS_DISPUTED"
+        # Profit targets are quarantined; the canonical basis is the fill price.
+        assert position.all_in_entry_basis_cents == 45
+        assert position.take_profit_price_cents is None
+        # Stop-loss is still derived from the trusted fill price (45c -> 40c).
+        assert position.stop_loss_price_cents == 40
+
+    def test_canonical_basis_used_for_pnl(self):
+        """PnL uses the trusted fill price, not the exchange-reported avg."""
+        position = Position(
+            market_id="KXXRP15M-26SEP022315-15",
+            series_ticker="KXXRP15M",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=55,
+            entry_fill_price_cents=45,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
+        )
+        position.update_runtime_state(60)
+        # PnL is (60 - 45) * 1 = 15c, not (60 - 55) = 5c.
+        assert position.unrealized_pnl_cents == 15

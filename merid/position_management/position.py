@@ -14,6 +14,11 @@ import os
 import time
 import uuid
 
+from merid.event_venues.kalshi.fees import (
+    validate_exit_policy_targets,
+    is_exit_net_profitable,
+)
+
 try:
     from merid.event_venues.kalshi.binary_price_space import require_outcome_side, SideValidationError
     BINARY_PRICE_SPACE_AVAILABLE = True
@@ -224,6 +229,17 @@ class Position:
     entry_executable_ask_cents: Optional[int] = None
     # Quality of the entry book capture. Only "AT_FILL" is trusted for spread-only invariants.
     entry_book_capture_quality: str = "UNKNOWN"
+    # CRITICAL FIX (2026-09-02): Canonical all-in entry basis.  This is the
+    # authoritative price used for PnL, R-multiple, and exit-target math.  It
+    # is normally the trusted fill price; it falls back to the exchange-reported
+    # average only when no fill price is available.  avg_entry_price_cents is
+    # retained for reconciliation and telemetry but is no longer the primary
+    # basis for profit/loss calculations.
+    all_in_entry_basis_cents: Optional[int] = None
+    basis_state: str = "UNKNOWN"
+    basis_version: int = 0
+    basis_sources: List[str] = field(default_factory=list)
+
     # Immutable fill and book timestamps/prices captured at entry.
     entry_fill_price_cents: Optional[int] = None
     entry_fill_timestamp: Optional[datetime] = None
@@ -323,6 +339,7 @@ class Position:
 
         for attr in [
             "avg_entry_price_cents",
+            "all_in_entry_basis_cents",
             "take_profit_price_cents",
             "stop_loss_price_cents",
             "scale_out_price_cents",
@@ -401,6 +418,102 @@ class Position:
             self.entry_book_timestamp = None
             self.entry_book_sequence = None
 
+        # CRITICAL FIX (2026-09-02): Establish the canonical all-in entry basis
+        # and reconcile it with the exchange-reported average.  The fill price is
+        # the authoritative anchor; it only falls back to the reported average
+        # when no fill price is available.  If the two sources diverge by more
+        # than the configured threshold, the basis is marked as disputed and
+        # profit-taking exits are disabled until an operator audit clears it.
+        MERID_BASIS_DIVERGENCE_THRESHOLD_CENTS = int(os.getenv("MERID_BASIS_DIVERGENCE_THRESHOLD_CENTS", "2"))
+        _fill_basis = self.entry_fill_price_cents
+        _rest_basis = self.avg_entry_price_cents
+        if _fill_basis and 0 < _fill_basis < 100:
+            self.all_in_entry_basis_cents = _fill_basis
+            if _rest_basis and _rest_basis > 0:
+                if abs(_fill_basis - _rest_basis) >= MERID_BASIS_DIVERGENCE_THRESHOLD_CENTS:
+                    self.basis_state = "BASIS_DISPUTED"
+                    self.basis_sources = [f"fill:{self.entry_fill_id or 'unknown'}", f"rest:avg={_rest_basis}"]
+                else:
+                    self.basis_state = "OK"
+                    self.basis_sources = [f"fill:{self.entry_fill_id or 'unknown'}", f"rest:avg={_rest_basis}"]
+            else:
+                self.basis_state = "FILL_ONLY"
+                self.basis_sources = [f"fill:{self.entry_fill_id or 'unknown'}"]
+            self.basis_version = max(self.basis_version, 1)
+        elif _rest_basis and 0 < _rest_basis < 100:
+            self.all_in_entry_basis_cents = _rest_basis
+            self.basis_state = "REST_ONLY"
+            self.basis_sources = [f"rest:avg={_rest_basis}"]
+            self.basis_version = max(self.basis_version, 1)
+
+        if self.basis_state == "BASIS_DISPUTED":
+            logger.warning(
+                "[POSITION-BASIS-DISPUTED] position=%s fill=%dc rest_avg=%dc divergence=%dc - "
+                "disabling profit-target derivation, use stop-loss/time/settlement exits only",
+                self.position_id[:8], _fill_basis, _rest_basis,
+                abs((_fill_basis or 0) - (_rest_basis or 0)),
+            )
+            self.take_profit_price_cents = None
+            self.take_profit_r_multiple = None
+            # Quarantine the position from new profit-taking entries; SL/time/settlement
+            # exits remain available for risk control.
+            _exit_policy = self.exit_policy or {}
+            _exit_policy["take_profit_enabled"] = False
+            self.exit_policy = _exit_policy
+
+        # CRITICAL FIX (2026-09-02): Validate any provided TP/SL against the
+        # canonical entry basis before fallback re-derivation.  This prevents
+        # stale or side-inverted targets (e.g., a 40c TP on a 55c NO entry)
+        # from surviving REST sync, monitor merges, and process restarts.
+        # The preferred basis is the trusted fill price; only fall back to the
+        # exchange-reported average when no fill price is available.
+        _entry_basis_cents = self.all_in_entry_basis_cents or self.entry_fill_price_cents or self.avg_entry_price_cents
+        if _entry_basis_cents and 0 < _entry_basis_cents < 100 and self.basis_state != "BASIS_DISPUTED":
+            _outcome_side = (
+                self.outcome_side
+                or self.thesis_side
+                or (self.side.value if isinstance(self.side, PositionSide) else str(self.side))
+            )
+            if _outcome_side and self.size is not None and Decimal(str(self.size)) > 0:
+                try:
+                    _validation = validate_exit_policy_targets(
+                        entry_price_cents=int(_entry_basis_cents),
+                        take_profit_price_cents=self.take_profit_price_cents,
+                        stop_loss_price_cents=self.stop_loss_price_cents,
+                        side=_outcome_side,
+                        size=self.size,
+                    )
+                    if not _validation.valid:
+                        if self.take_profit_price_cents != _validation.take_profit_price_cents:
+                            logger.warning(
+                                "[POSITION-TP-VALIDATE] position=%s side=%s entry=%dc "
+                                "invalid_tp=%s reasons=%s - clearing to force fallback/re-derivation",
+                                self.position_id[:8],
+                                _outcome_side,
+                                int(_entry_basis_cents),
+                                self.take_profit_price_cents,
+                                _validation.reason,
+                            )
+                            self.take_profit_price_cents = _validation.take_profit_price_cents
+                            self.take_profit_r_multiple = None
+                        if self.stop_loss_price_cents != _validation.stop_loss_price_cents:
+                            logger.warning(
+                                "[POSITION-SL-VALIDATE] position=%s side=%s entry=%dc "
+                                "invalid_sl=%s reasons=%s - clearing",
+                                self.position_id[:8],
+                                _outcome_side,
+                                int(_entry_basis_cents),
+                                self.stop_loss_price_cents,
+                                _validation.reason,
+                            )
+                            self.stop_loss_price_cents = _validation.stop_loss_price_cents
+                except Exception as _validate_err:
+                    logger.warning(
+                        "[POSITION-VALIDATE] TP/SL validation failed for position=%s: %s",
+                        self.position_id[:8],
+                        _validate_err,
+                    )
+
         # CRITICAL FIX (2026-08-25): Positions without an explicit stop-loss
         # (e.g., REST-synced or legacy fills) must still have a catastrophic
         # hard stop.  The exchange-reported entry price is a trusted anchor;
@@ -408,6 +521,10 @@ class Position:
         # state to FALLBACK so the monitor's provenance guard allows it.  We only
         # do this when we have a trusted fill price or a non-unknown provenance
         # state, so bare test objects with no provenance are not turned live.
+        # Fallback SL is only derived from a trusted anchor.  An all-in basis
+        # alone is not enough unless it is linked to a fill or an explicitly
+        # trusted provenance state; a bare test object or REST-only position with
+        # unknown provenance must not receive a hard stop.
         has_trusted_entry_anchor = (
             self.entry_fill_price_cents is not None
             or self.risk_params_state in (
@@ -418,11 +535,11 @@ class Position:
         if (
             self.stop_loss_enabled
             and self.stop_loss_price_cents is None
-            and self.avg_entry_price_cents is not None
-            and self.avg_entry_price_cents > 0
+            and (self.all_in_entry_basis_cents or self.avg_entry_price_cents) is not None
+            and (self.all_in_entry_basis_cents or self.avg_entry_price_cents) > 0
             and has_trusted_entry_anchor
         ):
-            entry_ref = int(self.entry_fill_price_cents or self.avg_entry_price_cents)
+            entry_ref = int(self.all_in_entry_basis_cents or self.entry_fill_price_cents or self.avg_entry_price_cents)
             fallback_sl = max(1, entry_ref - FALLBACK_STOP_LOSS_BUFFER_CENTS)
             self.stop_loss_price_cents = fallback_sl
             if self.risk_params_state == RiskParamsState.UNKNOWN:
@@ -453,8 +570,19 @@ class Position:
         # floored by the fee-aware net profit target so it cannot be a loss-making
         # take-profit. No unconditional 5c TP.
         _exit_policy_take_profit_enabled = (self.exit_policy or {}).get("take_profit_enabled", True)
-        if _exit_policy_take_profit_enabled and self.take_profit_price_cents is None and self.entry_fill_price_cents:
-            entry_ref = self.entry_fill_price_cents
+        _trusted_basis_for_tp = self.basis_state in (
+            "FILL_ONLY",
+            "OK",
+            "FILL_LEDGER_REBUILD",
+        )
+        if (
+            _exit_policy_take_profit_enabled
+            and self.take_profit_price_cents is None
+            and (self.all_in_entry_basis_cents or self.entry_fill_price_cents)
+            and _trusted_basis_for_tp
+            and self.basis_state != "BASIS_DISPUTED"
+        ):
+            entry_ref = self.all_in_entry_basis_cents or self.entry_fill_price_cents
             if (
                 entry_ref > 0
                 and self.entry_model_probability is not None
@@ -502,10 +630,20 @@ class Position:
             # price. This is the canonical fallback for positions reconstructed from
             # REST or from fills where model probabilities were not propagated,
             # and it is gated by the same round-trip fee buffer used downstream.
-            if self.take_profit_price_cents is None and self.entry_fill_price_cents:
+            _trusted_basis_for_tp = self.basis_state in (
+                "FILL_ONLY",
+                "OK",
+                "FILL_LEDGER_REBUILD",
+            )
+            if (
+                self.take_profit_price_cents is None
+                and (self.all_in_entry_basis_cents or self.entry_fill_price_cents)
+                and _trusted_basis_for_tp
+                and self.basis_state != "BASIS_DISPUTED"
+            ):
                 try:
                     from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
-                    entry_ref = int(self.entry_fill_price_cents)
+                    entry_ref = int(self.all_in_entry_basis_cents or self.entry_fill_price_cents)
                     if 0 < entry_ref < 100:
                         fallback_tp = min_profitable_exit_price_cents(
                             entry_ref,
@@ -536,8 +674,10 @@ class Position:
                 except Exception:
                     pass
 
-        if self.stop_loss_enabled and self.stop_loss_price_cents and self.avg_entry_price_cents:
-            self.initial_risk_cents = abs(self.avg_entry_price_cents - self.stop_loss_price_cents)
+        if self.stop_loss_enabled and self.stop_loss_price_cents:
+            _risk_basis = self.all_in_entry_basis_cents or self.avg_entry_price_cents
+            if _risk_basis:
+                self.initial_risk_cents = abs(_risk_basis - self.stop_loss_price_cents)
 
         # CRITICAL FIX (2026-08-10): Hard stop is the soft SL minus an emergency buffer.
         # This is set at construction and updated by the monitor if the buffer changes.
@@ -586,14 +726,17 @@ class Position:
         # side space (YES cents for YES positions, NO cents for NO positions).
         # A position is always LONG its own side, so profit = own-side price rising.
         # The previous NO branch assumed YES-space current price and inverted NO PnL.
-        self.unrealized_pnl_cents = (current_price_cents - self.avg_entry_price_cents) * self.size
+        # CRITICAL FIX (2026-09-02): Use the canonical all-in basis when available;
+        # avg_entry_price_cents is kept for reconciliation but is not the primary PnL basis.
+        _entry_basis = self.all_in_entry_basis_cents or self.avg_entry_price_cents
+        self.unrealized_pnl_cents = (current_price_cents - _entry_basis) * self.size
 
         # Calculate R-multiple (PnL per unit of risk)
         if self.initial_risk_cents > 0:
             self.r_multiple = self.unrealized_pnl_cents / self.initial_risk_cents
-        elif self.avg_entry_price_cents > 0:
+        elif _entry_basis > 0:
             # If no stop loss set, use entry price as risk proxy
-            self.r_multiple = self.unrealized_pnl_cents / self.avg_entry_price_cents
+            self.r_multiple = self.unrealized_pnl_cents / _entry_basis
         else:
             # Both initial_risk_cents and avg_entry_price_cents are 0 - cannot calculate R-multiple
             self.r_multiple = 0.0
@@ -1133,6 +1276,10 @@ class Position:
             "side": self.side.value if isinstance(self.side, PositionSide) else self.side,
             "size": self.size,
             "avg_entry_price_cents": self.avg_entry_price_cents,
+            "all_in_entry_basis_cents": self.all_in_entry_basis_cents,
+            "basis_state": self.basis_state,
+            "basis_version": self.basis_version,
+            "basis_sources": list(self.basis_sources) if self.basis_sources else [],
             "opened_at": self.opened_at.isoformat() if self.opened_at else None,
             "take_profit_price_cents": self.take_profit_price_cents,
             "take_profit_r_multiple": self.take_profit_r_multiple,
@@ -1238,6 +1385,10 @@ class Position:
             side=PositionSide(validated_side),
             size=data.get("size", 0),
             avg_entry_price_cents=data.get("avg_entry_price_cents", 0),
+            all_in_entry_basis_cents=data.get("all_in_entry_basis_cents"),
+            basis_state=data.get("basis_state", "UNKNOWN"),
+            basis_version=data.get("basis_version", 0),
+            basis_sources=list(data.get("basis_sources", [])) if data.get("basis_sources") else [],
             opened_at=datetime.fromisoformat(data["opened_at"]) if data.get("opened_at") else datetime.now(timezone.utc),
             take_profit_price_cents=data.get("take_profit_price_cents"),
             take_profit_r_multiple=data.get("take_profit_r_multiple"),

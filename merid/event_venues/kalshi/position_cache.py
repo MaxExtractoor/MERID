@@ -18,6 +18,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from merid.data.ingress_replay import replay_start_time, replay_time
+from merid.event_venues.kalshi.fees import validate_exit_policy_targets
 from utils.logger import get_logger
 
 try:
@@ -521,6 +522,15 @@ class CachedPosition:
     # CRITICAL 2026-08-09: Canonical position size in centi-contracts (100 = 1 contract).
     quantity_cc: int = 0  # Initialized from contracts*100 if not explicitly provided
 
+    # CRITICAL FIX (2026-09-02): Canonical all-in entry basis for the cached record.
+    # This is the authoritative price used to reconstruct the Position and must
+    # survive REST sync / fill races.  It is computed from the fill price when
+    # available and updated when REST reports a divergent average.
+    all_in_entry_basis_cents: Optional[int] = None
+    basis_state: str = "UNKNOWN"
+    basis_version: int = 0
+    basis_sources: List[str] = field(default_factory=list)
+
     # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution.
     entry_signal_id: Optional[str] = None
     entry_model: Optional[str] = None
@@ -571,6 +581,54 @@ class CachedPosition:
         if self.quantity_cc == 0 and self.contracts:
             self.quantity_cc = int(self.contracts * 100)
             self.contracts = int(self.contracts)
+
+        # CRITICAL FIX (2026-09-02): CachedPosition is an intermediate durable
+        # record; invalid TP/SL values must not be persisted to disk or passed
+        # to the monitor.  Prefer the fill price as the canonical basis, then
+        # the exchange-reported average.  Clearing here lets the downstream
+        # Position.__post_init__ or _to_position re-derive a fee-aware target.
+        _entry_basis = self.entry_fill_price_cents or self.avg_price_cents
+        if _entry_basis and 0 < _entry_basis < 100 and self.quantity_cc and self.quantity_cc > 0:
+            _outcome_side = self.outcome_side or self.thesis_side or self.side or "yes"
+            _size = Decimal(self.quantity_cc) / Decimal("100")
+            try:
+                _validation = validate_exit_policy_targets(
+                    entry_price_cents=int(_entry_basis),
+                    take_profit_price_cents=self.take_profit_price_cents,
+                    stop_loss_price_cents=self.stop_loss_price_cents,
+                    side=_outcome_side,
+                    size=_size,
+                )
+                if not _validation.valid:
+                    if self.take_profit_price_cents != _validation.take_profit_price_cents:
+                        logger.warning(
+                            "[CACHED-POSITION-TP-VALIDATE] market=%s side=%s entry=%dc "
+                            "invalid_tp=%s reasons=%s - clearing",
+                            self.market_id,
+                            _outcome_side,
+                            int(_entry_basis),
+                            self.take_profit_price_cents,
+                            _validation.reason,
+                        )
+                        self.take_profit_price_cents = _validation.take_profit_price_cents
+                        self.take_profit_r_multiple = None
+                    if self.stop_loss_price_cents != _validation.stop_loss_price_cents:
+                        logger.warning(
+                            "[CACHED-POSITION-SL-VALIDATE] market=%s side=%s entry=%dc "
+                            "invalid_sl=%s reasons=%s - clearing",
+                            self.market_id,
+                            _outcome_side,
+                            int(_entry_basis),
+                            self.stop_loss_price_cents,
+                            _validation.reason,
+                        )
+                        self.stop_loss_price_cents = _validation.stop_loss_price_cents
+            except Exception as _validate_err:
+                logger.warning(
+                    "[CACHED-POSITION-VALIDATE] TP/SL validation failed for market=%s: %s",
+                    self.market_id,
+                    _validate_err,
+                )
 
     @property
     def notional_usd(self) -> Decimal:
@@ -1564,6 +1622,10 @@ class KalshiPositionCache:
                 entry_executable_ask_cents=cached_position.entry_executable_ask_cents,
                 entry_book_capture_quality=cached_position.entry_book_capture_quality,
                 entry_fill_price_cents=cached_position.entry_fill_price_cents or price_cents,
+                all_in_entry_basis_cents=cached_position.all_in_entry_basis_cents or cached_position.entry_fill_price_cents or cached_position.avg_price_cents or price_cents,
+                basis_state=cached_position.basis_state,
+                basis_version=cached_position.basis_version,
+                basis_sources=list(cached_position.basis_sources or []),
                 entry_fill_timestamp=cached_position.entry_fill_timestamp,
                 entry_book_timestamp=cached_position.entry_book_timestamp,
                 entry_book_sequence=cached_position.entry_book_sequence,
@@ -2789,11 +2851,13 @@ class KalshiPositionCache:
                         )
                         if fee_aware_floor is None:
                             raise ValueError("fee_aware_floor is None")
-                        margin = fee_aware_floor - entry_ref
-                        if side.lower() == "yes":
-                            tp_price = int(min(99, fee_aware_floor))
-                        else:
-                            tp_price = int(max(1, entry_ref - margin))
+                        # Side-space invariant: a long position (YES or NO) profits
+                        # when the own-side price rises.  The fee-aware floor is
+                        # already in the same side-space as entry_ref, so it is the
+                        # correct TP for both sides.  The old NO branch subtracted
+                        # the margin and produced a loss target (e.g., 40c TP on a
+                        # 55c NO entry), which the Position validator now rejects.
+                        tp_price = int(min(99, fee_aware_floor))
                         tp_r = tp_r or 1.5
                         logger.warning(
                             "[POSITION-CACHE-TP-FALLBACK] market=%s side=%s entry=%dc - "
@@ -2802,10 +2866,10 @@ class KalshiPositionCache:
                         )
                     except Exception:
                         entry_ref = position_side_price if position_side_price > 0 else tp_targets.get("entry_price", 50)
-                        if side.lower() == "yes":
-                            tp_price = min(99, entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS)
-                        else:
-                            tp_price = max(1, entry_ref - TAKE_PROFIT_MIN_PROFIT_CENTS)
+                        # Safe minimum gross-profit floor for either side.  The
+                        # Position validator will clear this if it is not net
+                        # profitable for the actual position size.
+                        tp_price = min(99, entry_ref + TAKE_PROFIT_MIN_PROFIT_CENTS)
                         tp_r = tp_r or 1.5
 
                 # CRITICAL FIX (2026-08-13): Mark risk parameter provenance.
@@ -2879,6 +2943,10 @@ class KalshiPositionCache:
                     risk_params_schema_version=2,
                     # CRITICAL FIX (2026-08-11): Immutable fill and entry book metadata.
                     entry_fill_price_cents=position_side_price,
+                    all_in_entry_basis_cents=position_side_price,
+                    basis_state="FILL_ONLY" if position_side_price and position_side_price > 0 else "UNKNOWN",
+                    basis_version=1,
+                    basis_sources=[f"fill:{fill_id}"] if fill_id else ["fill:unknown"],
                     entry_fill_timestamp=datetime.now(timezone.utc),
                     entry_book_timestamp=entry_book_timestamp,
                     entry_book_sequence=entry_book_sequence,
@@ -4171,7 +4239,16 @@ class KalshiPositionCache:
             entry_execution_mode=tp_targets.get("entry_execution_mode") or getattr(first_fill, 'entry_execution_mode', None),
             entry_fill_id=getattr(first_fill, 'fill_id', None) if first_fill else None,
             entry_order_id=getattr(first_fill, 'order_id', None) if first_fill else None,
-            entry_fill_price_cents=avg_price_cents,
+            # CRITICAL FIX (2026-09-02): Keep the immutable first-fill price as the
+            # canonical entry anchor; the REST-reported average is retained in
+            # avg_price_cents for reconciliation only.
+            entry_fill_price_cents=(
+                int(getattr(first_fill, 'price_cents', 0) or 0)
+                if first_fill and getattr(first_fill, 'price_cents', None)
+                else avg_price_cents
+            ),
+            all_in_entry_basis_cents=None,  # will be derived from entry_fill_price_cents/avg in __post_init__
+            basis_sources=[f"fill:{getattr(first_fill, 'fill_id', 'unknown')}"] if first_fill else ["rest:reconstruct"],
             entry_fill_timestamp=getattr(first_fill, 'created_time', None) if first_fill else None,
             entry_executable_bid_cents=tp_targets.get("entry_executable_bid_cents"),
             entry_executable_ask_cents=tp_targets.get("entry_executable_ask_cents"),
@@ -5286,6 +5363,10 @@ class KalshiPositionCache:
                             outcome_side=canonical_side_for_record,
                             book_side="ask",
                             avg_price_cents=avg_price_cents,
+                            all_in_entry_basis_cents=avg_price_cents,
+                            basis_state="REST_ONLY",
+                            basis_version=1,
+                            basis_sources=["rest:sync"],
                             entry_price_state=entry_price_state,  # CRITICAL FIX (2026-07-23): Track data quality
                             realized_pnl_usd=Decimal(str(pos.get("realized_pnl", 0))),
                             unrealized_pnl_usd=Decimal(str(pos.get("unrealized_pnl", 0))),
@@ -5933,6 +6014,10 @@ class KalshiPositionCache:
                         outcome_side=thesis_side or "yes",
                         book_side="ask",
                         avg_price_cents=avg_price_cents,
+                        all_in_entry_basis_cents=avg_price_cents,
+                        basis_state="FILL_LEDGER_REBUILD" if avg_price_cents else "UNKNOWN",
+                        basis_version=1,
+                        basis_sources=["ledger:rebuild"],
                         entry_price_state="known" if avg_price_cents else "unknown",
                         take_profit_price_cents=take_profit_price_cents,
                         stop_loss_price_cents=stop_loss_price_cents,

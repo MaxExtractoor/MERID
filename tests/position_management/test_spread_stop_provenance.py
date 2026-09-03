@@ -329,14 +329,16 @@ class TestProductionHardStop:
         # hard=48, no trigger.  If stop=50, hard=49, current=49 triggers, adverse=1,
         # spread=1, need 2, 1<2 -> rejected (spread only).  But stop at entry is not
         # a real stop.  This still proves the spread-only guard.
+        # Use a valid stop below entry and a 2c spread so the adverse move is
+        # smaller than the spread + hard-stop buffer, forcing a spread-only rejection.
         position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=10,
             avg_entry_price_cents=50,
-            stop_loss_price_cents=50,
-            entry_executable_bid_cents=49,
+            stop_loss_price_cents=49,
+            entry_executable_bid_cents=48,
             entry_executable_ask_cents=50,
         )
         position.opened_at = datetime.utcnow() - timedelta(seconds=10)
@@ -346,9 +348,10 @@ class TestProductionHardStop:
         monitor = PositionMonitor()
         monitor.add_position(position)
 
-        # Current 49 is at the stop; hard threshold is 49, so it is a hard stop
-        # but the adverse move (50-49=1) is not larger than the 1c spread + buffer.
-        triggered, kind = monitor._evaluate_stop_loss(position, 49, _snapshot(position, 49, 50))
+        # Current 48 is at the hard threshold (49-1=48).  The adverse move
+        # (50-48=2) is not larger than the 2c spread + 1c hard buffer, so it is
+        # rejected as a spread-only stop.
+        triggered, kind = monitor._evaluate_stop_loss(position, 48, _snapshot(position, 49, 50))
         assert triggered is False
         assert "hard_stop_rejected_spread_only" in kind
 
@@ -364,7 +367,7 @@ class TestFallbackRiskParamsState:
             side=PositionSide.YES,
             size=10,
             avg_entry_price_cents=50,
-            take_profit_price_cents=55,
+            take_profit_price_cents=60,
             stop_loss_price_cents=40,
             stop_loss_enabled=True,
             risk_params_state="fallback",
@@ -375,7 +378,7 @@ class TestFallbackRiskParamsState:
         # Cached TP/SL are retained as a fallback policy.
         assert position.stop_loss_enabled is True
         assert position.stop_loss_price_cents == 40
-        assert position.take_profit_price_cents == 55
+        assert position.take_profit_price_cents == 60
 
     def test_unknown_rest_position_does_not_invent_risk_params(self):
         """A REST-reconciled position with no cached TP/SL remains unknown and unmonitored for stops."""
@@ -486,14 +489,14 @@ class TestFeeAwareTakeProfitAndDebounce:
                 side=PositionSide.YES,
                 size=10,
                 avg_entry_price_cents=50,
-                take_profit_price_cents=55,
+                take_profit_price_cents=60,
                 risk_params_state="original_persisted",
                 risk_params_schema_version=2,
                 client_order_id="test-client",
                 entry_fill_id="test-fill",
                 fill_source="ws",
             )
-            assert position.should_trigger_take_profit(55) is False
+            assert position.should_trigger_take_profit(60) is False
             assert position.tp_debounce_first_seen_at is not None
 
     def test_tp_debounce_resets_on_drop(self):
@@ -505,15 +508,15 @@ class TestFeeAwareTakeProfitAndDebounce:
                 side=PositionSide.YES,
                 size=10,
                 avg_entry_price_cents=50,
-                take_profit_price_cents=55,
+                take_profit_price_cents=60,
                 risk_params_state="original_persisted",
                 risk_params_schema_version=2,
                 client_order_id="test-client",
                 entry_fill_id="test-fill",
                 fill_source="ws",
             )
-            position.should_trigger_take_profit(55)
+            position.should_trigger_take_profit(60)
             first_seen = position.tp_debounce_first_seen_at
             assert first_seen is not None
-            assert position.should_trigger_take_profit(54) is False
+            assert position.should_trigger_take_profit(59) is False
             assert position.tp_debounce_first_seen_at is None
