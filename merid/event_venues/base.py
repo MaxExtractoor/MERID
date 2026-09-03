@@ -95,6 +95,7 @@ class PlacedOrder:
     side: str
     size: Decimal
     price: Optional[Decimal]
+    outcome_id: Optional[str] = None  # User's held outcome (yes/no) for binary markets
     filled_size: Decimal = Decimal("0")
     remaining_size: Optional[Decimal] = None
     status: str = "pending"  # pending, filled, partially_filled, cancelled, rejected

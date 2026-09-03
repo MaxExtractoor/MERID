@@ -23,7 +23,7 @@ try:
 except Exception:
     UNIFIED_SIZING_AVAILABLE = False
 
-from typing import Any, Dict, List, Optional, TypeVar
+from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
 import uuid
 
@@ -5222,6 +5222,15 @@ class KalshiVenueClient(EventVenueClient):
         smaller and expose ``fill_count`` / ``remaining_count`` fixed-point
         strings and ``average_fill_price`` in dollars.  This parser handles
         both shapes and a number of legacy variants.
+
+        Canonicalization performed here:
+        - ``PlacedOrder.side`` is the user action (buy/sell).
+        - ``PlacedOrder.outcome_id`` is the user's held outcome (yes/no).
+        - ``PlacedOrder.price`` is the market price of that held outcome in
+          dollars (the user's own-side price/leg), not the YES-space V2 price.
+        - ``raw_data`` is annotated with ``merid_user_outcome`` and
+          ``merid_yes_space_price_dollars`` so downstream adapters can recover
+          both spaces without re-deriving them.
         """
 
         def _safe_decimal(value: Any) -> Optional[Decimal]:
@@ -5240,6 +5249,111 @@ class KalshiVenueClient(EventVenueClient):
                     if dec is not None:
                         return dec
             return Decimal("0")
+
+        def _derive_user_outcome() -> Optional[str]:
+            """Return the user's held outcome (yes/no) from V1/V2 fields."""
+            book_side = (data.get("book_side") or "").lower()
+            action = (data.get("action") or "").lower()
+            outcome_side = (data.get("outcome_side") or "").lower()
+            legacy_side = (data.get("side") or "").lower()
+
+            # V2 create-order responses carry book_side.  The user's book side
+            # and action together unambiguously identify the held outcome:
+            #   bid + buy  = BUY_YES  -> yes
+            #   bid + sell = SELL_NO  -> no
+            #   ask + buy  = BUY_NO   -> no
+            #   ask + sell = SELL_YES -> yes
+            if book_side in ("bid", "ask") and action in ("buy", "sell"):
+                if book_side == "bid":
+                    return "yes" if action == "buy" else "no"
+                return "no" if action == "buy" else "yes"
+
+            # V1 user-form responses carry the outcome directly.
+            if outcome_side in ("yes", "no") and action in ("buy", "sell"):
+                # If the response is the counterparty view the outcome label is
+                # still the traded contract; the action is opposite.  The book
+                # inference above is preferred; without a book_side, trust the
+                # outcome and action pair as the user form if it is internally
+                # consistent with a Kalshi order.  BUY_NO is an unusual but
+                # economically valid user label in V1.
+                return outcome_side
+
+            if legacy_side in ("yes", "no"):
+                return legacy_side
+
+            return None
+
+        def _derive_user_action(outcome: Optional[str]) -> str:
+            """Return the user action (buy/sell) from V1/V2 fields."""
+            action = (data.get("action") or "").lower()
+            if action in ("buy", "sell"):
+                return action
+
+            book_side = (data.get("book_side") or "").lower()
+            outcome_side = (data.get("outcome_side") or data.get("side") or "").lower()
+            if outcome == "yes":
+                if book_side == "bid":
+                    return "buy"
+                if book_side == "ask":
+                    return "sell"
+                # Fallback: infer from raw action if present and consistent.
+                if outcome_side == "yes" and action in ("buy", "sell"):
+                    return action
+            elif outcome == "no":
+                if book_side == "ask":
+                    return "buy"
+                if book_side == "bid":
+                    return "sell"
+                if outcome_side == "no" and action in ("buy", "sell"):
+                    return action
+
+            return "buy"
+
+        def _market_leg_prices() -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+            """Return (yes_price, no_price, yes_space_price) as decimals.
+
+            The third value is the YES-space price when it can be determined
+            unambiguously (average_fill_price / V2 price); otherwise None.
+            """
+            yes_dollars = _safe_decimal(data.get("yes_price_dollars"))
+            no_dollars = _safe_decimal(data.get("no_price_dollars"))
+            avg_fill = _safe_decimal(data.get("average_fill_price"))
+
+            if yes_dollars is not None and no_dollars is not None:
+                return yes_dollars, no_dollars, yes_dollars
+
+            if yes_dollars is not None:
+                return yes_dollars, (Decimal("1") - yes_dollars), yes_dollars
+
+            if no_dollars is not None:
+                yes_p = Decimal("1") - no_dollars
+                return yes_p, no_dollars, yes_p
+
+            if avg_fill is not None:
+                return avg_fill, (Decimal("1") - avg_fill), avg_fill
+
+            # Legacy integer-cents fields and the catch-all ``price`` field.
+            # ``price`` in V2 is YES-space; in V1 it is the user's own-side
+            # price.  We use it only as a last resort and do not claim it is
+            # YES-space (return None for yes_space).
+            for field in ("yes_price", "no_price", "price"):
+                value = data.get(field)
+                if value is not None and value != "":
+                    dec = _safe_decimal(value)
+                    if dec is not None:
+                        if dec > Decimal("1.0"):
+                            dec = dec / Decimal("100")
+                        if field == "yes_price":
+                            return dec, (Decimal("1") - dec), dec
+                        if field == "no_price":
+                            yes_p = Decimal("1") - dec
+                            return yes_p, dec, yes_p
+                        # Generic ``price`` - we cannot distinguish space, so
+                        # it is treated as the only known leg and the
+                        # complement is synthesized only for display math.
+                        return None, None, None
+
+            return None, None, None
 
         def _order_price() -> Optional[Decimal]:
             # V1 order response: side-specific dollar price strings.
@@ -5278,37 +5392,36 @@ class KalshiVenueClient(EventVenueClient):
             filled_size = _fp_count("fill_count_fp", "fill_count", "filled_count")
             remaining_size = _fp_count("remaining_count_fp", "remaining_count", "initial_count_fp", "count_fp", "count")
 
-            # side in PlacedOrder is the user action (buy/sell). V1 Order has
-            # action directly. V2 may lack it; fall back to outcome/book-side
-            # inference if available.
-            side = data.get("action") or ""
-            if side not in ("buy", "sell"):
-                book_side = (data.get("book_side") or "").lower()
-                outcome_side = (data.get("outcome_side") or data.get("side") or "").lower()
-                if outcome_side in ("yes", "no"):
-                    # V2 response semantics: the API reports the counterparty's
-                    # perspective.  Our BUY_NO appears as the counterparty's SELL_YES
-                    # (book=ask, outcome=yes), and our SELL_NO appears as the
-                    # counterparty's BUY_YES (book=bid, outcome=yes).  If Kalshi
-                    # instead echoes the user's outcome_side, the mapping below still
-                    # recovers the user's action correctly.
-                    #
-                    # User action -> response book/outcome:
-                    # BUY_YES  -> book=bid,  outcome=yes
-                    # SELL_YES -> book=ask,  outcome=yes
-                    # BUY_NO   -> book=ask,  outcome=no  (or counterparty: book=ask, outcome=yes)
-                    # SELL_NO  -> book=bid,  outcome=no  (or counterparty: book=bid, outcome=yes)
-                    if book_side == "bid":
-                        side = "buy" if outcome_side == "yes" else "sell"
-                    elif book_side == "ask":
-                        side = "sell" if outcome_side == "yes" else "buy"
+            outcome_id = _derive_user_outcome()
+            side = _derive_user_action(outcome_id)
 
-            price = _order_price()
+            yes_price, no_price, yes_space_price = _market_leg_prices()
+
+            # Default to the raw best-effort price if our canonical market legs
+            # could not be reconstructed.
+            if outcome_id == "yes" and yes_price is not None:
+                price = yes_price
+            elif outcome_id == "no" and no_price is not None:
+                price = no_price
+            else:
+                price = _order_price()
+
+            # Annotate raw_data so port-ledger adapters can recover both spaces.
+            annotated = dict(data) if data else {}
+            if outcome_id:
+                annotated["merid_user_outcome"] = outcome_id
+            if yes_space_price is not None:
+                annotated["merid_yes_space_price_dollars"] = str(yes_space_price)
+            if yes_price is not None:
+                annotated["merid_yes_price_dollars"] = str(yes_price)
+            if no_price is not None:
+                annotated["merid_no_price_dollars"] = str(no_price)
 
             return PlacedOrder(
                 order_id=data.get("order_id", data.get("id", "")),
                 market_id=data.get("ticker", ""),
                 side=side,
+                outcome_id=outcome_id,
                 size=size,
                 price=price,
                 filled_size=filled_size,
@@ -5316,7 +5429,7 @@ class KalshiVenueClient(EventVenueClient):
                 status=data.get("status", "pending"),
                 venue="kalshi",
                 created_at=self._parse_datetime(data.get("created_at")),
-                raw_data=data,
+                raw_data=annotated,
             )
         except (ValueError, TypeError, KeyError) as e:
             logger.warning("Failed to parse Kalshi order: %s", e)

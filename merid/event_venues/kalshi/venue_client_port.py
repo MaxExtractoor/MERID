@@ -363,8 +363,29 @@ def _placed_order_to_response(placed: PlacedOrder, client_order_id: Optional[str
         price_cents_int = int(round(placed.price * Decimal("100")))
     else:
         price_cents_int = None
-    average_price_cents = price_cents_int
-    price_cents = price_cents_int
+
+    # The average fill price reported by Kalshi V2 is in YES space.  Preserve
+    # it separately from the user-side price/leg so downstream slippage, PnL
+    # and fee math stay in the correct outcome space.
+    yes_space_price_dollars = None
+    if placed.raw_data:
+        yes_space_raw = placed.raw_data.get("merid_yes_space_price_dollars")
+        if yes_space_raw:
+            try:
+                yes_space_price_dollars = Decimal(str(yes_space_raw))
+            except Exception:
+                yes_space_price_dollars = None
+    if yes_space_price_dollars is None and placed.price is not None:
+        if placed.outcome_id == "yes":
+            yes_space_price_dollars = placed.price
+        elif placed.outcome_id == "no":
+            yes_space_price_dollars = Decimal("1") - placed.price
+
+    if yes_space_price_dollars is not None:
+        average_price_cents = int(round(yes_space_price_dollars * Decimal("100")))
+    else:
+        average_price_cents = None
+
     return CreateOrderResponse(
         success=True,
         order_id=placed.order_id,
@@ -372,7 +393,7 @@ def _placed_order_to_response(placed: PlacedOrder, client_order_id: Optional[str
         status=_normalize_status(placed.status),
         filled_size=placed.filled_size,
         remaining_size=placed.remaining_size,
-        price_cents=price_cents,
+        price_cents=price_cents_int,
         average_price_cents=average_price_cents,
         raw_data=placed.raw_data or {},
     )
@@ -401,12 +422,22 @@ def _dict_to_order(raw: Dict[str, Any]) -> Order:
 
 
 def _placed_order_to_order(placed: PlacedOrder) -> Order:
+    # PlacedOrder.side is the user action (buy/sell); PlacedOrder.outcome_id is
+    # the user held outcome (yes/no); PlacedOrder.price is the user-side price.
+    # Fall back to raw_data only for legacy responses that did not set the
+    # canonical fields.
+    side = placed.side if placed.side in ("buy", "sell") else (
+        placed.raw_data.get("side", "buy") if placed.raw_data else "buy"
+    )
+    outcome = placed.outcome_id or (
+        placed.raw_data.get("outcome_id", "yes") if placed.raw_data else "yes"
+    )
     return Order(
         order_id=placed.order_id,
         client_order_id=placed.raw_data.get("client_order_id") if placed.raw_data else None,
         ticker=placed.market_id,
-        side=placed.raw_data.get("side", "buy") if placed.raw_data else "buy",
-        outcome=placed.raw_data.get("outcome_id", "yes") if placed.raw_data else "yes",
+        side=side,
+        outcome=outcome,
         size=placed.size,
         filled_size=placed.filled_size,
         remaining_size=placed.remaining_size or Decimal("0"),

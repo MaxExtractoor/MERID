@@ -461,9 +461,10 @@ def _safe_price_to_cents(p) -> Optional[int]:
 def _fill_position_side_price_cents(fill: Any, side: str) -> Optional[int]:
     """Return the price for ``side`` from a fill's stored leg prices.
 
-    Prefers ``yes_price_dollars`` / ``no_price_dollars``, then the
-    canonical/legacy price only if it is already tagged for ``side``.
-    No missing leg is synthesized via 100 - other_side.
+    Prefers ``yes_price_dollars`` / ``no_price_dollars``, using the stored
+    canonical execution-side price to disambiguate swapped per-leg labels.
+    Falls back to the canonical/legacy price only if it is already tagged for
+    ``side``.  No missing leg is synthesized via 100 - other_side.
     """
     side = (side or "").lower()
     if side not in ("yes", "no"):
@@ -471,6 +472,30 @@ def _fill_position_side_price_cents(fill: Any, side: str) -> Optional[int]:
 
     yes_cents = _safe_price_to_cents(getattr(fill, "yes_price_dollars", None))
     no_cents = _safe_price_to_cents(getattr(fill, "no_price_dollars", None))
+    canon = getattr(fill, "canonical_leg_price_cents", None)
+    exec_side = (getattr(fill, "canonical_position_side", None) or getattr(fill, "side", None) or "").lower()
+
+    # If both market legs are present, use the canonical execution-side price to
+    # orient them.  Kalshi V2 payloads and some of our older records may have the
+    # yes/no labels swapped; the canonical leg price tells us which stored value
+    # is the actual execution-side price, so the other label is the held side.
+    if yes_cents is not None and no_cents is not None and canon is not None and exec_side in ("yes", "no"):
+        # Determine the actual market YES/NO prices from the (possibly swapped) labels.
+        if exec_side == "yes":
+            if abs(yes_cents - canon) <= 1:
+                actual_yes, actual_no = yes_cents, no_cents
+            elif abs(no_cents - canon) <= 1:
+                actual_yes, actual_no = no_cents, yes_cents
+            else:
+                actual_yes, actual_no = yes_cents, no_cents
+        else:  # exec_side == "no"
+            if abs(no_cents - canon) <= 1:
+                actual_yes, actual_no = yes_cents, no_cents
+            elif abs(yes_cents - canon) <= 1:
+                actual_yes, actual_no = no_cents, yes_cents
+            else:
+                actual_yes, actual_no = yes_cents, no_cents
+        return actual_yes if side == "yes" else actual_no
 
     if side == "yes" and yes_cents is not None:
         return yes_cents
@@ -479,7 +504,6 @@ def _fill_position_side_price_cents(fill: Any, side: str) -> Optional[int]:
 
     can_side = getattr(fill, "canonical_position_side", None) or getattr(fill, "side", None)
     if can_side and can_side.lower() == side:
-        canon = getattr(fill, "canonical_leg_price_cents", None)
         if canon is not None:
             return int(canon)
         prop = getattr(fill, "price_cents", None)
@@ -977,8 +1001,9 @@ class KalshiFill:
         position it is the NO-leg price.  This lets counterparty-equivalent
         fills (e.g. SELL_NO vs BUY_YES) be compared on a single price axis.
 
-        No missing leg is synthesized via 100 - other_side.  If a side-tagged
-        price is not available, falls back to the stored canonical/legacy price.
+        The stored yes/no per-leg labels may be swapped; we use the canonical
+        execution-side price to orient them.  No missing leg is synthesized
+        via 100 - other_side.
         """
         yes_cents = _safe_price_to_cents(self.yes_price_dollars)
         no_cents = _safe_price_to_cents(self.no_price_dollars)
@@ -987,6 +1012,26 @@ class KalshiFill:
         # A sell of NO is long YES, so the held side is YES and we need the YES-leg
         # price, not the NO execution price.
         held_side = (self.economic_side or self.canonical_position_side or "").lower()
+        exec_side = (self.canonical_position_side or self.side or "").lower()
+        canon = self.canonical_leg_price_cents
+
+        if yes_cents is not None and no_cents is not None and canon is not None and exec_side in ("yes", "no"):
+            # Orient the two stored legs.  The canonical leg is the execution price.
+            if exec_side == "yes":
+                if abs(yes_cents - canon) <= 1:
+                    actual_yes, actual_no = yes_cents, no_cents
+                elif abs(no_cents - canon) <= 1:
+                    actual_yes, actual_no = no_cents, yes_cents
+                else:
+                    actual_yes, actual_no = yes_cents, no_cents
+            else:  # exec_side == "no"
+                if abs(no_cents - canon) <= 1:
+                    actual_yes, actual_no = yes_cents, no_cents
+                elif abs(yes_cents - canon) <= 1:
+                    actual_yes, actual_no = no_cents, yes_cents
+                else:
+                    actual_yes, actual_no = yes_cents, no_cents
+            return actual_yes if held_side == "yes" else actual_no
 
         if held_side == "yes" and yes_cents is not None:
             return yes_cents
@@ -4761,11 +4806,20 @@ class KalshiFillsLedger:
         if (a.canonical_yes_delta_cc or 0) != (b.canonical_yes_delta_cc or 0):
             return False
 
-        a_price = self._yes_price_cents_for_dedupe(a)
-        b_price = self._yes_price_cents_for_dedupe(b)
-        if a_price is None or b_price is None:
+        # Compare the unordered market pair {YES, NO}.  V2 payloads and internal
+        # records may label the two legs differently; the sorted pair is
+        # invariant under label swaps and collapses counterparty-equivalent fills
+        # (BUY_NO vs SELL_YES, SELL_NO vs BUY_YES) onto the same market state.
+        a_yes, a_no = self._market_price_pair_for_dedupe(a)
+        b_yes, b_no = self._market_price_pair_for_dedupe(b)
+        if a_yes is None or b_yes is None:
             return False
-        return abs(a_price - b_price) <= 1
+        # Check both possible orientations; if either matches within 1c, the
+        # two fills represent the same execution state.
+        return (
+            (abs(a_yes - b_yes) <= 1 and abs(a_no - b_no) <= 1)
+            or (abs(a_yes - b_no) <= 1 and abs(a_no - b_yes) <= 1)
+        )
 
     def _yes_price_cents_for_dedupe(self, fill: KalshiFill) -> Optional[int]:
         """Return the YES-leg price in cents for identity comparison.
@@ -4776,22 +4830,75 @@ class KalshiFillsLedger:
         side is known, use ``canonical_leg_price_cents`` and complement it when the
         canonical side is ``no``.
         """
+        yes, no = self._market_price_pair_for_dedupe(fill)
+        if yes is None or no is None:
+            return None
+        return yes
+
+    def _market_price_pair_for_dedupe(self, fill: KalshiFill) -> Tuple[Optional[int], Optional[int]]:
+        """Return (yes_cents, no_cents) market prices for identity comparison.
+
+        The pair is canonicalized by sorting the two leg prices.  Kalshi V2
+        payloads and our internal records may have ``yes_price_dollars`` and
+        ``no_price_dollars`` labels swapped; the unordered market pair is
+        invariant under label swaps, so two fills with the same market state
+        compare as equal even when their per-leg labels differ.
+        """
         yes = _safe_price_to_cents(fill.yes_price_dollars)
-        if yes is not None:
-            return yes
-
         no = _safe_price_to_cents(fill.no_price_dollars)
+
+        if yes is not None and no is not None:
+            # Both legs present.  The two values should be complements of a
+            # binary market (YES + NO = 100c).  Round-then-sort so swapped
+            # labels still match and a one-cent rounding drift is tolerated.
+            if abs(yes + no - 100) <= 1:
+                low, high = (yes, no) if yes <= no else (no, yes)
+                return (low, high)
+            # Non-complement drift: orient by which leg matches the canonical
+            # execution-side price.
+            canon = fill.canonical_leg_price_cents
+            side = (fill.canonical_position_side or "").lower()
+            if canon is not None and side in ("yes", "no"):
+                if side == "yes":
+                    if abs(yes - canon) <= 1:
+                        return (yes, no)
+                    if abs(no - canon) <= 1:
+                        return (no, yes)
+                else:
+                    if abs(no - canon) <= 1:
+                        return (yes, no)
+                    if abs(yes - canon) <= 1:
+                        return (no, yes)
+            # Last resort: trust the labels as-is.
+            return (yes, no)
+
+        canon = fill.canonical_leg_price_cents
+        side = (fill.canonical_position_side or "").lower()
+
+        if yes is not None:
+            other = 100 - yes
+            # Orient by execution/canonical side when available.
+            if side == "yes" and (canon is None or abs(yes - canon) <= 1):
+                return (yes, other)
+            if side == "no" and (canon is None or abs(other - canon) <= 1):
+                return (other, yes)  # yes field is the NO price
+            return (yes, other)
+
         if no is not None:
-            return 100 - no
+            other = 100 - no
+            if side == "no" and (canon is None or abs(no - canon) <= 1):
+                return (other, no)
+            if side == "yes" and (canon is None or abs(other - canon) <= 1):
+                return (no, other)  # no field is the YES price
+            return (other, no)
 
-        canonical = fill.canonical_leg_price_cents
-        if canonical is not None:
-            if fill.canonical_position_side == "yes":
-                return canonical
-            if fill.canonical_position_side == "no":
-                return 100 - canonical
+        if canon is not None:
+            if side == "yes":
+                return (canon, 100 - canon)
+            if side == "no":
+                return (100 - canon, canon)
 
-        return None
+        return (None, None)
 
     def _reindex_fill_id(self, old_id: str, new_id: str, fill: KalshiFill) -> None:
         """Move secondary indexes from ``old_id`` to ``new_id`` after promotion."""
