@@ -494,6 +494,7 @@ class CachedPosition:
     # CRITICAL FIX (2026-08-01): Add exit policy metadata for bracket orders
     # Required for _validate_risk_contract_linkage in order router
     exit_policy_id: Optional[str] = None  # Exit policy ID for tracking
+    exit_policy: Optional[Dict[str, Any]] = None  # Resolved ExitPolicyResolution as JSON-safe dict
     window_resolution_id: Optional[str] = None  # Window resolution ID for tracking
     client_order_id: Optional[str] = None  # For hedge fill detection
     # Resting bracket order tracking (GTC limit at TP / SL price)
@@ -1350,6 +1351,10 @@ class KalshiPositionCache:
             if client_order_id:
                 tp_targets = self._pending_tp_targets.get(client_order_id, {}) or {}
 
+            # Resolved exit policy is the single source of truth for TP/trailing/scale-out.
+            _exit_policy = tp_targets.get("exit_policy") or {}
+            take_profit_enabled = bool(_exit_policy.get("take_profit_enabled", True))
+
             # Trailing stop profile config
             trailing_distance_cents = 5
             try:
@@ -1386,7 +1391,7 @@ class KalshiPositionCache:
             # intent, derive a conservative target that clears round-trip fees and the
             # minimum profit margin. A fallback TP below the fee buffer would be
             # rejected by the exit guard and leave the position unmonitored.
-            if tp_price is None and price_cents and 0 < price_cents < 100:
+            if take_profit_enabled and tp_price is None and price_cents and 0 < price_cents < 100:
                 try:
                     from merid.event_venues.kalshi.fees import (
                         min_profitable_exit_price_cents,
@@ -1428,6 +1433,21 @@ class KalshiPositionCache:
                 mandatory_tp_price
                 or tp_price
             )
+
+            # CRITICAL FIX: Apply the resolved exit policy to TP/trailing configuration.
+            # The policy is the single source of truth for whether TP/trailing are enabled
+            # and at what R-multiple trailing arms.  Without this, PositionMonitor falls
+            # back to the static profile and micro-scalp exits override the policy TP.
+            if not take_profit_enabled:
+                final_tp_price = None
+
+            trailing_enabled = bool(_exit_policy.get("trailing_enabled", True))
+            if trailing_enabled:
+                monitor_trailing_type = TrailingType.FIXED_CENTS
+                monitor_trailing_param = float(trailing_distance_cents)
+            else:
+                monitor_trailing_type = TrailingType.NONE
+                monitor_trailing_param = 0.0
 
             sl_original = tp_targets.get("sl_price")
             if sl_original is not None:
@@ -1507,6 +1527,7 @@ class KalshiPositionCache:
                 avg_entry_price_cents=cached_position.avg_price_cents,
                 opened_at=cached_position.entry_fill_timestamp or datetime.now(timezone.utc),
                 take_profit_price_cents=final_tp_price,
+                take_profit_r_multiple=(tp_targets.get("tp_r") if take_profit_enabled and final_tp_price else None),
                 # CRITICAL FIX (2026-08-25): Do not disable the stop-loss just
                 # because no SL price is known.  Position.__post_init__ will
                 # derive a fallback hard stop from the exchange-reported entry
@@ -1515,10 +1536,11 @@ class KalshiPositionCache:
                 stop_loss_price_cents=final_sl_price,
                 risk_params_state=monitor_risk_params_state,
                 risk_params_schema_version=2,
-                trailing_type=TrailingType.FIXED_CENTS,
-                trailing_param=trailing_distance_cents,
+                trailing_type=monitor_trailing_type,
+                trailing_param=monitor_trailing_param,
                 scale_out_price_cents=scale_out_price,
                 exit_policy_id=client_order_id or fill_id or "unknown",
+                exit_policy=_exit_policy,
                 vol_regime=cached_position.vol_regime or "unknown",
                 confidence=cached_position.confidence or "unknown",
                 thesis_side=(side or "").lower(),
@@ -1683,6 +1705,7 @@ class KalshiPositionCache:
         sl_policy_version: Optional[str] = None,
         order_intent_id: Optional[str] = None,
         max_hold_seconds: Optional[int] = None,
+        exit_policy: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Register TP targets, edge-decay policy and entry provenance for an order before it fills.
 
@@ -1727,6 +1750,7 @@ class KalshiPositionCache:
             "entry_book_sequence": None,
             "entry_book_source": None,
             "registered_at": replay_time(),
+            "exit_policy": exit_policy,
         }
 
         # CRITICAL FIX (2026-08-23): Persist a durable edge-decay policy snapshot
@@ -2751,7 +2775,8 @@ class KalshiPositionCache:
                             )
 
                 # A missing TP can be replaced with a default profit target.
-                if tp_price is None:
+                _exit_policy = tp_targets.get("exit_policy") or {}
+                if tp_price is None and _exit_policy.get("take_profit_enabled", True):
                     try:
                         from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
                         from merid.position_management.position import TAKE_PROFIT_MIN_PROFIT_CENTS
@@ -2878,6 +2903,8 @@ class KalshiPositionCache:
                     # CRITICAL FIX (2026-08-11): Executable entry book for spread-only exit invariants
                     entry_executable_bid_cents=entry_executable_bid_cents,
                     entry_executable_ask_cents=entry_executable_ask_cents,
+                    # CRITICAL FIX: Resolved exit policy from the order intent.
+                    exit_policy=tp_targets.get("exit_policy"),
                     # Ratchet profit floor initialization (defaults to inactive)
                     ratchet_activated=False,
                     ratchet_floor_price_cents=None,

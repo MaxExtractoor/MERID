@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 import os
 import time
@@ -234,6 +234,7 @@ class Position:
     # Policy references
     window_resolution_id: str = ""
     exit_policy_id: str = ""
+    exit_policy: Optional[Dict[str, Any]] = None  # Resolved ExitPolicyResolution as JSON-safe dict
 
     # Runtime state (not persisted)
     current_price_cents: int = 0
@@ -451,7 +452,8 @@ class Position:
         # buffer, and it never exceeds the model's own edge. The final value is also
         # floored by the fee-aware net profit target so it cannot be a loss-making
         # take-profit. No unconditional 5c TP.
-        if self.take_profit_price_cents is None and self.entry_fill_price_cents:
+        _exit_policy_take_profit_enabled = (self.exit_policy or {}).get("take_profit_enabled", True)
+        if _exit_policy_take_profit_enabled and self.take_profit_price_cents is None and self.entry_fill_price_cents:
             entry_ref = self.entry_fill_price_cents
             if (
                 entry_ref > 0
@@ -699,19 +701,25 @@ class Position:
             # Fixed cent trail: trail_level = max_favorable - fixed_distance
             # trailing_param is the fixed distance in cents (e.g., 5 cents)
             # CRITICAL FIX: 2026-07-06 - Use aggressive distance (2c) in 80-85c profit zone
-            try:
-                from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
-                if is_profile_active():
-                    adapter = get_active_profile()
-                    profile = adapter.profile
-                    if self.trailing_profit_zone_activated:
-                        fixed_distance = profile.trailing_stop_trailing_distance_cents_profit_zone  # 2c in profit zone
-                    else:
-                        fixed_distance = profile.trailing_stop_trailing_distance_cents  # 5c normal
-                else:
-                    fixed_distance = int(trailing_param)  # Fallback to param
-            except Exception as e:
-                fixed_distance = int(trailing_param)  # Fallback to param
+            # CRITICAL FIX: Prefer the position's resolved giveback (trailing_param) when
+            # it is set, so the resolved ExitPolicyResolution controls the trail distance.
+            fixed_distance = None
+            if trailing_param and trailing_param > 0:
+                fixed_distance = int(trailing_param)
+            else:
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                    if is_profile_active():
+                        adapter = get_active_profile()
+                        profile = adapter.profile
+                        if self.trailing_profit_zone_activated:
+                            fixed_distance = profile.trailing_stop_trailing_distance_cents_profit_zone  # 2c in profit zone
+                        else:
+                            fixed_distance = profile.trailing_stop_trailing_distance_cents  # 5c normal
+                except Exception:
+                    pass
+            if fixed_distance is None:
+                fixed_distance = 5  # Safe fallback
 
             # CRITICAL FIX (2026-07-16): Side-space — trail below max favorable for BOTH sides
             trail_level = self.max_favorable_price_cents - fixed_distance
@@ -1178,6 +1186,7 @@ class Position:
             # trailing_profit_threshold_reached_at is runtime-only, not persisted
             "window_resolution_id": self.window_resolution_id,
             "exit_policy_id": self.exit_policy_id,
+            "exit_policy": self.exit_policy,
             "current_price_cents": self.current_price_cents,
             "unrealized_pnl_cents": self.unrealized_pnl_cents,
             "r_multiple": self.r_multiple,
@@ -1282,6 +1291,7 @@ class Position:
             # trailing_profit_threshold_reached_at is runtime-only, not persisted
             window_resolution_id=data.get("window_resolution_id", ""),
             exit_policy_id=data.get("exit_policy_id", ""),
+            exit_policy=data.get("exit_policy"),
             current_price_cents=data.get("current_price_cents", 0),
             unrealized_pnl_cents=data.get("unrealized_pnl_cents", 0),
             r_multiple=data.get("r_multiple", 0.0),

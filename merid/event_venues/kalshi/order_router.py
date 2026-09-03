@@ -1480,6 +1480,57 @@ class ExitPolicyResolution:
     version: str = "v1"
 
 
+def _get_enum_or_value(value: Any) -> Any:
+    """Return the string value of an Enum, or the value itself if not an enum."""
+    if value is None:
+        return None
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def exit_policy_to_dict(policy: Any) -> Dict[str, Any]:
+    """Serialize an ExitPolicyResolution (or any policy-like object) to JSON.
+
+    This dictionary is stored on OrderIntent, CachedPosition, and Position so the
+    single resolved exit policy is the source of truth at fill and monitoring time.
+    It is intentionally defensive so test stubs that use SimpleNamespace do not
+    crash order construction.
+    """
+    tp_mode = getattr(policy, "tp_mode", None)
+    sl_mode = getattr(policy, "sl_mode", None)
+    tp_time_based_r = getattr(policy, "tp_time_based_r", None) or {}
+
+    return {
+        "policy_id": getattr(policy, "policy_id", ""),
+        "asset": getattr(policy, "asset", ""),
+        "regime": getattr(policy, "regime", ""),
+        "tp_mode": _get_enum_or_value(tp_mode),
+        "tp_r_multiple": getattr(policy, "tp_r_multiple", 0.0),
+        "tp_min_cents": getattr(policy, "tp_min_cents", 0),
+        "tp_price_cents": getattr(policy, "tp_price_cents", None),
+        "take_profit_enabled": getattr(policy, "take_profit_enabled", True),
+        "tp_time_based_r": dict(tp_time_based_r) if isinstance(tp_time_based_r, dict) else dict(tp_time_based_r or {}),
+        "sl_mode": _get_enum_or_value(sl_mode),
+        "sl_cents": getattr(policy, "sl_cents", None),
+        "sl_r_multiple": getattr(policy, "sl_r_multiple", None),
+        "stop_loss_enabled": getattr(policy, "stop_loss_enabled", True),
+        "trailing_enabled": getattr(policy, "trailing_enabled", True),
+        "trailing_activation_r": getattr(policy, "trailing_activation_r", 0.8),
+        "trailing_giveback_cents": getattr(policy, "trailing_giveback_cents", 5),
+        "scale_out_enabled": getattr(policy, "scale_out_enabled", False),
+        "scale_out_trigger_r": getattr(policy, "scale_out_trigger_r", 0.7),
+        "scale_out_fraction": getattr(policy, "scale_out_fraction", 0.5),
+        "max_hold_seconds": getattr(policy, "max_hold_seconds", 600),
+        "max_round_trips": getattr(policy, "max_round_trips", 2),
+        "min_price_move_for_reentry": getattr(policy, "min_price_move_for_reentry", 5),
+        "min_edge_after_fees_cents": getattr(policy, "min_edge_after_fees_cents", 2.0),
+        "edge_confidence": getattr(policy, "edge_confidence", None),
+        "net_edge_cents_at_entry": getattr(policy, "net_edge_cents_at_entry", None),
+        "version": getattr(policy, "version", "v1"),
+    }
+
+
 @dataclass
 class WindowResolution:
     """Entry window resolution for a trade.
@@ -2506,6 +2557,7 @@ class OrderIntent:
     risk_tier: Optional[str] = None  # Risk tier (A/B/C) from ExitPolicyResolution
     trailing_enabled: Optional[str] = None  # Whether trailing stop is enabled
     max_hold_seconds: Optional[int] = None  # Max hold time from ExitPolicyResolution
+    exit_policy: Optional[Dict[str, Any]] = None  # Resolved ExitPolicyResolution as JSON-safe dict
     max_rest_seconds: Optional[int] = 180  # Max time a maker/passive order may rest on the book before expiration
     
     # ENTRY/EXIT DIRECTION CONTRACT: Formal direction and exit reason tracking
@@ -12871,6 +12923,7 @@ async def _route_live(
                     sl_policy_version="v1",
                     order_intent_id=intent.intent_id,
                     max_hold_seconds=intent.max_hold_seconds,
+                    exit_policy=intent.exit_policy,
                 )
             except Exception as _tp_reg_err:
                 logger.debug("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
