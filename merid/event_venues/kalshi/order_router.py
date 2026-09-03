@@ -1843,7 +1843,70 @@ def resolve_exit_policy(
         logger.warning("[ORDER-ROUTER] Failed to load trailing giveback config from profile: %s", e)
         # Fallback to hardcoded value
         trailing_giveback_cents = 5
-    
+
+    # CRITICAL FIX (2026-09-02): Validate resolved TP/SL targets before returning
+    # the policy.  A TP that is not net-profitable after round-trip taker fees is
+    # clamped to the fee-aware floor; if even the floor is unreachable or the
+    # target is on the wrong side of entry, the fixed TP/SL is disabled.
+    if entry_price_cents is not None and 0 < entry_price_cents < 100:
+        _resolved_side = strip_context.get("thesis_side", "yes")
+        _resolved_sl_price = None
+        if sl_cents_offset is not None and sl_cents_offset > 0:
+            _resolved_sl_price = max(1, entry_price_cents - int(sl_cents_offset))
+        try:
+            from merid.event_venues.kalshi.fees import (
+                validate_exit_policy_targets,
+                min_profitable_exit_price_cents,
+                MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS,
+            )
+            _validation = validate_exit_policy_targets(
+                entry_price_cents=entry_price_cents,
+                take_profit_price_cents=tp_price_cents,
+                stop_loss_price_cents=_resolved_sl_price,
+                side=_resolved_side,
+                size=Decimal("1"),
+            )
+            if not _validation.valid:
+                if tp_price_cents is not None:
+                    _can_clamp = any(
+                        r in _validation.invalid_reasons
+                        for r in ("INVALID_TP_GROSS_INSUFFICIENT", "INVALID_TP_NET_NEGATIVE")
+                    )
+                    if _can_clamp:
+                        _gross_min = tp_min_cents or MERID_TAKE_PROFIT_MIN_GROSS_PROFIT_CENTS
+                        _floor = min_profitable_exit_price_cents(
+                            entry_price_cents,
+                            Decimal("1"),
+                            gross_min_cents=_gross_min,
+                        )
+                        if _floor is not None and _floor > entry_price_cents:
+                            _v2 = validate_exit_policy_targets(
+                                entry_price_cents=entry_price_cents,
+                                take_profit_price_cents=_floor,
+                                stop_loss_price_cents=_resolved_sl_price,
+                                side=_resolved_side,
+                                size=Decimal("1"),
+                            )
+                            if _v2.valid:
+                                tp_price_cents = _floor
+                            else:
+                                tp_price_cents = None
+                                take_profit_enabled = False
+                        else:
+                            tp_price_cents = None
+                            take_profit_enabled = False
+                    else:
+                        tp_price_cents = None
+                        take_profit_enabled = False
+                if _validation.stop_loss_price_cents is None:
+                    stop_loss_enabled = False
+        except Exception as _validate_err:
+            logger.warning(
+                "[ORDER-ROUTER] Exit policy target validation failed for %s: %s",
+                policy_id,
+                _validate_err,
+            )
+
     return ExitPolicyResolution(
         policy_id=policy_id,
         asset=asset,

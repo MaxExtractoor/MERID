@@ -576,6 +576,7 @@ class PositionMonitor:
             "entry_edge", "entry_book_snapshot_id", "entry_edge_pct", "fill_source",
             "provenance_state", "take_profit_price_cents", "stop_loss_enabled",
             "stop_loss_price_cents", "trailing_type", "trailing_param", "scale_out_price_cents",
+            "all_in_entry_basis_cents", "basis_state", "basis_version", "basis_sources",
         }
 
         with self._lock:
@@ -2233,17 +2234,40 @@ class PositionMonitor:
         _take_profit_enabled = _exit_policy.get("take_profit_enabled", True)
         if _take_profit_enabled and position.take_profit_price_cents is None and position.avg_entry_price_cents > 0:
             if position.stop_loss_enabled and position.initial_risk_cents > 0:
-                # Use existing risk calculation for a symmetric 1R bracket
-                position.take_profit_price_cents = position.avg_entry_price_cents + position.initial_risk_cents
-                position.take_profit_r_multiple = 1.0
-                if position.risk_params_state == RiskParamsState.UNKNOWN:
-                    position.risk_params_state = RiskParamsState.FALLBACK
-                logger.info(
-                    "[POSITION-MONITOR-TP-FALLBACK] Set 1R TP from SL for position=%s: entry=%dc tp=%dc",
-                    position.position_id[:8],
-                    position.avg_entry_price_cents,
-                    position.take_profit_price_cents,
-                )
+                # Fee-aware 1R bracket.  A naive entry + risk target does not
+                # account for round-trip taker fees; use the canonical fee-aware
+                # floor with a gross-min of at least 1R or the configured minimum.
+                try:
+                    from merid.event_venues.kalshi.fees import min_profitable_exit_price_cents
+                    _gross_min = max(position.initial_risk_cents, TAKE_PROFIT_MIN_PROFIT_CENTS)
+                    _entry_ref = position.avg_entry_price_cents
+                    _fallback_tp = min_profitable_exit_price_cents(
+                        _entry_ref,
+                        position.size,
+                        gross_min_cents=_gross_min,
+                    )
+                    if _fallback_tp is not None and _fallback_tp > _entry_ref:
+                        position.take_profit_price_cents = _fallback_tp
+                        _max_gain = SIDE_SPACE_TOTAL_CENTS - _entry_ref
+                        position.take_profit_r_multiple = (
+                            (_fallback_tp - _entry_ref) / _max_gain
+                            if _max_gain > 0
+                            else 0.0
+                        )
+                        if position.risk_params_state == RiskParamsState.UNKNOWN:
+                            position.risk_params_state = RiskParamsState.FALLBACK
+                        logger.info(
+                            "[POSITION-MONITOR-TP-FALLBACK] Set fee-aware 1R TP from SL for position=%s: entry=%dc tp=%dc",
+                            position.position_id[:8],
+                            _entry_ref,
+                            _fallback_tp,
+                        )
+                except Exception:
+                    logger.debug(
+                        "[POSITION-MONITOR-TP-FALLBACK] No fee-aware 1R TP for position=%s (entry=%dc, no model/SL)",
+                        position.position_id[:8],
+                        position.avg_entry_price_cents,
+                    )
             elif (
                 position.risk_params_state == RiskParamsState.FALLBACK
                 or position.entry_fill_price_cents

@@ -1,0 +1,151 @@
+{
+  "saved_at": 1788400563.3758643,
+  "portfolios": {
+    "smoke_test_user": {
+      "starting_balance": 10000.0,
+      "current_balance": 9900.0,
+      "total_pnl": 0.0,
+      "total_fees": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "BTC_long_perp_paper": {
+          "position_id": "paper_pos_1_1788400563",
+          "user_id": "smoke_test_user",
+          "asset": "BTC",
+          "side": "long",
+          "size_usd": 100.0,
+          "entry_price": 50049.99999999999,
+          "current_price": 50000.0,
+          "leverage": 1,
+          "unrealized_pnl": -0.09990009990008537,
+          "realized_pnl": 0.0,
+          "opened_at": 1788400563.3411224,
+          "market_type": "perp",
+          "market_id": null,
+          "venue": "paper",
+          "contracts": 0
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_1_1788400563_08144b",
+          "user_id": "smoke_test_user",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 50049.99999999999,
+          "filled_size": 100.0,
+          "created_at": 1788400563.3411224,
+          "filled_at": 1788400563.3411224,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ],
+      "closed_positions": []
+    },
+    "smoke_test_1788400563": {
+      "starting_balance": 10000.0,
+      "current_balance": 9500.0,
+      "total_pnl": 0.0,
+      "total_fees": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "ETH_long_perp_paper": {
+          "position_id": "paper_pos_2_1788400563",
+          "user_id": "smoke_test_1788400563",
+          "asset": "ETH",
+          "side": "long",
+          "size_usd": 500.0,
+          "entry_price": 3002.9999999999995,
+          "current_price": 3000.0,
+          "leverage": 1,
+          "unrealized_pnl": -0.4995004995004238,
+          "realized_pnl": 0.0,
+          "opened_at": 1788400563.352121,
+          "market_type": "perp",
+          "market_id": null,
+          "venue": "paper",
+          "contracts": 0
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_2_1788400563_5e63ed",
+          "user_id": "smoke_test_1788400563",
+          "asset": "ETH",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 3002.9999999999995,
+          "filled_size": 500.0,
+          "created_at": 1788400563.352121,
+          "filled_at": 1788400563.352121,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ],
+      "closed_positions": []
+    },
+    "pnl_test_1788400563": {
+      "starting_balance": 10000.0,
+      "current_balance": 9000.0,
+      "total_pnl": 0.0,
+      "total_fees": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "TEST_long_perp_paper": {
+          "position_id": "paper_pos_3_1788400563",
+          "user_id": "pnl_test_1788400563",
+          "asset": "TEST",
+          "side": "long",
+          "size_usd": 1000.0,
+          "entry_price": 100.1,
+          "current_price": 100.1,
+          "leverage": 1,
+          "unrealized_pnl": 0.0,
+          "realized_pnl": 0.0,
+          "opened_at": 1788400563.3748667,
+          "market_type": "perp",
+          "market_id": null,
+          "venue": "paper",
+          "contracts": 0
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_3_1788400563_7353c4",
+          "user_id": "pnl_test_1788400563",
+          "asset": "TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 1000.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 1000.0,
+          "created_at": 1788400563.3748667,
+          "filled_at": 1788400563.3748667,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ],
+      "closed_positions": []
+    }
+  },
+  "order_counter": 3,
+  "position_counter": 3
+}
