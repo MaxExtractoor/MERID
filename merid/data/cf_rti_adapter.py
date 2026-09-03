@@ -391,7 +391,11 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
 
     source_ts_ms = None
     timestamp_quality = "source"
-    for field in ("ts", "timestamp", "time", "source_ts_ms", "published_at"):
+    # Kalshi's cfbenchmarks_value feed wraps the raw CF Benchmarks payload and
+    # provides ``received_at`` as the wall-clock time the tick was received.
+    # The raw payload may contain an older index/sample timestamp, so prefer
+    # the Kalshi receive time for freshness while still accepting other fields.
+    for field in ("received_at", "ts", "timestamp", "time", "source_ts_ms", "published_at"):
         if field in data and data[field] is not None:
             candidate = data[field]
             parsed = _parse_timestamp(candidate)
