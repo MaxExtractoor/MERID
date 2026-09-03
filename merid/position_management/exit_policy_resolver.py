@@ -330,10 +330,11 @@ class ExitPolicyResolver:
         elif current_price_cents is None:
             tp_ineligible = "missing_current_price"
         if tp_eligible:
-            if position.side.value == "yes":
-                tp_triggered = current_price_cents >= tp_price
-            else:
-                tp_triggered = current_price_cents <= tp_price
+            # CRITICAL FIX (2026-09-03): Side-space semantics.  Both YES and NO
+            # positions are long their own side; take-profit is a price ABOVE the
+            # entry in own-side cents, so it triggers when the own-side price
+            # rises to or above the target for BOTH sides.
+            tp_triggered = current_price_cents >= tp_price
         triggers["TAKE_PROFIT"] = ExitTriggerEvaluation(
             trigger="TAKE_PROFIT",
             configured=tp_configured,
@@ -431,22 +432,25 @@ class ExitPolicyResolver:
             ts_ineligible = "trailing_stop_not_configured"
         elif current_price_cents is None:
             ts_ineligible = "missing_current_price"
+        ts_threshold: Optional[int] = None
         if ts_eligible:
-            # Use the high/low watermark as the trailing threshold.
-            if position.side.value == "yes":
-                ts_triggered = current_price_cents <= position.low_watermark_cents
+            # CRITICAL FIX (2026-09-03): Use the position's computed trail level
+            # (below max_favorable_price_cents) and trigger for BOTH sides when
+            # the own-side price falls to or below it.  The raw high/low watermarks
+            # are not the stop level and the previous comparison was inverted for NO.
+            ts_threshold = position.get_trail_level()
+            if ts_threshold is None:
+                ts_eligible = False
+                ts_ineligible = "trailing_not_active"
             else:
-                ts_triggered = current_price_cents >= position.high_watermark_cents
+                ts_triggered = current_price_cents <= ts_threshold
         triggers["TRAILING_STOP"] = ExitTriggerEvaluation(
             trigger="TRAILING_STOP",
             configured=ts_configured,
             eligible=ts_eligible,
             triggered=ts_triggered,
             observed_value=Decimal(current_price_cents) if current_price_cents is not None else None,
-            threshold=(
-                Decimal(position.low_watermark_cents) if position.side.value == "yes"
-                else Decimal(position.high_watermark_cents)
-            ),
+            threshold=Decimal(ts_threshold) if ts_threshold is not None else None,
             ineligible_reason=ts_ineligible,
         )
 

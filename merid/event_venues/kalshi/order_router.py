@@ -1625,13 +1625,13 @@ def resolve_exit_policy(
     TP_EDGE_CAPTURE = 0.75
     TP_MIN_GROSS_PROFIT_CENTS = tp_min_cents
     regime_tp_multiplier = 1.0  # Always defined for fee-aware TP block below
+    mean_reversion_config: Dict[str, Any] = {}  # Always defined for fallback/no-profile paths
     
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
         profile = get_active_profile().profile
         
         # Load from YAML exit_policy.risk_reward section
-        mean_reversion_config = {}
         if hasattr(profile, 'exit_policy_risk_reward'):
             rr_config = profile.exit_policy_risk_reward
             mean_reversion_config = rr_config.get('mean_reversion', {})
@@ -1683,19 +1683,23 @@ def resolve_exit_policy(
                 tp_min_cents = 3
     except Exception as e:
         logger.warning("[ORDER-ROUTER] Failed to load TP/SL config from profile: %s, using fallback", e)
-        # Fallback to hardcoded values
+        # Fallback to hardcoded values; keep regime multiplier in sync with the
+        # fee-aware TP block so conservative/aggressive still affect the target.
         if regime == "conservative":
             tp_r_multiple = 0.75
             tp_min_cents = 5
             configured_max_hold_seconds = 900
+            regime_tp_multiplier = 0.85
         elif regime == "aggressive":
             tp_r_multiple = 1.2
             tp_min_cents = 2
             configured_max_hold_seconds = 600
+            regime_tp_multiplier = 1.15
         else:  # normal
             tp_r_multiple = 1.0
             tp_min_cents = 3
             configured_max_hold_seconds = 600
+            regime_tp_multiplier = 1.0
     
     # CRITICAL FIX (2026-08-12): Fee-aware, fair-value-capped take-profit.
     # TP is derived from the model edge (75% capture) but is capped at:
@@ -1822,13 +1826,18 @@ def resolve_exit_policy(
         )
     else:
         # Legacy fallback for callers that do not supply an entry price.
+        # Use the active profile when available; otherwise fall back to the
+        # canonical Crypto15mProfile class default (8c) instead of a stale 5c.
         try:
-            from merid.risk.profiles.crypto_15m_profile import get_active_profile
-            profile = get_active_profile().profile
-            sl_cents_offset = max(_sl_min_cents, profile.dynamic_risk_sl_cents_normal_vol)
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile, Crypto15mProfile
+            active = get_active_profile()
+            if active is not None and getattr(active, "profile", None) is not None:
+                sl_cents_offset = max(_sl_min_cents, active.profile.dynamic_risk_sl_cents_normal_vol)
+            else:
+                sl_cents_offset = max(_sl_min_cents, Crypto15mProfile.dynamic_risk_sl_cents_normal_vol)
         except Exception as e:
             logger.warning("[ORDER-ROUTER] Failed to load SL config from profile: %s", e)
-            sl_cents_offset = 5
+            sl_cents_offset = 8
     
     # CRITICAL FIX: Load trailing_giveback_cents from profile config (2026-07-13)
     # Previously hardcoded to 5 - now uses profile configuration

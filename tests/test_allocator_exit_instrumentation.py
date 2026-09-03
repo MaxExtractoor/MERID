@@ -215,9 +215,12 @@ def test_exit_eval_contains_all_trigger_results(asset):
         size=Decimal("1"),
         avg_entry_price_cents=50,
         take_profit_price_cents=75,
+        stop_loss_enabled=False,
+        stop_loss_price_cents=None,
         trailing_type=TrailingType.FIXED_CENTS,
-        high_watermark_cents=0,
-        low_watermark_cents=0,
+        max_favorable_price_cents=60,
+        high_watermark_cents=60,
+        low_watermark_cents=60,
         risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
         risk_params_schema_version=2,
         client_order_id="test-client-order-id",
@@ -323,3 +326,69 @@ def test_exit_eval_current_edge_reversal_requires_negative_edge(asset):
     assert cer.eligible is True
     assert cer.triggered is True
     assert evaluation.chosen_exit_reason == "CURRENT_EDGE_REVERSAL"
+
+
+@pytest.mark.parametrize("asset", ASSETS)
+def test_exit_eval_no_side_take_profit_and_trailing_trigger_correctly(asset):
+    """NO-side own-space prices must use the same comparisons as YES.
+
+    Regression: the resolver previously inverted the TAKE_PROFIT comparison for
+    NO (used <= instead of >=) and the TRAILING_STOP comparison (used >= high
+    watermark).  Both sides are long their own side, so TP fires when own-side
+    price rises to/above the target and the trailing stop fires when own-side
+    price falls to/below the trail level.
+    """
+    position = Position(
+        market_id=f"KX{asset}15M-TEST",
+        side=PositionSide.NO,
+        size=Decimal("1"),
+        avg_entry_price_cents=40,
+        take_profit_price_cents=50,
+        stop_loss_enabled=False,
+        stop_loss_price_cents=None,
+        trailing_type=TrailingType.FIXED_CENTS,
+        max_favorable_price_cents=45,
+        high_watermark_cents=45,
+        low_watermark_cents=45,
+        risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+        risk_params_schema_version=2,
+        client_order_id="test-client-order-id",
+        entry_book_capture_quality="AT_FILL",
+        entry_signal_id="test-signal",
+        entry_model_probability=0.45,
+        entry_market_probability=0.40,
+        entry_edge=0.05,
+        fill_source="ws",
+        entry_edge_pct=0.05,
+    )
+    position.update_runtime_state(current_price_cents=55)
+
+    resolver = ExitPolicyResolver()
+    market_context = {
+        "current_price_cents": 55,
+        "time_to_expiry_seconds": 600.0,
+        "current_edge_pct": 0.15,
+        "book_snapshot_id": "snap-1",
+    }
+    evaluation = resolver.evaluate(position, market_context)
+
+    # TP should fire because own-side price (55) is at/above the NO-side target (50).
+    tp = evaluation.triggers["TAKE_PROFIT"]
+    assert tp.configured is True
+    assert tp.eligible is True
+    assert tp.triggered is True
+
+    # Trailing stop: trail_level = max_favorable(45) - default 5c = 40.
+    # Current own-side price 55 is above 40, so not triggered.
+    ts = evaluation.triggers["TRAILING_STOP"]
+    assert ts.configured is True
+    assert ts.eligible is True
+    assert ts.triggered is False
+
+    # When the own-side price falls to the trail level, the trailing stop fires.
+    position.update_runtime_state(current_price_cents=40)
+    market_context["current_price_cents"] = 40
+    evaluation = resolver.evaluate(position, market_context)
+    ts = evaluation.triggers["TRAILING_STOP"]
+    assert ts.eligible is True
+    assert ts.triggered is True

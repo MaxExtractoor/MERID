@@ -49,23 +49,52 @@ class TestOrderRouterExitPolicy:
         assert result.trailing_giveback_cents == 5  # 5 cent giveback
     
     def test_tp_r_multiple_by_regime(self):
-        """Verify TP R-multiple varies by regime.
-        
-        CRITICAL FIX 2026-07-16: Updated to align with 2:1 risk/reward ratio (80% TP, 40% SL)
-        Previous values (0.75, 1.0, 1.2) were based on old exit policy
-        New values (0.6, 0.8, 0.96) align with 80% TP base, adjusted by regime
+        """Verify TP R-multiple varies by regime when a model edge is available.
+
+        CRITICAL FIX (2026-08-12): TP is now edge-based and capped at the
+        fee-aware fair-value floor.  Without a trusted model edge fixed TP is
+        disabled; with an edge the capture distance is scaled by the regime
+        multiplier, so conservative < normal < aggressive.
         """
-        conservative = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="conservative")
-        normal = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="normal")
-        aggressive = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="aggressive")
-        
-        # Conservative should have lower TP (0.8 * 0.75 = 0.6)
-        assert conservative.tp_r_multiple == pytest.approx(0.6)
-        # Normal should have baseline TP (0.8 base from profile)
-        assert normal.tp_r_multiple == pytest.approx(0.8)
-        # Aggressive should have higher TP (0.8 * 1.2 = 0.96)
-        assert aggressive.tp_r_multiple == pytest.approx(0.96)
+        strip_context = {
+            "entry_price_cents": 42,
+            "entry_model_probability": 0.70,
+        }
+        conservative = router_resolve_exit_policy(
+            edge_result=None, asset="BTC", regime="conservative", strip_context=strip_context
+        )
+        normal = router_resolve_exit_policy(
+            edge_result=None, asset="BTC", regime="normal", strip_context=strip_context
+        )
+        aggressive = router_resolve_exit_policy(
+            edge_result=None, asset="BTC", regime="aggressive", strip_context=strip_context
+        )
+
+        for result in [conservative, normal, aggressive]:
+            assert result.take_profit_enabled is True
+            assert result.tp_r_multiple > 0
+            assert result.tp_price_cents is not None
+            assert result.tp_price_cents > strip_context["entry_price_cents"]
+
+        # Regime ordering: conservative is tightest, aggressive is widest.
+        assert conservative.tp_r_multiple < normal.tp_r_multiple < aggressive.tp_r_multiple
     
+    def test_resolve_exit_policy_no_profile_does_not_raise(self):
+        """Regression: no active profile must not leave mean_reversion_config unbound.
+
+        Previously the mean-reversion TP block referenced `mean_reversion_config`
+        before it was assigned, raising UnboundLocalError when the active profile
+        was unavailable.  The function must always return a valid ExitPolicyResolution.
+        """
+        result = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="normal")
+        assert result is not None
+        assert result.sl_mode == StopLossMode.FIXED_CENTS
+        assert result.stop_loss_enabled is True
+        # SL fallback should be the canonical normal-vol offset, not a stale 5c.
+        assert result.sl_cents >= 8
+        # Without an edge, fixed TP is disabled; no exception is raised.
+        assert result.take_profit_enabled is False
+
     def test_asset_specific_adjustments(self):
         """Verify tier 2 assets (SOL, XRP, DOGE) have wider TP thresholds."""
         btc_result = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="normal")

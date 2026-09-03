@@ -77,6 +77,8 @@ class ExitReason(str, Enum):
     OPPORTUNITY_COST = "opportunity_cost"  # 2026-08-12: better opportunity exists
     SETTLEMENT_GUARD = "settlement_guard"  # 2026-08-12: forced T-30s exit
     MODEL_INVALIDATION_LOSS_EXIT = "model_invalidation_loss_exit"  # 2026-08-12: edge collapse below entry with loss
+    CURRENT_EDGE_REVERSAL = "current_edge_reversal"  # 2026-08-23: model has reversed to the opposite outcome
+    CONTINUATION_STOP = "continuation_stop"  # 2026-08-25: 5m underlying continuation stop
     MARKET_EXPIRED = "market_expired"
 
 

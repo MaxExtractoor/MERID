@@ -380,8 +380,8 @@ class TestMaxHoldTimeConfiguration:
         te_config = profile.exit_policy_time_exit
         assert 'max_hold_minutes' in te_config or len(te_config) == 0
     
-    def test_max_hold_time_default_15_minutes(self):
-        """Test that default max_hold_minutes is 15 minutes."""
+    def test_max_hold_time_from_yaml(self):
+        """Test that max_hold_minutes is loaded from the YAML profile."""
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         from pathlib import Path
         
@@ -395,10 +395,11 @@ class TestMaxHoldTimeConfiguration:
         adapter = Crypto15mProfileAdapter(profile_path)
         profile = adapter.profile
         
-        # Check default max_hold_minutes
+        # Check max_hold_minutes loaded from YAML (tightened to 8 minutes per
+        # 2026-08-28 research on 15m edge half-life).
         te_config = profile.exit_policy_time_exit
         max_hold_minutes = te_config.get('max_hold_minutes', 15)
-        assert max_hold_minutes == 15
+        assert max_hold_minutes == 8
     
     def test_max_hold_time_regime_adjustments(self):
         """Test that max hold time adjusts based on regime."""
