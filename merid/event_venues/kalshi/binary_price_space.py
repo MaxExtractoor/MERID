@@ -1101,12 +1101,17 @@ def book_side_from_outcome_action(held_side: str, action: str) -> str:
 # ── Canonical Price Range Checking ─────────────────────────────────────────────
 
 # Canonical price ranges (NON-NEGOTIABLE invariants)
-# CRITICAL FIX (2026-08-14): Fail-closed to the symmetric 10c-75c entry range
-# that the GlobalAllocator enforces.  This is the single source of truth for
-# executable entry prices and prevents extreme longshot / shortshot losses.
-# It overrules the earlier 1c-85c / 15c-99c expansion that allowed 97c NO fills.
-CANONICAL_MIN_CENTS = 10  # Production entry range minimum
-CANONICAL_MAX_CENTS = 75  # Production entry range maximum
+# CRITICAL FIX (2026-09-03): Side-aware canonical range.  YES contracts are
+# bounded at the high end because buying YES above 75c offers little upside,
+# while NO contracts can trade up to 95c before hitting the short-shot/noise
+# tail.  The 88c-95c NO band showed systematic positive EV in the 2026 FLB
+# study, so the canonical NO ceiling is 95c, not the old symmetric 75c.
+CANONICAL_MIN_CENTS = 10  # Legacy symmetric minimum (kept for backward compat)
+CANONICAL_MAX_CENTS = 75  # Legacy symmetric maximum (kept for backward compat)
+CANONICAL_YES_MIN_CENTS = 10
+CANONICAL_YES_MAX_CENTS = 75
+CANONICAL_NO_MIN_CENTS = 25
+CANONICAL_NO_MAX_CENTS = 95
 SIDE_AWARE_YES_MIN_CENTS = 1
 SIDE_AWARE_YES_MAX_CENTS = 75
 SIDE_AWARE_NO_MIN_CENTS = 25
@@ -1129,20 +1134,22 @@ FLB_NO_EDGE_BAND_MAX = 95  # NO edge band end
 
 
 def is_price_in_canonical_range(price_cents: int, side: str) -> bool:
-    """Check if price is in the production canonical entry range.
+    """Check if price is in the production side-aware canonical entry range.
 
-    CRITICAL FIX (2026-08-14): Fail-closed to the symmetric 10c-75c entry
-    range.  This is the single source of truth for order eligibility across
-    agent_grid, order_router, order_gate, loop_15m, and Kalshi client.  It
-    prevents the extreme longshot / shortshot fills (e.g. 97c) that drained
-    the bankroll.
+    CRITICAL FIX (2026-09-03): Side-aware canonical range.  YES contracts are
+    bounded 10c-75c to avoid low-profit, high-risk longshot entries.  NO
+    contracts are bounded 25c-95c because the 88c-95c NO band showed
+    systematic positive EV (inverse favorite-longshot bias) and because a high
+    NO price simply reflects a high probability of the event NOT occurring.
+    This is the single source of truth for order eligibility across
+    agent_grid, order_router, order_gate, loop_15m, and Kalshi client.
 
     Args:
         price_cents: Price in cents (0-99)
         side: "yes" or "no" (for logging/context)
 
     Returns:
-        True if price is in canonical entry range
+        True if price is in canonical entry range for the given side
 
     Example:
         >>> is_price_in_canonical_range(25, "yes")
@@ -1151,10 +1158,30 @@ def is_price_in_canonical_range(price_cents: int, side: str) -> bool:
         True
         >>> is_price_in_canonical_range(10, "yes")
         True
-        >>> is_price_in_canonical_range(94, "no")
+        >>> is_price_in_canonical_range(78, "no")
+        True
+        >>> is_price_in_canonical_range(97, "no")
         False
     """
-    return CANONICAL_MIN_CENTS <= price_cents <= CANONICAL_MAX_CENTS
+    side = (side or "yes").lower()
+    if side == "no":
+        return CANONICAL_NO_MIN_CENTS <= price_cents <= CANONICAL_NO_MAX_CENTS
+    return CANONICAL_YES_MIN_CENTS <= price_cents <= CANONICAL_YES_MAX_CENTS
+
+
+def get_canonical_price_range(side: str) -> Tuple[int, int]:
+    """Return the (min, max) canonical entry price range for a side.
+
+    Args:
+        side: "yes" or "no"
+
+    Returns:
+        Tuple of (min_cents, max_cents)
+    """
+    side = (side or "yes").lower()
+    if side == "no":
+        return CANONICAL_NO_MIN_CENTS, CANONICAL_NO_MAX_CENTS
+    return CANONICAL_YES_MIN_CENTS, CANONICAL_YES_MAX_CENTS
 
 
 def is_price_in_crisis_range(price_cents: int, side: str) -> bool:

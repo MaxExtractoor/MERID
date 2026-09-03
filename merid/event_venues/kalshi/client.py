@@ -2246,31 +2246,19 @@ class KalshiVenueClient(EventVenueClient):
                 retries=0,
             )
 
-        # CRITICAL: Price guard - canonical 10¢-75¢ entry range.
+        # CRITICAL: Price guard - side-aware canonical entry range.
         # This is the FINAL safety net before API call and applies in the
         # order's own price space (YES or NO) per binary_price_space invariants.
-        from merid.event_venues.kalshi.binary_price_space import CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
-        min_price_cents = CANONICAL_MIN_CENTS
-        max_price_cents = CANONICAL_MAX_CENTS
+        from merid.event_venues.kalshi.binary_price_space import is_price_in_canonical_range
 
         if not getattr(order, "reduce_only", False):
-            if raw_price_cents < min_price_cents:
+            if not is_price_in_canonical_range(raw_price_cents, outcome):
                 logger.critical(
-                    "[KALSHI_CLIENT_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s outcome=%s",
-                    raw_price_cents, min_price_cents, ticker, outcome
+                    "[KALSHI_CLIENT_BLOCKED] Price outside side-aware canonical range: price=%dc side=%s | ticker=%s outcome=%s",
+                    raw_price_cents, outcome, ticker, outcome
                 )
                 return OperationResult.fail(
-                    f"Deep OTM longshot blocked: price={raw_price_cents}c < {min_price_cents}c threshold",
-                    latency_ms=0.0,
-                    retries=0,
-                )
-            if raw_price_cents > max_price_cents:
-                logger.critical(
-                    "[KALSHI_CLIENT_BLOCKED] Extreme price rejected: price=%dc > %dc threshold | ticker=%s outcome=%s",
-                    raw_price_cents, max_price_cents, ticker, outcome
-                )
-                return OperationResult.fail(
-                    f"Extreme price blocked: price={raw_price_cents}c > {max_price_cents}c threshold",
+                    f"Price outside canonical range: price={raw_price_cents}c side={outcome}",
                     latency_ms=0.0,
                     retries=0,
                 )
@@ -2734,29 +2722,19 @@ class KalshiVenueClient(EventVenueClient):
                     retries=0,
                 )
 
-            # CRITICAL: Price guard - canonical 10c-75c entry range (entries only).
+            # CRITICAL: Price guard - side-aware canonical entry range (entries only).
             # Exits/reduce-only orders may cross the book at any valid 1c-99c
             # price to close a position.
-            from merid.event_venues.kalshi.binary_price_space import CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
+            from merid.event_venues.kalshi.binary_price_space import is_price_in_canonical_range
 
             if not getattr(order, "reduce_only", False):
-                if _price_cents < CANONICAL_MIN_CENTS:
+                if not is_price_in_canonical_range(_price_cents, outcome):
                     logger.critical(
-                        "[KALSHI_CLIENT_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s outcome=%s",
-                        _price_cents, CANONICAL_MIN_CENTS, ticker, outcome,
+                        "[KALSHI_CLIENT_BLOCKED] Price outside side-aware canonical range: price=%dc side=%s | ticker=%s outcome=%s",
+                        _price_cents, outcome, ticker, outcome,
                     )
                     return OperationResult.fail(
-                        f"Deep OTM longshot blocked: price={_price_cents}c < {CANONICAL_MIN_CENTS}c threshold",
-                        latency_ms=0.0,
-                        retries=0,
-                    )
-                if _price_cents > CANONICAL_MAX_CENTS:
-                    logger.critical(
-                        "[KALSHI_CLIENT_BLOCKED] Extreme price rejected: price=%dc > %dc threshold | ticker=%s outcome=%s",
-                        _price_cents, CANONICAL_MAX_CENTS, ticker, outcome,
-                    )
-                    return OperationResult.fail(
-                        f"Extreme price blocked: price={_price_cents}c > {CANONICAL_MAX_CENTS}c threshold",
+                        f"Price outside canonical range: price={_price_cents}c side={outcome}",
                         latency_ms=0.0,
                         retries=0,
                     )

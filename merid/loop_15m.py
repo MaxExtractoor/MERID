@@ -7917,13 +7917,17 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # price.  That price is the single source of truth for the order limit.
         # If it is missing or stale, fall back to the candidate price or market
         # state, and re-gate the final price before submission.
-        from merid.event_venues.kalshi.binary_price_space import CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
-        min_price_cents, max_price_cents = CANONICAL_MIN_CENTS, CANONICAL_MAX_CENTS
+        from merid.event_venues.kalshi.binary_price_space import (
+            is_price_in_canonical_range,
+            get_canonical_price_range,
+        )
 
+        _candidate_side = (candidate.get("side") or "yes").lower()
         _candidate_price_cents = int(candidate.get("price_cents", 0) or 0)
+        min_price_cents, max_price_cents = get_canonical_price_range(_candidate_side)
         if (
             approved_price_cents is not None
-            and min_price_cents <= approved_price_cents <= max_price_cents
+            and is_price_in_canonical_range(approved_price_cents, _candidate_side)
         ):
             if _candidate_price_cents != approved_price_cents:
                 logger.warning(
@@ -7934,15 +7938,15 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             candidate["price_cents"] = price_cents
         elif (
             _candidate_price_cents > 0
-            and min_price_cents <= _candidate_price_cents <= max_price_cents
+            and is_price_in_canonical_range(_candidate_price_cents, _candidate_side)
         ):
             # Signal's price is valid - use it directly
             price_cents = _candidate_price_cents
-            logger.info("[15M-LOOP] ticker=%s using signal price_cents=%d (side=%s, valid in canonical range)",
-                      ticker, price_cents, candidate.get("side"))
+            logger.info("[15M-LOOP] ticker=%s using signal price_cents=%d (side=%s, valid in side-aware canonical range)",
+                      ticker, price_cents, _candidate_side)
         else:
             # Signal's price is invalid - fall back to market state
-            logger.warning(f"[15M-LOOP] ticker={ticker} signal price_cents={price_cents} invalid (<=0 or outside {min_price_cents}-{max_price_cents}c range), falling back to market state")
+            logger.warning(f"[15M-LOOP] ticker={ticker} signal price_cents={_candidate_price_cents} invalid (<=0 or outside side-aware canonical range for side={_candidate_side}), falling back to market state")
             try:
                 from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                 market_state_store = get_kalshi_market_state_store()

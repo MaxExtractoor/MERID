@@ -846,23 +846,20 @@ def normalize_order(
         raise OrderIntentValidationError(f"invalid_action:{action}")
 
     price_cents = _safe_int_cents(getattr(intent, "price_cents", None), "price_cents")
-    from merid.event_venues.kalshi.binary_price_space import (
-        CANONICAL_MAX_CENTS,
-        CANONICAL_MIN_CENTS,
-    )
+    from merid.event_venues.kalshi.binary_price_space import is_price_in_canonical_range
     is_exit = (
         getattr(intent, "reduce_only", False)
         or getattr(intent, "entry_or_exit", "") in ("exit", "close")
         or getattr(intent, "is_exit_order", False)
     )
-    # Entries are constrained to the canonical 10c-75c range; exits can cross
+    # Entries are constrained to the side-aware canonical range; exits can cross
     # the book at any valid 1c-99c price to close a position.
     if is_exit:
         if not (1 <= price_cents <= 99):
             raise OrderIntentValidationError(f"invalid_price:price_cents={price_cents}")
     else:
-        if not (CANONICAL_MIN_CENTS <= price_cents <= CANONICAL_MAX_CENTS):
-            raise OrderIntentValidationError(f"invalid_price:price_cents={price_cents}")
+        if not is_price_in_canonical_range(price_cents, contract):
+            raise OrderIntentValidationError(f"invalid_price:price_cents={price_cents},contract={contract}")
 
     # Canonical quantity resolution.  ``count_fp`` (Decimal contracts) is the
     # fixed-point authority; ``qty_cc`` is the integer centi-contract form.  If

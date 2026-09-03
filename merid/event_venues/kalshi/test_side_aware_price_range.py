@@ -90,8 +90,12 @@ def test_early_expiry_scenario():
 
 
 def test_canonical_range_still_works():
-    """Test that canonical range is the symmetric 10c-75c entry range."""
-    # CRITICAL FIX (2026-08-14): canonical range is now 10c-75c for both sides.
+    """Test the side-aware canonical entry range.
+
+    2026-09-03: canonical range is side-aware:
+      - YES: 10c-75c (low-profit / longshot protection)
+      - NO: 25c-95c (88c-95c NO inverse-FLB band is systematically +EV)
+    """
 
     # YES canonical range (10c-75c)
     assert is_price_in_canonical_range(10, "yes") == True   # Min YES
@@ -100,12 +104,12 @@ def test_canonical_range_still_works():
     assert is_price_in_canonical_range(9, "yes") == False  # Too low
     assert is_price_in_canonical_range(76, "yes") == False  # Too high
 
-    # NO canonical range (10c-75c)
-    assert is_price_in_canonical_range(10, "no") == True  # Min NO
-    assert is_price_in_canonical_range(25, "no") == True
-    assert is_price_in_canonical_range(75, "no") == True  # Max NO
-    assert is_price_in_canonical_range(9, "no") == False  # Too low
-    assert is_price_in_canonical_range(76, "no") == False  # Too high
+    # NO canonical range (25c-95c)
+    assert is_price_in_canonical_range(25, "no") == True  # Min NO
+    assert is_price_in_canonical_range(75, "no") == True
+    assert is_price_in_canonical_range(95, "no") == True  # Max NO
+    assert is_price_in_canonical_range(24, "no") == False  # Too low
+    assert is_price_in_canonical_range(96, "no") == False  # Too high
 
 
 def test_crisis_range_still_works():
@@ -128,7 +132,7 @@ def test_crisis_range_still_works():
 
 
 def test_side_aware_vs_canonical_comparison():
-    """Side-aware range still accepts late-expiry; canonical 10c-75c rejects it."""
+    """Side-aware and canonical ranges both permit the 88c-95c NO band."""
     # Late-expiry scenario: YES=6c, NO=94c
 
     # Side-aware range accepts late-expiry prices
@@ -137,16 +141,17 @@ def test_side_aware_vs_canonical_comparison():
     assert side_aware_yes is True  # YES=6c inside side-aware 1c-75c
     assert side_aware_no is True  # NO=94c inside side-aware 25c-99c
 
-    # Canonical 10c-75c entry range rejects the same prices
+    # Canonical side-aware range: YES still rejected at 6c, NO 94c accepted
+    # because it is inside the 25c-95c inverse-FLB band.
     canonical_yes = is_price_in_canonical_range(6, "yes")
     canonical_no = is_price_in_canonical_range(94, "no")
     assert canonical_yes is False
-    assert canonical_no is False
+    assert canonical_no is True
 
 
 def test_all_assets_late_expiry():
-    """Test all assets from the logs with late-expiry prices."""
-    # From the logs, all assets showed this pattern:
+    """Test canonical vs side-aware ranges for late-expiry asset examples."""
+    # (asset, yes_price, no_price)
     test_cases = [
         ("BTC", 3, 97),
         ("ETH", 1, 99),
@@ -157,16 +162,19 @@ def test_all_assets_late_expiry():
 
     for asset, yes_price, no_price in test_cases:
         # With side-aware range, both should be accepted
-        assert is_price_in_side_aware_range(yes_price, "yes") == True, \
+        assert is_price_in_side_aware_range(yes_price, "yes") is True, \
             f"{asset}: YES {yes_price}c should be in range"
-        assert is_price_in_side_aware_range(no_price, "no") == True, \
+        assert is_price_in_side_aware_range(no_price, "no") is True, \
             f"{asset}: NO {no_price}c should be in range (FIX)"
 
-        # Canonical 10c-75c entry range must reject these extreme fills.
-        assert is_price_in_canonical_range(yes_price, "yes") == False, \
-            f"{asset}: YES {yes_price}c should be outside canonical 10c-75c (FIX)"
-        assert is_price_in_canonical_range(no_price, "no") == False, \
-            f"{asset}: NO {no_price}c should be outside canonical 10c-75c (FIX)"
+        # Canonical YES range (10c-75c) always rejects these low YES prices.
+        assert is_price_in_canonical_range(yes_price, "yes") is False, \
+            f"{asset}: YES {yes_price}c should be outside canonical 10c-75c"
+
+        # Canonical NO range (25c-95c) accepts 94c but still rejects 97c/99c.
+        expected_no_canonical = 25 <= no_price <= 95
+        assert is_price_in_canonical_range(no_price, "no") == expected_no_canonical, \
+            f"{asset}: NO {no_price}c canonical expectation {expected_no_canonical}"
 
         # Verify duality
         assert yes_to_no_price(yes_price) == no_price, \
