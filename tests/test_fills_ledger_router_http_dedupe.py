@@ -53,6 +53,8 @@ def _router_fill(
     is_exit: bool = False,
     reduce_only: bool = False,
     entry_or_exit: str = "entry",
+    yes_price_dollars: str = "0.48",
+    no_price_dollars: str = "0.52",
 ) -> "KalshiFill":
     """Build a live-router KalshiFill for the same economic execution."""
     from merid.event_venues.kalshi.fills_ledger import KalshiFill
@@ -65,8 +67,8 @@ def _router_fill(
         action=action,
         count_fp=Decimal("1"),
         quantity_cc=100,
-        yes_price_dollars=Decimal("0.48"),
-        no_price_dollars=Decimal("0.52"),
+        yes_price_dollars=Decimal(yes_price_dollars),
+        no_price_dollars=Decimal(no_price_dollars),
         fee_cost=Decimal("0.01"),
         canonical_position_side=canonical_side,
         canonical_position_action=canonical_action,
@@ -88,6 +90,8 @@ def _http_counterparty_raw(
     action: str,
     outcome_side: str,
     book_side: str,
+    yes_price_dollars: str = "0.48",
+    no_price_dollars: str = "0.52",
 ) -> dict:
     """Build an HTTP /portfolio/fills raw payload in the counterparty form."""
     return {
@@ -99,12 +103,74 @@ def _http_counterparty_raw(
         "action": action,
         "outcome_side": outcome_side,
         "book_side": book_side,
-        "yes_price_dollars": "0.48",
-        "no_price_dollars": "0.52",
+        "yes_price_dollars": yes_price_dollars,
+        "no_price_dollars": no_price_dollars,
         "count_fp": "1",
         "fee_cost": "0.01",
         "created_time": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@pytest.mark.asyncio
+async def test_http_counterparty_buy_no_promotes_router_buy_no(ledger):
+    """BUY_NO via router with swapped per-leg labels, then SELL_YES via HTTP.
+
+    This is a direct regression for the 2026-09-02 XRP incident: the live-router
+    record incorrectly stored yes/no labels swapped (yes=0.40, no=0.60 when the
+    market was YES=0.60/NO=0.40).  The later HTTP counterparty fill reports the
+    same market with the correct labels.  Deduplication must use the unordered
+    market pair, not the labels, so the two records collapse.
+    """
+    coid = "coid-buy-no-swap"
+    order_id = "order-router-http-swap-1"
+    _record_intent(ledger, side="BUY_NO", action="buy", client_order_id=coid, entry_or_exit="entry")
+
+    # Live-router record as produced before the user-side price fix:
+    # user is BUY_NO (long NO) but the stored yes/no prices are swapped.
+    router_fill = _router_fill(
+        order_id,
+        coid,
+        side="no",
+        action="buy",
+        canonical_side="no",
+        canonical_action="buy",
+        yes_delta=-100,
+        leg_price_cents=60,
+        yes_price_dollars="0.40",
+        no_price_dollars="0.60",
+    )
+    ledger.on_fill(router_fill)
+
+    assert len(ledger._fills) == 1
+    key = "KXBTC15M-TEST:no"
+    assert key in ledger._open_positions
+    assert ledger._open_positions[key]["total_contracts"] == 1
+
+    # HTTP fill in counterparty form with the *same market*, correct labels.
+    http_raw = _http_counterparty_raw(
+        "http-fill-swap-1",
+        order_id,
+        coid,
+        side="yes",
+        action="sell",
+        outcome_side="yes",
+        book_side="ask",
+        yes_price_dollars="0.60",
+        no_price_dollars="0.40",
+    )
+    new_count, new_ids = await ledger.ingest_http_fills([http_raw])
+
+    assert new_count == 0
+    assert new_ids == []
+    assert len(ledger._fills) == 1
+    assert len(ledger._open_positions) == 1
+    assert ledger._open_positions[key]["total_contracts"] == 1
+
+    assert "http-fill-swap-1" in ledger._fills
+    promoted = ledger._fills["http-fill-swap-1"]
+    assert promoted.confirmed_by_rest is True
+    assert promoted.canonical_position_side == "no"
+    assert promoted.canonical_position_action == "buy"
 
 
 @pytest.mark.asyncio

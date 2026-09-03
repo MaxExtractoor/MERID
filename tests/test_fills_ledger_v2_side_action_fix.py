@@ -8,6 +8,7 @@ that position-cache PnL is not inverted for NO-side long positions.
 
 import pytest
 from datetime import datetime, timezone
+from decimal import Decimal
 
 
 @pytest.fixture
@@ -1000,3 +1001,60 @@ class TestPositionMonitorSidePreservation:
         stored = monitor._open_positions[pos.position_id]
         assert stored.side == PositionSide.NO
         assert stored.market_id == pos.market_id
+
+
+class TestPositionCacheLabelRobustness:
+    """position_cache.on_fill must use the correct held-side price even when the
+    yes_price_dollars / no_price_dollars labels are swapped in the fill record.
+    """
+
+    @pytest.mark.asyncio
+    async def test_position_cache_ignores_swapped_yes_no_labels(self):
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        cache = get_position_cache()
+        cache._positions = {}
+        cache._applied_fill_ids.clear()
+        cache._reconciliation_halted.clear()
+
+        market_id = "KXBTC15M-LABEL-SWAP-TEST"
+
+        # This KalshiFill represents a BUY_NO execution.  The actual market is
+        # YES=60c / NO=40c, but the yes/no price labels are swapped as happened
+        # in the 2026-09-02 XRP live-router incident.  The canonical leg price
+        # (40c on the no side) is correct and must disambiguate the labels.
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill
+
+        fill = KalshiFill(
+            fill_id="label-swap-fill-1",
+            market_ticker=market_id,
+            side="no",
+            action="buy",
+            count_fp=Decimal("1"),
+            quantity_cc=100,
+            yes_price_dollars=Decimal("0.40"),  # swapped: this is actually NO
+            no_price_dollars=Decimal("0.60"),   # swapped: this is actually YES
+            fee_cost=Decimal("0.0007"),
+            canonical_position_side="no",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=40,
+            canonical_yes_delta_cc=-100,
+            canonicalization_state="TRUSTED_LIVE_V1",
+        )
+
+        await cache.on_fill(
+            market_id=market_id,
+            contracts=1,
+            price_cents=40,
+            fee_cents=7,
+            side="no",
+            action="buy",
+            quantity_cc=100,
+            fill_id=fill.fill_id,
+            canonicalization_state="TRUSTED_LIVE_V1",
+        )
+
+        pos = cache._positions[market_id]
+        assert pos.side == "no"
+        assert pos.quantity_cc == 100
+        assert pos.avg_price_cents == 40

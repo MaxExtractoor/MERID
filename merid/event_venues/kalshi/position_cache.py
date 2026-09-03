@@ -80,9 +80,10 @@ def _fill_position_side_price_cents(fill: Any, side: str) -> Optional[int]:
     """Return the price for ``side`` from a fill's stored leg prices.
 
     Prefers the explicit ``yes_price_dollars`` / ``no_price_dollars`` fields,
-    then ``canonical_leg_price_cents`` / ``price_cents`` only when the fill's
-    canonical side matches the requested side.  Never synthesizes a missing
-    leg price via 100 - other_side.
+    using the stored canonical execution-side price to disambiguate swapped
+    per-leg labels.  Falls back to ``canonical_leg_price_cents`` / ``price_cents``
+    only when the fill's canonical side matches the requested side.  Never
+    synthesizes a missing leg price via 100 - other_side.
     """
     side = (side or "").lower()
     if side not in ("yes", "no"):
@@ -90,6 +91,29 @@ def _fill_position_side_price_cents(fill: Any, side: str) -> Optional[int]:
 
     yes_cents = _price_to_cents(getattr(fill, "yes_price_dollars", None))
     no_cents = _price_to_cents(getattr(fill, "no_price_dollars", None))
+    canon = getattr(fill, "canonical_leg_price_cents", None)
+    exec_side = (getattr(fill, "canonical_position_side", None) or getattr(fill, "side", None) or "").lower()
+
+    # If both market legs are present, use the canonical execution-side price to
+    # orient them.  Kalshi V2 payloads and older records may have the yes/no
+    # labels swapped; the canonical leg price identifies the execution-side value
+    # so the other label is the held side.
+    if yes_cents is not None and no_cents is not None and canon is not None and exec_side in ("yes", "no"):
+        if exec_side == "yes":
+            if abs(yes_cents - canon) <= 1:
+                actual_yes, actual_no = yes_cents, no_cents
+            elif abs(no_cents - canon) <= 1:
+                actual_yes, actual_no = no_cents, yes_cents
+            else:
+                actual_yes, actual_no = yes_cents, no_cents
+        else:  # exec_side == "no"
+            if abs(no_cents - canon) <= 1:
+                actual_yes, actual_no = yes_cents, no_cents
+            elif abs(yes_cents - canon) <= 1:
+                actual_yes, actual_no = no_cents, yes_cents
+            else:
+                actual_yes, actual_no = yes_cents, no_cents
+        return actual_yes if side == "yes" else actual_no
 
     if side == "yes" and yes_cents is not None:
         return yes_cents
@@ -98,7 +122,6 @@ def _fill_position_side_price_cents(fill: Any, side: str) -> Optional[int]:
 
     can_side = getattr(fill, "canonical_position_side", None) or getattr(fill, "side", None)
     if can_side and can_side.lower() == side:
-        canon = getattr(fill, "canonical_leg_price_cents", None)
         if canon is not None:
             return int(canon)
         prop = getattr(fill, "price_cents", None)
