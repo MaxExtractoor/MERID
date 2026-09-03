@@ -9,14 +9,43 @@ This test verifies the critical fix for trailing stop activation:
 
 import pytest
 import asyncio
+import time
 from datetime import datetime
-from merid.position_management.position import Position, PositionSide, TrailingType
+from merid.position_management.position import Position, PositionSide, TrailingType, RiskParamsState
 from merid.position_management.position_monitor import PositionMonitor
 from merid.position_management.exit_policy import ExitReason
 
 
 class TestTrailingStopFixedCents:
     """Test FIXED_CENTS trailing stop for 15-minute markets."""
+
+    def setup_method(self):
+        """Clear stale durable exit-intent state between tests.
+
+        The PositionMonitor persists in-flight exits to disk; without cleanup,
+        repeated runs of this module see the previous run's exit as already
+        in-flight and skip the new trigger.
+        """
+        from pathlib import Path
+        import json
+
+        from merid.position_management.position_monitor import get_position_monitor
+
+        monitor = get_position_monitor()
+        if monitor is not None:
+            monitor._exit_intent_in_flight.clear()
+            monitor._exit_registry.clear()
+
+        path = Path(__file__).resolve().parents[2] / "data" / "exit_intents.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    # Drop any keys that look like this module's test fixtures.
+                    pruned = {k: v for k, v in data.items() if not k.startswith("test-")}
+                    path.write_text(json.dumps(pruned, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
     def test_fixed_cents_trail_level_yes_position(self):
         """Test FIXED_CENTS trail level calculation for YES position."""
@@ -267,6 +296,48 @@ class TestTrailingStopFixedCents:
         # Trailing should activate after delay elapses
         await monitor._legacy_check_position(position, 62)
         assert position.trailing_activated is True
+
+    async def test_trailing_activation_r_from_exit_policy(self):
+        """Trailing activation threshold is driven by exit_policy.trailing_activation_r."""
+        monitor = PositionMonitor(poll_interval=0.1)
+
+        position = Position(
+            position_id="test-activation-r",
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=45,  # 5c risk -> 0.8R = 4c activation
+            take_profit_price_cents=99,
+            trailing_type=TrailingType.FIXED_CENTS,
+            trailing_param=5,
+            exit_policy={"trailing_enabled": True, "trailing_activation_r": 0.8},
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
+        )
+
+        monitor.add_position(position)
+
+        # Price at 53 -> 3c profit, below 0.8R (4c). Should NOT arm.
+        await monitor._legacy_check_position(position, 53)
+        assert position.trailing_profit_threshold_reached_at is None
+        assert position.trailing_activated is False
+
+        # Price at 54 -> 4c profit, exactly 0.8R. Should arm but not activate yet.
+        await monitor._legacy_check_position(position, 54)
+        assert position.trailing_profit_threshold_reached_at is not None
+        assert position.trailing_activated is False
+
+        # Simulate delay elapsed
+        position.trailing_profit_threshold_reached_at = time.time() - 31
+
+        # Re-check at 54 -> trailing should now be active
+        await monitor._legacy_check_position(position, 54)
+        assert position.trailing_activated is True
+
+        # Price drops to 49; max_favorable is 54, trail level is 49 -> trigger
+        assert position.should_trigger_trail(49) is True
 
 
 if __name__ == "__main__":

@@ -2229,7 +2229,9 @@ class PositionMonitor:
         # from the original edge-based entry path, or from a 1:1 SL-based bracket
         # when the position has a verified stop-loss.  The fallback is bounded by
         # the round-trip fee buffer and TAKE_PROFIT_MIN_PROFIT_CENTS.
-        if position.take_profit_price_cents is None and position.avg_entry_price_cents > 0:
+        _exit_policy = getattr(position, "exit_policy", None) or {}
+        _take_profit_enabled = _exit_policy.get("take_profit_enabled", True)
+        if _take_profit_enabled and position.take_profit_price_cents is None and position.avg_entry_price_cents > 0:
             if position.stop_loss_enabled and position.initial_risk_cents > 0:
                 # Use existing risk calculation for a symmetric 1R bracket
                 position.take_profit_price_cents = position.avg_entry_price_cents + position.initial_risk_cents
@@ -2867,7 +2869,8 @@ class PositionMonitor:
         # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing (2c distance) when price crosses 80c profit zone
         # CRITICAL FIX: 2026-07-12 - Implement activation delay to prevent noise-triggered trailing
         # Record when profit threshold is reached, then wait for activation_delay_sec before activating
-        if not position.trailing_activated:
+        _exit_policy = getattr(position, "exit_policy", None) or {}
+        if not position.trailing_activated and position.trailing_type != TrailingType.NONE:
             # Check if position has minimum profit to activate trailing
             min_profit_cents = 12  # Default from profile (align with 2026 research)
             profit_zone_activation_cents = 80  # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing at 80c
@@ -2882,6 +2885,13 @@ class PositionMonitor:
                     activation_delay_sec = profile.trailing_stop_activation_delay_sec
             except Exception as e:
                 logger.warning("[POSITION-MONITOR] Could not read trailing config from profile: %s", e)
+
+            # CRITICAL FIX: Use the resolved exit policy's trailing_activation_r when available.
+            # This makes trailing arm at 0.8R (or the policy-specific value) instead of a
+            # static 10c profile threshold, preventing early/late activation.
+            _trailing_activation_r = _exit_policy.get("trailing_activation_r")
+            if _trailing_activation_r is not None and position.initial_risk_cents and position.initial_risk_cents > 0:
+                min_profit_cents = float(position.initial_risk_cents) * float(_trailing_activation_r)
 
             # Calculate current profit in cents
             # CRITICAL FIX (2026-07-16): Side-space — profit = own-side price rising for BOTH sides

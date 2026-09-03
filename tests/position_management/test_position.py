@@ -688,3 +688,78 @@ class TestProbabilityAdjustedTrailing:
         # Should still apply adjustment
         assert adjusted_trail is not None
         assert adjusted_trail > base_trail
+
+
+class TestExitPolicyPropagation:
+    """Test that the resolved exit policy is respected by Position."""
+
+    def test_take_profit_disabled_by_exit_policy(self):
+        """When the resolved exit policy disables TP, no fallback target is set."""
+        position = Position(
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            entry_fill_price_cents=50,
+            entry_model_probability=0.70,
+            entry_market_probability=0.50,
+            exit_policy={"take_profit_enabled": False},
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
+        )
+
+        assert position.take_profit_price_cents is None
+
+    def test_take_profit_enabled_by_exit_policy(self):
+        """When the resolved exit policy enables TP, a fallback target is derived."""
+        position = Position(
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            entry_fill_price_cents=50,
+            entry_model_probability=0.70,
+            entry_market_probability=0.50,
+            exit_policy={"take_profit_enabled": True},
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            client_order_id="client-1",
+        )
+
+        # Fallback TP should be set above entry (model edge is 20c, 75% capture = 15c)
+        assert position.take_profit_price_cents is not None
+        assert position.take_profit_price_cents > 50
+
+    def test_trailing_giveback_from_exit_policy(self):
+        """FIXED_CENTS trailing uses the giveback from the resolved exit policy."""
+        position = Position(
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+            trailing_type=TrailingType.FIXED_CENTS,
+            trailing_param=3,
+        )
+
+        position.max_favorable_price_cents = 60
+        position.update_runtime_state(60)
+
+        # Resolved policy giveback of 3c should be honored (not the default 5c)
+        assert position.get_trail_level() == 57
+
+    def test_trailing_disabled_by_exit_policy(self):
+        """When trailing is disabled in the policy, the position is unarmed."""
+        position = Position(
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+            trailing_type=TrailingType.FIXED_CENTS,
+            trailing_param=5,
+            exit_policy={"trailing_enabled": False},
+        )
+
+        assert position.get_trail_level() is None

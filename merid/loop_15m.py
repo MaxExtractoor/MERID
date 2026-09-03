@@ -7606,7 +7606,13 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
     # Convert candidate dict to OrderIntent and route to order router.
     # Returns True if order was submitted, False if order was rejected/skipped.
     try:
-        from merid.event_venues.kalshi.order_router import OrderIntent, resolve_window_policy, resolve_exit_policy, route_order_async
+        from merid.event_venues.kalshi.order_router import (
+            OrderIntent,
+            resolve_window_policy,
+            resolve_exit_policy,
+            route_order_async,
+            exit_policy_to_dict,
+        )
         from merid.risk.executable_cost_ev_gate import evaluate_executable_cost_ev, EVInput
         
         ticker = candidate.get("ticker")
@@ -8615,6 +8621,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             window_resolution_id=window_resolution_id if window_resolution_id else f"window_resolution_{uuid.uuid4().hex[:12]}",
             risk_tier="A",  # Default to tier A (conservative) for 15m crypto
             max_hold_seconds=int(exit_policy.max_hold_seconds) if exit_policy and hasattr(exit_policy, 'max_hold_seconds') else 600,  # 10 min default
+            exit_policy=exit_policy_to_dict(exit_policy) if exit_policy else None,
             # CRITICAL FIX: Pass effective_equity_usd to risk manager for proper sizing
             effective_equity_usd=effective_equity_usd,
             # CRITICAL FIX (2026-07-31): Add entry_or_exit field for entry/exit direction contract
