@@ -417,6 +417,8 @@ data/full_week_reconciliation.json
 data/*_provenance_*.json
 data/*_provenance.json
 data/kalshi_*.json
+data/kalshi_order_attempts.db
+data/kalshi_order_attempts.db*
 data/trading_circuit_breaker_http_watermark.json
 data/exit_intents*.json
 data/backup_*/
