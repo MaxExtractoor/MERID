@@ -690,3 +690,50 @@ class TestBankrollDrawdownCircuitBreaker:
             assert not service.is_entry_allowed()
         finally:
             bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service
+
+    def test_false_drawdown_trip_when_position_cache_lags(self):
+        """A fresh fill reduces available cash before the cache sees the position.
+
+        Regression for the live BTC trade where equity=3.07, available=2.67,
+        positions=0.40, and the cache portfolio value was still 0. Without the
+        API-equity floor, effective equity became 2.67 and the drawdown circuit
+        incorrectly opened at 13.59% from a high of 3.09.
+        """
+        from merid.event_venues.kalshi import bankroll_service_v2
+
+        mock_client = MockKalshiClient(balance_response=3.07)
+        service = BankrollServiceV2(mock_client)
+
+        original_service = bankroll_service_v2._BANKROLL_SERVICE_V2
+        bankroll_service_v2._BANKROLL_SERVICE_V2 = service
+
+        try:
+            service._current = InternalBankroll(
+                equity_usd=Decimal("3.07"),
+                available_cash_usd=Decimal("2.67"),
+                max_riskable_frac=Decimal("0.02"),
+                state=BalanceState.FRESH,
+                as_of=datetime.now(timezone.utc),
+                source="kalshi",
+            )
+            service._high_watermark_usd = Decimal("3.09")
+
+            # Simulate the position cache not yet ingesting the new position.
+            with patch("merid.event_venues.kalshi.position_cache.get_position_cache") as mock_get_cache:
+                mock_cache = Mock()
+                mock_cache.get_all_positions.return_value = {}
+                mock_get_cache.return_value = mock_cache
+
+                effective_equity = service._effective_equity_for_drawdown()
+                # The bug produced 2.67; the fix floors at the API-reported total equity.
+                assert effective_equity == Decimal("3.07"), \
+                    f"Expected effective equity floor=3.07, got {effective_equity}"
+
+                service._evaluate_drawdown_circuit()
+                drawdown_pct = service.get_circuit_snapshot().drawdown_pct
+                assert drawdown_pct == Decimal("0.65"), \
+                    f"Expected drawdown ~0.65%, got {drawdown_pct}%"
+                assert service._drawdown_circuit_state == BankrollCircuitState.CLOSED, \
+                    "Circuit should remain CLOSED; a false OPEN is a regression"
+        finally:
+            bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service

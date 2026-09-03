@@ -3596,8 +3596,37 @@ class KalshiFillsLedger:
         import asyncio
         return await asyncio.to_thread(self.compute_net_positions)
 
+    def _market_is_expired_or_quarantined(self, market_ticker: str) -> bool:
+        """Return True if the market is expired or quarantined and should be skipped.
+
+        Mirrors the expiry/quarantine check used by ``compute_net_positions`` so
+        expired markets do not trigger missing-price warnings or phantom position
+        computation.
+        """
+        from datetime import datetime, timezone
+
+        now_ts = datetime.now(timezone.utc).timestamp()
+        try:
+            from merid.event_venues.kalshi.market_filter import parse_expiry_from_ticker
+            expiry_ts = parse_expiry_from_ticker(market_ticker)
+            if expiry_ts > 0 and now_ts > expiry_ts + 30:  # 30s settlement buffer
+                return True
+            from merid.event_venues.kalshi.position_cache import _is_expired_ticker
+            if _is_expired_ticker(market_ticker):
+                return True
+        except Exception as _exp_err:
+            logger.debug("[FILLS-LEDGER-COMPUTE] Expiry check failed for %s: %s", market_ticker, _exp_err)
+        return False
+
     def compute_position_from_fills(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Recompute position for a market purely from fills ledger using signed YES exposure."""
+        if self._market_is_expired_or_quarantined(market_ticker):
+            logger.debug(
+                "[FILLS-LEDGER-COMPUTE] Skipping position computation for expired/quarantined market: %s",
+                market_ticker,
+            )
+            return None
+
         fill_ids = self._fills_by_market.get(market_ticker, [])
         if not fill_ids:
             return None
@@ -3764,6 +3793,7 @@ class KalshiFillsLedger:
                     continue
             except Exception as _exp_err:
                 logger.debug(f"Expiry check failed for {market_ticker}: {_exp_err}")
+                continue
 
             # PRODUCTION FIX (2026-07-03): Time-filter fills to exclude stale data
             fill_ids = self._fills_by_market.get(market_ticker, [])
@@ -3978,6 +4008,12 @@ class KalshiFillsLedger:
         settled_tickers: List[str] = []
         for ticker in self._fills_by_market:
             if ticker not in checked_markets:
+                # Skip expired/quarantined markets before computing a phantom
+                # settled position. These markets no longer have active exposure
+                # and should not trigger missing-price warnings.
+                if self._market_is_expired_or_quarantined(ticker):
+                    continue
+
                 # We have fills for a market Kalshi didn't report in positions
                 # (could be closed position, or settlement, or subaccount filtering)
                 fills_without_positions += len(self._fills_by_market[ticker])

@@ -819,6 +819,12 @@ class BankrollServiceV2:
         The authoritative cash balance is the hard settlement floor, but drawdown
         must react to open positions. We layer conservative mark-to-market from the
         position cache on top.
+
+        The Kalshi-reported total equity is the authoritative floor. If the position
+        cache has not yet ingested a new position, `portfolio_usd` can transiently
+        undercount the locked position value, so we clamp effective equity to the
+        API-reported total equity. This prevents a false drawdown trip when a fresh
+        trade reduces available cash but the cache is one tick behind.
         """
         if self._current is None:
             return None
@@ -831,7 +837,13 @@ class BankrollServiceV2:
         except Exception as exc:
             logger.debug("[BANKROLL-DRAWDOWN] Failed to mark portfolio to market: %s", exc)
 
-        return cash + portfolio_usd
+        effective_equity = cash + portfolio_usd
+        # Never let the derived effective equity fall below what Kalshi authoritatively
+        # reports as total equity; the position cache can lag behind a fresh fill.
+        if self._current.equity_usd is not None:
+            effective_equity = max(self._current.equity_usd, effective_equity)
+
+        return effective_equity
 
     def _evaluate_drawdown_circuit(self) -> None:
         """Evaluate and transition the bankroll drawdown circuit breaker.

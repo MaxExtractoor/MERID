@@ -213,7 +213,7 @@ def _init_ws_metrics():
         ws_events_dropped_total = Counter(
             'merid_ws_events_dropped_total',
             'Total WS events dropped due to backpressure',
-            ['event_type']
+            labelnames=['event_type']
         )
 
         ws_fills_dropped_total = Counter(
@@ -266,6 +266,28 @@ def _init_ws_metrics():
     except ImportError:
         # Prometheus client not available - metrics will be no-ops
         pass
+
+def _inc_ws_events_dropped(event_type: str) -> None:
+    """Increment the dropped-events Prometheus counter safely.
+
+    The counter is created with the ``event_type`` label. This helper
+    defends against an unlabeled metric object or a missing Prometheus
+    client by falling back to an unlabeled ``.inc()`` (or silently
+    dropping the update) rather than letting a metric misconfiguration
+    crash the hot enqueue path.
+    """
+    if ws_events_dropped_total is None:
+        return
+    et = str(event_type or "unknown")
+    try:
+        ws_events_dropped_total.labels(event_type=et).inc()
+    except Exception:
+        # Fall back to an unlabeled increment if the metric is not labeled
+        # or the registry state has drifted. Metrics must never block events.
+        try:
+            ws_events_dropped_total.inc()
+        except Exception:
+            pass
 
 def _check_production_invariant(store) -> Tuple[bool, List[str]]:
     """Helper function to check production invariant (runs in thread pool).
@@ -3728,7 +3750,8 @@ class KalshiWebSocketBridge:
                 }
         
         # EVENT-LOOP-FIX: Check queue depth and apply backpressure
-        current_qsize = self._queue.qsize()
+        # DUAL-QUEUE BRIDGE PATTERN: _thread_queue is the thread-safe producer queue.
+        current_qsize = self._thread_queue.qsize()
         queue_pressure = current_qsize / _BRIDGE_QUEUE_SIZE
         
         # Hard backpressure: throttle producer when queue near full
@@ -3748,22 +3771,20 @@ class KalshiWebSocketBridge:
             # Try to drop oldest non-fill event from queue
             try:
                 # Get oldest event from queue
-                oldest = self._queue.get_nowait()
+                oldest = self._thread_queue.get_nowait()
                 event_type = oldest.get("type") if isinstance(oldest, dict) else "unknown"
-                
+
                 # If oldest is not a fill, count as dropped and continue
                 if event_type != "fill":
                     self._events_dropped += 1
-                    if ws_events_dropped_total:
-                        ws_events_dropped_total.labels(event_type=event_type).inc()
+                    _inc_ws_events_dropped(event_type)
                     logger.debug("[WS-BACKPRESSURE] Dropped oldest non-fill event (type=%s)", event_type)
                 else:
                     # Oldest was a fill, put it back and drop current instead
-                    self._queue.put_nowait(oldest)
+                    self._thread_queue.put_nowait(oldest)
                     self._events_dropped += 1
                     current_event_type = event.get("type") if isinstance(event, dict) else "unknown"
-                    if ws_events_dropped_total:
-                        ws_events_dropped_total.labels(event_type=current_event_type).inc()
+                    _inc_ws_events_dropped(current_event_type)
                     logger.debug("[WS-BACKPRESSURE] Oldest was fill, dropping current event (type=%s)", current_event_type)
                     return
             except queue.Empty:
@@ -3788,8 +3809,7 @@ class KalshiWebSocketBridge:
             if event_type != "fill":
                 self._events_dropped += 1
                 # P2 Task 7: Update Prometheus metrics
-                if ws_events_dropped_total:
-                    ws_events_dropped_total.labels(event_type=event_type).inc()
+                _inc_ws_events_dropped(event_type)
                 # Log aggressive drops sparingly (rate-limited to avoid log I/O in hot path)
                 now = _time.monotonic()
                 if now - getattr(self, '_last_backpressure_warn_ts', 0) > 5.0:
@@ -3806,7 +3826,7 @@ class KalshiWebSocketBridge:
         # and can stall the WebSocket callback thread. Only coalesce at extreme queue
         # depth where dropping is preferable to unbounded buffering.
         COALESCE_HIGH_WATERMARK = _BRIDGE_QUEUE_SIZE
-        current_qsize = self._queue.qsize()
+        current_qsize = self._thread_queue.qsize()
         
         # Track max queue size seen for metrics
         if not hasattr(self, '_max_queue_size_seen'):
@@ -3838,7 +3858,10 @@ class KalshiWebSocketBridge:
                         ws_fills_dropped_total.inc()
             except queue.Empty:
                 pass
-            self._queue.put_nowait(event)
+            # DUAL-QUEUE BRIDGE PATTERN: Always use the thread-safe _thread_queue;
+            # the legacy _queue alias is the same object, but referencing it here
+            # is a foot-gun if it is ever reassigned to an asyncio.Queue.
+            self._thread_queue.put_nowait(event)
             self._events_dropped += 1
             # Log every 100 drops so operators see the problem
             if self._events_dropped % 100 == 1:
@@ -4114,7 +4137,7 @@ class KalshiWebSocketBridge:
             now = _time.monotonic()
             if now - getattr(self, '_last_drain_drop_warn_ts', 0) > 5.0:
                 self._last_drain_drop_warn_ts = now
-                logger.warning("[WS-DRAIN-THREAD] async_queue full, dropping event (queue_size=%d)", self._async_queue.qsize())
+                logger.warning("[WS-DRAIN-THREAD] async_queue full, dropping event")
 
     def _schedule_reorder_resync(self, channel: str, seq: int, event: Any) -> None:
         """Fast-forward the reorder watermark for a channel and request a snapshot.
@@ -4261,8 +4284,12 @@ class KalshiWebSocketBridge:
                         _ws_forward_events_per_sec = 0.0
                     
                     # Get queue size
-                    _ws_forward_queue_size = self._queue.qsize()
-                    
+                    # DUAL-QUEUE BRIDGE PATTERN: queue depth is measured on the
+                    # thread-safe _thread_queue, not on _async_queue. The forwarder
+                    # loop owns the async queue, so _async_queue.qsize() would be
+                    # safe there, but it does not reflect the real producer backlog.
+                    _ws_forward_queue_size = self._thread_queue.qsize()
+
                     # Update Prometheus metrics
                     if ws_forwarder_throughput:
                         ws_forwarder_throughput.set(_ws_forward_events_per_sec)

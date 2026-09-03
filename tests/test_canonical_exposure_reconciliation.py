@@ -168,6 +168,24 @@ def test_doge_replay_sell_no_closes_buy_no():
     assert entry_yes + exit_yes == 0
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_expiry_checks_in_exposure_tests(monkeypatch):
+    """Exposure math is independent of expiry filtering.
+
+    The tests in this module verify signed-YES arithmetic, not market-lifecycle
+    filtering.  Neutralize the expiry/quarantine guards so historical test
+    tickers continue to exercise the position computation contract.
+    """
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.position_cache._is_expired_ticker",
+        lambda _t: False,
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.market_filter.parse_expiry_from_ticker",
+        lambda _t, _m=None: 0.0,
+    )
+
+
 def test_rest_and_ledger_exposure_match_for_equivalent_positions():
     """A REST snapshot and a fill sequence for the same long-NO position agree on signed-YES."""
     ticker = "KXETH15M-26AUG092200-00"

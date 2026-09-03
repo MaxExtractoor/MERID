@@ -123,6 +123,44 @@ class TestKalshiWebSocketReconnect:
                 assert "MARKET2" not in ids
     
     @pytest.mark.asyncio
+    async def test_reconnect_refreshes_stale_orderbook_tickers(self, ws_client):
+        """Reconnect refreshes stale orderbook tickers to the current active market."""
+        ws_client._running = True
+        stale = "KXBTC15M-26AUG281200-45"
+        fresh = "KXBTC15M-26AUG281215-00"
+        ws_client._orderbook_tickers = {stale}
+
+        new_market = MagicMock()
+        new_market.market.market_id = fresh
+        catalog = MagicMock()
+        catalog.get_current_15m_market.return_value = new_market
+
+        with patch("merid.event_venues.kalshi.market_catalog.get_market_catalog", return_value=catalog):
+            with patch.object(ws_client, "connect", new_callable=AsyncMock):
+                with patch.object(ws_client, "subscribe_orderbooks_batch", new_callable=AsyncMock) as mock_sub:
+                    with patch("asyncio.sleep", new_callable=AsyncMock):
+                        await ws_client._reconnect()
+
+        ids = mock_sub.call_args.args[0]
+        assert fresh in ids
+        assert stale not in ids
+
+    @pytest.mark.asyncio
+    async def test_reconnect_keeps_orderbook_tickers_when_catalog_unavailable(self, ws_client):
+        """Reconnect keeps existing orderbook tickers if the catalog is unavailable."""
+        ws_client._running = True
+        ws_client._orderbook_tickers = {"MARKET1"}
+
+        with patch("merid.event_venues.kalshi.market_catalog.get_market_catalog", return_value=None):
+            with patch.object(ws_client, "connect", new_callable=AsyncMock):
+                with patch.object(ws_client, "subscribe_orderbooks_batch", new_callable=AsyncMock) as mock_sub:
+                    with patch("asyncio.sleep", new_callable=AsyncMock):
+                        await ws_client._reconnect()
+
+        ids = mock_sub.call_args.args[0]
+        assert "MARKET1" in ids
+
+    @pytest.mark.asyncio
     async def test_successful_connect_resets_delay(self, ws_client):
         """Successful connect resets reconnect delay."""
         ws_client._reconnect_delay = 16.0  # Elevated from previous failures

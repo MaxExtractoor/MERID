@@ -2290,6 +2290,89 @@ class KalshiWebSocket(EventVenueStream):
         except Exception:
             return 0.0
 
+    def _extract_asset_from_market_id(self, market_id: str) -> Optional[str]:
+        """Return the 15m crypto asset symbol (BTC, ETH, ...) for a market ticker, or None."""
+        if not market_id:
+            return None
+        upper = str(market_id).upper().strip()
+        # Keep in sync with ws_bridge._extract_asset_from_ticker and ACTIVE_CRYPTO_ASSETS.
+        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            if upper.startswith(f"KX{asset}15M"):
+                return asset
+        return None
+
+    def _refresh_subscriptions_to_current_markets(self) -> None:
+        """Map stored market-ticker subscription sets to the current active market per asset.
+
+        After a 15m contract rollover the stored tickers refer to the expired
+        contract. Refreshing them from the catalog before resubscribing prevents
+        reconnecting to stale markets and receiving no data.
+        """
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+        except Exception as e:
+            logger.debug("[WS-RECONNECT] Could not load market catalog: %s", e)
+            return
+
+        if catalog is None:
+            logger.info("[WS-RECONNECT] No market catalog available - keeping existing subscription sets")
+            return
+
+        def _current_for(ticker: str) -> str:
+            asset = self._extract_asset_from_market_id(ticker)
+            if not asset:
+                return ticker
+            try:
+                current = catalog.get_current_15m_market(asset)
+                if current is None:
+                    return ticker
+                return current.market.market_id if hasattr(current, "market") else current.market_id
+            except Exception as e:
+                logger.debug("[WS-RECONNECT] Could not resolve current market for %s: %s", ticker, e)
+                return ticker
+
+        # Refresh orderbook tickers (the primary bug target)
+        old_orderbook = set(self._orderbook_tickers)
+        new_orderbook = {_current_for(t) for t in old_orderbook}
+        if new_orderbook != old_orderbook:
+            self._orderbook_tickers = new_orderbook
+            logger.info(
+                "[WS-RECONNECT] Refreshed orderbook subscriptions: %s -> %s",
+                sorted(old_orderbook), sorted(new_orderbook)
+            )
+
+        # Apply the same refresh to other market-ticker subscription sets so a
+        # reconnect does not replay stale contracts for quotes, trades, or fills.
+        old_ticker_subs = set(self._ticker_subscriptions)
+        new_ticker_subs = {_current_for(t) for t in old_ticker_subs}
+        if new_ticker_subs != old_ticker_subs:
+            self._ticker_subscriptions = new_ticker_subs
+            logger.info(
+                "[WS-RECONNECT] Refreshed ticker subscriptions: %s -> %s",
+                sorted(old_ticker_subs), sorted(new_ticker_subs)
+            )
+
+        old_trade = set(self._trade_tickers)
+        new_trade = {_current_for(t) for t in old_trade}
+        if new_trade != old_trade:
+            self._trade_tickers = new_trade
+            logger.info(
+                "[WS-RECONNECT] Refreshed trade subscriptions: %s -> %s",
+                sorted(old_trade), sorted(new_trade)
+            )
+
+        old_fill = {t for t in self._fill_tickers if not str(t).startswith("event:")}
+        new_fill = {_current_for(t) for t in old_fill}
+        event_fills = {t for t in self._fill_tickers if str(t).startswith("event:")}
+        new_fill_set = new_fill | event_fills
+        if new_fill_set != self._fill_tickers:
+            self._fill_tickers = new_fill_set
+            logger.info(
+                "[WS-RECONNECT] Refreshed fill subscriptions: %s -> %s",
+                sorted(old_fill), sorted(new_fill)
+            )
+
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff + jitter + circuit breaker.
 
@@ -2413,6 +2496,12 @@ class KalshiWebSocket(EventVenueStream):
                         )
                 except Exception as e:
                     logger.warning("[WS-RECONNECT-STATE-SYNC] Market-state invalidation failed: %s", e)
+
+                # CRITICAL FIX: Refresh stored market-ticker subscriptions to the
+                # current active 15m contract before resubscribing. Otherwise a
+                # reconnect will resubscribe to stale contracts that have already
+                # rolled and will not receive data.
+                self._refresh_subscriptions_to_current_markets()
 
                 # BUG-6: replay subscriptions using the correct call per subscription type
                 if self._ticker_subscriptions:
