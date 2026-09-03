@@ -2153,8 +2153,13 @@ class PositionMonitor:
             # Migrate any legacy JSON-loaded in-flight state that is not in the store.
             # This is a one-way seed; after migration, the store owns the state.
             for pid, flight in list(self._exit_intent_in_flight.items()):
-                if self._exit_intent_in_flight[pid].get("attempt_id"):
-                    continue  # already rehydrated from store
+                _json_attempt_id = flight.get("attempt_id")
+                if _json_attempt_id and store.get_exit_attempt(_json_attempt_id):
+                    continue  # durable record exists
+                # If a JSON entry carries an attempt_id that is not in the store,
+                # it is not authoritative; clear it and migrate into the store.
+                if _json_attempt_id:
+                    flight["attempt_id"] = None
                 state = flight.get("state", "EXECUTION_PENDING")
                 if state == "RECONCILED":
                     continue
