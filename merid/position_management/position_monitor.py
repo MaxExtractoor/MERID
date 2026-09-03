@@ -45,6 +45,12 @@ from merid.event_venues.kalshi.stop_candidate import (
     record_stop_candidate,
 )
 from merid.event_venues.kalshi.binary_price_space import to_signed_yes_exposure
+from merid.event_venues.kalshi.order_attempt_store import (
+    ExitOrderAttemptState,
+    ExitOrderAttemptConflict,
+    OrderAttemptStore,
+)
+from merid.event_venues.kalshi.order_identity import derive_exit_client_order_id
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -370,11 +376,18 @@ class PositionMonitor:
 
         # 2026-09-01: Durable exit-intent registry.  The in-flight state survives
         # process restarts so exits are not duplicated after a crash/restart.
-        self._exit_intent_persistence_path = (
-            Path(__file__).resolve().parents[2] / "data" / "exit_intents.json"
-        )
+        # The path can be overridden for tests; the SQLite ExitOrderAttemptStore
+        # remains the authoritative source of truth.
+        _env_path = os.environ.get("MERID_EXIT_INTENT_PERSISTENCE_PATH")
+        if _env_path:
+            self._exit_intent_persistence_path = Path(_env_path)
+        else:
+            self._exit_intent_persistence_path = (
+                Path(__file__).resolve().parents[2] / "data" / "exit_intents.json"
+            )
         self._exit_intent_persistence_path.parent.mkdir(parents=True, exist_ok=True)
         self._load_exit_intent_in_flight()
+        self._rehydrate_exit_intent_in_flight_from_store()
 
         # CRITICAL FIX (2026-08-09): Durable cleanup queue for capacity/risk/monitor cleanup failures.
         # A position is removed from active trading immediately; any failed bookkeeping is retried.
@@ -1430,6 +1443,7 @@ class PositionMonitor:
         client_order_id: Optional[str] = None,
         reason: Optional[str] = None,
         task: Optional[asyncio.Task] = None,
+        attempt_id: Optional[str] = None,
     ) -> None:
         """
         Mark an exit intent as in-flight for a position.
@@ -1442,11 +1456,16 @@ class PositionMonitor:
         The intent is only SUBMITTED after the router/exchange call returns a valid
         response. A timeout does NOT allow a new exit until order/position state is reconciled.
 
+        2026-09-02: When an ExitOrderAttemptStore record exists, this call also
+        transitions it to SUBMITTING.  The durable store is the source of truth;
+        the in-memory registry and JSON file are runtime/debug projections.
+
         Args:
             position_id: Position ID
             client_order_id: Optional client_order_id for order lookup on timeout
             reason: Optional trigger reason for diagnostic logs
             task: Optional asyncio Task so it can be cancelled on timeout/retry
+            attempt_id: Optional durable ExitOrderAttempt attempt_id
         """
         with self._lock:
             existing = self._exit_intent_in_flight.get(position_id, {})
@@ -1456,6 +1475,7 @@ class PositionMonitor:
                 "client_order_id": client_order_id if client_order_id is not None else existing.get("client_order_id"),
                 "reason": reason if reason is not None else existing.get("reason"),
                 "task": task if task is not None else existing.get("task"),
+                "attempt_id": attempt_id if attempt_id is not None else existing.get("attempt_id"),
             }
             # Carry forward any other diagnostic keys (exchange_order_id, etc.)
             for key, value in existing.items():
@@ -1466,11 +1486,19 @@ class PositionMonitor:
                 self._position_to_client_order[position_id] = client_order_id
                 self._recent_exit_submissions[client_order_id] = time.time()
             logger.info(
-                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent EXECUTION_PENDING: position_id=%s client_order_id=%s reason=%s",
+                "[EXIT-INTENT-IN-FLIGHT] Marked exit intent EXECUTION_PENDING: position_id=%s client_order_id=%s reason=%s attempt_id=%s",
                 position_id[:8],
                 client_order_id or updated.get("client_order_id"),
                 reason or updated.get("reason") or "unknown",
+                attempt_id or updated.get("attempt_id") or "none",
             )
+        # Durable lifecycle: if a store record is known, promote it to SUBMITTING.
+        _coid = client_order_id or existing.get("client_order_id")
+        self._transition_exit_attempt(
+            _coid,
+            ExitOrderAttemptState.SUBMITTING.value,
+            reason or "monitor_mark_in_flight",
+        )
         self._save_exit_intent_in_flight()
 
     def _mark_exit_intent_submitted(
@@ -1480,7 +1508,10 @@ class PositionMonitor:
         client_order_id: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> None:
-        """Mark an exit intent as SUBMITTED after the exchange ack/router response."""
+        """Mark an exit intent as SUBMITTED after the exchange ack/router response.
+
+        2026-09-02: Also promotes the durable ExitOrderAttempt to ACKNOWLEDGED.
+        """
         with self._lock:
             flight = self._exit_intent_in_flight.get(position_id)
             if flight is None:
@@ -1500,6 +1531,13 @@ class PositionMonitor:
                 exchange_order_id,
                 reason or "unknown",
             )
+        _coid = client_order_id or (flight.get("client_order_id") if flight else None)
+        self._transition_exit_attempt(
+            _coid,
+            ExitOrderAttemptState.ACKNOWLEDGED.value,
+            reason or "monitor_mark_submitted",
+            exchange_order_id=exchange_order_id,
+        )
         self._save_exit_intent_in_flight()
 
     def _mark_exit_intent_retryable(
@@ -1536,9 +1574,32 @@ class PositionMonitor:
             )
         self._save_exit_intent_in_flight()
 
+    @staticmethod
+    def _terminal_state_from_reason(reason: str) -> str:
+        """Map a reconcile reason to an ExitOrderAttemptState terminal state."""
+        r = (reason or "").lower()
+        if "filled" in r:
+            return ExitOrderAttemptState.FILLED.value
+        if "cancel" in r or "canceled" in r or "cancelled" in r:
+            return ExitOrderAttemptState.CANCELED.value
+        if "rejected" in r or "reject" in r:
+            return ExitOrderAttemptState.REJECTED_EXCHANGE.value
+        if "expired" in r:
+            return ExitOrderAttemptState.EXPIRED_EXCHANGE.value
+        if "exchange_confirmed_flat" in r or "flat" in r:
+            return ExitOrderAttemptState.EXCHANGE_CONFIRMED_FLAT.value
+        if "not_submitted" in r or "not accepted" in r:
+            return ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
+        return ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
+
     def _mark_exit_intent_reconciled(self, position_id: str, reason: str) -> None:
-        """Mark an exit intent as reconciled (terminal). Safe to call idempotently."""
+        """Mark an exit intent as reconciled (terminal). Safe to call idempotently.
+
+        2026-09-02: Also terminalizes the durable ExitOrderAttempt.
+        """
         with self._lock:
+            flight = self._exit_intent_in_flight.get(position_id, {})
+            coid = flight.get("client_order_id") or self._position_to_client_order.get(position_id)
             if position_id in self._exit_intent_in_flight:
                 self._exit_intent_in_flight[position_id]["state"] = "RECONCILED"
                 logger.info(
@@ -1547,6 +1608,11 @@ class PositionMonitor:
                 )
             if position_id in self._position_to_client_order:
                 del self._position_to_client_order[position_id]
+        self._transition_exit_attempt(
+            coid,
+            self._terminal_state_from_reason(reason),
+            reason,
+        )
         self._save_exit_intent_in_flight()
 
     def _get_unresolved_exit_client_order_id(
@@ -1569,7 +1635,12 @@ class PositionMonitor:
     def _mark_exit_intent_submission_unknown(
         self, position_id: str, reason: str
     ) -> None:
-        """Mark an exit intent as SUBMISSION_UNKNOWN (lost ack in flight)."""
+        """Mark an exit intent as SUBMISSION_UNKNOWN (lost ack in flight).
+
+        2026-09-02: Also promotes the durable ExitOrderAttempt to SUBMISSION_UNKNOWN
+        and schedules reconciliation.  This is an operational obligation, not a
+        terminal state.
+        """
         with self._lock:
             flight = self._exit_intent_in_flight.get(position_id)
             if flight is None:
@@ -1582,6 +1653,12 @@ class PositionMonitor:
                 "[EXIT-INTENT-IN-FLIGHT] Marked exit intent SUBMISSION_UNKNOWN: position_id=%s reason=%s",
                 position_id[:8], reason,
             )
+        _coid = flight.get("client_order_id") if flight else None
+        self._transition_exit_attempt(
+            _coid,
+            ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+            reason,
+        )
         self._save_exit_intent_in_flight()
 
     def _is_exit_intent_in_flight(self, position_id: str) -> bool:
@@ -1691,7 +1768,17 @@ class PositionMonitor:
         in-flight lock and allow resubmission.  When ``force`` is True and the
         prior order is not live, the lock is released and a fresh exit attempt
         can be made.
+
+        2026-09-02: This is the active resolver path.  The durable
+        ExitOrderAttempt is transitioned to RESOLVING_ON_EXCHANGE, then to a
+        terminal state once exchange evidence is conclusive.
         """
+        if client_order_id:
+            self._transition_exit_attempt(
+                client_order_id,
+                ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value,
+                "reconcile_started",
+            )
         try:
             # Best-effort: if position is already flat, terminalize.
             with self._lock:
@@ -2003,6 +2090,253 @@ class PositionMonitor:
             )
         except Exception as exc:
             logger.warning("[EXIT-INTENT-PERSISTENCE] failed to load: %s", exc)
+
+    def _rehydrate_exit_intent_in_flight_from_store(self) -> None:
+        """Rehydrate in-flight exit state from the durable attempt store.
+
+        The SQLite-backed ExitOrderAttemptStore is the source of truth.  The
+        legacy JSON file at data/exit_intents.json is treated as a fallback
+        migration source only; editing or deleting it cannot erase a durable
+        record.  Any legacy JSON entry that is not already in the store is
+        migrated into the store with a deterministic client_order_id.
+        """
+        try:
+            store = OrderAttemptStore()
+            nonterminal = store.list_nonterminal_exit_attempts()
+            if nonterminal:
+                logger.info(
+                    "[EXIT-INTENT-REHYDRATE] %d nonterminal exit attempt(s) from durable store",
+                    len(nonterminal),
+                )
+            for record in nonterminal:
+                pid = record.position_key
+                store_state = record.state
+                # Map durable FSM states to the simplified in-flight state machine
+                # that the rest of the monitor expects.
+                if store_state in {
+                    ExitOrderAttemptState.INTENT_PERSISTED.value,
+                    ExitOrderAttemptState.SUBMITTING.value,
+                }:
+                    in_flight_state = "EXECUTION_PENDING"
+                elif store_state in {
+                    ExitOrderAttemptState.ACKNOWLEDGED.value,
+                    ExitOrderAttemptState.ACKNOWLEDGED_LATE.value,
+                    ExitOrderAttemptState.RESTING.value,
+                    ExitOrderAttemptState.PARTIALLY_FILLED.value,
+                }:
+                    in_flight_state = "SUBMITTED"
+                elif store_state in {
+                    ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+                    ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value,
+                }:
+                    in_flight_state = "SUBMISSION_UNKNOWN"
+                elif store_state in {
+                    ExitOrderAttemptState.RETRYABLE_FAILURE.value,
+                }:
+                    in_flight_state = "RETRYABLE_FAILURE"
+                else:
+                    in_flight_state = "RECONCILIATION_REQUIRED"
+                self._exit_intent_in_flight[pid] = {
+                    "state": in_flight_state,
+                    "timestamp": record.created_at,
+                    "client_order_id": record.client_order_id,
+                    "attempt_id": record.attempt_id,
+                    "reason": record.reason,
+                    "reconcile_count": 0,
+                    "last_reconcile_at": 0.0,
+                    "submitted_at": record.updated_at if store_state != ExitOrderAttemptState.INTENT_PERSISTED.value else None,
+                    "exchange_order_id": record.exchange_order_id,
+                }
+                self._position_to_client_order[pid] = record.client_order_id
+                self._recent_exit_submissions[record.client_order_id] = record.updated_at
+
+            # Migrate any legacy JSON-loaded in-flight state that is not in the store.
+            # This is a one-way seed; after migration, the store owns the state.
+            for pid, flight in list(self._exit_intent_in_flight.items()):
+                if self._exit_intent_in_flight[pid].get("attempt_id"):
+                    continue  # already rehydrated from store
+                state = flight.get("state", "EXECUTION_PENDING")
+                if state == "RECONCILED":
+                    continue
+                reason = flight.get("reason") or "unknown"
+                coid = flight.get("client_order_id")
+                if not coid:
+                    # Legacy records may not have a client_order_id.  Derive one
+                    # deterministically from the position_id and reason so restarts
+                    # are stable, then seed the durable store.
+                    coid = derive_exit_client_order_id(pid, reason)
+                    flight["client_order_id"] = coid
+                try:
+                    existing = store.get_exit_attempt_by_client_order_id(coid)
+                    if existing is None:
+                        attempt = store.create_exit_attempt(
+                            exit_intent_id=flight.get("exit_intent_id") or f"legacy_{uuid.uuid4().hex}",
+                            position_key=pid,
+                            ticker=flight.get("ticker", ""),
+                            reason=reason,
+                            client_order_id=coid,
+                            requested_quantity=flight.get("requested_quantity", 0),
+                            requested_limit_cents=flight.get("requested_limit_cents"),
+                            payload={"migrated_from_json": True, "legacy_state": state},
+                        )
+                        self._exit_intent_in_flight[pid]["attempt_id"] = attempt.attempt_id
+                        self._position_to_client_order[pid] = coid
+                        self._recent_exit_submissions[coid] = flight.get("timestamp", time.time())
+                        logger.info(
+                            "[EXIT-INTENT-REHYDRATE] Migrated legacy JSON intent for position=%s to attempt=%s client_order_id=%s",
+                            pid[:8], attempt.attempt_id[:8], coid[:8],
+                        )
+                    else:
+                        self._exit_intent_in_flight[pid]["attempt_id"] = existing.attempt_id
+                except ExitOrderAttemptConflict:
+                    logger.warning(
+                        "[EXIT-INTENT-REHYDRATE] Conflict migrating legacy JSON for position=%s; keeping in-memory state",
+                        pid[:8],
+                    )
+                except Exception as migrate_exc:
+                    logger.warning(
+                        "[EXIT-INTENT-REHYDRATE] Failed to migrate legacy JSON for position=%s: %s",
+                        pid[:8], migrate_exc,
+                    )
+
+            # CRITICAL FIX (2026-09-02): Migrate legacy SUBMISSION_UNKNOWN records
+            # from the identity order_attempts table into the new exit-order attempt
+            # lifecycle.  This is the recovery path for the stuck
+            # client_order_id="exit_ac7038bd..." style records that pre-date the
+            # ExitOrderAttempt FSM.
+            try:
+                for order_record in store.get_unresolved(lookback_seconds=86400 * 30):
+                    if order_record.status not in ("SUBMISSION_UNKNOWN", "ACKNOWLEDGED", "SUBMITTING"):
+                        continue
+                    try:
+                        payload = json.loads(order_record.payload_json or "{}")
+                    except Exception:
+                        payload = {}
+                    if payload.get("type") != "exit_order_attempt":
+                        continue
+                    coid = order_record.client_order_id
+                    pid = payload.get("position_id")
+                    if not coid or not pid:
+                        continue
+                    if store.get_exit_attempt_by_client_order_id(coid):
+                        continue
+                    try:
+                        attempt = store.create_exit_attempt(
+                            exit_intent_id=order_record.intent_id or f"migrated_{order_record.order_attempt_id}",
+                            position_key=pid,
+                            ticker=payload.get("market_id", ""),
+                            reason=payload.get("exit_reason") or "unknown",
+                            client_order_id=coid,
+                            requested_quantity=int(payload.get("count", 0) * 100),
+                            requested_limit_cents=payload.get("price_cents"),
+                            payload={
+                                "migrated_from_order_attempt_id": order_record.order_attempt_id,
+                                "legacy_status": order_record.status,
+                            },
+                        )
+                        # FSM requires INTENT_PERSISTED -> SUBMITTING, then the
+                        # legacy status tells us whether it reached the exchange.
+                        store.transition_exit_attempt(
+                            attempt.attempt_id,
+                            ExitOrderAttemptState.SUBMITTING.value,
+                            actor="position_monitor",
+                            reason="migrated_legacy_submit",
+                        )
+                        if order_record.status == "ACKNOWLEDGED":
+                            store.transition_exit_attempt(
+                                attempt.attempt_id,
+                                ExitOrderAttemptState.ACKNOWLEDGED.value,
+                                actor="position_monitor",
+                                reason="migrated_legacy_acknowledged",
+                            )
+                            in_flight_state = "SUBMITTED"
+                        elif order_record.status == "SUBMISSION_UNKNOWN":
+                            store.transition_exit_attempt(
+                                attempt.attempt_id,
+                                ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+                                actor="position_monitor",
+                                reason="migrated_from_legacy_order_attempt",
+                            )
+                            in_flight_state = "SUBMISSION_UNKNOWN"
+                        else:
+                            in_flight_state = "EXECUTION_PENDING"
+                        self._exit_intent_in_flight[pid] = {
+                            "state": in_flight_state,
+                            "timestamp": attempt.created_at,
+                            "client_order_id": coid,
+                            "attempt_id": attempt.attempt_id,
+                            "reason": payload.get("exit_reason") or "unknown",
+                            "reconcile_count": 0,
+                            "last_reconcile_at": 0.0,
+                            "submitted_at": attempt.updated_at,
+                            "exchange_order_id": None,
+                        }
+                        self._position_to_client_order[pid] = coid
+                        self._recent_exit_submissions[coid] = attempt.updated_at
+                        logger.info(
+                            "[EXIT-INTENT-REHYDRATE] Migrated legacy order_attempt_id=%s for position=%s to attempt=%s client_order_id=%s",
+                            order_record.order_attempt_id[:8] if order_record.order_attempt_id else "",
+                            pid[:8], attempt.attempt_id[:8], coid[:8],
+                        )
+                    except ExitOrderAttemptConflict:
+                        logger.warning(
+                            "[EXIT-INTENT-REHYDRATE] Conflict migrating legacy order attempt client_order_id=%s",
+                            coid[:8],
+                        )
+            except Exception as legacy_exc:
+                logger.warning("[EXIT-INTENT-REHYDRATE] Legacy order attempt migration failed: %s", legacy_exc)
+
+        except Exception as exc:
+            logger.warning("[EXIT-INTENT-REHYDRATE] failed to load from store: %s", exc)
+
+    def _transition_exit_attempt(
+        self,
+        client_order_id: Optional[str],
+        new_state: str,
+        reason: str,
+        exchange_order_id: Optional[str] = None,
+        raw_payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Transition the durable exit attempt for ``client_order_id``.
+
+        Returns the attempt_id if the transition succeeded, or ``None`` if no
+        attempt was found or the transition was rejected.  Actor is always the
+        PositionMonitor for transitions driven by this class.
+        """
+        if not client_order_id:
+            return None
+        try:
+            store = OrderAttemptStore()
+            record = store.get_exit_attempt_by_client_order_id(client_order_id)
+            if record is None:
+                return None
+            updated = store.transition_exit_attempt(
+                attempt_id=record.attempt_id,
+                new_state=new_state,
+                actor="position_monitor",
+                reason=reason,
+                exchange_order_id=exchange_order_id,
+                raw_payload=raw_payload,
+            )
+            if updated:
+                logger.info(
+                    "[EXIT-ATTEMPT-TRANSITION] client_order_id=%s attempt=%s %s -> %s reason=%s",
+                    client_order_id[:8],
+                    updated.attempt_id[:8],
+                    record.state,
+                    updated.state,
+                    reason,
+                )
+                return updated.attempt_id
+            else:
+                logger.warning(
+                    "[EXIT-ATTEMPT-TRANSITION] client_order_id=%s transition to %s rejected (stale version or invalid)",
+                    client_order_id[:8], new_state,
+                )
+                return None
+        except Exception:
+            logger.exception("[EXIT-ATTEMPT-TRANSITION] failed for client_order_id=%s", client_order_id)
+            return None
 
     def _get_position_lock(self, position_id: str) -> threading.Lock:
         """

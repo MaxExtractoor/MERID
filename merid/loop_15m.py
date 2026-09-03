@@ -2451,6 +2451,7 @@ async def _execute_exit_order(
         _clear_in_flight()
         return
     
+    durable_exit_attempt = None
     try:
         # CRITICAL FIX (2026-07-23): Check exit registry first (source of truth)
         # This is more reliable than querying RestingOrderMonitor which may have websocket lag
@@ -3144,6 +3145,63 @@ async def _execute_exit_order(
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
             return
 
+        # 2026-09-02: Create or recover the durable ExitOrderAttempt record.
+        # This is the source of truth for the exit lifecycle; the in-memory
+        # PositionMonitor registry and the JSON file are secondary projections.
+        durable_exit_attempt = None
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import (
+                OrderAttemptStore,
+                ExitOrderAttemptState,
+                ExitOrderAttemptConflict,
+            )
+
+            store = OrderAttemptStore()
+            durable_exit_attempt = store.get_exit_attempt_by_client_order_id(client_order_id)
+            if durable_exit_attempt is not None and OrderAttemptStore.is_terminal_state(durable_exit_attempt.state):
+                # A prior attempt reached a terminal state (e.g. NOT_ACCEPTED_CONFIRMED).
+                # Supersede it so the same client_order_id can be reused for this
+                # new logical exit attempt after a re-arm.
+                superseded = store.transition_exit_attempt(
+                    durable_exit_attempt.attempt_id,
+                    ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL.value,
+                    "superseded_for_rearm",
+                )
+                if superseded:
+                    durable_exit_attempt = None
+            if durable_exit_attempt is None:
+                durable_exit_attempt = store.create_exit_attempt(
+                    exit_intent_id=intent.intent_id,
+                    position_key=position.position_id,
+                    ticker=position.market_id,
+                    reason=exit_reason_str,
+                    client_order_id=client_order_id,
+                    requested_quantity=requested_exit_cc,
+                    requested_limit_cents=int(round(exit_price_cents)),
+                    exchange_order_id=None,
+                    policy_version=int(getattr(position, "exit_policy", {}).get("version", 0) or 0),
+                    basis_version=int(getattr(position, "basis_version", 0) or 0),
+                    payload={
+                        "order_attempt_id": intent.order_attempt_id,
+                        "parent_entry_fill_id": intent.parent_entry_fill_id,
+                        "parentage_status": _parentage_status,
+                    },
+                )
+        except ExitOrderAttemptConflict:
+            logger.warning(
+                "[EXIT-ORDER-ATTEMPT] Active exit attempt already exists for position=%s client_order_id=%s; reusing",
+                position.position_id[:8], client_order_id[:8] if client_order_id else "",
+            )
+            try:
+                from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+                durable_exit_attempt = OrderAttemptStore().get_exit_attempt_by_client_order_id(client_order_id)
+            except Exception:
+                pass
+        except Exception as attempt_err:
+            logger.warning(
+                "[EXIT-ORDER-ATTEMPT] Failed to create durable exit attempt: %s", attempt_err
+            )
+
         # LIFECYCLE-EXIT CANONICAL LOG SCHEMA (machine-parseable, single line)
         logger.info(
             "[LIFECYCLE-EXIT] asset=%s ticker=%s agent_id=%s thesis_side=%s action=%s kalshi_side=%s "
@@ -3171,7 +3229,10 @@ async def _execute_exit_order(
         # order id so the monitor can reconcile a timeout by looking up the order.
         # 2026-08-25: carry the trigger reason so in-flight diagnostics are not reset to "unknown".
         self._position_monitor._mark_exit_intent_in_flight(
-            position.position_id, client_order_id=intent.client_order_id, reason=exit_reason_str
+            position.position_id,
+            client_order_id=intent.client_order_id,
+            reason=exit_reason_str,
+            attempt_id=durable_exit_attempt.attempt_id if durable_exit_attempt else None,
         )
 
         # CRITICAL FIX (2026-07-23): Register exit submission in cache before routing
@@ -3263,11 +3324,25 @@ async def _execute_exit_order(
                         intent.client_order_id,
                         _current_resubmit + 1,
                     )
+                    if durable_exit_attempt:
+                        try:
+                            from merid.event_venues.kalshi.order_attempt_store import (
+                                OrderAttemptStore,
+                                ExitOrderAttemptState,
+                            )
+                            OrderAttemptStore().transition_exit_attempt(
+                                durable_exit_attempt.attempt_id,
+                                ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value,
+                                "not_submitted_resubmit_limit_exhausted",
+                            )
+                        except Exception:
+                            pass
                     if self._position_monitor:
-                        self._position_monitor._mark_exit_intent_submission_unknown(
+                        self._position_monitor._mark_exit_intent_reconciled(
                             position.position_id,
                             "not_submitted_resubmit_limit_exhausted",
                         )
+                    self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
                     return
                 _current_resubmit += 1
                 logger.warning(
@@ -3307,11 +3382,23 @@ async def _execute_exit_order(
                 _result_status,
                 _result_reason,
             )
+            if durable_exit_attempt:
+                try:
+                    from merid.event_venues.kalshi.order_attempt_store import (
+                        OrderAttemptStore,
+                        ExitOrderAttemptState,
+                    )
+                    OrderAttemptStore().transition_exit_attempt(
+                        durable_exit_attempt.attempt_id,
+                        ExitOrderAttemptState.REJECTED_EXCHANGE.value,
+                        f"route_status={_result_status} reason={_result_reason}",
+                    )
+                except Exception:
+                    pass
             if self._position_monitor:
-                self._position_monitor._mark_exit_intent_retryable(
+                self._position_monitor._mark_exit_intent_reconciled(
                     position.position_id,
-                    "RouteNoOrder",
-                    f"status={_result_status} reason={_result_reason}",
+                    f"rejected:{_result_status} reason={_result_reason}",
                 )
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
             return
@@ -3477,6 +3564,25 @@ async def _execute_exit_order(
                 exit_price_cents,
             )
             self._position_monitor.remove_position(position.position_id)
+            if durable_exit_attempt:
+                try:
+                    from merid.event_venues.kalshi.order_attempt_store import (
+                        OrderAttemptStore,
+                        ExitOrderAttemptState,
+                    )
+                    terminal_state = (
+                        ExitOrderAttemptState.FILLED.value
+                        if result and getattr(result, "status", "") == "filled_live"
+                        else ExitOrderAttemptState.EXCHANGE_CONFIRMED_FLAT.value
+                    )
+                    OrderAttemptStore().transition_exit_attempt(
+                        durable_exit_attempt.attempt_id,
+                        terminal_state,
+                        finalizer_reason,
+                        exchange_order_id=getattr(result, "order_id", None),
+                    )
+                except Exception:
+                    pass
             logger.critical(
                 "[EXIT-ORDER-CONFIRMED] position=%s market=%s status=%s order_id=%s "
                 "- position removed after confirmed full execution",
@@ -3508,6 +3614,25 @@ async def _execute_exit_order(
             )
             position.size = new_size
             position.mark_reconciling(finalizer_reason)
+            if durable_exit_attempt:
+                try:
+                    from merid.event_venues.kalshi.order_attempt_store import (
+                        OrderAttemptStore,
+                        ExitOrderAttemptState,
+                    )
+                    partial_state = (
+                        ExitOrderAttemptState.RESTING.value
+                        if result and getattr(result, "is_resting", False)
+                        else ExitOrderAttemptState.PARTIALLY_FILLED.value
+                    )
+                    OrderAttemptStore().transition_exit_attempt(
+                        durable_exit_attempt.attempt_id,
+                        partial_state,
+                        finalizer_reason,
+                        exchange_order_id=getattr(result, "order_id", None),
+                    )
+                except Exception:
+                    pass
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close=None)
         else:
             logger.error(
@@ -3519,12 +3644,50 @@ async def _execute_exit_order(
             )
             # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
             position.mark_reconciling(finalizer_reason)
+            if durable_exit_attempt and result:
+                try:
+                    from merid.event_venues.kalshi.order_attempt_store import (
+                        OrderAttemptStore,
+                        ExitOrderAttemptState,
+                    )
+                    _result_status = getattr(result, "status", "")
+                    if _result_status == "unfilled_ioc":
+                        _terminal = ExitOrderAttemptState.TERMINAL_UNFILLED.value
+                    elif _result_status == "canceled":
+                        _terminal = ExitOrderAttemptState.CANCELED.value
+                    elif _result_status == "rejected":
+                        _terminal = ExitOrderAttemptState.REJECTED_EXCHANGE.value
+                    elif _result_status == "expired":
+                        _terminal = ExitOrderAttemptState.EXPIRED_EXCHANGE.value
+                    else:
+                        _terminal = ExitOrderAttemptState.TERMINAL_UNFILLED.value
+                    OrderAttemptStore().transition_exit_attempt(
+                        durable_exit_attempt.attempt_id,
+                        _terminal,
+                        f"finalizer:{finalizer_reason} status={_result_status}",
+                        exchange_order_id=getattr(result, "order_id", None),
+                    )
+                except Exception:
+                    pass
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
 
     except Exception as e:
         logger.error("[EXIT-ORDER] Failed to execute exit order: %s", e, exc_info=True)
         error_type = type(e).__name__
         is_code_failure = isinstance(e, (ImportError, ModuleNotFoundError, SyntaxError, NameError, AttributeError))
+        if durable_exit_attempt:
+            try:
+                from merid.event_venues.kalshi.order_attempt_store import (
+                    OrderAttemptStore,
+                    ExitOrderAttemptState,
+                )
+                OrderAttemptStore().transition_exit_attempt(
+                    durable_exit_attempt.attempt_id,
+                    ExitOrderAttemptState.REJECTED_EXCHANGE.value,
+                    f"exception:{error_type} error={e}",
+                )
+            except Exception:
+                pass
         if is_code_failure:
             # CRITICAL FIX (2026-08-23): Deployment/code failures must NOT be treated as
             # market rejections or retry attempts. Record reconciliation required and
