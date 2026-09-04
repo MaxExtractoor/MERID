@@ -211,7 +211,10 @@ class TestAutoResumeUnmatched:
         )
         assert breaker.halted
 
-    def test_auto_resume_succeeds_when_all_safe(self):
+    def test_auto_resume_does_not_clear_breaker(self):
+        # 2026-09-03: auto-resolution of an unmatched fill is not an operator
+        # release.  The breaker must remain halted so admin_release() is the
+        # only path that clears a halt.
         breaker = get_trading_circuit_breaker()
         breaker.halt(
             "unmatched_live_exchange_fill",
@@ -224,7 +227,7 @@ class TestAutoResumeUnmatched:
             fill_state={"found": True, "resolved": True, "unmatched": False, "intent_id": "intent-1"},
             recent_unmatched_count=0,
         )
-        assert not breaker.halted
+        assert breaker.halted, "auto-resume must not clear the circuit breaker"
 
 
 class TestOrderIdentityValidation:

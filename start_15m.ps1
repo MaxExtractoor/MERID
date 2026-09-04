@@ -115,6 +115,17 @@ if (Test-Path $EnvFile) {
             $value = $matches[2].Trim()
             # Skip empty values and comments
             if ($name -and $value -and !$name.StartsWith('#')) {
+                # 2026-09-04: respect process environment for the live emergency
+                # tokens.  This lets the operator inject real tokens from a
+                # secret store (e.g. Devin Cloud, Windows Credential, 1Password)
+                # without placing them in a .env file.  The fail-closed token
+                # preflight below still runs.
+                if ($name -in @("MERID_MANUAL_EMERGENCY_TOKEN", "MERID_BREAKER_RELEASE_TOKEN")) {
+                    $existing = [Environment]::GetEnvironmentVariable($name, "Process")
+                    if ($existing -and $existing -ne "SET_FROM_SECRET_STORE") {
+                        continue
+                    }
+                }
                 Set-Item -Path "env:$name" -Value $value
             }
         }

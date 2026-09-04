@@ -6102,7 +6102,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                                 pos_price = getattr(pos_obj, 'avg_price_cents', None)
                                 if pos_price is None or pos_price == 0:
                                     logger.warning(
-                                        "[SIDE-AWARE-CHECK] Skipping corrupted position: %s (contracts=%d, price=%s)",
+                                        "[SIDE-AWARE-CHECK] Skipping corrupted position: %s (contracts=%.2f, price=%s)",
                                         pos_ticker, pos_obj.contracts, pos_price
                                     )
                                     continue
@@ -6122,7 +6122,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                                             # SAME SIDE - Block duplicate same-side position
                                             logger.error(
                                                 "[SIDE-AWARE-CHECK] REJECTING: asset=%s window=%s has same-side position=%s "
-                                                "(existing_thesis=%s new_thesis=%s contracts=%d) - blocking duplicate same-side order",
+                                                "(existing_thesis=%s new_thesis=%s contracts=%.2f) - blocking duplicate same-side order",
                                                 asset, window_id, pos_ticker, existing_thesis_side, new_thesis_side, pos_obj.contracts
                                             )
                                             _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "same_side_position_exists")
@@ -6144,7 +6144,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                                             pos_ticker
                                         )
                                         logger.error(
-                                            "[ASSET-WINDOW-CHECK] REJECTING: asset=%s window=%s already has position=%s (contracts=%d) - blocking duplicate order",
+                                            "[ASSET-WINDOW-CHECK] REJECTING: asset=%s window=%s already has position=%s (contracts=%.2f) - blocking duplicate order",
                                             asset, window_id, pos_ticker, pos_obj.contracts
                                         )
                                         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "asset_window_position_exists")
@@ -10090,7 +10090,7 @@ async def _apply_order_result_to_canonical_state(
                 action=canonical_action,
                 is_exit=is_exit,
                 quantity_cc=quantity_cc,
-                canonicalization_state="TRUSTED_PAPER_V1",
+                canonicalization_state=canonicalization_state,
             )
     except Exception as e:
         logger.warning("[PAPER-FILL-CANONICAL-APPLY] Failed to apply fill to ledger/cache: %s", e)

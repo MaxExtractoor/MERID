@@ -150,7 +150,7 @@ class TestFractionalPositionMath:
         pos = cache.get_position("KXETH15M-TEST")
         assert pos is not None
         assert pos.quantity_cc == 49
-        assert pos.contracts == 0  # display floor
+        assert pos.contracts == Decimal("0.49")
         assert pos._yes_exposure() == -49
 
     @pytest.mark.asyncio

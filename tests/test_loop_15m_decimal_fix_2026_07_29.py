@@ -146,9 +146,9 @@ class TestLoop15mSourceCodeDecimalFix:
         with open("c:/Dev/MERID/merid/loop_15m.py", "r", encoding="utf-8") as f:
             source = f.read()
         
-        # Check for the fix pattern in notional calculation
-        assert "Decimal(str((position.contracts * position.avg_price_cents) / 100.0))" in source, \
-            "loop_15m.py must use Decimal for notional calculation from contracts and price"
+        # Check for the exact Decimal centi-contract notional calculation.
+        assert "Decimal(position.quantity_cc) * Decimal(position.avg_price_cents) / Decimal(\"10000\")" in source, \
+            "loop_15m.py must use Decimal for notional calculation from quantity_cc and price"
 
     def test_loop_15m_uses_decimal_for_position_tracking(self):
         """Test that loop_15m.py uses Decimal for position tracking after fill."""

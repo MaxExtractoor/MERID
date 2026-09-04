@@ -483,6 +483,12 @@ def validate_production_startup() -> None:
     if os.getenv("MERID_ALLOW_CT_SCRIPT_BYPASS", "").strip().lower() in ("1", "true", "yes"):
         forbidden.append("MERID_ALLOW_CT_SCRIPT_BYPASS=true")
 
+    # Disabled shared risk guard must never be silently honored in production.
+    # (MERID_DISABLE_CRYPTO15M_GATE is intentionally set to 1 for the lean 15m
+    # stack because the crypto15m allocator is archived; order_gate.py honors it.)
+    if os.getenv("MERID_DISABLE_SHARED_RISK_GUARD", "").strip().lower() in ("1", "true", "yes"):
+        forbidden.append("MERID_DISABLE_SHARED_RISK_GUARD=true")
+
     # Firewall enforcement and exit parentage are required unless an explicit
     # canary profile is documented. These must not be silent defaults.
     if os.getenv("MERID_EXIT_FIREWALL_OBSERVE_ONLY", "").strip().lower() in ("1", "true", "yes"):
@@ -1329,6 +1335,17 @@ def validate_hybrid_signal_audit() -> None:
             os.getenv("MERID_HYBRID_DISABLE_ALL_DELTAS", ""),
         )
         return
+
+    # FVG is an unvalidated hybrid delta.  Live hybrid re-enablement must not
+    # combine it with other hybrid signals until a dedicated FVG audit passes.
+    fvg_enabled = os.getenv("MERID_ENABLE_FVG", "").strip().lower() in ("1", "true", "yes")
+    if fvg_enabled:
+        raise StartupValidationError(
+            "CRITICAL SAFETY VIOLATION: MERID_ENABLE_FVG=1 with hybrid deltas enabled "
+            "in live trading. FVG signals are not validated out-of-sample and must be "
+            "disabled per AGENTS.md 2026-08-28. Set MERID_ENABLE_FVG=0 or use a "
+            "Bachelier-only runtime."
+        )
 
     # Live trading with hybrid signals: require a passing audit artifact.
     audit_path = Path(

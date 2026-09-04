@@ -471,10 +471,10 @@ class CachedPosition:
     """
     market_id: str
     agent_id: str  # Agent identifier for composite key (market_id, agent_id)
-    contracts: int
-    side: str  # "yes" or "no" - derived from thesis_side, may be refreshed from REST
-    thesis_side: str  # "yes" or "no" - immutable strategy thesis set from entry intent
-    avg_price_cents: Optional[int]  # None = unknown/missing, 0 = invalid (real prices are 10-75c)
+    contracts: Decimal = Decimal("0")  # Display contracts (fractional aware)
+    side: str = "yes"  # "yes" or "no" - derived from thesis_side, may be refreshed from REST
+    thesis_side: str = "yes"  # "yes" or "no" - immutable strategy thesis set from entry intent
+    avg_price_cents: Optional[int] = None  # None = unknown/missing, 0 = invalid (real prices are 10-75c)
     realized_pnl_usd: Decimal = Decimal("0")
     # Canonical exposure as confirmed by fills / Kalshi positions.
     outcome_side: str = ""  # canonical outcome the position is long (yes/no); from fills if available
@@ -577,10 +577,12 @@ class CachedPosition:
     exchange_index: Optional[int] = None  # Kalshi exchange shard index (e.g. 2 for crypto 15m)
 
     def __post_init__(self):
-        """Initialize canonical quantity_cc from contracts if not already set."""
+        """Initialize canonical quantity_cc and display contracts consistently."""
         if self.quantity_cc == 0 and self.contracts:
-            self.quantity_cc = int(self.contracts * 100)
-            self.contracts = int(self.contracts)
+            self.quantity_cc = int(Decimal(str(self.contracts)) * Decimal("100"))
+        # Display contracts are always the exact fractional form of quantity_cc.
+        if self.quantity_cc:
+            self.contracts = Decimal(self.quantity_cc) / Decimal("100")
 
         # CRITICAL FIX (2026-09-02): CachedPosition is an intermediate durable
         # record; invalid TP/SL values must not be persisted to disk or passed
@@ -877,7 +879,7 @@ class CachedPosition:
                     self.thesis_side = new_side
 
             self.quantity_cc = int(new_quantity_cc)
-            self.contracts = int(new_quantity_cc) // 100
+            self.contracts = Decimal(new_quantity_cc) / Decimal("100")
             self.entry_price_state = "known"
 
             if self.quantity_cc < pre_quantity_cc:
@@ -929,7 +931,7 @@ class CachedPosition:
                     self.market_id, self.entry_price_state,
                 )
                 self.quantity_cc = int(new_quantity_cc)
-                self.contracts = int(new_quantity_cc) // 100
+                self.contracts = Decimal(new_quantity_cc) / Decimal("100")
             else:
                 # Long position PnL: exit price - entry price in own-side cents.
                 pnl_per = adjusted_price_cents - self.avg_price_cents
@@ -937,7 +939,7 @@ class CachedPosition:
                 _realized_pnl_before = self.realized_pnl_usd
                 self.realized_pnl_usd += Decimal(pnl_cents) / Decimal("100") - Decimal(fee_cents) / Decimal("100")
                 self.quantity_cc = int(new_quantity_cc)
-                self.contracts = int(new_quantity_cc) // 100
+                self.contracts = Decimal(new_quantity_cc) / Decimal("100")
 
                 # CRITICAL FIX (2026-08-27): Feed realized PnL to the bankroll drawdown
                 # breaker once the position is fully settled. Exits are the canonical
@@ -2057,6 +2059,29 @@ class KalshiPositionCache:
                 )
                 return
 
+            # 2026-09-03: Fail-closed guard against live fills carrying a paper trust
+            # state.  A live fill must be tagged TRUSTED_LIVE_V1 (or the backfilled
+            # equivalent); anything else means a mis-tagged producer or a live/paper
+            # wire mix-up and must not mutate live position state.
+            if canonicalization_state == "TRUSTED_PAPER_V1":
+                if self._fills_ledger:
+                    try:
+                        _live_check = self._fills_ledger.get_fill_by_id(fill_id) if fill_id else None
+                        if _live_check and _live_check.is_live:
+                            self.require_rest_reconciliation(
+                                market_id,
+                                reason="paper_state_for_live_fill",
+                            )
+                            logger.warning(
+                                "[POSITION-CACHE-LIVE-PAPER-STATE] fill_id=%s market=%s - "
+                                "live fill has TRUSTED_PAPER_V1 canonicalization state; "
+                                "skipping live position application and requiring REST reconciliation.",
+                                fill_id, market_id,
+                            )
+                            return
+                    except Exception:
+                        pass
+
             # CRITICAL 2026-08-09: Durable, exactly-once idempotency gate.
             # We check both the in-memory set and the canonical fills_ledger. The
             # ledger survives restarts, so replayed fills cannot re-create or re-close
@@ -2272,8 +2297,8 @@ class KalshiPositionCache:
                 if agent_id and not is_exit:
                     try:
                         envelope = get_kalshi_crypto_15m_risk_envelope()
-                        # Use canonical quantity_cc to avoid Decimal/float TypeError and support fractional fills.
-                        order_notional_usd = (quantity_cc * price_cents) / 10000.0
+                        # Use canonical quantity_cc and Decimal arithmetic to avoid float/lossy rounding.
+                        order_notional_usd = Decimal(quantity_cc) * Decimal(price_cents) / Decimal("10000")
 
                         # CRITICAL FIX (2026-07-08): Release resting exposure and record execution exposure
                         # Resting exposure was recorded at placement time (order_gate, top3 gate)
@@ -2320,7 +2345,7 @@ class KalshiPositionCache:
                     try:
                         envelope = get_kalshi_crypto_15m_risk_envelope()
                         # Calculate notional to release based on canonical centi-contracts closed.
-                        position_notional_usd = (quantity_cc * price_cents) / 10000.0
+                        position_notional_usd = Decimal(quantity_cc) * Decimal(price_cents) / Decimal("10000")
                         # CRITICAL FIX 2026-07-08: Extract asset for per-asset exposure release
                         from config.kalshi_crypto_config import kalshi_ticker_to_asset
                         asset = kalshi_ticker_to_asset(market_id) if market_id else None
@@ -2334,71 +2359,11 @@ class KalshiPositionCache:
                             agent_id, position_notional_usd, market_id, fill_id or "N/A"
                         )
 
-                        # CRITICAL FIX: 2026-07-09 - Release global slot allocator slot on position closure
-                        # This allows re-entry within the same window when positions close early
-                        try:
-                            from merid.risk.global_slot_allocator import get_global_slot_allocator
-                            slot_allocator = get_global_slot_allocator()
-
-                            # CRITICAL FIX: Log slot allocator state before release for diagnostics
-                            slot_summary = slot_allocator.get_summary()
-                            logger.info(
-                                "[POSITION-CACHE] Slot allocator state before release: total_exposure=$%.2f slot_count=%d asset=%s agent=%s market=%s",
-                                slot_summary["total_exposure_usd"], slot_summary["slot_count"], asset, agent_id, market_id
-                            )
-
-                            # Release slot by asset (more precise than agent_id)
-                            # Since exit orders bypass allocation, we release by asset to free up exposure
-                            released_count = slot_allocator.release_by_asset(asset) if asset else 0
-                            if released_count > 0:
-                                logger.info(
-                                    "[POSITION-CACHE] Released %d slot(s) from global allocator for asset=%s on sell fill",
-                                    released_count, asset
-                                )
-                            else:
-                                # CRITICAL FIX (2026-07-15): Log why asset release failed before using fallback
-                                # This helps diagnose slot allocation issues
-                                logger.warning(
-                                    "[POSITION-CACHE] Asset release returned 0 slots for asset=%s agent=%s market=%s. "
-                                    "This may indicate: 1) No slot was allocated for this position, 2) Asset mismatch, "
-                                    "3) Slot already released. Using agent_id fallback as last resort.",
-                                    asset, agent_id, market_id
-                                )
-                                # Fallback: try releasing by agent_id if asset release didn't work
-                                # WARNING: If agent has multiple positions across assets, this may release wrong slots
-                                released_count = slot_allocator.release_by_agent(agent_id)
-                                if released_count > 0:
-                                    logger.warning(
-                                        "[POSITION-CACHE] Released %d slot(s) from global allocator for agent=%s on sell fill (fallback - may be incorrect if agent has multiple positions)",
-                                        released_count, agent_id
-                                    )
-                                else:
-                                    logger.warning(
-                                        "[POSITION-CACHE] Agent release also returned 0 slots for agent=%s. "
-                                        "Slot may have already been released or never allocated.",
-                                        agent_id
-                                    )
-
-                            # CRITICAL FIX: Log slot allocator state after release for verification
-                            slot_summary_after = slot_allocator.get_summary()
-                            logger.info(
-                                "[POSITION-CACHE] Slot allocator state after release: total_exposure=$%.2f slot_count=%d released=%d",
-                                slot_summary_after["total_exposure_usd"], slot_summary_after["slot_count"], released_count
-                            )
-
-                            # 2026-07-13: Record position close in GlobalAllocator for per-asset tracking
-                            try:
-                                from merid.risk.profiles.global_allocator import get_global_allocator
-                                allocator = get_global_allocator()
-                                if allocator and asset:
-                                    allocator.record_position_closed(asset)
-                            except Exception as ga_exc:
-                                logger.debug("[POSITION-CACHE] Failed to record position close in GlobalAllocator: %s", ga_exc)
-                        except Exception as slot_err:
-                            logger.warning(
-                                "[POSITION-CACHE] Failed to release slot from global allocator: %s",
-                                slot_err
-                            )
+                        # 2026-09-03: Slot/GlobalAllocator release is deferred until
+                        # position.apply_fill() confirms the position is fully closed
+                        # (quantity_cc == 0).  Releasing the slot on any sell fill would
+                        # free the per-asset budget while a partial position remains,
+                        # allowing a new entry to over-allocate.
                     except RuntimeError as e:
                         # Bankroll not ready - log warning but don't crash
                         logger.warning(
@@ -2622,7 +2587,7 @@ class KalshiPositionCache:
                             # If position already exists and has contracts, reject entry fill to prevent >1 contract
                             if existing_position.contracts > 0 and os.getenv("MERID_DISABLE_CONTRACT_LIMIT", "false").lower() not in ("true", "1", "yes"):
                                 logger.critical(
-                                    "[POSITION-CACHE-ENTRY-REJECT] market=%s existing_position_contracts=%d fill_contracts=%.2f - "
+                                    "[POSITION-CACHE-ENTRY-REJECT] market=%s existing_position_contracts=%.2f fill_contracts=%.2f - "
                                     "REJECTING entry fill to prevent >1 contract per position violation. "
                                     "This violates the $1 allocation rule limit. Position already exists.",
                                     market_id, existing_position.contracts, quantity_cc / 100.0
@@ -2650,10 +2615,11 @@ class KalshiPositionCache:
                             record_count = getattr(fill_record, 'count_fp', None) or contracts
                             if record_side and record_action and record_side.lower() in ("yes", "no"):
                                 try:
-                                    record_count_int = int(float(record_count))
+                                    # yes_delta expects centi-contracts, not display contracts.
+                                    record_count_cc = int(Decimal(str(record_count)) * Decimal("100"))
                                 except Exception:
-                                    record_count_int = contracts
-                                canonical_intent_yes = yes_delta(record_action, record_side, record_count_int)
+                                    record_count_cc = quantity_cc
+                                canonical_intent_yes = yes_delta(record_action, record_side, record_count_cc)
                                 canonical_intent_side, _ = from_signed_yes_exposure(canonical_intent_yes)
                                 if canonical_intent_side.lower() != thesis_side_from_intent.lower():
                                     logger.critical(
@@ -3385,13 +3351,14 @@ class KalshiPositionCache:
                             # Record close with category="crypto" and asset for notional tracking
                             risk_mgr.record_close(
                                 category="crypto",
-                                contracts=pre_contracts,  # Use pre-fill contracts (the amount being closed)
+                                contracts=pre_contracts,  # Display/legacy contract count
                                 price_cents=price_cents,
                                 asset=asset.upper(),  # CRITICAL: Pass asset for per-asset notional tracking
+                                quantity_cc=pre_quantity_cc,  # Canonical centi-contract close size
                             )
                             logger.info(
-                                "[POSITION-CACHE] Recorded position close in risk manager: asset=%s category=crypto contracts=%d price=%dc",
-                                asset.upper(), pre_contracts, price_cents
+                                "[POSITION-CACHE] Recorded position close in risk manager: asset=%s category=crypto contracts=%.2f price=%dc",
+                                asset.upper(), pre_quantity_cc / 100.0, price_cents
                             )
                     except Exception as risk_err:
                         logger.warning("[POSITION-CACHE] Failed to record position close in risk manager: %s", risk_err)
@@ -3407,7 +3374,7 @@ class KalshiPositionCache:
                             if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
                                 # Derive agent_id from asset
                                 agent_id = f"{asset.upper()}_15M"
-                                position_notional_usd = (pre_quantity_cc * price_cents) / 10000.0
+                                position_notional_usd = Decimal(pre_quantity_cc) * Decimal(price_cents) / Decimal("10000")
                                 envelope.record_position_closure(
                                     agent_id=agent_id,
                                     position_notional_usd=position_notional_usd,
@@ -3419,6 +3386,32 @@ class KalshiPositionCache:
                                 )
                     except Exception as window_err:
                         logger.warning("[POSITION-CACHE] Failed to record window exposure reduction: %s", window_err)
+
+                    # 2026-09-03: Release the GlobalSlotAllocator slot only when the
+                    # position is fully closed, and release the specific ticker slot
+                    # rather than all slots for the asset.  Partial exits must not free
+                    # the slot budget, otherwise a new entry could over-allocate.
+                    try:
+                        from merid.risk.global_slot_allocator import get_global_slot_allocator
+                        from merid.risk.profiles.global_allocator import get_global_allocator
+                        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+
+                        slot_allocator = get_global_slot_allocator()
+                        _asset = kalshi_ticker_to_asset(market_id)
+                        if slot_allocator and slot_allocator.release_slot_by_ticker(market_id):
+                            logger.info(
+                                "[POSITION-CACHE] Released slot for fully closed position: market=%s",
+                                market_id,
+                            )
+                        if _asset:
+                            _ga = get_global_allocator()
+                            if _ga:
+                                _ga.record_position_closed(_asset)
+                    except Exception as slot_exc:
+                        logger.warning(
+                            "[POSITION-CACHE] Failed to release slot/GlobalAllocator for closed position %s: %s",
+                            market_id, slot_exc,
+                        )
 
                     # SELL-SIDE FIX: Release contract lease when position is fully closed
                     # This ensures the lease is freed for future orders and prevents
@@ -3489,7 +3482,7 @@ class KalshiPositionCache:
                         await self._cancel_brackets(position)
                         await self._submit_resting_bracket(position)
                         logger.info(
-                            "[BRACKET-RESIZE] %s: resized brackets to %d contracts",
+                            "[BRACKET-RESIZE] %s: resized brackets to %.2f contracts",
                             market_id, position.contracts,
                         )
                     except Exception as resize_exc:
@@ -3525,28 +3518,29 @@ class KalshiPositionCache:
                         for agent in grid._agents:
                             if agent.config.name.startswith(asset_upper):
                                 # Calculate PnL and trade risk
-                                pnl_usd = 0.0
-                                trade_risk_usd = 0.0
+                                pnl_usd = Decimal("0")
+                                trade_risk_usd = Decimal("0")
 
                                 if position is None:
                                     # New position: calculate trade risk as contracts * price
-                                    trade_risk_usd = (quantity_cc * price_cents) / 10000.0
-                                elif position.contracts == 0:
+                                    trade_risk_usd = Decimal(quantity_cc) * Decimal(price_cents) / Decimal("10000")
+                                elif position.quantity_cc == 0:
                                     # Position closed: calculate realized PnL
                                     # For YES: pnl = (exit_price - entry_price) * contracts
                                     # For NO: pnl = (entry_price - exit_price) * contracts
                                         # Long position PnL: exit price - entry price in own-side cents.
                                     if position.avg_price_cents is not None:
                                         pnl_cents = price_cents - position.avg_price_cents
-                                        pnl_usd = (pnl_cents * pre_quantity_cc) / 10000.0
+                                        pnl_usd = Decimal(pnl_cents) * Decimal(pre_quantity_cc) / Decimal("10000")
                                     else:
-                                        pnl_usd = 0.0
+                                        pnl_usd = Decimal("0")
 
-                                # Call update_cooldown_on_fill with PnL and trade risk
+                                # Call update_cooldown_on_fill with PnL and trade risk.
+                                # agent_grid_15m still expects float, so cast at the boundary.
                                 agent.update_cooldown_on_fill(
                                     asset=asset_upper,
-                                    pnl_usd=pnl_usd,
-                                    trade_risk_usd=trade_risk_usd
+                                    pnl_usd=float(pnl_usd),
+                                    trade_risk_usd=float(trade_risk_usd)
                                 )
                                 logger.info(
                                     "[AGENT-GRID-SESSION] Updated session tracking: asset=%s pnl=%.2f trade_risk=%.2f",
@@ -3772,7 +3766,7 @@ class KalshiPositionCache:
             # Log details for each invalid position
             for pos in invalid_positions:
                 logger.warning(
-                    "[POSITION-CACHE-INVALID-POSITION] market=%s contracts=%d avg_price=%s side=%s thesis_side=%s",
+                    "[POSITION-CACHE-INVALID-POSITION] market=%s contracts=%.2f avg_price=%s side=%s thesis_side=%s",
                     pos['market_id'], pos['contracts'], pos['avg_price_cents'], pos['side'], pos['thesis_side']
                 )
 
@@ -3811,7 +3805,7 @@ class KalshiPositionCache:
         if market_id in self._positions:
             position = self._positions[market_id]
             logger.warning(
-                "[POSITION-CACHE] Force deleting phantom position: market=%s contracts=%d avg_price=%s",
+                "[POSITION-CACHE] Force deleting phantom position: market=%s contracts=%.2f avg_price=%s",
                 market_id, position.contracts, position.avg_price_cents
             )
             del self._positions[market_id]
@@ -3882,7 +3876,7 @@ class KalshiPositionCache:
                     if cached_pos.contracts > 0:
                         # Phantom position detected - delete from cache
                         logger.warning(
-                            "[POSITION-CACHE-AUTO-FIX] Phantom position detected for %s: cache shows %d contracts but fills ledger shows 0. DELETING from cache.",
+                            "[POSITION-CACHE-AUTO-FIX] Phantom position detected for %s: cache shows %.2f contracts but fills ledger shows 0. DELETING from cache.",
                             market_id, cached_pos.contracts
                         )
                         del self._positions[market_id]
@@ -4773,7 +4767,7 @@ class KalshiPositionCache:
                 )
                 for market_id, cached_pos in existing_positions.items():
                     logger.info(
-                        "[REST-SYNC-BEFORE-POSITION] market=%s thesis_side=%s contracts=%d",
+                        "[REST-SYNC-BEFORE-POSITION] market=%s thesis_side=%s contracts=%.2f",
                         market_id, cached_pos.thesis_side, cached_pos.contracts
                     )
 
@@ -5421,7 +5415,7 @@ class KalshiPositionCache:
                 )
                 for market_id, cached_pos in self._positions.items():
                     logger.info(
-                        "[REST-SYNC-AFTER-POSITION] market=%s thesis_side=%s contracts=%d",
+                        "[REST-SYNC-AFTER-POSITION] market=%s thesis_side=%s contracts=%.2f",
                         market_id, cached_pos.thesis_side, cached_pos.contracts
                     )
 
@@ -5656,7 +5650,7 @@ class KalshiPositionCache:
                             monitor.upsert_position(monitor_position, caller="rest_sync")
                             logger.info(
                                 "[POSITION-MONITOR-REST-SYNC] Upserted REST-synced position to monitor: "
-                                "market=%s side=%s size=%d TP=%s SL=%s risk_state=%s",
+                                "market=%s side=%s size=%.2f TP=%s SL=%s risk_state=%s",
                                 market_id, cached_pos.side, cached_pos.contracts,
                                 f"{tp_price}c" if tp_price is not None else "none",
                                 f"{sl_price}c" if sl_price is not None else "none",
@@ -5740,7 +5734,7 @@ class KalshiPositionCache:
         for asset in assets:
             exposure = self.get_asset_exposure(asset)
             logger.info(
-                "[POSITION-CACHE-HEALTH] asset=%s contracts=%d notional=%.2f unrealized_pnl=%.2f position_count=%d",
+                "[POSITION-CACHE-HEALTH] asset=%s contracts=%.2f notional=%.2f unrealized_pnl=%.2f position_count=%d",
                 asset,
                 exposure["total_contracts"],
                 exposure["total_notional_usd"],
@@ -6024,7 +6018,7 @@ class KalshiPositionCache:
                     )
                     rebuilt_count += 1
                     logger.info(
-                        "[POSITION-CACHE-REBUILD] Rebuilt position: market=%s contracts=%d avg_price=%dc thesis_side=%s",
+                        "[POSITION-CACHE-REBUILD] Rebuilt position: market=%s contracts=%.2f avg_price=%dc thesis_side=%s",
                         market_id, net_contracts, avg_price_cents or 0, thesis_side or "unknown"
                     )
 
@@ -6169,7 +6163,7 @@ class KalshiPositionCache:
 
         cached_pos = self._positions.pop(market_id)
         logger.warning(
-            "[POSITION-CACHE-REMOVE] Removed stale/phantom position: market=%s contracts=%d avg_price=%s",
+            "[POSITION-CACHE-REMOVE] Removed stale/phantom position: market=%s contracts=%.2f avg_price=%s",
             market_id, cached_pos.contracts, cached_pos.avg_price_cents
         )
 
@@ -6730,18 +6724,25 @@ class KalshiPositionCache:
         # Bracket exits sell the same side we are long (yes -> SELL_YES, no -> SELL_NO).
         kalshi_side = to_kalshi_side(position.side, "sell")
 
+        # 2026-09-04: Use canonical quantity_cc for exact fractional position closes.
+        # count is the display whole-contract count (at least 1); count_fp is the
+        # exact fractional size; pre_position_fp is the canonical centi-contract size.
+        display_count = max(1, position.quantity_cc // 100)
+        close_count_fp = Decimal(position.quantity_cc) / Decimal("100")
+
         # TP leg: GTC sell at TP price
         tp_tag = self._bracket_client_tag(position.market_id, "tp", tp_price)
         logger.info(
             "[BRACKET-CREATION-DEBUG] Creating TP bracket: market=%s side=%s action=sell price=%dc count=%d",
-            position.market_id, position.side, tp_price, position.contracts
+            position.market_id, position.side, tp_price, position.quantity_cc // 100
         )
         tp_intent = OrderIntent(
             ticker=position.market_id,
             side=kalshi_side,
             action="sell",
             price_cents=int(tp_price),
-            count=int(position.contracts),
+            count=display_count,
+            count_fp=close_count_fp,
             source="resting_bracket_take_profit",
             agent_id="position_cache_bracket",
             client_tag=tp_tag,
@@ -6761,8 +6762,10 @@ class KalshiPositionCache:
             # CRITICAL FIX (2026-08-07): Bracket exit intents must carry position-delta
             # contract fields. _route_live enforces pre_position_size>0 for every exit,
             # and bracket orders close the full position so expected_post_position_size=0.
-            pre_position_size=int(position.contracts),
+            pre_position_size=display_count,
+            pre_position_fp=position.quantity_cc,
             expected_post_position_size=0,
+            expected_post_position_fp=0,
         )
         logger.info(
             "[BRACKET-CREATION-DEBUG] TP intent created: side=%s action=%s price=%dc count=%d",
@@ -6775,7 +6778,7 @@ class KalshiPositionCache:
             ok = res is not None and (res.has_execution or (res.request_completed and not res.is_terminal))
             self._record_bracket_metric("tp", ok)
             logger.info(
-                "[BRACKET] TP submitted market=%s side=%s qty=%d @ %d¢ tag=%s ok=%s",
+                "[BRACKET] TP submitted market=%s side=%s qty=%.2f @ %d¢ tag=%s ok=%s",
                 position.market_id, position.side, position.contracts,
                 tp_price, tp_tag, ok,
             )

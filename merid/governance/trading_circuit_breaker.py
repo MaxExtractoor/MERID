@@ -165,11 +165,25 @@ class TradingCircuitBreaker:
         )
         return record
 
-    def resume(self) -> None:
-        """Resume trading.  This must be called deliberately by an operator."""
+    def _resume(self) -> None:
+        """Internal resume.  Use only from the logged admin_release() path."""
         with self._lock:
             self._reset()
         logger.critical("[TRADING-CIRCUIT-BREAKER] RESUMED")
+
+    def resume(self) -> None:
+        """Resume trading.  This must be called deliberately by an operator.
+
+        DEPRECATED: Direct ``resume()`` calls from application code are
+        prohibited.  Use ``admin_release()`` with a valid approval token and
+        safety checks.  This method is retained for tests and interactive
+        diagnostics and will log a critical warning on every call.
+        """
+        logger.critical(
+            "[TRADING-CIRCUIT-BREAKER] resume() called directly; "
+            "use admin_release() for production release."
+        )
+        self._resume()
 
     async def admin_release(
         self,
@@ -320,7 +334,7 @@ class TradingCircuitBreaker:
             # Continue to release; the operational log still records the action.
 
         # ---- Release ----
-        self.resume()
+        self._resume()
         released = True
 
         logger.critical(
@@ -466,13 +480,14 @@ class TradingCircuitBreaker:
             )
             return False
 
-        # All safety checks passed.  Write an audit log and resume.
+        # All safety checks passed.  Write an audit log.  The breaker does NOT
+        # auto-resume; the operator must use admin_release() with a valid token.
         logger.critical(
-            "[TRADING-CIRCUIT-BREAKER] Auto-resuming from unmatched_live_exchange_fill: "
-            "fill_id=%s exchange_positions=%d open_orders=%d recent_unmatched=%d",
+            "[TRADING-CIRCUIT-BREAKER] Unmatched live exchange fill resolved: "
+            "fill_id=%s exchange_positions=%d open_orders=%d recent_unmatched=%d. "
+            "Operator must release the circuit breaker via admin_release().",
             fill_id, exchange_positions_count, open_orders_count, recent_unmatched_count,
         )
-        self.resume()
         return True
 
     def require_live_fill_identity(

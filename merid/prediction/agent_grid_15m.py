@@ -7699,6 +7699,17 @@ class LeanAgent15m:
             p_yes_model = None
             hybrid = None
 
+        # Defensive containment: never feed a hybrid p_yes into trade_decision
+        # unless the runtime is explicitly hybrid. Bachelier-only is the default
+        # live baseline, so the canonical Bachelier model in compute_trade_decision
+        # should be the only probability source.
+        if p_yes_model is not None and self._resolve_runtime_signal_mode() == "bachelier":
+            logger.debug(
+                "[HYBRID-P-YES-CONTAINMENT] asset=%s runtime=bachelier; suppressing p_yes_model from trade_decision",
+                asset,
+            )
+            p_yes_model = None
+
         # Thresholds: profile is the single source of truth; env overrides
         # allow emergency calibration without a code change.
         def _numeric_pref(v):
@@ -7879,8 +7890,11 @@ class LeanAgent15m:
 
         # Reduced sizing for FVG-influenced trades: the FVG layer is untested,
         # so live exposure is scaled by MERID_FVG_SIZE_SCALE (default 0.5).
+        # Containment: FVG must never size-scale a Bachelier-only decision, even if
+        # MERID_ENABLE_FVG is toggled independently.
         fvg_influenced = (
-            hybrid is not None
+            not bachelier_only_live
+            and hybrid is not None
             and abs(float(getattr(hybrid, "fvg_delta", 0.0) or 0.0)) > 0.0
         )
         fvg_size_scale = 1.0

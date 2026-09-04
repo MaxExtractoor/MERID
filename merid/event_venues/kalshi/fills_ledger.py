@@ -672,7 +672,7 @@ def derive_position_effect(
         return {
             "canonical_position_side": side,
             "canonical_position_action": action,
-            "canonical_leg_price_cents": None,
+            "canonical_leg_price_cents": canonical_leg_price_cents,
             "canonical_yes_delta_cc": canonical_yes_delta_cc,
             "canonicalization_state": "UNTRUSTED_RAW",
         }
@@ -1252,9 +1252,9 @@ class OrderIntent:
                 asset = self.ticker.split("-")[0][2:] if self.ticker.startswith("KX") else "UNKNOWN"
                 asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
 
-                # Calculate fill notional using quantity_cc to avoid Decimal/float TypeError.
+                # Calculate fill notional using quantity_cc and Decimal arithmetic.
                 fill_quantity_cc = int(Decimal(str(fill_count)) * Decimal("100")) if fill_count is not None else 0
-                fill_notional = (fill_quantity_cc * self.price_cents) / 10000.0
+                fill_notional = Decimal(fill_quantity_cc) * Decimal(self.price_cents) / Decimal("10000")
 
                 allocator.record_order_filled(asset, self.order_id or self.intent_id, fill_notional)
                 logger.info(
@@ -5327,7 +5327,7 @@ class KalshiFillsLedger:
                     p_selected=p_selected,
                 )
                 logger.debug(
-                    "Recorded fill in agent_performance_tracker: agent=%s market=%s side=%s price=%dc contracts=%d",
+                    "Recorded fill in agent_performance_tracker: agent=%s market=%s side=%s price=%dc contracts=%.2f",
                     fill.agent_id, fill.market_ticker, _can_side, fill.price_cents, fill.count_fp
                 )
             except Exception as e:

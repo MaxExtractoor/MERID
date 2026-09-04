@@ -29,6 +29,7 @@ import os
 import threading
 import math
 import time
+from decimal import Decimal
 
 from merid.event_venues.kalshi.risk_parameters import (
     DEFAULT_KALSHI_PRICE_CENTS,
@@ -2098,6 +2099,7 @@ class KalshiRiskManager:
         group_id: Optional[str] = None,
         asset: Optional[str] = None,
         timeframe: Optional[str] = None,
+        quantity_cc: Optional[int] = None,
     ) -> None:
         """Record a position close and decrement notional exposure.
 
@@ -2105,9 +2107,17 @@ class KalshiRiskManager:
         total_notional_usd and category_notional reflect actual open
         exposure rather than monotonically growing lifetime volume.
         """
-        contracts = int(contracts) if contracts is not None else 0
+        # 2026-09-04: Prefer exact centi-contracts for notional math.
+        # If quantity_cc is provided, it is the canonical close size; contracts is display only.
+        if quantity_cc is not None:
+            close_qty_cc = int(quantity_cc)
+            close_contracts_fp = Decimal(close_qty_cc) / Decimal("100")
+        else:
+            close_contracts_fp = Decimal(int(contracts)) if contracts is not None else Decimal("0")
+            close_qty_cc = int(close_contracts_fp * Decimal("100"))
         price_cents = int(price_cents) if price_cents is not None else 0
-        notional = contracts * price_cents / 100.0
+        notional = float(close_contracts_fp * Decimal(price_cents) / Decimal("100"))
+        contracts_int = int(close_contracts_fp)
         self._state.total_notional_usd = max(0.0, self._state.total_notional_usd - notional)
 
         if category:
@@ -2117,9 +2127,9 @@ class KalshiRiskManager:
             )
             self._state.category_contracts[category] = max(
                 0,
-                self._state.category_contracts.get(category, 0) - contracts,
+                self._state.category_contracts.get(category, 0) - contracts_int,
             )
-        
+
         # Decrement per-asset notional on position close
         if asset:
             asset_key = asset.upper()
@@ -2137,7 +2147,7 @@ class KalshiRiskManager:
             )
             new_contracts = max(
                 0,
-                self._state.group_contracts.get(gid, 0) - contracts,
+                self._state.group_contracts.get(gid, 0) - contracts_int,
             )
             self._state.group_notional[gid] = new_notional
             self._state.group_contracts[gid] = new_contracts
