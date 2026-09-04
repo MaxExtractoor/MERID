@@ -501,7 +501,7 @@ class GlobalAllocator:
                         if cache.force_delete_phantom_position(market_id):
                             phantom_deleted = True
                             logger.info(
-                                "[GLOBAL-ALLOCATOR] Cleaned up phantom position for %s: market=%s contracts=%d avg_price=%s",
+                                "[GLOBAL-ALLOCATOR] Cleaned up phantom position for %s: market=%s contracts=%.2f avg_price=%s",
                                 c.asset, market_id, position.contracts, position.avg_price_cents
                             )
                 if phantom_deleted:

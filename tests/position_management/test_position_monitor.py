@@ -1592,10 +1592,11 @@ class TestPositionMonitorPositionCacheIntegration:
         mock_risk_mgr._state.asset_notional = {"BTC": 5.0}
         # Track record_close calls and actually update asset_notional
         record_close_calls = []
-        def mock_record_close(category, contracts, price_cents, asset):
-            record_close_calls.append({"category": category, "contracts": contracts, "price_cents": price_cents, "asset": asset})
-            # Simulate the actual behavior: decrement asset_notional
-            notional_to_decrement = (contracts * price_cents) / 100.0
+        def mock_record_close(category, contracts, price_cents, asset, quantity_cc=None, **kwargs):
+            record_close_calls.append({"category": category, "contracts": contracts, "price_cents": price_cents, "asset": asset, "quantity_cc": quantity_cc})
+            # Simulate the actual behavior: decrement asset_notional using exact quantity_cc if provided.
+            close_qty = quantity_cc if quantity_cc is not None else contracts * 100
+            notional_to_decrement = (close_qty * price_cents) / 10000.0
             if asset in mock_risk_mgr._state.asset_notional:
                 mock_risk_mgr._state.asset_notional[asset] -= notional_to_decrement
         mock_risk_mgr.record_close = mock_record_close

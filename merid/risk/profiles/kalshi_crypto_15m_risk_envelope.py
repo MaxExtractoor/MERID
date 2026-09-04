@@ -20,6 +20,20 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.risk.profiles.kalshi_crypto_15m_risk_envelope")
 
+
+def _to_decimal(value) -> Decimal:
+    """Return a Decimal from int, float, Decimal, or string without binary artifacts."""
+    if value is None:
+        return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, (int, float)):
+        return Decimal(str(value))
+    if isinstance(value, str):
+        return Decimal(value)
+    return Decimal(str(value))
+
+
 # ── Module-Level Window Tracking State (2026-07-06 CRITICAL FIX) ────────────
 # get_kalshi_crypto_15m_risk_envelope() computes a FRESH envelope on every call,
 # so window exposure stored on envelope instances was discarded immediately:
@@ -31,12 +45,12 @@ logger = get_logger("merid.risk.profiles.kalshi_crypto_15m_risk_envelope")
 _WINDOW_TRACKING_LOCK = threading.Lock()
 _WINDOW_TRACKING_STATE: Dict[str, Any] = {
     "window_start_ts": 0.0,
-    "agent_exposure_usd": {},   # agent_id -> cumulative executed notional this window
-    "total_exposure_usd": 0.0,  # cumulative executed notional across all agents this window
-    "agent_resting_exposure_usd": {},  # agent_id -> cumulative resting order notional this window (CRITICAL FIX 2026-07-08)
-    "total_resting_exposure_usd": 0.0,  # cumulative resting order notional across all agents this window (CRITICAL FIX 2026-07-08)
-    "peak_bankroll_usd": 0.0,  # CRITICAL FIX 2026-07-08: Peak bankroll at window start for consistent 5% calculation
-    "asset_exposure_usd": {},  # CRITICAL FIX 2026-07-08: asset -> cumulative executed notional this window (for tracking, not enforcement)
+    "agent_exposure_usd": {},   # agent_id -> cumulative executed notional this window (Decimal)
+    "total_exposure_usd": Decimal("0"),  # cumulative executed notional across all agents this window (Decimal)
+    "agent_resting_exposure_usd": {},  # agent_id -> cumulative resting order notional this window (Decimal)
+    "total_resting_exposure_usd": Decimal("0"),  # cumulative resting order notional across all agents this window (Decimal)
+    "peak_bankroll_usd": Decimal("0"),  # peak bankroll at window start (Decimal)
+    "asset_exposure_usd": {},  # asset -> cumulative executed notional this window (Decimal)
 }
 
 # FIX 10: Persistent risk envelope state file path
@@ -53,10 +67,10 @@ def _reset_shared_window_state_for_testing() -> None:
     with _WINDOW_TRACKING_LOCK:
         _WINDOW_TRACKING_STATE["window_start_ts"] = 0.0
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
-        _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
         _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
-        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
-        _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
+        _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = Decimal("0")
         _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {}
 
 
@@ -84,7 +98,7 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
     # force reset on every empty-position reconciliation cycle while still
     # clearing genuine stale exposure on startup or after stuck positions.
     with _WINDOW_TRACKING_LOCK:
-        if _WINDOW_TRACKING_STATE["total_exposure_usd"] == 0.0 and not _WINDOW_TRACKING_STATE["agent_exposure_usd"]:
+        if _WINDOW_TRACKING_STATE["total_exposure_usd"] == Decimal("0") and not _WINDOW_TRACKING_STATE["agent_exposure_usd"]:
             return
 
     # Capture stale exposure before reset for logging
@@ -95,10 +109,10 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
 
         _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
-        _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
         _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
-        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
-        _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
+        _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = Decimal("0")
         _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {}
         venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
 
@@ -145,7 +159,8 @@ def save_window_state() -> bool:
         os.makedirs(os.path.dirname(_WINDOW_STATE_FILE), exist_ok=True)
 
         with open(_WINDOW_STATE_FILE, "w") as f:
-            json.dump(state_to_save, f, indent=2)
+            # Serialize Decimal notional values as strings for exact round-tripping.
+            json.dump(state_to_save, f, indent=2, default=str)
 
         logger.info(
             f"[WINDOW-TRACKING-PERSIST] Saved window state to {_WINDOW_STATE_FILE}: "
@@ -193,15 +208,22 @@ def load_window_state() -> bool:
             )
             return False
 
-        # Load state into module-level shared state
+        # Load state into module-level shared state. Notional values are persisted
+        # as strings; convert back to Decimal for exact arithmetic.
         with _WINDOW_TRACKING_LOCK:
             _WINDOW_TRACKING_STATE["window_start_ts"] = loaded_state["window_start_ts"]
-            _WINDOW_TRACKING_STATE["agent_exposure_usd"] = loaded_state["agent_exposure_usd"]
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = loaded_state["total_exposure_usd"]
-            _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = loaded_state.get("agent_resting_exposure_usd", {})
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = loaded_state.get("total_resting_exposure_usd", 0.0)
-            _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = loaded_state.get("peak_bankroll_usd", 0.0)
-            _WINDOW_TRACKING_STATE["asset_exposure_usd"] = loaded_state.get("asset_exposure_usd", {})
+            _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {
+                k: Decimal(str(v)) for k, v in loaded_state["agent_exposure_usd"].items()
+            }
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal(str(loaded_state["total_exposure_usd"]))
+            _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {
+                k: Decimal(str(v)) for k, v in loaded_state.get("agent_resting_exposure_usd", {}).items()
+            }
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal(str(loaded_state.get("total_resting_exposure_usd", 0)))
+            _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = Decimal(str(loaded_state.get("peak_bankroll_usd", 0)))
+            _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {
+                k: Decimal(str(v)) for k, v in loaded_state.get("asset_exposure_usd", {}).items()
+            }
 
         logger.info(
             f"[WINDOW-TRACKING-PERSIST] Loaded window state from {_WINDOW_STATE_FILE}: "
@@ -236,14 +258,15 @@ def _roll_window_if_needed_locked(current_ts: float, current_bankroll_usd: float
         
         _WINDOW_TRACKING_STATE["window_start_ts"] = bucket_start
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
-        _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
         _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
-        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
         _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {}
-        
-        # CRITICAL FIX 2026-07-08: Lock in peak bankroll at window start
-        # If current bankroll is provided and > 0, use it. Otherwise use previous peak.
-        # For first window start (old_peak_bankroll == 0), use current bankroll if provided.
+
+        # CRITICAL FIX 2026-07-08: Lock in peak bankroll at window start.
+        # Bankroll is kept as Decimal for exact arithmetic.
+        current_bankroll_usd = _to_decimal(current_bankroll_usd)
+        old_peak_bankroll = _to_decimal(old_peak_bankroll)
         if current_bankroll_usd > 0:
             _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = current_bankroll_usd
         elif old_peak_bankroll > 0:
@@ -264,45 +287,47 @@ def _roll_window_if_needed_locked(current_ts: float, current_bankroll_usd: float
 
 
 def detect_and_correct_window_exposure_drift(
-    actual_position_exposure_usd: float,
+    actual_position_exposure_usd: Decimal,
     current_ts: float,
-    correction_threshold_usd: float = 0.01,
-) -> tuple[bool, float, str]:
+    correction_threshold_usd: Decimal = Decimal("0.01"),
+) -> tuple[bool, Decimal, str]:
     """
     CRITICAL FIX (2026-08-01): Detect and correct window exposure state drift.
-    
+
     Window exposure tracking can drift from actual positions due to:
     - Missing position closure events (positions closed outside system)
     - Process restarts before closure events processed
     - Race conditions in recording executions
     - Network failures causing event loss
-    
+
     This function compares tracked window exposure with actual position exposure
     and automatically corrects drift when detected beyond threshold.
-    
+
     Args:
-        actual_position_exposure_usd: Actual exposure from position cache (sum of open positions)
+        actual_position_exposure_usd: Actual exposure from position cache (sum of open positions) (Decimal)
         current_ts: Current timestamp for window alignment
-        correction_threshold_usd: Minimum drift amount to trigger correction (default $0.01)
-    
+        correction_threshold_usd: Minimum drift amount to trigger correction (default $0.01 Decimal)
+
     Returns:
         Tuple of (drift_detected, drift_amount_usd, correction_message)
         - drift_detected: True if drift was detected and corrected
         - drift_amount_usd: Amount of drift detected (positive = tracked > actual)
         - correction_message: Description of correction action taken
     """
+    actual_position_exposure_usd = _to_decimal(actual_position_exposure_usd)
+    correction_threshold_usd = _to_decimal(correction_threshold_usd)
     with _WINDOW_TRACKING_LOCK:
-        _roll_window_if_needed_locked(current_ts, 0.0)
-        
+        _roll_window_if_needed_locked(current_ts, Decimal("0"))
+
         tracked_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         drift_amount = tracked_exposure - actual_position_exposure_usd
         drift_detected = abs(drift_amount) > correction_threshold_usd
-        
+
         if drift_detected:
             # Correct the drift by adjusting tracked exposure to match actual
             old_tracked = tracked_exposure
             _WINDOW_TRACKING_STATE["total_exposure_usd"] = actual_position_exposure_usd
-            
+
             # Also correct per-agent exposure proportionally
             if old_tracked > 0:
                 scale_factor = actual_position_exposure_usd / old_tracked
@@ -315,19 +340,19 @@ def detect_and_correct_window_exposure_drift(
                     per_agent_exposure = actual_position_exposure_usd / agent_count
                     for agent_id in _WINDOW_TRACKING_STATE["agent_exposure_usd"]:
                         _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = per_agent_exposure
-            
+
             correction_message = (
                 f"[WINDOW-TRACKING-DRIFT] Corrected exposure drift: "
                 f"tracked=${old_tracked:.2f} -> actual=${actual_position_exposure_usd:.2f} "
                 f"(drift=${drift_amount:.2f}) at ts={current_ts:.0f}"
             )
             logger.warning(correction_message)
-            
+
             # Persist corrected state
             save_window_state()
         else:
             correction_message = ""
-        
+
         return drift_detected, drift_amount, correction_message
 
 # VERSION TAG: This log identifies the deployed revision of kalshi_crypto_15m_risk_envelope.py
@@ -673,9 +698,9 @@ class KalshiCrypto15mRiskEnvelope:
         with _WINDOW_TRACKING_LOCK:
             _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
             _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
             _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
             self.window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
         self.agent_window_exposure_usd = {}
         self.total_window_exposure_usd = 0.0
@@ -688,10 +713,10 @@ class KalshiCrypto15mRiskEnvelope:
     def check_window_limit(
         self,
         agent_id: str,
-        order_notional_usd: float,
+        order_notional_usd: Decimal,
         current_ts: float,
         asset: Optional[str] = None,
-        actual_position_exposure_usd: Optional[float] = None,
+        actual_position_exposure_usd: Optional[Decimal] = None,
     ) -> tuple[bool, str]:
         """Check if order would exceed window-based risk limits (HARD STOP).
         
@@ -725,20 +750,21 @@ class KalshiCrypto15mRiskEnvelope:
         # Zero notional orders are valid (e.g., IOC orders that don't fill)
         # 2026-07-08: DISABLED percentage-based assertions - using fixed $2 exposure model
         # Percentage-based limits are obsolete; system uses MERID_FIXED_EXPOSURE_CAP_USD=$2.00
+        order_notional_usd = _to_decimal(order_notional_usd)
         assert order_notional_usd >= 0, "Order notional must be non-negative"
         assert agent_id, "Agent ID must be provided"
-        
+
         # CRITICAL FIX (2026-08-01): Automatic drift detection and correction
         # If actual position exposure is provided, detect and correct drift before checking limits
         if actual_position_exposure_usd is not None:
             drift_detected, drift_amount, correction_msg = detect_and_correct_window_exposure_drift(
                 actual_position_exposure_usd,
                 current_ts,
-                correction_threshold_usd=0.01,
+                correction_threshold_usd=Decimal("0.01"),
             )
             if drift_detected:
                 logger.info(f"[WINDOW-TRACKING] {correction_msg}")
-        
+
         # CRITICAL (2026-07-06): Read cumulative exposure from module-level shared
         # state. Envelope instances are recomputed on every call, so instance
         # fields always start at zero - only the shared state carries the truth.
@@ -746,41 +772,43 @@ class KalshiCrypto15mRiskEnvelope:
         # multiple resting orders from exceeding window limits when they execute.
         with _WINDOW_TRACKING_LOCK:
             _roll_window_if_needed_locked(current_ts, self.live_bankroll_usd)
-            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
+            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, Decimal("0"))
             current_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
-            current_agent_resting = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, 0.0)
+            current_agent_resting = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, Decimal("0"))
             current_total_resting = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
             # CRITICAL FIX 2026-07-08: Use peak bankroll at window start for consistent limits
-            peak_bankroll_usd = _WINDOW_TRACKING_STATE["peak_bankroll_usd"] or self.live_bankroll_usd
+            peak_bankroll_usd = _to_decimal(
+                _WINDOW_TRACKING_STATE["peak_bankroll_usd"] or self.live_bankroll_usd
+            )
             # Track per-asset exposure for monitoring (not enforcement - fixed $1 cap used instead)
-            current_asset_exposure = 0.0
+            current_asset_exposure = Decimal("0")
             if asset:
-                current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
-        
+                current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, Decimal("0"))
+
         # CRITICAL: System uses the fixed exposure cap.  Percentage-based limits
         # (3% per-agent, 5% total venue) are DISABLED.  An explicit
         # MERID_FIXED_EXPOSURE_CAP_USD env override takes precedence (it has
         # already been validated by the live-config resolver), clamped to
         # peak/live bankroll for underfunded account protection.
         env_cap = os.getenv('MERID_FIXED_EXPOSURE_CAP_USD')
-        fixed_exposure_cap_usd = (
-            float(env_cap) if env_cap is not None else self.fixed_exposure_cap_usd
+        fixed_exposure_cap_usd = _to_decimal(
+            env_cap if env_cap is not None else self.fixed_exposure_cap_usd
         )
         effective_cap_usd = min(fixed_exposure_cap_usd, peak_bankroll_usd)
         total_venue_limit_usd = effective_cap_usd  # No percentage overrides allowed
-        
+
         # Per-agent and per-asset limit checks are DISABLED
         # The global slot allocator (global_slot_allocator.py) enforces $2.00 total cap
         # across all 5 assets (BTC+ETH+SOL+XRP+DOGE) based on edge quality competition
         if asset:
             # Per-asset limit check DISABLED - slot allocator handles this
             pass
-        
+
         # Calculate total venue window limit (including resting orders)
         # CRITICAL: Uses fixed $2.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
         new_total_exposure = current_total_exposure + order_notional_usd
         new_total_venue = new_total_exposure + current_total_resting  # Executed + Resting
-        
+
         # Check total venue window limit (HARD STOP) - includes resting orders
         if new_total_venue > total_venue_limit_usd:
             reason = (
@@ -790,7 +818,7 @@ class KalshiCrypto15mRiskEnvelope:
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
-        
+
         logger.info(
             f"[WINDOW-TRACKING] Window check OK: agent={agent_id} asset={asset or 'N/A'} "
             f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f} "
@@ -801,7 +829,7 @@ class KalshiCrypto15mRiskEnvelope:
     def record_order_execution(
         self,
         agent_id: str,
-        order_notional_usd: float,
+        order_notional_usd: Decimal,
         asset: Optional[str] = None,
     ) -> None:
         """Record order execution in window tracking.
@@ -811,11 +839,10 @@ class KalshiCrypto15mRiskEnvelope:
 
         Args:
             agent_id: Agent identifier
-            order_notional_usd: Notional value of executed order in USD
+            order_notional_usd: Notional value of executed order in USD (Decimal)
             asset: Asset symbol (e.g., "BTC", "ETH") for per-asset tracking
         """
-        # 2026-08-09: Defensive cast to float to prevent Decimal/float TypeError.
-        order_notional_usd = float(order_notional_usd) if order_notional_usd is not None else 0.0
+        order_notional_usd = _to_decimal(order_notional_usd)
         # CRITICAL FIX (2026-07-23): Short-circuit on zero notional (zero-fill orders)
         # Zero-fill orders are normal outcomes and should not trigger errors
         if order_notional_usd <= 0:
@@ -828,7 +855,7 @@ class KalshiCrypto15mRiskEnvelope:
         # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
         assert self.live_bankroll_usd > 0, "Bankroll must be positive for recording execution"
         assert agent_id, "Agent ID must be provided for recording"
-        
+
         # CRITICAL (2026-07-06): Write to module-level shared state so the
         # recorded exposure survives envelope recomputation and is visible to
         # subsequent check_window_limit() calls (fixed $1 cap enforcement).
@@ -836,22 +863,22 @@ class KalshiCrypto15mRiskEnvelope:
         with _WINDOW_TRACKING_LOCK:
             _roll_window_if_needed_locked(_time_mod.time(), self.live_bankroll_usd)
             _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = (
-                _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0) + order_notional_usd
+                _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, Decimal("0")) + order_notional_usd
             )
             _WINDOW_TRACKING_STATE["total_exposure_usd"] += order_notional_usd
             # CRITICAL FIX 2026-07-08: Track per-asset exposure for monitoring (not enforcement)
             if asset:
                 _WINDOW_TRACKING_STATE["asset_exposure_usd"][asset] = (
-                    _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0) + order_notional_usd
+                    _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, Decimal("0")) + order_notional_usd
                 )
             agent_total = _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id]
             venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
-            asset_total = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0) if asset else 0.0
-        
-        # Sync instance fields for observability/snapshots
-        self.agent_window_exposure_usd[agent_id] = agent_total
-        self.total_window_exposure_usd = venue_total
-        
+            asset_total = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, Decimal("0")) if asset else Decimal("0")
+
+        # Sync instance fields for observability/snapshots (float for test/JSON compatibility)
+        self.agent_window_exposure_usd[agent_id] = float(agent_total)
+        self.total_window_exposure_usd = float(venue_total)
+
         logger.info(
             f"[WINDOW-TRACKING] Recorded execution: agent={agent_id} asset={asset or 'N/A'} "
             f"notional=${order_notional_usd:.2f} "
@@ -863,46 +890,45 @@ class KalshiCrypto15mRiskEnvelope:
     def record_position_closure(
         self,
         agent_id: str,
-        position_notional_usd: float,
+        position_notional_usd: Decimal,
         asset: Optional[str] = None,
     ) -> None:
         """Record position closure (reduces window exposure).
-        
+
         CRITICAL FIX 2026-07-08: Added asset parameter for per-asset exposure release.
-        
+
         CRITICAL: This allows agents to re-enter after closing positions
         via trailing stop, ratchet, or mandatory 99c exit.
-        
+
         Args:
             agent_id: Agent identifier
-            position_notional_usd: Notional value of closed position in USD
+            position_notional_usd: Notional value of closed position in USD (Decimal)
             asset: Asset symbol (e.g., "BTC", "ETH") for per-asset tracking
         """
         # CRITICAL (2026-07-06): Operate on module-level shared state (see
         # record_order_execution for rationale).
         import time as _time_mod
-        # 2026-08-09: Defensive cast to float to prevent Decimal/float TypeError in window tracking.
-        position_notional_usd = float(position_notional_usd) if position_notional_usd is not None else 0.0
+        position_notional_usd = _to_decimal(position_notional_usd)
         with _WINDOW_TRACKING_LOCK:
             _roll_window_if_needed_locked(_time_mod.time(), self.live_bankroll_usd)
-            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
-            new_agent_exposure = max(0.0, current_agent_exposure - position_notional_usd)
+            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, Decimal("0"))
+            new_agent_exposure = max(Decimal("0"), current_agent_exposure - position_notional_usd)
             _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = new_agent_exposure
             _WINDOW_TRACKING_STATE["total_exposure_usd"] = max(
-                0.0, _WINDOW_TRACKING_STATE["total_exposure_usd"] - position_notional_usd
+                Decimal("0"), _WINDOW_TRACKING_STATE["total_exposure_usd"] - position_notional_usd
             )
             # CRITICAL FIX 2026-07-08: Release per-asset exposure
             if asset:
-                current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
-                new_asset_exposure = max(0.0, current_asset_exposure - position_notional_usd)
+                current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, Decimal("0"))
+                new_asset_exposure = max(Decimal("0"), current_asset_exposure - position_notional_usd)
                 _WINDOW_TRACKING_STATE["asset_exposure_usd"][asset] = new_asset_exposure
             venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
-            asset_total = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0) if asset else 0.0
-        
-        # Sync instance fields for observability/snapshots
-        self.agent_window_exposure_usd[agent_id] = new_agent_exposure
-        self.total_window_exposure_usd = venue_total
-        
+            asset_total = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, Decimal("0")) if asset else Decimal("0")
+
+        # Sync instance fields for observability/snapshots (float for test/JSON compatibility)
+        self.agent_window_exposure_usd[agent_id] = float(new_agent_exposure)
+        self.total_window_exposure_usd = float(venue_total)
+
         logger.info(
             f"[WINDOW-TRACKING] Recorded closure: agent={agent_id} asset={asset or 'N/A'} "
             f"notional=${position_notional_usd:.2f} "
@@ -914,36 +940,35 @@ class KalshiCrypto15mRiskEnvelope:
     def refund_order_execution(
         self,
         agent_id: str,
-        order_notional_usd: float
+        order_notional_usd: Decimal
     ) -> None:
         """Refund window exposure for rejected/unfilled orders.
-        
+
         CRITICAL: This reverses the optimistic exposure recording done at gate pass time
         when orders are rejected by the exchange or fail to fill. Without this, window
         exposure accumulates even though no actual positions are taken, blocking all
         future orders until the 15m window expires.
-        
+
         Args:
             agent_id: Agent identifier
-            order_notional_usd: Notional value to refund in USD
+            order_notional_usd: Notional value to refund in USD (Decimal)
         """
-        # 2026-08-09: Defensive cast to float to prevent Decimal/float TypeError.
-        order_notional_usd = float(order_notional_usd) if order_notional_usd is not None else 0.0
+        order_notional_usd = _to_decimal(order_notional_usd)
         # CRITICAL (2026-07-07): Operate on module-level shared state (see
         # record_order_execution for rationale).
         with _WINDOW_TRACKING_LOCK:
-            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
-            new_agent_exposure = max(0.0, current_agent_exposure - order_notional_usd)
+            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, Decimal("0"))
+            new_agent_exposure = max(Decimal("0"), current_agent_exposure - order_notional_usd)
             _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = new_agent_exposure
             _WINDOW_TRACKING_STATE["total_exposure_usd"] = max(
-                0.0, _WINDOW_TRACKING_STATE["total_exposure_usd"] - order_notional_usd
+                Decimal("0"), _WINDOW_TRACKING_STATE["total_exposure_usd"] - order_notional_usd
             )
             venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
-        
-        # Sync instance fields for observability/snapshots
-        self.agent_window_exposure_usd[agent_id] = new_agent_exposure
-        self.total_window_exposure_usd = venue_total
-        
+
+        # Sync instance fields for observability/snapshots (float for test/JSON compatibility)
+        self.agent_window_exposure_usd[agent_id] = float(new_agent_exposure)
+        self.total_window_exposure_usd = float(venue_total)
+
         logger.info(
             f"[WINDOW-TRACKING] Refunded execution: agent={agent_id} "
             f"notional=${order_notional_usd:.2f} "
@@ -954,32 +979,33 @@ class KalshiCrypto15mRiskEnvelope:
     def record_resting_order_placement(
         self,
         agent_id: str,
-        order_notional_usd: float
+        order_notional_usd: Decimal
     ) -> None:
         """Record resting order placement (adds to resting exposure).
-        
+
         CRITICAL FIX (2026-07-08): This prevents multiple resting orders from
         exceeding window limits. Resting orders are counted in window exposure
         at placement time, then released when they fill, cancel, or expire.
-        
+
         Args:
             agent_id: Agent identifier
-            order_notional_usd: Notional value of resting order in USD
+            order_notional_usd: Notional value of resting order in USD (Decimal)
         """
         import time as _time_mod
+        order_notional_usd = _to_decimal(order_notional_usd)
         with _WINDOW_TRACKING_LOCK:
             _roll_window_if_needed_locked(_time_mod.time())
             _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"][agent_id] = (
-                _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, 0.0) + order_notional_usd
+                _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, Decimal("0")) + order_notional_usd
             )
             _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] += order_notional_usd
             agent_total = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"][agent_id]
             venue_total = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
-        
-        # Sync instance fields for observability/snapshots
-        self.agent_resting_exposure_usd[agent_id] = agent_total
-        self.total_resting_exposure_usd = venue_total
-        
+
+        # Sync instance fields for observability/snapshots (float for test/JSON compatibility)
+        self.agent_resting_exposure_usd[agent_id] = float(agent_total)
+        self.total_resting_exposure_usd = float(venue_total)
+
         logger.info(
             f"[WINDOW-TRACKING] Recorded resting order: agent={agent_id} "
             f"notional=${order_notional_usd:.2f} "
@@ -990,31 +1016,32 @@ class KalshiCrypto15mRiskEnvelope:
     def release_resting_order_exposure(
         self,
         agent_id: str,
-        order_notional_usd: float
+        order_notional_usd: Decimal
     ) -> None:
         """Release resting order exposure (when order fills, cancels, or expires).
-        
+
         CRITICAL FIX (2026-07-08): This reverses the resting exposure recording
         done at placement time. Called when resting orders fill, are canceled,
         or expire. Without this, resting exposure accumulates indefinitely.
-        
+
         Args:
             agent_id: Agent identifier
-            order_notional_usd: Notional value to release in USD
+            order_notional_usd: Notional value to release in USD (Decimal)
         """
+        order_notional_usd = _to_decimal(order_notional_usd)
         with _WINDOW_TRACKING_LOCK:
-            current_agent_resting = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, 0.0)
-            new_agent_resting = max(0.0, current_agent_resting - order_notional_usd)
+            current_agent_resting = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, Decimal("0"))
+            new_agent_resting = max(Decimal("0"), current_agent_resting - order_notional_usd)
             _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"][agent_id] = new_agent_resting
             _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = max(
-                0.0, _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] - order_notional_usd
+                Decimal("0"), _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] - order_notional_usd
             )
             venue_total = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
-        
-        # Sync instance fields for observability/snapshots
-        self.agent_resting_exposure_usd[agent_id] = new_agent_resting
-        self.total_resting_exposure_usd = venue_total
-        
+
+        # Sync instance fields for observability/snapshots (float for test/JSON compatibility)
+        self.agent_resting_exposure_usd[agent_id] = float(new_agent_resting)
+        self.total_resting_exposure_usd = float(venue_total)
+
         logger.info(
             f"[WINDOW-TRACKING] Released resting order: agent={agent_id} "
             f"notional=${order_notional_usd:.2f} "
@@ -1363,10 +1390,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
     with _WINDOW_TRACKING_LOCK:
         _roll_window_if_needed_locked(time.time())
         window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
-        agent_window_exposure_usd = dict(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
-        total_window_exposure_usd = _WINDOW_TRACKING_STATE["total_exposure_usd"]
-        agent_resting_exposure_usd = dict(_WINDOW_TRACKING_STATE["agent_resting_exposure_usd"])
-        total_resting_exposure_usd = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
+        # Sync Decimal module state to float instance fields for test/observability compatibility.
+        agent_window_exposure_usd = {k: float(v) for k, v in _WINDOW_TRACKING_STATE["agent_exposure_usd"].items()}
+        total_window_exposure_usd = float(_WINDOW_TRACKING_STATE["total_exposure_usd"])
+        agent_resting_exposure_usd = {k: float(v) for k, v in _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].items()}
+        total_resting_exposure_usd = float(_WINDOW_TRACKING_STATE["total_resting_exposure_usd"])
     
     # ── Initialize Adaptive Risk ───────────────────────────────────────────────
     per_trade_risk_multiplier = 1.0

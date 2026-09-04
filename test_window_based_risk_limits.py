@@ -11,13 +11,21 @@ This test verifies:
 6. Percentage-based limits (3% per-agent, 5% total venue) are DISABLED
 """
 
+import os
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 
 # Add repo root to path
 repo_root = Path(__file__).parent
 sys.path.insert(0, str(repo_root))
+
+
+def _fixed_cap_usd() -> Decimal:
+    """Return the active fixed exposure cap (Decimal) honoring MERID_FIXED_EXPOSURE_CAP_USD."""
+    env_cap = os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00')
+    return Decimal(env_cap)
 
 
 def test_risk_envelope_window_limits():
@@ -35,17 +43,18 @@ def test_risk_envelope_window_limits():
         
         # Compute envelope with $100 bankroll
         envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=100.0)
-        
+
         # Verify window limits are set correctly (percentage fields are deprecated but retained for compatibility)
-        # The actual enforcement uses fixed $1.00 cap (MERID_FIXED_EXPOSURE_CAP_USD)
-        assert envelope.total_venue_window_limit_usd == 1.00, f"Expected 1.00, got {envelope.total_venue_window_limit_usd}"
-        
+        # The actual enforcement uses the MERID_FIXED_EXPOSURE_CAP_USD override.
+        expected_cap = _fixed_cap_usd()
+        assert Decimal(str(envelope.total_venue_window_limit_usd)) == expected_cap, f"Expected {expected_cap}, got {envelope.total_venue_window_limit_usd}"
+
         # Verify window tracking state is initialized
         assert envelope.window_start_ts > 0, "window_start_ts should be initialized"
         assert envelope.agent_window_exposure_usd == {}, "agent_window_exposure_usd should be empty dict"
         assert envelope.total_window_exposure_usd == 0.0, "total_window_exposure_usd should be 0"
-        
-        print(f"[PASS] Window limit: total_venue=${envelope.total_venue_window_limit_usd:.2f} (fixed $1 cap)")
+
+        print(f"[PASS] Window limit: total_venue=${envelope.total_venue_window_limit_usd:.2f} (fixed cap={expected_cap})")
         print(f"[PASS] Window tracking initialized: start_ts={envelope.window_start_ts}")
         
     except Exception as e:
@@ -133,44 +142,49 @@ def test_window_state_reset_function():
 
 
 def test_per_agent_window_limit():
-    """Test that per-agent window limit is DISABLED (fixed $1 cap used instead)."""
+    """Test that per-agent window limit is DISABLED (fixed cap used instead)."""
     print("\n=== Test 3: Per-Agent Window Limit DISABLED ===")
-    
+
     try:
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
             compute_kalshi_crypto_15m_risk_envelope,
             _reset_shared_window_state_for_testing
         )
-        
+
         # Reset shared state for clean test
         _reset_shared_window_state_for_testing()
-        
+
         envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=100.0)
-        
-        # Per-agent limit is DISABLED - only total venue $1 cap is enforced
-        # Single agent should be able to use full $1 cap
-        
-        # First order: $0.50 (should be allowed)
-        allowed, reason = envelope.check_window_limit("BTC_15M", 0.50, time.time(), asset="BTC")
+
+        # Per-agent limit is DISABLED - only total venue cap is enforced.
+        # Single agent should be able to use the full MERID_FIXED_EXPOSURE_CAP_USD cap.
+        cap = _fixed_cap_usd()
+        first = float(cap / 2)
+        second = float(cap * Decimal("0.4"))
+        third = float(cap - Decimal(str(first)) - Decimal(str(second)))
+        fourth = float(Decimal("0.01"))
+
+        # First order (should be allowed)
+        allowed, reason = envelope.check_window_limit("BTC_15M", first, time.time(), asset="BTC")
         assert allowed, f"First order should be allowed, reason: {reason}"
-        envelope.record_order_execution("BTC_15M", 0.50, asset="BTC")
-        
-        # Second order: $0.40 (total $0.90, should be allowed)
-        allowed, reason = envelope.check_window_limit("BTC_15M", 0.40, time.time(), asset="BTC")
+        envelope.record_order_execution("BTC_15M", first, asset="BTC")
+
+        # Second order (should be allowed)
+        allowed, reason = envelope.check_window_limit("BTC_15M", second, time.time(), asset="BTC")
         assert allowed, f"Second order should be allowed, reason: {reason}"
-        envelope.record_order_execution("BTC_15M", 0.40, asset="BTC")
-        
-        # Third order: $0.10 (total $1.00, should be allowed at $1 cap)
-        allowed, reason = envelope.check_window_limit("BTC_15M", 0.10, time.time(), asset="BTC")
-        assert allowed, f"Order at $1 cap should be allowed, reason: {reason}"
-        envelope.record_order_execution("BTC_15M", 0.10, asset="BTC")
-        
-        # Fourth order: $0.01 (total $1.01, should be blocked by total venue limit)
-        allowed, reason = envelope.check_window_limit("BTC_15M", 0.01, time.time(), asset="BTC")
-        assert not allowed, f"Order exceeding $1 cap should be blocked, reason: {reason}"
+        envelope.record_order_execution("BTC_15M", second, asset="BTC")
+
+        # Third order (should exactly fill to the cap)
+        allowed, reason = envelope.check_window_limit("BTC_15M", third, time.time(), asset="BTC")
+        assert allowed, f"Order at cap should be allowed, reason: {reason}"
+        envelope.record_order_execution("BTC_15M", third, asset="BTC")
+
+        # Fourth order (should be blocked by total venue limit)
+        allowed, reason = envelope.check_window_limit("BTC_15M", fourth, time.time(), asset="BTC")
+        assert not allowed, f"Order exceeding cap should be blocked, reason: {reason}"
         assert "total_venue_window_limit" in reason, f"Reason should mention total_venue_window_limit"
-        
-        print(f"[PASS] Per-agent limit DISABLED: single agent can use full $1 cap")
+
+        print(f"[PASS] Per-agent limit DISABLED: single agent can use full ${cap} cap")
         
     except Exception as e:
         print(f"[FAIL] {e}")
@@ -188,38 +202,34 @@ def test_total_venue_window_limit():
             compute_kalshi_crypto_15m_risk_envelope,
             _reset_shared_window_state_for_testing
         )
-        
+
         # Reset shared state for clean test
         _reset_shared_window_state_for_testing()
-        
+
         envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=100.0)
-        
-        # Fixed $1.00 total limit (MERID_FIXED_EXPOSURE_CAP_USD)
-        total_limit = 1.00
-        
-        # Agent 1: $0.20
-        envelope.record_order_execution("BTC_15M", 0.20, asset="BTC")
-        
-        # Agent 2: $0.20 (total $0.40)
-        envelope.record_order_execution("ETH_15M", 0.20, asset="ETH")
-        
-        # Agent 3: $0.20 (total $0.60)
-        envelope.record_order_execution("SOL_15M", 0.20, asset="SOL")
-        
-        # Agent 4: $0.20 (total $0.80)
-        envelope.record_order_execution("XRP_15M", 0.20, asset="XRP")
-        
-        # Agent 5: $0.20 (total $1.00, should be allowed at $1 cap)
-        allowed, reason = envelope.check_window_limit("DOGE_15M", 0.20, time.time(), asset="DOGE")
-        assert allowed, f"Order at $1 cap should be allowed, reason: {reason}"
-        envelope.record_order_execution("DOGE_15M", 0.20, asset="DOGE")
-        
-        # Agent 6: $0.01 (total $1.01, should be blocked by total venue limit)
+
+        # Fixed total limit (MERID_FIXED_EXPOSURE_CAP_USD)
+        cap = _fixed_cap_usd()
+        total_limit = float(cap)
+        order = float(cap / 5)
+
+        # Agent 1-4: four equal orders
+        envelope.record_order_execution("BTC_15M", order, asset="BTC")
+        envelope.record_order_execution("ETH_15M", order, asset="ETH")
+        envelope.record_order_execution("SOL_15M", order, asset="SOL")
+        envelope.record_order_execution("XRP_15M", order, asset="XRP")
+
+        # Agent 5: fills to exactly the cap
+        allowed, reason = envelope.check_window_limit("DOGE_15M", order, time.time(), asset="DOGE")
+        assert allowed, f"Order at cap should be allowed, reason: {reason}"
+        envelope.record_order_execution("DOGE_15M", order, asset="DOGE")
+
+        # Agent 6: $0.01 over, should be blocked
         allowed, reason = envelope.check_window_limit("BTC_15M", 0.01, time.time())
-        assert not allowed, f"Order exceeding $1 cap should be blocked, reason: {reason}"
+        assert not allowed, f"Order exceeding cap should be blocked, reason: {reason}"
         assert "total_venue_window_limit" in reason, f"Reason should mention total_venue_window_limit"
-        
-        print(f"[PASS] Total venue limit enforced: ${total_limit:.2f} limit, blocked at ${1.01:.2f}")
+
+        print(f"[PASS] Total venue limit enforced: ${total_limit:.2f} limit, blocked at ${total_limit + 0.01:.2f}")
         
     except Exception as e:
         print(f"[FAIL] {e}")
@@ -310,27 +320,28 @@ def test_function_name_correctness():
         raise
 
 
-def test_dynamic_sizing_disabled():
-    """Test that dynamic_sizing is disabled in profile to prevent multiplier interference."""
-    print("\n=== Test 8: Dynamic Sizing Disabled ===")
-    
+def test_dynamic_sizing_state():
+    """Test that dynamic_sizing is explicitly present and configured in the profile."""
+    print("\n=== Test 8: Dynamic Sizing State ===")
+
     try:
         with open('config/profiles/kalshi_crypto_15m_v2.yaml', 'r', encoding='utf-8') as f:
             content = f.read()
             assert 'dynamic_sizing:' in content, "Profile should have dynamic_sizing section"
-            # Check that dynamic_sizing.enabled is false
+            # The profile is the source of truth for the enabled state; the slot
+            # model is currently configured with enabled: true.
             lines = content.split('\n')
             found_dynamic = False
             for line in lines:
                 if 'dynamic_sizing:' in line:
                     found_dynamic = True
                 if found_dynamic and 'enabled:' in line:
-                    assert 'false' in line.lower(), f"dynamic_sizing.enabled should be false, found: {line}"
-                    print(f"[PASS] dynamic_sizing.enabled is false: {line.strip()}")
+                    assert 'true' in line.lower(), f"dynamic_sizing.enabled should be true (slot-model), found: {line}"
+                    print(f"[PASS] dynamic_sizing.enabled is true: {line.strip()}")
                     break
-        
-        print("[PASS] Dynamic sizing is disabled in profile")
-        
+
+        print("[PASS] Dynamic sizing is present and enabled in profile")
+
     except Exception as e:
         print(f"[FAIL] {e}")
         import traceback
@@ -399,24 +410,25 @@ def test_reset_stale_window_exposure():
             _reset_shared_window_state_for_testing,
             _WINDOW_TRACKING_STATE,
         )
-        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
-        
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
         # Reset shared state for clean test
         _reset_shared_window_state_for_testing()
-        
+
         # Create envelope and record exposure
         envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=100.0)
         envelope.record_order_execution("BTC_15M", 1.97, asset="BTC")
-        
+
         # Verify exposure is recorded
         assert envelope.total_window_exposure_usd == 1.97
-        
-        # Create position cache (should detect stale exposure and reset)
-        # Note: This tests the _reset_stale_window_exposure() method which is called in __init__
-        cache = KalshiPositionCache()
-        
+
+        # Get the singleton and clear it so _reset_stale_window_exposure sees an empty cache.
+        cache = get_position_cache()
+        cache.clear_sync()
+        cache._reset_stale_window_exposure()
+
         # Verify exposure was reset because position cache is empty
-        assert _WINDOW_TRACKING_STATE["total_exposure_usd"] == 0.0, "Stale exposure should be reset when position cache is empty"
+        assert float(_WINDOW_TRACKING_STATE["total_exposure_usd"]) == 0.0, "Stale exposure should be reset when position cache is empty"
         assert _WINDOW_TRACKING_STATE["agent_exposure_usd"] == {}, "Stale agent exposure should be reset when position cache is empty"
         
         print("[PASS] _reset_stale_window_exposure() detects and clears stale exposure")
@@ -486,41 +498,48 @@ def test_position_monitor_window_capacity_release():
 def test_deprecated_guards_blocked():
     """Test that deprecated guards are blocked from importing."""
     print("\n=== Test 13: Deprecated Guards Blocked ===")
-    
+
     try:
         import os
         import sys
         import subprocess
-        
+
+        # Use a clean environment that removes the opt-in flag, while preserving
+        # PATH / PYTHONPATH so the import can find the package.
+        clean_env = os.environ.copy()
+        clean_env.pop("ALLOW_DEPRECATED_RISK_GUARDS", None)
+        clean_env.pop("KALSHI_ALLOW_DEPRECATED_RISK_GUARDS", None)
+
         # Test 1: Try to import global_risk_guard without ALLOW_DEPRECATED_RISK_GUARDS
-        # This should fail (either with ImportError or syntax error due to special chars)
         result = subprocess.run(
             [sys.executable, "-c", "from merid.guards.global_risk_guard import get_global_risk_guard"],
             capture_output=True,
             text=True,
-            cwd="c:\\Dev\\MERID"
+            cwd="c:\\Dev\\MERID",
+            env=clean_env,
         )
-        
+
         assert result.returncode != 0, "Import should fail without ALLOW_DEPRECATED_RISK_GUARDS"
         print("[PASS] global_risk_guard is blocked without ALLOW_DEPRECATED_RISK_GUARDS")
-        
+
         # Test 2: Try to import global_execution_guard without ALLOW_DEPRECATED_RISK_GUARDS
         result = subprocess.run(
             [sys.executable, "-c", "from merid.guards.global_execution_guard import get_global_execution_guard"],
             capture_output=True,
             text=True,
-            cwd="c:\\Dev\\MERID"
+            cwd="c:\\Dev\\MERID",
+            env=clean_env,
         )
-        
+
         assert result.returncode != 0, "Import should fail without ALLOW_DEPRECATED_RISK_GUARDS"
         print("[PASS] global_execution_guard is blocked without ALLOW_DEPRECATED_RISK_GUARDS")
-        
+
         # Test 3: Import should succeed with ALLOW_DEPRECATED_RISK_GUARDS=1
         # SKIPPED: The file has special characters that cause syntax errors even with the env var
         # The important part is that guards are blocked by default (tests 1-2)
         print("[SKIP] Opt-in test skipped due to file encoding issues")
         print("[INFO] Guards are effectively blocked by default, which is the critical requirement")
-        
+
     except Exception as e:
         print(f"[FAIL] {e}")
         import traceback

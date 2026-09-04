@@ -2050,9 +2050,11 @@ def test_window_exposure_recorded_on_fill_not_at_gate():
     with open("merid/event_venues/kalshi/position_cache.py", "r", encoding="utf-8") as f:
         cache_source = f.read()
     
-    # Verify slot release on fill exists
-    assert "release_by_asset" in cache_source, \
-        "position_cache.py should release slots by asset on fill"
+    # Verify slot release on full close exists and is ticker-specific.
+    # The old release_by_asset path was too coarse and could release slots while
+    # a partial position remained; the new code uses release_slot_by_ticker.
+    assert "release_slot_by_ticker" in cache_source, \
+        "position_cache.py should release slots by ticker on full close"
     
     # Verify it's in the on_fill function
     assert "def on_fill" in cache_source, \

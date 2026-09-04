@@ -1,9 +1,13 @@
 """Backward-compatible wrapper for the trading circuit breaker."""
 
+from utils.logger import get_logger
+
 from merid.governance.trading_circuit_breaker import (
     TradingCircuitBreaker,
     get_trading_circuit_breaker,
 )
+
+logger = get_logger("merid.governance.adaptive_risk_limits")
 
 
 class AdaptiveRiskLimits:
@@ -26,7 +30,13 @@ class AdaptiveRiskLimits:
             if not self._breaker.halted:
                 self._breaker.halt(reason="legacy_emergency_halt_set_true")
         else:
-            self._breaker.resume()
+            # 2026-09-03: Clearing a halt through the legacy boolean setter is
+            # no longer allowed.  Use TradingCircuitBreaker.admin_release() with
+            # a valid approval token, run ID, and safety checks.
+            logger.warning(
+                "[ADAPTIVE-RISK-LIMITS] emergency_halt=False ignored; "
+                "use admin_release() to clear the circuit breaker"
+            )
 
     @property
     def emergency_halt_reason(self) -> str:

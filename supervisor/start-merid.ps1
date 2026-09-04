@@ -13,7 +13,10 @@ $env:MERID_TRADING_MODE = "paper"
 $env:MERID_PM_TRADING_MODE = "paper"
 $env:MERID_LIVE_TRADING_UNLOCKED = "false"
 $env:MERID_ALLOW_LIVE_TRADES = "false"
-$env:KALSHI_ENV = "demo"
+# CANARY: this is a debug/paper restart of a working tree with uncommitted
+# live-money-path changes.  Remove this line before promoting to live.
+$env:MERID_ALLOW_DIRTY_TREE = "1"
+# Do not override KALSHI_ENV here; the canonical source is .env (MERID_KALSHI_ENV).
 $env:MERID_HTTP_PORT = "8011"
 $env:MERID_API_BASE_URL = "http://127.0.0.1:8011"
 $env:MERID_LOG_LEVEL = "INFO"
@@ -46,11 +49,14 @@ New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
 Write-Host "Starting MERID server..." -ForegroundColor Green
 
-# Start uvicorn with logging
-uvicorn web.main_15m_lean:app `
+# Prefer the project virtualenv uvicorn and do not terminate on stderr chatter.
+$python = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.exe" } else { "py" }
+$ErrorActionPreference = "Continue"
+
+& $python -m uvicorn web.main_15m_lean:app `
     --host 0.0.0.0 `
     --port 8011 `
     --log-level info `
-    2>&1 | Tee-Object logs/merid-server.log
+    *> logs/merid-server.log
 
 Write-Host "Server exited" -ForegroundColor Red

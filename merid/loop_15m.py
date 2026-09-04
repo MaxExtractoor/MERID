@@ -1194,12 +1194,12 @@ class Kalshi15mLoop:
                         # Calculate notional: contracts * avg_price_cents / 100
                         # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
                         if position.avg_price_cents is not None:
-                            notional = Decimal(str((position.contracts * position.avg_price_cents) / 100.0))
+                            notional = Decimal(position.quantity_cc) * Decimal(position.avg_price_cents) / Decimal("10000")
                             self._asset_positions[asset] += notional
-                            logger.debug("[15m-LOOP] Position: market=%s asset=%s contracts=%d price=%d notional=%.2f", 
+                            logger.debug("[15m-LOOP] Position: market=%s asset=%s contracts=%.2f price=%d notional=%.2f", 
                                         market_id, asset, position.contracts, position.avg_price_cents, notional)
                         else:
-                            logger.warning("[15m-LOOP] Position with unknown entry price: market=%s asset=%s contracts=%d - skipping notional calculation",
+                            logger.warning("[15m-LOOP] Position with unknown entry price: market=%s asset=%s contracts=%.2f - skipping notional calculation",
                                          market_id, asset, position.contracts)
                 
                 # Log final exposure for each asset
@@ -4406,7 +4406,7 @@ async def _run_loop(self) -> None:
                             self._asset_positions[asset] += notional
                             # CRITICAL FIX (2026-07-31): Log individual position notional for debugging
                             logger.debug(
-                                "[15m-LOOP] Position notional: market=%s asset=%s contracts=%d avg_price=%dc notional=%s",
+                                "[15m-LOOP] Position notional: market=%s asset=%s contracts=%.2f avg_price=%dc notional=%s",
                                 market_id, asset, position.contracts, position.avg_price_cents, notional
                             )
                 
@@ -5062,7 +5062,7 @@ async def _run_loop(self) -> None:
                                                         context={"asset": asset, "ticker": ticker, "pos_ticker": pos_ticker}
                                                     )
                                                     logger.warning(
-                                                        "[15m-LOOP] Asset already has position in current window: asset=%s window=%s position=%s (contracts=%d) - skipping (legacy check, superseded by thesis check)",
+                                                        "[15m-LOOP] Asset already has position in current window: asset=%s window=%s position=%s (contracts=%.2f) - skipping (legacy check, superseded by thesis check)",
                                                         asset, pos_window_id, pos_ticker, pos_obj.contracts
                                                     )
                                                     continue
@@ -7070,7 +7070,7 @@ async def _run_one_cycle(self, tick: int) -> None:
         for asset in assets:
             exposure = position_cache.get_asset_exposure(asset)
             logger.info(
-                "[POSITION-EXPOSURE] cycle=%d asset=%s contracts=%d notional=%.2f unrealized_pnl=%.2f position_count=%d",
+                "[POSITION-EXPOSURE] cycle=%d asset=%s contracts=%.2f notional=%.2f unrealized_pnl=%.2f position_count=%d",
                 tick,
                 asset,
                 exposure["total_contracts"],
@@ -7428,7 +7428,7 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                         self._asset_positions[asset] += notional
                         # CRITICAL FIX (2026-07-31): Log individual position notional for debugging
                         logger.debug(
-                            "[15M-LOOP] Position notional: market=%s asset=%s contracts=%d avg_price=%dc notional=%s",
+                            "[15M-LOOP] Position notional: market=%s asset=%s contracts=%.2f avg_price=%dc notional=%s",
                             market_id, asset, position.contracts, position.avg_price_cents, notional
                         )
             

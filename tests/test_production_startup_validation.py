@@ -84,6 +84,8 @@ def _clean_prod(monkeypatch):
     monkeypatch.delenv("DEBUG_ALLOW_MANUAL_ORDERS", raising=False)
     monkeypatch.delenv("ALLOW_DIRECT_EXECUTION", raising=False)
     monkeypatch.delenv("MERID_ALLOW_CT_SCRIPT_BYPASS", raising=False)
+    monkeypatch.delenv("MERID_DISABLE_CRYPTO15M_GATE", raising=False)
+    monkeypatch.delenv("MERID_DISABLE_SHARED_RISK_GUARD", raising=False)
     monkeypatch.setenv("MERID_EXIT_FIREWALL_OBSERVE_ONLY", "false")
     monkeypatch.setenv("MERID_REQUIRE_EXIT_PARENTAGE", "1")
     monkeypatch.setenv("MERID_CIRCUIT_BREAKER_DISABLED", "0")
