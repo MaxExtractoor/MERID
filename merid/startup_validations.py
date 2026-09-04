@@ -484,10 +484,14 @@ def validate_production_startup() -> None:
         forbidden.append("MERID_ALLOW_CT_SCRIPT_BYPASS=true")
 
     # Disabled shared risk guard must never be silently honored in production.
-    # (MERID_DISABLE_CRYPTO15M_GATE is intentionally set to 1 for the lean 15m
-    # stack because the crypto15m allocator is archived; order_gate.py honors it.)
+    # The lean 15m stack intentionally sets MERID_DISABLE_SHARED_RISK_GUARD=1
+    # because the deprecated GlobalRiskGuard would block the new
+    # UnifiedRiskManager/fixed-slot-allocator path (see start_15m.ps1).  The flag
+    # is allowed only for the kalshi_crypto_15m_v2 profile, where the new risk
+    # manager is the single source of truth.
     if os.getenv("MERID_DISABLE_SHARED_RISK_GUARD", "").strip().lower() in ("1", "true", "yes"):
-        forbidden.append("MERID_DISABLE_SHARED_RISK_GUARD=true")
+        if not is_kalshi_15m_profile():
+            forbidden.append("MERID_DISABLE_SHARED_RISK_GUARD=true")
 
     # Firewall enforcement and exit parentage are required unless an explicit
     # canary profile is documented. These must not be silent defaults.

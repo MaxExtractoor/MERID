@@ -120,13 +120,13 @@ if (Test-Path $EnvFile) {
                 # secret store (e.g. Devin Cloud, Windows Credential, 1Password)
                 # without placing them in a .env file.  The fail-closed token
                 # preflight below still runs.
+                $existing = $null
                 if ($name -in @("MERID_MANUAL_EMERGENCY_TOKEN", "MERID_BREAKER_RELEASE_TOKEN")) {
                     $existing = [Environment]::GetEnvironmentVariable($name, "Process")
-                    if ($existing -and $existing -ne "SET_FROM_SECRET_STORE") {
-                        continue
-                    }
                 }
-                Set-Item -Path "env:$name" -Value $value
+                if (-not ($existing -and $existing -ne "SET_FROM_SECRET_STORE")) {
+                    Set-Item -Path "env:$name" -Value $value
+                }
             }
         }
     }
