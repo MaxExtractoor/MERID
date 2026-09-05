@@ -68,11 +68,29 @@ except ImportError:
 # CF-RTI settlement input: authoritative settlement reference.
 # This is the only source permitted to set settlement_reference="cfb_rti_live".
 try:
-    from merid.data.cf_rti_adapter import get_live_rti
+    from merid.data.cf_rti_adapter import get_live_rti, get_rti_history
     _CFB_RTI_AVAILABLE = True
 except ImportError:
     _CFB_RTI_AVAILABLE = False
     get_live_rti = None  # type: ignore
+    get_rti_history = None  # type: ignore
+
+# Settlement-aware distribution model for the 60-second TWAP payoff.
+# Disabled by default until shadow validation is complete.
+try:
+    from merid.prediction.settlement_distribution import (
+        build_settlement_state,
+        compute_settlement_distribution,
+        SettlementDistribution,
+    )
+    _SETTLEMENT_DISTRIBUTION_AVAILABLE = True
+except ImportError:
+    _SETTLEMENT_DISTRIBUTION_AVAILABLE = False
+    build_settlement_state = None  # type: ignore
+    compute_settlement_distribution = None  # type: ignore
+    SettlementDistribution = None  # type: ignore
+
+MERID_SETTLEMENT_DISTRIBUTION_V2 = os.environ.get("MERID_SETTLEMENT_DISTRIBUTION_V2", "").strip().lower() in ("1", "true", "yes")
 
 # Import invariant checker for production logging
 from merid.validation.regime_gating_invariants import (
@@ -7695,6 +7713,54 @@ class LeanAgent15m:
         )
         bachelier_spot_price = _get_bachelier_spot_price(cfb_observation, settlement_input_price)
 
+        # Settlement-aware distribution model (opt-in, V2).  Treats the contract
+        # payoff as the final 60-second CF RTI average, not a point price at
+        # expiry.  Disabled by default until shadow/live calibration is complete.
+        settlement_distribution: Optional[Any] = None
+        if MERID_SETTLEMENT_DISTRIBUTION_V2 and _SETTLEMENT_DISTRIBUTION_AVAILABLE:
+            try:
+                from merid.data.cf_rti_adapter import get_rti_history
+
+                expiry_ts = getattr(market, "expires_at", None)
+                if expiry_ts is None and hasattr(market, "market"):
+                    expiry_ts = getattr(market.market, "end_date", None)
+                now_ts = dt.now(timezone.utc)
+                rti_history = []
+                if get_rti_history is not None:
+                    rti_history = get_rti_history(asset, max_age_s=90.0)
+
+                latest_rti_ts = None
+                if cfb_observation is not None:
+                    _ts_ms = getattr(cfb_observation, "source_ts_ms", None)
+                    if _ts_ms is not None:
+                        try:
+                            latest_rti_ts = dt.fromtimestamp(_ts_ms / 1000.0, tz=timezone.utc)
+                        except Exception:
+                            latest_rti_ts = None
+
+                sd_state = build_settlement_state(
+                    ticker=ticker,
+                    asset=asset,
+                    strike_price=float(strike),
+                    expiry_ts=expiry_ts,
+                    now_ts=now_ts,
+                    latest_rti=bachelier_spot_price,
+                    latest_rti_decimal=getattr(cfb_observation, "value_decimal", None) if cfb_observation is not None else None,
+                    latest_rti_ts=latest_rti_ts,
+                    rti_history=rti_history,
+                    source="cf_rti",
+                    settlement_reference=settlement_reference,
+                )
+                settlement_distribution = compute_settlement_distribution(sd_state, annualized_vol=annualized_vol)
+            except Exception as sd_exc:
+                logger.warning(
+                    "[SETTLEMENT-DISTRIBUTION] asset=%s failed to build distribution: %s",
+                    asset,
+                    sd_exc,
+                    exc_info=True,
+                )
+                settlement_distribution = None
+
         run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
 
         # Hybrid probability: fuse Bachelier fair value with the live
@@ -7798,6 +7864,7 @@ class LeanAgent15m:
                 p_yes_model=p_yes,
                 min_required_edge=min_required_edge,
                 settlement_reference=settlement_reference,
+                settlement_distribution=settlement_distribution,
                 policy_version="trade_decision_v2",
             )
             _record_decision_audit(

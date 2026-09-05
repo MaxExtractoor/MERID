@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
+from merid.prediction.settlement_distribution import SettlementDistribution
 from merid.data.ingress_replay import replay_time
 from merid.audit.replay_state_diff import record_state_checksum
 from utils.logger import get_logger
@@ -1126,6 +1127,7 @@ def compute_trade_decision(
     no_score: Optional[float] = None,
     p_yes_model: Optional[float] = None,
     p_no_model: Optional[float] = None,
+    settlement_distribution: Optional[SettlementDistribution] = None,
     yes_vote_count: int = 0,
     no_vote_count: int = 0,
     selected_side_pre_edge: Optional[Literal["yes", "no"]] = None,
@@ -1139,14 +1141,11 @@ def compute_trade_decision(
 ) -> TradeDecision:
     """Compute a calibrated, cost-aware trade decision for a 15m binary market.
 
-    The raw probability uses the settlement-aware normal model from the
-    production notes:
-
-        z = ln(spot/strike) / (sigma * sqrt(T))
-        p_yes_raw = Phi(z)
-
-    where T is in years and sigma is annualized volatility.  Drift is shrunk
-    to zero because 15-minute drift estimates are unreliable.
+    The default raw probability uses a log-moneyness Bachelier baseline.  When a
+    ``settlement_distribution`` is supplied, it is treated as the authoritative
+    distribution of the final 60-second CF RTI settlement average and is used
+    directly for p_yes_raw.  Drift is shrunk to zero because 15-minute drift
+    estimates are unreliable.
 
     A trade is emitted only when:
       1. The data_state is healthy.
@@ -1301,6 +1300,27 @@ def compute_trade_decision(
         "bachelier_spot": float(spot_price),
         "strike": float(strike_price),
     })
+
+    # If a settlement-aware distribution is supplied, use it as the canonical
+    # distribution of the final 60-second settlement average.  This overrides
+    # the legacy point-price Bachelier p_yes for probability but preserves the
+    # same cost/edge/tail gates.
+    if settlement_distribution is not None and math.isfinite(settlement_distribution.p_yes_raw):
+        p_yes_raw = float(settlement_distribution.p_yes_raw)
+        log_moneyness = (float(settlement_distribution.mean) - float(strike_price)) / max(abs(float(strike_price)), 1e-12)
+        z = float(settlement_distribution.z_score)
+        indicators.update({
+            "settlement_forecast_mean": float(settlement_distribution.mean),
+            "settlement_forecast_std": float(settlement_distribution.std),
+            "settlement_observed_count": int(settlement_distribution.observed_count),
+            "settlement_remaining_count": int(settlement_distribution.remaining_count),
+            "settlement_phase": settlement_distribution.phase,
+            "settlement_forecast_method": settlement_distribution.forecast_method,
+            "settlement_model_version": settlement_distribution.model_version,
+            "log_moneyness": log_moneyness,
+            "z_score": z,
+            "p_yes_raw": p_yes_raw,
+        })
 
     # 2026-08-30: Per-side tail calibration.  The YES and NO held-side
     # probabilities are calibrated independently from their own tail curves,
