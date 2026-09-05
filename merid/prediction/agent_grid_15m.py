@@ -388,10 +388,9 @@ def _get_settlement_input_price(
         obs = get_live_rti(asset)
         if obs is not None and obs.execution_eligible:
             # Kalshi crypto 15m contracts settle on a 60-second average of CF RTI
-            # observations.  The Bachelier baseline must therefore compare the
-            # current 60-second average to the strike (itself a 60-second average),
-            # not a noisy per-second tick.  Fall back to the tick only when the
-            # average is missing or invalid.
+            # observations.  The settlement *reference* is the 60-second average.
+            # The Bachelier *forecast* of the future 60-second average must start
+            # from the current instantaneous RTI tick, not from the lagged average.
             raw_price: Optional[Decimal] = obs.settlement_price()
             if raw_price is None or not raw_price.is_finite() or raw_price <= 0:
                 obs = None
@@ -452,6 +451,25 @@ def _get_settlement_input_price(
     if obs is not None and not obs.execution_eligible:
         reason = f"cf_rti_not_execution_eligible:{obs.timestamp_quality}"
     return spot_price, 0.0, f"cf_rti_unavailable:{reason}", obs
+
+
+def _get_bachelier_spot_price(cfb_observation: Any, settlement_input_price: float) -> float:
+    """Return the Bachelier spot for p_yes forecast.
+
+    The future 60-second TWAP is best predicted by the current instantaneous
+    RTI tick, not by the current 60-second average.  If the latest tick is
+    missing or invalid, fall back to the settlement reference price.
+    """
+    if cfb_observation is not None:
+        raw = getattr(cfb_observation, "value", None)
+        if raw is not None:
+            try:
+                val = float(raw)
+                if math.isfinite(val) and val > 0:
+                    return val
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return float(settlement_input_price)
 
 
 def _quote_age_ms(market_state: Any) -> Optional[int]:
@@ -7169,17 +7187,19 @@ class LeanAgent15m:
             os.environ.get(f"MERID_ANNUALIZED_VOL_{asset.upper()}")
             or _vol_defaults.get(asset.upper(), 0.80)
         )
+        # spot_price is the Bachelier spot (latest RTI tick), not the 60s average.
+        bachelier_spot = float(spot_price)
         resolved_vol, vol_source, _band_min, _band_max, components = _resolve_annualized_vol(
             asset=asset,
             requested_vol=requested_vol,
-            spot_price=float(settlement_input_price),
+            spot_price=bachelier_spot,
             strike_price=float(strike),
             seconds_to_expiry=effective_seconds,
             market_prob=market_prob,
         )
         if components is None:
             components = _compute_bachelier_components(
-                float(settlement_input_price), float(strike), effective_seconds, resolved_vol
+                bachelier_spot, float(strike), effective_seconds, resolved_vol
             ) or {
                 "log_moneyness": 0.0,
                 "z_score": 0.0,
@@ -7673,6 +7693,7 @@ class LeanAgent15m:
             spot_price,
             settlement_digits=getattr(market, "settlement_digits", None),
         )
+        bachelier_spot_price = _get_bachelier_spot_price(cfb_observation, settlement_input_price)
 
         run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
 
@@ -7683,7 +7704,7 @@ class LeanAgent15m:
         try:
             hybrid = self._compute_hybrid_p_yes(
                 asset=asset,
-                spot_price=spot_price,
+                spot_price=bachelier_spot_price,
                 settlement_input_price=settlement_input_price,
                 strike=float(strike),
                 yes_ask=float(yes_ask),
@@ -7756,7 +7777,7 @@ class LeanAgent15m:
                 decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
                 ticker=ticker,
                 asset=asset,
-                spot_price=settlement_input_price,
+                spot_price=bachelier_spot_price,
                 strike_price=float(strike),
                 seconds_to_expiry=seconds_to_expiry,
                 yes_bid_cents=float(yes_bid),
@@ -7865,7 +7886,7 @@ class LeanAgent15m:
             try:
                 hybrid_bachelier = self._compute_hybrid_p_yes(
                     asset=asset,
-                    spot_price=spot_price,
+                    spot_price=bachelier_spot_price,
                     settlement_input_price=settlement_input_price,
                     strike=float(strike),
                     yes_ask=float(yes_ask),
