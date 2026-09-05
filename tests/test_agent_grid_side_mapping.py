@@ -141,7 +141,7 @@ class TestSideMappingConsistency:
         ("momentum_fvg", 0.001, "yes"),   # Positive velocity → YES
         ("momentum_fvg", -0.001, "no"),   # Negative velocity → NO
         ("price_based", 0.20, "yes"),     # Low price → YES
-        ("price_based", 0.80, "no"),      # High price → NO
+        ("price_based", 0.90, "no"),      # High price (>= profile sell_threshold) → NO
     ])
     def test_side_mapping_by_mode(self, mode, velocity, expected_side):
         """Test that each mode maps inputs to sides correctly."""
