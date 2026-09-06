@@ -14,7 +14,6 @@ from merid.prediction.settlement_distribution import (
     compute_settlement_distribution,
     probability_yes,
 )
-from merid.prediction.trade_decision import compute_trade_decision
 
 
 class FakeRtiObservation:
@@ -68,7 +67,7 @@ class TestSettlementDistribution:
         # 45 observations: average 99.0. Latest tick 102.0.
         history = []
         for i in range(45):
-            ts = window_start + timedelta(seconds=i)
+            ts = window_start + timedelta(seconds=i + 1)
             history.append(FakeRtiObservation(_ms(ts), 99.0))
 
         state = build_settlement_state(
@@ -100,7 +99,7 @@ class TestSettlementDistribution:
 
         history = []
         for i in range(59):
-            ts = window_start + timedelta(seconds=i)
+            ts = window_start + timedelta(seconds=i + 1)
             history.append(FakeRtiObservation(_ms(ts), 100.0))
 
         state = build_settlement_state(
@@ -130,7 +129,7 @@ class TestSettlementDistribution:
 
         history = []
         for i in range(60):
-            ts = window_start + timedelta(seconds=i)
+            ts = window_start + timedelta(seconds=i + 1)
             history.append(FakeRtiObservation(_ms(ts), 101.0))
 
         state = build_settlement_state(
@@ -208,8 +207,8 @@ class TestSettlementDistribution:
         acc = SettlementWindowAccumulator(
             ticker="KXBTC15M-TEST", expiry_ts=expiry, window_start_ts=window_start
         )
-        acc.add_observation(window_start, Decimal("100.0"))
-        acc.add_observation(window_start + timedelta(milliseconds=300), Decimal("101.0"))
+        acc.add_observation(window_start + timedelta(seconds=1), Decimal("100.0"))
+        acc.add_observation(window_start + timedelta(seconds=1, milliseconds=300), Decimal("101.0"))
         assert acc.observed_count() == 1
         assert float(acc.observed_sum()) == 101.0
 
@@ -231,6 +230,7 @@ class TestSettlementDistributionTradeDecisionIntegration:
             phase="pre_window",
             forecast_method="test",
         )
+        from merid.prediction.trade_decision import compute_trade_decision
         decision = compute_trade_decision(
             run_id="r1",
             decision_id="d1",
@@ -277,6 +277,7 @@ class TestSettlementDistributionTradeDecisionIntegration:
             forecast_method="test",
         )
         # Hybrid p_yes_model overrides the distribution for the final selected side.
+        from merid.prediction.trade_decision import compute_trade_decision
         decision = compute_trade_decision(
             run_id="r1",
             decision_id="d2",
@@ -305,6 +306,128 @@ class TestSettlementDistributionTradeDecisionIntegration:
             p_yes_model=0.90,  # Should override the 0.40 p_yes_raw and select YES
         )
         assert decision.selected_outcome == "yes"
+
+
+def _state_at(elapsed, history=None, **kwargs):
+    expiry = datetime(2026, 9, 5, 16, 1, tzinfo=timezone.utc)
+    return build_settlement_state(
+        ticker="KXBTC15M-TEST", asset="BTC", strike_price=100,
+        expiry_ts=expiry, now_ts=expiry - timedelta(seconds=60 - elapsed),
+        latest_rti=101, rti_history=history or [], **kwargs,
+    )
+
+
+def test_right_endpoint_window_has_sixty_samples():
+    start = _state_at(0).window_start_ts
+    history = [FakeRtiObservation(_ms(start + timedelta(seconds=i)), 100 + i)
+               for i in range(61)]
+    state = _state_at(60, history)
+    assert state.observed_count == 60
+    assert state.observed_sum == Decimal(60 * 100 + sum(range(1, 61)))
+    acc = SettlementWindowAccumulator("test", state.expiry_ts, start)
+    for obs in history:
+        acc.add_observation(_dt(obs.source_ts_ms), obs.value_decimal)
+    assert acc.observed_count() == 60
+    assert acc.observed_sum() == state.observed_sum
+    assert acc.remaining_count(start) == 60
+
+
+def test_latest_source_timestamp_wins_and_future_frame_is_excluded():
+    start = _state_at(0).window_start_ts
+    history = [FakeRtiObservation(_ms(start + timedelta(seconds=s)), v)
+               for s, v in [(1.8, 108), (1.2, 102), (1.9, 109)]]
+    state = _state_at(1.85, history)
+    assert state.observed_sum == Decimal(108)
+    acc = SettlementWindowAccumulator("test", state.expiry_ts, start)
+    for obs in history[:2]:
+        acc.add_observation(_dt(obs.source_ts_ms), obs.value_decimal)
+    assert acc.observed_sum() == Decimal(108)
+
+
+@pytest.mark.parametrize("elapsed", [-60, 0, 0.5, 14, 14.5, 59, 59.5])
+def test_discrete_brownian_covariance(elapsed):
+    start = _state_at(0).window_start_ts
+    history = [FakeRtiObservation(_ms(start + timedelta(seconds=i)), 99)
+               for i in range(1, max(0, math.floor(elapsed)) + 1)]
+    state = _state_at(elapsed, history)
+    dist = compute_settlement_distribution(state, 0.6)
+    offsets = [i - elapsed for i in range(1, 61) if i > elapsed]
+    expected = sum(min(a, b) for a in offsets for b in offsets) / 3600
+    assert dist.std ** 2 == pytest.approx((0.6 * 101) ** 2 * expected / 31536000)
+    assert dist.remaining_count == state.remaining_count == len(offsets)
+
+
+@pytest.mark.parametrize("elapsed", [15, 59.9, 60, 65])
+def test_missing_elapsed_samples_rejected(elapsed):
+    with pytest.raises(ValueError, match="samples"):
+        compute_settlement_distribution(_state_at(elapsed), 0.6)
+
+
+@pytest.mark.parametrize("vol", [float("nan"), float("inf"), -float("inf"), -0.6])
+def test_invalid_volatility_rejected(vol):
+    with pytest.raises(ValueError):
+        compute_settlement_distribution(_state_at(-60), vol)
+
+
+@pytest.mark.parametrize("count", [1, 59])
+def test_incomplete_expired_average_is_not_certainty(count):
+    start = _state_at(0).window_start_ts
+    history = [FakeRtiObservation(_ms(start + timedelta(seconds=i)), 110)
+               for i in range(1, count + 1)]
+    with pytest.raises(ValueError, match="samples"):
+        compute_settlement_distribution(_state_at(60, history), 0.6)
+
+
+def test_identical_timestamp_conflict_is_rejected():
+    start = _state_at(0).window_start_ts
+    ts = start + timedelta(seconds=1)
+    history = [FakeRtiObservation(_ms(ts), value) for value in [100, 101]]
+    with pytest.raises(ValueError, match="Conflicting"):
+        _state_at(1, history)
+    acc = SettlementWindowAccumulator("test", start + timedelta(seconds=60), start)
+    acc.add_observation(ts, Decimal(100))
+    acc.add_observation(ts, Decimal(100))
+    with pytest.raises(ValueError, match="Conflicting"):
+        acc.add_observation(ts, Decimal(101))
+
+
+def test_future_latest_reference_rejected():
+    state = _state_at(-60)
+    from dataclasses import replace
+    with pytest.raises(ValueError, match="Future"):
+        compute_settlement_distribution(
+            replace(state, latest_rti_ts=state.now_ts + timedelta(milliseconds=1)), 0.6,
+        )
+
+
+def test_missing_source_timestamp_is_not_local_arrival_time():
+    from types import SimpleNamespace
+    start = _state_at(0).window_start_ts
+    obs = SimpleNamespace(source_ts_ms=None, observed_ts_ms=_ms(start + timedelta(seconds=1)),
+                          value_decimal=Decimal(100))
+    assert _state_at(1, [obs]).observed_count == 0
+
+
+@pytest.mark.parametrize("std", [float("nan"), float("inf"), -1])
+def test_invalid_std_cannot_become_certainty(std):
+    with pytest.raises(ValueError):
+        probability_yes(build_stub(101, std, 100), 100)
+
+
+@pytest.mark.parametrize("phase, tte", [("invalid", 0), ("unknown", 120)])
+def test_invalid_phase_rejected(phase, tte):
+    from dataclasses import replace
+    with pytest.raises(ValueError):
+        compute_settlement_distribution(
+            replace(_state_at(-60), phase=phase, seconds_to_expiry=tte), 0.6,
+        )
+
+
+def test_out_of_order_same_second_uses_latest_source_time():
+    start = _state_at(0).window_start_ts
+    history = [FakeRtiObservation(_ms(start + timedelta(seconds=s)), v)
+               for s, v in [(1.8, 108), (1.2, 102)]]
+    assert _state_at(1.85, history).observed_sum == Decimal(108)
 
 
 def build_stub(mean: float, std: float, strike: float):

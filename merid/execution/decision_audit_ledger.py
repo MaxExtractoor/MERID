@@ -1033,11 +1033,16 @@ class DecisionAuditLedger:
             pass
 
         strike = _to_float(indicators.get("strike"))
+        # spot_price is the instantaneous price the model consumed (the latest
+        # CF RTI tick recorded as indicators["bachelier_spot"]).  The 60-second
+        # settlement reference is stored in its own column and must not be
+        # conflated with the model input.
         spot_price = _to_float(
-            settlement_reference_price
-            or indicators.get("bachelier_spot")
+            indicators.get("bachelier_spot")
             or getattr(decision, "spot_price", None)
         )
+        if spot_price is not None and spot_price <= 0:
+            spot_price = None
 
         # Market-state derived BBO and depth.
         yes_bid, yes_ask, no_bid, no_ask = _best_bid_ask(market_state)
@@ -1444,6 +1449,15 @@ def _build_side_ev_row(
         and _book_is_executable(market_state)
     )
 
+    if side == "yes":
+        side_raw_probability = _to_float(getattr(decision, "p_yes_raw", None))
+    else:
+        side_raw_probability = _to_float(indicators.get("p_no_raw"))
+        if side_raw_probability is None:
+            _p_yes_raw = _to_float(getattr(decision, "p_yes_raw", None))
+            if _p_yes_raw is not None:
+                side_raw_probability = 1.0 - _p_yes_raw
+
     return {
         "eligible_for_model": bool(eligible_for_model),
         "eligible_for_policy": bool(eligible_for_policy),
@@ -1457,8 +1471,8 @@ def _build_side_ev_row(
         "executable_entry_depth_fp": float(depth_cc),
         "expected_entry_fill_cents": expected_fill,
         "expected_entry_slippage_cents": None,
-        "raw_probability": p_selected,
-        "calibrated_probability": p_opposite,
+        "raw_probability": side_raw_probability,
+        "calibrated_probability": p_selected,
         "gross_edge_cents": gross_edge_cents,
         "entry_fee_cents": entry_fee_cents,
         "exit_or_settlement_fee_cents": exit_fee_cents,
@@ -1525,6 +1539,15 @@ def _legacy_side_ev_row(
         and _book_is_executable(market_state)
     )
 
+    if side == "yes":
+        side_raw_probability = _to_float(getattr(decision, "p_yes_raw", None))
+    else:
+        side_raw_probability = _to_float(indicators.get("p_no_raw"))
+        if side_raw_probability is None:
+            _p_yes_raw = _to_float(getattr(decision, "p_yes_raw", None))
+            if _p_yes_raw is not None:
+                side_raw_probability = 1.0 - _p_yes_raw
+
     return {
         "eligible_for_model": entry_price is not None,
         "eligible_for_policy": entry_price is not None and in_canonical,
@@ -1538,8 +1561,8 @@ def _legacy_side_ev_row(
         "executable_entry_depth_fp": float(depth_cc),
         "expected_entry_fill_cents": entry_price_cents,
         "expected_entry_slippage_cents": None,
-        "raw_probability": _to_float(getattr(decision, f"p_{side}_calibrated", None)),
-        "calibrated_probability": None,
+        "raw_probability": side_raw_probability,
+        "calibrated_probability": _to_float(getattr(decision, f"p_{side}_calibrated", None)),
         "gross_edge_cents": gross_edge_cents,
         "entry_fee_cents": entry_fee_cents,
         "exit_or_settlement_fee_cents": exit_fee_cents,

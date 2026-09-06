@@ -242,6 +242,63 @@ def test_settlement_computes_counterfactuals(tmp_db: Path) -> None:
         assert outcome["counterfactual_no_pnl_cents"] == -29.0
 
 
+def test_side_ev_probabilities_are_same_side(tmp_db: Path) -> None:
+    """raw_probability/calibrated_probability must record THIS side's
+    probabilities.  Regression for the bug where raw_probability stored the
+    post-calibration selected probability and calibrated_probability stored the
+    opposite side's probability."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.p_yes_raw = Decimal("0.62")
+    dec.p_yes_calibrated = Decimal("0.58")
+    dec.p_no_calibrated = Decimal("0.42")
+    dec.yes_edge_breakdown.p_selected = 0.58
+    dec.yes_edge_breakdown.p_opposite = 0.42
+    dec.no_edge_breakdown.p_selected = 0.42
+    dec.no_edge_breakdown.p_opposite = 0.58
+    ledger.record_trade_decision(dec)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT side, raw_probability, calibrated_probability FROM strategy_decision_side_ev WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchall()
+        yes = [r for r in rows if r["side"] == "yes"][0]
+        no = [r for r in rows if r["side"] == "no"][0]
+        assert yes["raw_probability"] == pytest.approx(0.62)
+        assert yes["calibrated_probability"] == pytest.approx(0.58)
+        # p_no_raw is absent from the fake indicators; it is derived as
+        # 1 - p_yes_raw.
+        assert no["raw_probability"] == pytest.approx(0.38)
+        assert no["calibrated_probability"] == pytest.approx(0.42)
+
+
+def test_snapshot_spot_price_is_model_input_not_settlement_reference(tmp_db: Path) -> None:
+    """spot_price must be the instantaneous price the model consumed
+    (indicators["bachelier_spot"], i.e. the latest CF RTI tick), not the
+    60-second settlement reference which has its own column."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+    ledger.record_trade_decision(
+        dec,
+        settlement_reference_price=65050.0,
+        settlement_reference_source="cfb_rti_live",
+    )
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        snap = conn.execute(
+            "SELECT spot_price, settlement_reference_price, spot_settlement_basis FROM strategy_decision_snapshots WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert snap["spot_price"] == pytest.approx(65000.0)  # bachelier_spot
+        assert snap["settlement_reference_price"] == pytest.approx(65050.0)
+        assert snap["spot_settlement_basis"] == pytest.approx(-50.0)
+
+
 def test_classify_reasons() -> None:
     c = _classify_no_trade_reason("data_state_not_healthy")
     assert c.decision == "NO_TRADE"

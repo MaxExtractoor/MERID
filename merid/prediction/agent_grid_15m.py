@@ -471,14 +471,18 @@ def _get_settlement_input_price(
     return spot_price, 0.0, f"cf_rti_unavailable:{reason}", obs
 
 
-def _get_bachelier_spot_price(cfb_observation: Any, settlement_input_price: float) -> float:
+def _get_bachelier_spot_price(cfb_observation: Any, settlement_input_price: float) -> Optional[float]:
     """Return the Bachelier spot for p_yes forecast.
 
     The future 60-second TWAP is best predicted by the current instantaneous
-    RTI tick, not by the current 60-second average.  If the latest tick is
-    missing or invalid, fall back to the settlement reference price.
+    RTI tick, not by the current 60-second average.  When the RTI feed is live
+    but the latest tick is missing or invalid, return ``None`` so the caller
+    fails closed instead of silently reusing the lagged 60-second average.
+    When RTI is unavailable entirely, ``settlement_input_price`` is the public
+    spot fallback and downstream confidence gates reject the non-``cfb_rti_live``
+    reference.
     """
-    if cfb_observation is not None:
+    if cfb_observation is not None and getattr(cfb_observation, "execution_eligible", False):
         raw = getattr(cfb_observation, "value", None)
         if raw is not None:
             try:
@@ -487,6 +491,7 @@ def _get_bachelier_spot_price(cfb_observation: Any, settlement_input_price: floa
                     return val
             except (TypeError, ValueError, OverflowError):
                 pass
+        return None
     return float(settlement_input_price)
 
 
@@ -7712,12 +7717,49 @@ class LeanAgent15m:
             settlement_digits=getattr(market, "settlement_digits", None),
         )
         bachelier_spot_price = _get_bachelier_spot_price(cfb_observation, settlement_input_price)
+        if bachelier_spot_price is None:
+            logger.warning(
+                "[CF-RTI-LATEST-TICK] asset=%s live RTI observation is missing a valid "
+                "latest tick; rejecting Bachelier entry (fail-closed, no 60s-avg fallback)",
+                asset,
+            )
+            self._record_signal_rejection(
+                "cf_rti_latest_tick_invalid",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    bachelier_spot_price,
+                    settlement_reference,
+                    seconds_to_expiry,
+                    extra={"settlement_reference_price": settlement_input_price},
+                )
+            )
+            return None
 
         # Settlement-aware distribution model (opt-in, V2).  Treats the contract
         # payoff as the final 60-second CF RTI average, not a point price at
         # expiry.  Disabled by default until shadow/live calibration is complete.
+        # When enabled it is the authoritative probability source: any failure to
+        # build it rejects the entry rather than silently falling back to the
+        # point-Bachelier path.
         settlement_distribution: Optional[Any] = None
-        if MERID_SETTLEMENT_DISTRIBUTION_V2 and _SETTLEMENT_DISTRIBUTION_AVAILABLE:
+        if MERID_SETTLEMENT_DISTRIBUTION_V2:
+            if not _SETTLEMENT_DISTRIBUTION_AVAILABLE:
+                logger.warning(
+                    "[SETTLEMENT-DISTRIBUTION] asset=%s V2 enabled but module unavailable; refusing entry",
+                    asset,
+                )
+                self._record_signal_rejection(
+                    "settlement_distribution_unavailable",
+                    **self._build_trade_decision_rejection_context(
+                        asset,
+                        spot_price,
+                        bachelier_spot_price,
+                        settlement_reference,
+                        seconds_to_expiry,
+                    )
+                )
+                return None
             try:
                 from merid.data.cf_rti_adapter import get_rti_history
 
@@ -7751,15 +7793,44 @@ class LeanAgent15m:
                     source="cf_rti",
                     settlement_reference=settlement_reference,
                 )
-                settlement_distribution = compute_settlement_distribution(sd_state, annualized_vol=annualized_vol)
+                # Resolve volatility once so the distribution and the decision
+                # engine consume the same final vol (env override, realized, or
+                # market-implied) instead of the pre-resolution default.
+                dist_yes_mid = (
+                    (yes_bid + yes_ask) / 2.0
+                    if yes_bid > 0 and yes_ask > 0
+                    else (yes_ask if yes_ask > 0 else 100.0 - no_bid)
+                )
+                dist_market_prob = max(1.0, min(99.0, dist_yes_mid)) / 100.0
+                resolved_dist_vol, _, _, _, _ = _resolve_annualized_vol(
+                    asset=asset,
+                    requested_vol=annualized_vol,
+                    spot_price=bachelier_spot_price,
+                    strike_price=float(strike),
+                    seconds_to_expiry=seconds_to_expiry,
+                    market_prob=dist_market_prob,
+                )
+                annualized_vol = resolved_dist_vol
+                settlement_distribution = compute_settlement_distribution(sd_state, annualized_vol=resolved_dist_vol)
             except Exception as sd_exc:
                 logger.warning(
-                    "[SETTLEMENT-DISTRIBUTION] asset=%s failed to build distribution: %s",
+                    "[SETTLEMENT-DISTRIBUTION] asset=%s V2 enabled but distribution build failed; refusing entry: %s",
                     asset,
                     sd_exc,
                     exc_info=True,
                 )
-                settlement_distribution = None
+                self._record_signal_rejection(
+                    "settlement_distribution_unavailable",
+                    **self._build_trade_decision_rejection_context(
+                        asset,
+                        spot_price,
+                        bachelier_spot_price,
+                        settlement_reference,
+                        seconds_to_expiry,
+                        extra={"settlement_distribution_error": str(sd_exc)},
+                    )
+                )
+                return None
 
         run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
 
@@ -8038,7 +8109,7 @@ class LeanAgent15m:
             cfb_observation=cfb_observation,
             decision=decision,
             public_spot=float(spot_price),
-            spot_price=float(settlement_input_price),
+            spot_price=float(bachelier_spot_price),
             cf_rti_basis=float(cf_rti_basis),
             yes_bid_cents=float(yes_bid),
             yes_ask_cents=float(yes_ask),
