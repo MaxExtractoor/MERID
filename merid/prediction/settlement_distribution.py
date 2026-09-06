@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
@@ -17,7 +17,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 # Same as trade_decision.py to keep vol/time conversions consistent.
 _SECONDS_PER_YEAR = 365.0 * 24.0 * 60.0 * 60.0
 _SETTLEMENT_WINDOW_SECONDS = 60.0
-_MODEL_VERSION = "settlement-average-normal-v1"
+_MODEL_VERSION = "settlement-average-normal-v2-discrete"
 
 
 @dataclass(frozen=True)
@@ -74,6 +74,8 @@ class SettlementWindowAccumulator:
     window_start_ts: datetime
     samples_by_second: dict = None  # type: ignore[assignment]
 
+    _source_timestamps: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+
     def __post_init__(self):
         if self.samples_by_second is None:
             object.__setattr__(self, "samples_by_second", {})
@@ -84,8 +86,13 @@ class SettlementWindowAccumulator:
             return
         # Floor to the second to align with the official 1s cadence.
         second_key = source_ts.replace(microsecond=0)
-        if self.window_start_ts <= second_key <= self.expiry_ts:
-            self.samples_by_second[second_key] = value
+        if self.window_start_ts < second_key <= source_ts <= self.expiry_ts:
+            previous = self._source_timestamps.get(second_key)
+            if previous is None or source_ts > previous:
+                self.samples_by_second[second_key] = value
+                self._source_timestamps[second_key] = source_ts
+            elif source_ts == previous and self.samples_by_second[second_key] != value:
+                raise ValueError("Conflicting settlement samples at the same source timestamp")
 
     def observed_sum(self) -> Decimal:
         return sum(self.samples_by_second.values(), Decimal("0"))
@@ -107,7 +114,7 @@ class SettlementWindowAccumulator:
             0,
             min(
                 int(_SETTLEMENT_WINDOW_SECONDS),
-                int((now_ts - self.window_start_ts).total_seconds()) + 1,
+                math.floor((now_ts - self.window_start_ts).total_seconds()),
             ),
         )
         return max(0, int(_SETTLEMENT_WINDOW_SECONDS) - elapsed_in_window)
@@ -143,9 +150,13 @@ def _price_volatility(
     ``sigma_price = annualized_vol * reference_price``.
     """
     ref = float(reference_price)
-    if not math.isfinite(ref) or ref <= 0:
-        ref = 1.0
-    return abs(annualized_vol) * ref
+    vol = float(annualized_vol)
+    if not math.isfinite(ref) or ref <= 0 or not math.isfinite(vol) or vol < 0:
+        raise ValueError("Settlement price and volatility must be finite and valid")
+    result = vol * ref
+    if not math.isfinite(result):
+        raise ValueError("Settlement price volatility overflow")
+    return result
 
 
 def _group_observations_by_second(
@@ -167,8 +178,6 @@ def _group_observations_by_second(
             ts = _source_ts_to_datetime(getattr(obs, "source_ts_ms", None))
         if ts is None and hasattr(obs, "source_ts"):
             ts = _to_utc_datetime(getattr(obs, "source_ts", None))
-        if ts is None and hasattr(obs, "observed_ts_ms"):
-            ts = _source_ts_to_datetime(getattr(obs, "observed_ts_ms", None))
 
         val = None
         if hasattr(obs, "value_decimal"):
@@ -184,10 +193,14 @@ def _group_observations_by_second(
         if ts is None or val is None or not val.is_finite() or val <= 0:
             continue
         second_key = ts.replace(microsecond=0)
-        if window_start <= second_key <= window_end:
-            by_second[second_key] = val
+        if window_start < second_key <= ts <= window_end:
+            previous = by_second.get(second_key)
+            if previous is None or ts > previous[0]:
+                by_second[second_key] = (ts, val)
+            elif ts == previous[0] and val != previous[1]:
+                raise ValueError("Conflicting settlement samples at the same source timestamp")
 
-    return sorted(by_second.items())
+    return [(second, value) for second, (_, value) in sorted(by_second.items())]
 
 
 def build_settlement_state(
@@ -289,7 +302,19 @@ def compute_settlement_distribution(
     state: SettlementState,
     annualized_vol: float,
 ) -> SettlementDistribution:
-    """Return the conditional distribution of the final 60s settlement average."""
+    """Return a zero-drift Bachelier distribution on 60 right-endpoint samples.
+
+    The schedule follows Kalshi's documented quarter-hour feed window
+    (expiry - 60s, expiry]: https://docs.kalshi.com/websockets/cfbenchmarks-value.
+    Flooring subsecond source frames is a local cadence approximation, not an
+    exchange correction policy. All elapsed slots must be present; unavailable
+    inputs raise ValueError rather than implying a known settlement outcome.
+    Callers must retain provenance/freshness gates and must not trade a fallback.
+
+    For future offsets u_i in seconds, variance is sigma_price**2 / year_seconds
+    times sum(min(u_i, u_j)) / 60**2. The continuous-limit variance formulas
+    retained below are reference identities, not the implemented discrete law.
+    """
 
     strike = float(state.strike_price)
     latest = float(state.latest_rti)
@@ -297,7 +322,34 @@ def compute_settlement_distribution(
     window_s = _SETTLEMENT_WINDOW_SECONDS
     price_vol = _price_volatility(annualized_vol, latest)
 
-    if state.phase == "expired" or tte <= 0:
+    if state.phase not in {"pre_window", "in_window", "expired"}:
+        raise ValueError("Invalid settlement phase")
+    if not math.isfinite(strike) or strike <= 0 or not math.isfinite(tte):
+        raise ValueError("Invalid settlement strike or time")
+    expected_phase = "expired" if tte <= 0 else ("in_window" if tte <= window_s else "pre_window")
+    if state.phase != expected_phase:
+        raise ValueError("Inconsistent settlement phase and time")
+    if state.expiry_ts is None or state.now_ts is None or state.expiry_ts.microsecond:
+        raise ValueError("Settlement timestamps require a whole-second expiry")
+    if abs((state.expiry_ts - state.now_ts).total_seconds() - tte) > 1e-6:
+        raise ValueError("Inconsistent settlement timestamps")
+    if state.latest_rti_ts is not None and state.latest_rti_ts > state.now_ts:
+        raise ValueError("Future settlement reference")
+    schedule = [state.expiry_ts - timedelta(seconds=i) for i in range(59, -1, -1)]
+    expected_samples = {ts for ts in schedule if ts <= state.now_ts}
+    actual_samples = dict(state.observed_samples)
+    if (set(actual_samples) != expected_samples
+            or len(actual_samples) != state.observed_count
+            or len(state.observed_samples) != state.observed_count
+            or any(not v.is_finite() or v <= 0 for v in actual_samples.values())
+            or sum(actual_samples.values(), Decimal("0")) != state.observed_sum):
+        raise ValueError("Incomplete or inconsistent elapsed settlement samples")
+    offsets = [(ts - state.now_ts).total_seconds() for ts in schedule if ts > state.now_ts]
+    variance_seconds = math.fsum(
+        (2 * (len(offsets) - i) - 1) * u for i, u in enumerate(offsets)
+    ) / window_s ** 2
+
+    if state.phase == "expired":
         # Degenerate: all settlement samples are fixed.  Use the observed average.
         if state.observed_count > 0:
             mean = float(state.observed_sum / state.observed_count)
@@ -320,8 +372,7 @@ def compute_settlement_distribution(
 
     if state.phase == "pre_window":
         # T >= W: no samples fixed yet, forecast mean is the current latent level.
-        t_years = tte / _SECONDS_PER_YEAR
-        effective_t_years = max(1e-12, t_years - (window_s / 2.0) / _SECONDS_PER_YEAR)
+        effective_t_years = variance_seconds / _SECONDS_PER_YEAR
         mean = latest
         std = price_vol * math.sqrt(effective_t_years)
         z = _z_score(mean, std, strike)
@@ -357,7 +408,7 @@ def compute_settlement_distribution(
     # Variance of a 60-second average with R seconds of residual Brownian motion.
     # Var(A_e | F_t) = sigma_price^2 * R^3 / (3 * W^2)  with R,W in years.
     if n_rem > 0 and r_years > 0:
-        var = (price_vol ** 2) * (r_years ** 3) / (3.0 * (window_s / _SECONDS_PER_YEAR) ** 2)
+        var = (price_vol ** 2) * variance_seconds / _SECONDS_PER_YEAR
         # Equivalent in seconds as a check: var = sigma_price^2 * R_s^3 / (3*W_s^2*_SECONDS_PER_YEAR)
     else:
         var = 0.0
@@ -380,15 +431,19 @@ def compute_settlement_distribution(
 
 
 def _z_score(mean: float, std: float, strike: float) -> float:
-    if not math.isfinite(std) or std <= 1e-12:
+    if not math.isfinite(std) or std < 0:
+        raise ValueError("Invalid settlement standard deviation")
+    if std == 0:
         return float("inf") if mean > strike else (float("-inf") if mean < strike else 0.0)
     return (mean - strike) / std
 
 
 def _probability_yes(mean: float, std: float, strike: float) -> float:
     if not math.isfinite(mean) or not math.isfinite(strike):
-        return 0.5
-    if not math.isfinite(std) or std <= 1e-12:
+        raise ValueError("Invalid settlement mean or strike")
+    if not math.isfinite(std) or std < 0:
+        raise ValueError("Invalid settlement standard deviation")
+    if std == 0:
         return 1.0 if mean >= strike else 0.0
     try:
         return statistics.NormalDist().cdf((mean - strike) / std)
