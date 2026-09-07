@@ -178,3 +178,90 @@ def test_acknowledged_record_not_regressed_by_rejection(store):
 def test_no_attempt_id_is_noop(store):
     intent = OrderIntent(ticker="KXBTC15M-TEST", price_cents=50, count=1)
     _finalize_attempt_store_for_result(intent, _result("rejected"))  # no raise
+
+
+# ---------------------------------------------------------------------------
+# not_submitted: venue lookup authoritatively confirmed the order never landed
+# ---------------------------------------------------------------------------
+
+
+def _not_submitted_result() -> OrderResult:
+    return _result(
+        "not_submitted",
+        reason="not_submitted:authoritative_lookup_empty",
+        submission_attempted=True,
+        exchange_request_sent=True,
+        exchange_ack_received=False,
+        submission_certainty="not_submitted",
+    )
+
+
+def test_submitting_not_submitted_is_terminal_rejected(store):
+    """Venue-confirmed absence resolves the attempt — not SUBMISSION_UNKNOWN."""
+    rec = _persist(store, "SUBMITTING")
+    _finalize_attempt_store_for_result(_intent_for(rec), _not_submitted_result())
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "REJECTED"
+
+
+def test_submission_unknown_not_submitted_resolves_rejected(store):
+    rec = _persist(store, "SUBMISSION_UNKNOWN")
+    _finalize_attempt_store_for_result(_intent_for(rec), _not_submitted_result())
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "REJECTED"
+
+
+def test_acknowledged_not_submitted_is_not_downgraded(store):
+    """An acked order that a later lookup cannot find is a venue conflict."""
+    rec = _persist(store, "ACKNOWLEDGED")
+    _finalize_attempt_store_for_result(_intent_for(rec), _not_submitted_result())
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "ACKNOWLEDGED"
+
+
+def test_release_entry_idempotency_by_client_order_id():
+    """Canonical entry records release on venue-confirmed absence."""
+    import merid.event_venues.kalshi.order_intent_contract as contract
+
+    contract.clear_entry_idempotency_registry()
+    try:
+        key = ("KXBTC15M-TEST", "no")
+        contract._accepted_entry_intents[key] = {
+            "ts": time.time(),
+            "submitted_ts": time.time(),
+            "intent_id": "intent-blocked",
+            "client_order_id": "coid-unknown-1",
+            "limit_cents": 50,
+            "submitted": False,
+            "order_id": None,
+            "has_execution": False,
+            "status": "reconciliation_required",
+        }
+        assert contract.release_entry_idempotency_by_client_order_id(
+            "coid-unknown-1"
+        ) is True
+        assert key not in contract._accepted_entry_intents
+    finally:
+        contract.clear_entry_idempotency_registry()
+
+
+def test_release_by_client_order_id_never_releases_executed():
+    import merid.event_venues.kalshi.order_intent_contract as contract
+
+    contract.clear_entry_idempotency_registry()
+    try:
+        key = ("KXBTC15M-TEST", "yes")
+        contract._accepted_entry_intents[key] = {
+            "ts": time.time(),
+            "submitted_ts": time.time(),
+            "intent_id": "intent-filled",
+            "client_order_id": "coid-filled-1",
+            "limit_cents": 50,
+            "submitted": True,
+            "order_id": "ord-1",
+            "has_execution": True,
+            "status": "filled",
+        }
+        assert contract.release_entry_idempotency_by_client_order_id(
+            "coid-filled-1"
+        ) is False
+        assert key in contract._accepted_entry_intents
+    finally:
+        contract.clear_entry_idempotency_registry()

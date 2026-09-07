@@ -438,6 +438,37 @@ def release_entry_idempotency_by_key(
             )
 
 
+def release_entry_idempotency_by_client_order_id(client_order_id: str | None) -> bool:
+    """Release the canonical entry record bound to ``client_order_id``.
+
+    Used by the background submission reconcile when the venue authoritatively
+    confirms no order exists for the ``client_order_id`` (``not_submitted``).
+    The reconciler does not hold the original intent, so the (ticker, contract)
+    key is resolved by scanning the registry.  A record that already has a
+    confirmed execution is never released — real fills keep protecting the
+    window.
+
+    Returns True when a record was removed.
+    """
+    if not client_order_id:
+        return False
+    with _entry_idempotency_lock:
+        for key, rec in list(_accepted_entry_intents.items()):
+            if rec.get("client_order_id") != client_order_id:
+                continue
+            if rec.get("has_execution"):
+                return False
+            removed = _accepted_entry_intents.pop(key, None)
+            if removed is not None:
+                logger.info(
+                    "[ENTRY-IDEMPOTENCY-RELEASED] ticker=%s contract=%s intent=%s "
+                    "client_order_id=%s (venue-confirmed not_submitted)",
+                    key[0], key[1], removed.get("intent_id"), client_order_id,
+                )
+                return True
+    return False
+
+
 def mark_entry_idempotency_executed(
     market_ticker: str,
     contract: str,

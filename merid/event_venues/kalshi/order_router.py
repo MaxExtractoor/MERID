@@ -307,6 +307,16 @@ def _finalize_attempt_store_for_result(
         ):
             if record.status in ("PERSISTED", "SUBMITTING"):
                 target = "ACKNOWLEDGED"
+        elif result_status == "not_submitted" or (
+            result is not None
+            and getattr(result, "submission_certainty", None) == "not_submitted"
+        ):
+            # The venue lookup authoritatively confirmed no order exists for
+            # this client_order_id — resolved terminal absence, not ambiguous.
+            # Keep ACKNOWLEDGED records untouched: an acked order that a later
+            # lookup cannot find is a venue-side conflict, not a rejection.
+            if record.status in ("PERSISTED", "SUBMITTING", "SUBMISSION_UNKNOWN"):
+                target = "REJECTED"
         elif record.status == "PERSISTED":
             # Never reached the pre-submit marker: no exchange request was sent
             # for this attempt, so REJECTED is the accurate terminal state.
@@ -3818,6 +3828,63 @@ async def reconcile_submission_unknown_client_order_id(
     _latency = (_time.monotonic() - t0) * 1000
     if _resolved_order is not None:
         return _apply_reconciled_order(_resolved_order, intent, mode, _latency)
+
+    # 2026-09-07: Authoritative absence is a resolved terminal outcome.
+    # Release the canonical entry-idempotency record, the pre-trade gate
+    # record, and the durable attempt row so the (ticker, contract) is not
+    # blocked by a reconciliation_required marker for the rest of the window
+    # and the audit trail reflects that the venue confirmed nothing landed.
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            release_entry_idempotency_by_client_order_id,
+        )
+
+        release_entry_idempotency_by_client_order_id(client_order_id)
+    except Exception as _rel_err:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] entry-idempotency release failed for %s: %s",
+            client_order_id, _rel_err,
+        )
+    try:
+        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+
+        _ptg = get_pre_trade_gate()
+        _ptg.mark_rejected(client_order_id, "not_submitted:authoritative_lookup_empty")
+    except Exception as _gate_err:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] gate terminalization failed for %s: %s",
+            client_order_id, _gate_err,
+        )
+    try:
+        from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+
+        _attempt_rec = OrderAttemptStore().get_by_client_order_id(client_order_id)
+        if _attempt_rec is not None and _attempt_rec.status in (
+            "PERSISTED",
+            "SUBMITTING",
+            "SUBMISSION_UNKNOWN",
+        ):
+            _payload: Dict[str, Any] = {}
+            try:
+                _payload = json.loads(_attempt_rec.payload_json or "{}")
+                if not isinstance(_payload, dict):
+                    _payload = {}
+            except Exception:
+                _payload = {}
+            _payload.update(
+                {
+                    "terminalized_by": "submission_reconcile_full",
+                    "route_reason": "not_submitted:authoritative_lookup_empty",
+                }
+            )
+            OrderAttemptStore().update_status(
+                _attempt_rec.order_attempt_id, "REJECTED", payload=_payload
+            )
+    except Exception as _attempt_err:
+        logger.debug(
+            "[SUBMISSION-RECONCILE-FULL] attempt-store update failed for %s: %s",
+            client_order_id, _attempt_err,
+        )
 
     logger.info(
         "[SUBMISSION-RECONCILE-FULL] client_order_id=%s ticker=%s not found; authoritative empty",
@@ -10600,6 +10667,21 @@ def _post_route_canonical_idempotency_cleanup(
         _mark_canonical_entry_reconciliation_required(
             intent, reason=result.reason or "post_route_recovery"
         )
+        return
+
+    # 2026-09-07: A reconcile that authoritatively proved the order is absent
+    # from the venue (``not_submitted`` / ``submission_certainty=not_submitted``)
+    # is a resolved terminal outcome, not an ambiguous one.  Without this branch
+    # the result fell into the uncertain-terminal check below (it deliberately
+    # reports ``exchange_request_sent=True, exchange_ack_received=False`` for the
+    # ORIGINAL submit) and left the canonical record ``reconciliation_required``
+    # for the rest of the window — blocking every re-entry on that
+    # (ticker, contract) even though the venue confirmed nothing was sent.
+    if (
+        result.status == "not_submitted"
+        or getattr(result, "submission_certainty", None) == "not_submitted"
+    ):
+        _terminalize_rejected_intent(intent, result)
         return
 
     # 2026-08-24: Required lifecycle invariant.  Any terminal no-execution
