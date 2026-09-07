@@ -9,6 +9,7 @@ Paper-trade-reset: get_paper_engine() now always resets state on startup
 """
 
 import ast
+import asyncio
 import importlib
 import sys
 import textwrap
@@ -117,3 +118,43 @@ class TestModifiedFilesCompile:
     def test_compile(self, rel_path):
         src = (ROOT / rel_path).read_text()
         compile(src, rel_path, "exec")
+
+
+@pytest.mark.parametrize("state_name,equity,expected", [
+    ("FRESH", Decimal("0.94"), 94),
+    ("FRESH", Decimal("0"), None),
+    ("FRESH", None, None),
+    ("DEGRADED", Decimal("0.94"), None),
+    ("ERROR", Decimal("0.94"), None),
+    (None, None, None),
+])
+def test_startup_balance_calibrator_uses_typed_freshness(monkeypatch, state_name, equity, expected):
+    from types import ModuleType, SimpleNamespace
+    from unittest.mock import AsyncMock
+    from merid.event_venues.kalshi.types import BalanceState
+
+    tree = ast.parse((ROOT / "web" / "main_15m_lean.py").read_text(encoding="utf-8"))
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "calibrate_balance_async")
+    logger = MagicMock()
+    namespace = {"asyncio": asyncio, "logger": logger}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "startup_calibrator", "exec"), namespace)
+    result = (SimpleNamespace(state=BalanceState[state_name], equity_usd=equity)
+              if state_name else None)
+    service = SimpleNamespace(get_current_bankroll=AsyncMock(return_value=result))
+    bankroll_module = ModuleType("merid.event_venues.kalshi.bankroll_service_v2")
+    bankroll_module.get_bankroll_service = AsyncMock(return_value=service)
+    calibrator_module = ModuleType("merid.event_venues.kalshi.balance_calibrator")
+    calibrator = MagicMock()
+    calibrator_module.get_balance_calibrator = MagicMock(return_value=calibrator)
+    calibrator_module.dollars_to_cents = lambda value: int(value * 100)
+    monkeypatch.setitem(sys.modules, bankroll_module.__name__, bankroll_module)
+    monkeypatch.setitem(sys.modules, calibrator_module.__name__, calibrator_module)
+
+    asyncio.run(namespace["calibrate_balance_async"]())
+
+    if expected is None:
+        calibrator.update.assert_not_called()
+    else:
+        calibrator.update.assert_called_once_with(expected)
+    logger.warning.assert_not_called()

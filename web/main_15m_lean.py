@@ -3060,6 +3060,13 @@ async def _run_full_startup_in_lifespan(app):
     """
     # P0-12 DIAGNOSTIC: Log function entry
     logger.info("[P2-STARTUP-ENTRY] _run_full_startup_in_lifespan ENTERED")
+
+    # Event-loop freeze watchdog: a synchronous block inside any coroutine
+    # below starves asyncio (wait_for timeouts cannot fire on a frozen loop).
+    # faulthandler's timer runs on a C-level watchdog thread, so it dumps all
+    # thread stacks to stderr even if the loop is dead. Cancelled on success.
+    import faulthandler
+    faulthandler.dump_traceback_later(120.0, exit=False, repeat=True)
     
     logger.info("[STARTUP-STACK] ENTRY - Initializing P2.x in lifespan")
     
@@ -3284,10 +3291,11 @@ async def _run_full_startup_in_lifespan(app):
                         dollars_to_cents,
                     )
                     from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
-                    service = await get_bankroll_service()
+                    from merid.event_venues.kalshi.types import BalanceState
+                    service = await asyncio.wait_for(get_bankroll_service(), timeout=60.0)
                     if service:
-                        result = await service.get_current_bankroll()
-                        if result.state.value == "fresh" and result.equity_usd:
+                        result = await asyncio.wait_for(service.get_current_bankroll(), timeout=60.0)
+                        if result is not None and result.state == BalanceState.FRESH and result.equity_usd:
                             balance_cents = dollars_to_cents(result.equity_usd)
                             get_balance_calibrator().update(balance_cents)
                             logger.info("[STARTUP-STACK] Balance calibrator completed: balance_cents=%d", balance_cents)
@@ -3305,17 +3313,22 @@ async def _run_full_startup_in_lifespan(app):
             #     (feeds calibration / PnL attribution across all 5 assets).
             # Each is best-effort and non-fatal: a failure here must never block trading.
             # ─────────────────────────────────────────────────────────────
-            try:
-                from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
-                await get_resting_order_monitor().start()
-                app.state.resting_order_monitor = get_resting_order_monitor()
-                logger.info("[STARTUP-STACK] P2.7: RestingOrderMonitor started (venue-side stale-order cancellation)")
-            except Exception as e:
-                logger.warning("[STARTUP-STACK] P2.7: RestingOrderMonitor start failed (non-fatal): %s", e)
+            # Run the monitor start as a bounded background task: its startup
+            # reconcile performs venue REST calls that must never stall the
+            # lifespan or starve the trading loop (observed hang 2026-09-06).
+            async def _start_resting_order_monitor_bg():
+                try:
+                    from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+                    await asyncio.wait_for(get_resting_order_monitor().start(), timeout=90.0)
+                    app.state.resting_order_monitor = get_resting_order_monitor()
+                    logger.info("[STARTUP-STACK] P2.7: RestingOrderMonitor started (venue-side stale-order cancellation)")
+                except Exception as e:
+                    logger.warning("[STARTUP-STACK] P2.7: RestingOrderMonitor start failed (non-fatal): %s", e)
+            asyncio.create_task(_start_resting_order_monitor_bg())
 
             try:
                 from merid.event_venues.kalshi.settlement_poller import start_settlement_polling_auto
-                _settlement_poller = await start_settlement_polling_auto()
+                _settlement_poller = await asyncio.wait_for(start_settlement_polling_auto(), timeout=60.0)
                 if _settlement_poller is not None:
                     app.state.settlement_poller = _settlement_poller
                     logger.info("[STARTUP-STACK] P2.7: Settlement poller started (settled-market grading -> realized outcomes)")
@@ -3327,7 +3340,7 @@ async def _run_full_startup_in_lifespan(app):
             try:
                 from merid.event_venues.kalshi.fills_poller import get_fills_poller
                 _fills_poller = get_fills_poller()
-                await _fills_poller.start()
+                await asyncio.wait_for(_fills_poller.start(), timeout=60.0)
                 app.state.fills_poller = _fills_poller
                 logger.info("[STARTUP-STACK] P2.7: FillsPoller started (periodic REST fills reconciliation)")
             except Exception as e:
@@ -3338,7 +3351,7 @@ async def _run_full_startup_in_lifespan(app):
             try:
                 from merid.event_venues.kalshi.continuous_reconciliation import get_continuous_reconciler
                 reconciler = get_continuous_reconciler()
-                await reconciler.start()
+                await asyncio.wait_for(reconciler.start(), timeout=60.0)
                 app.state.continuous_reconciler = reconciler
                 logger.info("[STARTUP-STACK] P2.7: ContinuousReconciler started (60s position reconciliation)")
             except Exception as e:
@@ -3349,7 +3362,7 @@ async def _run_full_startup_in_lifespan(app):
             try:
                 from merid.monitoring.heartbeat_monitor import get_heartbeat_monitor
                 heartbeat = get_heartbeat_monitor()
-                await heartbeat.start()
+                await asyncio.wait_for(heartbeat.start(), timeout=30.0)
                 app.state.heartbeat_monitor = heartbeat
                 logger.info("[STARTUP-STACK] P2.7: HeartbeatMonitor started (30s heartbeat interval)")
             except Exception as e:
@@ -3367,7 +3380,7 @@ async def _run_full_startup_in_lifespan(app):
             try:
                 from merid.monitoring.trade_attribution_fact_table import TradeAttributionTable
                 trade_attribution = TradeAttributionTable.get_instance()
-                await trade_attribution.start()
+                await asyncio.wait_for(trade_attribution.start(), timeout=30.0)
                 app.state.trade_attribution_table = trade_attribution
                 logger.info("[STARTUP-STACK] P2.7.1: TradeAttributionTable started")
             except Exception as e:
@@ -3378,7 +3391,7 @@ async def _run_full_startup_in_lifespan(app):
             try:
                 from merid.monitoring.bankroll_reconciler import BankrollReconciler
                 bankroll_reconciler = BankrollReconciler.get_instance()
-                await bankroll_reconciler.start()
+                await asyncio.wait_for(bankroll_reconciler.start(), timeout=30.0)
                 app.state.bankroll_reconciler = bankroll_reconciler
                 logger.info("[STARTUP-STACK] P2.7.2: BankrollReconciler started")
             except Exception as e:
@@ -3447,6 +3460,7 @@ async def _run_full_startup_in_lifespan(app):
     except Exception as e:
         logger.exception("[STARTUP-STACK] FAILED: %r", e)
     finally:
+        faulthandler.cancel_dump_traceback_later()
         _trading_thread_alive = False
         logger.info("[STARTUP-STACK] EXIT - Full startup terminated")
 

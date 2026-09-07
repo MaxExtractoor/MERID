@@ -240,6 +240,117 @@ def _mark_attempt_status(intent: "OrderIntent", status: str) -> None:
         logger.warning("[ORDER-ATTEMPT-STATUS] Failed to mark %s: %s", status, status_err)
 
 
+def _finalize_attempt_store_for_result(
+    intent: "OrderIntent", result: Optional["OrderResult"]
+) -> None:
+    """Reconcile the durable ``order_attempts`` row with the route outcome.
+
+    ``PERSISTED`` is written at identity finalization and only transitions to
+    ``SUBMITTING`` at the marker immediately before ``port.create_order``.  A
+    record still in ``PERSISTED`` when routing terminates therefore provably
+    never reached the venue: it is terminalized as ``REJECTED`` so the audit
+    trail can distinguish pre-submit rejections (gate/idempotency/quote-mode
+    blocks) from orders that were actually sent.  A record still in
+    ``SUBMITTING`` when routing ends without a resolved outcome is promoted to
+    ``SUBMISSION_UNKNOWN`` so it stops masquerading as a live in-flight
+    submission and continues to require venue recovery before retry.
+
+    This fixes two lifecycle gaps observed in production:
+
+    - The route-level ``asyncio.wait_for`` timeout cancels ``_route_live`` via
+      ``CancelledError``, which bypasses the inner ``except asyncio.TimeoutError``
+      that marks ``SUBMISSION_UNKNOWN``; attempts were left ``SUBMITTING``
+      forever.
+    - Pre-submit rejection paths produced a terminal ``OrderResult`` but never
+      updated the attempt store, leaving records ``PERSISTED`` forever.
+
+    Terminal records (FILLED / REJECTED / CANCELED) are never downgraded, and
+    this function never raises.
+    """
+    _ATTEMPT_TERMINAL = {"FILLED", "REJECTED", "CANCELED"}
+    try:
+        from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+
+        order_attempt_id = getattr(intent, "order_attempt_id", None)
+        if not order_attempt_id:
+            return
+        store = OrderAttemptStore()
+        record = store.get_by_order_attempt_id(order_attempt_id)
+        if record is None or record.status in _ATTEMPT_TERMINAL:
+            return
+
+        result_status = getattr(result, "status", "") if result is not None else ""
+        has_execution = (
+            bool(getattr(result, "has_execution", False)) if result is not None else False
+        )
+
+        target: Optional[str] = None
+        if has_execution or result_status in (
+            "filled_mock",
+            "filled_paper",
+            "filled_live",
+            "partial_live",
+            "partial_fill",
+        ):
+            if record.status in (
+                "PERSISTED",
+                "SUBMITTING",
+                "SUBMISSION_UNKNOWN",
+                "ACKNOWLEDGED",
+            ):
+                target = "FILLED"
+        elif result_status in (
+            "accepted_live",
+            "submitted_live",
+            "resting",
+            "unfilled_ioc",
+        ):
+            if record.status in ("PERSISTED", "SUBMITTING"):
+                target = "ACKNOWLEDGED"
+        elif record.status == "PERSISTED":
+            # Never reached the pre-submit marker: no exchange request was sent
+            # for this attempt, so REJECTED is the accurate terminal state.
+            target = "REJECTED"
+        elif record.status == "SUBMITTING":
+            # Marked immediately before the exchange request; reaching cleanup
+            # still in SUBMITTING means the in-route ack path never resolved
+            # the outcome (route timeout/cancel/exception) — treat as unknown.
+            target = "SUBMISSION_UNKNOWN"
+
+        if target is None or target == record.status:
+            return
+
+        try:
+            payload = json.loads(record.payload_json or "{}")
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+        payload.update(
+            {
+                "terminalized_by": "post_route_cleanup",
+                "route_result_status": result_status or None,
+                "route_reason": (
+                    (getattr(result, "reason", None) or getattr(result, "error", None) or "")[:200]
+                    or None
+                ),
+                "submission_attempted": getattr(result, "submission_attempted", None),
+            }
+        )
+        store.update_status(order_attempt_id, target, payload=payload)
+        logger.info(
+            "[ORDER-ATTEMPT-STATUS] terminalized attempt_id=%s %s -> %s "
+            "route_status=%s reason=%s",
+            order_attempt_id,
+            record.status,
+            target,
+            result_status or "none",
+            payload.get("route_reason"),
+        )
+    except Exception as exc:
+        logger.debug("[ORDER-ATTEMPT-STATUS] finalize failed (non-fatal): %s", exc)
+
+
 # Trade trace integration for calibration (P1: Feed lag calibration)
 try:
     from merid.prediction.trade_trace import update_trace
@@ -10461,6 +10572,12 @@ def _post_route_canonical_idempotency_cleanup(
     released only when we are certain no exchange order is in flight.
     Ambiguous / submission-unknown outcomes are marked for reconciliation.
     """
+    # Durable attempt-store reconciliation: a record still PERSISTED here
+    # provably never reached the venue (REJECTED), and a record still
+    # SUBMITTING without a resolved outcome is promoted to SUBMISSION_UNKNOWN
+    # (route-level timeout/cancel bypasses the in-route marker).
+    _finalize_attempt_store_for_result(intent, result)
+
     if result is None:
         _release_canonical_entry_idempotency(intent)
         return
@@ -13726,15 +13843,23 @@ async def _route_live(
             _send_state = market_state_store.get(intent.ticker)
         except Exception:
             _send_state = None
-        _book_receive_age_ms = 0.0
-        _book_exchange_age_ms = 0.0
+        _book_receive_age_ms = -1.0
+        _book_exchange_age_ms = -1.0
         _book_sequence = None
         _strategy_snapshot_age_ms = 0.0
         _execution_price_source = "UNKNOWN"
         if _send_state is not None:
-            _now = replay_time()
-            _book_receive_age_ms = max(0.0, (_now - getattr(_send_state, "last_book_update_ts", _now)) * 1000.0)
-            _book_exchange_age_ms = max(0.0, (_now - getattr(_send_state, "last_ws_update_ts", _now)) * 1000.0)
+            # last_book_update_ts / last_ws_update_ts are time.monotonic()
+            # timestamps (see market_state.py); a wall-clock replay_time()
+            # subtraction produces epoch-scale garbage.  -1.0 signals "no
+            # timestamp recorded", matching the <=0 => infinite-age convention.
+            _now_mono = _time.monotonic()
+            _last_book_ts = getattr(_send_state, "last_book_update_ts", 0.0) or 0.0
+            _last_ws_ts = getattr(_send_state, "last_ws_update_ts", 0.0) or 0.0
+            if _last_book_ts > 0.0:
+                _book_receive_age_ms = max(0.0, (_now_mono - _last_book_ts) * 1000.0)
+            if _last_ws_ts > 0.0:
+                _book_exchange_age_ms = max(0.0, (_now_mono - _last_ws_ts) * 1000.0)
             _book_sequence = getattr(_send_state, "last_sequence", None)
             _execution_price_source = getattr(_send_state, "data_source", "UNKNOWN") or "UNKNOWN"
         if getattr(intent, "snapshot_ts", 0):
