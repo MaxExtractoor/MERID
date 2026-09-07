@@ -199,6 +199,7 @@ class KalshiCfRtiStream:
     async def _recv_one(self, timeout: float) -> Optional[Dict[str, Any]]:
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
+        received_at_mono_ns = time.monotonic_ns()
         try:
             if is_replay_active():
                 raw = await self._ws.recv()
@@ -216,10 +217,14 @@ class KalshiCfRtiStream:
         )
 
         try:
-            return json.loads(raw)
+            data = json.loads(raw)
         except json.JSONDecodeError:
             logger.warning("[KALSHI-CF-RTI-WS] Non-JSON frame: %r", raw[:200])
             return None
+
+        if isinstance(data, dict):
+            data["received_at_mono_ns"] = received_at_mono_ns
+        return data
 
     async def _handle_message(self, data: Dict[str, Any]) -> None:
         msg_type = data.get("type")
@@ -242,7 +247,12 @@ class KalshiCfRtiStream:
             return
 
         if msg_type == "cfbenchmarks_value":
-            await self._forward_frame(msg, sid=data.get("sid"), seq=data.get("seq"))
+            await self._forward_frame(
+                msg,
+                sid=data.get("sid"),
+                seq=data.get("seq"),
+                received_at_mono_ns=data.get("received_at_mono_ns"),
+            )
 
     async def _wait_for_message(
         self,
@@ -362,6 +372,7 @@ class KalshiCfRtiStream:
         msg: Dict[str, Any],
         sid: Optional[int] = None,
         seq: Optional[int] = None,
+        received_at_mono_ns: Optional[int] = None,
     ) -> None:
         if not self.on_frame:
             return
@@ -406,6 +417,13 @@ class KalshiCfRtiStream:
             data["seq"] = seq
         if "sid" not in data and sid is not None:
             data["sid"] = sid
+
+        # Event-loop lag: time between the OS receiving the frame and this
+        # coroutine processing it.  Large values indicate the RTI event loop is
+        # blocked by another task (e.g. a synchronous catalog/market update).
+        now = time.monotonic_ns()
+        if received_at_mono_ns is not None and now > received_at_mono_ns:
+            data["event_loop_lag_ms"] = (now - received_at_mono_ns) // 1_000_000
 
         try:
             self.on_frame(KalshiCfRtiFrame(index_id=index_id, data=data))

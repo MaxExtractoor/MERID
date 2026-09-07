@@ -56,3 +56,30 @@ def test_irregular_ticks_missing_seconds():
     miss = buf.missing_seconds
     assert (exp - 58) in miss
     assert not buf.is_settlement_grade()
+
+
+def test_sol_precision_preserved_to_settlement():
+    """Four-decimal SOL values survive raw-source through final settlement average."""
+    exp = 1_700_001_200
+    buf = SettlementRTIBuffer("KXSOL15M-TEST", "SOL", exp)
+    from decimal import Decimal
+    values = [Decimal("150.1234"), Decimal("150.1235"), Decimal("150.1236")]
+    for i, v in enumerate(values):
+        buf.ingest(exp - 59 + i, v)
+    avg = buf.avg_received_decimal
+    assert avg is not None
+    # Average of the three values
+    assert str(avg) == "150.1235"
+
+
+def test_doge_precision_preserved_to_settlement():
+    """Seven-decimal DOGE values survive raw-source through final settlement average."""
+    exp = 1_700_001_300
+    buf = SettlementRTIBuffer("KXDOGE15M-TEST", "DOGE", exp)
+    from decimal import Decimal
+    values = [Decimal("0.1234567"), Decimal("0.1234568"), Decimal("0.1234569")]
+    for i, v in enumerate(values):
+        buf.ingest(exp - 59 + i, v)
+    avg = buf.avg_received_decimal
+    assert avg is not None
+    assert str(avg) == "0.1234568"

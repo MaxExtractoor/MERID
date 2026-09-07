@@ -646,6 +646,9 @@ class KalshiWebSocketBridge:
         self._sync_lock_init_lock = threading.Lock()
         self._last_sync_attempt_ts: float = 0.0  # Track last sync attempt for backoff
         self._sync_retry_interval_s: float = 5.0  # Minimum 5s between sync attempts
+        # Debounce duplicate immediate-sync requests from catalog refresh
+        self._last_sync_request_ts: float = 0.0
+        self._sync_request_min_interval_s: float = 5.0
         
         # REST polling loop lifecycle
         self._rest_polling_active: bool = False
@@ -2774,6 +2777,7 @@ class KalshiWebSocketBridge:
         self._desired_tickers = sorted(new_set)
         self._desired_tickers_gen += 1
         self._sync_requested = True
+        self._last_sync_request_ts = _time.monotonic()
         # Reset sync cooldown so a new desired set is acted on immediately
         self._last_sync_attempt_ts = 0.0
         logger.info(
@@ -2781,7 +2785,7 @@ class KalshiWebSocketBridge:
             len(self._desired_tickers), self._desired_tickers_gen
         )
 
-    def request_immediate_sync(self, reason: str = "catalog_rollover") -> None:
+    def request_immediate_sync(self, reason: str = "catalog_rollover") -> bool:
         """Request an immediate WebSocket subscription sync.
 
         The catalog refresh path uses this after detecting a rollover or after
@@ -2790,13 +2794,37 @@ class KalshiWebSocketBridge:
         concrete rollover hook: it triggers the existing ``sync_to_catalog``
         path that uses subscribe/unsubscribe (Kalshi's ``update_subscription``
         equivalent for this codebase) to align the live ticker set.
+
+        Returns:
+            ``True`` if this request was accepted and the forwarder will act on
+            it as soon as possible. ``False`` if a sync is already pending or
+            was requested too recently; the existing pending request will keep
+            retrying on schedule, so the caller should not log a fresh alert.
         """
+        now = _time.monotonic()
+        if self._sync_requested:
+            if now - self._last_sync_request_ts < self._sync_request_min_interval_s:
+                logger.debug(
+                    "[WS-REQUEST-IMMEDIATE-SYNC] reason=%s skipped - already requested %.2fs ago",
+                    reason, now - self._last_sync_request_ts,
+                )
+                return False
+            # Keep the pending request alive without resetting the forwarder
+            # cooldown; an in-flight sync will retry on schedule.
+            self._last_sync_request_ts = now
+            logger.info(
+                "[WS-REQUEST-IMMEDIATE-SYNC] reason=%s still pending, re-signaled",
+                reason,
+            )
+            return False
         self._sync_requested = True
         self._last_sync_attempt_ts = 0.0
+        self._last_sync_request_ts = now
         logger.info(
             "[WS-REQUEST-IMMEDIATE-SYNC] reason=%s desired_tickers=%d",
             reason, len(self._desired_tickers)
         )
+        return True
 
     async def sync_to_catalog(self) -> bool:
         """Sync WS subscriptions to desired ticker set set by 15m loop.
