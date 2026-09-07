@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import asyncio
 import concurrent.futures
 from pathlib import Path
@@ -1573,18 +1574,27 @@ class KalshiMarketCatalog:
             
             # If validation fails, trigger WS bridge sync
             if not validation_result["valid"]:
-                if validation_result.get("grace_only"):
-                    logger.warning(
-                        "[CATALOG-REFRESH] Universe invariant violated during grace period, "
-                        "triggering WS bridge sync"
-                    )
-                else:
-                    logger.error("[CATALOG-REFRESH] Universe invariant violated, triggering WS bridge sync")
                 try:
                     # Rollover hook: request immediate resync so the bridge can
                     # add/remove tickers via its existing sync_to_catalog path.
-                    bridge.request_immediate_sync("catalog_rollover")
-                    logger.info("[CATALOG-REFRESH] WS bridge immediate sync requested")
+                    # The bridge debounces duplicate requests, so repeated
+                    # catalog refreshes within the same grace window cannot
+                    # spawn a sync storm.
+                    accepted = bridge.request_immediate_sync("catalog_rollover")
+                    if accepted:
+                        if validation_result.get("grace_only"):
+                            logger.warning(
+                                "[CATALOG-REFRESH] Universe invariant violated during grace period, "
+                                "triggering WS bridge sync"
+                            )
+                        else:
+                            logger.error("[CATALOG-REFRESH] Universe invariant violated, triggering WS bridge sync")
+                        logger.info("[CATALOG-REFRESH] WS bridge immediate sync requested")
+                    else:
+                        logger.debug(
+                            "[CATALOG-REFRESH] Universe invariant still resolving; "
+                            "WS bridge sync already pending or throttled"
+                        )
                 except Exception as sync_error:
                     logger.error(f"[CATALOG-REFRESH] Failed to request WS bridge sync: {sync_error}")
             else:
@@ -1621,59 +1631,50 @@ class KalshiMarketCatalog:
                 store = get_kalshi_market_state_store()
                 logger.info("[CATALOG-FEED] Using singleton state store (no injection)")
             
-            # Feed expiry data synchronously to avoid lock hang
-            # Only populate REST-owned fields (expiry, volume, OI, strikes)
-            # WS-owned fields (bid/ask) are handled by WS bridge
+            # Feed expiry data asynchronously to avoid blocking the catalog
+            # event loop (and therefore any other event loops on the same OS thread).
+            # Only populate REST-owned fields (expiry, volume, OI, strikes);
+            # WS-owned fields (bid/ask) are handled by the WS bridge.
             feed_count = 0
-            missing_expiry_count = 0
-            logger.info(f"[CATALOG-FEED] Starting feed loop for {len(enriched)} enriched markets")
-            
+            missing_expiry_count = sum(1 for cm in enriched if cm.market.end_date is None)
+            feed_enriched = [cm for cm in enriched if cm.market.end_date is not None]
+
+            if missing_expiry_count:
+                for cm in enriched:
+                    if cm.market.end_date is None:
+                        logger.error(
+                            "[CATALOG-FEED] MISSING_EXPIRY_FOR_15M_MARKET: ticker=%s "
+                            "asset=%s has no end_date - cannot compute seconds_to_expiry",
+                            cm.market.market_id, cm.asset
+                        )
+
+            logger.info("[CATALOG-FEED] Starting feed loop for %d enriched markets", len(enriched))
+
             # CRITICAL DIAGNOSTIC: Log first 5 tickers to verify time window filtering
             sample_tickers = [cm.market.market_id for cm in enriched[:5]]
             logger.info(
-                f"[CATALOG-FEED] Sample tickers being fed to state store: {sample_tickers}"
+                "[CATALOG-FEED] Sample tickers being fed to state store: %s",
+                sample_tickers
             )
-            
-            for idx, cm in enumerate(enriched):
-                ticker = cm.market.market_id
-                logger.info(f"[CATALOG-FEED] Processing market {idx+1}/{len(enriched)}: ticker={ticker} asset={cm.asset}")
-                try:
-                    # EventMarket uses end_date, not close_time
-                    expiry_dt = cm.market.end_date
-                    if expiry_dt is None:
-                        logger.error(
-                            f"[CATALOG-FEED] MISSING_EXPIRY_FOR_15M_MARKET: ticker={ticker} "
-                            f"asset={cm.asset} has no end_date - cannot compute seconds_to_expiry"
-                        )
-                        missing_expiry_count += 1
-                        continue
-                    
-                    market_data = {
-                        "ticker": cm.market.market_id,
-                        "expiration_time": expiry_dt.isoformat(),
-                        "expected_expiration_time": expiry_dt.isoformat(),
-                        "latest_expiration_time": expiry_dt.isoformat(),
-                        "volume_24h": int(cm.market.volume) if cm.market.volume else 0,
-                        "open_interest": int(cm.market.open_interest) if cm.market.open_interest else 0,
-                        "notional_value": 0,  # Not available in EventMarket
-                        "underlying": cm.asset,
-                        "strike_price": cm.strike_price,
-                        "floor_strike": cm.floor_strike,
-                        "cap_strike": cm.cap_strike,
-                        "status": "open" if cm.market.active else "closed",
-                    }
-                    # Apply REST data to state store (async-safe)
-                    logger.info(f"[CATALOG-FEED] About to call apply_rest_market for ticker={ticker}")
-                    store.apply_rest_market(market_data)
-                    feed_count += 1
-                    logger.info(f"[CATALOG-FEED] Successfully fed ticker={ticker} (count={feed_count})")
-                except Exception as e:
-                    logger.error(
-                        f"[CATALOG-FEED] Failed to feed market {ticker}: {e}",
-                        exc_info=True
-                    )
-                    # Continue to next ticker instead of breaking
-                    continue
+
+            # batch_size=1 yields after each market so a slow apply_rest_market
+            # cannot monopolize the catalog refresh event loop.
+            feed_start = time.monotonic()
+            try:
+                feed_count = await self._apply_rest_markets_batched(
+                    feed_enriched, store, batch_size=1
+                )
+            except Exception as e:
+                logger.error(
+                    "[CATALOG-FEED] Failed to feed markets: %s",
+                    e,
+                    exc_info=True,
+                )
+            feed_elapsed = time.monotonic() - feed_start
+            logger.info(
+                "[CATALOG-FEED] Feed loop completed in %.3fs: %d/%d markets fed",
+                feed_elapsed, feed_count, len(enriched)
+            )
         
         logger.info(f"[BOOT-TRACE] Catalog → MarketStateStore async feed completed: {feed_count}/{len(enriched)} markets fed successfully")
 
@@ -2002,6 +2003,8 @@ class KalshiMarketCatalog:
                 "floor_strike": cm.floor_strike,
                 "cap_strike": cm.cap_strike,
                 "exchange_index": getattr(cm, 'exchange_index', None),
+                "status": "open" if mkt.active else "closed",
+                "external_spot": None,
             })
             applied += 1
             # Yield control every batch_size to avoid blocking the event loop
@@ -2073,6 +2076,8 @@ class KalshiMarketCatalog:
                 "floor_strike": cm.floor_strike,
                 "cap_strike": cm.cap_strike,
                 "exchange_index": getattr(cm, 'exchange_index', None),
+                "status": "open" if mkt.active else "closed",
+                "external_spot": None,
             })
             applied += 1
         return applied

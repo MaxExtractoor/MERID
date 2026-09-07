@@ -280,3 +280,102 @@ def test_validate_observation_recovers_after_long_gap():
     result = _validate_observation("BTC", "BRTI", fresh_obs)
     assert result is fresh_obs
     assert get_last_rejection_reason("BTC") == ""
+
+
+def test_processing_age_ms_is_monotonic_elapsed():
+    """processing_age_ms is derived from the monotonic clock, not the provider timestamp."""
+    now_ms = _now_ms()
+    now_mono_ns = _now_mono_ns()
+
+    obs = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65000.0,
+        source_ts_ms=now_ms,  # provider timestamp is fresh
+        observed_ts_ms=now_ms,
+        observed_ts_mono_ns=now_mono_ns - 500_000_000,  # we received it 500ms ago
+        sequence=1,
+    )
+
+    result = _validate_observation("BTC", "BRTI", obs)
+    assert result is not None
+    assert result is obs
+    assert result.processing_ts_mono_ns is not None
+    assert result.processing_ts_mono_ns >= now_mono_ns
+    assert result.processing_age_ms is not None
+    assert 400 <= result.processing_age_ms <= 2000
+
+
+def test_event_loop_lag_ms_is_recorded():
+    """An event_loop_lag_ms value is propagated into the validated observation."""
+    now_ms = _now_ms()
+    now_mono_ns = _now_mono_ns()
+
+    obs = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65000.0,
+        source_ts_ms=now_ms,
+        observed_ts_ms=now_ms,
+        observed_ts_mono_ns=now_mono_ns,
+        sequence=1,
+        event_loop_lag_ms=42,
+    )
+
+    result = _validate_observation("BTC", "BRTI", obs)
+    assert result is not None
+    assert result is obs
+    assert result.event_loop_lag_ms == 42
+    assert result.processing_age_ms is not None
+
+
+def test_old_source_timestamp_cannot_overwrite_newer_state():
+    """An observation with an older source_ts_ms must not replace newer state."""
+    now_ms = _now_ms()
+    now_mono_ns = _now_mono_ns()
+
+    newer = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65100.0,
+        source_ts_ms=now_ms + 1000,
+        observed_ts_ms=now_ms,
+        observed_ts_mono_ns=now_mono_ns,
+        sequence=2,
+    )
+    _state.last_observation_by_asset["BTC"] = newer
+    _state.last_source_ts_ms_by_asset["BTC"] = newer.source_ts_ms
+
+    older = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65000.0,
+        source_ts_ms=now_ms,
+        observed_ts_ms=now_ms,
+        observed_ts_mono_ns=now_mono_ns,
+        sequence=1,
+    )
+
+    result = _validate_observation("BTC", "BRTI", older)
+    assert result is None
+    assert get_last_rejection_reason("BTC") == "cfb_rti_nonmonotonic"
+
+
+def test_provider_late_observation_rejected_at_freshness_boundary():
+    """An event that is 11 seconds old at receipt is rejected as source-stale."""
+    now_ms = _now_ms()
+    now_mono_ns = _now_mono_ns()
+
+    obs = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65000.0,
+        source_ts_ms=now_ms - 11_000,
+        observed_ts_ms=now_ms,
+        observed_ts_mono_ns=now_mono_ns,
+        sequence=1,
+    )
+
+    result = _validate_observation("BTC", "BRTI", obs)
+    assert result is None
+    assert "stale" in get_last_rejection_reason("BTC")

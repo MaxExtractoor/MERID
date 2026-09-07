@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -96,3 +97,56 @@ async def test_process_messages_continues_while_data_arrives():
 
     assert not disconnect_called
     assert stream._running_latch == 3
+
+
+@pytest.mark.asyncio
+async def test_recv_one_tags_message_with_received_at_mono_ns():
+    """_recv_one annotates parsed frames with the monotonic receipt timestamp."""
+    with patch.object(ws_module, "get_kalshi_config", _dummy_config):
+        stream = ws_module.KalshiCfRtiStream(on_disconnect=lambda: None)
+
+    stream._ws = MagicMock()
+
+    async def _recv():
+        return '{"type":"noop"}'
+
+    stream._ws.recv = _recv
+
+    data = await stream._recv_one(timeout=1.0)
+    assert data is not None
+    assert "received_at_mono_ns" in data
+    assert isinstance(data["received_at_mono_ns"], int)
+    assert data["received_at_mono_ns"] > 0
+
+
+@pytest.mark.asyncio
+async def test_forward_frame_includes_event_loop_lag_ms():
+    """_forward_frame measures the time from recv to processing."""
+    with patch.object(ws_module, "get_kalshi_config", _dummy_config):
+        stream = ws_module.KalshiCfRtiStream(on_disconnect=lambda: None)
+
+    received = []
+
+    def on_frame(frame):
+        received.append(frame)
+
+    stream.on_frame = on_frame
+
+    # Simulate a frame whose JSON payload contains a value and index_id.
+    raw_msg = {
+        "index_id": "BRTI",
+        "data": '{"value": 65000.0, "timestamp": 1788819357.5}',
+    }
+
+    await stream._forward_frame(
+        raw_msg,
+        sid=1,
+        seq=100,
+        received_at_mono_ns=time.monotonic_ns() - 5_000_000,  # 5ms ago
+    )
+
+    assert len(received) == 1
+    frame = received[0]
+    assert frame.data["event_loop_lag_ms"] is not None
+    assert isinstance(frame.data["event_loop_lag_ms"], int)
+    assert frame.data["event_loop_lag_ms"] >= 0

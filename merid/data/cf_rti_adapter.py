@@ -23,6 +23,7 @@ import math
 import os
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -121,6 +122,10 @@ class CfbRtiObservation:
     raw_value: Optional[str] = None
     retained_digits: Optional[int] = None
     market_settlement_digits: Optional[int] = None
+    # Internal pipeline diagnostics (monotonic clocks only)
+    processing_ts_mono_ns: Optional[int] = None
+    processing_age_ms: Optional[int] = None
+    event_loop_lag_ms: Optional[int] = None
 
     def __post_init__(self):
         # Derive Decimal values from float/string inputs for backward-compatible
@@ -183,6 +188,26 @@ class _AdapterState:
 _state = _AdapterState()
 _rti_history_lock = threading.RLock()
 _RTI_HISTORY_MAX_LEN = int(os.environ.get("MERID_CFB_RTI_HISTORY_MAX_LEN", "120"))
+
+# One-shot stack-capture flags for pipeline stalls.
+_processing_stack_captured = False
+_event_loop_lag_stack_captured = False
+
+
+def _capture_processing_stack(age_ms: int, kind: str = "processing") -> None:
+    """Capture a one-shot stack trace when a frame spends too long in the pipeline."""
+    global _processing_stack_captured, _event_loop_lag_stack_captured
+    stack = "".join(traceback.format_stack())
+    logger.error(
+        "[CF-RTI-ADAPTER] %s_stall_one_shot_stack age_ms=%s\n%s",
+        kind,
+        age_ms,
+        stack,
+    )
+    if kind == "processing":
+        _processing_stack_captured = True
+    elif kind == "event_loop_lag":
+        _event_loop_lag_stack_captured = True
 
 # Kalshi authenticated ``cfbenchmarks_value`` WebSocket stream.
 _kalshi_stream: Optional[Any] = None
@@ -272,7 +297,7 @@ def _ensure_kalshi_stream() -> Optional[Any]:
             logger.info(
                 "[CF-RTI-ADAPTER] stream_observation_accepted "
                 "asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s "
-                "source_ts_ms=%s observed_ts_ms=%s age_ms=%s timestamp_quality=%s execution_eligible=%s",
+                "source_ts_ms=%s observed_ts_ms=%s age_ms=%s processing_age_ms=%s event_loop_lag_ms=%s timestamp_quality=%s execution_eligible=%s",
                 asset,
                 cfb_symbol,
                 _format_price(asset, validated.value_decimal),
@@ -281,6 +306,8 @@ def _ensure_kalshi_stream() -> Optional[Any]:
                 validated.source_ts_ms,
                 validated.observed_ts_ms,
                 validated.age_ms,
+                validated.processing_age_ms,
+                validated.event_loop_lag_ms,
                 validated.timestamp_quality,
                 validated.execution_eligible,
             )
@@ -439,6 +466,13 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
     execution_eligible = source_ts_ms is not None
     market_digits = get_asset_settlement_digits(asset)
 
+    event_loop_lag_ms = data.get("event_loop_lag_ms")
+    if event_loop_lag_ms is not None:
+        try:
+            event_loop_lag_ms = int(event_loop_lag_ms)
+        except (TypeError, ValueError):
+            event_loop_lag_ms = None
+
     return CfbRtiObservation(
         asset=asset,
         cfb_symbol=cfb_symbol,
@@ -458,6 +492,7 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
         timestamp_quality=timestamp_quality,
         execution_eligible=execution_eligible,
         price_source_health="healthy" if execution_eligible else "suspect",
+        event_loop_lag_ms=event_loop_lag_ms,
     )
 
 
@@ -719,6 +754,23 @@ def _validate_observation(
             )
             return None
 
+    # Attach internal freshness diagnostics (monotonic clock only).
+    now_mono_ns = _now_mono_ns()
+    processing_age_ms = None
+    if obs.observed_ts_mono_ns is not None:
+        processing_age_ms = (now_mono_ns - obs.observed_ts_mono_ns) // 1_000_000
+
+    # One-shot stack capture if this frame sat in the pipeline too long.
+    if processing_age_ms is not None and processing_age_ms > _MAX_CFB_RTI_AGE_MS and not _processing_stack_captured:
+        _capture_processing_stack(processing_age_ms, kind="processing")
+
+    if obs.event_loop_lag_ms is not None and obs.event_loop_lag_ms > _MAX_CFB_RTI_AGE_MS and not _event_loop_lag_stack_captured:
+        _capture_processing_stack(obs.event_loop_lag_ms, kind="event_loop_lag")
+
+    # Mutate the frozen observation in-place (allowed via object.__setattr__)
+    # so callers that compare identity continue to work.
+    object.__setattr__(obs, "processing_ts_mono_ns", now_mono_ns)
+    object.__setattr__(obs, "processing_age_ms", processing_age_ms)
     return obs
 
 
