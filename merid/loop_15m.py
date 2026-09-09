@@ -1260,7 +1260,7 @@ class Kalshi15mLoop:
             slot_allocator = get_global_slot_allocator()
             position_count = len(all_positions) if 'all_positions' in locals() else 0
             slot_allocator.clear_slots_on_empty_positions(position_count)
-            logger.info("[15m-LOOP] Slot allocator phantom slots cleared (position_count=%d)", position_count)
+            logger.info("[15m-LOOP] Slot allocator phantom slots cleared (position_count=%s)", position_count)
         except Exception as e:
             logger.warning("[15m-LOOP] Failed to clear phantom slots from slot allocator: %s", e, exc_info=True)
 
@@ -1668,7 +1668,7 @@ class Kalshi15mLoop:
                 self._watchdog_budget
             )
             logger.error(
-                "[15M-LOOP-WATCHDOG] event loop health: is_running=%s, task_count=%d",
+                "[15M-LOOP-WATCHDOG] event loop health: is_running=%s, task_count=%s",
                 loop.is_running(),
                 len(asyncio.all_tasks(loop))
             )
@@ -2360,7 +2360,7 @@ def _run_exit_price_guard(
             logger.error(
                 "[EXIT-GUARD-REJECT] position=%s market=%s reason=%s - "
                 "Discretionary exit does not meet per-contract minimum profit floor "
-                "(expected_net=%dc, worst_net=%dc, min_profit_per_contract=%dc, total_min=%dc, fees=%dc, closed_count=%d)",
+                "(expected_net=%dc, worst_net=%dc, min_profit_per_contract=%dc, total_min=%dc, fees=%dc, closed_count=%s)",
                 (getattr(position, "position_id", "") or "")[:8],
                 getattr(position, "market_id", None),
                 canonical,
@@ -3223,7 +3223,7 @@ async def _execute_exit_order(
         )
 
         logger.info(
-            "[EXIT-ORDER] Routing exit order: ticker=%s side=%s action=%s count=%d count_fp=%s price=%dc reason=%s client_order_id=%s order_attempt_id=%s",
+            "[EXIT-ORDER] Routing exit order: ticker=%s side=%s action=%s count=%s count_fp=%s price=%dc reason=%s client_order_id=%s order_attempt_id=%s",
             position.market_id, side_str, action, _count, str(_count_fp), exit_price_cents, exit_reason, intent.client_order_id, intent.order_attempt_id
         )
 
@@ -3738,7 +3738,7 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
             f"{'FULL_EXIT' if contracts_to_close is None else 'PARTIAL_EXIT'}"
         )
         logger.info(
-            "[IDEMPOTENCY-AUDIT] position=%s market=%s reason=%s retry_count=%d dedupe_key=%s rearming_for_retry",
+            "[IDEMPOTENCY-AUDIT] position=%s market=%s reason=%s retry_count=%s dedupe_key=%s rearming_for_retry",
             position.position_id[:8],
             position.market_id,
             exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
@@ -3829,7 +3829,7 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
 
             logger.warning(
                 "[EXIT-ORDER-RETRY] Re-armed position for exit retry: position=%s market=%s "
-                "reason=%s retry_count=%d - exit will re-fire on next poll",
+                "reason=%s retry_count=%s - exit will re-fire on next poll",
                 position.position_id[:8],
                 position.market_id,
                 exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
@@ -3840,7 +3840,7 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
             position.size += contracts_to_close
             logger.warning(
                 "[EXIT-ORDER-RETRY] Partial exit failed, restored size: position=%s market=%s "
-                "size=%d (+%d restored) reason=%s retry_count=%d",
+                "size=%d (+%d restored) reason=%s retry_count=%s",
                 position.position_id[:8],
                 position.market_id,
                 position.size,
@@ -5219,19 +5219,21 @@ async def _run_loop(self) -> None:
 
                                 # FVG-influenced trades are scaled by MERID_FVG_SIZE_SCALE (default 0.5)
                                 # to reduce live exposure while the placebo matrix is being collected.
+                                # Preserve fractional centi-contract precision when scaling.
                                 fvg_size_scale = float(candidate.get("fvg_size_scale", 1.0) or 1.0)
-                                if fvg_size_scale < 1.0 and fvg_size_scale > 0.0 and count > 0:
-                                    scaled_count = max(1, int(count * fvg_size_scale))
+                                if fvg_size_scale < 1.0 and fvg_size_scale > 0.0 and count > 0.0:
+                                    scaled_count = round(float(count * fvg_size_scale), 2)
+                                    scaled_count = max(0.01, scaled_count)
                                     if scaled_count != count:
                                         logger.info(
-                                            "[15M-LOOP-FVG-SIZE] ticker=%s original_count=%d scaled_count=%d fvg_size_scale=%.2f",
+                                            "[15M-LOOP-FVG-SIZE] ticker=%s original_count=%s scaled_count=%s fvg_size_scale=%.2f",
                                             ticker, count, scaled_count, fvg_size_scale,
                                         )
                                         candidate["count"] = scaled_count
-                                
+
                                 # CRITICAL FIX: Skip execution if sizing returned count=0
                                 # This prevents invalid orders from being submitted
-                                if count == 0:
+                                if count < 0.01:
                                     sizing_reason = metadata.get("reason", metadata.get("rejection_reason", "unknown"))
                                     logger.warning(
                                         "[15m-LOOP] Sizing returned count=0 for ticker=%s (notional=%.2f, rejection_reason=%s) - skipping execution",
@@ -5250,7 +5252,7 @@ async def _run_loop(self) -> None:
                                     continue
                                 
                                 logger.info(
-                                    "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%d notional=%.2f",
+                                    "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%s notional=%.2f",
                                     ticker, float(edge_pct), float(confidence), count, float(notional)
                                 )
                                 
@@ -5259,14 +5261,14 @@ async def _run_loop(self) -> None:
                                 # can increase count based on market depth, violating the $1 cap.
                                 # For 15m crypto agents with fixed $1 exposure, liquidity-aware sizing is incompatible.
                                 # The slot allocator already enforces position limits based on available capital.
-                                # Skip liquidity-aware sizing; unified_sizing determines count (1 or 2) within the $1 cap.
+                                # Skip liquidity-aware sizing; unified_sizing determines fractional count within the $1 cap.
                                 logger.debug(
-                                    "[15m-LOOP] Liquidity-aware sizing DISABLED for $1 global rule enforcement: ticker=%s count=%d (up to %d contracts per trade)",
+                                    "[15m-LOOP] Liquidity-aware sizing DISABLED for $1 global rule enforcement: ticker=%s count=%s (up to %s contracts per trade)",
                                     ticker, count, _get_max_contracts_per_order()
                                 )
                             except Exception as sizing_err:
-                                logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
-                                candidate["count"] = 1
+                                logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1.0: %s", sizing_err)
+                                candidate["count"] = 1.0
                             
                             # Execute candidate and check if order was actually submitted
                             order_submitted = await self._execute_candidate(candidate, tick_id)
@@ -5441,7 +5443,7 @@ async def _run_loop(self) -> None:
                                     result = await route_order_async(hedge_intent)
                                     if result and (result.has_execution or (result.request_completed and not result.is_terminal)):
                                         logger.info(
-                                            "[15m-LOOP] Hedge order routed successfully: ticker=%s side=%s count=%d status=%s attempt=%d",
+                                            "[15m-LOOP] Hedge order routed successfully: ticker=%s side=%s count=%s status=%s attempt=%d",
                                             hedge_intent.ticker, hedge_intent.side, hedge_intent.count, result.status, attempt + 1
                                         )
                                         break
@@ -5449,7 +5451,7 @@ async def _run_loop(self) -> None:
                                         _hedge_status = result.status if result else "none"
                                         _hedge_reason = result.reason or "unknown" if result else "unknown"
                                         logger.warning(
-                                            "[15m-LOOP] Hedge order rejected (attempt %d/%d): ticker=%s side=%s count=%d status=%s reason=%s",
+                                            "[15m-LOOP] Hedge order rejected (attempt %d/%d): ticker=%s side=%s count=%s status=%s reason=%s",
                                             attempt + 1, max_retries, hedge_intent.ticker, hedge_intent.side, hedge_intent.count, _hedge_status, _hedge_reason
                                         )
                                         if attempt < max_retries - 1:
@@ -5464,7 +5466,7 @@ async def _run_loop(self) -> None:
                             
                             if result and not (result.has_execution or (result.request_completed and not result.is_terminal)):
                                 logger.error(
-                                    "[15m-LOOP] Hedge order failed after %d retries: ticker=%s side=%s count=%d - alpha remains unhedged",
+                                    "[15m-LOOP] Hedge order failed after %d retries: ticker=%s side=%s count=%s - alpha remains unhedged",
                                     max_retries, hedge_intent.ticker, hedge_intent.side, hedge_intent.count
                                 )
                     else:
@@ -5698,7 +5700,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                         logger.info("[LOOP-STARTUP] First refresh event wait completed: event_set=%s catalog_id=%s", event_set, id(self._catalog))
                     
                     catalog_snapshot = self._catalog.snapshot()
-                    logger.info("[LOOP-STARTUP] After snapshot: market_count=%d catalog_id=%s", catalog_snapshot.market_count if catalog_snapshot else 0, id(self._catalog))
+                    logger.info("[LOOP-STARTUP] After snapshot: market_count=%s catalog_id=%s", catalog_snapshot.market_count if catalog_snapshot else 0, id(self._catalog))
                     
                     if catalog_snapshot and catalog_snapshot.market_count > 0:
                         self._catalog_ready = True
@@ -5729,7 +5731,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                         logger.info("[15M-LOOP] CATALOG-NOT-READY: Waiting for first catalog refresh (total_markets=0, last_refresh=None)")
                         # DIAGNOSTIC: Log more details about why catalog is not ready
                         if catalog_snapshot:
-                            logger.warning("[15M-LOOP] CATALOG-DEBUG: snapshot exists but market_count=%d, refreshed_at=%s", catalog_snapshot.market_count, catalog_snapshot.refreshed_at)
+                            logger.warning("[15M-LOOP] CATALOG-DEBUG: snapshot exists but market_count=%s, refreshed_at=%s", catalog_snapshot.market_count, catalog_snapshot.refreshed_at)
                         else:
                             logger.warning("[15M-LOOP] CATALOG-DEBUG: catalog_snapshot is None")
             
@@ -5757,7 +5759,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                             )
                 else:
                     logger.warning(
-                        "[15M-LOOP] Catalog not ready (market_count=%d), "
+                        "[15M-LOOP] Catalog not ready (market_count=%s), "
                         "proceeding with last known markets",
                         catalog_snapshot.market_count if catalog_snapshot else 0,
                     )
@@ -6200,7 +6202,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                                                 from merid.event_venues.kalshi.order_router import route_order_async
                                                 asyncio.create_task(route_order_async(quote_intent))
                                                 logger.debug(
-                                                    "[MM-15M-EXECUTE] Routed quote: ticker=%s side=%s action=%s kalshi_side=%s price=%dc count=%d",
+                                                    "[MM-15M-EXECUTE] Routed quote: ticker=%s side=%s action=%s kalshi_side=%s price=%dc count=%s",
                                                     quote.ticker, quote.side, quote.action, kalshi_side, quote.price_cents, quote.count
                                                 )
                                             except Exception as quote_exc:
@@ -7089,7 +7091,7 @@ async def _run_one_cycle(self, tick: int) -> None:
         for asset in assets:
             exposure = position_cache.get_asset_exposure(asset)
             logger.info(
-                "[POSITION-EXPOSURE] cycle=%d asset=%s contracts=%.2f notional=%.2f unrealized_pnl=%.2f position_count=%d",
+                "[POSITION-EXPOSURE] cycle=%d asset=%s contracts=%.2f notional=%.2f unrealized_pnl=%.2f position_count=%s",
                 tick,
                 asset,
                 exposure["total_contracts"],
@@ -8074,37 +8076,40 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # CRITICAL FIX: Consolidated sizing path - use count from unified_sizing
         # The count is already computed by compute_order_size in the main loop (line 1565)
         # This removes the dual sizing path inconsistency where _execute_candidate
-        # would recalculate count from risk envelope, overwriting the unified_sizing result
-        count = int(candidate.get("count", 1))
-        
+        # would recalculate count from risk envelope, overwriting the unified_sizing result.
+        # Count is now fractional (centi-contract precision, 0.01 = one centi-contract).
+        count = float(candidate.get("count", 1.0))
+
         # 2026-08-22: Count is computed by unified_sizing under the $1 cap. Allow up to
         # _get_max_contracts_per_order() as a defensive ceiling; compute_order_size will still
         # reduce the count when price/exposure doesn't allow 2 contracts.
-        if count > _get_max_contracts_per_order():
+        max_per_order = float(_get_max_contracts_per_order())
+        if count > max_per_order:
             logger.warning(
-                "[15M-LOOP] CRITICAL: count=%d exceeds max_contracts_per_order=%d, capping. ticker=%s",
-                count, _get_max_contracts_per_order(), ticker
+                "[15M-LOOP] CRITICAL: count=%s exceeds max_contracts_per_order=%s, capping. ticker=%s",
+                count, max_per_order, ticker
             )
-            count = _get_max_contracts_per_order()
-        
-        # Validate count is reasonable
-        if count < 1:
-            logger.warning("[15M-LOOP] Invalid count=%d from candidate, defaulting to 1", count)
-            count = 1
+            count = max_per_order
+
+        # Validate count is reasonable.  Anything below one centi-contract is effectively zero.
+        if count < 0.01:
+            logger.warning("[15M-LOOP] Invalid count=%s from candidate, defaulting to 1.0", count)
+            count = 1.0
         
         # Calculate notional for logging
         position_notional_usd = (count * price_cents) / 100.0
         logger.info(
-            "[15M-LOOP] Using unified_sizing count=%d notional=%.2f ticker=%s",
+            "[15M-LOOP] Using unified_sizing count=%s notional=%.2f ticker=%s",
             count, position_notional_usd, ticker
         )
 
         # 2026-08-29: The quantity must never exceed the EV-gated approved size.
+        # approved_size_cc is centi-contracts; convert back to fractional contracts.
         if approved_size_cc is not None and approved_size_cc > 0:
-            approved_count = approved_size_cc // 100
-            if approved_count > 0 and count > approved_count:
+            approved_count = approved_size_cc / 100.0
+            if approved_count > 0.0 and count > approved_count:
                 logger.warning(
-                    "[15M-LOOP] count=%d exceeds EV-approved count=%d; capping. ticker=%s",
+                    "[15M-LOOP] count=%s exceeds EV-approved count=%s; capping. ticker=%s",
                     count, approved_count, ticker,
                 )
                 count = approved_count
@@ -8141,12 +8146,12 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     if not ev_result.allowed:
                         self._rejection_counters["ev_gate_rejected"] += 1
                         logger.error(
-                            "[15M-LOOP] EV gate REJECTS submitted price=%dc count=%d for ticker=%s reasons=%s",
+                            "[15M-LOOP] EV gate REJECTS submitted price=%dc count=%s for ticker=%s reasons=%s",
                             price_cents, count, ticker, ev_result.reasons,
                         )
                         return False
                     logger.info(
-                        "[15M-LOOP] EV gate ALLOWS submitted price=%dc count=%d for ticker=%s net_ev=%s",
+                        "[15M-LOOP] EV gate ALLOWS submitted price=%dc count=%s for ticker=%s net_ev=%s",
                         price_cents, count, ticker, ev_result.net_ev,
                     )
                     candidate["submitted_price_cents"] = price_cents
@@ -8773,6 +8778,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             action=action_raw,  # Keep as lowercase "buy"/"sell" for early validation
             price_cents=price_cents,  # BUG #2 FIX: Add required price_cents field
             count=count,  # CRITICAL FIX: Use count from sizing calculation instead of hardcoded 1
+            count_fp=Decimal(str(count)),  # CRITICAL FIX: exact fractional centi-contract count
             source="merid.prediction.agent_grid_15m",  # Use 'source' instead of 'caller_module'
             agent_id=agent_id,  # CRITICAL: Pass actual agent_id for authorization
             edge_pct=edge_pct,  # BUG #34 FIX: Add edge_pct from candidate
@@ -8888,7 +8894,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         logger.info(
             "[ORDER-INTENT-CREATED] trace_id=%s candidate_id=%s ticker=%s side=%s action=%s "
-            "price_cents=%d count=%d edge_pct=%.6f source=%s",
+            "price_cents=%d count=%s edge_pct=%.6f source=%s",
             trace_id,
             candidate.get("candidate_id"),
             ticker,
@@ -8912,7 +8918,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         outcome_side, _ = parse_kalshi_side(kalshi_side)
         logger.info(
             "[DIRECTION-POLICY-RECORD] trace_id=%s ticker=%s lifecycle=%s outcome_side=%s action=%s "
-            "kalshi_side=%s price_cents=%d count=%d position_before=%d position_after_expected=%s",
+            "kalshi_side=%s price_cents=%d count=%s position_before=%d position_after_expected=%s",
             getattr(intent, 'trace_id', 'unknown'),
             ticker,
             entry_or_exit,
@@ -8933,7 +8939,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         edge_no_val = (100.0 - model_prob_yes_canonical * 100.0) if model_prob_yes_canonical is not None else None
         logger.info(
             "[LIFECYCLE-ENTRY] asset=%s ticker=%s agent_id=%s indicator_side=%s edge_yes=%.2f edge_no=%.2f "
-            "edge_pct=%.4f thesis_side=%s entry_action=%s kalshi_side=%s price_cents=%d count=%d "
+            "edge_pct=%.4f thesis_side=%s entry_action=%s kalshi_side=%s price_cents=%d count=%s "
             "strategy_intent=%s entry_or_exit=%s",
             asset,
             ticker,
@@ -9357,7 +9363,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         if result and result.status == "rejected":
             self._rejection_counters["router_rejected"] += 1
             logger.warning(
-                "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%d "
+                "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%s "
                 "reason=%s latency_ms=%s",
                 trace_id,
                 candidate.get("candidate_id"),
@@ -9372,7 +9378,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         if result and result.requires_recovery:
             self._rejection_counters["router_rejected"] += 1
             logger.warning(
-                "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%d "
+                "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%s "
                 "reason=%s status=%s latency_ms=%s",
                 trace_id,
                 candidate.get("candidate_id"),
@@ -9388,7 +9394,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         if result and result.status == "unfilled_ioc":
             self._rejection_counters["other"] += 1
             logger.info(
-                "[15M-LOOP-SIDE-AWARE] IOC order did not fill: ticker=%s side=%s count=%d status=%s order_id=%s",
+                "[15M-LOOP-SIDE-AWARE] IOC order did not fill: ticker=%s side=%s count=%s status=%s order_id=%s",
                 ticker, kalshi_side, count, result.status, result.order_id
             )
             return False

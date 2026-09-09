@@ -2470,7 +2470,7 @@ class KalshiVenueClient(EventVenueClient):
             action, outcome, kalshi_side,
             kalshi_order.get("price", "N/A"),
             yes_space_price_cents,
-            ticker, int(order.size),
+            ticker, order.size,
             _wire_exchange_index,
         )
 
