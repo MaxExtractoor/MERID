@@ -63,12 +63,15 @@ class PositionSlot:
     entry_price_cents: int
     entry_time: float
     status: SlotStatus = SlotStatus.OCCUPIED
-    count: int = 1  # number of contracts represented by this slot
+    count: float = 1.0  # number of contracts represented by this slot
 
     @property
     def exposure_usd(self) -> float:
-        """Exposure in USD for this slot."""
-        return (self.count * self.entry_price_cents) / 100.0
+        """Kalshi position value in USD (par = $1.00 per contract).
+
+        The global exposure cap is a position-value cap, not an entry-cost cap.
+        """
+        return float(self.count)
 
 
 # Backwards-compatible alias used by legacy test suites.
@@ -86,7 +89,7 @@ class AllocationRequest:
     spread_cents: int
     confidence: float = 0.5  # Model confidence (0.0-1.0) for priority/tiebreaker
     is_exit_order: bool = False  # CRITICAL: Exit orders bypass slot allocation
-    count: int = 1  # Contract count (default 1, used for validation)
+    count: float = 1.0  # Contract count (default 1.0, used for validation)
     request_time: float = field(default_factory=time.time)
     
     def __post_init__(self):
@@ -424,7 +427,7 @@ class GlobalSlotAllocator:
         self,
         entry_price_cents: int,
         asset: Optional[str] = None,
-        count: int = 1
+        count: float = 1.0
     ) -> Tuple[bool, str]:
         """
         Check if a slot can be allocated for the given entry price.
@@ -432,7 +435,7 @@ class GlobalSlotAllocator:
         Args:
             entry_price_cents: Entry price in cents
             asset: Optional asset symbol for per-asset checks
-            count: Number of contracts (default 1)
+            count: Number of contracts (default 1.0)
 
         Returns:
             Tuple of (allowed, reason)
@@ -459,11 +462,12 @@ class GlobalSlotAllocator:
                     f"max {self.max_positions_per_asset} allowed"
                 )
 
-        # Check available exposure
+        # Check available exposure.  Required exposure is position value (Kalshi par),
+        # not the cash cost of entry, so it is simply the contract count.
         # CRITICAL FIX (2026-08-24): Round to 2 decimals to avoid floating-point
         # epsilon causing false "Insufficient exposure" rejections when
         # required and available are equal to the cent.
-        required_exposure = round((count * entry_price_cents) / 100.0, 2)
+        required_exposure = round(float(count), 2)
         available = round(self.get_available_exposure(), 2)
 
         if required_exposure > available:
@@ -477,11 +481,11 @@ class GlobalSlotAllocator:
         # the per-asset position limit and cheapest-price-first selection logic.
         # Re-enable if needed with proper configuration and testing.
 
-        # Check if enough room for minimum entry (10c)
-        if round(available - required_exposure, 2) < round(self.min_entry_cents / 100.0, 2):
+        # Check if enough room for one centi-contract after this trade
+        if round(available - required_exposure, 2) < 0.01:
             # This is OK - we just won't be able to add another position after this one
             logger.debug(
-                "[SLOT-ALLOCATOR] Allocation would leave <10c available: "
+                "[SLOT-ALLOCATOR] Allocation would leave <$0.01 available: "
                 "this is the last possible slot"
             )
 
@@ -536,7 +540,7 @@ class GlobalSlotAllocator:
             self._total_rejections += 1
             logger.info(
                 "[SLOT-ALLOCATOR] Rejected allocation: agent=%s asset=%s "
-                "price=%dc count=%d edge=%.2f%% spread=%dc confidence=%.2f - %s",
+                "price=%dc count=%s edge=%.2f%% spread=%dc confidence=%.2f - %s",
                 request.agent_id, request.asset, request.entry_price_cents,
                 request.count, request.edge_pct, request.spread_cents,
                 request.confidence, reason
@@ -569,7 +573,7 @@ class GlobalSlotAllocator:
                 
                 logger.info(
                     "[SLOT-ALLOCATOR] Allocated slot: slot_id=%s agent=%s asset=%s "
-                    "ticker=%s price=%dc count=%d edge=%.2f%% spread=%dc confidence=%.2f "
+                    "ticker=%s price=%dc count=%s edge=%.2f%% spread=%dc confidence=%.2f "
                     "total_exposure=$%.2f available=$%.2f slot_count=%d",
                     slot_id, request.agent_id, request.asset, request.ticker,
                     request.entry_price_cents, request.count, request.edge_pct,
@@ -630,7 +634,7 @@ class GlobalSlotAllocator:
         self,
         slot_id: str,
         fill_price_cents: int,
-        filled_count: int = 1,
+        filled_count: float = 1.0,
     ) -> bool:
         """
         Update an allocated slot to the actual fill price and filled count.
@@ -679,7 +683,7 @@ class GlobalSlotAllocator:
         self,
         ticker: str,
         fill_price_cents: int,
-        filled_count: int = 1,
+        filled_count: float = 1.0,
     ) -> bool:
         """
         Update the first matching slot by ticker to the actual fill price.

@@ -22,12 +22,23 @@ from __future__ import annotations
 
 import math
 import os
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Tuple
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.unified_sizing")
+
+# Kalshi binary crypto-15m contracts are $1.00 par instruments.  A position of
+# one full contract creates $1.00 of notional settlement exposure, so sizing
+# must cap the number of contracts by position value, not just by the cash
+# required to enter.  This is the key value used for the fixed exposure cap.
+KALSHI_CONTRACT_PAR_VALUE_USD = Decimal("1.00")
+
+# Precision for fractional contract quantities.  Kalshi V2 count_fp supports
+# two decimal places (centi-contracts), which is also the unit the whole stack
+# uses for signed YES centi-contract accounting.
+CONTRACT_COUNT_QUANTUM = Decimal("0.01")
 
 # Profile integration
 try:
@@ -786,7 +797,7 @@ def compute_order_size(
     side: str = "yes",  # 2026-07-13: Side for Kelly calculation (yes/no)
     metadata: Optional[dict] = None,  # 2026-07-31: Metadata for sweet spot price adjustment tracking
     flb_position_multiplier: float = 1.0,  # 2026-08-01: FLB-aware position sizing multiplier
-) -> Tuple[int, Decimal, dict]:
+) -> Tuple[float, Decimal, dict]:
     """Compute order size using fixed $2 total exposure model with Kelly filtering (2026-07-12).
     
     This is the SINGLE SOURCE OF TRUTH for order sizing in 15m agents.
@@ -872,7 +883,7 @@ def compute_order_size(
                 "[UNIFIED-SIZING] Kelly filter: asset=%s model_prob=%.2f price=%dc kelly=%.4f - NO EDGE, rejecting",
                 asset, model_prob, price_cents, kelly_fraction
             )
-            return 0, Decimal("0"), {
+            return 0.0, Decimal("0"), {
                 "bankroll_usd": float(bankroll_usd),
                 "price_cents": price_cents,
                 "asset": asset,
@@ -928,24 +939,25 @@ def compute_order_size(
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from slot allocator: %s", e)
     
-    # Step 3: Calculate available exposure
+    # Step 3: Calculate available exposure (position value, not just cash outlay)
     available_exposure_usd = fixed_exposure_cap_usd - existing_exposure_usd
     
-    # Step 4: Calculate contract cost
+    # Step 4: Calculate contract cost and contract par value
     contract_cost_usd = Decimal(price_cents) / Decimal("100")
+    contract_par_value_usd = KALSHI_CONTRACT_PAR_VALUE_USD
 
-    # Step 4a: Compute the maximum number of whole contracts that fit under any
-    # explicit per-order notional cap (legacy percentage-based fallback).
-    max_by_notional: Optional[int] = None
+    # Step 4a: Compute the maximum fractional count that fits under any explicit
+    # per-order notional cap (legacy percentage-based fallback), using position value.
+    max_by_notional: Optional[Decimal] = None
     if max_notional_usd is not None:
-        max_by_notional = int(Decimal(str(max_notional_usd)) // contract_cost_usd)
-        if max_by_notional < 1:
+        max_by_notional = Decimal(str(max_notional_usd)) / contract_par_value_usd
+        if max_by_notional < CONTRACT_COUNT_QUANTUM:
             logger.warning(
                 "[UNIFIED-SIZING] CAPITAL_INSUFFICIENT: asset=%s price=%dc contract_cost=%.2f "
                 "exceeds max_notional_usd=%.2f - rejecting order",
                 asset, price_cents, float(contract_cost_usd), float(max_notional_usd)
             )
-            return 0, Decimal("0"), {
+            return 0.0, Decimal("0"), {
                 "bankroll_usd": float(bankroll_usd),
                 "price_cents": price_cents,
                 "asset": asset,
@@ -954,11 +966,12 @@ def compute_order_size(
                 "max_notional_usd": float(max_notional_usd),
             }
 
-    # Step 5: Check if we have enough exposure slot
-    if available_exposure_usd < contract_cost_usd:
+    # Step 5: Check if we have enough exposure slot (position value, not cost)
+    min_position_value_for_trade = CONTRACT_COUNT_QUANTUM * contract_par_value_usd
+    if available_exposure_usd < min_position_value_for_trade:
         logger.warning(
-            "[UNIFIED-SIZING] Insufficient exposure slot: available=%.2f, needed=%.2f, existing=%.2f, cap=%.2f asset=%s",
-            float(available_exposure_usd), float(contract_cost_usd), float(existing_exposure_usd),
+            "[UNIFIED-SIZING] Insufficient exposure slot: available=%.2f, needed_min=%.2f, existing=%.2f, cap=%.2f asset=%s",
+            float(available_exposure_usd), float(min_position_value_for_trade), float(existing_exposure_usd),
             float(fixed_exposure_cap_usd), asset
         )
         # Debug: log slot allocator state for troubleshooting
@@ -978,7 +991,7 @@ def compute_order_size(
         except Exception as e:
             logger.warning("[UNIFIED-SIZING] Failed to log slot allocator state: %s", e)
 
-        return 0, Decimal("0"), {
+        return 0.0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
             "asset": asset,
@@ -988,22 +1001,22 @@ def compute_order_size(
             "existing_exposure_usd": float(existing_exposure_usd),
         }
 
-    # Step 6: Compute target contract count
+    # Step 6: Compute target contract count (fractional allowed, 2 decimals)
     # 2026-08-22: Size up to the configured per-asset max while staying inside the
-    # fixed $1 global exposure cap. The $1 allocation itself is not changed.
+    # fixed $1 global exposure cap. The cap is position value ($1.00 per contract).
     if _is_dynamic_sizing_enabled():
-        target_contracts = _get_dynamic_sizing_base_contracts()
-        if target_contracts < 1:
-            target_contracts = 1
+        target_contracts = Decimal(str(_get_dynamic_sizing_base_contracts()))
+        if target_contracts < CONTRACT_COUNT_QUANTUM:
+            target_contracts = CONTRACT_COUNT_QUANTUM
     else:
-        target_contracts = _get_max_contracts_per_asset(asset)
+        target_contracts = Decimal(str(_get_max_contracts_per_asset(asset)))
 
     # Step 7: Get effective max contracts cap (per-asset, dynamic, and live config)
-    max_contracts_cap = _get_max_contracts_per_asset(asset)
+    max_contracts_cap = Decimal(str(_get_max_contracts_per_asset(asset)))
     if _is_dynamic_sizing_enabled():
-        dynamic_max = _get_dynamic_sizing_max_contracts()
-        if dynamic_max < 1:
-            dynamic_max = 1
+        dynamic_max = Decimal(str(_get_dynamic_sizing_max_contracts()))
+        if dynamic_max < CONTRACT_COUNT_QUANTUM:
+            dynamic_max = CONTRACT_COUNT_QUANTUM
         max_contracts_cap = min(max_contracts_cap, dynamic_max)
 
     # 2026-08-29: Respect the resolved live-config per-order contract cap.  The
@@ -1014,17 +1027,21 @@ def compute_order_size(
 
         resolved = get_resolved_live_config(allow_unresolved=True)
         if resolved and resolved.resolved and resolved.max_contracts_per_order is not None:
-            resolved_max = int(resolved.max_contracts_per_order)
-            if resolved_max < 1:
-                resolved_max = 1
+            resolved_max = Decimal(str(resolved.max_contracts_per_order))
+            if resolved_max < CONTRACT_COUNT_QUANTUM:
+                resolved_max = CONTRACT_COUNT_QUANTUM
             max_contracts_cap = min(max_contracts_cap, resolved_max)
     except Exception as exc:
         logger.warning("[UNIFIED-SIZING] Failed to read resolved max_contracts_per_order: %s", exc)
 
-    # Step 8: Cap by the number of whole contracts that fit in the available $2 exposure
-    max_by_exposure = int(available_exposure_usd // contract_cost_usd)
+    # Step 8: Cap by the number of *fractional* contracts that fit in the
+    # available fixed exposure (position value), the available bankroll, and
+    # the cash needed to enter.  Each full contract is $1.00 of Kalshi par.
+    max_by_exposure = available_exposure_usd / contract_par_value_usd
+    max_by_bankroll = bankroll_usd / contract_par_value_usd
+    max_by_cash_cost = bankroll_usd / contract_cost_usd
 
-    contract_count = min(target_contracts, max_contracts_cap, max_by_exposure)
+    contract_count = min(target_contracts, max_contracts_cap, max_by_exposure, max_by_bankroll, max_by_cash_cost)
     if max_by_notional is not None:
         contract_count = min(contract_count, max_by_notional)
 
@@ -1042,32 +1059,25 @@ def compute_order_size(
             "[UNIFIED-SIZING] Daily/weekly loss cap hit; rejecting size for asset=%s",
             asset,
         )
-        return 0, Decimal("0"), {
+        return 0.0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
             "asset": asset,
             "reason": "daily_weekly_loss_cap",
         }
-    # 2026-08-29: Round to the nearest whole contract, but require the
-    # scaled notional to be at least half a contract before allowing one.
-    # This prevents a single-contract canary from being floored to zero
-    # inside the warning zone (e.g. loss_size_scale=0.96 -> int(0.96)=0).
-    scaled = contract_count * loss_size_scale
-    if scaled >= 0.5:
-        contract_count = max(1, int(scaled + 0.5))
-    else:
-        contract_count = 0
 
-    if contract_count < 1:
-        # Defensive: should not reach here because of the exposure check above,
-        # but handle the case where a cap reduced the count to 0.
+    # Scale by the loss/heat multiplier and quantize to the Kalshi-supported
+    # centi-contract precision (2 decimal places).  Sizes smaller than one
+    # centi-contract are treated as zero to avoid sub-minimal submissions.
+    scaled = (contract_count * Decimal(str(loss_size_scale))).quantize(CONTRACT_COUNT_QUANTUM, rounding=ROUND_HALF_UP)
+    if scaled < CONTRACT_COUNT_QUANTUM:
         logger.warning(
             "[UNIFIED-SIZING] Insufficient exposure for requested count: "
-            "available=$%.2f, price=%dc, target=%d, max_cap=%d, by_exposure=%d, loss_scale=%.4f, asset=%s",
+            "available=$%.2f, price=%dc, target=%s, max_cap=%s, by_exposure=%s, loss_scale=%.4f, asset=%s",
             float(available_exposure_usd), price_cents, target_contracts, max_contracts_cap, max_by_exposure,
             loss_size_scale, asset
         )
-        return 0, Decimal("0"), {
+        return 0.0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
             "asset": asset,
@@ -1075,13 +1085,13 @@ def compute_order_size(
             "available_exposure_usd": float(available_exposure_usd),
             "contract_cost_usd": float(contract_cost_usd),
             "existing_exposure_usd": float(existing_exposure_usd),
-            "max_contracts_cap": max_contracts_cap,
-            "target_contracts": target_contracts,
-            "max_by_exposure": max_by_exposure,
+            "max_contracts_cap": float(max_contracts_cap),
+            "target_contracts": float(target_contracts),
+            "max_by_exposure": float(max_by_exposure),
             "loss_size_scale": float(loss_size_scale),
         }
 
-    order_notional_usd = Decimal(contract_count) * contract_cost_usd
+    order_notional_usd = scaled * contract_cost_usd
 
     # 2026-08-01: Apply FLB position sizing multiplier
     # FLB multiplier reduces effective position size based on FLB risk zones
@@ -1096,9 +1106,9 @@ def compute_order_size(
 
     logger.info(
         "[UNIFIED-SIZING] Slot-based sizing: asset=%s price=%dc cost=$%.2f "
-        "existing_exposure=$%.2f available=$%.2f cap=$%.2f contracts=%d flb_multiplier=%.2f",
+        "existing_exposure=$%.2f available=$%.2f cap=$%.2f contracts=%.2f flb_multiplier=%.2f",
         asset, price_cents, float(contract_cost_usd), float(existing_exposure_usd),
-        float(available_exposure_usd), float(fixed_exposure_cap_usd), contract_count, flb_position_multiplier
+        float(available_exposure_usd), float(fixed_exposure_cap_usd), float(scaled), flb_position_multiplier
     )
     
     # Step 8: Validate min_notional and min_contracts if provided
@@ -1107,7 +1117,7 @@ def compute_order_size(
             "[UNIFIED-SIZING] Undersized trade: notional=%.2f < min_notional=%.2f. Rejecting.",
             float(order_notional_usd), float(min_notional_usd)
         )
-        return 0, Decimal("0"), {
+        return 0.0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
             "asset": asset,
@@ -1116,17 +1126,17 @@ def compute_order_size(
             "min_notional_usd": float(min_notional_usd),
         }
     
-    if min_contracts is not None and contract_count < min_contracts:
+    if min_contracts is not None and scaled < Decimal(str(min_contracts)):
         logger.info(
-            "[UNIFIED-SIZING] Undersized trade: count=%d < min_contracts=%d. Rejecting.",
-            contract_count, min_contracts
+            "[UNIFIED-SIZING] Undersized trade: count=%s < min_contracts=%s. Rejecting.",
+            scaled, min_contracts
         )
-        return 0, Decimal("0"), {
+        return 0.0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
             "asset": asset,
             "reason": "below_min_contracts",
-            "contract_count": contract_count,
+            "contract_count": float(scaled),
             "min_contracts": min_contracts,
         }
     
@@ -1139,7 +1149,7 @@ def compute_order_size(
         "bankroll_usd": float(bankroll_usd),
         "price_cents": price_cents,
         "asset": asset,
-        "contract_count": contract_count,
+        "contract_count": float(scaled),
         "order_notional_usd": float(order_notional_usd),
         "existing_exposure_usd": float(existing_exposure_usd),
         "available_exposure_usd": float(available_exposure_usd),
@@ -1180,10 +1190,10 @@ def compute_order_size(
         metadata["kelly_fraction"] = kelly_fraction
 
     logger.info(
-        "[UNIFIED-SIZING] Final sizing: asset=%s contracts=%d notional=$%.2f price=%dc "
+        "[UNIFIED-SIZING] Final sizing: asset=%s contracts=%.2f notional=$%.2f price=%dc "
         "total_exposure_after=$%.2f",
-        asset, contract_count, float(order_notional_usd), price_cents,
+        asset, float(scaled), float(order_notional_usd), price_cents,
         float(existing_exposure_usd + order_notional_usd)
     )
     
-    return contract_count, order_notional_usd, metadata
+    return float(scaled), order_notional_usd, metadata

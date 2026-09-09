@@ -41,7 +41,7 @@ assert os is not None, "os module failed to import at module level"
 from dataclasses import dataclass, field, replace as _dc_replace
 from enum import Enum
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, ROUND_CEILING
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -136,7 +136,7 @@ def compute_intent_hash(
     side: str,
     action: str,
     price_cents: int,
-    count: int,
+    count: float,
     order_type: str,
     time_in_force: str,
 ) -> str:
@@ -1122,7 +1122,7 @@ def get_resting_orders() -> List[RestingOrder]:
         return list(_resting_orders.values())
 
 
-def _resolve_requested_count(placed_size, intent_count: int) -> int:
+def _resolve_requested_count(placed_size, intent_count: float) -> float:
     """Resolve the requested contract count for fill reconciliation.
 
     Kalshi's create-order response may omit or zero the `size` field even for
@@ -2604,7 +2604,7 @@ class OrderIntent:
     """
     ticker: str
     price_cents: int
-    count: int
+    count: float
     count_fp: Optional[Decimal] = None
     side: str = ""
     action: str = ""
@@ -4578,7 +4578,9 @@ def _compute_max_execution_cost_cents(
     per_contract_max = max(per_contract_max, all_in_cost_fallback + 1.0)
 
     total_max_cents = canonical_count * Decimal(per_contract_max)
-    return int(total_max_cents.to_integral_value(rounding=ROUND_HALF_UP))
+    # Use ceiling so fractional sizes are not rejected by rounding the cost cap
+    # below the actual all-in cost (e.g. 0.75 * 51c = 38.25c must cap at 39c).
+    return int(total_max_cents.to_integral_value(rounding=ROUND_CEILING))
 
 
 def _build_create_order_request(
@@ -4964,7 +4966,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
         # INVARIANT-2: Exit count must be positive
         if count <= 0:
             logger.critical(
-                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s count=%d - "
+                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s count=%s - "
                 "EXIT orders require count>0. Zero or negative count is invalid. Rejecting as critical bug.",
                 intent.ticker, intent.side, count
             )
@@ -4978,7 +4980,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
         # INVARIANT-3: Exit count cannot exceed position size (cannot over-close)
         if count > pre_position_size:
             logger.critical(
-                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%d - "
+                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%s - "
                 "EXIT orders cannot close more contracts than exist in position. "
                 "This would over-close the position. Rejecting as critical bug.",
                 intent.ticker, intent.side, pre_position_size, count
@@ -4994,7 +4996,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
         expected_post_position_size = pre_position_size - count
         if expected_post_position_size < 0:
             logger.critical(
-                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%d post_size=%d - "
+                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%s post_size=%d - "
                 "EXIT orders cannot result in negative position size. "
                 "This would flip position sign and create exposure on opposite leg. Rejecting as critical bug.",
                 intent.ticker, intent.side, pre_position_size, count, expected_post_position_size
@@ -5010,7 +5012,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
         expected_post_from_intent = getattr(intent, 'expected_post_position_fp', None)
         if expected_post_from_intent is not None and int(expected_post_from_intent) != expected_post_position_size:
             logger.critical(
-                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%d computed_post=%d intent_post=%d - "
+                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s pre_size=%d count=%s computed_post=%d intent_post=%d - "
                 "Caller-supplied expected post-size does not match the canonical pre - count. Rejecting.",
                 intent.ticker, intent.side, pre_position_size, count,
                 expected_post_position_size, int(expected_post_from_intent),
@@ -5023,7 +5025,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
             )
 
         logger.info(
-            "[EXIT-INVARIANT-PASS] ticker=%s side=%s pre_size=%d count=%d post_size=%d - "
+            "[EXIT-INVARIANT-PASS] ticker=%s side=%s pre_size=%d count=%s post_size=%d - "
             "Exit order passes all position-delta invariants (close-only validation)",
             intent.ticker, intent.side, pre_position_size, count, expected_post_position_size
         )
@@ -9575,7 +9577,7 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
     # allocator exit bypass (is_exit_order=True).
     if _is_exit_order(intent) or intent.entry_or_exit == "exit":
         logger.info(
-            "[BANKROLL-CAP] Exit order bypasses notional cap: ticker=%s count=%d price=%dc (exposure-reducing)",
+            "[BANKROLL-CAP] Exit order bypasses notional cap: ticker=%s count=%s price=%dc (exposure-reducing)",
             intent.ticker, intent.count, intent.price_cents
         )
         return None
@@ -10309,7 +10311,7 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
     _selected_price = getattr(intent, "selected_outcome_price_cents", None)
     logger.info(
         "[ORDER-CONSTRUCTION-AUDIT] "
-        "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d "
+        "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%s "
         "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s "
         "p_yes=%s p_no=%s p_selected=%s selected_price_cents=%s gross_edge=%s net_edge=%s "
         "edge_audit=\"p_selected - price - all_in_costs = net_edge\"",
@@ -10449,7 +10451,7 @@ def _release_allocated_slot(intent: OrderIntent) -> None:
                 # Log slot allocator state before release for diagnostics
                 slot_summary = slot_allocator.get_summary()
                 logger.info(
-                    "[order-router] Slot allocator state before release (attempt %d/%d): total_exposure=$%.2f slot_count=%d slot_id=%s ticker=%s",
+                    "[order-router] Slot allocator state before release (attempt %d/%d): total_exposure=$%.2f slot_count=%s slot_id=%s ticker=%s",
                     attempt + 1, max_retries, slot_summary["total_exposure_usd"], slot_summary["slot_count"], slot_id, intent.ticker
                 )
                 
@@ -10459,7 +10461,7 @@ def _release_allocated_slot(intent: OrderIntent) -> None:
                 # Log slot allocator state after release for verification
                 slot_summary_after = slot_allocator.get_summary()
                 logger.info(
-                    "[order-router] Released allocated slot_id=%s for ticker=%s (attempt %d/%d) - new state: total_exposure=$%.2f slot_count=%d",
+                    "[order-router] Released allocated slot_id=%s for ticker=%s (attempt %d/%d) - new state: total_exposure=$%.2f slot_count=%s",
                     slot_id, intent.ticker, attempt + 1, max_retries, slot_summary_after["total_exposure_usd"], slot_summary_after["slot_count"]
                 )
                 break  # Success, exit retry loop
@@ -11316,7 +11318,7 @@ async def _route_live(
     _selected_price = getattr(intent, "selected_outcome_price_cents", None)
     logger.info(
         "[ORDER-CONSTRUCTION-AUDIT] "
-        "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d "
+        "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%s "
         "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s snapshot_age=%.1fs "
         "p_yes=%s p_no=%s p_selected=%s selected_price_cents=%s gross_edge=%s net_edge=%s "
         "edge_audit=\"p_selected - price - all_in_costs = net_edge\"",
@@ -11739,7 +11741,7 @@ async def _route_live(
             
             _release_gate_record(intent, f"stale_market_data:{intent.ticker}")
             logger.info(
-                "[ORDER-BLOCKED] ticker=%s reason=STALE_MARKET_DATA side=%s count=%d detail=age=%.1fs",
+                "[ORDER-BLOCKED] ticker=%s reason=STALE_MARKET_DATA side=%s count=%s detail=age=%.1fs",
                 intent.ticker,
                 intent.side,
                 intent.count,
@@ -13001,7 +13003,7 @@ async def _route_live(
                         latency = (_time.monotonic() - t0) * 1000
                         _release_gate_record(intent, f"market_band_skip:{band_result.skip_reason}")
                         logger.info(
-                            "[ORDER-BLOCKED] ticker=%s reason=MARKET_BAND_SKIP side=%s count=%d detail=%s",
+                            "[ORDER-BLOCKED] ticker=%s reason=MARKET_BAND_SKIP side=%s count=%s detail=%s",
                             intent.ticker,
                             intent.side,
                             intent.count,
@@ -13309,13 +13311,13 @@ async def _route_live(
         # INSTRUMENTATION: Log order type (RESTING vs MARKETABLE) for monitoring
         logger.info(
             "[ORDER-TYPE-INSTRUMENT] ticker=%s side=%s action=%s type=%s aggressiveness=%.2f "
-            "edge=%.3f price=%dc count=%d notional=%.2fUSD",
+            "edge=%.3f price=%dc count=%s notional=%.2fUSD",
             intent.ticker, intent.side, intent.action, order_type_label, intent.aggressiveness,
             intent.edge_pct or 0.0, final_price_cents, intent.count, _pre_notional_usd
         )
 
         logger.info(
-            "[KALSHI_ORDER_INTENT] ticker=%s side=%s action=%s count=%d price_cents=%d "
+            "[KALSHI_ORDER_INTENT] ticker=%s side=%s action=%s count=%s price_cents=%d "
             "mode=%s source=%s",
             intent.ticker,
             intent.side,
@@ -13371,7 +13373,7 @@ async def _route_live(
         _underlying = _get_underlying(intent.ticker)
         logger.info(
             "[DRY-RUN-TRACE] pre_fill | router_path=order_router ticker=%s side=%s action=%s | "
-            "price=%d¢ count=%d notional=%d¢ underlying=%s",
+            "price=%d¢ count=%s notional=%d¢ underlying=%s",
             intent.ticker, intent.side, intent.action,
             intent.price_cents, intent.count, _notional_cents, _underlying
         )
@@ -13384,7 +13386,7 @@ async def _route_live(
             # Dry-run mode: log would-submit without placing real order
             logger.info(
                 "[DRY-RUN-EXECUTION] mode=%s | ticker=%s | side=%s | action=%s | "
-                "price=%d¢ | count=%d | notional=%d¢ | client_tag=%s | order_group_id=%s",
+                "price=%d¢ | count=%s | notional=%d¢ | client_tag=%s | order_group_id=%s",
                 execution_mode,
                 intent.ticker,
                 intent.side,
@@ -13541,7 +13543,7 @@ async def _route_live(
         # Log order intent before API call for lifecycle traceability
         trace_id = intent.client_tag or uuid.uuid4().hex
         logger.info(
-            "[SUBMIT-ORDER-INTENT] trace_id=%s asset=%s market_id=%s side=%s action=%s price_cents=%d count=%d notional_cents=%d client_tag=%s order_group_id=%s liquidity_role=%s stp=%s snapshot_ts=%.3f snapshot_age_ms=%.0f expected_fee_role=%s expected_fee_rate_bps=%.2f expected_fee_cents=%d",
+            "[SUBMIT-ORDER-INTENT] trace_id=%s asset=%s market_id=%s side=%s action=%s price_cents=%d count=%s notional_cents=%d client_tag=%s order_group_id=%s liquidity_role=%s stp=%s snapshot_ts=%.3f snapshot_age_ms=%.0f expected_fee_role=%s expected_fee_rate_bps=%.2f expected_fee_cents=%d",
             trace_id,
             intent.ticker.split("-")[0][2:] if intent.ticker.startswith("KX") else "UNKNOWN",
             intent.ticker,
@@ -13772,7 +13774,7 @@ async def _route_live(
                         rest_no_levels = [[level.price_cents / 100.0, float(level.size)] for level in ob_result.no_levels]
 
                         logger.info(
-                            "[WS-REST-DIVERGENCE-DIAG] ticker=%s yes_levels_count=%d no_levels_count=%d yes_levels_sample=%s no_levels_sample=%s",
+                            "[WS-REST-DIVERGENCE-DIAG] ticker=%s yes_levels_count=%s no_levels_count=%s yes_levels_sample=%s no_levels_sample=%s",
                             intent.ticker,
                             len(rest_yes_levels), len(rest_no_levels),
                             rest_yes_levels[:3] if rest_yes_levels else [],
@@ -14047,7 +14049,7 @@ async def _route_live(
         # either in port.create_order or in a blocking pre-submit registration.
         logger.info(
             "[ORDER-ROUTER-CHECKPOINT] ticker=%s intent_id=%s stage=pre_submit "
-            "client_order_id=%s price_cents=%d count=%d",
+            "client_order_id=%s price_cents=%d count=%s",
             intent.ticker,
             intent.intent_id,
             intent.client_order_id or intent.client_tag or "",
@@ -14646,7 +14648,7 @@ async def _route_live(
         # 2026-07-25: Log ORDER-FILL when order is filled
         if filled_count > 0:
             logger.info(
-                "[ORDER-FILL] intent_id=%s ticker=%s order_id=%s filled_count=%d fill_price_cents=%d notional=$%.2f",
+                "[ORDER-FILL] intent_id=%s ticker=%s order_id=%s filled_count=%s fill_price_cents=%d notional=$%.2f",
                 intent.intent_id, intent.ticker, _venue_oid, filled_count, fill_price_cents, (filled_count * fill_price_cents) / 100.0
             )
 
@@ -15240,7 +15242,7 @@ def _route_order_impl(intent: OrderIntent) -> OrderResult:
 
     # Structured audit log for production traceability
     logger.info(
-        "[AUDIT] caller_check | module=%s | intent=%s | action=%s | count=%d | "
+        "[AUDIT] caller_check | module=%s | intent=%s | action=%s | count=%s | "
         "authorized=%s | is_known_bypass=%s",
         _caller,
         intent.ticker,
@@ -15755,7 +15757,7 @@ def _run_pre_trade_gate(
             if verdict.is_duplicate:
                 logger.info(
                     "[order-router] IDEMPOTENT DUPLICATE: ticker=%s coid=%s status=%s reason=%s "
-                    "agent=%s strategy=%s side=%s action=%s count=%d price=%dc (returning synthetic success)",
+                    "agent=%s strategy=%s side=%s action=%s count=%s price=%dc (returning synthetic success)",
                     intent.ticker, verdict.client_order_id[:16], verdict.existing_status, verdict.reason,
                     _agent, _strategy, intent.side, intent.action, intent.count, intent.price_cents,
                 )
@@ -15812,7 +15814,7 @@ def _run_pre_trade_gate(
             # Include all relevant order parameters and rejection reason
             logger.warning(
                 "[order-router] GATE BLOCKED: ticker=%s coid=%s reason=%s "
-                "agent=%s strategy=%s side=%s action=%s count=%d price=%dc "
+                "agent=%s strategy=%s side=%s action=%s count=%s price=%dc "
                 "intent_id=%s entry_or_exit=%s exit_policy_id=%s window_resolution_id=%s "
                 "risk_tier=%s max_hold_seconds=%s latency_ms=%.2f",
                 intent.ticker, verdict.client_order_id[:16], verdict.reason,
@@ -16355,7 +16357,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     if intent.entry_or_exit == "exit":
         logger.info(
             "[EXIT-ROUTER-AUDIT] intent_id=%s ticker=%s entry_or_exit=%s exit_reason=%s "
-            "pre_size=%s post_size=%s count=%d side=%s action=%s source=%s router_accept_ts=%.3f",
+            "pre_size=%s post_size=%s count=%s side=%s action=%s source=%s router_accept_ts=%.3f",
             intent.intent_id,
             intent.ticker,
             intent.entry_or_exit,
@@ -16372,7 +16374,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     # AUDIT #4: Execution path tracking
     exec_path = "EXIT" if intent.entry_or_exit == "exit" else "ENTRY"
     logger.info(
-        "[EXEC-PATH] %s intent_id=%s ticker=%s side=%s count=%d source=%s",
+        "[EXEC-PATH] %s intent_id=%s ticker=%s side=%s count=%s source=%s",
         exec_path,
         intent.intent_id,
         intent.ticker,
@@ -16624,7 +16626,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
                 f"inferred_asset={asset} | timeframe={timeframe} | series={series_ticker or 'N/A'}"
             )
             logger.info(
-                "[ORDER-BLOCKED] ticker=%s reason=SCOPE_VIOLATION side=%s count=%d detail=%s",
+                "[ORDER-BLOCKED] ticker=%s reason=SCOPE_VIOLATION side=%s count=%s detail=%s",
                 intent.ticker,
                 intent.side,
                 intent.count,
@@ -16652,7 +16654,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             f"side={intent.side} | count={intent.count}"
         )
         logger.info(
-            "[ORDER-BLOCKED] ticker=%s reason=RATE_LIMIT side=%s count=%d",
+            "[ORDER-BLOCKED] ticker=%s reason=RATE_LIMIT side=%s count=%s",
             intent.ticker,
             intent.side,
             intent.count,
@@ -16674,7 +16676,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             f"ticker={intent.ticker} | side={intent.side} | count={intent.count}"
         )
         logger.info(
-            "[ORDER-BLOCKED] ticker=%s reason=INVALID_PRICE side=%s count=%d price_cents=%s",
+            "[ORDER-BLOCKED] ticker=%s reason=INVALID_PRICE side=%s count=%s price_cents=%s",
             intent.ticker,
             intent.side,
             intent.count,
@@ -16695,7 +16697,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             f"ticker={intent.ticker} | side={intent.side} | count={intent.count}"
         )
         logger.info(
-            "[ORDER-BLOCKED] ticker=%s reason=INVALID_PRICE side=%s count=%d price_cents=%d",
+            "[ORDER-BLOCKED] ticker=%s reason=INVALID_PRICE side=%s count=%s price_cents=%d",
             intent.ticker,
             intent.side,
             intent.count,
@@ -16725,7 +16727,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             f"ticker={intent.ticker} | side={intent.side} | count={intent.count} | source={intent.source}"
         )
         logger.info(
-            "[ORDER-BLOCKED] ticker=%s reason=MIN_PRICE_VIOLATION side=%s count=%d price_cents=%d",
+            "[ORDER-BLOCKED] ticker=%s reason=MIN_PRICE_VIOLATION side=%s count=%s price_cents=%d",
             intent.ticker,
             intent.side,
             intent.count,
@@ -16850,7 +16852,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
 
     # Structured audit log for production traceability
     logger.info(
-        "[AUDIT] caller_check | module=%s | intent=%s | action=%s | count=%d | "
+        "[AUDIT] caller_check | module=%s | intent=%s | action=%s | count=%s | "
         "authorized=%s | is_known_bypass=%s",
         _caller,
         intent.ticker,
@@ -17064,7 +17066,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     # the next checkpoints narrow the hang location.
     logger.info(
         "[ORDER-ROUTER-CHECKPOINT] ticker=%s intent_id=%s stage=post_deep_otm "
-        "price_cents=%d count=%d edge_pct=%s",
+        "price_cents=%d count=%s edge_pct=%s",
         intent.ticker,
         intent.intent_id,
         intent.price_cents,
@@ -17412,7 +17414,7 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         "attempt_id=%s intent_id=%s client_order_id=%s client_tag=%s "
         "ticker=%s side=%s action=%s price_cents=%s count=%s "
         "state=%s exchange_order_id=%s exchange_status=%s "
-        "filled_count=%d remaining_count=%d reason=%s latency_ms=%.2f",
+        "filled_count=%s remaining_count=%s reason=%s latency_ms=%.2f",
         intent.intent_id,
         intent.intent_id,
         intent.client_order_id or "",
@@ -17749,7 +17751,7 @@ async def _execute_scaled_order(
         if plan is None:
             # Scaling not recommended, return None to use normal routing
             logger.debug(
-                "[ORDER-SCALING] Scaling not recommended for intent_id=%s ticker=%s count=%d edge=%.2f",
+                "[ORDER-SCALING] Scaling not recommended for intent_id=%s ticker=%s count=%s edge=%.2f",
                 intent.intent_id, intent.ticker, intent.count, edge_pct
             )
             return None
@@ -17818,7 +17820,7 @@ async def _execute_scaled_order(
                 total_rejected += child.count
             
             logger.info(
-                "[ORDER-SCALING] Child %d/%d: status=%s count=%d cumulative_filled=%d",
+                "[ORDER-SCALING] Child %d/%d: status=%s count=%s cumulative_filled=%d",
                 i + 1, len(plan.child_orders), child_result.status, child.count, total_filled
             )
         

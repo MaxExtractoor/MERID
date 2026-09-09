@@ -17946,9 +17946,9 @@ class LeanAgentGrid15m:
 
                                     if asset.lower() in pos_ticker.lower():
 
-                                        pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else candidate.get('price_cents', 50)
-
-                                        current_position_notional += (pos_obj.contracts * pos_price) / 100.0
+                                        # Use contract count as position value (Kalshi par = $1.00/contract)
+                                        # rather than entry notional, so allocation caps position value.
+                                        current_position_notional += float(pos_obj.contracts)
 
                         except Exception as e:
 
@@ -17968,7 +17968,7 @@ class LeanAgentGrid15m:
 
                         price_cents=price_cents,
 
-                        count=int(candidate.get('count', 1)),
+                        count=float(candidate.get('count', 1.0)),
 
                         edge_pct=float(candidate.get('edge_pct', 0.0)),
 
@@ -18101,9 +18101,11 @@ class LeanAgentGrid15m:
                         # loop_15m._execute_candidate (via resolve_exit_policy) is the single source
                         # of truth for TP/SL. Injecting tight 1c targets from the allocator was
                         # overriding the policy and causing premature exits.
+                        # Propagate any allocator-scaled fractional count back to the candidate.
+                        original_candidate['count'] = float(order.count)
                         candidates.append(original_candidate)
                         logger.info(
-                            "[GLOBAL-ALLOCATOR-RETURN] asset=%s ticker=%s side=%s price=%dc count=%d edge=%.1f%%",
+                            "[GLOBAL-ALLOCATOR-RETURN] asset=%s ticker=%s side=%s price=%dc count=%s edge=%.1f%%",
                             order.asset, order.ticker, order.side, order.price_cents, order.count, order.edge_pct
                         )
                     else:

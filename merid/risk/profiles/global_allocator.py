@@ -59,7 +59,7 @@ class OrderCandidate:
     side: str  # "yes" or "no"
     action: str  # "buy" or "sell"
     price_cents: int
-    count: int
+    count: float
     edge_pct: float
     confidence: float
     model_prob: float
@@ -68,8 +68,19 @@ class OrderCandidate:
 
     @property
     def notional_usd(self) -> float:
-        """Calculate order notional in USD."""
+        """Calculate order notional (cash outlay) in USD."""
         return (self.price_cents * self.count) / 100.0
+
+    @property
+    def position_value_usd(self) -> float:
+        """Calculate Kalshi position value in USD.
+
+        Each binary crypto-15m contract has a $1.00 par settlement payout, so
+        the position value is simply the contract count multiplied by $1.00.
+        This is the value that must fit under the fixed exposure cap and the
+        account's buying power, not the entry notional.
+        """
+        return float(self.count)
 
     @property
     def edge_score(self) -> float:
@@ -104,6 +115,11 @@ class CanonicalLivePosition:
     def is_open(self) -> bool:
         """An exposure is live if it is either filled on exchange or resting on the book."""
         return self.exchange_confirmed_open or self.pending_order_open
+
+    @property
+    def position_value_usd(self) -> float:
+        """Kalshi position value (par = $1.00 per contract)."""
+        return float(self.contracts)
 
 
 @dataclass
@@ -278,9 +294,9 @@ class GlobalAllocator:
         candidate: OrderCandidate,
         canonical_live_positions: List[CanonicalLivePosition]
     ) -> float:
-        """Return the total live notional for this exact candidate ticker."""
+        """Return the total live position value (Kalshi par) for this exact candidate ticker."""
         return sum(
-            p.notional_usd
+            p.position_value_usd
             for p in canonical_live_positions
             if p.asset == candidate.asset
             and p.ticker == candidate.ticker
@@ -384,11 +400,11 @@ class GlobalAllocator:
         self._asset_positions = current_positions.copy()
 
         if use_canonical:
-            # Overwrite with notional from authoritative canonical live positions (per ticker)
+            # Overwrite with position value from authoritative canonical live positions (per ticker)
             self._asset_positions = {}
             for p in canonical_live_positions:
                 if p.is_open:
-                    self._asset_positions[p.asset] = self._asset_positions.get(p.asset, 0.0) + p.notional_usd
+                    self._asset_positions[p.asset] = self._asset_positions.get(p.asset, 0.0) + p.position_value_usd
 
         # CRITICAL FIX (2026-07-31): Clear pending orders for assets that already have positions
         # This handles the case where fills occurred but global_allocator wasn't notified
@@ -602,7 +618,7 @@ class GlobalAllocator:
 
         for r in range(1, n + 1):
             for combo in combinations(unique_candidates, r):
-                total_notional = sum(c.notional_usd for c in combo)
+                total_notional = sum(c.position_value_usd for c in combo)
                 if total_notional > self.venue_cap_usd:
                     continue
 
@@ -612,7 +628,7 @@ class GlobalAllocator:
                         asset_current = self._current_notional_for_ticker(candidate, canonical_live_positions)
                     else:
                         asset_current = current_positions.get(candidate.asset, 0.0)
-                    asset_with_order = candidate.notional_usd
+                    asset_with_order = candidate.position_value_usd
                     max_asset_notional = self.venue_cap_usd * self.max_single_asset_fraction
                     if (asset_current + asset_with_order) > max_asset_notional:
                         combo_valid = False
@@ -637,7 +653,7 @@ class GlobalAllocator:
 
         for r in range(1, n + 1):
             for combo in combinations(unique_candidates, r):
-                total_notional = sum(c.notional_usd for c in combo)
+                total_notional = sum(c.position_value_usd for c in combo)
                 if total_notional > self.venue_cap_usd:
                     continue
 
@@ -647,7 +663,7 @@ class GlobalAllocator:
                         asset_current = self._current_notional_for_ticker(candidate, canonical_live_positions)
                     else:
                         asset_current = current_positions.get(candidate.asset, 0.0)
-                    asset_with_order = candidate.notional_usd
+                    asset_with_order = candidate.position_value_usd
                     if (asset_current + asset_with_order) > max_asset_notional:
                         combo_valid = False
                         break
@@ -665,7 +681,7 @@ class GlobalAllocator:
                 asset_current = self._current_notional_for_ticker(c, canonical_live_positions)
             else:
                 asset_current = current_positions.get(c.asset, 0.0)
-            if (asset_current + c.notional_usd) > max_asset_notional:
+            if (asset_current + c.position_value_usd) > max_asset_notional:
                 asset_cap_violation[cid] = True
 
         chosen_ids = {c.candidate_id or f"oc-{id(c)}" for c in chosen}
@@ -732,10 +748,10 @@ class GlobalAllocator:
                 "utilization_pct": 0.0
             }
         
-        total_notional = sum(c.notional_usd for c in chosen)
+        total_notional = sum(c.position_value_usd for c in chosen)
         asset_breakdown = {}
         for c in chosen:
-            asset_breakdown[c.asset] = asset_breakdown.get(c.asset, 0.0) + c.notional_usd
+            asset_breakdown[c.asset] = asset_breakdown.get(c.asset, 0.0) + c.position_value_usd
         
         avg_edge = sum(_to_edge_percent(c.edge_pct) for c in chosen) / len(chosen)
         
