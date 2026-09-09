@@ -1000,6 +1000,8 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
     if market is not None:
         if hasattr(market, "raw_data") and market.raw_data:
             raw_sources.append(("market.raw_data", market.raw_data))
+        if hasattr(market, "market") and getattr(market, "market", None) and getattr(market.market, "raw_data", None):
+            raw_sources.append(("market.market.raw_data", market.market.raw_data))
     if current_market is not None:
         if hasattr(current_market, "market") and getattr(current_market.market, "raw_data", None):
             raw_sources.append(("catalog.market.raw_data", current_market.market.raw_data))
