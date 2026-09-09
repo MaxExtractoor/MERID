@@ -987,12 +987,16 @@ class KalshiMarketStateStore:
         state.recovery_ts = time.monotonic()
         state.recovery_required_source = ""
         state.invalidation_cause = ""
-        if source == "WS_ORDERBOOK_DELTA_LIVE":
+        if source in ("WS_ORDERBOOK_DELTA_LIVE", "WS_CLEAN_SNAPSHOT"):
+            # A contiguous WS delta is the strongest confirmation, but Kalshi's
+            # live bridge also sends full clean snapshots that reset the book to
+            # a known, authoritative state.  Treating a fresh clean WS snapshot as
+            # confirmed for new-entry gating prevents the strategy from being
+            # permanently blocked when the market is quiet and only snapshots flow.
             state.live_sequence_confirmed = True
         else:
-            # Snapshots (even authoritative REST ones) are not a confirmed live
-            # sequence; a contiguous WS delta is required to clear the bootstrap
-            # flag for new-entry gating.
+            # REST and other non-live snapshots still require a subsequent
+            # contiguous WS delta before new capital can be committed.
             state.live_sequence_confirmed = False
         return True
 
