@@ -4544,8 +4544,10 @@ class KalshiVenueClient(EventVenueClient):
             fills = data.get("fills", [])
             all_fills.extend(fills)
 
+            # Defensive: some API paths return an empty page with a cursor,
+            # which causes unbounded pagination.  Treat an empty page as the end.
             cursor = data.get("cursor")
-            if not cursor:
+            if not fills or not cursor:
                 break
             page += 1
 

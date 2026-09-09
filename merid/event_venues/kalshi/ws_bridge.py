@@ -2436,6 +2436,14 @@ class KalshiWebSocketBridge:
                 f"subscribed to {len(self._subscribed_tickers)} tickers"
             )
             
+            # CRITICAL FIX: Seed the desired set from the actual subscribed tickers before
+            # the startup catalog sync.  Without this, _desired_tickers is empty and
+            # sync_to_catalog() treats the freshly-subscribed tickers as stale, dropping
+            # every orderbook subscription on startup.
+            if self._subscribed_tickers:
+                self.set_markets(list(self._subscribed_tickers))
+                logger.info("[WS-STARTUP-SYNC] Seeded desired_tickers from %d subscribed tickers", len(self._subscribed_tickers))
+
             # CRITICAL FIX: Sync to catalog immediately after startup to handle rollover mismatch
             # This fixes the bug where WS bridge subscribes to old window tickers (e.g., 26JUN021930-30)
             # while catalog has already rolled to new window tickers (e.g., 26JUN021945-45)
