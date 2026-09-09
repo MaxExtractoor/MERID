@@ -974,6 +974,7 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
     # 2. Catalog fallback: the catalog is the authoritative source for 15m
     #    window metadata and is especially important right after a rollover when
     #    the state store has not yet received a REST feed.
+    current_market = None
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         catalog = get_market_catalog()
@@ -990,6 +991,30 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
                             return float(price), f"catalog.{field}", diagnostic
     except Exception as exc:
         logger.warning("[STRIKE-RESOLUTION] asset=%s catalog lookup failed: %s", asset, exc)
+
+    # 3. Raw-data fallback: if the parsed object fields are missing (e.g. a
+    #    freshly-rolled market where state store has not yet been fed), the
+    #    authoritative REST payload still lives on the nested EventMarket or the
+    #    CatalogMarket.  Use it only after the canonical fields fail.
+    raw_sources: List[Tuple[str, Any]] = []
+    if market is not None:
+        if hasattr(market, "raw_data") and market.raw_data:
+            raw_sources.append(("market.raw_data", market.raw_data))
+    if current_market is not None:
+        if hasattr(current_market, "market") and getattr(current_market.market, "raw_data", None):
+            raw_sources.append(("catalog.market.raw_data", current_market.market.raw_data))
+        elif hasattr(current_market, "raw_data") and current_market.raw_data:
+            raw_sources.append(("catalog.raw_data", current_market.raw_data))
+
+    for source_name, raw in raw_sources:
+        for field in ("floor_strike", "strike_price", "cap_strike"):
+            candidate = raw.get(field)
+            if candidate is None:
+                continue
+            if _is_valid_strike_target(candidate, asset):
+                price = _quantize_strike(candidate)
+                if price is not None:
+                    return float(price), f"{source_name}.{field}", diagnostic
 
     # No authoritative strike found.  Fail closed: do not fabricate a strike
     # from the contemporaneous public spot.  Using a live price as the target
