@@ -280,8 +280,29 @@ class LiveRuntimeState:
         config_hash: str,
     ) -> None:
         with self._lock:
+            new_pid = process_id or str(os.getpid())
+            # If a new process is starting and the persisted state came from a
+            # previous process, fail-closed: halt entries so the startup state
+            # machine can re-run from a safe state.  This prevents a stale
+            # LIVE_ENTRIES_ENABLED file from causing illegal transitions on restart.
+            if self._process_id and self._process_id != new_pid:
+                if self._state != "LIVE_ENTRIES_HALTED":
+                    self._log_transition(
+                        self._state,
+                        "LIVE_ENTRIES_HALTED",
+                        "process_restarted",
+                        ["PROCESS_RESTART", "HALTED_BY_OPERATOR"],
+                    )
+                    self._state = "LIVE_ENTRIES_HALTED"
+                    self._entry_halted = True
+                    self._reason = "process_restarted"
+                    self._reason_codes = ["PROCESS_RESTART", "HALTED_BY_OPERATOR"]
+                    self._last_transition_at = self._now()
+                # Clear stale release assertion; the new process must re-run preflight.
+                self._release_assertion = None
+
             self._run_id = run_id or str(uuid.uuid4())
-            self._process_id = process_id or str(os.getpid())
+            self._process_id = new_pid
             self._deployment_sha = deployment_sha
             self._config_hash = config_hash
             self._persist()
