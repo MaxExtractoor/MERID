@@ -28,6 +28,11 @@ try:
 except ImportError:
     logger = logging.getLogger("web.main_15m_lean")
     logger.warning("[UVLOOP] uvloop not available, using default asyncio")
+    # 2026-09-09: Selector event loop is required on Windows to avoid
+    # ProactorEventLoop stalls after awaited coroutines complete.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        logger.info("[UVLOOP] Set WindowsSelectorEventLoopPolicy on Windows")
 
 # Use get_logger for consistent logging across the production stack
 from utils.logger import get_logger, startup_log_cleanup
