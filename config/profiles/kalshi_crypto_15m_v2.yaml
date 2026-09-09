@@ -142,7 +142,7 @@ catalog_staleness_enforced: false
 # System was consistently betting NO for 100+ trades, losing $184.32 on $1.6k volume
 # Panic fade was fading the wrong way - buying high expecting reversion down, selling low expecting reversion up
 # Turbine research showed mean reversion failed completely (0 for 432 variants) on 15-minute markets
-signal_mode: hybrid  # Options: mean_reversion, momentum_fvg, volatility_reversion, hybrid, price_based, trend - 2026-08-19: Use hybrid to enable price-based probability signals while keeping momentum_fvg fallback
+signal_mode: bachelier  # 2026-09-08: P0 fix - runtime enforces Bachelier-only for settlement pricing; config must match runtime.
 
 # ── Phase 1 Profitability Enhancements ─────────────────────────────────────────
 # YES/NO Sum Arbitrage, Market Making, and Correlation Tracking

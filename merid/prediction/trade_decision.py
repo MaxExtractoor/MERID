@@ -1001,6 +1001,16 @@ def _compute_confidence(
     yes_depth_cc: float,
     no_depth_cc: float,
     model_uncertainty: float,
+    *,
+    rti_age_ms: Optional[int] = None,
+    quote_age_ms: Optional[int] = None,
+    rti_book_skew_ms: Optional[int] = None,
+    book_sequence_confirmed: Optional[bool] = None,
+    book_initialized: Optional[bool] = None,
+    cfb_execution_eligible: Optional[bool] = None,
+    rti_execution_max_age_ms: int = 2000,
+    book_execution_max_age_ms: int = 1000,
+    rti_book_skew_max_ms: int = 1500,
 ) -> ConfidenceResult:
     """Derive confidence from observable uncertainty sources.
 
@@ -1018,6 +1028,22 @@ def _compute_confidence(
         reasons.append(f"settlement_reference={settlement_reference}")
     if seconds_to_expiry < 60.0:
         reasons.append("near_expiry")
+
+    # 2026-09-08: P0 freshness/skew/sequence gates become confidence blockers.
+    if cfb_execution_eligible is False:
+        reasons.append("rti_not_execution_eligible")
+    if rti_age_ms is not None and rti_age_ms > rti_execution_max_age_ms:
+        reasons.append(f"rti_stale:{rti_age_ms}ms")
+    if quote_age_ms is not None and quote_age_ms > book_execution_max_age_ms:
+        reasons.append(f"orderbook_stale:{quote_age_ms}ms")
+    if rti_age_ms is not None and quote_age_ms is not None:
+        skew = abs(rti_age_ms - quote_age_ms)
+        if skew > rti_book_skew_max_ms:
+            reasons.append(f"rti_book_skew:{skew}ms")
+    if book_initialized is False:
+        reasons.append("orderbook_not_initialized")
+    if book_sequence_confirmed is False:
+        reasons.append("orderbook_sequence_gap")
 
     # Spread and depth checks: a wide spread or thin book reduces confidence.
     yes_spread = yes_ask_cents - yes_bid_cents
@@ -1137,6 +1163,11 @@ def compute_trade_decision(
     settlement_reference: str = "unknown",
     policy_version: str = "trade_decision_v2",
     quote_age_ms: Optional[int] = None,
+    rti_age_ms: Optional[int] = None,
+    rti_book_skew_ms: Optional[int] = None,
+    book_sequence_confirmed: Optional[bool] = None,
+    book_initialized: Optional[bool] = None,
+    cfb_execution_eligible: Optional[bool] = None,
     build_sha: Optional[str] = None,
 ) -> TradeDecision:
     """Compute a calibrated, cost-aware trade decision for a 15m binary market.
@@ -1522,6 +1553,12 @@ def compute_trade_decision(
         yes_depth_cc=yes_depth_cc,
         no_depth_cc=no_depth_cc,
         model_uncertainty=model_uncertainty,
+        rti_age_ms=rti_age_ms,
+        quote_age_ms=quote_age_ms,
+        rti_book_skew_ms=rti_book_skew_ms,
+        book_sequence_confirmed=book_sequence_confirmed,
+        book_initialized=book_initialized,
+        cfb_execution_eligible=cfb_execution_eligible,
     )
 
     # Selection: prefer the side with the higher *qualifying* net edge.

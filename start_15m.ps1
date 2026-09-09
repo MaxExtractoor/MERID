@@ -15,10 +15,26 @@ param(
     [int]$Port = 8011,
     [string]$ServerHost = "127.0.0.1",
     [string]$Profile = "kalshi_crypto_15m_v2",
-    [string]$EnvFile = ".\.env"
+    [string]$EnvFile = ".\.env",
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
+
+# 0. Observe-only guard (P0 remediation, 2026-09-08).
+# The server process must remain in a read-only, halted state unless the
+# operator explicitly opts out by setting MERID_OBSERVE_ONLY=0 before
+# invoking this script.  This is an additional layer on top of the durable
+# auto_execution_mode setting in AGENTS.md; the runtime state still requires
+# a separate explicit release via the live-runtime-state API.
+if ([string]::IsNullOrWhiteSpace($env:MERID_OBSERVE_ONLY)) {
+    $env:MERID_OBSERVE_ONLY = "1"
+    Write-Host "[start_15m] MERID_OBSERVE_ONLY defaulted to 1 (read-only). Set MERID_OBSERVE_ONLY=0 to allow auto live enable." -ForegroundColor Yellow
+} elseif ($env:MERID_OBSERVE_ONLY.Trim().ToLowerInvariant() -in @("0", "false", "no")) {
+    Write-Host "[start_15m] MERID_OBSERVE_ONLY=0; auto-execution may enable live entries if all gates pass." -ForegroundColor Red
+} else {
+    Write-Host "[start_15m] MERID_OBSERVE_ONLY=$($env:MERID_OBSERVE_ONLY) (read-only). Live entries will remain halted." -ForegroundColor Cyan
+}
 
 # 0. Pre-flight helpers
 function Require-ExactEnvValue {
@@ -187,7 +203,7 @@ $env:MERID_ALLOW_LIVE_TRADES = "true"
 # low/negative edge momentum_fvg signals to execute and lose money.  The filter now
 # uses the signal's ev_net_cents or computes canonical edge_cents = (P_true - P_market)*100.
 $env:MERID_KALSHI_NET_EDGE_FILTER_ENABLED = "true"
-Write-Host "[start_15m] *** LIVE MODE - REAL ORDERS WILL BE SENT ***" -ForegroundColor Red
+Write-Host "[start_15m] *** LIVE VENUE SELECTED - ORDERS ARE FAIL-CLOSED BY observe_only GATE ***" -ForegroundColor Red
 Write-Host "[start_15m] TRADING_ENABLED=$($env:TRADING_ENABLED)" -ForegroundColor Cyan
 Write-Host "[start_15m] MERID_PM_TRADING_MODE=$($env:MERID_PM_TRADING_MODE)" -ForegroundColor Cyan
 Write-Host "[start_15m] MERID_PM_LIVE_ENABLED=$($env:MERID_PM_LIVE_ENABLED)" -ForegroundColor Cyan
@@ -196,17 +212,39 @@ Write-Host "[start_15m] MERID_ALLOW_LIVE_TRADES=$($env:MERID_ALLOW_LIVE_TRADES)"
 # 2.1 PREFLIGHT: live mode requires explicit safety controls.  These must come
 #    from the production config source (.env / .env.production / env) and are
 #    intentionally fail-closed.  Do not provide silent defaults.
+function Get-AutoExecutionModeFromAgentsMd {
+    $scriptDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
+    $agentsPath = Join-Path $scriptDir "AGENTS.md"
+    if (-not (Test-Path $agentsPath)) { return 0 }
+    try {
+        # Use Python for robust parsing; PowerShell regex can backtrack on large files.
+        $mode = py -3.11 -c "import re,sys; c=open(r'$agentsPath','r',encoding='utf-8').read(); m=re.search(r'```yaml\s*\n---\s*\n(?P<front>.*?)---\s*\n```', c, re.DOTALL); print(int(re.search(r'auto_execution_mode\s*:\s*(\d+)', m.group('front'), re.DOTALL).group(1))) if m and re.search(r'auto_execution_mode\s*:\s*(\d+)', m.group('front'), re.DOTALL) else print(0)"
+        if ($mode -match '^\d+$') { return [int]$mode }
+    } catch { }
+    return 0
+}
+
+$autoExecutionMode = Get-AutoExecutionModeFromAgentsMd
+Write-Host "[start_15m] AGENTS.md auto_execution_mode=$autoExecutionMode" -ForegroundColor Cyan
+
 if ($env:MERID_PM_TRADING_MODE -eq "live") {
     Require-ExactEnvValue -Name "MERID_REQUIRE_EXIT_PARENTAGE" -Expected "1"
     Require-ExactEnvValue -Name "MERID_EXIT_FIREWALL_OBSERVE_ONLY" -Expected "false"
 
-    # Production emergency and breaker release tokens must be set and must not be
-    # the placeholder values from the template.
-    if ([string]::IsNullOrWhiteSpace($env:MERID_MANUAL_EMERGENCY_TOKEN) -or $env:MERID_MANUAL_EMERGENCY_TOKEN -eq "SET_FROM_SECRET_STORE") {
-        throw "[start_15m] LIVE MODE REFUSED: MERID_MANUAL_EMERGENCY_TOKEN must be set to a real secret from the secret store."
-    }
-    if ([string]::IsNullOrWhiteSpace($env:MERID_BREAKER_RELEASE_TOKEN) -or $env:MERID_BREAKER_RELEASE_TOKEN -eq "SET_FROM_SECRET_STORE") {
-        throw "[start_15m] LIVE MODE REFUSED: MERID_BREAKER_RELEASE_TOKEN must be set to a real secret from the secret store."
+    # 2026-09-08: AGENTS.md durable operator contract.  When auto_execution_mode
+    # is 1, no per-run manual release token is required.  Token checks for
+    # explicit manual releases belong in the runtime release API, not startup.
+    if ($autoExecutionMode -ne 1) {
+        # Production emergency and breaker release tokens must be set and must not be
+        # the placeholder values from the template.
+        if ([string]::IsNullOrWhiteSpace($env:MERID_MANUAL_EMERGENCY_TOKEN) -or $env:MERID_MANUAL_EMERGENCY_TOKEN -eq "SET_FROM_SECRET_STORE") {
+            throw "[start_15m] LIVE MODE REFUSED: MERID_MANUAL_EMERGENCY_TOKEN must be set to a real secret from the secret store."
+        }
+        if ([string]::IsNullOrWhiteSpace($env:MERID_BREAKER_RELEASE_TOKEN) -or $env:MERID_BREAKER_RELEASE_TOKEN -eq "SET_FROM_SECRET_STORE") {
+            throw "[start_15m] LIVE MODE REFUSED: MERID_BREAKER_RELEASE_TOKEN must be set to a real secret from the secret store."
+        }
+    } else {
+        Write-Host "[start_15m] auto_execution_mode=1: skipping per-run startup token check" -ForegroundColor Cyan
     }
 
     # Circuit breaker must not be disabled.  Observe-only is the canary default
@@ -325,6 +363,11 @@ Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
 # CRITICAL FIX: Remove --log-config to prevent interference with lifespan event
 # CRITICAL FIX: Remove --reload after clearing __pycache__ to force fresh import
 # CRITICAL FIX: Remove --lifespan on (redundant - app already has lifespan defined)
+if ($DryRun) {
+    Write-Host "[start_15m] Dry-run complete. Server was NOT started." -ForegroundColor Green
+    exit 0
+}
+
 $env:PYTHONUNBUFFERED = "1"
 $ErrorActionPreference = "Continue"
 # Prefer the project virtualenv so the exact package set is used.

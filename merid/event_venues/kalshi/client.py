@@ -2978,6 +2978,29 @@ class KalshiVenueClient(EventVenueClient):
             "count": len(canceled),
         }
 
+    async def cancel_all_open_orders(self, dry_run: bool = True) -> Dict[str, Any]:
+        """Cancel all currently open orders, or return the list in dry-run mode.
+
+        Safety: ``dry_run=True`` is the default.  It fetches open orders but does
+        not submit any cancel request, making it safe to call during preflight
+        or health checks.  Set ``dry_run=False`` only during an actual emergency
+        halt or flatten workflow.
+        """
+        open_orders = await self.get_open_orders()
+        order_ids = [o.order_id for o in open_orders if getattr(o, "order_id", None)]
+        if not order_ids:
+            return {"canceled": [], "failed": [], "not_found": [], "dry_run": dry_run, "count": 0}
+        if dry_run:
+            return {
+                "canceled": [],
+                "failed": [],
+                "not_found": [],
+                "dry_run": True,
+                "would_cancel": order_ids,
+                "count": 0,
+            }
+        return await self.batch_cancel_orders(order_ids)
+
     async def batch_place_orders(
         self,
         order_specs: List[Dict[str, Any]],
