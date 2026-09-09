@@ -765,7 +765,7 @@ async def lifespan(app: FastAPI):
                 # Determine if price-based thresholds are active
                 price_based_active = (signal_mode in ['price_based', 'hybrid'])
                 
-                logger.error(
+                logger.info(
                     "[LIFESPAN] Step 5: profile=%s version=%s guardrails=[min=%s,max=%s] "
                     "deep_otm=[cheap=%d,expensive=%d] signal_mode=%s price_based_active=%s "
                     "price_based_thresholds=[buy=%.2f,sell=%.2f]",
