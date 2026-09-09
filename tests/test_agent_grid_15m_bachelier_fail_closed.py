@@ -48,13 +48,13 @@ class TestBachelierSpot:
             obs = _obs(value=bad)
             assert _get_bachelier_spot_price(obs, 64999.0) is None, f"value={bad!r}"
 
-    def test_unavailable_rti_uses_public_spot_fallback(self):
-        """When RTI is unavailable, settlement_input_price is the public spot
-        (downstream confidence gates reject the non-cfb_rti_live reference)."""
+    def test_unavailable_rti_rejects_bachelier_spot(self):
+        """When RTI is missing or ineligible, _get_bachelier_spot_price fails
+        closed; the public spot is intentionally not used as the Bachelier spot."""
         from merid.prediction.agent_grid_15m import _get_bachelier_spot_price
 
-        assert _get_bachelier_spot_price(None, 64000.0) == pytest.approx(64000.0)
-        assert _get_bachelier_spot_price(_obs(value=65000.0, execution_eligible=False), 64000.0) == pytest.approx(64000.0)
+        assert _get_bachelier_spot_price(None, 64000.0) is None
+        assert _get_bachelier_spot_price(_obs(value=65000.0, execution_eligible=False), 64000.0) is None
 
 
 def _make_agent():
@@ -111,6 +111,12 @@ def _patch_strike_and_rti(monkeypatch, ag, obs, settlement_price=65000.5):
         lambda asset, spot_price, settlement_digits=None: (
             settlement_price, 0.5, "cfb_rti_live", obs
         ),
+    )
+    # Tests target the settlement-distribution gate, not the snapshot-freshness
+    # gate. Provide a valid snapshot so the decision flow reaches distribution.
+    monkeypatch.setattr(
+        ag, "validate_trade_snapshot",
+        lambda **kwargs: [],
     )
 
 
