@@ -168,6 +168,25 @@ class LiveRuntimeState:
             self._config_hash = data.get("config_hash", "")
             self._release_assertion = data.get("release_assertion")
             self._transition_history = data.get("transition_history", [])[:100]
+
+            # Persisted last_transition_at must not drift ahead of the
+            # transition history. If the file only contains the tail or the
+            # timestamp was not restored, derive it from the most recent record.
+            persisted_last_at = data.get("last_transition_at", self._started_at)
+            if self._transition_history:
+                latest_at = self._started_at
+                try:
+                    latest_at = max(
+                        (record.get("at") or record.get("timestamp", "")
+                         for record in self._transition_history
+                         if record),
+                        default=self._started_at,
+                    )
+                except Exception:
+                    latest_at = self._started_at
+                self._last_transition_at = max(persisted_last_at, latest_at)
+            else:
+                self._last_transition_at = persisted_last_at
         except Exception as exc:
             logger.warning(
                 "[LIVE-RUNTIME-STATE] failed to load persisted state: %s; defaulting to halted",

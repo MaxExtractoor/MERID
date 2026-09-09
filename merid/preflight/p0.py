@@ -95,7 +95,10 @@ async def run_p0_preflight_checks(
     try:
         open_orders = await client.get_open_orders()
         positions = await client.get_positions()
-        fills_result = await client.get_fills(limit=20)
+        # P0: request only recent fills (last 24h) to avoid unbounded
+        # pagination and partial-data warnings on accounts with long history.
+        since_ts = int((time.time() - 86400) * 1000)
+        fills_result = await client.get_fills(limit=20, since_ts=since_ts)
         fills = fills_result.unwrap_or([]) if hasattr(fills_result, "unwrap_or") else list(fills_result)
 
         cache = get_position_cache()

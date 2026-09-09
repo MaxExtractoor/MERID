@@ -533,34 +533,43 @@ class KalshiWebSocket(EventVenueStream):
         
         timestamp = str(int(replay_time() * 1000))  # Default to local time
         skew_compensated = False
-        
-        try:
-            # Get time from Kalshi server (most reliable source)
-            # 2026-09-02: use the recommended external-api production host.
-            ws_url = "https://external-api.kalshi.com/trade-api/v2"
-            response = requests.head(ws_url, timeout=2)
-            if response.status_code == 200:
-                server_date_str = response.headers.get("Date")
-                if server_date_str:
-                    server_dt = parsedate_to_datetime(server_date_str)
-                    server_time = server_dt.timestamp()
-                    local_time = replay_time()
-                    skew_seconds = server_time - local_time
-                    
-                    logger.info(f"[WS-AUTH] Clock skew: {skew_seconds:.2f}s (server - local)")
-                    
-                    # Apply skew compensation
-                    # If skew is positive, server is ahead (local is slow) -> add time
-                    # If skew is negative, server is behind (local is fast) -> subtract time
-                    compensated_time = local_time + skew_seconds
-                    timestamp = str(int(compensated_time * 1000))
-                    skew_compensated = True
-                    logger.info(f"[WS-AUTH] Applied clock skew compensation: {skew_seconds:.2f}s")
-        except Exception as e:
-            logger.warning(f"[WS-AUTH] Failed to get server time for skew calculation: {e}")
-        
+
+        # Try a public endpoint first (no auth required); HEAD the base path may
+        # return 405, so fall back to a GET with a tiny limit.
+        public_endpoints = [
+            lambda: requests.head("https://external-api.kalshi.com/trade-api/v2/markets", params={"limit": 1}, timeout=2),
+            lambda: requests.get("https://external-api.kalshi.com/trade-api/v2/markets", params={"limit": 1}, timeout=2),
+        ]
+
+        for attempt, request_fn in enumerate(public_endpoints, 1):
+            try:
+                response = request_fn()
+                if response.status_code in (200, 204, 405) or 200 <= response.status_code < 300:
+                    server_date_str = response.headers.get("Date")
+                    if server_date_str:
+                        server_dt = parsedate_to_datetime(server_date_str)
+                        server_time = server_dt.timestamp()
+                        local_time = replay_time()
+                        skew_seconds = server_time - local_time
+
+                        logger.info(f"[WS-AUTH] Clock skew: {skew_seconds:.2f}s (server - local)")
+
+                        # Apply skew compensation
+                        # If skew is positive, server is ahead (local is slow) -> add time
+                        # If skew is negative, server is behind (local is fast) -> subtract time
+                        compensated_time = local_time + skew_seconds
+                        timestamp = str(int(compensated_time * 1000))
+                        skew_compensated = True
+                        logger.info(f"[WS-AUTH] Applied clock skew compensation: {skew_seconds:.2f}s")
+                        break
+            except Exception as e:
+                if attempt == 1:
+                    logger.debug(f"[WS-AUTH] First skew endpoint attempt failed: {e}")
+                else:
+                    logger.warning(f"[WS-AUTH] Failed to get server time for skew calculation: {e}")
+
         if not skew_compensated:
-            logger.warning("[WS-AUTH] Could not calculate clock skew, using local time (may cause auth errors)")
+            logger.info("[WS-AUTH] Using local time for WebSocket auth (skew endpoint unavailable)")
         method = "GET"
         path = "/trade-api/ws/v2"
         msg_string = timestamp + method + path
