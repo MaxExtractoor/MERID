@@ -11997,11 +11997,13 @@ class LeanAgent15m:
             logger.warning("[PRICE-BASED-DISABLED] asset=%s signal_mode=volatility_reversion is not an authoritative source", asset)
             return None
 
-        # HYBRID STRATEGY (2026-08-13): the hybrid ensemble is the unified
-        # TradeDecision engine.  It consumes external spot, the Kalshi strike,
-        # the live YES/NO order book, and execution costs to emit a single
-        # calibrated, cost-aware decision.  No price-based panic-fade override.
-        if self.config.signal_mode == "hybrid":
+        # HYBRID / BACHELIER STRATEGY (2026-08-13): the unified TradeDecision
+        # engine is the production signal source.  It consumes external spot, the
+        # Kalshi strike, the live YES/NO order book, and execution costs to emit
+        # a single calibrated, cost-aware decision.  The runtime mode resolves
+        # to Bachelier-only unless `MERID_HYBRID_ENABLE_DELTAS=1` is set, so the
+        # engine is safe for the profile's `signal_mode: bachelier`.
+        if self.config.signal_mode in ("hybrid", "bachelier"):
             if _allow_price_signal:
                 logger.warning("[HYBRID-SIGNAL] asset=%s MERID_ALLOW_PRICE_BASED=1 - price_based path is deprecated", asset)
                 price_signal = self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
