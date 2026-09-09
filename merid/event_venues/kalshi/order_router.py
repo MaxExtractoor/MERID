@@ -5456,6 +5456,24 @@ def _resolve_max_slippage_cents() -> int:
     return default
 
 
+def _resolve_post_only_buffer_cents() -> int:
+    """Resolve the resting buffer for post-only/maker orders.
+
+    A buffer > 1c protects against one-tick book moves and network
+    latency between the local repricer and the exchange accepting the
+    order, avoiding ``post only cross`` rejections.  Env override
+    MERID_POST_ONLY_BUFFER_CENTS can raise/lower it without a code change.
+    """
+    default = 2
+    try:
+        env_val = os.environ.get("MERID_POST_ONLY_BUFFER_CENTS")
+        if env_val:
+            return int(env_val)
+    except Exception:
+        pass
+    return default
+
+
 def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
     """Resolve Kalshi time-in-force and absolute GTC expiration.
 
@@ -8028,6 +8046,10 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
         else:
             role = "maker"  # aggressiveness == 0 means resting/maker by default
 
+    # Buffer for post-only/maker orders: stay inside the spread far enough to
+    # survive one-tick book moves and network latency without crossing.
+    post_only_buffer_cents = _resolve_post_only_buffer_cents() if role != "taker" else 0
+
     # Edge-preserving cap: never reprice a buy above the level that still clears
     # the signal's net edge threshold after fees.  This is the canonical budget
     # that unifies the repricer, the fill-adjusted edge gate, and slippage policy.
@@ -8079,7 +8101,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             if role == "maker":
                 # Maker buy: rest on the book, at or below ask-1.
                 # The user-required invariant is adjusted_price <= side_ask.
-                adjusted_price = min(adjusted_price, side_ask - 1)
+                adjusted_price = min(adjusted_price, side_ask - post_only_buffer_cents)
                 if adjusted_price >= side_ask:
                     raise RepriceWouldCross(
                         ticker=intent.ticker,
@@ -8197,7 +8219,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                     pass
             else:
                 # Default fill-rate improvement: do not cross the ask.
-                adjusted_price = min(adjusted_price, side_ask - 1)
+                adjusted_price = min(adjusted_price, side_ask - post_only_buffer_cents)
                 if is_buy and edge_preserve_cap is not None:
                     adjusted_price = min(adjusted_price, edge_preserve_cap)
             # Role-consistent invariant for buy paths.
@@ -8228,7 +8250,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
         if side_bid is not None:
             if role == "maker":
                 # Maker sell: rest on the book, strictly above the bid.
-                adjusted_price = max(adjusted_price, side_bid + 1)
+                adjusted_price = max(adjusted_price, side_bid + post_only_buffer_cents)
                 if adjusted_price <= side_bid:
                     raise RepriceWouldCross(
                         ticker=intent.ticker,
@@ -8331,7 +8353,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                     pass
             else:
                 # Default fill-rate improvement: do not cross the bid.
-                adjusted_price = max(adjusted_price, side_bid + 1)
+                adjusted_price = max(adjusted_price, side_bid + post_only_buffer_cents)
             # Role-consistent invariant for sell paths.
             if side_bid is not None:
                 if role == "maker" and adjusted_price <= side_bid:
