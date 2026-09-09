@@ -414,6 +414,8 @@ from enum import Enum
 from dataclasses import dataclass
 
 from utils.logger import get_logger
+from merid.observability.live_runtime_state import can_submit_live_entry
+from merid.config.observe_only import is_observe_only
 
 
 @dataclass(frozen=True)
@@ -4098,6 +4100,23 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                     allow_new_entries = False
         except Exception as e:
             logger.warning("[15m-LOOP] Bankroll breaker check failed: %s", e)
+
+    # 2026-09-08: P0 live runtime state machine.  Even if all per-asset and
+    # data gates pass, live entries require the canonical state to be
+    # LIVE_ENTRIES_ENABLED.  Exits do not pass through this gate.
+    if allow_new_entries:
+        if not can_submit_live_entry():
+            logger.warning(
+                "[15m-LOOP] ENTRY_BLOCKED: live_runtime_state=%s; not LIVE_ENTRIES_ENABLED",
+                "unknown",
+            )
+            allow_new_entries = False
+
+    # 2026-09-08: P0 observe-only mode.  No new entries are permitted while
+    # the deployment is collecting data and verifying the stack.
+    if allow_new_entries and is_observe_only():
+        logger.info("[15m-LOOP] observe-only mode: allowing data capture, blocking new entries")
+        allow_new_entries = False
 
     logger.info(
         "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s "

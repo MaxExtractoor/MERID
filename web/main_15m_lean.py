@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import time
 import os
+import uuid
 import logging
 import asyncio
 from pathlib import Path
@@ -35,6 +36,16 @@ logger = get_logger("web.main_15m_lean")
 
 # Import startup_state early for singleton reset during module import
 from web.startup_state import startup_state
+
+# 2026-09-08: P0 live runtime state machine.  Live entries are gated by an
+# explicit, persisted state machine, not merely by environment variables.
+from merid.observability.live_runtime_state import (
+    get_live_runtime_state,
+    ReleaseAssertion,
+    LiveRuntimeStateError,
+)
+from merid.config.auto_execution import is_auto_execution_enabled
+from merid.config.observe_only import is_observe_only
 
 logger.debug("[MAIN-15M-LEAN] Module loaded and initialized")
 
@@ -324,6 +335,18 @@ except Exception as e:
     logger.warning(f"[MAIN-15M-LEAN] Unexpected error importing health_snapshot_router: {e}")
     health_snapshot_router = None
 
+# OPTIONAL: live_runtime_state router - operator-visible state and emergency halt
+try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import live_runtime_state_router (OPTIONAL)")
+    from web.api.live_runtime_state_router import router as live_runtime_state_router
+    logger.info("[MAIN-15M-LEAN] Imported live_runtime_state_router")
+except ImportError as e:
+    logger.warning(f"[MAIN-15M-LEAN] ImportError importing live_runtime_state_router: {e}")
+    live_runtime_state_router = None
+except Exception as e:
+    logger.warning(f"[MAIN-15M-LEAN] Unexpected error importing live_runtime_state_router: {e}")
+    live_runtime_state_router = None
+
 # CRITICAL: kalshi_api router - contains fills ledger endpoints, positions, orders
 # This router is required for fills ingestion and reconciliation to work properly
 try:
@@ -507,6 +530,18 @@ async def lifespan(app: FastAPI):
             "[LIFESPAN-SECURITY] Live trading requires MERID_KALSHI_WS_CLIENT=ws."
         )
         raise SystemExit(1)
+
+    # 2026-09-08: AGENTS.md durable operator config.  Manual release tokens are
+    # not a per-run startup requirement when auto_execution_mode is enabled.
+    # Per-run tokens would violate the durable operator contract and can prevent
+    # an unattended restart from performing the required automatic preflight.
+    # Token validation for explicit manual releases belongs in the release API.
+    observe_only = is_observe_only()
+    logger.info(
+        "[LIFESPAN] auto_execution=%s observe_only=%s; per-run token check skipped in lifespan",
+        is_auto_execution_enabled(),
+        observe_only,
+    )
     
     try:
         # CRITICAL: Reset singletons at lifespan entry to force clean startup
@@ -530,6 +565,21 @@ async def lifespan(app: FastAPI):
         startup_state.started_at = datetime.now(timezone.utc)
         logger.info("[LIFESPAN] Step 1c: startup_state.started set to True")
 
+        # 2026-09-08: initialize the canonical live runtime state machine.
+        # Live entry permission is a separate concern from process startup.
+        live_state = get_live_runtime_state()
+        _startup_run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        live_state.set_process_identity(
+            run_id=_startup_run_id,
+            process_id=str(os.getpid()),
+            deployment_sha="",
+            config_hash="",
+        )
+        try:
+            live_state.transition("STARTING", "lifespan_entry")
+        except Exception as e:
+            logger.warning("[LIFESPAN] live runtime state STARTING transition failed: %s", e)
+
         # Resolve live config before any trade decisions are made, so every
         # TradeDecision and OrderIntent carries config_hash and build_sha.
         logger.info("[LIFESPAN] Step 1d: Resolving live configuration")
@@ -551,7 +601,25 @@ async def lifespan(app: FastAPI):
                 "[LIFESPAN] Step 1d: Live config resolution failed: %s - server cannot start without a resolved live config",
                 e,
             )
+            if 'live_state' in locals():
+                try:
+                    live_state.halt_entries("live_config_resolution_failed", ["LIVE_CONFIG_FAILURE"])
+                except Exception:
+                    pass
             raise
+
+        # Bind the resolved config to the live runtime state.
+        if 'live_state' in locals() and _resolved_cfg is not None:
+            try:
+                live_state.set_process_identity(
+                    run_id=_startup_run_id,
+                    process_id=str(os.getpid()),
+                    deployment_sha=getattr(_resolved_cfg, "build_sha", ""),
+                    config_hash=getattr(_resolved_cfg, "config_hash", ""),
+                )
+                live_state.transition("PREFLIGHT_RUNNING", "live_config_resolved")
+            except Exception as e:
+                logger.warning("[LIFESPAN] live runtime state PREFLIGHT_RUNNING transition failed: %s", e)
 
         # Start the authoritative CF Benchmarks RTI stream as early as possible.
         # The stream is non-blocking; starting it before the rest of the trading
@@ -582,6 +650,83 @@ async def lifespan(app: FastAPI):
                 e
             )
             raise
+
+        # 2026-09-08: P0 preflight assertions.  Run the same live checks that
+        # the standalone ``scripts/p0_preflight.py`` runs before the trading
+        # loop is started.  Failures here keep entries halted and prevent the
+        # loop from ever seeing a state where entries could be enabled.
+        logger.info("[LIFESPAN] Step 3a: P0 preflight assertions")
+        p0_preflight_passed = False
+        p0_preflight_detail = "not run"
+        try:
+            from merid.preflight.p0 import run_p0_preflight_checks
+
+            _p0_client = getattr(app.state, "kalshi_client", None)
+            _p0_catalog = getattr(app.state, "catalog", None)
+            _p0_bankroll = getattr(app.state, "bankroll", None)
+
+            if _p0_client is None or _p0_catalog is None or _p0_bankroll is None:
+                raise RuntimeError(
+                    f"P0 preflight missing components: "
+                    f"client={_p0_client is not None} catalog={_p0_catalog is not None} bankroll={_p0_bankroll is not None}"
+                )
+
+            _p0_results = await run_p0_preflight_checks(
+                client=_p0_client,
+                bankroll=_p0_bankroll,
+                catalog=_p0_catalog,
+                max_wait_rti=30.0,
+            )
+            p0_preflight_passed = all(ok for ok, _ in _p0_results)
+            p0_preflight_detail = f"{_p0_results}"
+            logger.info("[LIFESPAN] Step 3a: P0 preflight assertions passed=%s", p0_preflight_passed)
+            for ok, msg in _p0_results:
+                logger.info("[LIFESPAN] Step 3a: %s", msg)
+            if not p0_preflight_passed:
+                raise RuntimeError(f"P0 preflight assertions failed: {_p0_results}")
+        except Exception as e:
+            logger.critical("[LIFESPAN] Step 3a: P0 preflight assertions failed: %s", e)
+            if 'live_state' in locals():
+                try:
+                    live_state.halt_entries("p0_preflight_failed", ["P0_PREFLIGHT_FAILURE"])
+                except Exception:
+                    pass
+            raise
+
+        # 2026-09-08: P0 preflight completion.  If P0 passed, complete the
+        # preflight and transition to LIVE_ENTRIES_ENABLED only when the durable
+        # operator configuration explicitly enables auto-execution and the
+        # process is not in observe-only mode.  This is done before P2.x so that
+        # the trading loop starts with the correct runtime state.
+        logger.info("[LIFESPAN] Step 3b: P0 preflight completion")
+        if 'live_state' in locals():
+            try:
+                auto_enable = is_auto_execution_enabled()
+                if not p0_preflight_passed:
+                    auto_enable = False
+                if is_observe_only():
+                    logger.info(
+                        "[LIFESPAN] Step 3b: observe-only mode; forcing LIVE_ENTRIES_HALTED regardless of auto_execution"
+                    )
+                    auto_enable = False
+                logger.info(
+                    "[LIFESPAN] Step 3b: live preflight complete; auto_execution=%s",
+                    auto_enable,
+                )
+                live_state.complete_preflight(
+                    auto_enable=auto_enable,
+                    preflight_context={
+                        "startup_phases_completed": True,
+                        "p0_preflight_passed": p0_preflight_passed,
+                        "p0_preflight_detail": p0_preflight_detail,
+                        "live_latches": live_latches,
+                        "auto_execution_enabled": auto_enable,
+                    },
+                )
+            except Exception as e:
+                logger.warning("[LIFESPAN] Step 3b: live preflight completion failed: %s", e)
+        else:
+            logger.warning("[LIFESPAN] Step 3b: live_state not in scope; skipping preflight completion")
         
         # Start production audit harness
         logger.info("[LIFESPAN] Step 4: Starting production audit harness")
@@ -787,10 +932,16 @@ async def lifespan(app: FastAPI):
             app.state.data_safety_coordinator = None
             # Non-fatal - continue without data safety features
         
+        logger.info("[LIFESPAN] Step 8: P2.x startup continuing; preflight already completed in Step 3b")
         logger.info("[LIFESPAN] Step 8: Startup complete, yielding to application")
         
     except Exception as e:
         logger.exception("[LIFESPAN] CRITICAL ERROR during startup: %r", e)
+        if 'live_state' in locals():
+            try:
+                live_state.halt_entries("lifespan_startup_failed", ["STARTUP_FAILURE"])
+            except Exception:
+                pass
         raise
     
     yield
@@ -1067,6 +1218,10 @@ if auth_router is not None:
     app.include_router(auth_router, prefix="/api/v1")
 if health_snapshot_router is not None:
     app.include_router(health_snapshot_router)
+
+# OPTIONAL: live runtime state operator endpoints
+if live_runtime_state_router is not None:
+    app.include_router(live_runtime_state_router, prefix="/api/v1")
 
 # CRITICAL FIX: kalshi_api router - contains fills ledger endpoints, positions, orders
 # This router is required for fills ingestion and reconciliation to work properly

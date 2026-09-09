@@ -50,6 +50,8 @@ from merid.intent_types import ExposureChange
 from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.trading_mode import TradingMode
 from utils.logger import get_logger
+from merid.observability.live_runtime_state import can_submit_live_entry
+from merid.config.observe_only import is_observe_only
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 from merid.prediction.trade_decision import (
@@ -16203,6 +16205,36 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
                 )
         except Exception as exc:
             logger.warning("[ORDER-ROUTER] Bankroll breaker check failed: %s", exc)
+
+    # 2026-09-08: P0 observe-only mode.  No order may be submitted while
+    # observe-only is active, regardless of state machine or exit status.
+    if is_observe_only():
+        logger.critical(
+            "[ORDER-ROUTER-REJECT] intent_id=%s observe-only mode is active; no order submission",
+            getattr(intent, "intent_id", None),
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason="observe_only_mode",
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
+
+    # 2026-09-08: P0 live runtime state machine.  New entries are rejected unless
+    # the canonical state machine is in LIVE_ENTRIES_ENABLED.  Exits and
+    # reduce-only orders remain available while entries are halted.
+    if not _is_exit_order(intent):
+        if not can_submit_live_entry():
+            logger.critical(
+                "[ORDER-ROUTER-REJECT] intent_id=%s live_runtime_state not LIVE_ENTRIES_ENABLED; rejecting entry",
+                getattr(intent, "intent_id", None),
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="live_runtime_state_halted",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
 
     # ── DECISION PROVENANCE CONTRACT (2026-08-19) ──────────────────────────
     # Enforce for the 15m crypto lane after identity is confirmed but before

@@ -109,7 +109,7 @@ class PortfolioReconciler:
         
         self._local_lock = threading.Lock()
         self._engine = get_portfolio_engine()
-        self._bankroll_service = _get_bankroll_service()()
+        self._bankroll_service_factory = _get_bankroll_service()
         self._kalshi_client = KalshiClient()
         
         # Reconciliation state
@@ -146,14 +146,16 @@ class PortfolioReconciler:
         
         try:
             # Use v2 bankroll service for reconciliation (single source of truth)
-            summary = await self._bankroll_service.get_summary(caller_module="portfolio_reconciliation")
-            
-            # Convert v2 summary to legacy balance format for compatibility
-            from merid.event_venues.kalshi.bankroll_service import BankrollResult
-            kalshi_balance = BankrollResult(
-                success=True,
+            bankroll_service = await self._bankroll_service_factory()
+            summary = await bankroll_service.get_summary(caller_module="portfolio_reconciliation")
+            portfolio_value_cents = await bankroll_service.get_portfolio_value_cents()
+
+            # Convert v2 summary to a local balance record without importing
+            # the deprecated bankroll_service module.
+            from types import SimpleNamespace
+            kalshi_balance = SimpleNamespace(
                 balance_cents=int(summary.available_cash_usd * 100) if summary.available_cash_usd else 0,
-                portfolio_value_cents=await self._bankroll_service.get_portfolio_value_cents(),
+                portfolio_value_cents=portfolio_value_cents,
                 equity_usd=summary.equity_usd,
                 timestamp=summary.as_of.timestamp() if summary.as_of else datetime.now(timezone.utc).timestamp(),
             )
@@ -191,7 +193,7 @@ class PortfolioReconciler:
         
         try:
             # Fetch positions from Kalshi portfolio endpoint
-            kalshi_positions = await self._kalshi_client.get_positions_async()
+            kalshi_positions = await self._kalshi_client.get_positions()
             kalshi_position_count = len([p for p in kalshi_positions if p.quantity != 0])
             
             # Build position maps for comparison

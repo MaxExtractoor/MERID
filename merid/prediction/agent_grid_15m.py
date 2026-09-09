@@ -474,25 +474,22 @@ def _get_settlement_input_price(
 def _get_bachelier_spot_price(cfb_observation: Any, settlement_input_price: float) -> Optional[float]:
     """Return the Bachelier spot for p_yes forecast.
 
-    The future 60-second TWAP is best predicted by the current instantaneous
-    RTI tick, not by the current 60-second average.  When the RTI feed is live
-    but the latest tick is missing or invalid, return ``None`` so the caller
-    fails closed instead of silently reusing the lagged 60-second average.
-    When RTI is unavailable entirely, ``settlement_input_price`` is the public
-    spot fallback and downstream confidence gates reject the non-``cfb_rti_live``
-    reference.
+    The CF Benchmarks RTI tick is the canonical settlement-model price.  It is
+    used only when the observation is execution-eligible.  There is no public
+    spot fallback for Bachelier pricing; if RTI is missing or ineligible the
+    caller fails closed.
     """
-    if cfb_observation is not None and getattr(cfb_observation, "execution_eligible", False):
-        raw = getattr(cfb_observation, "value", None)
-        if raw is not None:
-            try:
-                val = float(raw)
-                if math.isfinite(val) and val > 0:
-                    return val
-            except (TypeError, ValueError, OverflowError):
-                pass
+    if cfb_observation is None or not getattr(cfb_observation, "execution_eligible", False):
         return None
-    return float(settlement_input_price)
+    raw = getattr(cfb_observation, "value", None)
+    if raw is not None:
+        try:
+            val = float(raw)
+            if math.isfinite(val) and val > 0:
+                return val
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return None
 
 
 def _quote_age_ms(market_state: Any) -> Optional[int]:
@@ -525,6 +522,65 @@ def _rti_age_ms(obs: Optional[Any]) -> Optional[int]:
         except Exception:
             pass
     return None
+
+
+def validate_trade_snapshot(
+    asset: str,
+    market_state: Any,
+    cfb_observation: Optional[Any],
+    settlement_reference: str,
+) -> list[str]:
+    """Hard fail-closed validation for a trade decision snapshot.
+
+    Returns a list of blocking reason codes.  An empty list means the snapshot
+    is acceptable for model evaluation (though downstream gates still apply).
+    """
+    failures: list[str] = []
+
+    if settlement_reference != "cfb_rti_live":
+        failures.append("SETTLEMENT_SOURCE_NOT_CFB_RTI_LIVE")
+
+    if cfb_observation is None:
+        failures.append("RTI_OBSERVATION_MISSING")
+    elif not getattr(cfb_observation, "execution_eligible", False):
+        failures.append("RTI_NOT_EXECUTION_ELIGIBLE")
+
+    rti_age_ms = _rti_age_ms(cfb_observation)
+    quote_age_ms = _quote_age_ms(market_state)
+    rti_exec_age_ms = int(
+        os.environ.get("MERID_RTI_EXECUTION_MAX_AGE_MS", "2000").strip() or "2000"
+    )
+    book_exec_age_ms = int(
+        os.environ.get("MERID_BOOK_EXECUTION_MAX_AGE_MS", "1000").strip() or "1000"
+    )
+    rti_book_skew_ms = int(
+        os.environ.get("MERID_RTI_BOOK_SKEW_MS", "1500").strip() or "1500"
+    )
+
+    if rti_age_ms is None:
+        failures.append("RTI_AGE_UNKNOWN")
+    elif rti_age_ms > rti_exec_age_ms:
+        failures.append(f"RTI_STALE:{rti_age_ms}ms")
+
+    if quote_age_ms is None:
+        failures.append("ORDERBOOK_AGE_UNKNOWN")
+    elif quote_age_ms > book_exec_age_ms:
+        failures.append(f"ORDERBOOK_STALE:{quote_age_ms}ms")
+
+    if rti_age_ms is not None and quote_age_ms is not None:
+        skew = abs(rti_age_ms - quote_age_ms)
+        if skew > rti_book_skew_ms:
+            failures.append(f"RTI_BOOK_TIME_SKEW:{skew}ms")
+
+    if market_state is None:
+        failures.append("MARKET_STATE_MISSING")
+    else:
+        if not getattr(market_state, "book_initialized", False):
+            failures.append("ORDERBOOK_NOT_INITIALIZED")
+        if not getattr(market_state, "live_sequence_confirmed", False):
+            failures.append("ORDERBOOK_SEQUENCE_NOT_CONFIRMED")
+
+    return failures
 
 
 def _record_decision_audit(
@@ -7736,6 +7792,32 @@ class LeanAgent15m:
             )
             return None
 
+        # P0: hard freshness/skew/sequence gate before any probability/edge work.
+        snapshot_failures = validate_trade_snapshot(
+            asset=asset,
+            market_state=market_state,
+            cfb_observation=cfb_observation,
+            settlement_reference=settlement_reference,
+        )
+        if snapshot_failures:
+            reason = "trade_snapshot_validation_failed:" + ",".join(snapshot_failures)
+            logger.warning("[TRADE-SNAPSHOT-REJECT] asset=%s %s", asset, reason)
+            self._record_signal_rejection(
+                reason,
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    bachelier_spot_price,
+                    settlement_reference,
+                    seconds_to_expiry,
+                    extra={
+                        "snapshot_failures": snapshot_failures,
+                        "settlement_reference_price": settlement_input_price,
+                    },
+                )
+            )
+            return None
+
         # Settlement-aware distribution model (opt-in, V2).  Treats the contract
         # payoff as the final 60-second CF RTI average, not a point price at
         # expiry.  Disabled by default until shadow/live calibration is complete.
@@ -7898,6 +7980,14 @@ class LeanAgent15m:
             or _numeric_pref(getattr(self.risk_config, "strategy_policy_min_edge", None))
         ) or _asset_profile.base_edge_threshold
 
+        _rti_age_ms_for_decision = _rti_age_ms(cfb_observation)
+        _quote_age_ms_for_decision = _quote_age_ms(market_state)
+        _rti_book_skew_ms_for_decision = (
+            None
+            if _rti_age_ms_for_decision is None or _quote_age_ms_for_decision is None
+            else abs(_rti_age_ms_for_decision - _quote_age_ms_for_decision)
+        )
+
         def _call_trade_decision(
             fee: float,
             p_yes: Optional[float],
@@ -7937,6 +8027,12 @@ class LeanAgent15m:
                 settlement_reference=settlement_reference,
                 settlement_distribution=settlement_distribution,
                 policy_version="trade_decision_v2",
+                quote_age_ms=_quote_age_ms_for_decision,
+                rti_age_ms=_rti_age_ms_for_decision,
+                rti_book_skew_ms=_rti_book_skew_ms_for_decision,
+                book_sequence_confirmed=getattr(market_state, "live_sequence_confirmed", None),
+                book_initialized=getattr(market_state, "book_initialized", None),
+                cfb_execution_eligible=getattr(cfb_observation, "execution_eligible", None),
             )
             _record_decision_audit(
                 decision,
