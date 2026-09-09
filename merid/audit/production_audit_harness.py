@@ -946,16 +946,17 @@ class ProductionAuditHarness:
                     f"shared={shared_window_start}"
                 )
             
-            if abs(envelope1.total_window_exposure_usd - shared_total_exposure) > 0.01:
+            shared_total_exposure_float = float(shared_total_exposure)
+            if abs(envelope1.total_window_exposure_usd - shared_total_exposure_float) > 0.01:
                 mismatches.append(
                     f"envelope1.total_window_exposure_usd={envelope1.total_window_exposure_usd:.2f}, "
-                    f"shared={shared_total_exposure:.2f}"
+                    f"shared={shared_total_exposure_float:.2f}"
                 )
-            
-            if abs(envelope2.total_window_exposure_usd - shared_total_exposure) > 0.01:
+
+            if abs(envelope2.total_window_exposure_usd - shared_total_exposure_float) > 0.01:
                 mismatches.append(
                     f"envelope2.total_window_exposure_usd={envelope2.total_window_exposure_usd:.2f}, "
-                    f"shared={shared_total_exposure:.2f}"
+                    f"shared={shared_total_exposure_float:.2f}"
                 )
             
             if mismatches:

@@ -298,7 +298,9 @@ class LiveRuntimeState:
                     self._reason = "process_restarted"
                     self._reason_codes = ["PROCESS_RESTART", "HALTED_BY_OPERATOR"]
                     self._last_transition_at = self._now()
-                # Clear stale release assertion; the new process must re-run preflight.
+                # A new process is a new runtime epoch; clear stale release
+                # assertion and started_at so persistence reflects this run.
+                self._started_at = self._now()
                 self._release_assertion = None
 
             self._run_id = run_id or str(uuid.uuid4())
