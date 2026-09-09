@@ -20,6 +20,7 @@ import collections
 import re
 
 import asyncio
+import threading
 
 import os
 
@@ -18284,15 +18285,18 @@ def _reconcile_cycle_counters(
 
     # Emit the write-completeness heartbeat once all recording attempts for this
     # cycle have finished.  This is fail-open: a heartbeat failure must not block
-    # the trading loop.
+    # the trading loop.  Run the heartbeat in a background thread so a slow
+    # schema migration or stale database cannot stall the trading cadence.
     if _DECISION_AUDIT_LEDGER_AVAILABLE:
         try:
             ledger = get_decision_audit_ledger()
-            ledger.log_cycle_heartbeat(
-                str(tick),
-                tick=tick,
-                assets_evaluated=assets_evaluated,
-            )
+            threading.Thread(
+                target=ledger.log_cycle_heartbeat,
+                args=(str(tick),),
+                kwargs={"tick": tick, "assets_evaluated": assets_evaluated},
+                daemon=True,
+                name=f"audit_heartbeat_tick_{tick}",
+            ).start()
         except Exception as hb_exc:
             logger.warning("[DECISION-AUDIT-HEARTBEAT] failed for tick=%d: %s", tick, hb_exc)
 
