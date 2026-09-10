@@ -21,6 +21,31 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# 0.1 Load .env file so the observe-only guard and all other settings are
+# resolved from the operator's persistent configuration before the process
+# environment is defaulted.
+if (Test-Path $EnvFile) {
+    Write-Host "[start_15m] Loading environment variables from $EnvFile" -ForegroundColor Cyan
+    Get-Content $EnvFile | ForEach-Object {
+        if ($_ -match '^([^#][^=]+)=(.*)$') {
+            $name = $matches[1].Trim()
+            $value = $matches[2].Trim()
+            if ($name -and $value -and !$name.StartsWith('#')) {
+                $existing = $null
+                if ($name -in @("MERID_MANUAL_EMERGENCY_TOKEN", "MERID_BREAKER_RELEASE_TOKEN")) {
+                    $existing = [Environment]::GetEnvironmentVariable($name, "Process")
+                }
+                if (-not ($existing -and $existing -ne "SET_FROM_SECRET_STORE")) {
+                    Set-Item -Path "env:$name" -Value $value
+                }
+            }
+        }
+    }
+    Write-Host "[start_15m] $EnvFile loaded successfully" -ForegroundColor Green
+} else {
+    Write-Host "[start_15m] WARNING: env file not found at $EnvFile" -ForegroundColor Yellow
+}
+
 # 0. Observe-only guard (P0 remediation, 2026-09-08).
 # The server process must remain in a read-only, halted state unless the
 # operator explicitly opts out by setting MERID_OBSERVE_ONLY=0 before
@@ -120,35 +145,6 @@ function Remove-LegacyExchangeCredentials {
     if ($stillPresent.Count -gt 0) {
         throw "[start_15m] LIVE MODE REFUSED: legacy exchange credentials are still present: $($stillPresent -join ', '). Remove them from the .env file and persistent environment before live trading."
     }
-}
-
-# 0.1 Load .env file to get credentials
-if (Test-Path $EnvFile) {
-    Write-Host "[start_15m] Loading environment variables from $EnvFile" -ForegroundColor Cyan
-    Get-Content $EnvFile | ForEach-Object {
-        if ($_ -match '^([^#][^=]+)=(.*)$') {
-            $name = $matches[1].Trim()
-            $value = $matches[2].Trim()
-            # Skip empty values and comments
-            if ($name -and $value -and !$name.StartsWith('#')) {
-                # 2026-09-04: respect process environment for the live emergency
-                # tokens.  This lets the operator inject real tokens from a
-                # secret store (e.g. Devin Cloud, Windows Credential, 1Password)
-                # without placing them in a .env file.  The fail-closed token
-                # preflight below still runs.
-                $existing = $null
-                if ($name -in @("MERID_MANUAL_EMERGENCY_TOKEN", "MERID_BREAKER_RELEASE_TOKEN")) {
-                    $existing = [Environment]::GetEnvironmentVariable($name, "Process")
-                }
-                if (-not ($existing -and $existing -ne "SET_FROM_SECRET_STORE")) {
-                    Set-Item -Path "env:$name" -Value $value
-                }
-            }
-        }
-    }
-    Write-Host "[start_15m] $EnvFile loaded successfully" -ForegroundColor Green
-} else {
-    Write-Host "[start_15m] WARNING: env file not found at $EnvFile" -ForegroundColor Yellow
 }
 
 # 0.2 Strip legacy exchange credentials from the live 15m process environment.
