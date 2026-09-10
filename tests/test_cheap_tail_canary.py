@@ -22,13 +22,23 @@ os.environ["MERID_CHEAP_TAIL_CANARY_MAX_DAILY"] = "3"
 fd, _tmp_daily = tempfile.mkstemp(suffix=".json")
 os.close(fd)
 os.environ["MERID_CHEAP_TAIL_CANARY_DAILY_FILE"] = _tmp_daily
-os.environ["MERID_TAIL_CALIBRATION_ENABLED"] = "0"
 os.environ["MERID_ORDER_DECISION_LEDGER_ENABLED"] = "0"
 os.environ["MERID_MIN_HELD_PRICE_CENTS"] = "35"
 
 import pytest
 
+import merid.prediction.trade_decision as _trade_decision_module
 from merid.prediction.trade_decision import compute_trade_decision
+
+
+@pytest.fixture(autouse=True)
+def _disable_tail_calibration_and_ledger(monkeypatch):
+    """Tail calibration is tested in the release-gate suite; disable it here
+    so the canary test scenario is deterministic and does not pollute the
+    shared module state for those tests.
+    """
+    monkeypatch.setattr(_trade_decision_module, "MERID_TAIL_CALIBRATION_ENABLED", False)
+    monkeypatch.setattr(_trade_decision_module, "MERID_ORDER_DECISION_LEDGER_ENABLED", False)
 
 
 def _make_canary_decision(**kwargs):

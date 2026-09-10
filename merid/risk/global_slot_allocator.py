@@ -67,11 +67,12 @@ class PositionSlot:
 
     @property
     def exposure_usd(self) -> float:
-        """Kalshi position value in USD (par = $1.00 per contract).
+        """Kalshi position value in USD (cash notional, not par).
 
-        The global exposure cap is a position-value cap, not an entry-cost cap.
+        The global exposure cap tracks cash at risk for a position, which is
+        the entry price paid per contract times the number of contracts held.
         """
-        return float(self.count)
+        return float(self.count) * float(self.entry_price_cents) / 100.0
 
 
 # Backwards-compatible alias used by legacy test suites.
@@ -462,12 +463,13 @@ class GlobalSlotAllocator:
                     f"max {self.max_positions_per_asset} allowed"
                 )
 
-        # Check available exposure.  Required exposure is position value (Kalshi par),
-        # not the cash cost of entry, so it is simply the contract count.
+        # Check available exposure.  Use cash notional (entry cost) so a one-
+        # contract canary fits under a sub-dollar cap and the cap tracks cash
+        # at risk, not Kalshi par value.
         # CRITICAL FIX (2026-08-24): Round to 2 decimals to avoid floating-point
         # epsilon causing false "Insufficient exposure" rejections when
         # required and available are equal to the cent.
-        required_exposure = round(float(count), 2)
+        required_exposure = round(float(count) * float(entry_price_cents) / 100.0, 2)
         available = round(self.get_available_exposure(), 2)
 
         if required_exposure > available:
