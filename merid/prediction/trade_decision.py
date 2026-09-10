@@ -846,6 +846,20 @@ def _apply_cheap_tail_canary_lane(
 
     # All canary gates passed; select one contract for the canary lane.
     _increment_canary_daily_count(decision.asset)
+    logger.info(
+        "[CHEAP-TAIL-CANARY-SELECTED] asset=%s ticker=%s side=%s "
+        "price_cents=%d p_selected=%.3f gross_edge=%.4f net_edge=%.4f "
+        "decision_id=%s daily_count=%d",
+        decision.asset,
+        decision.ticker,
+        canary_side,
+        int(round(float(canary_breakdown.executable_entry_price) * 100.0)),
+        canary_breakdown.p_selected,
+        canary_breakdown.gross_edge,
+        canary_breakdown.net_edge,
+        decision.decision_id,
+        _canary_daily_count(),
+    )
 
     new_indicators = dict(decision.indicators or {})
     new_indicators["decision_lane"] = "cheap_tail_canary"
