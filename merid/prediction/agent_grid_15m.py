@@ -8132,6 +8132,26 @@ class LeanAgent15m:
                 execution_mode = "taker"
                 fee_cents = taker_fee_cents
 
+        # Cheap-tail canary lane must be post-only/maker, one contract, short TTL.
+        # This is enforced regardless of the ordinary taker/maker selection because
+        # the canary is an exploration lane with explicit no-chase rules.
+        if (
+            decision.selected_outcome is not None
+            and decision.indicators.get("decision_lane") == "cheap_tail_canary"
+        ):
+            if liquidity_role != "maker":
+                logger.info(
+                    "[CANARY-ORDER-STYLE] asset=%s overriding liquidity_role=%s -> maker "
+                    "for cheap_tail_canary lane",
+                    asset, liquidity_role,
+                )
+            liquidity_role = "maker"
+            execution_mode = "maker"
+            post_only = True
+            time_in_force = "gtc"
+            aggressiveness = 0.0
+            fee_cents = maker_fee_cents
+
         # Production-safe containment: compute a Bachelier-only shadow decision so
         # we can compare the live hybrid side against the baseline side on the same
         # market, fully logged but not executed.

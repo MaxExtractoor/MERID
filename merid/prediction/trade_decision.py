@@ -8,12 +8,15 @@ inputs to the decision engine.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import statistics
+import threading
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
@@ -129,6 +132,88 @@ MERID_ANCHOR_VOL_TO_MARKET = os.environ.get("MERID_ANCHOR_VOL_TO_MARKET", "").st
 # 4c LCB(EV_net) canary threshold experiment.
 MERID_CANARY_4C_LCB = os.environ.get("MERID_CANARY_4C_LCB", "").strip().lower() in ("1", "true", "yes")
 MERID_CANARY_LCB_BASE_CENTS = float(os.environ.get("MERID_CANARY_LCB_BASE_CENTS", "4.0"))
+
+# Cheap-tail canary lane: bounded exploration for 20-34c contracts.
+# This is a separate lane from the core 35c+ policy; it does not lower global
+# held-price or π* gates for the main lane.  It is intentionally narrow:
+# one contract, YES-only by default, post-only/maker, strict EV and gap rules.
+MERID_CHEAP_TAIL_CANARY_ENABLED = os.environ.get("MERID_CHEAP_TAIL_CANARY_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+MERID_CHEAP_TAIL_CANARY_MIN_PRICE_CENTS = int(os.environ.get("MERID_CHEAP_TAIL_CANARY_MIN_PRICE_CENTS", "20"))
+MERID_CHEAP_TAIL_CANARY_MAX_PRICE_CENTS = int(os.environ.get("MERID_CHEAP_TAIL_CANARY_MAX_PRICE_CENTS", "34"))
+MERID_CHEAP_TAIL_CANARY_ALLOWED_SIDES = [
+    s.strip().lower()
+    for s in os.environ.get("MERID_CHEAP_TAIL_CANARY_ALLOWED_SIDES", "yes").split(",")
+    if s.strip()
+]
+MERID_CHEAP_TAIL_CANARY_MIN_NET_EDGE_PCT = float(
+    os.environ.get("MERID_CHEAP_TAIL_CANARY_MIN_NET_EDGE_PCT", "8.0")
+)
+MERID_CHEAP_TAIL_CANARY_MIN_PROB_GAP_PCT = float(
+    os.environ.get("MERID_CHEAP_TAIL_CANARY_MIN_PROB_GAP_PCT", "9.0")
+)
+MERID_CHEAP_TAIL_CANARY_MIN_EV_TO_TAIL_RATIO = float(
+    os.environ.get("MERID_CHEAP_TAIL_CANARY_MIN_EV_TO_TAIL_RATIO", "0.10")
+)
+MERID_CHEAP_TAIL_CANARY_MIN_TTE_S = float(
+    os.environ.get("MERID_CHEAP_TAIL_CANARY_MIN_TTE_S", "120.0")
+)
+MERID_CHEAP_TAIL_CANARY_MAX_TTE_S = float(
+    os.environ.get("MERID_CHEAP_TAIL_CANARY_MAX_TTE_S", "900.0")
+)
+MERID_CHEAP_TAIL_CANARY_MAX_DAILY = int(
+    os.environ.get("MERID_CHEAP_TAIL_CANARY_MAX_DAILY", "3")
+)
+MERID_CHEAP_TAIL_CANARY_DAILY_FILE = os.environ.get(
+    "MERID_CHEAP_TAIL_CANARY_DAILY_FILE",
+    "data/cheap_tail_canary_daily.json",
+)
+
+
+# In-memory and persisted daily canary attempt accounting.
+_cheap_tail_canary_daily_lock = threading.RLock()
+_cheap_tail_canary_daily_state: Dict[str, Any] = {}
+
+
+def _load_cheap_tail_canary_daily_state() -> Dict[str, Any]:
+    """Load or initialize the persisted cheap-tail canary daily counter."""
+    global _cheap_tail_canary_daily_state
+    with _cheap_tail_canary_daily_lock:
+        if _cheap_tail_canary_daily_state:
+            return dict(_cheap_tail_canary_daily_state)
+        try:
+            path = Path(MERID_CHEAP_TAIL_CANARY_DAILY_FILE)
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                data = {}
+        except Exception:
+            data = {}
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if "date" not in data or data.get("date") != today:
+            data = {"date": today, "count": 0, "assets": {}}
+        _cheap_tail_canary_daily_state = data
+        return dict(data)
+
+
+def _canary_daily_count() -> int:
+    with _cheap_tail_canary_daily_lock:
+        return int(_load_cheap_tail_canary_daily_state().get("count", 0))
+
+
+def _increment_canary_daily_count(asset: str) -> None:
+    with _cheap_tail_canary_daily_lock:
+        state = _load_cheap_tail_canary_daily_state()
+        state["count"] = int(state.get("count", 0)) + 1
+        assets = state.setdefault("assets", {})
+        assets[asset] = int(assets.get(asset, 0)) + 1
+        _cheap_tail_canary_daily_state = state
+        try:
+            Path(MERID_CHEAP_TAIL_CANARY_DAILY_FILE).parent.mkdir(parents=True, exist_ok=True)
+            Path(MERID_CHEAP_TAIL_CANARY_DAILY_FILE).write_text(
+                json.dumps(state, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.warning("[CHEAP-TAIL-CANARY] failed to persist daily count: %s", exc)
 
 
 def _inverse_normal_cdf(p: float) -> float:
@@ -644,6 +729,151 @@ def apply_canary_lcb_gate(
         p_opposite=None,
         approved_size_cc=Decimal("0"),
         no_trade_reason=shadow_cohort["delta_reason"] or decision.no_trade_reason or "lcb_canary_no_trade",
+        indicators=new_indicators,
+    )
+
+
+def _apply_cheap_tail_canary_lane(
+    decision: TradeDecision,
+    quote_age_ms: Optional[int],
+) -> TradeDecision:
+    """Bounded cheap-tail canary overlay for 20-34c held-side contracts.
+
+    This lane is separate from the core 35c+ policy.  It does not lower the
+    global held-price floor or the π* premium.  It is only allowed when the
+    core lane has rejected the candidate and a narrow set of canary-specific
+    EV, probability-gap, and data-quality conditions are met.
+
+    Defaults are fail-closed: disabled, YES-only, one contract, post-only/maker,
+    strict net edge and probability-gap requirements.
+    """
+    if not MERID_CHEAP_TAIL_CANARY_ENABLED:
+        return decision
+    if decision.selected_outcome is not None:
+        # A core (or 4c LCB) lane has already selected a side; do not override.
+        return decision
+    if decision.data_state != "healthy":
+        return decision
+    if decision.regime_label == "unknown" or float(decision.regime_probability) < float(MIN_REGIME_POSTERIOR):
+        return decision
+    if not decision.confidence_valid:
+        return decision
+    if decision.seconds_to_expiry is None:
+        return decision
+    tte = float(decision.seconds_to_expiry)
+    if tte < MERID_CHEAP_TAIL_CANARY_MIN_TTE_S or tte > MERID_CHEAP_TAIL_CANARY_MAX_TTE_S:
+        return decision
+    if _canary_daily_count() >= MERID_CHEAP_TAIL_CANARY_MAX_DAILY:
+        return decision
+
+    canary_side: Optional[Literal["yes", "no"]] = None
+    canary_breakdown: Optional[EdgeBreakdown] = None
+
+    for side, breakdown in (
+        ("yes", decision.yes_edge_breakdown),
+        ("no", decision.no_edge_breakdown),
+    ):
+        if breakdown is None:
+            continue
+        if side not in MERID_CHEAP_TAIL_CANARY_ALLOWED_SIDES:
+            continue
+        price_cents = int(round(float(breakdown.executable_entry_price) * 100.0))
+        if price_cents < MERID_CHEAP_TAIL_CANARY_MIN_PRICE_CENTS:
+            continue
+        if price_cents > MERID_CHEAP_TAIL_CANARY_MAX_PRICE_CENTS:
+            continue
+        # Tail calibration must be configured for the held side (i.e., held
+        # price is below the tail-calibration floor).  We do not require that
+        # the cap was applied, only that the model is operating in a bucket
+        # with calibration coverage.
+        if side == "yes" and not decision.indicators.get("tail_calibration_yes_configured"):
+            continue
+        if side == "no" and not decision.indicators.get("tail_calibration_no_configured"):
+            continue
+        # Model probability vs market-implied price gap (gross edge) must
+        # exceed the canary threshold, e.g. p - price >= 9%.
+        gross_edge = float(breakdown.gross_edge)
+        if gross_edge < (MERID_CHEAP_TAIL_CANARY_MIN_PROB_GAP_PCT / 100.0) - 1e-9:
+            continue
+        # Net edge after all-in costs must exceed the canary threshold, e.g.
+        # net edge >= 8% of notional.
+        net_edge = float(breakdown.net_edge)
+        if net_edge < (MERID_CHEAP_TAIL_CANARY_MIN_NET_EDGE_PCT / 100.0) - 1e-9:
+            continue
+        # Prefer the side with the highest qualifying net edge; ties leave
+        # canary_side as the first found, which is deterministic (yes before no).
+        if canary_breakdown is None or net_edge > float(canary_breakdown.net_edge):
+            canary_side = side
+            canary_breakdown = breakdown
+
+    if canary_side is None or canary_breakdown is None:
+        return decision
+
+    # Re-evaluate the executable-cost EV gate with canary-specific thresholds.
+    # This is the final economic authority for the canary lane.
+    entry_fee = Decimal(str(canary_breakdown.entry_fee))
+    exit_cost = Decimal(str(canary_breakdown.exit_cost_reserve))
+    uncertainty_reserve = Decimal(str(canary_breakdown.model_risk_reserve))
+    adverse_selection_reserve = Decimal(str(decision.adverse_selection_reserve or "0"))
+
+    ev_input = EVInput(
+        p_model=Decimal(str(canary_breakdown.p_selected)),
+        p_exec=Decimal(str(canary_breakdown.executable_entry_price)),
+        qty_cc=100,
+        entry_fee_per_contract=entry_fee,
+        expected_exit_cost_per_contract=exit_cost,
+        adverse_selection_reserve_per_contract=adverse_selection_reserve,
+        uncertainty_reserve_per_contract=uncertainty_reserve,
+        quote_age_ms=quote_age_ms,
+        ticker=decision.ticker,
+        decision_id=decision.decision_id,
+        min_dollar_ev=Decimal(str(MERID_CHEAP_TAIL_CANARY_MIN_NET_EDGE_PCT / 100.0)),
+        min_ev_to_tail_ratio=Decimal(str(MERID_CHEAP_TAIL_CANARY_MIN_EV_TO_TAIL_RATIO)),
+    )
+    ev_result = evaluate_executable_cost_ev(ev_input)
+    if not ev_result.allowed:
+        new_indicators = dict(decision.indicators or {})
+        new_indicators["cheap_tail_canary"] = {
+            "eligible_side": canary_side,
+            "eligible_price_cents": int(round(float(canary_breakdown.executable_entry_price) * 100.0)),
+            "gross_edge": round(float(canary_breakdown.gross_edge), 4),
+            "net_edge": round(float(canary_breakdown.net_edge), 4),
+            "ev_gate_allowed": False,
+            "ev_gate_result": ev_result.to_dict(),
+            "reason": "canary_ev_gate_rejected",
+        }
+        return replace(decision, indicators=new_indicators)
+
+    # All canary gates passed; select one contract for the canary lane.
+    _increment_canary_daily_count(decision.asset)
+
+    new_indicators = dict(decision.indicators or {})
+    new_indicators["decision_lane"] = "cheap_tail_canary"
+    new_indicators["cheap_tail_canary"] = {
+        "eligible_side": canary_side,
+        "eligible_price_cents": int(round(float(canary_breakdown.executable_entry_price) * 100.0)),
+        "gross_edge": round(float(canary_breakdown.gross_edge), 4),
+        "net_edge": round(float(canary_breakdown.net_edge), 4),
+        "min_net_edge_pct": MERID_CHEAP_TAIL_CANARY_MIN_NET_EDGE_PCT,
+        "min_prob_gap_pct": MERID_CHEAP_TAIL_CANARY_MIN_PROB_GAP_PCT,
+        "ev_gate_allowed": True,
+        "ev_gate_result": ev_result.to_dict(),
+    }
+
+    return replace(
+        decision,
+        selected_outcome=canary_side,
+        selected_action="buy",
+        selected_outcome_price=Decimal(str(canary_breakdown.executable_entry_price)),
+        p_selected=Decimal(str(canary_breakdown.p_selected)),
+        p_opposite=Decimal(str(canary_breakdown.p_opposite)),
+        gross_edge=Decimal(str(canary_breakdown.gross_edge)),
+        net_edge=Decimal(str(canary_breakdown.net_edge)),
+        edge_breakdown=canary_breakdown,
+        approved_size_cc=Decimal("100"),
+        no_trade_reason=None,
+        ev_gate_allowed=True,
+        ev_gate_result=ev_result.to_dict(),
         indicators=new_indicators,
     )
 
@@ -1934,6 +2164,12 @@ def compute_trade_decision(
             annualized_vol_source=_vol_source_for_canary,
             settlement_reference=settlement_reference,
         )
+
+    # Cheap-tail canary overlay (20-34c).  This is the narrow, bounded lane
+    # configured by MERID_CHEAP_TAIL_CANARY_* environment variables.  It runs
+    # after the 4c LCB overlay and may select a side the core lane rejected.
+    if MERID_CHEAP_TAIL_CANARY_ENABLED:
+        decision = _apply_cheap_tail_canary_lane(decision, quote_age_ms=quote_age_ms)
 
     record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
 
