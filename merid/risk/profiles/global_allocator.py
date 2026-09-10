@@ -75,12 +75,13 @@ class OrderCandidate:
     def position_value_usd(self) -> float:
         """Calculate Kalshi position value in USD.
 
-        Each binary crypto-15m contract has a $1.00 par settlement payout, so
-        the position value is simply the contract count multiplied by $1.00.
-        This is the value that must fit under the fixed exposure cap and the
-        account's buying power, not the entry notional.
+        For the fixed $0.90/$2.00 exposure model the relevant risk is the
+        cash outlay (entry notional), because the maximum loss of a binary
+        position is the amount paid to enter.  Using par ($1.00/contract)
+        would overstate the cash-at-risk and would prevent a one-contract
+        cheap-tail canary from fitting under the cap.
         """
-        return float(self.count)
+        return self.notional_usd
 
     @property
     def edge_score(self) -> float:
@@ -118,8 +119,8 @@ class CanonicalLivePosition:
 
     @property
     def position_value_usd(self) -> float:
-        """Kalshi position value (par = $1.00 per contract)."""
-        return float(self.contracts)
+        """Kalshi position value (cash notional, not par payout)."""
+        return self.notional_usd
 
 
 @dataclass
