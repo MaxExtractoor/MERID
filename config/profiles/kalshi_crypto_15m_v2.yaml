@@ -1328,10 +1328,11 @@ contract_caps:
 # Replaces percentage-based sizing with fixed dollar cap to ensure $2+ profit per 15m window
 risk_policy:
   # FIXED DOLLAR EXPOSURE MODEL (2026-07-08)
-  # Ensures never more than $0.75 exposure at any time (~10% of $7.71 bankroll)
+  # Ensures never more than $0.90 exposure at any time (~96% of $0.94 bankroll)
   # Forces entries in sweet spot (10-75c) and enables mandatory profit exits
   # 2026-08-28: lowered from $2.00 to survive the $7.71 account and avoid 26% single-trade risk.
-  fixed_exposure_cap_usd: 0.75  # CRITICAL: $0.75 max total exposure across all assets
+  # 2026-09-10: raised to $0.90 to align with MERID_FIXED_EXPOSURE_CAP_USD in .env and the one-contract canary.
+  fixed_exposure_cap_usd: 0.90  # CRITICAL: $0.90 max total exposure across all assets
   sequential_trading: true  # No new entries until all positions exit
   # MANDATORY PROFIT EXIT (2026-07-08)
   # Automatic profit-taking based on entry price to ensure quick wins
