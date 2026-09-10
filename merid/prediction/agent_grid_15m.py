@@ -8139,12 +8139,17 @@ class LeanAgent15m:
             decision.selected_outcome is not None
             and decision.indicators.get("decision_lane") == "cheap_tail_canary"
         ):
-            if liquidity_role != "maker":
-                logger.info(
-                    "[CANARY-ORDER-STYLE] asset=%s overriding liquidity_role=%s -> maker "
-                    "for cheap_tail_canary lane",
-                    asset, liquidity_role,
-                )
+            logger.info(
+                "[CANARY-ORDER-STYLE] asset=%s side=%s price_cents=%s "
+                "liquidity_role=%s -> maker post_only=%s tif=%s fee_cents=%.3f",
+                asset,
+                decision.selected_outcome,
+                int(round(float(decision.selected_outcome_price) * 100.0)) if decision.selected_outcome_price is not None else None,
+                liquidity_role,
+                True,
+                "gtc",
+                fee_cents,
+            )
             liquidity_role = "maker"
             execution_mode = "maker"
             post_only = True
