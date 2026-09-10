@@ -1,29 +1,12 @@
 """Unit tests for the cheap-tail canary lane."""
 from __future__ import annotations
 
+import json
 import math
 import os
 import tempfile
+from datetime import datetime, timezone
 from decimal import Decimal
-
-# Must set canary environment *before* importing trade_decision so the
-# module-level constants are loaded correctly.
-os.environ["MERID_CHEAP_TAIL_CANARY_ENABLED"] = "1"
-os.environ["MERID_CHEAP_TAIL_CANARY_ALLOWED_SIDES"] = "yes"
-os.environ["MERID_CHEAP_TAIL_CANARY_ALLOWED_ASSETS"] = "ETH"
-os.environ["MERID_CHEAP_TAIL_CANARY_MIN_PRICE_CENTS"] = "20"
-os.environ["MERID_CHEAP_TAIL_CANARY_MAX_PRICE_CENTS"] = "34"
-os.environ["MERID_CHEAP_TAIL_CANARY_MIN_NET_EDGE_PCT"] = "8.0"
-os.environ["MERID_CHEAP_TAIL_CANARY_MIN_PROB_GAP_PCT"] = "9.0"
-os.environ["MERID_CHEAP_TAIL_CANARY_MIN_EV_TO_TAIL_RATIO"] = "0.10"
-os.environ["MERID_CHEAP_TAIL_CANARY_MIN_TTE_S"] = "120"
-os.environ["MERID_CHEAP_TAIL_CANARY_MAX_TTE_S"] = "900"
-os.environ["MERID_CHEAP_TAIL_CANARY_MAX_DAILY"] = "3"
-fd, _tmp_daily = tempfile.mkstemp(suffix=".json")
-os.close(fd)
-os.environ["MERID_CHEAP_TAIL_CANARY_DAILY_FILE"] = _tmp_daily
-os.environ["MERID_ORDER_DECISION_LEDGER_ENABLED"] = "0"
-os.environ["MERID_MIN_HELD_PRICE_CENTS"] = "35"
 
 import pytest
 
@@ -31,20 +14,49 @@ import merid.prediction.trade_decision as _trade_decision_module
 from merid.prediction.trade_decision import compute_trade_decision
 
 
+_fd, _tmp_daily = tempfile.mkstemp(suffix=".json")
+os.close(_fd)
+
+
+def _reset_canary_daily_file() -> None:
+    """Write a fresh daily counter and clear any in-memory cached state."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    fresh = {"date": today, "count": 0, "assets": {}}
+    with open(_tmp_daily, "w", encoding="utf-8") as f:
+        json.dump(fresh, f)
+    _trade_decision_module._cheap_tail_canary_daily_state = {}
+
+
+_reset_canary_daily_file()
+
+
 @pytest.fixture(autouse=True)
-def _disable_tail_calibration_and_ledger(monkeypatch):
-    """Tail calibration is tested in the release-gate suite; disable it here
-    so the canary test scenario is deterministic and does not pollute the
-    shared module state for those tests.
+def _configure_canary(monkeypatch):
+    """Set the canary lane constants via monkeypatch so these tests work
+    regardless of which test file imports *merid.prediction.trade_decision* first.
     """
+    _reset_canary_daily_file()
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_ENABLED", True)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_ALLOWED_SIDES", ["yes"])
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_ALLOWED_ASSETS", ["ETH"])
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MIN_PRICE_CENTS", 20)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MAX_PRICE_CENTS", 34)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MIN_NET_EDGE_PCT", 8.0)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MIN_PROB_GAP_PCT", 9.0)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MIN_EV_TO_TAIL_RATIO", 0.10)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MIN_TTE_S", 120.0)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MAX_TTE_S", 900.0)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_MAX_DAILY", 3)
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_DAILY_FILE", _tmp_daily)
     monkeypatch.setattr(_trade_decision_module, "MERID_TAIL_CALIBRATION_ENABLED", False)
     monkeypatch.setattr(_trade_decision_module, "MERID_ORDER_DECISION_LEDGER_ENABLED", False)
+    monkeypatch.setattr(_trade_decision_module, "MERID_MIN_HELD_PRICE_CENTS", 35)
 
 
-def _make_canary_decision(**kwargs):
+def _make_canary_decision(decision_id: str = "test-dec", **kwargs):
     defaults = {
         "run_id": "test-run",
-        "decision_id": "test-dec",
+        "decision_id": decision_id,
         "ticker": "KXETH15M-26SEP101830-30",
         "asset": "ETH",
         "spot_price": 99.9655,
@@ -73,7 +85,7 @@ def _make_canary_decision(**kwargs):
 
 def test_canary_selects_cheap_yes_eth():
     """A 30c ETH YES with Bachelier p ~0.44 and positive net edge should be selected by the canary."""
-    decision = _make_canary_decision()
+    decision = _make_canary_decision(decision_id="test-canary-select")
     assert decision.selected_outcome == "yes", f"expected canary YES, got {decision.selected_outcome}"
     assert decision.indicators.get("decision_lane") == "cheap_tail_canary"
     assert float(decision.approved_size_cc) == 100.0
@@ -84,14 +96,14 @@ def test_canary_selects_cheap_yes_eth():
 
 def test_main_lane_rejects_cheap_yes():
     """The same 30c candidate must be rejected by the main lane; canary is the only path."""
-    decision = _make_canary_decision()
+    decision = _make_canary_decision(decision_id="test-main-vs-canary")
     assert decision.no_trade_reason is None or "cheap_tail_canary" in (decision.no_trade_reason or "")
     assert decision.indicators.get("decision_lane") == "cheap_tail_canary"
 
 
 def test_canary_blocks_non_allowed_asset():
     """A cheap YES for a non-allowed asset must not be selected by the canary."""
-    decision = _make_canary_decision(asset="SOL")
+    decision = _make_canary_decision(decision_id="test-asset-guard", asset="SOL")
     assert decision.indicators.get("decision_lane") != "cheap_tail_canary"
     assert decision.selected_outcome is None or decision.selected_outcome != "yes"
 
@@ -100,6 +112,7 @@ def test_canary_blocks_non_allowed_side():
     """A cheap NO (even if in range) must not be selected because allowed_sides=yes."""
     # Mirror the scenario: 30c NO with p_no=0.44 (spot just above strike).
     decision = _make_canary_decision(
+        decision_id="test-side-guard",
         spot_price=100.0345,
         yes_bid_cents=70.0,
         yes_ask_cents=71.0,
@@ -109,10 +122,11 @@ def test_canary_blocks_non_allowed_side():
     assert decision.indicators.get("decision_lane") != "cheap_tail_canary"
 
 
-def test_main_lane_does_not_select_cheap_tail():
+def test_main_lane_does_not_select_cheap_tail(monkeypatch):
     """Without the canary overlay the 30c candidate should be a no_trade."""
-    env = dict(os.environ)
-    env["MERID_CHEAP_TAIL_CANARY_ENABLED"] = "0"
-    # We can't easily reload the module in this process, but the test above
-    # already verifies the canary path.  This test documents the intent.
-    assert True
+    with open(_tmp_daily, "w", encoding="utf-8") as _:
+        pass  # reset daily count
+    monkeypatch.setattr(_trade_decision_module, "MERID_CHEAP_TAIL_CANARY_ENABLED", False)
+    decision = _make_canary_decision(decision_id="test-main-lane-only")
+    assert decision.selected_outcome is None
+    assert decision.indicators.get("decision_lane") != "cheap_tail_canary"
