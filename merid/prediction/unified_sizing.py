@@ -939,7 +939,7 @@ def compute_order_size(
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from slot allocator: %s", e)
     
-    # Step 3: Calculate available exposure (position value, not just cash outlay)
+    # Step 3: Calculate available exposure (cash notional at risk)
     available_exposure_usd = fixed_exposure_cap_usd - existing_exposure_usd
     
     # Step 4: Calculate contract cost and contract par value
@@ -947,10 +947,10 @@ def compute_order_size(
     contract_par_value_usd = KALSHI_CONTRACT_PAR_VALUE_USD
 
     # Step 4a: Compute the maximum fractional count that fits under any explicit
-    # per-order notional cap (legacy percentage-based fallback), using position value.
+    # per-order notional cap (legacy percentage-based fallback), using cash cost.
     max_by_notional: Optional[Decimal] = None
     if max_notional_usd is not None:
-        max_by_notional = Decimal(str(max_notional_usd)) / contract_par_value_usd
+        max_by_notional = Decimal(str(max_notional_usd)) / contract_cost_usd
         if max_by_notional < CONTRACT_COUNT_QUANTUM:
             logger.warning(
                 "[UNIFIED-SIZING] CAPITAL_INSUFFICIENT: asset=%s price=%dc contract_cost=%.2f "
@@ -966,8 +966,8 @@ def compute_order_size(
                 "max_notional_usd": float(max_notional_usd),
             }
 
-    # Step 5: Check if we have enough exposure slot (position value, not cost)
-    min_position_value_for_trade = CONTRACT_COUNT_QUANTUM * contract_par_value_usd
+    # Step 5: Check if we have enough exposure slot (cash cost, not par value)
+    min_position_value_for_trade = CONTRACT_COUNT_QUANTUM * contract_cost_usd
     if available_exposure_usd < min_position_value_for_trade:
         logger.warning(
             "[UNIFIED-SIZING] Insufficient exposure slot: available=%.2f, needed_min=%.2f, existing=%.2f, cap=%.2f asset=%s",
@@ -1035,10 +1035,10 @@ def compute_order_size(
         logger.warning("[UNIFIED-SIZING] Failed to read resolved max_contracts_per_order: %s", exc)
 
     # Step 8: Cap by the number of *fractional* contracts that fit in the
-    # available fixed exposure (position value), the available bankroll, and
-    # the cash needed to enter.  Each full contract is $1.00 of Kalshi par.
-    max_by_exposure = available_exposure_usd / contract_par_value_usd
-    max_by_bankroll = bankroll_usd / contract_par_value_usd
+    # available fixed exposure (cash notional), the available bankroll, and
+    # the cash needed to enter.  Use contract cost, not Kalshi par.
+    max_by_exposure = available_exposure_usd / contract_cost_usd
+    max_by_bankroll = bankroll_usd / contract_cost_usd
     max_by_cash_cost = bankroll_usd / contract_cost_usd
 
     contract_count = min(target_contracts, max_contracts_cap, max_by_exposure, max_by_bankroll, max_by_cash_cost)
