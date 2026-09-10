@@ -1613,69 +1613,64 @@ class KalshiMarketCatalog:
         # This is critical for MD health reporting (minutes_to_expiry calculation)
         logger.info("[BOOT-TRACE] Catalog → MarketStateStore async feed starting (expiry fields for SLA)")
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-        # CRITICAL FIX (2026-08-02): Skip catalog feed on first refresh to prevent timeout
-        # The catalog feed is too slow during first refresh due to contract_normalization
-        # State store will be populated by WS bridge and subsequent catalog refreshes
-        if not self._first_refresh_completed.is_set():
-            logger.info("[CATALOG-FEED] Skipping feed loop on first refresh to prevent timeout - state store will be populated by WS bridge")
-            feed_count = 0
-            missing_expiry_count = 0
+        # Always feed REST market metadata into the state store on the first refresh.
+        # The 15m strategy needs expiry/strike fields immediately; the WS bridge only
+        # provides orderbook data and does not populate these fields.
+        # CRITICAL FIX (2026-08-02): Use injected state store if available, otherwise get singleton
+        # This prevents race condition when catalog refresh thread calls get_kalshi_market_state_store()
+        # from a different thread than where it was initialized
+        if hasattr(self, '_state_store') and self._state_store is not None:
+            store = self._state_store
+            logger.info("[CATALOG-FEED] Using injected state store to prevent thread race")
         else:
-            # CRITICAL FIX (2026-08-02): Use injected state store if available, otherwise get singleton
-            # This prevents race condition when catalog refresh thread calls get_kalshi_market_state_store()
-            # from a different thread than where it was initialized
-            if hasattr(self, '_state_store') and self._state_store is not None:
-                store = self._state_store
-                logger.info("[CATALOG-FEED] Using injected state store to prevent thread race")
-            else:
-                store = get_kalshi_market_state_store()
-                logger.info("[CATALOG-FEED] Using singleton state store (no injection)")
-            
-            # Feed expiry data asynchronously to avoid blocking the catalog
-            # event loop (and therefore any other event loops on the same OS thread).
-            # Only populate REST-owned fields (expiry, volume, OI, strikes);
-            # WS-owned fields (bid/ask) are handled by the WS bridge.
-            feed_count = 0
-            missing_expiry_count = sum(1 for cm in enriched if cm.market.end_date is None)
-            feed_enriched = [cm for cm in enriched if cm.market.end_date is not None]
+            store = get_kalshi_market_state_store()
+            logger.info("[CATALOG-FEED] Using singleton state store (no injection)")
 
-            if missing_expiry_count:
-                for cm in enriched:
-                    if cm.market.end_date is None:
-                        logger.error(
-                            "[CATALOG-FEED] MISSING_EXPIRY_FOR_15M_MARKET: ticker=%s "
-                            "asset=%s has no end_date - cannot compute seconds_to_expiry",
-                            cm.market.market_id, cm.asset
-                        )
+        # Feed expiry data asynchronously to avoid blocking the catalog
+        # event loop (and therefore any other event loops on the same OS thread).
+        # Only populate REST-owned fields (expiry, volume, OI, strikes);
+        # WS-owned fields (bid/ask) are handled by the WS bridge.
+        feed_count = 0
+        missing_expiry_count = sum(1 for cm in enriched if cm.market.end_date is None)
+        feed_enriched = [cm for cm in enriched if cm.market.end_date is not None]
 
-            logger.info("[CATALOG-FEED] Starting feed loop for %d enriched markets", len(enriched))
+        if missing_expiry_count:
+            for cm in enriched:
+                if cm.market.end_date is None:
+                    logger.error(
+                        "[CATALOG-FEED] MISSING_EXPIRY_FOR_15M_MARKET: ticker=%s "
+                        "asset=%s has no end_date - cannot compute seconds_to_expiry",
+                        cm.market.market_id, cm.asset
+                    )
 
-            # CRITICAL DIAGNOSTIC: Log first 5 tickers to verify time window filtering
-            sample_tickers = [cm.market.market_id for cm in enriched[:5]]
-            logger.info(
-                "[CATALOG-FEED] Sample tickers being fed to state store: %s",
-                sample_tickers
+        logger.info("[CATALOG-FEED] Starting feed loop for %d enriched markets", len(enriched))
+
+        # CRITICAL DIAGNOSTIC: Log first 5 tickers to verify time window filtering
+        sample_tickers = [cm.market.market_id for cm in enriched[:5]]
+        logger.info(
+            "[CATALOG-FEED] Sample tickers being fed to state store: %s",
+            sample_tickers
+        )
+
+        # batch_size=1 yields after each market so a slow apply_rest_market
+        # cannot monopolize the catalog refresh event loop.
+        feed_start = time.monotonic()
+        try:
+            feed_count = await self._apply_rest_markets_batched(
+                feed_enriched, store, batch_size=1
             )
-
-            # batch_size=1 yields after each market so a slow apply_rest_market
-            # cannot monopolize the catalog refresh event loop.
-            feed_start = time.monotonic()
-            try:
-                feed_count = await self._apply_rest_markets_batched(
-                    feed_enriched, store, batch_size=1
-                )
-            except Exception as e:
-                logger.error(
-                    "[CATALOG-FEED] Failed to feed markets: %s",
-                    e,
-                    exc_info=True,
-                )
-            feed_elapsed = time.monotonic() - feed_start
-            logger.info(
-                "[CATALOG-FEED] Feed loop completed in %.3fs: %d/%d markets fed",
-                feed_elapsed, feed_count, len(enriched)
+        except Exception as e:
+            logger.error(
+                "[CATALOG-FEED] Failed to feed markets: %s",
+                e,
+                exc_info=True,
             )
-        
+        feed_elapsed = time.monotonic() - feed_start
+        logger.info(
+            "[CATALOG-FEED] Feed loop completed in %.3fs: %d/%d markets fed",
+            feed_elapsed, feed_count, len(enriched)
+        )
+
         logger.info(f"[BOOT-TRACE] Catalog → MarketStateStore async feed completed: {feed_count}/{len(enriched)} markets fed successfully")
 
         # Pre-register settlement buffers for RTI-settled markets so the
