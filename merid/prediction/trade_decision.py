@@ -747,6 +747,10 @@ def _apply_cheap_tail_canary_lane(
     Defaults are fail-closed: disabled, YES-only, one contract, post-only/maker,
     strict net edge and probability-gap requirements.
     """
+    from merid.risk.executable_cost_ev_gate import (
+        evaluate_executable_cost_ev,
+        EVInput,
+    )
     if not MERID_CHEAP_TAIL_CANARY_ENABLED:
         return decision
     if decision.selected_outcome is not None:
