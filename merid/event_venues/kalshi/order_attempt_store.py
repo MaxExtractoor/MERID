@@ -498,6 +498,8 @@ class OrderAttemptStore:
                     ON exit_order_attempts(state);
                 CREATE INDEX IF NOT EXISTS idx_exit_order_attempts_client_order_id
                     ON exit_order_attempts(client_order_id);
+                CREATE INDEX IF NOT EXISTS idx_exit_order_attempts_exchange_order_id
+                    ON exit_order_attempts(exchange_order_id);
                 CREATE INDEX IF NOT EXISTS idx_exit_order_attempt_events_attempt_id
                     ON exit_order_attempt_events(attempt_id);
             """
@@ -595,6 +597,25 @@ class OrderAttemptStore:
         conn = self._get_conn()
         cur = conn.execute(
             "SELECT * FROM exit_order_attempts WHERE client_order_id = ?", (client_order_id,)
+        )
+        row = cur.fetchone()
+        return ExitOrderAttemptRecord.from_row(row) if row else None
+
+    def get_exit_attempt_by_exchange_order_id(
+        self, exchange_order_id: str
+    ) -> Optional[ExitOrderAttemptRecord]:
+        """Recover an exit attempt from the exchange's order_id.
+
+        Kalshi's HTTP fill payload often omits ``client_order_id``.  The
+        ``position_cache`` mapping is populated when the router receives the
+        order ack, but on a route timeout that mapping may not yet exist.  The
+        durable exit attempt table is updated by reconciliation, so it can
+        bridge an exchange ``order_id`` back to the intent/client_order_id
+        before the breaker sees the fill as unmatched.
+        """
+        conn = self._get_conn()
+        cur = conn.execute(
+            "SELECT * FROM exit_order_attempts WHERE exchange_order_id = ?", (exchange_order_id,)
         )
         row = cur.fetchone()
         return ExitOrderAttemptRecord.from_row(row) if row else None
