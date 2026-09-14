@@ -71,9 +71,9 @@ class KalshiOrder:
     side: str  # "yes" or "no"
     order_type: str  # "limit" or "market"
     price: Optional[Decimal]  # Price in cents (for limit orders)
-    count: int  # Number of contracts
-    filled_count: int = 0
-    remaining_count: Optional[int] = None
+    count: Decimal  # Number of contracts (Kalshi V2 supports 0.01-contract precision)
+    filled_count: Decimal = Decimal("0")
+    remaining_count: Optional[Decimal] = None
     status: str = "pending"  # pending, executed, cancelled, rejected
     client_order_id: Optional[str] = None
     created_at: Optional[datetime] = None
@@ -85,7 +85,7 @@ class KalshiPosition:
     """Represents a Kalshi position."""
     ticker: str
     side: str  # "yes" or "no"
-    count: int
+    count: Decimal  # Number of contracts (Kalshi V2 supports 0.01-contract precision)
     avg_price: Decimal  # Average entry price in cents
     total_cost: Decimal
     unrealized_pnl: Optional[Decimal] = None
@@ -100,7 +100,7 @@ class KalshiTrade:
     ticker: str
     order_id: str
     side: str  # "yes" or "no"
-    count: int
+    count: Decimal  # Number of contracts (Kalshi V2 supports 0.01-contract precision)
     price: Decimal  # Fill price in cents
     fee: Decimal
     timestamp: datetime

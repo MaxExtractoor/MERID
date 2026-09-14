@@ -1037,9 +1037,17 @@ def compute_order_size(
     # Step 8: Cap by the number of *fractional* contracts that fit in the
     # available fixed exposure (cash notional), the available bankroll, and
     # the cash needed to enter.  Use contract cost, not Kalshi par.
+    # 2026-09-14: Reserve at least the venue's 1c minimum fee so the total
+    # cost (notional + fee) does not exceed the account. Kalshi rounds fees
+    # up to the next cent, so a 1c headroom is the smallest safe reserve.
     max_by_exposure = available_exposure_usd / contract_cost_usd
     max_by_bankroll = bankroll_usd / contract_cost_usd
-    max_by_cash_cost = bankroll_usd / contract_cost_usd
+    min_fee_usd = Decimal("0.01")
+    max_by_cash_cost = (
+        max(Decimal("0"), bankroll_usd - min_fee_usd) / contract_cost_usd
+        if bankroll_usd > min_fee_usd
+        else Decimal("0")
+    )
 
     contract_count = min(target_contracts, max_contracts_cap, max_by_exposure, max_by_bankroll, max_by_cash_cost)
     if max_by_notional is not None:

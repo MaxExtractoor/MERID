@@ -1151,18 +1151,36 @@ def _resolve_execution_mode(intent: OrderIntent) -> str:
     """Return the canonical execution-mode string for an intent.
 
     Resolution order:
-      1. Policy-driven ``intent.expected_role`` / ``intent.fee_type`` from the
+      1. Marketable posture: an order that is already priced/flagged as IOC/FOK
+         with non-zero aggressiveness and post_only=False must execute as a taker.
+         This prevents the policy engine (which sees the pre-reprice price) from
+         forcing a resting maker order that the repricer has already committed to
+         crossing.
+      2. Policy-driven ``intent.expected_role`` / ``intent.fee_type`` from the
          maker/taker integration (or the exit bypass). This is the authoritative
          economic role selected by the policy engine, so it overrides stale or
          conflicting loop-level execution_mode defaults.
-      2. Explicit ``intent.execution_mode`` if it is a known mode.
-      3. Explicit ``intent.liquidity_role`` if set to ``maker`` or ``taker``.
-      4. Legacy posture flags (post_only, aggressiveness).
+      3. Explicit ``intent.execution_mode`` if it is a known mode.
+      4. Explicit ``intent.liquidity_role`` if set to ``maker`` or ``taker``.
+      5. Legacy posture flags (post_only, aggressiveness).
 
     ``staged_ioc`` is preserved as a distinct mode because callers may want the
     staged lifecycle; downstream repricing and validation treat it as taker/IOC
     until the two-stage state machine is implemented.
     """
+    # 2026-09-14: Marketable IOC/FOK posture wins over a policy maker hint when
+    # the signal stack has already committed to an aggressive, post-only=False,
+    # terminal TIF. The repricer depends on this being a taker.
+    post_only = bool(getattr(intent, "post_only", False))
+    aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
+    tif = (getattr(intent, "time_in_force", "gtc") or "gtc").strip().lower()
+    if (
+        not post_only
+        and aggressiveness > 0.0
+        and tif in ("ioc", "fok", "immediate_or_cancel", "fill_or_kill")
+    ):
+        return "taker"
+
     policy_role = getattr(intent, "expected_role", None) or getattr(intent, "fee_type", None)
     if policy_role in ("maker", "taker"):
         return policy_role
@@ -1175,8 +1193,6 @@ def _resolve_execution_mode(intent: OrderIntent) -> str:
     if role in ("maker", "taker"):
         return role
 
-    post_only = bool(getattr(intent, "post_only", False))
-    aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
     if post_only:
         return "passive_quote"
     if aggressiveness == 0.0:
@@ -2828,17 +2844,27 @@ class OrderIntent:
             if self.reduce_only is True or self.entry_or_exit == "exit":
                 self.is_exit_order = True
 
-        # Kalshi contracts trade in whole cents.  Normalize cent-denominated
-        # fields so downstream arithmetic and API submissions never see
-        # fractional or numpy-scalar values such as 31.5c.
+        # Kalshi price is always an integer number of cents.  Contract *count*
+        # is a fractional value (Kalshi V2 supports 0.01-contract granularity),
+        # so preserve it to 2 decimals.  ``count_fp`` is the canonical Decimal
+        # authority and must be initialized from ``count`` when missing, before
+        # ``count`` is coerced to float.
         self.price_cents = int(round(self.price_cents))
-        self.count = int(round(self.count))
+
+        # Use str() to avoid binary-float Decimal artifacts (e.g. 0.15 -> 0.1499...).
         if self.count_fp is None:
-            self.count_fp = Decimal(self.count)
+            if self.count is not None:
+                self.count_fp = Decimal(str(self.count))
+            else:
+                self.count_fp = Decimal("0")
         else:
-            # Use str() to avoid binary-float Decimal artefacts.  Centi-contract
-            # alignment is validated by normalize_order / the canonical contract.
             self.count_fp = Decimal(str(self.count_fp))
+
+        if self.count is not None:
+            self.count = float(self.count_fp)
+        else:
+            self.count = float(self.count_fp)
+
         self.size_contracts = int(round(self.size_contracts))
         if self.take_profit_price_cents is not None:
             self.take_profit_price_cents = int(round(self.take_profit_price_cents))
@@ -4552,7 +4578,11 @@ def _compute_max_execution_cost_cents(
     Returns ``None`` only when neither EV provenance nor a model probability is
     available; callers should fail-closed if they require the guard.
     """
-    canonical_count = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    canonical_count = (
+        intent.count_fp
+        if intent.count_fp is not None
+        else Decimal(str(intent.count or 0))
+    )
     if canonical_count <= 0:
         return None
 
@@ -4764,7 +4794,11 @@ def _build_create_order_request(
             f"client_order_id not finalized for intent_id={intent.intent_id}"
         )
 
-    canonical_count = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    canonical_count = (
+        intent.count_fp
+        if intent.count_fp is not None
+        else Decimal(str(intent.count or 0))
+    )
 
     # Resolve a deliberate STP mode; never leave it unset.
     stp = _resolve_self_trade_prevention_type(intent)
@@ -4954,7 +4988,7 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
             return None
 
         pre_position_size = int(pre_position_size)
-        exit_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+        exit_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(str(intent.count or 0))
         count = int(exit_count_fp * Decimal("100"))
 
         # INVARIANT-1: Position must have positive size (cannot exit from zero)
@@ -5892,7 +5926,7 @@ def simulate_paper_fill(
     requested_count_fp = (
         Decimal(str(intent.count_fp))
         if intent.count_fp is not None
-        else Decimal(max(0, int(intent.count)))
+        else Decimal(str(max(0.0, float(intent.count or 0))))
     )
     requested_qty_cc = int(requested_count_fp * Decimal("100"))
 
@@ -6195,7 +6229,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     if intent.count_fp is not None:
         qty_cc = int(intent.count_fp * Decimal("100"))
     else:
-        qty_cc = (intent.count or 0) * 100
+        qty_cc = int((intent.count or 0) * 100)
 
     if qty_cc <= 0:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "non_positive_size")
@@ -6407,7 +6441,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             # Exit orders bypass this check to allow position closure
             if not _is_exit_order(intent):
                 can_allocate, alloc_reason = slot_allocator.can_allocate(
-                    intent.price_cents, asset, count=int(intent.count or 1)
+                    intent.price_cents, asset, count=float(intent.count or 0.0)
                 )
                 if not can_allocate:
                     # CRITICAL FIX (2026-07-15): Check for phantom slot lockout
@@ -6424,7 +6458,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                             slot_allocator.clear_slots_on_empty_positions(position_count=0)
                             # Retry allocation after clearing phantom slots
                             can_allocate, alloc_reason = slot_allocator.can_allocate(
-                                intent.price_cents, asset, count=int(intent.count or 1)
+                                intent.price_cents, asset, count=float(intent.count or 0.0)
                             )
                             if can_allocate:
                                 logger.info(
@@ -6454,7 +6488,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             # CRITICAL FIX (2026-08-18): Use canonical qty_cc so fractional sizes are
             # included in the exposure math instead of being rounded to 0 contracts.
             price_cents_int = int(intent.price_cents) if intent.price_cents is not None else 0
-            qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+            qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else int(Decimal(str(intent.count or 0)) * Decimal("100"))
 
             if not _is_exit_order(intent):
                 current_exposure = slot_allocator.get_total_exposure()
@@ -8910,7 +8944,7 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
     Returns:
         Adjusted count (capped at available liquidity, never exceeds MAX_CONTRACTS_PER_ORDER)
     """
-    requested_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    requested_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(str(intent.count or 0))
 
     # CRITICAL FIX (2026-07-20): Exit orders bypass depth-based sizing.
     if _is_exit_order(intent):
@@ -8974,7 +9008,7 @@ def _apply_risk_based_order_sizing(
     """
     from decimal import Decimal
 
-    requested = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    requested = intent.count_fp if intent.count_fp is not None else Decimal(str(intent.count or 0))
 
     # CRITICAL FIX (2026-07-20): Exit orders bypass risk-based sizing
     # Exit orders reduce exposure and should not be constrained by the $1 cap
@@ -9048,8 +9082,10 @@ def _apply_risk_based_order_sizing(
             flb_position_multiplier=flb_position_multiplier  # 2026-08-01: FLB position sizing
         )
         
-        # If unified_sizing returns 0, reject the order
-        if count == 0:
+        # If unified_sizing returns a non-positive (or sub-centi-contract) count,
+        # reject the order.  ``count`` is the fractional contract cap computed by
+        # unified_sizing; treat anything below one centi-contract as zero.
+        if count <= 0:
             # Log the actual reason from metadata (Kelly filter or exposure cap)
             reason = metadata.get("reason", "unknown")
             if reason == "kelly_no_edge":
@@ -9064,10 +9100,10 @@ def _apply_risk_based_order_sizing(
                 )
             return Decimal(0)
 
-        # unified_sizing returns the maximum whole-contract count the $1 cap
+        # unified_sizing returns the maximum fractional contract count the cap
         # allows.  Keep the requested fractional size as long as it is under that
         # cap; only cap when the requested size is larger.
-        max_count_fp = Decimal(count)
+        max_count_fp = Decimal(str(count))
         sized = min(requested, max_count_fp)
 
         if sized < requested:
@@ -10333,11 +10369,15 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
     
     # Enforce fixed $1 exposure cap sizing via unified_sizing (global slot allocator model)
     # This applies to MOCK/PAPER modes as well for consistency
-    original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    original_count_fp = (
+        intent.count_fp
+        if intent.count_fp is not None
+        else Decimal(str(intent.count or 0))
+    )
     sized_fp = _apply_risk_based_order_sizing(intent)
     if sized_fp is not None:
         intent.count_fp = sized_fp
-        intent.count = int(sized_fp)
+        intent.count = float(sized_fp)
 
     # Reject order if slot-based sizing returned 0 (exceeds $1 fixed exposure cap)
     if sized_fp is None or sized_fp <= 0:
@@ -11057,7 +11097,7 @@ def _prepare_order_for_gate(
     # Execution planning
     original_order_type = intent.order_type
     original_tif = intent.time_in_force
-    original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+    original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(str(intent.count or 0))
     original_price = intent.price_cents
 
     intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
@@ -11085,7 +11125,7 @@ def _prepare_order_for_gate(
         sized_fp = _apply_risk_based_order_sizing(intent)
     if sized_fp is not None:
         intent.count_fp = sized_fp
-        intent.count = int(sized_fp)
+        intent.count = float(sized_fp)
 
     if sized_fp is None or sized_fp <= 0:
         latency = (_time.monotonic() - t0) * 1000
@@ -11102,7 +11142,7 @@ def _prepare_order_for_gate(
             compute_fee_estimate,
             LiquidityRole,
         )
-        _qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+        _qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else int(Decimal(str(intent.count or 0)) * Decimal("100"))
         _fee = compute_fee_estimate(
             LiquidityRole(intent.liquidity_role),
             intent.price_cents,
@@ -11176,7 +11216,7 @@ def _prepare_order_for_gate(
     intent.snapshot_age_ms = book_age_ms
 
     # Reject order if slot-based sizing returned 0
-    qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+    qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else int(Decimal(str(intent.count or 0)) * Decimal("100"))
     if qty_cc == 0 and not _is_exit:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
@@ -11205,7 +11245,7 @@ def _prepare_order_for_gate(
             asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else None
             if asset:
                 can_allocate, alloc_reason = slot_allocator.can_allocate(
-                    intent.price_cents, asset, count=int(intent.count or 1)
+                    intent.price_cents, asset, count=float(intent.count or 0.0)
                 )
                 if not can_allocate:
                     latency = (_time.monotonic() - t0) * 1000
@@ -11437,7 +11477,7 @@ async def _route_live(
         _is_exit_gate = _is_exit_order(intent)
         original_order_type = intent.order_type
         original_tif = intent.time_in_force
-        original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(intent.count)
+        original_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(str(intent.count or 0))
         original_price = intent.price_cents
 
         if not plan_done or prepared_state is None:
@@ -11623,7 +11663,7 @@ async def _route_live(
         # Exits REDUCE exposure - blocking them for exceeding the cap traps positions
         # that can never be closed. The slot allocator already exempts exits (is_exit_order=True).
         # CRITICAL FIX (2026-08-18): Use canonical quantity_cc for fractional sizing.
-        qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else (intent.count or 0) * 100
+        qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else int(Decimal(str(intent.count or 0)) * Decimal("100"))
         if qty_cc == 0 and not _is_exit_order(intent):
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
@@ -11822,7 +11862,7 @@ async def _route_live(
             decision="deny",
             reason="live_not_enabled",
             venue="Kalshi",
-            size=int(intent.count),
+            size=float(intent.count or 0),
             notional_usd=float(intent.count * intent.price_cents) / 100.0,
             caps=f"mode={gate.mode.value} live_enabled={gate.live_enabled}",
         )
@@ -13328,7 +13368,7 @@ async def _route_live(
             decision="approve",
             reason="live_order_admitted",
             venue="Kalshi",
-            size=int(intent.count),
+            size=float(intent.count),
             notional_usd=_pre_notional_usd,
             caps=f"mode={mode.value} source={getattr(intent, 'source', '')}",
         )
@@ -13347,7 +13387,7 @@ async def _route_live(
             intent.ticker,
             intent.side,
             intent.action,
-            int(intent.count),
+            intent.count,
             int(intent.price_cents),
             mode.value,
             getattr(intent, "source", "") or "",
@@ -15216,9 +15256,17 @@ def _route_order_impl(intent: OrderIntent) -> OrderResult:
     LIVE mode requires ``route_order_async`` so the real Kalshi client can be
     called without blocking hacks.
     """
-    # Normalize count to int to avoid Decimal/float TypeError downstream.
-    # price_cents must remain un-cast here so validation can reject non-integer prices.
-    intent.count = int(intent.count) if intent.count is not None else 0
+    # Preserve fractional contract counts.  ``count`` is the display/legacy float;
+    # ``count_fp`` is the authoritative Decimal.  Truncating to int here turned
+    # valid 0.15-contract intents into count=0 and caused local rejection before
+    # the order could reach the venue.
+    if intent.count is None:
+        intent.count = 0.0
+    else:
+        try:
+            intent.count = float(intent.count)
+        except (TypeError, ValueError):
+            intent.count = 0.0
 
     # ── DURABLE ORDER-IDENTITY FINALIZATION (2026-08-12) ───────────────────
     try:
@@ -16010,7 +16058,7 @@ def _run_shared_risk_guard_and_dedup(
         guard = get_unified_risk_manager()
         allowed, reason = guard.check_order(
             ticker=intent.ticker,
-            contracts=int(intent.count),
+            contracts=float(intent.count or 0),
             price_cents=int(intent.price_cents),
             category="crypto",
             underlying=asset,
@@ -16088,7 +16136,7 @@ def _run_shared_risk_guard_and_dedup(
 
                 fee_cents = getattr(intent, "fee_cents", None)
                 if fee_cents is None:
-                    contracts = int(intent.count) if intent.count else 1
+                    contracts = Decimal(str(intent.count or 0))
                     fee_cents = calculate_kalshi_fee_cents(contracts, price)
 
                 slippage_cents = getattr(intent, "slippage_cents", None)
@@ -16194,9 +16242,17 @@ def _validate_risk_contract_linkage(intent: OrderIntent) -> tuple[bool, Optional
 
 async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     """Async order routing implementation that supports true LIVE execution."""
-    # Normalize count to int to avoid Decimal/float TypeError downstream.
-    # price_cents must remain un-cast here so validation can reject non-integer prices.
-    intent.count = int(intent.count) if intent.count is not None else 0
+    # Preserve fractional contract counts.  ``count`` is the display/legacy float;
+    # ``count_fp`` is the authoritative Decimal.  Truncating to int here turned
+    # valid 0.15-contract intents into count=0 and caused local rejection before
+    # the order could reach the venue.
+    if intent.count is None:
+        intent.count = 0.0
+    else:
+        try:
+            intent.count = float(intent.count)
+        except (TypeError, ValueError):
+            intent.count = 0.0
 
     # ── DURABLE ORDER-IDENTITY FINALIZATION (2026-08-12) ───────────────────
     try:
