@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 from datetime import datetime as dt, timezone, timedelta, datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 import json
 from pathlib import Path
@@ -17033,15 +17033,24 @@ class LeanAgentGrid15m:
 
                     for pos in kalshi_positions:
 
-                        # Convert average_entry_price from dollars to cents
-
-                        avg_price_cents = int(float(pos.average_entry_price) * 100) if pos.average_entry_price else 0
+                        # Convert average_entry_price from dollars to cents exactly.
+                        # Preserve fractional contracts via quantity_cc / position_fp.
+                        avg_price_cents = (
+                            int((Decimal(str(pos.average_entry_price)) * Decimal("100")).to_integral_value(rounding=ROUND_HALF_UP))
+                            if pos.average_entry_price
+                            else 0
+                        )
+                        quantity_cc = int(Decimal(str(pos.size)) * Decimal("100"))
 
                         rest_positions.append({
 
                             "market_id": pos.market_id,
 
-                            "contracts": int(pos.size),
+                            "contracts": str(pos.size),
+
+                            "quantity_cc": quantity_cc,
+
+                            "position_fp": str(pos.size),
 
                             "side": pos.outcome_id or "yes",
 
@@ -17079,15 +17088,23 @@ class LeanAgentGrid15m:
 
                                 continue
 
+                            order_quantity_cc = int(Decimal(str(order.size)) * Decimal("100")) if order.size else 0
+                            order_price_cents = (
+                                int((Decimal(str(order.price)) * Decimal("100")).to_integral_value(rounding=ROUND_HALF_UP))
+                                if order.price
+                                else 0
+                            )
                             open_order_list.append({
 
                                 "market_id": order.market_id,
 
                                 "side": order.side or "yes",
 
-                                "contracts": int(order.size) if order.size else 0,
+                                "contracts": str(order.size) if order.size else "0",
 
-                                "price_cents": int(float(order.price) * 100) if order.price else 0,
+                                "quantity_cc": order_quantity_cc,
+
+                                "price_cents": order_price_cents,
 
                                 "order_id": order.order_id or "",
 
