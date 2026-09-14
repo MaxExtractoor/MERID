@@ -14613,19 +14613,25 @@ async def _route_live(
         # CRITICAL FIX (2026-07-12): Kalshi's create-order response may omit/zero `size`.
         # The port response carries filled/remaining sizes; the intent count is
         # the authoritative requested size for fill reconciliation.
-        requested_count = _resolve_requested_count(None, intent.count)
+        # Fixed-point intent count is the authority for fractional orders; the
+        # legacy int helper would truncate 0.11 -> 0 and misclassify partials.
+        _intent_count_fp = (
+            Decimal(str(intent.count_fp)) if intent.count_fp is not None
+            else Decimal(str(intent.count or 0))
+        )
+        requested_count = _resolve_requested_count(None, intent.count) if _intent_count_fp >= 1 else float(_intent_count_fp)
         filled_count_fp = Decimal(str(placed_res.filled_size or 0))
         remaining_count_fp = (
             Decimal(str(placed_res.remaining_size))
             if placed_res.remaining_size is not None
-            else max(Decimal("0"), Decimal(str(requested_count)) - filled_count_fp)
+            else max(Decimal("0"), _intent_count_fp - filled_count_fp)
         )
         # Authoritative requested size from the V2 response, falling back to the
         # fixed-point intent count.  Integer display counts are floors.
         requested_count_fp = (
             filled_count_fp + remaining_count_fp
             if placed_res.remaining_size is not None
-            else Decimal(str(intent.count_fp or requested_count))
+            else _intent_count_fp
         )
         # Canonical centi-contract quantities for fractional fills.
         _filled_quantity_cc = int(filled_count_fp * Decimal("100"))
@@ -14633,6 +14639,10 @@ async def _route_live(
         # Display/legacy whole-contract counts are floors.
         filled_count = int(filled_count_fp)
         remaining_count = int(remaining_count_fp)
+        # Execution gates must use the fixed-point counts: a 0.11-contract fill
+        # floors to 0 and would otherwise skip position/ledger accounting.
+        _has_fill = filled_count_fp > 0
+        _has_remaining = remaining_count_fp > 0
         fill_price_cents = (
             placed_res.price_cents
             if placed_res.price_cents is not None
@@ -14700,7 +14710,7 @@ async def _route_live(
             logger.warning("[DEDUP-CACHE-ERROR] Failed to mark completed (non-fatal): %s", dedup_complete_err)
         
         # P1: Wire TradeTrace into fill events (update fill_time and fill_price)
-        if _TRACE_AVAILABLE and intent.trace_id and filled_count > 0:
+        if _TRACE_AVAILABLE and intent.trace_id and _has_fill:
             update_trace(
                 intent.trace_id,
                 fill_time=replay_time(),
@@ -14710,20 +14720,21 @@ async def _route_live(
         
         # Log order acknowledgment for successful submission
         logger.info(
-            "[ORDER-ACK] trace_id=%s order_id=%s status=ACCEPTED filled=%d remaining=%d avg_price_cents=%d latency_ms=%.2f",
+            "[ORDER-ACK] trace_id=%s order_id=%s status=ACCEPTED filled=%s remaining=%s avg_price_cents=%d latency_ms=%.2f",
             trace_id,
             _venue_oid,
-            filled_count,
-            remaining_count,
+            filled_count_fp,
+            remaining_count_fp,
             fill_price_cents,
             latency,
         )
 
         # 2026-07-25: Log ORDER-FILL when order is filled
-        if filled_count > 0:
+        if _has_fill:
             logger.info(
-                "[ORDER-FILL] intent_id=%s ticker=%s order_id=%s filled_count=%s fill_price_cents=%d notional=$%.2f",
-                intent.intent_id, intent.ticker, _venue_oid, filled_count, fill_price_cents, (filled_count * fill_price_cents) / 100.0
+                "[ORDER-FILL] intent_id=%s ticker=%s order_id=%s filled_count=%s fill_price_cents=%d notional=$%.4f",
+                intent.intent_id, intent.ticker, _venue_oid, filled_count_fp, fill_price_cents,
+                float(filled_count_fp * Decimal(fill_price_cents) / 100),
             )
 
             # 2026-07-25: Portfolio divergence detection - compare internal exposure with Kalshi portfolio
@@ -14753,7 +14764,7 @@ async def _route_live(
         # Window is set only when we have a fill or resting order, not on submission
         # This allows retry attempts for IOC orders that don't fill
         if asset and intent.action.lower() == "buy":
-            has_exposure = filled_count > 0 or remaining_count > 0
+            has_exposure = _has_fill or _has_remaining
             if has_exposure:
                 try:
                     import time
@@ -14788,17 +14799,17 @@ async def _route_live(
                 client_order_id=intent.client_tag or f"coid-{_venue_oid}",
                 ticker=intent.ticker,
                 side=intent.side,
-                intended_count=requested_count,
+                intended_count=float(requested_count_fp),
             )
             # If immediate fill, apply it idempotently through sanity checker
-            if filled_count > 0:
+            if _has_fill:
                 _fill_id = f"{_venue_oid}-0"  # sequence 0 for initial fill
                 _ok, _err = _sanity.apply_fill(
                     order_id=_venue_oid,
                     fill_id=_fill_id,
                     ticker=intent.ticker,
                     side=intent.side,
-                    filled_count=filled_count,
+                    filled_count=float(filled_count_fp),
                     price_cents=fill_price_cents,
                     strategy_group=intent.source or "default",
                 )
@@ -14806,9 +14817,9 @@ async def _route_live(
                     # CRITICAL: Sanity violation detected - duplicate fill or overfill
                     logger.critical(
                         "[SANITY_VIOLATION] fill_rejected ticker=%s coid=%s error=%s "
-                        "filled=%d requested=%d strategy=%s",
+                        "filled=%s requested=%s strategy=%s",
                         intent.ticker, intent.client_tag, _err,
-                        filled_count, requested_count, intent.source or "default"
+                        filled_count_fp, requested_count_fp, intent.source or "default"
                     )
                     # Halt strategy on critical violation (prevent further orders)
                     if _err and ("duplicate_fill" in _err or "overfill" in _err or "POSITION_LIMIT" in _err):
@@ -14835,8 +14846,8 @@ async def _route_live(
             _ptg = _get_ptg()
             _ptg.mark_submitted(intent.client_tag or "", _venue_oid)
             _mark_canonical_entry_submitted(intent, order_id=_venue_oid)
-            if filled_count > 0:
-                _ptg.mark_filled(intent.client_tag or "", filled_count, fill_id=f"{_venue_oid}-0", filled_qty_cc=filled_count * 100)
+            if _has_fill:
+                _ptg.mark_filled(intent.client_tag or "", float(filled_count_fp), fill_id=f"{_venue_oid}-0", filled_qty_cc=_filled_quantity_cc)
                 _mark_canonical_entry_executed(intent, fill_id=f"{_venue_oid}-0")
                 # CRITICAL: Record price execution to prevent repeat price execution
                 _record_price_execution(intent)
@@ -14850,20 +14861,20 @@ async def _route_live(
         # not be updated here to avoid double-counting partial fills.
 
         # DRY-RUN-TRACE: Fill reconciliation
-        _partial = filled_count < requested_count and filled_count > 0
-        _fill_pct = (filled_count / requested_count * 100) if requested_count > 0 else 0.0
+        _partial = _has_fill and filled_count_fp < requested_count_fp
+        _fill_pct = float(filled_count_fp / requested_count_fp * 100) if requested_count_fp > 0 else 0.0
         logger.info(
             "[DRY-RUN-TRACE] fill_reconcile | router_path=order_router ticker=%s side=%s action=%s | "
-            "requested_C=%d filled_C=%d avg_price=%d¢ partial=%s fill_pct=%.1f%% | fee_expected=%d¢ fee_actual=%d¢",
+            "requested_C=%s filled_C=%s avg_price=%d¢ partial=%s fill_pct=%.1f%% | fee_expected=%d¢ fee_actual=%d¢",
             intent.ticker, intent.side, intent.action,
-            requested_count, filled_count, fill_price_cents, _partial, _fill_pct,
+            requested_count_fp, filled_count_fp, fill_price_cents, _partial, _fill_pct,
             _fee_pre, fee_cents
         )
         
         # EXECUTION QUALITY FEEDBACK: Track slippage and fill rate for dynamic risk engine
         # Only update for actual executions; unfilled_ioc / rejected / unknown paths
         # must not feed zero-fill rows into execution statistics.
-        if filled_count > 0:
+        if _has_fill:
             try:
                 from merid.event_venues.kalshi.dynamic_risk import get_dynamic_risk_engine
                 from config.kalshi_crypto_config import kalshi_ticker_to_asset
@@ -15071,13 +15082,13 @@ async def _route_live(
                         slot_allocator.update_slot_fill_price(
                             slot_id=slot_id,
                             fill_price_cents=int(fill_price_cents),
-                            filled_count=int(filled_count),
+                            filled_count=float(filled_count_fp),
                         )
                     else:
                         slot_allocator.update_slot_by_ticker(
                             ticker=intent.ticker,
                             fill_price_cents=int(fill_price_cents),
-                            filled_count=int(filled_count),
+                            filled_count=float(filled_count_fp),
                         )
                 except Exception as _sa:
                     logger.debug("GlobalSlotAllocator fill-price update failed (non-fatal): %s", _sa)
@@ -15085,11 +15096,11 @@ async def _route_live(
                 logger.debug("UnifiedRiskManager fill accounting failed (non-fatal): %s", _rr)
 
         logger.info(
-            "[KALSHI_ORDER_RESULT] ticker=%s status=%s order_id=%s filled=%d source=order_router",
+            "[KALSHI_ORDER_RESULT] ticker=%s status=%s order_id=%s filled=%s source=order_router",
             intent.ticker,
             status,
             _venue_oid,
-            filled_count,
+            filled_count_fp,
         )
         
         # RESTING ORDER MONITOR: Register GTC limit orders for dynamic re-checking
