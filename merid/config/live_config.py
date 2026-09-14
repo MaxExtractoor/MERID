@@ -313,6 +313,24 @@ _ENV_OVERRIDES: Dict[str, _EnvOverride] = {
         safety_kind="bool_safe",
         description="Whether live order submission is explicitly allowed.",
     ),
+    # Kalshi exchange-shard collateral (2026-09-14).  Crypto 15m markets trade on
+    # shard 2 and Kalshi collateralizes per shard; see shard_funding.py.
+    "MERID_AUTO_FUND_TRADING_SHARD": _EnvOverride(
+        name="MERID_AUTO_FUND_TRADING_SHARD",
+        type="bool",
+        is_safety_limit=True,
+        safety_kind="bool_safe",
+        default=True,
+        description="Move idle cash onto the trading shard (intra-account transfer) at preflight and in the loop.",
+    ),
+    "MERID_MIN_TRADING_SHARD_COLLATERAL_CENTS": _EnvOverride(
+        name="MERID_MIN_TRADING_SHARD_COLLATERAL_CENTS",
+        type="int",
+        is_safety_limit=True,
+        safety_kind="floor",
+        default=12,
+        description="Trading-shard cash floor (cents) below which entries are halted; env may only raise it.",
+    ),
 }
 
 # Environment variables that are explicitly not safety-critical and may be

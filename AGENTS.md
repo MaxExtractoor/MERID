@@ -54,11 +54,17 @@ the next server restart must automatically execute the live startup sequence bel
    - Subscription, ordering, symbol, and provenance checks pass.
 
 6. Fetch authoritative exchange state through REST:
-   - Account balance and buying power.
+   - Account balance and buying power, **per exchange shard** (`balance_breakdown`).
    - Open orders.
    - Current market positions.
    - Recent fills.
-   - Required market metadata and market-state information.
+   - Required market metadata and market-state information, including each market's `exchange_index`.
+
+6a. Ensure trading-shard collateral. Kalshi collateralizes orders on the exchange shard that hosts the market (crypto 15m markets: shard 2 since 2026-08-24). Cash on shard 0 cannot back a shard-2 order; the exchange rejects it with `insufficient_balance`. Preflight must:
+   - Resolve the trading shard from market metadata (`MERID_KALSHI_TRADING_SHARD` may pin it).
+   - If the trading shard holds less than `min(MERID_FIXED_EXPOSURE_CAP_USD, total cash)`, move idle cash from other shards with an intra-account transfer (`POST /portfolio/intra_exchange_instance_transfer`). This is a collateral relocation inside the same account, never a withdrawal, and is governed by `MERID_AUTO_FUND_TRADING_SHARD` (default on).
+   - Fail closed (`trading_shard_collateral` FAIL) if the trading shard still cannot back one contract (`MERID_MIN_TRADING_SHARD_COLLATERAL_CENTS`, default 12c).
+   - The loop re-checks every 60s and the order router rejects locally with `insufficient_shard_balance:...` instead of submitting an order the exchange will refuse.
 
 7. Recover all uncertain submission outcomes by `client_order_id`, `intent_id`, and exchange order lookup before considering entries enabled.
 
@@ -94,6 +100,7 @@ the next server restart must automatically execute the live startup sequence bel
    - Reconciliation divergence
    - Untrusted side conflict
    - Missing protective-exit capability
+   - Trading-shard collateral below the one-contract minimum
 
 14. Verify the live model configuration is approved:
    - Use Bachelier-only with TWAP-appropriate volatility unless another model has a documented approved release.
@@ -181,8 +188,15 @@ The individual trade decision must additionally pass:
 - Full net edge after corrected fees, spread, expected slippage, and execution costs passes the configured threshold.
 - Tail calibration is valid for the held side and price bucket.
 - Required RTI provenance is valid if the settlement path uses CF Benchmarks RTI.
+- The market's exchange shard holds at least `limit_price + fee` per contract of cash.
 
 The live system must not submit entries outside this canonical decision path.
+
+### Execution mode: full live, no canary lanes
+
+Production runs one decision path: the core Bachelier/TWAP lane with the held-price floor, π* premium, and executable-cost EV gate. The exploration overlays (`MERID_CHEAP_TAIL_CANARY_*`, `MERID_CANARY_4C_LCB`, `MERID_LIVE_CANARY`) are **off** and must stay off unless a documented, approved experiment re-enables one. Order size is bounded by the account (`MERID_MAX_CONTRACTS_PER_ORDER`, `MERID_FIXED_EXPOSURE_CAP_USD`), not by a canary flag; raise both together as the bankroll grows. A low account balance is not a reason to halt entries — the system must size to what the trading shard can collateralize and otherwise trade normally.
+
+`MERID_OBSERVE_ONLY` is an operator emergency read-only switch. `start_15m.ps1` derives its default from `auto_execution_mode` (1 → `0`); it must never silently default to read-only while this contract says auto-execute.
 
 ## Runtime halt and recovery
 
@@ -262,6 +276,9 @@ exit_firewall_mode
 require_exit_parentage
 model_release_id
 tail_calibration_artifact_hash
+trading_shard
+shard_balances
+auto_fund_trading_shard
 ```
 
 ## Preserved non-negotiable safeguards

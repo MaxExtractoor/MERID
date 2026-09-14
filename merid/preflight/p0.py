@@ -77,6 +77,26 @@ async def run_p0_preflight_checks(
     except Exception as e:
         results.append(_check("market_catalog_initialized", False, str(e)))
 
+    # 3a. Trading-shard collateral.  Kalshi collateralizes per exchange shard
+    # (crypto = shard 2); cash parked on shard 0 cannot back a 15m entry and
+    # every order would be rejected with ``insufficient_balance``.  Move idle
+    # cash onto the trading shard (intra-account transfer) and fail closed if
+    # the shard still cannot back a single contract.
+    try:
+        from merid.event_venues.kalshi.shard_funding import ensure_trading_shard_funded, min_collateral_cents
+
+        funding = await ensure_trading_shard_funded(client, catalog)
+        results.append(
+            _check(
+                "trading_shard_collateral",
+                funding.funded,
+                f"{funding.summary()} min_cents={min_collateral_cents()} "
+                f"breakdown={{{', '.join(f'{k}: ${v:.4f}' for k, v in sorted(funding.shard_balances.items()))}}}",
+            )
+        )
+    except Exception as e:
+        results.append(_check("trading_shard_collateral", False, str(e)))
+
     # 4. Bankroll service fresh.
     try:
         summary = await bankroll.get_summary(caller_module="p0_preflight")
