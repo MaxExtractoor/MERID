@@ -78,7 +78,17 @@ class RawVenueBalance:
         locked_cents = response.get("locked_balance", 0) or 0
         portfolio_value_cents = response.get("portfolio_value", 0) or 0
         
+        # Kalshi truncates the integer ``balance`` (cents) but reports exact
+        # sub-cent cash in ``balance_dollars`` (and per shard in
+        # ``balance_breakdown``).  Prefer the exact figure so a $0.0975 account
+        # is not sized as $0.09.
         cash_available_usd = Decimal(str(balance_cents)) / 100
+        _exact = response.get("balance_dollars")
+        if _exact is not None:
+            try:
+                cash_available_usd = Decimal(str(_exact))
+            except (ArithmeticError, ValueError, TypeError):
+                pass
         portfolio_value_usd = Decimal(str(portfolio_value_cents)) / 100
         total_equity_usd = cash_available_usd + portfolio_value_usd
         
