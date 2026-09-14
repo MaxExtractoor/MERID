@@ -2518,12 +2518,12 @@ class KalshiVenueClient(EventVenueClient):
 
         # Log order submission with key metadata
         logger.info(
-            "[ORDER-SUBMIT] client_order_id=%s asset=%s ticker=%s side=%s size=%d price=%s tp=N/A sl=N/A intent=%s",
+            "[ORDER-SUBMIT] client_order_id=%s asset=%s ticker=%s side=%s size=%s price=%s tp=N/A sl=N/A intent=%s",
             kalshi_order.get("client_order_id", "N/A"),
             ticker.split("-")[0] if "-" in ticker else "N/A",  # Extract asset from ticker
             ticker,
             kalshi_order.get("side", "N/A"),
-            int(kalshi_order.get("count", 0)),  # Convert string back to int for logging
+            kalshi_order.get("count_fp", kalshi_order.get("count", "0")),  # fixed-point string (fractional contracts)
             kalshi_order.get("price", "N/A"),  # V2 API uses "price" field
             kalshi_order.get("type", "N/A")
         )
@@ -2557,10 +2557,14 @@ class KalshiVenueClient(EventVenueClient):
         avg_fill_yes_price_cents = (
             int(round(float(avg_fill_price) * 100)) if avg_fill_price is not None else None
         )
-        fill_count = response_data.get("fill_count") or response_data.get("filled_count")
+        fill_count = (
+            response_data.get("fill_count_fp")
+            or response_data.get("fill_count")
+            or response_data.get("filled_count")
+        )
         try:
-            immediate_fill_count = int(fill_count) if fill_count is not None else None
-        except (ValueError, TypeError):
+            immediate_fill_count = str(Decimal(str(fill_count))) if fill_count is not None else None
+        except (ValueError, TypeError, ArithmeticError):
             immediate_fill_count = None
 
         fill_trace = {

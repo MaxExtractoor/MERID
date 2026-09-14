@@ -127,7 +127,7 @@ class PositionSanityChecker:
                 # high-volume periods or when multiple ingestion sources (WS + HTTP) overlap
                 logger.info(
                     "[SANITY] DUPLICATE FILL DETECTED: fill_id=%s order_id=%s "
-                    "ticker=%s count=%d — NOT applying again (expected idempotent behavior)",
+                    "ticker=%s count=%s — NOT applying again (expected idempotent behavior)",
                     fill_id, order_id, ticker, filled_count
                 )
                 # Duplicate fills are P2 expected behavior, do NOT alert or count toward budget
