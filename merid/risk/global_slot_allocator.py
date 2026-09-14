@@ -19,6 +19,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 import numpy as np
@@ -100,14 +101,19 @@ class AllocationRequest:
         min_entry_cents = resolved.min_entry_cents if resolved else 10
         max_entry_cents = resolved.max_entry_cents if resolved else 75
 
-        if self.count < 1:
-            raise ValueError(f"count>0 required, got count={self.count}")
+        # Kalshi V2 supports fractional contracts down to 0.01 (one centi-contract).
+        # Reject sub-minimal or non-positive sizes, but allow sub-one-contract entries
+        # when the fixed exposure cap only permits a fractional position.
+        _count_dec = Decimal(str(self.count))
+        _quantum = Decimal("0.01")
+        if _count_dec < _quantum:
+            raise ValueError(f"count>=0.01 required, got count={self.count}")
         # Only validate entry price and per-order count cap for entry orders.
         # Exit orders can be at any price and may exceed 2 contracts to close a position.
         if not self.is_exit_order:
-            if not (1 <= self.count <= max_contracts):
+            if not (_quantum <= _count_dec <= max_contracts):
                 raise ValueError(
-                    f"Entry orders must have count between 1 and {max_contracts}, got count={self.count}"
+                    f"Entry orders must have count between 0.01 and {max_contracts}, got count={self.count}"
                 )
             if self.entry_price_cents < min_entry_cents or self.entry_price_cents > max_entry_cents:
                 raise ValueError(
@@ -667,13 +673,13 @@ class GlobalSlotAllocator:
             old_price = slot.entry_price_cents
             old_count = slot.count
             slot.entry_price_cents = int(fill_price_cents)
-            slot.count = int(filled_count)
+            slot.count = float(filled_count)
 
             total_exposure = self.get_total_exposure()
             available = self.get_available_exposure()
             logger.info(
                 "[SLOT-ALLOCATOR] Updated slot to fill price: slot_id=%s "
-                "ticker=%s old_price=%dc old_count=%d new_price=%dc new_count=%d "
+                "ticker=%s old_price=%dc old_count=%s new_price=%dc new_count=%s "
                 "total_exposure=$%.2f available=$%.2f slot_count=%d",
                 slot_id, slot.ticker, old_price, old_count,
                 slot.entry_price_cents, slot.count,

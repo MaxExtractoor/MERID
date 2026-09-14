@@ -116,12 +116,15 @@ def kalshi_taker_fee_cents_parabolic(
 
     # Validate and clamp price
     P = _validate_price(price_dollars)
-    C = int(contracts)
+    # CRITICAL FIX 2026-09-14: Preserve fractional contract counts so the fee
+    # scales correctly for centi-contract orders.  Truncating to int under- or
+    # over-charges and breaks sub-1-contract sizing.
+    C = Decimal(str(contracts))
 
     # Use Decimal to avoid float boundary errors that break ceil-based invariants.
     # Example: 175.0 becoming 175.0000000003 -> ceil -> 176 (incorrect).
     p = Decimal(str(P))
-    c = Decimal(C)
+    c = C
     rate = Decimal(str(sched.taker_rate))
     parabolic_term = p * (Decimal("1") - p)
     fee_cents_exact = rate * c * parabolic_term * Decimal("100")
@@ -166,10 +169,11 @@ def kalshi_maker_fee_cents(
 
     # Validate and clamp price
     P = _validate_price(price_dollars)
-    C = int(contracts)
+    # CRITICAL FIX 2026-09-14: Preserve fractional contract counts for fee scaling.
+    C = Decimal(str(contracts))
 
     p = Decimal(str(P))
-    c = Decimal(C)
+    c = C
     rate = Decimal(str(sched.maker_rate))
     parabolic_term = p * (Decimal("1") - p)
     fee_cents_exact = rate * c * parabolic_term * Decimal("100")

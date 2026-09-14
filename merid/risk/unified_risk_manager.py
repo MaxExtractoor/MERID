@@ -482,7 +482,7 @@ class UnifiedRiskManager:
     def check_order(
         self,
         ticker: str,
-        contracts: int,
+        contracts: Union[int, float, Decimal],
         price_cents: int,
         category: str = "crypto",
         underlying: str = "",
@@ -508,7 +508,10 @@ class UnifiedRiskManager:
         Returns:
             Tuple of (allowed: bool, reason: str)
         """
-        contracts = int(contracts) if contracts is not None else 0
+        # Preserve fractional contract counts (Kalshi V2 supports 0.01-contract
+        # granularity).  Truncating to int here turned 0.15-contract orders into
+        # zero and caused local rejection before the order could be submitted.
+        contracts = float(contracts) if contracts is not None else 0.0
         price_cents = int(price_cents) if price_cents is not None else 0
 
         with self._lock:

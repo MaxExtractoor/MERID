@@ -762,14 +762,21 @@ def _safe_int_cents(value: Any, field: str) -> int:
         raise OrderIntentValidationError("invalid_price:price_not_integer")
 
 
-def _safe_count(value: Any) -> int:
-    """Coerce a contract count to a positive integer."""
-    try:
-        count = int(value) if value is not None else 0
-    except (TypeError, ValueError):
-        count = 0
-    if count <= 0:
+def _safe_count(value: Any) -> Decimal:
+    """Coerce a contract count to a positive, centi-contract-aligned Decimal.
+
+    ``count`` is a legacy/display field; fractional contracts (e.g. 0.15)
+    are valid on Kalshi V2 and must not be truncated to zero.
+    """
+    if value is None:
         raise OrderIntentValidationError("non_positive_size")
+    try:
+        count = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise OrderIntentValidationError(f"invalid_count:{value}")
+    if count <= Decimal("0"):
+        raise OrderIntentValidationError("non_positive_size")
+    count = count.quantize(Decimal("0.01"))
     return count
 
 

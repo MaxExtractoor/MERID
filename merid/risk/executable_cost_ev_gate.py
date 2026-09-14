@@ -59,7 +59,7 @@ class EVResult:
     p_model: Decimal
     p_exec: Decimal
     qty_cc: int
-    count: int
+    count: Decimal
     gross_ev: Decimal
     expected_entry_fee: Decimal
     expected_exit_cost: Decimal
@@ -79,7 +79,7 @@ class EVResult:
             "p_model": str(self.p_model),
             "p_exec": str(self.p_exec),
             "qty_cc": self.qty_cc,
-            "count": self.count,
+            "count": str(self.count),
             "gross_ev": str(self.gross_ev),
             "expected_entry_fee": str(self.expected_entry_fee),
             "expected_exit_cost": str(self.expected_exit_cost),
@@ -133,12 +133,14 @@ def evaluate_executable_cost_ev(input: EVInput) -> EVResult:
     if input.qty_cc is None or input.qty_cc <= 0:
         return _rejected(input, reasons=["non_positive_quantity"])
 
-    count = int(Decimal(input.qty_cc) / Decimal("100"))
-    if count <= 0:
+    # Preserve fractional contracts.  Kalshi V2 supports centi-contract precision;
+    # a 15 cc (0.15 contract) order is valid and must not be rejected as "< 1".
+    count = Decimal(input.qty_cc) / Decimal("100")
+    if count <= Decimal("0"):
         return _rejected(input, reasons=["quantity_less_than_one_contract"])
 
     # Notional per contract is $1 for Kalshi binaries; total notional = count * $1.
-    notional = Decimal(count)
+    notional = count
 
     # Gross expected value = (p_model - p_exec) * notional.
     gross_ev = (input.p_model - input.p_exec) * notional
@@ -215,7 +217,7 @@ def _rejected(input: EVInput, reasons: List[str]) -> EVResult:
         p_model=input.p_model,
         p_exec=input.p_exec,
         qty_cc=input.qty_cc,
-        count=0,
+        count=Decimal("0"),
         gross_ev=Decimal("0"),
         expected_entry_fee=Decimal("0"),
         expected_exit_cost=Decimal("0"),

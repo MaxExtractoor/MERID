@@ -399,6 +399,10 @@ merid_audit_bundle.zip
 data/audit/
 data/data/
 data/paper_positions.json
+data/live_runtime_state*.json
+data/cheap_tail_canary_daily.json
+data/p0_preflight_snapshots/
+data/stale_ledger_backup_*/
 data/run_summaries/
 data/shadow/cfb_rti/
 data/shadow/cfb_rti_report/

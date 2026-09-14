@@ -425,3 +425,144 @@ class TestOrderResultSemantics:
         assert not result.success
         assert not result.has_execution
         assert result.executed_count == 0
+
+
+class TestFractionalQuantityAndRolePrecedence:
+    """Fractional sizing, fee reserve, taker/IOC role precedence, and positive qty."""
+
+    def _intent(self, **overrides):
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        defaults = {
+            "ticker": "KXETH15M-26AUG090200-00",
+            "side": "BUY_YES",
+            "action": "buy",
+            "price_cents": 50,
+            "count": 1,
+        }
+        defaults.update(overrides)
+        return OrderIntent(**defaults)
+
+    def test_post_init_preserves_fractional_count(self):
+        intent = self._intent(count=0.15)
+        assert intent.count_fp == Decimal("0.15")
+        assert intent.count == 0.15
+        assert int(intent.count_fp * Decimal("100")) == 15
+
+    def test_centi_contract_quantity_from_fractional_intent(self):
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        from decimal import Decimal
+        intent = OrderIntent(
+            ticker="KXETH15M-T",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=0.15,
+        )
+        qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else int(Decimal(str(intent.count or 0)) * Decimal("100"))
+        assert qty_cc == 15
+        assert qty_cc > 0
+
+    def test_zero_count_intent_has_zero_qty_cc(self):
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        from decimal import Decimal
+        intent = OrderIntent(
+            ticker="KXETH15M-T",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=0,
+        )
+        qty_cc = int(intent.count_fp * Decimal("100")) if intent.count_fp is not None else int(Decimal(str(intent.count or 0)) * Decimal("100"))
+        assert qty_cc == 0
+
+    def test_resolve_execution_mode_taker_precedence(self):
+        from merid.event_venues.kalshi.order_router import _resolve_execution_mode
+        intent = self._intent(
+            execution_mode="maker",
+            expected_role="maker",
+            fee_type="maker",
+            aggressiveness=1.0,
+            post_only=False,
+            time_in_force="ioc",
+        )
+        assert _resolve_execution_mode(intent) == "taker"
+
+    def test_policy_taker_resolves_to_ioc_non_post_only(self):
+        from merid.event_venues.kalshi.order_router import _apply_execution_mode
+        intent = self._intent(
+            expected_role="taker",
+            fee_type="taker",
+            aggressiveness=0.0,
+            post_only=True,
+        )
+        post_only, aggressiveness, order_type, tif = _apply_execution_mode(intent)
+        assert post_only is False
+        assert tif == "IOC"
+        assert order_type == "limit"
+
+    def test_build_create_order_request_preserves_fractional_size(self):
+        from merid.event_venues.kalshi.order_router import (
+            _build_create_order_request,
+            OrderIntent,
+        )
+        from merid.event_venues.kalshi.port import CreateOrderRequest
+
+        intent = OrderIntent(
+            ticker="KXETH15M-26AUG090200-00",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=0.15,
+            client_order_id="test-coid-001",
+            idempotency_key="test-idem-001",
+            time_in_force="ioc",
+            aggressiveness=1.0,
+            post_only=False,
+        )
+        req = _build_create_order_request(
+            intent,
+            ticker=intent.ticker,
+            exchange_index=2,
+            final_price_cents=50,
+            effective_order_type="limit",
+            effective_tif="IOC",
+            expiration_ts=None,
+            post_only=False,
+        )
+        assert isinstance(req, CreateOrderRequest)
+        assert req.size == Decimal("0.15")
+        assert req.time_in_force == "IOC"
+        assert req.post_only is False
+        assert req.exchange_index == 2
+        assert req.metadata["count_fp"] == "0.15"
+
+    def test_client_format_count_fp_rounds_to_centi_contract(self):
+        from merid.event_venues.kalshi.client import _format_count_fp
+
+        assert _format_count_fp(Decimal("0.15")) == "0.15"
+        assert _format_count_fp(Decimal("1.00")) == "1"
+        assert _format_count_fp(1) == "1"
+        assert _format_count_fp(0.15) == "0.15"
+
+    def test_unified_sizing_reserves_min_fee_headroom(self):
+        from merid.prediction.unified_sizing import compute_order_size
+
+        # Bankroll of $0.01 (exactly the 1c fee reserve), price 50c -> contract cost $0.50.
+        # Reserving the 1c fee leaves $0.00, so no position can be afforded.
+        count, notional, meta = compute_order_size(
+            bankroll_usd=Decimal("0.01"),
+            price_cents=50,
+            asset="BTC",
+        )
+        assert count == 0.0
+
+        # Bankroll of $0.515 -> after 1c fee, $0.505 available.
+        # At 50c per contract that is 1.01 contracts, quantized to 0.01.
+        # Notional must be <= cash after fee reserve ($0.505).
+        count, notional, meta = compute_order_size(
+            bankroll_usd=Decimal("0.515"),
+            price_cents=50,
+            asset="BTC",
+        )
+        assert Decimal(str(count)) > 0
+        assert notional <= Decimal("0.505")

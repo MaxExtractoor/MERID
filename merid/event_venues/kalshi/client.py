@@ -5508,14 +5508,14 @@ class KalshiVenueClient(EventVenueClient):
         Legacy format: uses count field
         """
         try:
-            # Handle both new API format (position_fp) and legacy format (count)
-            count = 0
+            # Handle both new API format (position_fp) and legacy format (count).
+            # Kalshi V2 supports fractional contracts (0.01 granularity); preserve
+            # the fixed-point value as Decimal, never truncate to an integer.
+            count = Decimal("0")
             if "position_fp" in data:
-                # New format: position_fp is a fixed-point string (e.g., "10.00")
-                count = int(float(data.get("position_fp", "0")))
+                count = Decimal(str(data.get("position_fp", "0")))
             elif "count" in data:
-                # Legacy format: count is an integer
-                count = int(data.get("count", 0))
+                count = Decimal(str(data.get("count", 0)))
 
             # CRITICAL FIX (2026-08-04): Kalshi REST may express positions as negative
             # `position_fp` values with an empty or missing `side` field. In the V2 API a
@@ -5532,10 +5532,10 @@ class KalshiVenueClient(EventVenueClient):
                 else:
                     side = "no"  # Fallback: negative position_fp convention = NO
                 logger.info(
-                    "[KALSHI-POSITION-PARSE] Negative position_fp for %s: normalized to side=%s count=%d",
+                    "[KALSHI-POSITION-PARSE] Negative position_fp for %s: normalized to side=%s count=%s",
                     data.get("ticker") or data.get("market_ticker", "unknown"),
                     side,
-                    count,
+                    str(count),
                 )
             elif not side:
                 side = "yes"  # Default for legacy positive positions
@@ -5665,12 +5665,17 @@ class KalshiVenueClient(EventVenueClient):
     def _parse_trade(self, data: Dict[str, Any]) -> Optional[KalshiTrade]:
         """Parse trade from API."""
         try:
+            # Preserve fractional contract count from V2 count_fp if available.
+            if "count_fp" in data:
+                count = Decimal(str(data.get("count_fp", "0")))
+            else:
+                count = Decimal(str(data.get("count", 0)))
             return KalshiTrade(
                 trade_id=data.get("trade_id", data.get("id", "")),
                 ticker=data.get("ticker", ""),
                 order_id=data.get("order_id", ""),
                 side=data.get("side", ""),
-                count=int(data.get("count", 0)),
+                count=count,
                 price=Decimal(str(data.get("price", 0))),
                 fee=Decimal(str(data.get("fee", 0))),
                 timestamp=self._parse_datetime(data.get("created_at")) or datetime.now(timezone.utc)

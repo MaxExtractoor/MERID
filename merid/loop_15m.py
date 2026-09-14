@@ -8108,8 +8108,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         # Validate count is reasonable.  Anything below one centi-contract is effectively zero.
         if count < 0.01:
-            logger.warning("[15M-LOOP] Invalid count=%s from candidate, defaulting to 1.0", count)
-            count = 1.0
+            logger.warning("[15M-LOOP] Invalid count=%s from candidate, rejecting", count)
+            return False
         
         # Calculate notional for logging
         position_notional_usd = (count * price_cents) / 100.0
@@ -8149,7 +8149,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     ev_input = EVInput(
                         p_model=_p_model,
                         p_exec=Decimal(str(price_cents)) / Decimal("100"),
-                        qty_cc=count * 100,
+                        qty_cc=int(round(count * 100)),
                         entry_fee_per_contract=_entry_fee,
                         expected_exit_cost_per_contract=_exit_cost,
                         adverse_selection_reserve_per_contract=getattr(trade_decision, "adverse_selection_reserve", Decimal("0")) or Decimal("0"),

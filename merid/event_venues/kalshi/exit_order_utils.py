@@ -9,6 +9,7 @@ between components. Previously, order_router._is_exit_order() and
 position_cache._is_exit_order_from_action() had duplicate logic that could diverge.
 """
 
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 
@@ -100,12 +101,19 @@ def _intent_signed_yes_delta_cc(intent) -> int:
         side = "yes"
     else:
         side = raw_side
-    count = getattr(intent, "count", 0) or 0
-    try:
-        count_int = int(count)
-    except (TypeError, ValueError):
-        return 0
-    return int(yes_delta(action, side, count_int * 100))
+    count_fp = getattr(intent, "count_fp", None)
+    if count_fp is not None:
+        try:
+            count_cc = int(count_fp * Decimal("100"))
+        except (TypeError, ValueError, InvalidOperation):
+            return 0
+    else:
+        count = getattr(intent, "count", 0) or 0
+        try:
+            count_cc = int(round(float(count) * 100))
+        except (TypeError, ValueError):
+            return 0
+    return int(yes_delta(action, side, count_cc))
 
 
 def is_exit_order_from_intent(intent, pre_position_yes_cc: Optional[int] = None) -> bool:
