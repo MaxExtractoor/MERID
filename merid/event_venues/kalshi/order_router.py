@@ -8610,20 +8610,22 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
     else:
         gross_edge_cents = notional_cents * (edge_pct / 100.0)
 
-    # Round-trip fee estimates using the schedule-based parabolic formula.
+    # Round-trip fee estimates using the exact venue fee (0.01c resolution).
+    # Kalshi does NOT ceil fees to a whole cent (verified against V2 fill
+    # records); the integer helpers over-charge fractional orders and would
+    # reject every sub-1-contract entry as "unprofitable".
     try:
-        from merid.event_venues.kalshi.parabolic_fees import (
-            kalshi_maker_fee_cents,
-            kalshi_taker_fee_cents_parabolic,
-        )
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
         price_dollars = price_cents / 100.0
-        maker_fee = kalshi_maker_fee_cents(price_dollars, count_value)
-        taker_fee = kalshi_taker_fee_cents_parabolic(price_dollars, count_value)
+        maker_fee = float(kalshi_fee_cents_exact(price_dollars, count_value, "maker"))
+        taker_fee = float(kalshi_fee_cents_exact(price_dollars, count_value, "taker"))
     except Exception:
         # Fee lookup failure is a production safety concern; fail closed.
         return "net_of_cost:fee_computation_failed"
 
-    spread_cents = max(0, best_ask - best_bid)
+    # Spread is quoted per contract; scale it by the fractional order size so a
+    # 4c spread on 0.17 contracts costs 0.68c, not 4c.
+    spread_cents = max(0, best_ask - best_bid) * count_value
 
     # Conservative round-trip cost assumptions:
     # - Maker path: pay maker fee to enter, pay taker fee to exit worst-case.
@@ -12735,9 +12737,9 @@ async def _route_live(
                         else Decimal(str(intent.count or 0))
                     )
                     _gate_price = int(intent.price_cents or 0)
-                    from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
-                    _gate_fee_cents = kalshi_taker_fee_cents_parabolic(_gate_price / 100.0, _gate_count_fp)
-                    _need = (Decimal(_gate_price) * _gate_count_fp + Decimal(_gate_fee_cents)) / 100
+                    from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+                    _gate_fee_cents = kalshi_fee_cents_exact(_gate_price / 100.0, _gate_count_fp, "taker")
+                    _need = (Decimal(_gate_price) * _gate_count_fp + _gate_fee_cents) / 100
                     if _shard_cash < _need:
                         latency = (_time.monotonic() - t0) * 1000
                         _funding = last_result()
