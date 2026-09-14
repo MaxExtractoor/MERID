@@ -191,7 +191,7 @@ async def ensure_trading_shard_funded(
 
     if deficit_cents <= 0 or idle_cents <= 0:
         res.funded = have >= min_needed
-        res.reason = "no_idle_cash_on_other_shards"
+        res.reason = "already_funded" if deficit_cents <= 0 else "no_idle_cash_on_other_shards"
         _last_check_ts, _last_result = time.time(), res
         logger.warning("[SHARD-FUNDING] %s", res.summary())
         return res
