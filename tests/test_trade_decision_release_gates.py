@@ -487,3 +487,36 @@ def test_canary_off_leaves_decision_unchanged(monkeypatch):
     assert d.selected_outcome == "yes"
     assert "shadow_cohort" not in d.indicators
 
+
+def test_pi_star_uses_exact_fractional_fee(monkeypatch):
+    """The p_selected_below_pi_star gate must preserve sub-cent fees, not round them to whole cents."""
+    calls = []
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.log_rejected_candidate",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+
+    # 40c NO contract, maker fee = 0.0175 * 1 * 0.40 * 0.60 * 100 = 0.42c.
+    fee_cents = 0.42
+    # p_no = 0.5041 clears the cost basis (0.4584) and net-edge threshold (~0.0446)
+    # but falls just below pi* (held 40c + fee 0.42c + 10c premium = 50.42c).
+    d = _make_decision(
+        min_edge=0.02,
+        p_yes_model=0.4959,
+        yes_bid=59.0,
+        yes_ask=60.0,
+        no_bid=39.0,
+        no_ask=40.0,
+        fee_cents=fee_cents,
+        data_quality="live",
+        regime="normal",
+    )
+    assert d.selected_outcome is None
+    assert "p_selected_below_pi_star" in (d.no_trade_reason or "")
+    pi_calls = [c for c in calls if "p_selected_below_pi_star" in str(c.get("reason", ""))]
+    assert len(pi_calls) == 1
+    assert math.isclose(pi_calls[0]["fee_cents"], fee_cents, rel_tol=1e-9, abs_tol=1e-9)
+
