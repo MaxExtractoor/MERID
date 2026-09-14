@@ -24,7 +24,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any, Dict, Iterable, Optional
 
 from utils.logger import get_logger
@@ -45,12 +45,16 @@ def auto_fund_enabled() -> bool:
 def min_collateral_cents() -> int:
     """Smallest shard balance that makes a one-contract entry possible.
 
-    Default 12c = 10c held-price floor + 1c fee + 1c headroom.
+    With Kalshi V2 count_fp the minimum order is one centi-contract (0.01).
+    At the default 35c held floor the all-in cost is ~1.35c (price * 0.01 + 1c
+    parabolic fee), so the default is 2c.  The env var remains an operator
+    override, but the function clamps it to at least 1c and never above the
+    configured target.
     """
     try:
-        return max(1, int(os.environ.get("MERID_MIN_TRADING_SHARD_COLLATERAL_CENTS", "12")))
+        return max(1, int(os.environ.get("MERID_MIN_TRADING_SHARD_COLLATERAL_CENTS", "2")))
     except ValueError:
-        return 12
+        return 2
 
 
 def target_shard_usd() -> Decimal:
@@ -165,33 +169,45 @@ async def ensure_trading_shard_funded(
 
     shards: Dict[int, Decimal] = dict(bal.data or {})
     have = shards.get(shard, Decimal("0"))
-    total = sum(shards.values(), Decimal("0"))
     min_needed = Decimal(min_collateral_cents()) / 100
-    # We can never park more than the account holds; don't flag a tiny account
-    # as under-funded when *all* its cash is already on the trading shard.
-    effective_target = min(target, total)
 
-    res = ShardFundingResult(shard, shards, have, target)
-
-    if have >= effective_target or (have >= min_needed and have + Decimal("0.005") >= total):
-        res.funded = have >= min_needed
-        res.reason = "already_funded" if res.funded else "account_below_min_collateral"
-        _last_check_ts, _last_result = time.time(), res
-        logger.info("[SHARD-FUNDING] %s", res.summary())
-        return res
-
-    deficit_cents = int(((effective_target - have) * 100).to_integral_value(rounding=ROUND_DOWN))
+    # Only whole cents can be moved between shards (Kalshi transfers are in
+    # cents / centicents).  Compute the transferable idle cash in integer cents.
     donors = sorted(
         ((idx, usd) for idx, usd in shards.items() if idx != shard and usd > 0),
         key=lambda kv: kv[1],
         reverse=True,
     )
     idle_cents = sum(int((usd * 100).to_integral_value(rounding=ROUND_DOWN)) for _, usd in donors)
-    res.details = {"deficit_cents": deficit_cents, "idle_cents_other_shards": idle_cents}
+    usable_total = have + (Decimal(idle_cents) / 100)
 
-    if deficit_cents <= 0 or idle_cents <= 0:
+    # The effective target is the smaller of the configured exposure cap and the
+    # cash we can actually get onto the trading shard.  This keeps sub-cent
+    # residue on other shards from being counted as spendable.
+    effective_target = min(target, usable_total)
+
+    res = ShardFundingResult(shard, shards, have, effective_target)
+    res.details = {
+        "configured_target_usd": float(target),
+        "idle_cents_other_shards": idle_cents,
+        "min_needed_usd": float(min_needed),
+    }
+
+    if have >= effective_target:
         res.funded = have >= min_needed
-        res.reason = "already_funded" if deficit_cents <= 0 else "no_idle_cash_on_other_shards"
+        res.reason = "already_funded" if res.funded else "account_below_min_collateral"
+        _last_check_ts, _last_result = time.time(), res
+        logger.info("[SHARD-FUNDING] %s", res.summary())
+        return res
+
+    # Round the deficit up: whole-cent transfers must cover the sub-cent gap.
+    deficit_cents = int(((effective_target - have) * 100).to_integral_value(rounding=ROUND_CEILING))
+    deficit_cents = min(deficit_cents, idle_cents)
+    res.details["deficit_cents"] = deficit_cents
+
+    if deficit_cents <= 0:
+        res.funded = have >= min_needed
+        res.reason = "no_idle_cash_on_other_shards"
         _last_check_ts, _last_result = time.time(), res
         logger.warning("[SHARD-FUNDING] %s", res.summary())
         return res

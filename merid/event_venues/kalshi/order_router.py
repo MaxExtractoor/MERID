@@ -12727,8 +12727,17 @@ async def _route_live(
                 _shards = await get_shard_balances_cached(client, max_age_s=15.0)
                 if _shards:
                     _shard_cash = _shards.get(int(_resolved_exchange_index), Decimal("0"))
-                    # Worst-case collateral: limit price + max 2c fee per contract.
-                    _need = Decimal(int(intent.price_cents or 0) + 2) * Decimal(str(intent.count)) / 100
+                    # Collateral = exact fractional notional + venue taker fee
+                    # (parabolic, ceil'd to the cent) computed on the canonical
+                    # count_fp so 0.15 contracts is not charged as 1 contract.
+                    _gate_count_fp = (
+                        Decimal(str(intent.count_fp)) if intent.count_fp is not None
+                        else Decimal(str(intent.count or 0))
+                    )
+                    _gate_price = int(intent.price_cents or 0)
+                    from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
+                    _gate_fee_cents = kalshi_taker_fee_cents_parabolic(_gate_price / 100.0, _gate_count_fp)
+                    _need = (Decimal(_gate_price) * _gate_count_fp + Decimal(_gate_fee_cents)) / 100
                     if _shard_cash < _need:
                         latency = (_time.monotonic() - t0) * 1000
                         _funding = last_result()

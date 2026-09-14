@@ -79,9 +79,30 @@ def test_moves_idle_cash_onto_crypto_shard():
     client = FakeClient({0: Decimal("0.9084"), 2: Decimal("0.0391")})
     res = asyncio.run(sf.ensure_trading_shard_funded(client, None))
     assert res.trading_shard == 2
-    assert client.transfers == [(0, 2, 86)]  # min(deficit 86c, donor 90c)
+    # deficit 86.09c rounds UP to 87c so the shard actually reaches the target
+    assert client.transfers == [(0, 2, 87)]
     assert res.funded and res.reason == "transferred"
-    assert res.trading_shard_usd == Decimal("0.8991")
+    assert res.trading_shard_usd == Decimal("0.9091")
+
+
+def test_low_balance_all_on_trading_shard_passes_preflight():
+    """Regression: $0.0975 account with $0.0891 on shard 2 and 0.84c on shard 0.
+
+    The 0.84c residue is not transferable (sub-cent), so the effective target
+    must collapse to what is on the trading shard and preflight must PASS.
+    """
+    client = FakeClient({0: Decimal("0.0084"), 1: Decimal("0"), 2: Decimal("0.0891"), 3: Decimal("0")})
+    res = asyncio.run(sf.ensure_trading_shard_funded(client, None))
+    assert client.transfers == []
+    assert res.funded and res.reason == "already_funded"
+    assert res.target_usd == Decimal("0.0891")
+
+
+def test_exact_balance_dollars_preferred_over_truncated_cents():
+    raw = RawVenueBalance.from_kalshi_response(
+        {"balance": 9, "balance_dollars": "0.0975", "balance_breakdown": [{"balance": "0.0975", "exchange_index": 2}]}
+    )
+    assert raw.cash_available == Decimal("0.0975")
 
 
 def test_already_funded_is_noop():
@@ -100,7 +121,7 @@ def test_tiny_account_all_on_trading_shard_is_funded():
 
 def test_fails_closed_when_auto_fund_disabled(monkeypatch):
     monkeypatch.setenv("MERID_AUTO_FUND_TRADING_SHARD", "0")
-    client = FakeClient({0: Decimal("5.00"), 2: Decimal("0.02")})
+    client = FakeClient({0: Decimal("5.00"), 2: Decimal("0.01")})
     res = asyncio.run(sf.ensure_trading_shard_funded(client, None))
     assert client.transfers == []
     assert not res.funded and res.reason == "auto_fund_disabled"
@@ -113,9 +134,9 @@ def test_transfer_rejection_is_reported_not_raised():
 
 
 def test_no_cash_anywhere_is_not_funded():
-    client = FakeClient({0: Decimal("0.00"), 2: Decimal("0.05")})
+    client = FakeClient({0: Decimal("0.00"), 2: Decimal("0.01")})
     res = asyncio.run(sf.ensure_trading_shard_funded(client, None))
-    assert not res.funded
+    assert not res.funded and res.reason == "account_below_min_collateral"
 
 
 def test_env_override_for_trading_shard(monkeypatch):

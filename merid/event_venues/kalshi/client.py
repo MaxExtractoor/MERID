@@ -4256,6 +4256,9 @@ class KalshiVenueClient(EventVenueClient):
         # Balance validation: ensure numeric and non-negative
         try:
             balance_usd = Decimal(str(balance_cents)) / 100
+            # Prefer Kalshi's exact dollar string (sub-cent precision) when present.
+            if raw.get("balance_dollars") is not None:
+                balance_usd = Decimal(str(raw["balance_dollars"]))
             locked_usd = Decimal(str(locked_cents)) / 100
             
             if balance_usd < 0:

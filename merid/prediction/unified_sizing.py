@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 import os
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from typing import Optional, Tuple
 
 from utils.logger import get_logger
@@ -1042,16 +1042,50 @@ def compute_order_size(
     # up to the next cent, so a 1c headroom is the smallest safe reserve.
     max_by_exposure = available_exposure_usd / contract_cost_usd
     max_by_bankroll = bankroll_usd / contract_cost_usd
+
+    # Kalshi collateralizes on the market's exchange shard, so the spendable
+    # cash is the trading-shard balance, not total account equity.  Read the
+    # cached per-shard breakdown (no network call); fall back to bankroll_usd
+    # when the cache is empty.
+    spendable_usd = bankroll_usd
+    try:
+        from merid.event_venues.kalshi.shard_funding import last_result as _shard_last_result
+
+        _sf = _shard_last_result()
+        if _sf is not None and _sf.shard_balances:
+            _shard_cash = _sf.shard_balances.get(_sf.trading_shard, Decimal("0"))
+            spendable_usd = min(bankroll_usd, _shard_cash)
+    except Exception:
+        pass
+
     min_fee_usd = Decimal("0.01")
     max_by_cash_cost = (
-        max(Decimal("0"), bankroll_usd - min_fee_usd) / contract_cost_usd
-        if bankroll_usd > min_fee_usd
+        max(Decimal("0"), spendable_usd - min_fee_usd) / contract_cost_usd
+        if spendable_usd > min_fee_usd
         else Decimal("0")
     )
 
     contract_count = min(target_contracts, max_contracts_cap, max_by_exposure, max_by_bankroll, max_by_cash_cost)
     if max_by_notional is not None:
         contract_count = min(contract_count, max_by_notional)
+
+    # Exact fee reserve: Kalshi's parabolic taker fee is ceil'd to the cent, so
+    # shrink the count (ROUND_DOWN to the centi-contract grid) until
+    # notional + fee fits within spendable cash.
+    try:
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
+
+        _q = contract_count.quantize(CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN)
+        for _ in range(8):
+            if _q < CONTRACT_COUNT_QUANTUM:
+                break
+            _fee_usd = Decimal(kalshi_taker_fee_cents_parabolic(price_cents / 100.0, _q)) / 100
+            if _q * contract_cost_usd + _fee_usd <= spendable_usd:
+                break
+            _q = (_q - CONTRACT_COUNT_QUANTUM).quantize(CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN)
+        contract_count = min(contract_count, _q)
+    except Exception as exc:
+        logger.warning("[UNIFIED-SIZING] fee-aware cash fit skipped: %s", exc)
 
     # 2026-08-28: Half-Kelly / daily-weekly cap sizing.  The UnifiedRiskManager
     # tracks realized PnL and throttles or blocks new size when the daily or
@@ -1077,7 +1111,7 @@ def compute_order_size(
     # Scale by the loss/heat multiplier and quantize to the Kalshi-supported
     # centi-contract precision (2 decimal places).  Sizes smaller than one
     # centi-contract are treated as zero to avoid sub-minimal submissions.
-    scaled = (contract_count * Decimal(str(loss_size_scale))).quantize(CONTRACT_COUNT_QUANTUM, rounding=ROUND_HALF_UP)
+    scaled = (contract_count * Decimal(str(loss_size_scale))).quantize(CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN)
     if scaled < CONTRACT_COUNT_QUANTUM:
         logger.warning(
             "[UNIFIED-SIZING] Insufficient exposure for requested count: "
