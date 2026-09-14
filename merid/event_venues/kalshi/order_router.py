@@ -12678,6 +12678,34 @@ async def _route_live(
                     latency_ms=round(latency, 2),
                 )
 
+        # ── Shard collateral gate (entries only) ──────────────────────────
+        # Kalshi collateralizes on the market's shard.  Reject locally with a
+        # precise reason (and trigger a throttled top-up) instead of spending a
+        # 4-20s round trip on an order the exchange will refuse with
+        # ``insufficient_balance``.  Exits are reduce-only and never need cash.
+        if not _is_exit and _resolved_exchange_index is not None and mode == TradingMode.LIVE:
+            try:
+                from merid.event_venues.kalshi.shard_funding import get_shard_balances_cached, last_result
+
+                _shards = await get_shard_balances_cached(client, max_age_s=15.0)
+                if _shards:
+                    _shard_cash = _shards.get(int(_resolved_exchange_index), Decimal("0"))
+                    # Worst-case collateral: limit price + max 2c fee per contract.
+                    _need = Decimal(int(intent.price_cents or 0) + 2) * Decimal(str(intent.count)) / 100
+                    if _shard_cash < _need:
+                        latency = (_time.monotonic() - t0) * 1000
+                        _funding = last_result()
+                        _reason = (
+                            f"insufficient_shard_balance:shard={_resolved_exchange_index}"
+                            f":have=${_shard_cash:.4f}:need=${_need:.2f}"
+                            f":funding={_funding.reason if _funding else 'not_run'}"
+                        )
+                        logger.warning("[order-router] %s ticker=%s intent_id=%s", _reason, _wire_ticker, intent.intent_id)
+                        _release_gate_record(intent, _reason)
+                        return OrderResult(status="rejected", mode=mode, reason=_reason, latency_ms=round(latency, 2))
+            except Exception as _shard_exc:
+                logger.debug("[order-router] shard collateral gate skipped: %s", _shard_exc)
+
         # ── Order Group Risk Check ─────────────────────────────────────────
         # A3/RISK-05: track og_manager and whether a debit was recorded so we
         # can reverse it if the exchange rejects the order.

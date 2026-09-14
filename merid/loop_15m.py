@@ -4471,6 +4471,21 @@ async def _run_loop(self) -> None:
                         logger.warning("[15m-LOOP] BALANCE-CALIBRATOR: Bankroll is None or <= 0, skipping calibration")
                 except Exception as e:
                     logger.warning("[15m-LOOP] Failed to fetch cycle bankroll: %s", e)
+
+                # Keep collateral on the Kalshi shard that hosts the 15m crypto
+                # markets.  Throttled inside the helper; never raises.  Runs as a
+                # background task so a transfer settle-wait cannot stall the tick.
+                try:
+                    from merid.event_venues.kalshi.client import get_kalshi_client
+                    from merid.event_venues.kalshi.shard_funding import maybe_refund_trading_shard
+
+                    _sf_task = getattr(self, "_shard_funding_task", None)
+                    if _sf_task is None or _sf_task.done():
+                        self._shard_funding_task = asyncio.create_task(
+                            maybe_refund_trading_shard(get_kalshi_client(), getattr(self, "_catalog", None), min_interval_s=60.0)
+                        )
+                except Exception as e:
+                    logger.debug("[15m-LOOP] shard funding scheduling failed: %s", e)
                 
                 # CRITICAL: Check if 15-minute ET window has changed
                 # Only reset cycle guards when window changes, not every 5 seconds

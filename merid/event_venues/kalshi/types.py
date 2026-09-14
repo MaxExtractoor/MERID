@@ -6,7 +6,7 @@ NO legacy "locked bankroll" concepts. NO assertions on external data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum, auto
@@ -41,6 +41,31 @@ class RawVenueBalance:
     raw_cents: Dict[str, int] # Original raw values for debugging
     as_of: datetime
     source: str = "kalshi"
+    # Per-exchange-shard cash (USD), parsed from ``balance_breakdown``.  Kalshi
+    # collateralizes orders on the shard that hosts the market (crypto = shard
+    # 2), so the aggregate ``balance`` is NOT what is spendable on a 15m market.
+    shard_balances: Dict[int, Decimal] = field(default_factory=dict)
+
+    @staticmethod
+    def parse_shard_balances(response: Dict[str, Any]) -> Dict[int, Decimal]:
+        """Parse ``balance_breakdown`` (dollar strings per ``exchange_index``)."""
+        out: Dict[int, Decimal] = {}
+        for item in response.get("balance_breakdown") or []:
+            try:
+                out[int(item["exchange_index"])] = Decimal(str(item.get("balance", "0")))
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                continue
+        return out
+
+    def shard_cash(self, exchange_index: Optional[int]) -> Decimal:
+        """Spendable cash on ``exchange_index``.
+
+        Falls back to the aggregate balance only when Kalshi did not return a
+        breakdown (legacy/unsharded response) or no shard was requested.
+        """
+        if exchange_index is None or not self.shard_balances:
+            return self.cash_available
+        return self.shard_balances.get(int(exchange_index), Decimal("0"))
     
     @classmethod
     def from_kalshi_response(cls, response: Dict[str, Any]) -> RawVenueBalance:
@@ -69,6 +94,7 @@ class RawVenueBalance:
             },
             as_of=datetime.now(timezone.utc),
             source="kalshi",
+            shard_balances=cls.parse_shard_balances(response),
         )
 
 

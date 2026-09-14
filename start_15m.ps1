@@ -46,21 +46,6 @@ if (Test-Path $EnvFile) {
     Write-Host "[start_15m] WARNING: env file not found at $EnvFile" -ForegroundColor Yellow
 }
 
-# 0. Observe-only guard (P0 remediation, 2026-09-08).
-# The server process must remain in a read-only, halted state unless the
-# operator explicitly opts out by setting MERID_OBSERVE_ONLY=0 before
-# invoking this script.  This is an additional layer on top of the durable
-# auto_execution_mode setting in AGENTS.md; the runtime state still requires
-# a separate explicit release via the live-runtime-state API.
-if ([string]::IsNullOrWhiteSpace($env:MERID_OBSERVE_ONLY)) {
-    $env:MERID_OBSERVE_ONLY = "1"
-    Write-Host "[start_15m] MERID_OBSERVE_ONLY defaulted to 1 (read-only). Set MERID_OBSERVE_ONLY=0 to allow auto live enable." -ForegroundColor Yellow
-} elseif ($env:MERID_OBSERVE_ONLY.Trim().ToLowerInvariant() -in @("0", "false", "no")) {
-    Write-Host "[start_15m] MERID_OBSERVE_ONLY=0; auto-execution may enable live entries if all gates pass." -ForegroundColor Red
-} else {
-    Write-Host "[start_15m] MERID_OBSERVE_ONLY=$($env:MERID_OBSERVE_ONLY) (read-only). Live entries will remain halted." -ForegroundColor Cyan
-}
-
 # 0. Pre-flight helpers
 function Require-ExactEnvValue {
     param(
@@ -199,7 +184,7 @@ $env:MERID_ALLOW_LIVE_TRADES = "true"
 # low/negative edge momentum_fvg signals to execute and lose money.  The filter now
 # uses the signal's ev_net_cents or computes canonical edge_cents = (P_true - P_market)*100.
 $env:MERID_KALSHI_NET_EDGE_FILTER_ENABLED = "true"
-Write-Host "[start_15m] *** LIVE VENUE SELECTED - ORDERS ARE FAIL-CLOSED BY observe_only GATE ***" -ForegroundColor Red
+Write-Host "[start_15m] *** LIVE VENUE SELECTED - entries gated by the live runtime state machine (preflight -> LIVE_ENTRIES_ENABLED) ***" -ForegroundColor Red
 Write-Host "[start_15m] TRADING_ENABLED=$($env:TRADING_ENABLED)" -ForegroundColor Cyan
 Write-Host "[start_15m] MERID_PM_TRADING_MODE=$($env:MERID_PM_TRADING_MODE)" -ForegroundColor Cyan
 Write-Host "[start_15m] MERID_PM_LIVE_ENABLED=$($env:MERID_PM_LIVE_ENABLED)" -ForegroundColor Cyan
@@ -222,6 +207,30 @@ function Get-AutoExecutionModeFromAgentsMd {
 
 $autoExecutionMode = Get-AutoExecutionModeFromAgentsMd
 Write-Host "[start_15m] AGENTS.md auto_execution_mode=$autoExecutionMode" -ForegroundColor Cyan
+
+# 2.0 Observe-only resolution (2026-09-14).  AGENTS.md auto_execution_mode is
+# the durable operator authorization.  When it is 1, the process must NOT
+# default to observe-only; doing so silently contradicted the contract and
+# left entries halted after every restart.  An explicit MERID_OBSERVE_ONLY=1
+# in the environment/.env still wins (operator emergency read-only mode).
+if ([string]::IsNullOrWhiteSpace($env:MERID_OBSERVE_ONLY)) {
+    $env:MERID_OBSERVE_ONLY = if ($autoExecutionMode -eq 1) { "0" } else { "1" }
+    Write-Host "[start_15m] MERID_OBSERVE_ONLY defaulted to $($env:MERID_OBSERVE_ONLY) from auto_execution_mode=$autoExecutionMode" -ForegroundColor Cyan
+}
+if ($env:MERID_OBSERVE_ONLY.Trim().ToLowerInvariant() -in @("0", "false", "no")) {
+    Write-Host "[start_15m] MERID_OBSERVE_ONLY=0: live entries auto-enable after startup preflight passes." -ForegroundColor Red
+} else {
+    Write-Host "[start_15m] MERID_OBSERVE_ONLY=$($env:MERID_OBSERVE_ONLY): read-only; live entries stay HALTED (exits/cancels still active)." -ForegroundColor Yellow
+}
+
+# 2.0a Kalshi exchange-shard collateral (2026-09-14).  Crypto 15m markets trade
+# on exchange shard 2 and Kalshi collateralizes per shard; cash left on shard 0
+# gets every entry rejected with insufficient_balance.  Startup preflight moves
+# idle cash onto the trading shard (intra-account transfer, never a withdrawal)
+# and the loop tops it up.  Set MERID_AUTO_FUND_TRADING_SHARD=0 to fail closed
+# instead of transferring.
+if ([string]::IsNullOrWhiteSpace($env:MERID_AUTO_FUND_TRADING_SHARD)) { $env:MERID_AUTO_FUND_TRADING_SHARD = "1" }
+Write-Host "[start_15m] MERID_AUTO_FUND_TRADING_SHARD=$($env:MERID_AUTO_FUND_TRADING_SHARD)" -ForegroundColor Cyan
 
 if ($env:MERID_PM_TRADING_MODE -eq "live") {
     Require-ExactEnvValue -Name "MERID_REQUIRE_EXIT_PARENTAGE" -Expected "1"

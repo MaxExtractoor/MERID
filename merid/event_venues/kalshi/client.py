@@ -4284,6 +4284,69 @@ class KalshiVenueClient(EventVenueClient):
             latency_ms=result.latency_ms,
             retries=result.retries,
         )
+
+    async def get_shard_balances(self) -> OperationResult[Dict[int, Decimal]]:
+        """Return spendable cash (USD) per Kalshi exchange shard.
+
+        Kalshi splits collateral across matching-engine shards (crypto = 2).
+        Orders are collateralized on the shard hosting the market, so this is
+        the balance that actually gates a 15m crypto entry.
+        """
+        from merid.event_venues.kalshi.types import RawVenueBalance
+
+        result = await self._request_with_resilience(
+            "GET", "/portfolio/balance", operation_name="get_shard_balances"
+        )
+        if not result.success:
+            return OperationResult.fail(
+                result.error, latency_ms=result.latency_ms, retries=result.retries
+            )
+        raw = result.data or {}
+        shards = RawVenueBalance.parse_shard_balances(raw)
+        if not shards:
+            # Unsharded response: everything lives on shard 0.
+            shards = {0: Decimal(str(raw.get("balance", 0) or 0)) / 100}
+        return OperationResult.ok(shards, latency_ms=result.latency_ms, retries=result.retries)
+
+    async def transfer_between_shards(
+        self,
+        source_shard: int,
+        destination_shard: int,
+        amount_cents: int,
+        client_transfer_id: Optional[str] = None,
+    ) -> OperationResult[Dict[str, Any]]:
+        """Move cash between exchange shards within this account.
+
+        Uses ``POST /portfolio/intra_exchange_instance_transfer``.  The wire
+        ``amount`` is in centicents.  This never withdraws funds or changes
+        positions; it only relocates collateral inside the same Kalshi account.
+        """
+        import uuid
+
+        if amount_cents <= 0:
+            return OperationResult.fail(ValueError("amount_cents must be positive"))
+        if source_shard == destination_shard:
+            return OperationResult.fail(ValueError("source and destination shard are identical"))
+        body = {
+            "source": "event_contract",
+            "destination": "event_contract",
+            "source_exchange_shard": int(source_shard),
+            "destination_exchange_shard": int(destination_shard),
+            "source_subaccount": 0,
+            "destination_subaccount": 0,
+            "amount": int(amount_cents) * 100,
+            "client_transfer_id": client_transfer_id or str(uuid.uuid4()),
+        }
+        logger.warning(
+            "[SHARD-TRANSFER] requesting %d -> %d amount_cents=%d client_transfer_id=%s",
+            source_shard, destination_shard, amount_cents, body["client_transfer_id"],
+        )
+        return await self._request_with_resilience(
+            "POST",
+            "/portfolio/intra_exchange_instance_transfer",
+            json_data=body,
+            operation_name="transfer_between_shards",
+        )
     
     async def get_positions_aggregated_by_event(
         self, limit: int = 200
