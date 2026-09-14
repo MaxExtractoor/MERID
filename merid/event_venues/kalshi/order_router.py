@@ -1151,19 +1151,27 @@ def _resolve_execution_mode(intent: OrderIntent) -> str:
     """Return the canonical execution-mode string for an intent.
 
     Resolution order:
-      1. Explicit ``intent.execution_mode`` if it is a known mode.
-      2. Explicit ``intent.liquidity_role`` / ``intent.fee_type`` if set to ``maker`` or ``taker``.
-      3. Legacy posture flags (post_only, aggressiveness).
+      1. Policy-driven ``intent.expected_role`` / ``intent.fee_type`` from the
+         maker/taker integration (or the exit bypass). This is the authoritative
+         economic role selected by the policy engine, so it overrides stale or
+         conflicting loop-level execution_mode defaults.
+      2. Explicit ``intent.execution_mode`` if it is a known mode.
+      3. Explicit ``intent.liquidity_role`` if set to ``maker`` or ``taker``.
+      4. Legacy posture flags (post_only, aggressiveness).
 
     ``staged_ioc`` is preserved as a distinct mode because callers may want the
     staged lifecycle; downstream repricing and validation treat it as taker/IOC
     until the two-stage state machine is implemented.
     """
+    policy_role = getattr(intent, "expected_role", None) or getattr(intent, "fee_type", None)
+    if policy_role in ("maker", "taker"):
+        return policy_role
+
     mode = getattr(intent, "execution_mode", None)
     if mode in ("maker", "taker", "staged_ioc", "passive_quote"):
         return mode
 
-    role = getattr(intent, "liquidity_role", None) or getattr(intent, "fee_type", None) or getattr(intent, "expected_role", None)
+    role = getattr(intent, "liquidity_role", None)
     if role in ("maker", "taker"):
         return role
 
