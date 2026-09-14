@@ -4261,8 +4261,9 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             )
 
         # 3) Both feeds are fresh; the market may have moved between snapshots.
-        #    Allow if the live WS is authoritative and the order is marketable.
-        if ws_authoritative and ws_marketable:
+        #    Allow only if the order is marketable against both fresh feeds so an
+        #    IOC taker limit can be filled against the exchange's actual book.
+        if ws_authoritative and ws_marketable and rest_marketable:
             logger.info(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=WS_AUTHORITATIVE decision=ALLOW "
                 "reason=natural_move ws_age_ms=%.0f rest_age_ms=%.0f max_divergence=%dc "
@@ -8189,18 +8190,12 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                             )
                         taker_cap = min(fair_cap, edge_cap)
 
-                # 2026-08-30: Reprice a taker BUY to actually cross the ask instead of
-                # conservatively using the slippage/edge cap.  The limit remains bounded
-                # by the cap, but we target one tick through the displayed ask whenever
-                # the edge/slippage budget permits, so an IOC limit stays marketable even
-                # if the ask jumps 1c before the order reaches the exchange.
-                if side_ask is not None:
-                    target = side_ask
-                    if (side_ask + 1) <= taker_cap:
-                        target = side_ask + 1
-                    adjusted_price = min(taker_cap, max(target, side_ask))
-                else:
-                    adjusted_price = taker_cap
+                # 2026-09-14: Use the full taker cap as the IOC limit. A limit order
+                # fills at the best available ask; the cap is the maximum we are willing
+                # to pay. The cap is bounded by the fair slippage budget and the
+                # edge-preserving budget, so the order stays marketable up to the cap
+                # without paying beyond the model's risk budget.
+                adjusted_price = taker_cap
 
                 try:
                     from merid.prediction.kalshi_maker_taker_contract import (
@@ -8324,18 +8319,12 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         )
                     taker_floor = max(fair_floor, edge_floor)
 
-                # 2026-08-30: Reprice a taker SELL to actually cross the bid, bounded by
-                # the slippage/edge floor.  Cross one tick below the displayed bid
-                # whenever the edge/slippage budget permits, so an IOC limit remains
-                # marketable even if the bid drops 1c before the order reaches the
-                # exchange.
-                if side_bid is not None:
-                    target = side_bid
-                    if (side_bid - 1) >= taker_floor:
-                        target = side_bid - 1
-                    adjusted_price = max(taker_floor, min(target, side_bid))
-                else:
-                    adjusted_price = taker_floor
+                # 2026-09-14: Use the full taker floor as the IOC limit. A limit order
+                # fills at the best available bid; the floor is the minimum we are willing
+                # to accept. The floor is bounded by the fair slippage budget and the
+                # edge-preserving budget, so the order stays marketable down to the floor
+                # without accepting less than the model's risk budget.
+                adjusted_price = taker_floor
 
                 try:
                     from merid.prediction.kalshi_maker_taker_contract import (
