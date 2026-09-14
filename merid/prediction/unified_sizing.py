@@ -499,14 +499,20 @@ def _get_slippage_cents() -> int:
         return 5
 
 
-def compute_fee_cents(price_cents: int) -> float:
-    """Average Kalshi fee per contract in cents for a single-contract fill."""
-    if _FEES_AVAILABLE and calculate_kalshi_fee_per_contract_cents is not None:
-        return float(calculate_kalshi_fee_per_contract_cents(1, price_cents))
-    # Fallback parabolic estimate (matches the official formula at extremes).
-    price = price_cents / 100.0
-    fee = 0.07 * 1.0 * price * (1.0 - price) * 100.0
-    return float(math.ceil(fee))
+def compute_fee_cents(price_cents: int, role: str = "taker") -> float:
+    """Exact Kalshi fee per contract in cents for a single-contract fill.
+
+    Uses Kalshi's observed rounding: rate * P * (1-P) rounded UP to $0.0001
+    (0.01 cents).  This replaces the legacy whole-cent ceiling which
+    over-charged every OTM/ITM price and rejected close-EV trades.
+    """
+    if price_cents <= 0 or price_cents >= 100:
+        return 0.0
+    from decimal import Decimal
+    from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+
+    price_dollars = price_cents / 100.0
+    return float(kalshi_fee_cents_exact(price_dollars, Decimal("1"), role))
 
 
 def compute_all_in_cost_cents(

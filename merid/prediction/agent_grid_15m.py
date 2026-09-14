@@ -6515,7 +6515,7 @@ class LeanAgent15m:
             execution_mode = "maker"
             time_in_force = "gtc"
             post_only = True
-            fee_cents = float(_kalshi_maker_fee_cents(price_cents / 100.0, 1)) if _UNIFIED_SIZING_AVAILABLE else 0.5
+            fee_cents = float(_kalshi_fee_cents_exact(price_cents / 100.0, 1, "maker")) if _UNIFIED_SIZING_AVAILABLE else 0.5
         else:
             liquidity_role = "taker"
             aggressiveness = 1.0
@@ -6871,7 +6871,7 @@ class LeanAgent15m:
         if liquidity_role == "taker":
             fee_cents = float(compute_fee_cents(price_cents)) if _UNIFIED_SIZING_AVAILABLE else 2.0
         else:
-            fee_cents = float(_kalshi_maker_fee_cents(price_cents / 100.0, 1)) if _UNIFIED_SIZING_AVAILABLE else 0.5
+            fee_cents = float(_kalshi_fee_cents_exact(price_cents / 100.0, 1, "maker")) if _UNIFIED_SIZING_AVAILABLE else 0.5
         all_in_cost_cents = float(price_cents) + fee_cents + impact_reserve_cents
         ev_net_cents = (model_prob * 100.0) - all_in_cost_cents
 
@@ -7748,10 +7748,10 @@ class LeanAgent15m:
         maker_fee_yes_cents = 0.0
         maker_fee_no_cents = 0.0
         try:
-            taker_fee_yes_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(yes_ask))))
-            taker_fee_no_cents = float(canonical_calculate_kalshi_fee_cents(1, int(round(no_ask))))
-            maker_fee_yes_cents = float(_kalshi_maker_fee_cents(yes_ask / 100.0, 1))
-            maker_fee_no_cents = float(_kalshi_maker_fee_cents(no_ask / 100.0, 1))
+            taker_fee_yes_cents = float(_kalshi_fee_cents_exact(yes_ask / 100.0, 1, "taker"))
+            taker_fee_no_cents = float(_kalshi_fee_cents_exact(no_ask / 100.0, 1, "taker"))
+            maker_fee_yes_cents = float(_kalshi_fee_cents_exact(yes_ask / 100.0, 1, "maker"))
+            maker_fee_no_cents = float(_kalshi_fee_cents_exact(no_ask / 100.0, 1, "maker"))
         except Exception:
             pass
         taker_fee_cents = max(taker_fee_yes_cents, taker_fee_no_cents)
@@ -8956,8 +8956,8 @@ class LeanAgent15m:
         # for maker-first routing decisions.
         # Maker fee on Kalshi uses the parabolic 0.0175 rate, not zero.
         spread_pct = spread_width_cents / 100.0
-        taker_fee_cents = canonical_calculate_kalshi_fee_cents(1, int(entry_price_cents))
-        maker_fee_cents = _kalshi_maker_fee_cents(entry_price_cents / 100.0, 1)
+        taker_fee_cents = float(_kalshi_fee_cents_exact(entry_price_cents / 100.0, 1, "taker"))
+        maker_fee_cents = float(_kalshi_fee_cents_exact(entry_price_cents / 100.0, 1, "maker"))
         taker_fee_pct = taker_fee_cents / entry_price_cents if entry_price_cents > 0 else 0.0
         maker_fee_pct = maker_fee_cents / entry_price_cents if entry_price_cents > 0 else 0.0
         executable_edge_maker_pct = edge_pct - maker_fee_pct
@@ -14167,7 +14167,7 @@ class LeanAgent15m:
 
             # Calculate fee in cents for the winning side using canonical Kalshi fee function.
 
-            fee_cents = canonical_calculate_kalshi_fee_cents(1, int(price_cents))
+            fee_cents = float(_kalshi_fee_cents_exact(price_cents / 100.0, 1, "taker"))
 
 
 
@@ -18371,9 +18371,10 @@ def _extract_error_message(result) -> str:
 # Backwards-compatible aliases used by legacy test suites.
 AgentGrid15M = LeanAgent15m
 
-# Tests expect a fee function with signature (contracts, price_cents) returning an int.
-from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as canonical_calculate_kalshi_fee_cents
-from merid.event_venues.kalshi.parabolic_fees import kalshi_maker_fee_cents as _kalshi_maker_fee_cents
+# 2026-09-14: Use exact (sub-cent) Kalshi fees for the trade-decision EV gate.
+# The legacy whole-cent helpers over-charged OTM/ITM contracts and rejected
+# marginal-but-profitable edges.
+from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact as _kalshi_fee_cents_exact
 from merid.prediction.trade_decision import (
     compute_trade_decision,
     _resolve_annualized_vol,
