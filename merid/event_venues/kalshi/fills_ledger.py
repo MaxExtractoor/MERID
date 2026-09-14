@@ -1963,6 +1963,16 @@ class KalshiFillsLedger:
                     continue
 
                 fill = self._parse_fill(raw, "http_poller")
+                if fill.unmatched:
+                    logger.warning(
+                        "[UNMATCHED-FILL] fill_id=%s ticker=%s client_order_id=%s order_id=%s reason=%s - "
+                        "QUARANTINED. No position/exposure/PnL will be applied; fill is stored in ledger only.",
+                        fill.fill_id, fill.market_ticker, fill.client_order_id, fill.order_id, fill.unmatched_reason
+                    )
+                    await self._maybe_halt_on_unmatched_fill(
+                        fill=fill,
+                        source="http_poller",
+                    )
                 if _is_test_fixture_fill(fill.fill_id):
                     continue
 
@@ -2367,6 +2377,17 @@ class KalshiFillsLedger:
                 return False
 
             fill = self._parse_fill(raw, "websocket")
+
+            if fill.unmatched:
+                logger.warning(
+                    "[UNMATCHED-FILL-WS] fill_id=%s ticker=%s client_order_id=%s order_id=%s reason=%s - "
+                    "QUARANTINED. No position/exposure/PnL will be applied.",
+                    fill.fill_id, fill.market_ticker, fill.client_order_id, fill.order_id, fill.unmatched_reason
+                )
+                await self._maybe_halt_on_unmatched_fill(
+                    fill=fill,
+                    source="websocket",
+                )
 
             # 2026-08-16: Quarantined fills (side conflict, unknown, untrusted) are
             # stored for audit and reconciliation, but they must not be applied to
@@ -3154,8 +3175,41 @@ class KalshiFillsLedger:
                 return None
 
             # Recover intent_id from the durable attempt store.
-            attempt = OrderAttemptStore().get_by_client_order_id(exchange_client_order_id)
-            if not attempt:
+            # Entry attempts live in ``order_attempts``; exit attempts live in
+            # ``exit_order_attempts``.  Either may be the source of the client id.
+            store = OrderAttemptStore()
+            _resolved_intent_id: Optional[str] = None
+            _resolved_client_tag: Optional[str] = None
+            _is_exit = False
+
+            attempt = store.get_by_client_order_id(exchange_client_order_id)
+            if attempt is not None:
+                _resolved_intent_id = attempt.intent_id
+                _resolved_client_tag = attempt.client_tag
+            else:
+                exit_attempt = store.get_exit_attempt_by_client_order_id(exchange_client_order_id)
+                if exit_attempt is not None:
+                    _resolved_intent_id = exit_attempt.exit_intent_id
+                    _resolved_client_tag = exit_attempt.client_order_id
+                    _is_exit = True
+                    # The exchange has now confirmed the order existed; promote the
+                    # durable exit attempt to ACKNOWLEDGED_LATE and record the
+                    # exchange order id so future HTTP fills resolve locally.
+                    try:
+                        from merid.event_venues.kalshi.order_attempt_store import ExitOrderAttemptState
+                        store.transition_exit_attempt(
+                            exit_attempt.attempt_id,
+                            ExitOrderAttemptState.ACKNOWLEDGED_LATE.value,
+                            actor="fills_ledger",
+                            reason="exchange_lookaside_confirmed_order",
+                            exchange_order_id=fill.order_id,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[FILLS-LEDGER-RESOLVE] Failed to promote exit attempt to ACKNOWLEDGED_LATE"
+                        )
+
+            if not _resolved_intent_id:
                 # We at least know the client_order_id now, so record the order_id
                 # mapping for downstream correlation even without the intent.
                 self.record_pending_order(
@@ -3173,12 +3227,12 @@ class KalshiFillsLedger:
                 return None
 
             # Register all known identity aliases so the fill can be reclassified.
-            _client_tag = attempt.client_tag or exchange_client_order_id
+            _client_tag = _resolved_client_tag or exchange_client_order_id
             self.record_pending_order(
                 client_order_id=exchange_client_order_id,
                 client_order_ids=[exchange_client_order_id, _client_tag],
                 order_id=fill.order_id,
-                intent_id=attempt.intent_id,
+                intent_id=_resolved_intent_id,
             )
 
             try:
@@ -3194,13 +3248,14 @@ class KalshiFillsLedger:
 
             logger.info(
                 "[FILLS-LEDGER-RESOLVE] Recovered unmatched fill from exchange "
-                "fill_id=%s order_id=%s client_order_id=%s intent_id=%s",
+                "fill_id=%s order_id=%s client_order_id=%s intent_id=%s is_exit=%s",
                 fill.fill_id,
                 fill.order_id,
                 exchange_client_order_id,
-                attempt.intent_id,
+                _resolved_intent_id,
+                _is_exit,
             )
-            return attempt.intent_id
+            return _resolved_intent_id
 
         except asyncio.TimeoutError:
             logger.warning(
@@ -6296,23 +6351,35 @@ class KalshiFillsLedger:
     def _recover_client_order_id_for_order_id(
         self, order_id: Optional[str]
     ) -> Optional[str]:
-        """Recover client_order_id from order_id using position_cache mapping.
+        """Recover client_order_id from order_id using the most durable sources.
 
-        Kalshi's HTTP /portfolio/fills payload often omits client_order_id.  The
-        order_router registers the mapping as soon as the exchange order_id is
-        known, so we can bridge back to the intent before the durable
-        fills_ledger intent indices have been updated.
+        Order of authority:
+          1. ``position_cache`` mapping, which is updated on every successful ack.
+          2. Durable ``exit_order_attempts`` table, which is updated by
+             reconciliation for route-timeout cases where the ack never reached
+             the router but the exchange accepted the order.
         """
         if not order_id:
             return None
         try:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             cache = get_position_cache()
-            if cache is None:
-                return None
-            return cache.get_client_tag_for_order_id(order_id)
+            if cache is not None:
+                _coid = cache.get_client_tag_for_order_id(order_id)
+                if _coid:
+                    return _coid
         except Exception:
-            return None
+            pass
+
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+            attempt = OrderAttemptStore().get_exit_attempt_by_exchange_order_id(order_id)
+            if attempt is not None:
+                return attempt.client_order_id
+        except Exception:
+            pass
+
+        return None
 
     def _resolve_intent_from_pending_order(
         self,
@@ -6374,14 +6441,10 @@ class KalshiFillsLedger:
                 return True
         return False
 
-    def _maybe_halt_on_unmatched_fill(
+    async def _maybe_halt_on_unmatched_fill(
         self,
         *,
-        fill_id: Any,
-        ticker: Optional[str],
-        client_order_id: Any,
-        order_id: Any,
-        created_time: Any,
+        fill: KalshiFill,
         source: str,
     ) -> None:
         """Halt trading if a live, unmatched fill cannot be resolved to an intent.
@@ -6390,29 +6453,42 @@ class KalshiFillsLedger:
         considered live when they are newer than the persisted per-source
         watermark.  This prevents 7-day backfills and CSV exports from tripping
         the breaker while still catching newly observed, unlinked fills.
+
+        Before asking the breaker to halt, perform a bounded exchange lookaside
+        for HTTP fills that have an ``order_id`` but no ``client_order_id``.  This
+        heals the common race where a create-order ack is lost but the order was
+        accepted and filled.
         """
-        # Do not ask the breaker to re-evaluate a fill we have already accepted
-        # from another source.  Cross-source duplicates (e.g. WS then HTTP) can
-        # otherwise trip the breaker when the in-memory OrderIntent has been
-        # pruned between the two ingestion events.
-        if fill_id in self._fills:
+        if fill.fill_id in self._fills:
             logger.debug(
                 "[UNMATCHED-FILL-SKIP] fill_id=%s already in ledger; not calling breaker",
-                fill_id,
+                fill.fill_id,
+            )
+            return
+
+        # AGENTS invariant: try an exchange lookaside before failing closed on a
+        # fill that has an exchange order_id but a missing local client_order_id.
+        if not fill.client_order_id and fill.order_id:
+            await self._resolve_intent_for_unmatched_fill_via_exchange(fill)
+            self._maybe_reclassify_unmatched(fill)
+
+        if not fill.unmatched:
+            logger.info(
+                "[UNMATCHED-FILL-RESOLVED] fill_id=%s resolved via exchange lookaside; "
+                "not calling breaker",
+                fill.fill_id,
             )
             return
 
         from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
-        if isinstance(created_time, datetime) and created_time.tzinfo is None:
-            created_time = created_time.replace(tzinfo=timezone.utc)
 
         get_trading_circuit_breaker().require_live_fill_identity(
             KalshiFill(
-                fill_id=str(fill_id) if fill_id else "",
-                market_ticker=ticker,
-                client_order_id=client_order_id,
-                order_id=order_id,
-                created_time=created_time,
+                fill_id=str(fill.fill_id) if fill.fill_id else "",
+                market_ticker=fill.market_ticker,
+                client_order_id=fill.client_order_id,
+                order_id=fill.order_id,
+                created_time=fill.created_time,
                 ingested_at=datetime.now(timezone.utc),
                 ingestion_source=source,
             ),
@@ -7025,26 +7101,6 @@ class KalshiFillsLedger:
                 # The fill is canonicalized but we must not attach entry/exit policy.
                 is_unmatched = True
                 unmatched_reason = "intent_missing_entry_or_exit_metadata"
-
-        # The effective client_order_id is the original wire value or the one we
-        # recovered from position_cache.  Pass this to the circuit breaker so the
-        # pending-intent lookup has both order_id and client_order_id to correlate.
-        effective_client_order_id = raw.get("client_order_id") or client_order_id
-
-        if is_unmatched:
-            logger.warning(
-                "[UNMATCHED-FILL] fill_id=%s ticker=%s client_order_id=%s order_id=%s reason=%s - "
-                "QUARANTINED. No position/exposure/PnL will be applied; fill is stored in ledger only.",
-                fill_id, ticker, effective_client_order_id, raw.get("order_id"), unmatched_reason
-            )
-            self._maybe_halt_on_unmatched_fill(
-                fill_id=fill_id,
-                ticker=ticker,
-                client_order_id=effective_client_order_id,
-                order_id=raw.get("order_id"),
-                created_time=created_time,
-                source=source,
-            )
 
         # Resolve exchange shard index from intent or raw payload.
         _fill_exchange_index = None
