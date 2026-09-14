@@ -83,15 +83,16 @@ def required_edge_cents(
     resolved_asset = (asset or "UNKNOWN").upper()
     adversity = ASSET_ADVERSITY_BUFFER_CENTS.get(resolved_asset, DEFAULT_ADVERSITY_BUFFER_CENTS)
 
-    # Fee per contract
+    # Fee per contract (exact, sub-cent resolution)
     if fee_per_contract_cents is not None:
         fee = float(fee_per_contract_cents)
     else:
-        if role == "maker":
-            fee = DEFAULT_MAKER_FEE_CENTS
-        else:
-            from merid.event_venues.kalshi.fees import calculate_kalshi_fee_per_contract_cents
-            fee = calculate_kalshi_fee_per_contract_cents(1, price_cents)
+        from decimal import Decimal
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+
+        fee = float(kalshi_fee_cents_exact(price_cents / 100.0, Decimal("1"), role))
+        if role == "maker" and DEFAULT_MAKER_FEE_CENTS > 0:
+            fee = max(fee, DEFAULT_MAKER_FEE_CENTS)
 
     # Spread cost: full for taker, half (rounded up) for maker.
     if spread_cents is None:

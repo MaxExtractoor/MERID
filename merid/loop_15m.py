@@ -2065,18 +2065,20 @@ def _get_executable_ask_cents(state: Any, held_outcome: str) -> Optional[int]:
     return None
 
 
-def _estimate_exit_fees(entry_price_cents: int, exit_price_cents: int, count: int) -> int:
+def _estimate_exit_fees(entry_price_cents: int, exit_price_cents: int, count) -> float:
     """Round-trip taker fee estimate in cents for a closing order."""
     try:
-        from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
+        from decimal import Decimal
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
 
-        entry_fee = kalshi_taker_fee_cents_parabolic(entry_price_cents / 100.0, count)
-        exit_fee = kalshi_taker_fee_cents_parabolic(exit_price_cents / 100.0, count)
-        return max(0, entry_fee + exit_fee)
+        _count = Decimal(str(count)) if not isinstance(count, Decimal) else count
+        entry_fee = float(kalshi_fee_cents_exact(entry_price_cents / 100.0, _count, "taker"))
+        exit_fee = float(kalshi_fee_cents_exact(exit_price_cents / 100.0, _count, "taker"))
+        return max(0.0, entry_fee + exit_fee)
     except Exception:
         # Fallback: 1% of notional, rounded up, for both sides.
-        notional_cents = (entry_price_cents + exit_price_cents) * count
-        return max(1, (notional_cents + 99) // 100)
+        notional_cents = (entry_price_cents + exit_price_cents) * float(count)
+        return float(max(1, (notional_cents + 99) // 100))
 
 
 def _canonicalize_exit_reason(exit_reason: Any) -> Tuple[str, str]:
