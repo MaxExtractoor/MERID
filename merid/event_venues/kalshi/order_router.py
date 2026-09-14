@@ -32,6 +32,7 @@ import os
 import random
 import threading
 import time as _time
+import warnings
 import uuid
 
 from merid.data.ingress_replay import replay_time, replay_start_time
@@ -5893,6 +5894,9 @@ def _is_live_mode(mode: TradingMode) -> bool:
 
 def _kalshi_fee_cents(price_cents: int, contracts: Any) -> int:
     """Canonical Kalshi fee calculation using unified fees module.
+
+    Deprecated: use :func:`kalshi_fee_cents_exact` from
+    :mod:`merid.event_venues.kalshi.parabolic_fees` for exact sub-cent fees.
     
     DELEGATED to unified fees module: merid.event_venues.kalshi.fees
     
@@ -5900,6 +5904,11 @@ def _kalshi_fee_cents(price_cents: int, contracts: Any) -> int:
     - C = number of contracts
     - P = price in dollars (price_cents / 100)
     """
+    warnings.warn(
+        "_kalshi_fee_cents is deprecated; use calculate_kalshi_fee_cents or kalshi_fee_cents_exact from merid.event_venues.kalshi.parabolic_fees",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return calculate_kalshi_fee_cents(contracts, price_cents)
 
 

@@ -1996,7 +1996,7 @@ def compute_trade_decision(
         # contracts require a larger risk premium because the 7-day data showed
         # severe overconfidence and a 37c average loser.
         _held_price_cents = int(round(float(selected_outcome_price) * 100.0))
-        _fee_cents = int(round(fee * 100.0))
+        _fee_cents = fee_per_contract_cents
         _risk_premium_cents = _pi_star_risk_premium(_held_price_cents)
         _pi_star = (_held_price_cents + _fee_cents + _risk_premium_cents) / 100.0
         if edge_breakdown.p_selected < _pi_star - 1e-9:
