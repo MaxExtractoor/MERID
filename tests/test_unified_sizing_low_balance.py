@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from merid.event_venues.kalshi import shard_funding as sf
-from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
+from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
 from merid.prediction.unified_sizing import compute_order_size
 
 
@@ -24,9 +24,12 @@ def test_low_balance_sizes_fractional_and_covers_fee():
     )
     q = Decimal(str(count))
     assert q >= Decimal("0.01"), meta
-    fee = Decimal(kalshi_taker_fee_cents_parabolic(0.55, q)) / 100
+    fee = kalshi_fee_cents_exact(0.55, q, "taker") / 100
     assert q * Decimal("0.55") + fee <= Decimal("0.0891")
     assert q == q.quantize(Decimal("0.01"))
+    # 0.15 @55c = $0.0825 + exact fee $0.0026 = $0.0851 <= $0.0891; 0.16 would
+    # be $0.0908.  The whole-cent ceiling used to force 0.14.
+    assert q == Decimal("0.15")
 
 
 def test_shard_cash_caps_below_total_equity():
@@ -35,5 +38,5 @@ def test_shard_cash_caps_below_total_equity():
         bankroll_usd=Decimal("5.20"), price_cents=50, asset="ETH", model_prob=0.70, side="yes"
     )
     q = Decimal(str(count))
-    fee = Decimal(kalshi_taker_fee_cents_parabolic(0.50, q)) / 100
+    fee = kalshi_fee_cents_exact(0.50, q, "taker") / 100
     assert q * Decimal("0.50") + fee <= Decimal("0.20")

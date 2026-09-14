@@ -547,22 +547,33 @@ class TestFractionalQuantityAndRolePrecedence:
     def test_unified_sizing_reserves_min_fee_headroom(self):
         from merid.prediction.unified_sizing import compute_order_size
 
-        # Bankroll of $0.01 (exactly the 1c fee reserve), price 50c -> contract cost $0.50.
-        # Reserving the 1c fee leaves $0.00, so no position can be afforded.
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+
+        # Bankroll of $0.005 at 50c: the minimum 0.01-contract order costs
+        # $0.005 + exact taker fee $0.0002 = $0.0052 > cash -> unaffordable.
         count, notional, meta = compute_order_size(
-            bankroll_usd=Decimal("0.01"),
+            bankroll_usd=Decimal("0.005"),
             price_cents=50,
             asset="BTC",
         )
         assert count == 0.0
 
-        # Bankroll of $0.515 -> after 1c fee, $0.505 available.
-        # At 50c per contract that is 1.01 contracts, quantized to 0.01.
-        # Notional must be <= cash after fee reserve ($0.505).
+        # Bankroll of $0.01 at 50c: 0.01 contracts ($0.005 + $0.0002) fits.
+        # Kalshi rounds fees up to $0.0001, not to a whole cent, so a flat 1c
+        # reserve would have wrongly rejected this.
+        count, notional, meta = compute_order_size(
+            bankroll_usd=Decimal("0.01"),
+            price_cents=50,
+            asset="BTC",
+        )
+        assert Decimal(str(count)) == Decimal("0.01")
+
+        # Bankroll of $0.515 at 50c: notional + exact fee must fit in cash.
         count, notional, meta = compute_order_size(
             bankroll_usd=Decimal("0.515"),
             price_cents=50,
             asset="BTC",
         )
-        assert Decimal(str(count)) > 0
-        assert notional <= Decimal("0.505")
+        q = Decimal(str(count))
+        assert q > 0
+        assert notional + kalshi_fee_cents_exact(0.50, q, "taker") / 100 <= Decimal("0.515")

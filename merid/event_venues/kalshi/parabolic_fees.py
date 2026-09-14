@@ -80,6 +80,38 @@ def _validate_price(price_dollars: float) -> float:
     return price_dollars
 
 
+def kalshi_fee_cents_exact(
+    price_dollars: float,
+    contracts,
+    role: Literal["taker", "maker"] = "taker",
+    *,
+    schedule: Optional["KalshiFeeSchedule"] = None,
+) -> Decimal:
+    """Exact venue fee in cents (Decimal, 0.01c resolution) for fractional orders.
+
+    Verified against Kalshi V2 fill records (2026-09-14): the venue charges
+    ``rate * C * P * (1 - P)`` rounded UP to $0.0001 (0.01 cents), e.g. 1
+    contract at 47c -> $0.0175 (exact 0.017437) and 1 contract at 1.1c ->
+    $0.0008 (exact 0.000762).  It is NOT rounded up to a whole cent, so the
+    integer helpers above over-charge sub-1-contract orders by up to ~1c and
+    must not be used for live sizing / net-of-cost gates.  Returns 0 for
+    non-positive counts.
+    """
+    try:
+        c = Decimal(str(contracts))
+    except Exception:
+        return Decimal("0")
+    if c <= 0:
+        return Decimal("0")
+    from config.kalshi_fee_schedule import get_active_fee_schedule
+
+    sched = schedule or get_active_fee_schedule()
+    p = Decimal(str(_validate_price(price_dollars)))
+    rate = Decimal(str(sched.maker_rate if role == "maker" else sched.taker_rate))
+    fee_dollars = (rate * c * p * (Decimal("1") - p)).quantize(Decimal("0.0001"), rounding=ROUND_CEILING)
+    return fee_dollars * Decimal("100")
+
+
 def kalshi_taker_fee_cents_parabolic(
     price_dollars: float,
     contracts: int,

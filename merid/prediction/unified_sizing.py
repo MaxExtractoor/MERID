@@ -1058,28 +1058,24 @@ def compute_order_size(
     except Exception:
         pass
 
-    min_fee_usd = Decimal("0.01")
-    max_by_cash_cost = (
-        max(Decimal("0"), spendable_usd - min_fee_usd) / contract_cost_usd
-        if spendable_usd > min_fee_usd
-        else Decimal("0")
-    )
+    max_by_cash_cost = spendable_usd / contract_cost_usd if spendable_usd > 0 else Decimal("0")
 
     contract_count = min(target_contracts, max_contracts_cap, max_by_exposure, max_by_bankroll, max_by_cash_cost)
     if max_by_notional is not None:
         contract_count = min(contract_count, max_by_notional)
 
-    # Exact fee reserve: Kalshi's parabolic taker fee is ceil'd to the cent, so
-    # shrink the count (ROUND_DOWN to the centi-contract grid) until
-    # notional + fee fits within spendable cash.
+    # Exact fee reserve: Kalshi charges rate*C*P*(1-P) rounded up to $0.0001
+    # (verified against V2 fill records; NOT ceil'd to a whole cent).  Shrink
+    # the count on the centi-contract grid (ROUND_DOWN) until notional + exact
+    # taker fee fits within spendable cash.
     try:
-        from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
 
         _q = contract_count.quantize(CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN)
         for _ in range(8):
             if _q < CONTRACT_COUNT_QUANTUM:
                 break
-            _fee_usd = Decimal(kalshi_taker_fee_cents_parabolic(price_cents / 100.0, _q)) / 100
+            _fee_usd = kalshi_fee_cents_exact(price_cents / 100.0, _q, "taker") / 100
             if _q * contract_cost_usd + _fee_usd <= spendable_usd:
                 break
             _q = (_q - CONTRACT_COUNT_QUANTUM).quantize(CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN)
