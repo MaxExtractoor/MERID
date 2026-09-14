@@ -243,6 +243,8 @@ class TestClearExpiredPositions:
         valid_ticker = f"KXSOL15M-{_et_ticker_body(future_time)}-50"
 
         cache._positions[closed_ticker] = type('CachedPosition', (), {
+            'market_id': closed_ticker,
+            'agent_id': 'BTC_15M',
             'contracts': 10,
             'quantity_cc': 1000,
             'avg_price_cents': 5000,
@@ -254,6 +256,8 @@ class TestClearExpiredPositions:
         })()
 
         cache._positions[settled_ticker] = type('CachedPosition', (), {
+            'market_id': settled_ticker,
+            'agent_id': 'ETH_15M',
             'contracts': 5,
             'quantity_cc': 500,
             'avg_price_cents': 6000,
@@ -265,6 +269,8 @@ class TestClearExpiredPositions:
         })()
 
         cache._positions[valid_ticker] = type('CachedPosition', (), {
+            'market_id': valid_ticker,
+            'agent_id': 'SOL_15M',
             'contracts': 2,
             'quantity_cc': 200,
             'avg_price_cents': 5500,

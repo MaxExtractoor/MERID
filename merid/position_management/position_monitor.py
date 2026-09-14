@@ -633,12 +633,13 @@ class PositionMonitor:
                 source = "new"
             else:
                 # Keep the trusted provenance of the old record but apply the new
-                # size/avg/price so the monitor tracks actual exposure.
+                # size so the monitor tracks actual exchange exposure.  The average
+                # entry price, fill price, and basis stay with the more trusted record
+                # to avoid REST-side complement prices wiping the live fill anchor.
                 base = existing
                 source = "old"
-                # Update size and average price from the new fill state.
+                # Update size from the new REST/fill state.
                 base.size = position.size
-                base.avg_entry_price_cents = position.avg_entry_price_cents
 
             # If the old record is more trusted, copy provenance fields back.
             if source == "new" and old_rank > new_rank:

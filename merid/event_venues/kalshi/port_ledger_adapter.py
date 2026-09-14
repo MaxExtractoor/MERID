@@ -310,8 +310,10 @@ def port_position_to_ledger_dict(position: Position) -> Dict[str, Any]:
         # Direction
         "side": side,
         "outcome": side,
-        # Quantity: quantity_cc is canonical; contracts is display-only.
+        # Quantity: quantity_cc is canonical; count_fp/position_fp preserve fractions.
         "quantity_cc": quantity_cc,
+        "count_fp": str(size),
+        "position_fp": str(size),
         "contracts": contracts,
         "count": contracts,
         "quantity": contracts,

@@ -4190,9 +4190,20 @@ class KalshiPositionCache:
             and tp_targets.get("entry_executable_bid_cents") is not None
             and tp_targets.get("entry_executable_ask_cents") is not None
         )
+        # CRITICAL FIX (2026-09-14): A live fill with durable client/order/fill linkage is
+        # original-persisted even if the AT_FILL book was not captured or recovered.  The
+        # book capture is a spread-stop invariant, not a prerequisite for trusted provenance.
+        first_fill_source = getattr(first_fill, 'fill_source', 'alpha') if first_fill else 'unknown'
+        trusted_fill_source = first_fill_source not in ("rest_sync", "replay", "historical", "manual", "unknown")
+        entry_linkage = (
+            client_order_id
+            or (getattr(first_fill, 'client_order_id', None) if first_fill else None)
+            or (getattr(first_fill, 'client_tag', None) if first_fill else None)
+            or (getattr(first_fill, 'order_id', None) if first_fill else None)
+        )
         risk_params_state = "unknown"
         risk_params_schema_version = 1
-        if first_fill is not None and client_order_id and has_at_fill_book:
+        if first_fill is not None and entry_linkage and trusted_fill_source:
             risk_params_state = "original_persisted"
             risk_params_schema_version = 2
 
@@ -5304,6 +5315,26 @@ class KalshiPositionCache:
                             and base_linkage
                         )
 
+                        # CRITICAL FIX (2026-09-14): REST-reported average for NO positions is
+                        # sometimes the YES-side complement (e.g., 73c for a 27c NO fill).
+                        # When the trusted fill record has the canonical own-side price and the
+                        # REST price is its complement, preserve the fill price as the cache
+                        # and monitor basis instead of overwriting with a wrong entry.
+                        if keep_existing_risk and avg_price_cents and base_position.entry_fill_price_cents:
+                            complement_sum = avg_price_cents + base_position.entry_fill_price_cents
+                            if abs(complement_sum - 100) <= 2:
+                                logger.warning(
+                                    "[POSITION-CACHE-REST-SYNC] market=%s preserving fill price %dc over REST complement %dc (sum=%dc)",
+                                    market_id,
+                                    base_position.entry_fill_price_cents,
+                                    avg_price_cents,
+                                    complement_sum,
+                                )
+                                avg_price_cents = base_position.entry_fill_price_cents
+                                if base_position.avg_price_cents and 0 < base_position.avg_price_cents < 100:
+                                    avg_price_cents = base_position.avg_price_cents
+                                entry_price_state = base_position.entry_price_state or "known"
+
                         self._positions[market_id] = replace(
                             base_position,
                             market_id=market_id,
@@ -5609,7 +5640,9 @@ class KalshiPositionCache:
                                 # synthetic with no fill linkage.
                                 fill_source=(
                                     cached_pos.fill_source
-                                    if is_original and cached_pos.fill_source
+                                    if cached_pos.fill_source
+                                    and cached_pos.fill_source not in ("rest_sync", "unknown", "", None)
+                                    and (cached_pos.client_order_id or cached_pos.entry_fill_id)
                                     else "rest_sync"
                                 ),
                                 entry_signal_id=(
