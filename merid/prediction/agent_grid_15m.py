@@ -17982,6 +17982,29 @@ class LeanAgentGrid15m:
 
 
 
+                    # Pre-fit the candidate size to the allocator's venue cap on
+                    # the centi-contract grid.  Sizing proper runs after allocation
+                    # in loop_15m, so a legacy count=1.0 default here would make a
+                    # 69c contract ($0.69) fail ASSET_CAP against a $0.09 account
+                    # even though 0.12 contracts is a perfectly valid Kalshi V2
+                    # count_fp order.  ROUND_DOWN so the fit never exceeds the cap.
+                    _pre_count = float(candidate.get('count', 0.0) or 0.0)
+                    try:
+                        from decimal import Decimal as _D, ROUND_DOWN as _RD
+                        _cap_usd = _D(str(getattr(allocator, "venue_cap_usd", 0.0) or 0.0))
+                        _price_usd = _D(price_cents) / _D(100)
+                        if _price_usd > 0 and _cap_usd > 0:
+                            _fit = (_cap_usd / _price_usd).quantize(_D("0.01"), rounding=_RD)
+                            if _pre_count <= 0.0 or _D(str(_pre_count)) > _fit:
+                                _pre_count = float(_fit)
+                        if _pre_count <= 0.0:
+                            _pre_count = 1.0
+                    except Exception as _fit_err:
+                        logger.debug("[GLOBAL-ALLOCATOR] cap pre-fit skipped: %s", _fit_err)
+                        if _pre_count <= 0.0:
+                            _pre_count = 1.0
+                    candidate['count'] = _pre_count
+
                     order_candidate = OrderCandidate(
 
                         asset=asset,
@@ -17994,7 +18017,7 @@ class LeanAgentGrid15m:
 
                         price_cents=price_cents,
 
-                        count=float(candidate.get('count', 1.0)),
+                        count=_pre_count,
 
                         edge_pct=float(candidate.get('edge_pct', 0.0)),
 
