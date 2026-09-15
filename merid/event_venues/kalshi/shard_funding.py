@@ -46,15 +46,15 @@ def min_collateral_cents() -> int:
     """Smallest shard balance that makes a one-contract entry possible.
 
     With Kalshi V2 count_fp the minimum order is one centi-contract (0.01).
-    At the default 35c held floor the all-in cost is ~1.35c (price * 0.01 + 1c
-    parabolic fee), so the default is 2c.  The env var remains an operator
+    At the default 35c held floor the all-in cost is ~0.36c (price * 0.01 +
+    parabolic fee), so the default is 1c.  The env var remains an operator
     override, but the function clamps it to at least 1c and never above the
     configured target.
     """
     try:
-        return max(1, int(os.environ.get("MERID_MIN_TRADING_SHARD_COLLATERAL_CENTS", "2")))
+        return max(1, int(os.environ.get("MERID_MIN_TRADING_SHARD_COLLATERAL_CENTS", "1")))
     except ValueError:
-        return 2
+        return 1
 
 
 def target_shard_usd() -> Decimal:

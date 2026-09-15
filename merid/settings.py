@@ -24,6 +24,7 @@ Usage:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from utils.logger import get_logger
 from utils.secrets_manager import is_sensitive_field, mask_sensitive_string, sanitize_dict_for_logging
 import os
@@ -1243,12 +1244,21 @@ class Settings(BaseSettings):
             response.raise_for_status()
             
             data = response.json()
-            # Kalshi returns balance in cents
-            balance_cents = data.get("balance", 0)
-            balance_usd = balance_cents / 100.0
-            
+            # Kalshi returns an integer ``balance`` (cents) but also the exact
+            # sub-cent ``balance_dollars`` string.  For a 1.97c account the
+            # integer is 1c and would size/abort incorrectly, so prefer the
+            # exact dollar figure.
+            _exact = data.get("balance_dollars")
+            if _exact is not None:
+                try:
+                    balance_usd = float(Decimal(str(_exact)))
+                except (ArithmeticError, ValueError, TypeError):
+                    balance_usd = data.get("balance", 0) / 100.0
+            else:
+                balance_usd = data.get("balance", 0) / 100.0
+
             logger.info(
-                "[KALSHI_BALANCE_FETCH] Successfully fetched Kalshi balance: $%.2f USD (from %s)",
+                "[KALSHI_BALANCE_FETCH] Successfully fetched Kalshi balance: $%.4f USD (from %s)",
                 balance_usd, env
             )
             return balance_usd
