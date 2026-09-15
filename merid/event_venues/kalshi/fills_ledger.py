@@ -424,7 +424,7 @@ def validate_fee_vs_estimate(
 # Version 2 = canonical fields backfilled from raw; Version 3 = execution-derived
 # canonical fields with explicit canonicalization_state and strict legacy rules.
 LEDGER_SCHEMA_VERSION: int = 3
-CANONICALIZATION_VERSION: int = 1
+CANONICALIZATION_VERSION: int = 2
 TRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1", "TRUSTED_PAPER_V1"})
 UNTRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"UNTRUSTED_LEGACY", "UNTRUSTED_RAW", "UNTRUSTED_SIDE_CONFLICT"})
 
@@ -5026,6 +5026,117 @@ class KalshiFillsLedger:
             pos_fills = pos.get("fills", [])
             pos["fills"] = [new_id if fid == old_id else fid for fid in pos_fills]
 
+    async def _backfill_canonical_from_raw(self) -> int:
+        """Re-canonicalize persisted rows whose canonicalization version is stale.
+
+        Rows written before the V2 canonicalizer (and any live-router fill that
+        leaked into the DB with counterparty-form fields) are replayed through the
+        current ``_parse_fill`` using the preserved ``raw_payload``.  This repairs
+        stale canonical side/action, leg price, signed proceeds, and fee values on
+        the next restart without requiring a manual DB migration.
+
+        Returns the number of rows whose canonical economics changed.
+        """
+        changed = 0
+        for original in list(self._fills.values()):
+            if original.canonicalization_version >= CANONICALIZATION_VERSION:
+                continue
+            if not original.raw_payload:
+                continue
+            try:
+                reparsed = self._parse_fill(original.raw_payload, original.ingestion_source or "http_poller")
+            except Exception as e:
+                logger.warning("[FILLS-LEDGER-BACKFILL] parse failed %s: %s", original.fill_id, e)
+                continue
+            if reparsed.canonicalization_state not in TRUSTED_CANONICALIZATION_STATES:
+                logger.info(
+                    "[FILLS-LEDGER-BACKFILL] %s reparse untrusted (%s); leaving original",
+                    original.fill_id, reparsed.canonicalization_state,
+                )
+                continue
+
+            # Only update the canonical economics.  Preserve identity, intent
+            # provenance, entry/exit metadata, and the original unmatched flag
+            # because the ledger already accepted this fill once.
+            _economics_changed = (
+                reparsed.side != original.side
+                or reparsed.action != original.action
+                or reparsed.execution_outcome_side != original.execution_outcome_side
+                or reparsed.execution_action != original.execution_action
+                or reparsed.execution_price_cents != original.execution_price_cents
+                or reparsed.yes_price_dollars != original.yes_price_dollars
+                or reparsed.no_price_dollars != original.no_price_dollars
+                or reparsed.fee_cost != original.fee_cost
+                or reparsed.proceeds_dollars != original.proceeds_dollars
+                or reparsed.canonical_position_side != original.canonical_position_side
+                or reparsed.canonical_position_action != original.canonical_position_action
+                or reparsed.canonical_leg_price_cents != original.canonical_leg_price_cents
+                or reparsed.canonical_yes_delta_cc != original.canonical_yes_delta_cc
+            )
+
+            if _economics_changed:
+                original.side = reparsed.side
+                original.action = reparsed.action
+                original.execution_outcome_side = reparsed.execution_outcome_side
+                original.execution_action = reparsed.execution_action
+                original.execution_price_cents = reparsed.execution_price_cents
+                original.yes_price_dollars = reparsed.yes_price_dollars
+                original.no_price_dollars = reparsed.no_price_dollars
+                original.fee_cost = reparsed.fee_cost
+                original.proceeds_dollars = reparsed.proceeds_dollars
+                original.canonical_position_side = reparsed.canonical_position_side
+                original.canonical_position_action = reparsed.canonical_position_action
+                original.canonical_leg_price_cents = reparsed.canonical_leg_price_cents
+                original.canonical_yes_delta_cc = reparsed.canonical_yes_delta_cc
+                original.canonicalization_state = reparsed.canonicalization_state
+                changed += 1
+                logger.info(
+                    "[FILLS-LEDGER-BACKFILL] %s re-canonicalized to side=%s action=%s "
+                    "canon=%s/%s leg=%s proceeds=%s",
+                    original.fill_id, original.side, original.action,
+                    original.canonical_position_side, original.canonical_position_action,
+                    original.canonical_leg_price_cents, original.proceeds_dollars,
+                )
+
+            # Always bump the version so this row is not re-parsed on every restart.
+            original.canonicalization_version = CANONICALIZATION_VERSION
+            original.ledger_schema_version = LEDGER_SCHEMA_VERSION
+
+        return changed
+
+    async def _delete_stale_live_router_rows(self, db) -> int:
+        """Remove provisional live-router rows that have an authoritative counterpart.
+
+        These duplicates were previously written to the DB before the router-side
+        deduplication was strict; they are never promoted again once an
+        authoritative row exists, but they can still be replayed and inflate
+        session-realized PnL.  Delete both in memory and in the DB.
+        """
+        deleted = 0
+        for _fill in list(self._fills.values()):
+            if not (_fill.fill_id and _fill.fill_id.startswith("live_router_") and _fill.order_id):
+                continue
+            _order_fills = self._fills_by_order.get(_fill.order_id, [])
+            if any(fid and not fid.startswith("live_router_") for fid in _order_fills):
+                _fill_id = _fill.fill_id
+                try:
+                    await self._execute_with_retry(db, "DELETE FROM kalshi_fills WHERE fill_id = ?", (_fill_id,))
+                except Exception as e:
+                    logger.warning("[FILLS-LEDGER-BACKFILL] could not delete stale live-router row %s: %s", _fill_id, e)
+                    continue
+                self._fills.pop(_fill_id, None)
+                self._processed_fill_ids.discard(_fill_id)
+                if _fill.order_id and _fill.order_id in self._fills_by_order:
+                    if _fill_id in self._fills_by_order[_fill.order_id]:
+                        self._fills_by_order[_fill.order_id].remove(_fill_id)
+                if _fill.market_ticker and _fill.market_ticker in self._fills_by_market:
+                    if _fill_id in self._fills_by_market[_fill.market_ticker]:
+                        self._fills_by_market[_fill.market_ticker].remove(_fill_id)
+                self._live_router_fill_ids.pop(_fill.order_id, None)
+                deleted += 1
+                logger.info("[FILLS-LEDGER-BACKFILL] deleted stale live-router row %s", _fill_id)
+        return deleted
+
     def _promote_live_router_fill(self, fill: KalshiFill) -> Optional[str]:
         """If ``fill`` matches a provisional live-router fill, promote it.
 
@@ -5077,13 +5188,26 @@ class KalshiFillsLedger:
         if fill.raw_payload:
             existing.raw_payload = fill.raw_payload
 
-        # Preserve the live-router canonical side/action (user's intended contract
-        # form).  The authoritative fill may report the counterparty form; only
-        # backfill side/action if the provisional record is incomplete.
-        if existing.canonical_position_side not in ("yes", "no"):
-            existing.canonical_position_side = fill.canonical_position_side or fill.side
-        if existing.canonical_position_action not in ("buy", "sell"):
-            existing.canonical_position_action = fill.canonical_position_action or fill.action
+        # Authoritative canonical side/action wins when the fill has a trusted
+        # canonicalization.  The live-router provisional may have been written in
+        # counterparty wire form (e.g. SELL_NO) while the exchange reports the
+        # equivalent held-side form (BUY_YES).  The user's *held outcome side* is the
+        # source of truth for cost basis and realized PnL; overwriting the
+        # provisional side/action with the authoritative trusted values prevents
+        # counterparty-form fills from flipping position cost basis.  We only fall
+        # back to the provisional side/action when the authoritative fill is itself
+        # not yet trusted.
+        if fill.canonicalization_state in TRUSTED_CANONICALIZATION_STATES:
+            if fill.canonical_position_side in ("yes", "no"):
+                existing.canonical_position_side = fill.canonical_position_side
+            if fill.canonical_position_action in ("buy", "sell"):
+                existing.canonical_position_action = fill.canonical_position_action
+        else:
+            # Backfill only if the provisional record is incomplete.
+            if existing.canonical_position_side not in ("yes", "no"):
+                existing.canonical_position_side = fill.canonical_position_side or fill.side
+            if existing.canonical_position_action not in ("buy", "sell"):
+                existing.canonical_position_action = fill.canonical_position_action or fill.action
 
         # Execution-side audit fields from the raw exchange report.
         if fill.execution_outcome_side:
@@ -8765,9 +8889,35 @@ class KalshiFillsLedger:
                 # 2026-08-27: Rebuild the live-router promotion index after a restart
                 # so authoritative HTTP/WS fills that arrive again can be deduplicated
                 # against the provisional live-router record persisted to the DB.
-                for _fill in self._fills.values():
+                # Prefer the authoritative (non-live_router) fill id when one already
+                # exists for the same order; otherwise point to the provisional id.
+                for _fill in list(self._fills.values()):
                     if _fill.order_id and _fill.fill_id.startswith("live_router_"):
-                        self._live_router_fill_ids[_fill.order_id] = _fill.fill_id
+                        _auth_ids = [
+                            fid
+                            for fid in self._fills_by_order.get(_fill.order_id, [])
+                            if fid and not fid.startswith("live_router_")
+                        ]
+                        if _auth_ids:
+                            self._live_router_fill_ids[_fill.order_id] = _auth_ids[0]
+                        else:
+                            self._live_router_fill_ids[_fill.order_id] = _fill.fill_id
+
+                # 2026-09-15: Re-canonicalize rows with stale canonicalization version.
+                # Live-router fills and rows persisted before the V2 canonicalizer may
+                # have been written in counterparty form; replaying them through the
+                # current _parse_fill and re-computing proceeds fixes realized PnL and
+                # prevents duplicate/phantom position effects on the next restart.
+                _backfilled = await self._backfill_canonical_from_raw()
+                if _backfilled:
+                    logger.info("[FILLS-LEDGER-BACKFILL] re-canonicalized %d rows", _backfilled)
+
+                # Delete stale live-router provisional rows that already have an
+                # authoritative exchange fill.  These rows leak into the DB from older
+                # router builds and can inflate realized PnL if left in place.
+                _deleted = await self._delete_stale_live_router_rows(db)
+                if _deleted:
+                    logger.info("[FILLS-LEDGER-BACKFILL] deleted %d stale live-router rows", _deleted)
 
                 self._last_migration_summary = {
                     "legacy_rows_total": legacy_rows_total,
