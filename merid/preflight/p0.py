@@ -8,6 +8,7 @@ bankroll service, and an RTI stream.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -118,7 +119,8 @@ async def run_p0_preflight_checks(
         # P0: request only recent fills (last 24h) to avoid unbounded
         # pagination and partial-data warnings on accounts with long history.
         since_ts = int((time.time() - 86400) * 1000)
-        fills_result = await client.get_fills(limit=20, since_ts=since_ts)
+        since_dt = datetime.fromtimestamp(since_ts / 1000, tz=timezone.utc)
+        fills_result = await client.get_fills(limit=100, since_ts=since_ts)
         fills = fills_result.unwrap_or([]) if hasattr(fills_result, "unwrap_or") else list(fills_result)
 
         cache = get_position_cache()
@@ -139,17 +141,54 @@ async def run_p0_preflight_checks(
                 logger.warning("[P0-PREFLIGHT] position_cache load_from_exchange failed: %s", load_err)
 
         internal_positions = list(cache.positions.values()) if hasattr(cache, "positions") else []
+        # Get all durable fills; we compare by identity, not by simple count.
         internal_fills = ledger.get_fills() if hasattr(ledger, "get_fills") else []
 
-        recon_detail = (
-            f"external_open_orders={len(open_orders)} external_positions={len(positions)} "
-            f"external_fills={len(fills)} internal_positions={len(internal_positions)} "
-            f"internal_fills={len(internal_fills)}"
-        )
+        ex_ids = {f.get("fill_id") or f.get("trade_id") for f in fills}
+        ex_by_order: Dict[str, List[Dict[str, Any]]] = {}
+        for f in fills:
+            ex_by_order.setdefault(f.get("order_id"), []).append(f)
+
+        in_by_id = {f.fill_id: f for f in internal_fills}
+
+        only_exchange = ex_ids - set(in_by_id)
+        only_internal = set(in_by_id) - ex_ids
+
+        allowed_internal: List[str] = []
+        problematic_internal: List[str] = []
+        for fid in only_internal:
+            fill = in_by_id[fid]
+            # Provisional live-router fills are expected to be superseded by an
+            # authoritative exchange fill with a real Kalshi fill_id.  If the
+            # exchange already reports a fill for the same order, the provisional
+            # record is a pre-promotion duplicate, not an untrusted divergence.
+            if fid.startswith("live_router_") and fill.order_id and fill.order_id in ex_by_order:
+                allowed_internal.append(fid)
+                continue
+
+            # Internal fills whose exchange timestamp is before the exchange
+            # window used in this preflight are not a 24h reconciliation
+            # divergence; they were reconciled in an earlier period.
+            fill_created = getattr(fill, "created_time", None)
+            if fill_created is not None and fill_created < since_dt:
+                allowed_internal.append(fid)
+                continue
+
+            problematic_internal.append(fid)
+
         recon_ok = (
             len(positions) == len(internal_positions)
             and len(open_orders) == 0
-            and len(fills) == len(internal_fills)
+            and len(only_exchange) == 0
+            and len(problematic_internal) == 0
+        )
+        recon_detail = (
+            f"external_open_orders={len(open_orders)} external_positions={len(positions)} "
+            f"external_fills={len(fills)} internal_positions={len(internal_positions)} "
+            f"internal_fills={len(internal_fills)} "
+            f"extra_internal={len(only_internal)} allowed_extra={len(allowed_internal)} "
+            f"missing_external={len(only_exchange)} "
+            f"problematic_internal={problematic_internal[:5]}"
         )
         results.append(_check("exchange_reconciliation", recon_ok, recon_detail))
 
