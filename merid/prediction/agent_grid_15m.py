@@ -34,6 +34,9 @@ from dataclasses import dataclass, field, asdict, replace
 
 from utils.logger import get_logger
 
+# Live configuration singleton for freshness thresholds.
+from merid.config.live_config import get_resolved_live_config
+
 # Single source of truth for all-in cost / EV used in signal generation.
 # This keeps the signal/EV contract identical to the sizing Kelly calculator.
 try:
@@ -548,15 +551,10 @@ def validate_trade_snapshot(
 
     rti_age_ms = _rti_age_ms(cfb_observation)
     quote_age_ms = _quote_age_ms(market_state)
-    rti_exec_age_ms = int(
-        os.environ.get("MERID_RTI_EXECUTION_MAX_AGE_MS", "2000").strip() or "2000"
-    )
-    book_exec_age_ms = int(
-        os.environ.get("MERID_BOOK_EXECUTION_MAX_AGE_MS", "1000").strip() or "1000"
-    )
-    rti_book_skew_ms = int(
-        os.environ.get("MERID_RTI_BOOK_SKEW_MS", "1500").strip() or "1500"
-    )
+    _live_cfg = get_resolved_live_config(allow_unresolved=True)
+    rti_exec_age_ms = _live_cfg.rti_execution_max_age_ms
+    book_exec_age_ms = _live_cfg.book_execution_max_age_ms
+    rti_book_skew_ms = _live_cfg.rti_book_skew_ms
 
     if rti_age_ms is None:
         failures.append("RTI_AGE_UNKNOWN")

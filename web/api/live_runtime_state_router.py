@@ -24,13 +24,14 @@ router = APIRouter(prefix="/live-runtime-state", tags=["live_runtime_state"])
 async def get_live_runtime_state_info() -> dict:
     """Return the current live runtime state and recent transition history."""
     state = get_live_runtime_state()
+    state_dict = state.to_dict()
     return {
-        "state": state.state,
-        "entry_halted": state.entry_halted,
-        "reason": state.to_dict().get("reason"),
-        "reason_codes": state.to_dict().get("reason_codes"),
-        "transition_history": state.transition_history[-20:],
-        "release_assertion": state.to_dict().get("release_assertion"),
+        "state": state_dict["state"],
+        "entry_halted": state_dict["entry_halted"],
+        "reason": state_dict.get("reason"),
+        "reason_codes": state_dict.get("reason_codes"),
+        "transition_history": state_dict.get("transition_history", []),
+        "release_assertion": state_dict.get("release_assertion"),
     }
 
 
