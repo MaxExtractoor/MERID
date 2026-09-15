@@ -5046,7 +5046,22 @@ class KalshiFillsLedger:
             return None
         existing = self._fills[existing_id]
         if not self._is_same_economic_fill(existing, fill):
-            return None
+            # Fallback identity match: same order, same market, same signed quantity.
+            # This protects promotion when the exchange reports counterparty-form
+            # prices that the pairwise dedupe comparison rejects.
+            same_market = existing.market_ticker == fill.market_ticker
+            same_qty = (existing.quantity_cc or 0) == (fill.quantity_cc or 0)
+            same_delta = (existing.canonical_yes_delta_cc or 0) == (fill.canonical_yes_delta_cc or 0)
+            if not (same_market and same_qty and same_delta):
+                logger.warning(
+                    "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s economic mismatch between provisional %s and authoritative %s; not promoting",
+                    fill.order_id, existing_id, fill.fill_id,
+                )
+                return None
+            logger.info(
+                "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoting by order/market/qty/delta match (provisional %s -> authoritative %s)",
+                fill.order_id, existing_id, fill.fill_id,
+            )
 
         new_id = fill.fill_id
 
@@ -5275,12 +5290,77 @@ class KalshiFillsLedger:
         except Exception as exc:
             logger.warning("[FILLS-LEDGER] Failed to emit fill fee audit: %s", exc)
 
+    def _suppress_duplicate_live_router(self, fill: KalshiFill) -> bool:
+        """If an authoritative exchange fill already exists for this order,
+        suppress the provisional live-router fill and alias its id to the
+        authoritative record.  This closes the race where the HTTP/WS fill
+        stream delivers the authoritative fill before the router's own
+        live-router callback, which previously created duplicate ledger rows.
+        """
+        if not (fill.fill_id and fill.fill_id.startswith("live_router_") and fill.order_id):
+            return False
+
+        order_fills = self._fills_by_order.get(fill.order_id, [])
+        auth_ids = [fid for fid in order_fills if fid and not fid.startswith("live_router_")]
+        if not auth_ids:
+            return False
+
+        auth_id = auth_ids[0]
+        auth = self._fills.get(auth_id)
+        if not auth:
+            return False
+
+        # Enrich the authoritative record with intent provenance carried only on
+        # the provisional live-router fill.
+        if fill.client_order_id and not auth.client_order_id:
+            auth.client_order_id = fill.client_order_id
+        if fill.client_tag and not auth.client_tag:
+            auth.client_tag = fill.client_tag
+        if fill.intent_id and not auth.intent_id:
+            auth.intent_id = fill.intent_id
+        if fill.agent_id and not auth.agent_id:
+            auth.agent_id = fill.agent_id
+        if fill.is_exit is not None and auth.is_exit is None:
+            auth.is_exit = fill.is_exit
+        if fill.entry_or_exit and not auth.entry_or_exit:
+            auth.entry_or_exit = fill.entry_or_exit
+        if fill.reduce_only and not auth.reduce_only:
+            auth.reduce_only = fill.reduce_only
+
+        # Alias the live-router id to the authoritative id for dedupe and promotion.
+        self._live_router_fill_ids[fill.order_id] = auth_id
+        self._processed_fill_ids.add(auth_id)
+        self._processed_fill_ids.add(fill.fill_id)
+
+        # Prevent the position cache from applying the live-router id later.
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            from merid.replay import replay_time
+
+            cache = get_position_cache()
+            if cache and fill.fill_id not in getattr(cache, "_applied_fill_ids", {}):
+                cache._applied_fill_ids[fill.fill_id] = replay_time()
+                cache._save_applied_fill_ids()
+        except Exception:
+            pass
+
+        logger.info(
+            "[FILLS-LEDGER-LIVE-ROUTER-DEDUP] order_id=%s suppressed provisional %s; authoritative %s already present",
+            fill.order_id, fill.fill_id, auth_id,
+        )
+        return True
+
     def on_fill(self, fill: KalshiFill) -> None:
         """Handle fill event with position state machine.
 
         Args:
             fill: KalshiFill object
         """
+        # 2026-09-15: If the exchange fill stream arrived before the router's
+        # live-router callback, do not create a duplicate ledger/position entry.
+        if self._suppress_duplicate_live_router(fill):
+            return
+
         # 2026-08-27: on_fill may be called directly from the order_router for
         # live fills.  Ensure the fill is indexed in the durable ledger before any
         # state-machine mutation so downstream consumers can look it up by id.
