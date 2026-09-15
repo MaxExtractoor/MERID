@@ -10279,6 +10279,16 @@ async def _apply_order_result_to_canonical_state(
         else:
             no_price_dollars = fill_price_dollars
             yes_price_dollars = Decimal("1") - fill_price_dollars
+
+        # Signed cash flow for this fill: buy is negative (cash out), sell is
+        # positive (cash in), net of the exact fee from the exchange/fill.
+        fee_dollars = Decimal(str(fill.get("fee_cents", 0))) / Decimal("100")
+        gross_dollars = fill_price_dollars * filled_count_fp
+        if canonical_action == "buy":
+            proceeds_dollars = -gross_dollars - fee_dollars
+        else:
+            proceeds_dollars = gross_dollars - fee_dollars
+
         kalshi_fill = KalshiFill(
             fill_id=str(fill_id),
             order_id=result.order_id or fill.get("order_id") or client_order_id,
@@ -10291,7 +10301,8 @@ async def _apply_order_result_to_canonical_state(
             fill_source="alpha",
             yes_price_dollars=yes_price_dollars,
             no_price_dollars=no_price_dollars,
-            fee_cost=Decimal(str(fill.get("fee_cents", 0))) / Decimal("100"),
+            fee_cost=fee_dollars,
+            proceeds_dollars=proceeds_dollars,
             client_order_id=client_order_id,
             created_time=datetime.now(timezone.utc),
             agent_id=intent.agent_id,
@@ -10339,6 +10350,7 @@ async def _apply_order_result_to_canonical_state(
                 is_exit=is_exit,
                 quantity_cc=quantity_cc,
                 canonicalization_state=canonicalization_state,
+                proceeds_dollars=proceeds_dollars,
             )
     except Exception as e:
         logger.warning("[PAPER-FILL-CANONICAL-APPLY] Failed to apply fill to ledger/cache: %s", e)
@@ -14654,15 +14666,19 @@ async def _route_live(
         # floors to 0 and would otherwise skip position/ledger accounting.
         _has_fill = filled_count_fp > 0
         _has_remaining = remaining_count_fp > 0
-        fill_price_cents = (
-            placed_res.price_cents
-            if placed_res.price_cents is not None
-            else (
-                placed_res.average_price_cents
-                if placed_res.average_price_cents is not None
-                else int(intent.price_cents)
-            )
-        )
+        # The create-order response's average_price_cents is in YES space.  Convert
+        # it to the user's outcome-side execution price so slippage, fees, and PnL
+        # stay in the correct price space.  Fall back to the user-side limit price,
+        # then the intent price, only when the average is unavailable.
+        if placed_res.average_price_cents is not None:
+            if (intent.side or "").lower() == "no":
+                fill_price_cents = 100 - placed_res.average_price_cents
+            else:
+                fill_price_cents = placed_res.average_price_cents
+        elif placed_res.price_cents is not None:
+            fill_price_cents = placed_res.price_cents
+        else:
+            fill_price_cents = int(intent.price_cents)
         # Fee is computed on the exact fixed-point count.
         fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count_fp)
         _venue_oid = placed_res.order_id or "unknown"

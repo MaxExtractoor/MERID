@@ -2337,6 +2337,7 @@ class KalshiFillsLedger:
                             action=fill.canonical_position_action,
                             is_exit=fill.is_exit,
                             canonicalization_state=fill.canonicalization_state,
+                            proceeds_dollars=fill.proceeds_dollars,
                         )
                     elif fill:
                         logger.warning(
@@ -5028,10 +5029,12 @@ class KalshiFillsLedger:
     def _promote_live_router_fill(self, fill: KalshiFill) -> Optional[str]:
         """If ``fill`` matches a provisional live-router fill, promote it.
 
-        The authoritative HTTP/WS fill overlays the provisional record and REWRITES
-        the position's ``entry_fill_id`` to the authoritative ``fill_id``.  This is
-        the canonical, immutable idempotency key for all exit/apply paths and the
-        single source of truth for position parentage.
+        The authoritative HTTP/WS fill overlays the provisional record.  The
+        provisional record keeps the user's canonical side/action (derived from the
+        originating intent), but the authoritative prices, fee, execution audit
+        fields, and the authoritative ``fill_id`` replace the provisional values.
+        This prevents counterparty-form fills from flipping the position side and
+        ensures the ledger's canonical economics match the actual exchange cash flow.
 
         Returns the promoted (authoritative) ``fill_id`` if a promotion happened,
         otherwise ``None``.
@@ -5047,78 +5050,110 @@ class KalshiFillsLedger:
 
         new_id = fill.fill_id
 
-        # Overlay authoritative fields onto the provisional record.  The
-        # authoritative fill id becomes the immutable idempotency key, replacing
-        # the provisional live-router id.
+        # Audit / identity fields from the exchange.
         existing.trade_id = fill.trade_id or fill.fill_id or existing.trade_id
         existing.order_id = fill.order_id or existing.order_id
         existing.client_order_id = getattr(fill, "client_order_id", None) or existing.client_order_id
         existing.client_tag = getattr(fill, "client_tag", None) or existing.client_tag
         existing.liquidity_role = fill.liquidity_role or existing.liquidity_role
+        existing.ingestion_source = fill.ingestion_source or existing.ingestion_source
+        existing.ingested_at = fill.ingested_at or existing.ingested_at
+        existing.confirmed_by_rest = True
+        if fill.raw_payload:
+            existing.raw_payload = fill.raw_payload
 
-        # Preserve the existing canonical side/action when they are already set.
-        # The live-router record is derived from the originating intent and keeps
-        # the user's intended contract form.  The authoritative fill may arrive in
-        # the economic counterparty form (e.g. BUY_YES for a SELL_NO); the
-        # canonical side/action must not be flipped, to keep the ledger's
-        # (ticker:side) position key stable.  Only backfill if the existing record
-        # is missing canonical fields.
-        if existing.canonical_position_side not in ("yes", "no") and fill.canonical_position_side in ("yes", "no"):
-            existing.canonical_position_side = fill.canonical_position_side
-        if existing.canonical_position_action not in ("buy", "sell") and fill.canonical_position_action in ("buy", "sell"):
-            existing.canonical_position_action = fill.canonical_position_action
-        if (
-            existing.canonical_position_side in ("yes", "no")
-            and existing.canonical_position_action in ("buy", "sell")
-            and (existing.canonical_yes_delta_cc is None or existing.canonical_yes_delta_cc == 0)
-        ):
+        # Preserve the live-router canonical side/action (user's intended contract
+        # form).  The authoritative fill may report the counterparty form; only
+        # backfill side/action if the provisional record is incomplete.
+        if existing.canonical_position_side not in ("yes", "no"):
+            existing.canonical_position_side = fill.canonical_position_side or fill.side
+        if existing.canonical_position_action not in ("buy", "sell"):
+            existing.canonical_position_action = fill.canonical_position_action or fill.action
+
+        # Execution-side audit fields from the raw exchange report.
+        if fill.execution_outcome_side:
+            existing.execution_outcome_side = fill.execution_outcome_side
+        if fill.execution_action:
+            existing.execution_action = fill.execution_action
+        if fill.execution_price_cents is not None:
+            existing.execution_price_cents = fill.execution_price_cents
+
+        # Authoritative price legs always overlay the provisional record.  The
+        # exchange's yes/no market prices are the source of truth; the ledger then
+        # derives the user's own outcome-side price from the preserved canonical side.
+        if fill.yes_price_dollars is not None:
+            existing.yes_price_dollars = fill.yes_price_dollars
+        if fill.no_price_dollars is not None:
+            existing.no_price_dollars = fill.no_price_dollars
+
+        # Backfill a missing opposite leg using the binary complement, but only
+        # when one authoritative leg is already present.
+        if existing.yes_price_dollars is not None and existing.no_price_dollars is None:
+            existing.no_price_dollars = Decimal("1") - existing.yes_price_dollars
+        if existing.no_price_dollars is not None and existing.yes_price_dollars is None:
+            existing.yes_price_dollars = Decimal("1") - existing.no_price_dollars
+
+        # Authoritative fee overwrites the provisional estimate.
+        if fill.fee_cost is not None:
+            existing.fee_cost = fill.fee_cost
+        elif fill.fee_cents is not None:
+            existing.fee_cost = Decimal(str(fill.fee_cents)) / Decimal("100")
+
+        # Recompute the canonical leg price in the user's outcome space using the
+        # authoritative legs and the preserved canonical side.
+        can_side = existing.canonical_position_side
+        yes_cents = _safe_price_to_cents(existing.yes_price_dollars)
+        no_cents = _safe_price_to_cents(existing.no_price_dollars)
+
+        if can_side == "yes" and yes_cents is not None:
+            existing.canonical_leg_price_cents = yes_cents
+        elif can_side == "no" and no_cents is not None:
+            existing.canonical_leg_price_cents = no_cents
+        elif fill.canonical_leg_price_cents is not None:
+            # Fallback to the authoritative leg price only if it is expressed on the
+            # same side as the user's canonical form; otherwise complement it.
+            auth_canon = fill.canonical_leg_price_cents
+            auth_side = fill.canonical_position_side or fill.side
+            if auth_side == can_side:
+                existing.canonical_leg_price_cents = auth_canon
+            else:
+                existing.canonical_leg_price_cents = 100 - auth_canon
+
+        # Recompute the canonical YES delta from the preserved side/action.
+        if can_side in ("yes", "no") and existing.canonical_position_action in ("buy", "sell"):
             try:
                 existing.canonical_yes_delta_cc = yes_delta(
-                    existing.canonical_position_action, existing.canonical_position_side, existing.quantity_cc
+                    existing.canonical_position_action, can_side, existing.quantity_cc
                 )
             except Exception:
                 pass
 
-        # Enrich price fields only when the existing record is missing them.
-        # The first observed execution (usually the live-router fill) is the
-        # source of truth for cost basis.  A later HTTP/WS observation of the
-        # same execution must not overwrite the leg prices, especially when the
-        # exchange reports the trade in a counterparty form with the price on the
-        # opposite leg.  Missing legs may be backfilled if they are needed for
-        # PnL or audit.
-        if existing.yes_price_dollars is None and fill.yes_price_dollars is not None:
-            existing.yes_price_dollars = fill.yes_price_dollars
-        if existing.no_price_dollars is None and fill.no_price_dollars is not None:
-            existing.no_price_dollars = fill.no_price_dollars
+        # Recompute proceeds_dollars using the preserved canonical side/action and
+        # the authoritative price legs.  This is the signed cash flow: negative for
+        # buys, positive for sells, net of fee.
+        try:
+            price_dollars = existing.yes_price_dollars if can_side == "yes" else existing.no_price_dollars
+            if price_dollars is None and existing.canonical_leg_price_cents is not None:
+                price_dollars = Decimal(str(existing.canonical_leg_price_cents)) / Decimal("100")
+            if price_dollars is not None and existing.count_fp is not None:
+                gross = price_dollars * existing.count_fp
+                fee = existing.fee_cost or Decimal("0")
+                if existing.canonical_position_action == "buy":
+                    existing.proceeds_dollars = -gross - fee
+                else:
+                    existing.proceeds_dollars = gross - fee
+        except Exception as e:
+            logger.warning(
+                "[FILLS-LEDGER-LIVE-PROMOTE] could not recompute proceeds for %s: %s",
+                existing.fill_id, e,
+            )
 
-        # Recompute the canonical leg and execution price in the existing
-        # canonical side's own outcome space, using the existing (preserved)
-        # canonical side.  Only update if the existing record still lacks a leg
-        # price for that side.
-        can_side = existing.canonical_position_side
-        if can_side == "yes" and existing.yes_price_dollars is not None:
-            if existing.canonical_leg_price_cents is None:
-                existing.canonical_leg_price_cents = _safe_price_to_cents(existing.yes_price_dollars)
-                existing.execution_price_cents = existing.canonical_leg_price_cents
-        elif can_side == "no" and existing.no_price_dollars is not None:
-            if existing.canonical_leg_price_cents is None:
-                existing.canonical_leg_price_cents = _safe_price_to_cents(existing.no_price_dollars)
-                existing.execution_price_cents = existing.canonical_leg_price_cents
-        elif existing.canonical_leg_price_cents is None and (fill.canonical_leg_price_cents is not None or fill.execution_price_cents is not None):
-            existing.canonical_leg_price_cents = fill.canonical_leg_price_cents or fill.execution_price_cents or existing.canonical_leg_price_cents
-            existing.execution_price_cents = fill.execution_price_cents or fill.canonical_leg_price_cents or existing.execution_price_cents
+        if fill.canonicalization_state in TRUSTED_CANONICALIZATION_STATES:
+            existing.canonicalization_state = fill.canonicalization_state
+        elif existing.canonicalization_state not in TRUSTED_CANONICALIZATION_STATES:
+            existing.canonicalization_state = "TRUSTED_LIVE_V1"
 
-        # price_cents is a read-only display property; canonical leg price is already
-        # preserved above. Do not assign to the property to avoid AttributeError.
-        existing.fee_cost = fill.fee_cost or existing.fee_cost
-        existing.fee_cents = fill.fee_cents or existing.fee_cents
-        existing.proceeds_dollars = fill.proceeds_dollars or existing.proceeds_dollars
-        existing.canonicalization_state = fill.canonicalization_state or existing.canonicalization_state
-        existing.confirmed_by_rest = True
-        existing.ingestion_source = fill.ingestion_source or existing.ingestion_source
-        existing.ingested_at = fill.ingested_at or existing.ingested_at
-        if fill.raw_payload:
-            existing.raw_payload = fill.raw_payload
+        # Merge missing provenance.
         if fill.intent_id and not existing.intent_id:
             existing.intent_id = fill.intent_id
         if fill.agent_id and not existing.agent_id:
@@ -5136,7 +5171,6 @@ class KalshiFillsLedger:
         if old_id != new_id:
             existing.fill_id = new_id
             self._reindex_fill_id(old_id, new_id, existing)
-            # The authoritative id is now the canonical key for this order.
             self._live_router_fill_ids[fill.order_id] = new_id
 
         # Both ids have been applied; idempotency must hold for either one.
@@ -5164,8 +5198,10 @@ class KalshiFillsLedger:
             )
 
         logger.info(
-            "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoted provisional %s to authoritative fill=%s trade=%s",
+            "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoted provisional %s to authoritative fill=%s trade=%s side=%s action=%s leg=%s proceeds=%s",
             fill.order_id, old_id, new_id, existing.trade_id,
+            existing.canonical_position_side, existing.canonical_position_action,
+            existing.canonical_leg_price_cents, existing.proceeds_dollars,
         )
 
         # Mutate the caller's fill object so downstream consumers see the

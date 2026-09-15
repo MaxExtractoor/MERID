@@ -303,6 +303,16 @@ All existing rules in this contract remain mandatory, including:
 - CF Benchmarks RTI source, freshness, symbol, ordering, and provenance gates.
 - Circuit-breaker fail-closed behavior.
 - Automatic preservation of exits whenever entries are halted.
+- Live-router provisional fills must be promoted (not duplicated) when the
+  authoritative exchange fill arrives. The promoted record keeps the user's
+  canonical side/action from the originating intent, but overwrites the
+  yes/no leg prices, fee, execution audit fields, and cash proceeds with the
+  exchange's authoritative values. The canonical leg price and signed
+  proceeds are recomputed from the authoritative legs and the user's outcome
+  side so counterparty-form fills cannot flip position cost basis.
+- Realized PnL is computed from authoritative signed cash proceeds where
+  available, not from leg-price conversions, so cross-leg and
+  counterparty-equivalent fills produce the correct PnL.
 
 ## Coding directive
 
