@@ -121,7 +121,7 @@ def test_tiny_account_all_on_trading_shard_is_funded():
 
 def test_fails_closed_when_auto_fund_disabled(monkeypatch):
     monkeypatch.setenv("MERID_AUTO_FUND_TRADING_SHARD", "0")
-    client = FakeClient({0: Decimal("5.00"), 2: Decimal("0.01")})
+    client = FakeClient({0: Decimal("5.00"), 2: Decimal("0.005")})
     res = asyncio.run(sf.ensure_trading_shard_funded(client, None))
     assert client.transfers == []
     assert not res.funded and res.reason == "auto_fund_disabled"
@@ -134,7 +134,7 @@ def test_transfer_rejection_is_reported_not_raised():
 
 
 def test_no_cash_anywhere_is_not_funded():
-    client = FakeClient({0: Decimal("0.00"), 2: Decimal("0.01")})
+    client = FakeClient({0: Decimal("0.00"), 2: Decimal("0.005")})
     res = asyncio.run(sf.ensure_trading_shard_funded(client, None))
     assert not res.funded and res.reason == "account_below_min_collateral"
 

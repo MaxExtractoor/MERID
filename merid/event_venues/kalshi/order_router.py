@@ -12255,7 +12255,11 @@ async def _route_live(
         logger.debug("[order-router] Using cached bankroll for unified risk calibration: %s", current_bankroll)
     
     if current_bankroll is not None and current_bankroll > 0:
-        balance_cents = int(current_bankroll * 100)
+        # Preserve sub-cent equity when calibrating risk: round to the nearest
+        # cent instead of truncating a 1.97c account to 1c.
+        from merid.event_venues.kalshi.balance_calibrator import dollars_to_cents
+
+        balance_cents = dollars_to_cents(current_bankroll)
         unified_risk.calibrate_from_balance(balance_cents)
     
     # Infer category and underlying

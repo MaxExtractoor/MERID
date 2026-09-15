@@ -338,8 +338,16 @@ _ENV_OVERRIDES: Dict[str, _EnvOverride] = {
         type="int",
         is_safety_limit=True,
         safety_kind="floor",
-        default=12,
-        description="Trading-shard cash floor (cents) below which entries are halted; env may only raise it.",
+        default=1,
+        description="Trading-shard cash floor (cents) below which entries are halted; must be at least 1c so a single centi-contract plus fee is always backable.",
+    ),
+    "MERID_MIN_TRADE_CASH_USD": _EnvOverride(
+        name="MERID_MIN_TRADE_CASH_USD",
+        type="decimal",
+        is_safety_limit=True,
+        safety_kind="floor",
+        default=Decimal("1.50"),
+        description="Minimum trade cash floor (USD); may be lowered by operator when the live account is micro-funded.",
     ),
     # Durable operator authorization and execution freshness thresholds.
     "MERID_AUTO_EXECUTION_MODE": _EnvOverride(

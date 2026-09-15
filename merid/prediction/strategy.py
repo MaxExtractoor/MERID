@@ -642,7 +642,8 @@ class KalshiStrategy:
                 _effective_usd = get_equity_for_risk_calc_sync()
                 _summary = get_summary_sync()
                 if _effective_usd and _effective_usd > 0:
-                    _bankroll_cents = int(_effective_usd * 100)
+                    _bankroll_usd = Decimal(str(_effective_usd))
+                    _bankroll_cents = int(_bankroll_usd * 100)
                     _state = _summary.state.value if _summary else "unknown"
                     logger.debug(
                         "[strategy] Using effective bankroll: $%.2f (state=%s)",
@@ -732,8 +733,9 @@ class KalshiStrategy:
             # The function returns (count, notional_usd, metadata_dict)
             # It enforces the $1 global slot allocator cap internally
             _asset = self._extract_asset_from_market_id(edge.market_id)
-            _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
-            
+            # _bankroll_usd was set from the exact equity string above; do not
+            # re-derive it from the whole-cent _bankroll_cents fallback value.
+
             # Apply governance factor from paper session if available
             # This propagates halt/downsize state into position sizing
             try:
