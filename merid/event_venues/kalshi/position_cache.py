@@ -456,6 +456,24 @@ def _stop_loss_enabled_default() -> bool:
     return True
 
 
+def _derive_proceeds_dollars(
+    action: str,
+    quantity_cc: int,
+    adjusted_price_cents: int,
+    fee_cents: int,
+) -> Decimal:
+    """Derive signed cash proceeds from position-side price and fee.
+
+    Buy: negative cash outflow of (price * count + fee).
+    Sell: positive cash inflow of (price * count - fee).
+    """
+    fee_dollars = Decimal(fee_cents) / Decimal("100")
+    gross_dollars = Decimal(quantity_cc * adjusted_price_cents) / Decimal("10000")
+    if (action or "buy").lower() == "buy":
+        return -gross_dollars - fee_dollars
+    return gross_dollars - fee_dollars
+
+
 @dataclass
 class CachedPosition:
     """Cached position state.
@@ -476,6 +494,10 @@ class CachedPosition:
     thesis_side: str = "yes"  # "yes" or "no" - immutable strategy thesis set from entry intent
     avg_price_cents: Optional[int] = None  # None = unknown/missing, 0 = invalid (real prices are 10-75c)
     realized_pnl_usd: Decimal = Decimal("0")
+    # Sum of signed cash proceeds from entry fills (negative for buys, positive for sells).
+    # Used with authoritative close proceeds to compute realized PnL without relying on
+    # leg-price conversion.
+    entry_cash_proceeds_usd: Decimal = Decimal("0")
     # Canonical exposure as confirmed by fills / Kalshi positions.
     outcome_side: str = ""  # canonical outcome the position is long (yes/no); from fills if available
     book_side: str = "ask"  # canonical resting book side (ask for a long position)
@@ -678,6 +700,7 @@ class CachedPosition:
         quantity_cc: Optional[int] = None,
         yes_price_cents: Optional[int] = None,
         no_price_cents: Optional[int] = None,
+        proceeds_dollars: Optional[Decimal] = None,
     ) -> None:
         """Update position with a new fill using signed YES exposure.
 
@@ -882,6 +905,19 @@ class CachedPosition:
             self.contracts = Decimal(new_quantity_cc) / Decimal("100")
             self.entry_price_state = "known"
 
+            # Track the signed cash proceeds of the entry.  Negative for buys
+            # (cash out), positive for sells (cash in), net of fee.
+            _fill_proceeds = (
+                proceeds_dollars if proceeds_dollars is not None
+                else _derive_proceeds_dollars(action, quantity_cc, adjusted_price_cents, fee_cents)
+            )
+            if pre_quantity_cc == 0:
+                # Fresh position
+                self.entry_cash_proceeds_usd = _fill_proceeds
+            else:
+                # Add to existing (rare; still accumulate cost basis)
+                self.entry_cash_proceeds_usd += _fill_proceeds
+
             if self.quantity_cc < pre_quantity_cc:
                 logger.critical(
                     "[WRONG-DIRECTION-POSITION-CHANGE] ticker=%s raw_side=%s action=%s pre_quantity_cc=%d fill_quantity_cc=%d post_quantity_cc=%d - ENTRY fill REDUCED position instead of increasing.",
@@ -933,11 +969,24 @@ class CachedPosition:
                 self.quantity_cc = int(new_quantity_cc)
                 self.contracts = Decimal(new_quantity_cc) / Decimal("100")
             else:
-                # Long position PnL: exit price - entry price in own-side cents.
-                pnl_per = adjusted_price_cents - self.avg_price_cents
-                pnl_cents = Decimal(closed_quantity_cc * pnl_per) / Decimal("100")
                 _realized_pnl_before = self.realized_pnl_usd
-                self.realized_pnl_usd += Decimal(pnl_cents) / Decimal("100") - Decimal(fee_cents) / Decimal("100")
+
+                # Prefer authoritative signed cash proceeds for realized PnL.
+                # This is the only robust method for cross-leg / counterparty-equivalent
+                # fills where the execution-side price and the position-side price can
+                # be different expressions of the same trade.
+                if proceeds_dollars is not None and pre_quantity_cc > 0:
+                    _closed_fraction = Decimal(closed_quantity_cc) / Decimal(pre_quantity_cc)
+                    _cost_basis = self.entry_cash_proceeds_usd * _closed_fraction
+                    _realized_delta = proceeds_dollars + _cost_basis
+                    self.realized_pnl_usd += _realized_delta
+                    self.entry_cash_proceeds_usd -= _cost_basis
+                else:
+                    # Fallback to price-difference PnL when proceeds are unavailable.
+                    pnl_per = adjusted_price_cents - self.avg_price_cents
+                    pnl_cents = Decimal(closed_quantity_cc * pnl_per) / Decimal("100")
+                    self.realized_pnl_usd += Decimal(pnl_cents) / Decimal("100") - Decimal(fee_cents) / Decimal("100")
+
                 self.quantity_cc = int(new_quantity_cc)
                 self.contracts = Decimal(new_quantity_cc) / Decimal("100")
 
@@ -2024,6 +2073,7 @@ class KalshiPositionCache:
         canonicalization_state: Optional[str] = None,
         yes_price_cents: Optional[int] = None,
         no_price_cents: Optional[int] = None,
+        proceeds_dollars: Optional[Decimal] = None,
     ) -> None:
         """Handle a fill event from WebSocket.
 
@@ -2122,6 +2172,7 @@ class KalshiPositionCache:
             _position_exchange_index = None
             fill_yes_price_cents = yes_price_cents
             fill_no_price_cents = no_price_cents
+            _fill_proceeds_dollars = proceeds_dollars
             if fill_id and self._fills_ledger:
                 try:
                     fill_record = self._fills_ledger.get_fill_by_id(fill_id)
@@ -2134,6 +2185,8 @@ class KalshiPositionCache:
                         fill_yes_price_cents = _fill_position_side_price_cents(fill_record, "yes") or yes_price_cents
                         fill_no_price_cents = _fill_position_side_price_cents(fill_record, "no") or no_price_cents
                         _position_exchange_index = getattr(fill_record, 'exchange_index', None)
+                        if getattr(fill_record, 'proceeds_dollars', None) is not None:
+                            _fill_proceeds_dollars = fill_record.proceeds_dollars
                 except Exception as ledger_err:
                     logger.debug("[POSITION-CACHE] Could not canonicalize from fill record: %s", ledger_err)
 
@@ -3257,6 +3310,7 @@ class KalshiPositionCache:
                     quantity_cc=quantity_cc,
                     yes_price_cents=fill_yes_price_cents,
                     no_price_cents=fill_no_price_cents,
+                    proceeds_dollars=_fill_proceeds_dollars,
                 )
                 logger.debug(
                     f"Position cache: updated {market_id}: action={action} side={side} "

@@ -170,3 +170,115 @@ class TestCachedPositionApplyFillCrossLeg:
         assert pos.contracts == 0
         # PnL uses the position-side exit price (YES = 60c) minus entry (50c)
         assert float(pos.realized_pnl_usd) == pytest.approx(0.10)
+
+
+class TestCachedPositionProceedsBasedPnL:
+    """Authoritative signed cash proceeds drive realized PnL, not leg-price math."""
+
+    def test_sell_no_long_yes_pnl_uses_proceeds(self):
+        """SELL_NO (long YES) at 66c, then BUY_NO to close at 34c = -32c loss."""
+        pos = CachedPosition(
+            market_id="KXBTC15M-PROCEEDS",
+            agent_id="test",
+            thesis_side="yes",
+            contracts=0,
+            side="yes",
+            avg_price_cents=0,
+            realized_pnl_usd=Decimal("0"),
+            unrealized_pnl_usd=Decimal("0"),
+        )
+        # Entry: SELL_NO 0.26 contracts at 66c, fee 0.00164
+        pos.apply_fill(
+            contracts=1,
+            price_cents=66,
+            fee_cents=0,
+            side="no",
+            action="sell",
+            yes_price_cents=34,
+            no_price_cents=66,
+            proceeds_dollars=Decimal("0.66"),
+        )
+        assert pos.side == "yes"
+        assert pos.quantity_cc == 100
+
+        # Exit: BUY_NO 1 contract at 66c (position side is YES, so price is 34c),
+        # but the authoritative proceeds are -0.34 (gross) - fee.
+        pos.apply_fill(
+            contracts=1,
+            price_cents=34,
+            fee_cents=0,
+            side="no",
+            action="buy",
+            yes_price_cents=34,
+            no_price_cents=66,
+            proceeds_dollars=Decimal("-0.34"),
+        )
+        assert pos.contracts == 0
+        # entry_cash_proceeds (+0.66) + close_proceeds (-0.34) = +0.32
+        assert float(pos.realized_pnl_usd) == pytest.approx(0.32)
+
+    def test_buy_yes_long_yes_pnl_uses_proceeds_with_fee(self):
+        """BUY_YES at 25c, then SELL_YES at 9.6c = -15.4c gross loss, minus fee."""
+        pos = CachedPosition(
+            market_id="KXBTC15M-PROCEEDS-FEE",
+            agent_id="test",
+            thesis_side="yes",
+            contracts=0,
+            side="yes",
+            avg_price_cents=0,
+            realized_pnl_usd=Decimal("0"),
+            unrealized_pnl_usd=Decimal("0"),
+        )
+        pos.apply_fill(
+            contracts=1,
+            price_cents=25,
+            fee_cents=0,
+            side="yes",
+            action="buy",
+            yes_price_cents=25,
+            no_price_cents=75,
+            proceeds_dollars=Decimal("-0.25"),
+        )
+        pos.apply_fill(
+            contracts=1,
+            price_cents=9,
+            fee_cents=1,
+            side="yes",
+            action="sell",
+            yes_price_cents=9,
+            no_price_cents=91,
+            proceeds_dollars=Decimal("0.08"),  # 0.09 - 0.01 fee
+        )
+        assert pos.contracts == 0
+        # -0.25 entry + 0.08 close = -0.17
+        assert float(pos.realized_pnl_usd) == pytest.approx(-0.17)
+
+    def test_partial_close_uses_proportional_cost_basis(self):
+        """A partial close allocates the correct fraction of entry proceeds."""
+        pos = CachedPosition(
+            market_id="KXBTC15M-PARTIAL",
+            agent_id="test",
+            thesis_side="yes",
+            contracts=2,
+            side="yes",
+            avg_price_cents=50,
+            realized_pnl_usd=Decimal("0"),
+            unrealized_pnl_usd=Decimal("0"),
+        )
+        pos.entry_cash_proceeds_usd = Decimal("-1.00")  # 2 contracts at 50c
+
+        # Sell 1 contract at 60c, proceeds +0.60
+        pos.apply_fill(
+            contracts=1,
+            price_cents=60,
+            fee_cents=0,
+            side="yes",
+            action="sell",
+            yes_price_cents=60,
+            no_price_cents=40,
+            proceeds_dollars=Decimal("0.60"),
+        )
+        assert pos.quantity_cc == 100
+        # half of -1.00 cost = -0.50; realized = 0.60 + (-0.50) = 0.10
+        assert float(pos.realized_pnl_usd) == pytest.approx(0.10)
+        assert float(pos.entry_cash_proceeds_usd) == pytest.approx(-0.50)
