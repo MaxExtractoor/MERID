@@ -222,12 +222,16 @@ class KalshiClientV2:
                     self._client = httpx.AsyncClient(
                         base_url=self._base_url,
                         timeout=httpx.Timeout(
-                            connect=15.0,
+                            connect=30.0,
                             read=60.0,
-                            write=15.0,
-                            pool=10.0,
+                            write=30.0,
+                            pool=30.0,
                         ),
-                        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                        limits=httpx.Limits(
+                            max_connections=50,
+                            max_keepalive_connections=20,
+                            keepalive_expiry=60.0,
+                        ),
                         verify=get_shared_ssl_context(),
                     )
         return self._client
