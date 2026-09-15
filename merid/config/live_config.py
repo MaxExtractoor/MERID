@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from merid.config.auto_execution import is_auto_execution_enabled
 from utils.logger import get_logger
 
 logger = get_logger("merid.config.live_config")
@@ -118,6 +119,15 @@ class ResolvedLiveConfig:
     min_held_price_cents: Decimal = Decimal("35")  # cents
     min_required_edge: Decimal = Decimal("0.02")
     min_p_selected: Decimal = Decimal("0.50")
+
+    # Operational freshness thresholds and execution authorization
+    auto_execution_mode: bool = False
+    book_execution_max_age_ms: int = 1000
+    rti_book_skew_ms: int = 1500
+    rti_execution_max_age_ms: int = 2000
+
+    # Canary / exploration overlays (must be off in production)
+    canary_4c_lcb_enabled: bool = False
 
     # Per-asset overrides
     per_asset: Dict[str, ResolvedAssetConfig] = field(default_factory=dict)
@@ -331,6 +341,35 @@ _ENV_OVERRIDES: Dict[str, _EnvOverride] = {
         default=12,
         description="Trading-shard cash floor (cents) below which entries are halted; env may only raise it.",
     ),
+    # Durable operator authorization and execution freshness thresholds.
+    "MERID_AUTO_EXECUTION_MODE": _EnvOverride(
+        name="MERID_AUTO_EXECUTION_MODE",
+        type="bool",
+        description="Durable operator authorization to enable live trading automatically after preflight.",
+    ),
+    "MERID_BOOK_EXECUTION_MAX_AGE_MS": _EnvOverride(
+        name="MERID_BOOK_EXECUTION_MAX_AGE_MS",
+        type="int",
+        description="Maximum orderbook age in milliseconds for execution eligibility.",
+    ),
+    "MERID_RTI_BOOK_SKEW_MS": _EnvOverride(
+        name="MERID_RTI_BOOK_SKEW_MS",
+        type="int",
+        description="Maximum allowed skew between RTI and orderbook timestamps in milliseconds.",
+    ),
+    "MERID_RTI_EXECUTION_MAX_AGE_MS": _EnvOverride(
+        name="MERID_RTI_EXECUTION_MAX_AGE_MS",
+        type="int",
+        description="Maximum RTI age in milliseconds for execution eligibility.",
+    ),
+    # Canary / exploration overlays.  These are fail-closed in production.
+    "MERID_CANARY_4C_LCB": _EnvOverride(
+        name="MERID_CANARY_4C_LCB",
+        type="bool",
+        is_safety_limit=True,
+        safety_kind="bool_safe",
+        description="4c LCB canary overlay; must be off in production (core Bachelier-only path).",
+    ),
 }
 
 # Environment variables that are explicitly not safety-critical and may be
@@ -399,6 +438,7 @@ _ALLOWED_NON_SAFETY_PREFIXES = {
     "MERID_OPERATION_MODE",  # already in schema
     "MERID_TRADE_MODE",  # already in schema
     "MERID_TRADING_MODE",
+    "MERID_BUILD_SHA",
     "MERID_PM_",
     "MERID_OBSERVE_ONLY",
     "MERID_LOOP_",
@@ -899,6 +939,13 @@ class LiveConfigResolver:
         if env_book_staleness is not None:
             book_staleness = env_book_staleness
 
+        # Operational execution freshness thresholds
+        auto_execution_mode = is_auto_execution_enabled()
+        book_execution_max_age_ms = int(env.get("MERID_BOOK_EXECUTION_MAX_AGE_MS", 1000))
+        rti_book_skew_ms = int(env.get("MERID_RTI_BOOK_SKEW_MS", 1500))
+        rti_execution_max_age_ms = int(env.get("MERID_RTI_EXECUTION_MAX_AGE_MS", 2000))
+        canary_4c_lcb_enabled = bool(env.get("MERID_CANARY_4C_LCB", False))
+
         # ── Stop-loss execution path ──────────────────────────────────────────
         # 2026-08-29: Detection and execution are deliberately decoupled here.
         # stop_loss_enabled means protective-exit detection is active and logged.
@@ -1052,6 +1099,11 @@ class LiveConfigResolver:
             min_held_price_cents=min_held_price,
             min_required_edge=min_required_edge,
             min_p_selected=resolved_min_p,
+            auto_execution_mode=auto_execution_mode,
+            book_execution_max_age_ms=book_execution_max_age_ms,
+            rti_book_skew_ms=rti_book_skew_ms,
+            rti_execution_max_age_ms=rti_execution_max_age_ms,
+            canary_4c_lcb_enabled=canary_4c_lcb_enabled,
             per_asset=per_asset,
             source_overrides={},
             conflicts_caught=[],
@@ -1141,6 +1193,15 @@ class LiveConfigResolver:
             self._invariants_checked.append(
                 f"Canary invariants: max_contracts_per_order=1, fixed_exposure_cap_usd={resolved.fixed_exposure_cap_usd}"
             )
+
+        # 6b. The 4c LCB exploration overlay must be off in production.
+        if resolved.canary_4c_lcb_enabled:
+            raise LiveConfigInvariantError(
+                "MERID_CANARY_4C_LCB must be off in production; the core Bachelier/TWAP path is the only authorized lane"
+            )
+        self._invariants_checked.append(
+            f"4c LCB canary: enabled={resolved.canary_4c_lcb_enabled}"
+        )
 
         # 7. TIF invariants.
         if resolved.entry_tif_default not in ("ioc", "fok"):

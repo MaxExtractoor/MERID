@@ -25,8 +25,10 @@ Rules
 -----
 - The singleton starts in ``LIVE_ENTRIES_HALTED``.
 - A process starts at ``STARTING`` and moves to ``PREFLIGHT_RUNNING``.
-- Preflight success alone is NOT enough to reach ``LIVE_ENTRIES_ENABLED``.
-  An explicit, secret-backed operator release is required.
+- By default, preflight ends in ``LIVE_ENTRIES_HALTED``.
+  When ``auto_execution_mode`` is active (``MERID_AUTO_EXECUTION_MODE`` or
+  the durable operator contract), preflight success may automatically
+  transition to ``LIVE_ENTRIES_ENABLED``.
 - Any preflight failure, RTI/book degradation, reconciliation divergence,
   circuit-breaker trip, unknown submission, or configuration conflict moves
   the state to ``LIVE_ENTRIES_HALTED``.
