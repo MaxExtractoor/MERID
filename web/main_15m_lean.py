@@ -2700,18 +2700,34 @@ async def internal_market_state(ticker: str):
                 "ticker": ticker
             }
         
-        # Extract relevant fields
+        # Extract relevant fields (KalshiMarketState uses *_cents fields).
+        last_update_ts = getattr(mstate, 'last_update_ts', None)
+        seconds_since_update = None
+        if last_update_ts:
+            seconds_since_update = round(time.monotonic() - float(last_update_ts), 3)
+        best_bid_cents = getattr(mstate, 'best_bid_cents', None)
+        best_ask_cents = getattr(mstate, 'best_ask_cents', None)
+        yes_price = best_bid_cents
+        no_price = 100 - best_ask_cents if best_ask_cents is not None else None
         return {
             "ticker": ticker,
-            "best_bid": getattr(mstate, 'best_bid', None),
-            "best_ask": getattr(mstate, 'best_ask', None),
-            "yes_price": getattr(mstate, 'yes_price', None),
-            "no_price": getattr(mstate, 'no_price', None),
+            "best_bid_cents": best_bid_cents,
+            "best_ask_cents": best_ask_cents,
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "mid_cents": getattr(mstate, 'mid_cents', None),
+            "spread_cents": getattr(mstate, 'spread_cents', None),
             "bid_size": getattr(mstate, 'bid_size', None),
             "ask_size": getattr(mstate, 'ask_size', None),
-            "last_update_ts": getattr(mstate, 'last_update_ts', None),
-            "seconds_since_update": getattr(mstate, 'seconds_since_update', None),
-            "market_status": getattr(mstate, 'market_status', 'unknown')
+            "last_update_ts": last_update_ts,
+            "seconds_since_update": seconds_since_update,
+            "market_status": getattr(mstate, 'market_status', 'unknown'),
+            "executable": getattr(mstate, 'executable', None),
+            "book_initialized": getattr(mstate, 'book_initialized', None),
+            "snapshot_complete": getattr(mstate, 'snapshot_complete', None),
+            "data_source": getattr(mstate, 'data_source', None),
+            "quote_owner": getattr(mstate, 'quote_owner', None),
+            "book_health": getattr(mstate, 'book_health', None),
         }
         
     except Exception as e:

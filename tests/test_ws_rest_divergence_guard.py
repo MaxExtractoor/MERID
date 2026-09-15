@@ -94,9 +94,10 @@ async def test_ws_authoritative_allows_marketable_divergence():
     store = _make_market_state_store(state)
     port = _make_port()
 
+    # BUY_NO at 30c is marketable against both WS (ask 21c) and REST (ask 30c).
     with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
         result = await _ws_rest_divergence_guard(
-            _make_intent(),
+            _make_intent(price_cents=30),
             port,
             TradingMode.LIVE,
             time.monotonic(),
@@ -247,6 +248,40 @@ async def test_coherent_feeds_allowed():
     with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
         result = await _ws_rest_divergence_guard(
             _make_intent(),
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_ws_snapshot_isolates_concurrent_state_mutation():
+    """The guard must snapshot WS state before awaiting REST; concurrent WS updates
+    must not influence the divergence decision for that order."""
+    state = _make_ws_state(best_bid_cents=50, best_ask_cents=50)
+    store = _make_market_state_store(state)
+
+    async def _mutating_get_orderbook(_ticker):
+        # Simulate a WS callback mutating the shared state while the REST
+        # fetch is in flight.  Without a snapshot this would make the guard
+        # see a 30c divergence and reject.
+        state.best_bid_cents = 80
+        state.best_ask_cents = 80
+        return OrderbookResult(
+            success=True,
+            yes_levels=[OrderbookLevel(price_cents=50, size=Decimal("100"), side="yes")],
+            no_levels=[OrderbookLevel(price_cents=50, size=Decimal("100"), side="no")],
+            timestamp=time.time(),
+        )
+
+    port = AsyncMock()
+    port.get_orderbook.side_effect = _mutating_get_orderbook
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(price_cents=50),
             port,
             TradingMode.LIVE,
             time.monotonic(),

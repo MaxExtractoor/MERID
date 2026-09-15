@@ -4081,6 +4081,9 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
     """
     ws_state: Optional[KalshiMarketState] = None
     market_state_store: Optional[Any] = None
+    ws_snapshot: Optional[Any] = None
+    ws_bid: Optional[int] = None
+    ws_ask: Optional[int] = None
     try:
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
         market_state_store = get_kalshi_market_state_store()
@@ -4095,18 +4098,37 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             )
             return None
 
+        # CRITICAL: Snapshot WS state into locals before any await.  The
+        # market_state_store.get() returns a shared mutable state; a WS callback
+        # may update it while we are awaiting the REST book, producing an
+        # inconsistent guard decision and misleading telemetry.  All WS values
+        # used after this point come from the snapshot.
+        ws_bid = int(round(ws_state.best_bid_cents))
+        ws_ask = int(round(ws_state.best_ask_cents))
+        ws_snapshot = SimpleNamespace(
+            best_bid_cents=ws_bid,
+            best_ask_cents=ws_ask,
+            data_source=getattr(ws_state, "data_source", "UNKNOWN"),
+            snapshot_complete=getattr(ws_state, "snapshot_complete", False),
+            live_sequence_confirmed=getattr(ws_state, "live_sequence_confirmed", False),
+            book_initialized=getattr(ws_state, "book_initialized", False),
+            book_health=getattr(ws_state, "book_health", "NO_SNAPSHOT"),
+            last_ws_update_ts=getattr(ws_state, "last_ws_update_ts", 0.0) or 0.0,
+            last_book_update_ts=getattr(ws_state, "last_book_update_ts", 0.0) or 0.0,
+        )
+
         ws_book = _side_aware_book_for_intent(
             {
-                "yes_bid_cents": int(round(ws_state.best_bid_cents)),
-                "yes_ask_cents": int(round(ws_state.best_ask_cents)),
-                "no_bid_cents": 100 - int(round(ws_state.best_ask_cents)),
-                "no_ask_cents": 100 - int(round(ws_state.best_bid_cents)),
+                "yes_bid_cents": ws_bid,
+                "yes_ask_cents": ws_ask,
+                "no_bid_cents": 100 - ws_ask,
+                "no_ask_cents": 100 - ws_bid,
             },
             intent.side,
         )
 
-        ws_authoritative = _is_ws_authoritative(ws_state)
-        ws_age_ms = _ws_age_ms(ws_state)
+        ws_authoritative = _is_ws_authoritative(ws_snapshot)
+        ws_age_ms = _ws_age_ms(ws_snapshot)
         ws_marketable = _is_marketable_against_book(intent, ws_book)
 
         max_ws_age_ms = float(os.environ.get("MERID_WS_REST_DIVERGENCE_WS_FRESH_MS", "5000.0"))
@@ -4185,8 +4207,8 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             "side=%s WS=%s/%s REST=%s/%s max_divergence=%dc tolerance=%dc "
             "ws_age_ms=%.0f rest_age_ms=%.0f ws_authoritative=%s",
             intent.ticker, intent.intent_id, intent.side,
-            ws_state.best_bid_cents, ws_state.best_ask_cents,
-            100 - ws_state.best_ask_cents, 100 - ws_state.best_bid_cents,
+            ws_bid, ws_ask,
+            100 - ws_ask, 100 - ws_bid,
             rest_book["yes_bid_cents"], rest_book["yes_ask_cents"],
             rest_book["no_bid_cents"], rest_book["no_ask_cents"],
             ws_book["space"], ws_book["bid_cents"], ws_book["ask_cents"],
@@ -4197,10 +4219,10 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
 
         # ---- check internal consistency of both feeds --------------------------
         ws_full_book = {
-            "yes_bid_cents": int(round(ws_state.best_bid_cents)),
-            "yes_ask_cents": int(round(ws_state.best_ask_cents)),
-            "no_bid_cents": 100 - int(round(ws_state.best_ask_cents)),
-            "no_ask_cents": 100 - int(round(ws_state.best_bid_cents)),
+            "yes_bid_cents": ws_bid,
+            "yes_ask_cents": ws_ask,
+            "no_bid_cents": 100 - ws_ask,
+            "no_ask_cents": 100 - ws_bid,
         }
         ws_consistent = _book_internal_consistent(market_state_store, ws_full_book, intent.ticker)
         rest_consistent = _book_internal_consistent(market_state_store, rest_book, intent.ticker)
@@ -4333,7 +4355,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_ERROR decision=ALLOW "
             "reason=divergence_check_exception error=%s ws_snapshot_complete=%s",
             intent.ticker, divergence_err,
-            getattr(ws_state, "snapshot_complete", False) if ws_state else False,
+            getattr(ws_snapshot, "snapshot_complete", False) if ws_snapshot else False,
         )
         return None
 
