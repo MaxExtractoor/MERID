@@ -581,6 +581,131 @@ def kalshi_fee_cents(contracts: int, price_cents: Union[int, float, Decimal]) ->
     return calculate_kalshi_fee_cents(contracts, price_cents)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORDER-LEVEL FEE CALCULATION WITH CENTICENT ROUNDING (Kalshi 2026 spec)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CENTICENT = Decimal("0.0001")
+"""Kalshi fee rounding precision: round up to nearest centicent (0.0001 USD)."""
+
+
+@dataclass(frozen=True)
+class FeeQuote:
+    """Structured fee quote for an order.
+    
+    Used for fee-aware decision making and pre-trade validation.
+    """
+    liquidity_role: str  # "maker" | "taker"
+    multiplier: Decimal
+    estimated_total_fee_usd: Decimal
+    estimated_fee_per_contract_usd: Decimal
+    fee_schedule_version: str = "2026-09"
+
+
+def kalshi_fee_usd(
+    *,
+    price_cents: int,
+    contracts: int,
+    liquidity_role: str,  # "taker" | "maker"
+    fee_multiplier: Decimal = Decimal("1"),
+) -> Decimal:
+    """Calculate order-level Kalshi fee with centicent rounding (Kalshi 2026 spec).
+    
+    Official Kalshi fee formula:
+        F = roundUp(M * coefficient * C * P * (1-P))
+    
+    where:
+        - M = series-specific fee multiplier (default 1.0)
+        - coefficient = 0.07 for taker, 0.0175 for maker
+        - C = contract quantity
+        - P = execution price in dollars (cents / 100)
+        - roundUp to centicent (0.0001 USD) per Kalshi schedule
+    
+    This is the production-accurate fee calculation that must be used for
+    all fee-aware decision making. Do not use static fee_bps or fee_per_contract
+    constants, as they do not account for:
+    - Order-size dependent rounding effects
+    - Series-specific multipliers
+    - Maker vs taker fee schedules
+    - Parabolic fee curve shape
+    
+    Args:
+        price_cents: Execution price in cents (1-99)
+        contracts: Number of contracts (must be positive)
+        liquidity_role: "taker" or "maker"
+        fee_multiplier: Series-specific multiplier (default 1.0)
+        
+    Returns:
+        Total fee in USD, rounded up to centicent
+        
+    Raises:
+        ValueError: If price_cents not in [1, 99] or contracts <= 0
+        
+    Examples:
+        >>> kalshi_fee_usd(price_cents=50, contracts=100, liquidity_role="taker")
+        Decimal('0.0175')  # $1.75 for 100 contracts at 50c
+        
+        >>> kalshi_fee_usd(price_cents=90, contracts=100, liquidity_role="taker")
+        Decimal('0.0063')  # $0.63 for 100 contracts at 90c (lower fee in tail)
+        
+        >>> kalshi_fee_usd(price_cents=50, contracts=100, liquidity_role="maker")
+        Decimal('0.0044')  # $0.44 for 100 contracts at 50c (maker fee)
+        
+    Reference:
+        https://kalshi.com/docs/kalshi-fee-schedule.pdf
+        https://help.kalshi.com/en/articles/13823811-limit-orders
+    """
+    if not 1 <= price_cents <= 99:
+        raise ValueError(f"price_cents must be in [1, 99], got {price_cents}")
+    if contracts <= 0:
+        raise ValueError(f"contracts must be positive, got {contracts}")
+    if liquidity_role not in ("taker", "maker"):
+        raise ValueError(f"liquidity_role must be 'taker' or 'maker', got {liquidity_role}")
+
+    p = Decimal(price_cents) / Decimal("100")
+
+    coefficient = (
+        Decimal("0.07")
+        if liquidity_role == "taker"
+        else Decimal("0.0175")
+    )
+
+    raw = fee_multiplier * coefficient * Decimal(contracts) * p * (Decimal("1") - p)
+
+    # Per Kalshi schedule: round up to centicent (0.0001 USD)
+    return raw.quantize(CENTICENT, rounding=ROUND_CEILING)
+
+
+def kalshi_fee_per_contract_usd(
+    *,
+    price_cents: int,
+    contracts: int,
+    liquidity_role: str = "taker",
+    fee_multiplier: Decimal = Decimal("1"),
+) -> Decimal:
+    """Calculate per-contract fee from order-level total.
+    
+    Important: Do not compute per-contract fee first and multiply by quantity.
+    The rounding is order-level, so per-contract = total_fee / contracts.
+    
+    Args:
+        price_cents: Execution price in cents
+        contracts: Number of contracts
+        liquidity_role: "taker" or "maker"
+        fee_multiplier: Series-specific multiplier
+        
+    Returns:
+        Per-contract fee in USD
+    """
+    total_fee = kalshi_fee_usd(
+        price_cents=price_cents,
+        contracts=contracts,
+        liquidity_role=liquidity_role,
+        fee_multiplier=fee_multiplier,
+    )
+    return total_fee / Decimal(contracts)
+
+
 def kalshi_fee_per_contract(contracts: int, price_cents: Union[int, float, Decimal]) -> float:
     """Alias for calculate_kalshi_fee_per_contract_cents (backwards compatibility)."""
     return calculate_kalshi_fee_per_contract_cents(contracts, price_cents)

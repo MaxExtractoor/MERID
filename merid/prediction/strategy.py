@@ -2767,7 +2767,7 @@ class KalshiStrategy:
         #         "[VOL_BREAKOUT] agent=%s market=%s sentiment_gating=disabled "
         #         "local_sentiment=%.0f neutral_band=[%.0f,%.0f] - proceeding based on EV only",
         #         self._agent_name, snapshot.market_id, local, lo, hi
-            )
+        #     )
 
         spec_edges = [e for e in snapshot.edges if e.edge_type in ("speculative", "sentiment_driven")]
         if not spec_edges:
