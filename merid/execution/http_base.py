@@ -150,8 +150,7 @@ class HTTPExecutor(TradeExecutor):
     @abstractmethod
     def _get_auth_headers(self) -> Dict[str, str]:
         """Authentication headers. Must be implemented by subclass."""
-        raise NotImplementedError
-        raise NotImplementedError
+        raise NotImplementedError("HTTPBase._get_auth_headers() must be implemented by subclass")
     
     def _generate_idempotency_key(self) -> str:
         """Generate unique idempotency key for request."""

@@ -354,24 +354,25 @@ def _fetch_realized_vol(asset: str) -> Optional[float]:
     """Return the canonical realized vol if it is fresh and confident."""
     if not MERID_USE_REALIZED_VOL:
         return None
-    try:
-        from merid.prediction.risk.sentiment_vol_service import get_current_volatility
-        scalar = get_current_volatility(asset)
-        if scalar is None:
-            return None
-        if scalar.value <= 0 or scalar.confidence < MERID_REALIZED_VOL_MIN_CONFIDENCE:
-            return None
-        age_s = (datetime.now(timezone.utc) - scalar.timestamp).total_seconds()
-        if age_s > MERID_REALIZED_VOL_MAX_AGE_S:
-            logger.warning(
-                "[VOL-REALIZED] asset=%s realized vol stale (age=%.0fs > %.0fs); ignoring",
-                asset, age_s, MERID_REALIZED_VOL_MAX_AGE_S,
-            )
-            return None
-        return float(scalar.value)
-    except Exception as exc:
-        logger.warning("[VOL-REALIZED] asset=%s failed to fetch realized vol: %s", asset, exc)
-        return None
+    # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): sentiment vol service disabled
+    # try:
+    #     from merid.prediction.risk.sentiment_vol_service import get_current_volatility
+    #     scalar = get_current_volatility(asset)
+    #     if scalar is None:
+    #         return None
+    #     if scalar.value <= 0 or scalar.confidence < MERID_REALIZED_VOL_MIN_CONFIDENCE:
+    #         return None
+    #     age_s = (datetime.now(timezone.utc) - scalar.timestamp).total_seconds()
+    #     if age_s > MERID_REALIZED_VOL_MAX_AGE_S:
+    #         logger.warning(
+    #             "[VOL-REALIZED] asset=%s realized vol stale (age=%.0fs > %.0fs); ignoring",
+    #             asset, age_s, MERID_REALIZED_VOL_MAX_AGE_S,
+    #         )
+    #         return None
+    #     return float(scalar.value)
+    # except Exception as exc:
+    #     logger.warning("[VOL-REALIZED] asset=%s failed to fetch realized vol: %s", asset, exc)
+    return None
 
 
 def _resolve_annualized_vol(

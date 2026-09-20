@@ -455,7 +455,8 @@ class AgentInterface(ABC):
         Args:
             market_state: Current market snapshot
         """
-        raise NotImplementedError
+        # Abstract base class for agents - must be implemented by subclasses
+        raise NotImplementedError("Agent.observe() must be implemented by subclass")
     
     @abstractmethod
     async def analyze(self) -> Dict[str, object]:
@@ -468,7 +469,8 @@ class AgentInterface(ABC):
         Returns:
             Analysis results dictionary
         """
-        raise NotImplementedError
+        # Abstract base class for agents - must be implemented by subclasses
+        raise NotImplementedError("Agent.analyze() must be implemented by subclass")
     
     @abstractmethod
     async def vote(self, proposal: Proposal) -> AgentVote:
@@ -484,7 +486,8 @@ class AgentInterface(ABC):
         Returns:
             Agent's vote with confidence and reasoning
         """
-        raise NotImplementedError
+        # Abstract base class for agents - must be implemented by subclasses
+        raise NotImplementedError("Agent.vote() must be implemented by subclass")
     
     @abstractmethod
     async def reflect(self, outcome: Outcome) -> None:
@@ -497,7 +500,8 @@ class AgentInterface(ABC):
         Args:
             outcome: Outcome of the proposal
         """
-        raise NotImplementedError
+        # Abstract base class for agents - must be implemented by subclasses
+        raise NotImplementedError("Agent.reflect() must be implemented by subclass")
     
     def _record_processing(self, latency_ms: float, success: bool) -> None:
         """

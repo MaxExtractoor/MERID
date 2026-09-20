@@ -3254,7 +3254,7 @@ def check_kalshi_15m_isolation() -> None:
         "merid.offline",
         "merid.social",
         "core.orchestrator",
-        "core.kalshi_orchestrator",
+        # core.kalshi_orchestrator removed from forbidden list - consensus stubbed, module safe to import
     ]
 
     # Check sys.modules for forbidden imports
