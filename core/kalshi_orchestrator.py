@@ -25,8 +25,9 @@ from swarm.spawner import SwarmSpawner
 from utils.logger import get_logger
 
 from core.kalshi_energy import KalshiEnergy, KalshiValidationResult, create_validation_result_from_settlement
-from core.consensus_engine import get_consensus_engine, ConsensusOutcome
-from schemas.consensus import KalshiContext, RiskDecisionContext
+# CONSENSUS MODULE REMOVED (Phase 1 legacy removal): Consensus functionality disabled
+# from core.consensus_engine import get_consensus_engine, ConsensusOutcome
+# from schemas.consensus import KalshiContext, RiskDecisionContext
 
 
 def _vote_positive(vote) -> bool:
@@ -57,10 +58,12 @@ class KalshiCore:
         base_agents = load_trading_agents()
         self.agents = self.spawner.bootstrap(base_agents)
         
-        # Initialize Kalshi consensus engine
-        self.consensus_engine = get_consensus_engine()
+        # CONSENSUS MODULE REMOVED (Phase 1 legacy removal): Consensus functionality disabled
+        # # Initialize Kalshi consensus engine
+        # self.consensus_engine = get_consensus_engine()
+        self.consensus_engine = None  # Placeholder to prevent AttributeError
         
-        self.logger.info("KALSHI CORE INITIALIZED — %d trading agents active", len(self.agents))
+        self.logger.info("KALSHI CORE INITIALIZED — %d trading agents active (CONSENSUS DISABLED)", len(self.agents))
         for agent in self.agents:
             self.logger.info("  • %s → %s", agent.agent_id, agent.model_name)
 
@@ -163,96 +166,15 @@ class KalshiCore:
         """
         Run Kalshi-specific consensus using the consensus engine.
         
-        Args:
-            kalshi_energy: Structured Kalshi energy
-            responses: Agent responses
-            
-        Returns:
-            Consensus result with Kalshi + RCK context
+        CONSENSUS MODULE REMOVED (Phase 1 legacy removal): This method is stubbed to prevent errors.
+        The 15m live trading path uses agent_grid_15m directly, not this orchestrator.
         """
-        try:
-            # Create Kalshi and RCK contexts for consensus engine
-            kalshi_context = KalshiContext(
-                market_id=kalshi_energy.market_id,
-                market_ticker=kalshi_energy.market_ticker,
-                series_ticker=kalshi_energy.series_ticker,
-                symbol=kalshi_energy.symbol,
-                timeframe=kalshi_energy.timeframe,
-                yes_bid_cents=kalshi_energy.yes_bid_cents,
-                yes_ask_cents=kalshi_energy.yes_ask_cents,
-                no_bid_cents=kalshi_energy.no_bid_cents,
-                no_ask_cents=kalshi_energy.no_ask_cents,
-                p_yes_implied=kalshi_energy.p_yes_implied,
-                p_yes_devig=kalshi_energy.p_yes_devig,
-                settlement_time=kalshi_energy.settlement_time,
-            )
-            
-            risk_context = RiskDecisionContext(
-                p_true=kalshi_energy.p_true,
-                p_implied=kalshi_energy.p_implied,
-                edge_bps=kalshi_energy.edge_bps,
-                kelly_fraction_full=kalshi_energy.kelly_fraction_full,
-                kelly_fraction_rck=kalshi_energy.kelly_fraction_rck,
-                kelly_fraction_used=kalshi_energy.kelly_fraction_used,
-                target_drawdown=kalshi_energy.target_drawdown,
-                drawdown_probability=kalshi_energy.drawdown_probability,
-                safety_factor=kalshi_energy.safety_factor,
-                direction=kalshi_energy.direction,
-                size_contracts=kalshi_energy.size_contracts,
-                bankroll_before=kalshi_energy.bankroll_before,
-                bankroll_after=kalshi_energy.bankroll_after,
-            )
-            
-            # Create votes from agent responses.
-            # IMPORTANT: Always build fresh Vote objects keyed to this market — never
-            # reuse pending_votes from a prior cycle.  The pending_votes dict is keyed
-            # by agent_id without a market dimension, so a stale vote from market A
-            # would silently contaminate the consensus for market B.
-            from core.consensus_engine import Vote
-            votes = []
-            proposal_key = f"trade_{kalshi_energy.market_id}"
-            for agent, response in zip(self.agents, responses):
-                vote = Vote(
-                    agent_id=agent.agent_id,
-                    proposal=proposal_key,
-                    signal=response.get("vote", "neutral"),
-                    confidence=response.get("confidence", 0.5),
-                    trust=self.consensus_engine.trust_scores.get(agent.agent_id, 1.0),
-                )
-                # Overwrite any stale entry for this agent so the dict stays coherent
-                # for other consumers of consensus_engine.pending_votes.
-                self.consensus_engine.pending_votes[agent.agent_id] = vote
-                votes.append(vote)
-            
-            # Create consensus result with Kalshi context
-            from core.consensus_engine import ConsensusResult
-            consensus_block = ConsensusResult(
-                decision="APPROVE" if kalshi_energy.edge_bps > 30 else "REJECT",
-                signal="bullish" if kalshi_energy.direction == "YES" else "bearish",
-                confidence=sum(v.confidence for v in votes) / len(votes) if votes else 0.0,
-                votes=votes,
-                quorum_met=len(votes) >= self.consensus_engine.min_votes,
-            )
-            
-            # Calculate consensus score
-            consensus_score = sum(v.weight for v in votes) / len(votes) if votes else 0.0
-            approved = consensus_score >= CONSENSUS_THRESHOLD and kalshi_energy.edge_bps > 30
-            
-            return {
-                "approved": approved,
-                "consensus": consensus_score,
-                "block_id": kalshi_energy.energy_id,
-                "block": consensus_block,
-                "summaries": self._build_agent_summaries(responses),
-            }
-            
-        except Exception as exc:
-            self.logger.error("Kalshi consensus failed: %s", exc)
-            return {
-                "approved": False,
-                "consensus": 0.0,
-                "error": str(exc),
-            }
+        self.logger.warning("Kalshi consensus disabled - consensus module removed in Phase 1")
+        return {
+            "approved": False,
+            "consensus": 0.0,
+            "error": "consensus_module_removed",
+        }
 
     async def _execute_agent(self, agent, energy: Dict[str, Any]) -> Dict[str, Any]:
         """Execute agent with Kalshi energy."""

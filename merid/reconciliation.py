@@ -458,22 +458,24 @@ def _fire_settlement_hooks(market_id: str) -> None:
             if resolved:
                 logger.info("settlement hook: debate %s resolved for %s", debate.id, market_id)
             # Compute and store debate rewards
-            try:
-                from merid.prediction.consensus import get_prediction_consensus_store
-                store = get_prediction_consensus_store()
-                opinions = store.list_opinions(symbol=market_id, limit=100)
-                if opinions:
-                    debate_store.compute_rewards_for_resolution(
-                        symbol=market_id,
-                        outcome=outcome,
-                        opinions=opinions,
-                    )
-                    logger.info(
-                        "settlement hook: rewards computed for %d opinions on %s",
-                        len(opinions), market_id,
-                    )
-            except Exception as exc:
-                logger.debug("settlement hook compute_rewards skipped for %s: %s", market_id, exc)
+            # CONSENSUS MODULE REMOVED (Phase 1 legacy removal): Consensus functionality disabled
+            # try:
+            #     from merid.prediction.consensus import get_prediction_consensus_store
+            #     store = get_prediction_consensus_store()
+            #     opinions = store.list_opinions(symbol=market_id, limit=100)
+            #     if opinions:
+            #         debate_store.compute_rewards_for_resolution(
+            #             symbol=market_id,
+            #             outcome=outcome,
+            #             opinions=opinions,
+            #         )
+            #         logger.info(
+            #             "settlement hook: rewards computed for %d opinions on %s",
+            #             len(opinions), market_id,
+            #         )
+            # except Exception as exc:
+            #     logger.debug("settlement hook compute_rewards skipped for %s: %s", market_id, exc)
+            logger.debug("settlement hook compute_rewards skipped: consensus module removed")
 
             # D8: Emit DebateEvent through RewardEngine so MechanismRegistry
             # fires AccuracyMechanism, ImprovementMechanism, InsightMechanism etc.

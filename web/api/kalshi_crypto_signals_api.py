@@ -6,8 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from web.api.auth import get_current_session
 from utils.logger import get_logger
 from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
-# LEGACY REMOVAL: consensus.consensus_coordinator import removed - consensus module deleted
-# from consensus.consensus_coordinator import get_consensus_coordinator
 from web.api.config.kalshi_signals import CRYPTO_AGENT_IDS
 
 from .models.signals import (

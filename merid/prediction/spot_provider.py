@@ -55,7 +55,8 @@ class SpotProvider:
         Returns:
             SpotSnapshot or None if unavailable
         """
-        raise NotImplementedError
+        # Abstract base class - must be implemented by subclasses (MeridRtiSpotProvider, CfbSpotProvider)
+        raise NotImplementedError("SpotProvider.get_spot() must be implemented by subclass")
 
 
 class MeridRtiSpotProvider(SpotProvider):

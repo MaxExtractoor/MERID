@@ -57,7 +57,8 @@ class EdgeComputer:
         Returns:
             EdgeComputationResult or None if edge check fails
         """
-        raise NotImplementedError
+        # Abstract base class - must be implemented by subclasses (UnifiedEdgeBackend, LegacyEdgeBackend)
+        raise NotImplementedError("EdgeComputer.compute() must be implemented by subclass")
 
 
 class LegacyEdgeBackend(EdgeComputer):

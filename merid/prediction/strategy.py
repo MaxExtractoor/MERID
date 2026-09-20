@@ -16,12 +16,12 @@ from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-# Sentiment gating mode - controls whether sentiment blocks trades
-# Options: "gating" (sentiment can block), "feature_only" (sentiment only for model features), "disabled" (ignore sentiment)
+# SENTIMENT MODULE REMOVED (Phase 1 legacy removal): Sentiment completely disabled from production
+# Previous gating mode options: "gating" (sentiment can block), "feature_only" (sentiment only for model features), "disabled" (ignore sentiment)
 # Profile YAML controls sentiment isolation for kalshi_crypto_15m_v2
 _SENTIMENT_MODE_DEFAULT = "disabled"
 SENTIMENT_MODE = os.getenv("MERID_SENTIMENT_MODE", _SENTIMENT_MODE_DEFAULT).lower()
-SENTIMENT_GATING_ENABLED = SENTIMENT_MODE in ("gating", "full")
+SENTIMENT_GATING_ENABLED = False  # FORCE DISABLED - sentiment module removed
 
 from merid.prediction.model import (
     ContractState,
@@ -1671,12 +1671,13 @@ class KalshiStrategy:
         # Pre-gate logging: always log gate inputs for observability
         _pre_asset = self._extract_asset_from_market_id(snapshot.market_id)
         # Defensive: get_calibration_config may not be available for 15m stack (sentiment disabled)
+        # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): crypto_registry disabled
         _pre_calib = None
-        try:
-            from merid.sentiment.crypto_registry import get_calibration_config
-            _pre_calib = get_calibration_config(_pre_asset)
-        except ImportError:
-            _pre_calib = None
+        # try:
+        #     from merid.sentiment.crypto_registry import get_calibration_config
+        #     _pre_calib = get_calibration_config(_pre_asset)
+        # except ImportError:
+        #     _pre_calib = None
         
         # Extract kalshi_price for EV calculation
         _pre_kalshi_price = float(best.market_prob) if best and hasattr(best, 'market_prob') else 0.5
@@ -2523,20 +2524,21 @@ class KalshiStrategy:
         local = snapshot.sentiment_local
         
         # PRODUCTION FIX v8 (2026-04-30): Track 24h contrarian statistics
-        from merid.prediction.sentiment_floor_tracker import get_sentiment_floor_tracker
-        _tracker = get_sentiment_floor_tracker()
+        # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): sentiment_floor_tracker disabled
+        # from merid.prediction.sentiment_floor_tracker import get_sentiment_floor_tracker
+        # _tracker = get_sentiment_floor_tracker()
         
         # PRODUCTION FIX: Sentiment gating can be disabled via MERID_SENTIMENT_MODE env var
         if SENTIMENT_GATING_ENABLED:
             if local is None or local < _cmin:
                 # Record the floor block for 24h statistics
-                _tracker.record_attempt(
-                    market_id=snapshot.market_id,
-                    local_sentiment=local,
-                    sentiment_min=_cmin,
-                    blocked=True,
-                    block_reason="sentiment_below_contrarian_floor",
-                )
+                # _tracker.record_attempt(
+                #     market_id=snapshot.market_id,
+                #     local_sentiment=local,
+                #     sentiment_min=_cmin,
+                #     blocked=True,
+                #     block_reason="sentiment_below_contrarian_floor",
+                # )
                 
                 # Log clear rejection reason with exact values
                 logger.info(
@@ -2741,29 +2743,30 @@ class KalshiStrategy:
             return self._evaluate_directional(snapshot, phase, correlation_id)
 
         # PRODUCTION FIX: Sentiment gating can be disabled via MERID_SENTIMENT_MODE env var
-        if SENTIMENT_GATING_ENABLED:
-            # Require elevated sentiment (either direction) to signal vol breakout
-            lo, hi = float(self.config.vol_breakout_neutral_low), float(self.config.vol_breakout_neutral_high)
-            if lo <= local <= hi:
-                return StrategySignal(
-                    market_id=snapshot.market_id,
-                    action=SignalAction.NO_ACTION,
-                    side="none", contracts=0, phase=phase,
-                    reason=f"Vol-breakout requires sentiment outside {lo:.0f}–{hi:.0f}; got {local:.0f}.",
-                    correlation_id=correlation_id,
-                    eval_context={
-                        "vol_breakout_neutral_low": lo,
-                        "vol_breakout_neutral_high": hi,
-                        "block": "sentiment_in_neutral_band",
-                    },
-                )
-        else:
-            # Sentiment gating disabled - log and proceed with EV-only evaluation
-            lo, hi = float(self.config.vol_breakout_neutral_low), float(self.config.vol_breakout_neutral_high)
-            logger.debug(
-                "[VOL_BREAKOUT] agent=%s market=%s sentiment_gating=disabled "
-                "local_sentiment=%.0f neutral_band=[%.0f,%.0f] - proceeding based on EV only",
-                self._agent_name, snapshot.market_id, local, lo, hi
+        # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): sentiment gating disabled
+        # if SENTIMENT_GATING_ENABLED:
+        #     # Require elevated sentiment (either direction) to signal vol breakout
+        #     lo, hi = float(self.config.vol_breakout_neutral_low), float(self.config.vol_breakout_neutral_high)
+        #     if lo <= local <= hi:
+        #         return StrategySignal(
+        #             market_id=snapshot.market_id,
+        #             action=SignalAction.NO_ACTION,
+        #             side="none", contracts=0, phase=phase,
+        #             reason=f"Vol-breakout requires sentiment outside {lo:.0f}–{hi:.0f}; got {local:.0f}.",
+        #             correlation_id=correlation_id,
+        #             eval_context={
+        #                 "vol_breakout_neutral_low": lo,
+        #                 "vol_breakout_neutral_high": hi,
+        #                 "block": "sentiment_in_neutral_band",
+        #             },
+        #         )
+        # else:
+        #     # Sentiment gating disabled - log and proceed with EV-only evaluation
+        #     lo, hi = float(self.config.vol_breakout_neutral_low), float(self.config.vol_breakout_neutral_high)
+        #     logger.debug(
+        #         "[VOL_BREAKOUT] agent=%s market=%s sentiment_gating=disabled "
+        #         "local_sentiment=%.0f neutral_band=[%.0f,%.0f] - proceeding based on EV only",
+        #         self._agent_name, snapshot.market_id, local, lo, hi
             )
 
         spec_edges = [e for e in snapshot.edges if e.edge_type in ("speculative", "sentiment_driven")]

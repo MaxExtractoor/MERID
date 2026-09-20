@@ -449,6 +449,11 @@ class KalshiSettlement:
                 cost = yes_cost if market_result == "yes" else no_cost
 
             # revenue is in cents; cost and fee are in dollars.
+            # DEBUG: Log API PnL calculation
+            logger.critical(
+                "[SETTLEMENT-API-PNL-DEBUG] market=%s revenue=%s cost=%s fee=%s api_pnl=%s",
+                market_id, revenue_dec, cost, fee_cost, float(revenue_dec - (cost * Decimal("100")) - (fee_cost * Decimal("100")))
+            )
             realized_pnl_cents = float(revenue_dec - (cost * Decimal("100")) - (fee_cost * Decimal("100")))
         except Exception:
             realized_pnl_cents = None
@@ -1019,7 +1024,17 @@ class KalshiSettlementPoller:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
             outcome = "yes" if settlement.outcome_str == "YES" else "no"
-            pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.market_id, outcome)
+            
+            # DEBUG: Log settlement hydration parameters
+            logger.critical(
+                "[SETTLEMENT-HYDRATION-DEBUG] market_id=%s ticker=%s outcome_str=%s derived_outcome=%s settlement_price=%s",
+                settlement.market_id, settlement.ticker, settlement.outcome_str, outcome, settlement.settlement_price_cents
+            )
+            
+            # CRITICAL FIX: Use settlement.ticker (series root) instead of market_id (full ticker)
+            # Position store uses market_ticker (e.g., "KXBTC") but settlement was passing full market_id (e.g., "KXBTC-15M-20251231")
+            # This caused lookup failure, falling back to incorrect API-derived PnL
+            pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.ticker, outcome)
             if pnl_dollars is None:
                 # No local open position; keep the API-derived value.
                 return settlement
@@ -1027,6 +1042,13 @@ class KalshiSettlementPoller:
             pnl_cents = (pnl_dollars * Decimal("100")).quantize(
                 Decimal("1"), rounding=ROUND_HALF_UP
             )
+            
+            # DEBUG: Log final PnL after hydration
+            logger.critical(
+                "[SETTLEMENT-HYDRATION-RESULT] market_id=%s pnl_dollars=%s pnl_cents=%s",
+                settlement.market_id, pnl_dollars, pnl_cents
+            )
+            
             return replace(settlement, realized_pnl_cents=float(pnl_cents))
         except Exception as exc:
             logger.warning(

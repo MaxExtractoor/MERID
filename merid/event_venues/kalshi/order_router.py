@@ -10913,11 +10913,7 @@ def _prepare_order_for_gate(
     _is_exit = _is_exit_order(intent)
 
     # Snapshot staleness gate
-    try:
-        _SNAPSHOT_MAX_AGE_S = float(os.getenv("KALSHI_ORDER_SNAPSHOT_MAX_AGE_S", "90"))
-    except NameError as ne:
-        logger.error(f"[DEBUG] NameError at line 1879: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
-        raise
+    _SNAPSHOT_MAX_AGE_S = float(os.getenv("KALSHI_ORDER_SNAPSHOT_MAX_AGE_S", "90"))
     _snap_age = replay_time() - intent.snapshot_ts
     if _snap_age > _SNAPSHOT_MAX_AGE_S:
         latency = (_time.monotonic() - t0) * 1000

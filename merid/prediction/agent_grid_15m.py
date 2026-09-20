@@ -655,18 +655,19 @@ except ImportError:
     logger.debug("[REJECTION-MONITOR] Not available - rejection tracking disabled")
 
 
-# Import BTC sentiment bias for correlation tracking
-try:
-    from merid.prediction.btc_sentiment_bias import (
-        get_btc_sentiment_bias,
-        init_btc_sentiment_bias,
-        SentimentBiasConfig,
-        calculate_internal_btc_sentiment
-    )
-    BTC_SENTIMENT_BIAS_ENABLED = True
-except ImportError:
-    BTC_SENTIMENT_BIAS_ENABLED = False
-    logger.debug("[BTC-SENTIMENT-BIAS] Not available - BTC sentiment bias disabled")
+# SENTIMENT MODULE REMOVED (Phase 1 legacy removal): BTC sentiment bias disabled
+# try:
+#     from merid.prediction.btc_sentiment_bias import (
+#         get_btc_sentiment_bias,
+#         init_btc_sentiment_bias,
+#         SentimentBiasConfig,
+#         calculate_internal_btc_sentiment
+#     )
+#     BTC_SENTIMENT_BIAS_ENABLED = True
+# except ImportError:
+# SentimentBiasConfig referenced in commented code below - no longer imported
+BTC_SENTIMENT_BIAS_ENABLED = False
+logger.debug("[BTC-SENTIMENT-BIAS] Disabled - sentiment module removed in Phase 1")
 
 # Import directional bias monitor for signal bias tracking
 try:
@@ -2379,26 +2380,24 @@ class LeanAgent15m:
 
 
         # Phase 8: Initialize BTC sentiment bias for correlation tracking
-        self._btc_sentiment_bias_enabled = getattr(config, 'btc_sentiment_bias_enabled', False)
-        if self._btc_sentiment_bias_enabled and BTC_SENTIMENT_BIAS_ENABLED:
-            try:
-                btc_bias_config = SentimentBiasConfig(
-                    enabled=True,
-                    btc_sentiment_threshold=getattr(config, 'btc_sentiment_threshold', 0.7),
-                    bias_strength=getattr(config, 'btc_sentiment_bias_strength', 0.05),
-                    correlated_assets=getattr(config, 'btc_sentiment_correlated_assets', ["ETH", "SOL", "XRP", "DOGE"]),
-                    correlation_threshold=getattr(config, 'btc_sentiment_correlation_threshold', 0.8),
-                    sentiment_window_seconds=getattr(config, 'btc_sentiment_window_seconds', 300)
-                )
-                self._btc_sentiment_bias = init_btc_sentiment_bias(btc_bias_config)
-                logger.info("[AGENT-INIT] %s BTC sentiment bias enabled", config.name)
-            except Exception as e:
-                logger.warning("[AGENT-INIT] Failed to initialize BTC sentiment bias: %s", e)
-                self._btc_sentiment_bias = None
-                self._btc_sentiment_bias_enabled = False
-        else:
-            self._btc_sentiment_bias = None
-            logger.info("[AGENT-INIT] %s BTC sentiment bias disabled", config.name)
+        # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): BTC sentiment bias disabled
+        self._btc_sentiment_bias_enabled = False
+        self._btc_sentiment_bias = None
+        # self._btc_sentiment_bias_enabled = getattr(config, 'btc_sentiment_bias_enabled', False)
+        # if self._btc_sentiment_bias_enabled and BTC_SENTIMENT_BIAS_ENABLED:
+        #     try:
+        #         btc_bias_config = SentimentBiasConfig(
+        #             enabled=True,
+        #             btc_sentiment_threshold=getattr(config, 'btc_sentiment_threshold', 0.7),
+        #             bias_strength=getattr(config, 'btc_sentiment_bias_strength', 0.05),
+        #             correlated_assets=getattr(config, 'btc_sentiment_correlated_assets', ["ETH", "SOL", "XRP", "DOGE"]),
+        #             correlation_threshold=getattr(config, 'btc_sentiment_correlation_threshold', 0.8),
+        #             sentiment_window_seconds=getattr(config, 'btc_sentiment_window_seconds', 300)
+        #         )
+        #         self._btc_sentiment_bias = init_btc_sentiment_bias(btc_bias_config)
+        #         logger.info("[AGENT-INIT] %s BTC sentiment bias enabled", config.name)
+        self._btc_sentiment_bias = None
+        logger.info("[AGENT-INIT] %s BTC sentiment bias disabled (Phase 1 removal)", config.name)
 
 
 
@@ -3054,11 +3053,13 @@ class LeanAgent15m:
         # Feed the 1-minute close to the SentimentVolService so it can compute a
         # canonical realized volatility.  This is the TWAP-appropriate vol source
         # used by trade_decision when MERID_USE_REALIZED_VOL is enabled.
-        try:
-            from merid.prediction.risk.sentiment_vol_service import get_sentiment_vol_service
-            get_sentiment_vol_service().update_price(asset, close_price)
-        except Exception as e:
-            logger.debug("[VOL-SERVICE-FEED] asset=%s failed to feed realized vol: %s", asset, e)
+        # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): sentiment vol service disabled
+        # try:
+        #     from merid.prediction.risk.sentiment_vol_service import get_sentiment_vol_service
+        #     get_sentiment_vol_service().update_price(asset, close_price)
+        # except Exception as e:
+        #     logger.debug("[VOL-SERVICE-FEED] asset=%s failed to feed realized vol: %s", asset, e)
+        pass
 
         # Append completed OHLC bar to price history once per minute
         self._spot_price_history[asset].append((candle_time, close_price, open_price, high_price, low_price))
@@ -6442,21 +6443,22 @@ class LeanAgent15m:
                 bias_monitor.record_signal(asset=asset, side=signal_side, edge=edge_pct, price=market_price)
 
         # BTC SENTIMENT BIAS: Apply correlation-based bias adjustment for non-BTC assets
-        if self._btc_sentiment_bias_enabled and self._btc_sentiment_bias and asset != "BTC":
-            try:
-                bias_adjustment = self._btc_sentiment_bias.get_bias_adjustment(
-                    asset=asset,
-                    base_edge=edge_pct,
-                    current_side=signal_side
-                )
-                if bias_adjustment != 0.0:
-                    edge_pct += bias_adjustment
-                    logger.info(
-                        "[BTC-SENTIMENT-BIAS-APPLIED] asset=%s original_edge=%.4f bias_adjustment=%.4f adjusted_edge=%.4f side=%s",
-                        asset, selected_edge, bias_adjustment, edge_pct, signal_side
-                    )
-            except Exception as bias_exc:
-                logger.warning("[BTC-SENTIMENT-BIAS-ERROR] asset=%s error=%s", asset, bias_exc)
+        # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): BTC sentiment bias disabled
+        # if self._btc_sentiment_bias_enabled and self._btc_sentiment_bias and asset != "BTC":
+        #     try:
+        #         bias_adjustment = self._btc_sentiment_bias.get_bias_adjustment(
+        #             asset=asset,
+        #             base_edge=edge_pct,
+        #             current_side=signal_side
+        #         )
+        #         if bias_adjustment != 0.0:
+        #             edge_pct += bias_adjustment
+        #             logger.info(
+        #                 "[BTC-SENTIMENT-BIAS-APPLIED] asset=%s original_edge=%.4f bias_adjustment=%.4f adjusted_edge=%.4f side=%s",
+        #                 asset, selected_edge, bias_adjustment, edge_pct, signal_side
+        #             )
+        #     except Exception as bias_exc:
+        #         logger.warning("[BTC-SENTIMENT-BIAS-ERROR] asset=%s error=%s", asset, bias_exc)
 
 
 

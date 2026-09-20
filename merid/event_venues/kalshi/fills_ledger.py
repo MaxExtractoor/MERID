@@ -6036,6 +6036,14 @@ class KalshiFillsLedger:
         fees = float(fees_cents) / 100.0
 
         settlement_pnl = total_payout - cost_basis - fees
+        
+        # DEBUG: Log settlement PnL calculation to diagnose negative WIN bug
+        logger.critical(
+            "[SETTLEMENT-PNL-DEBUG] side=%s outcome=%s contracts=%s avg_price=%sc fees=%sc payout=$%.2f cost=$%.2f fees=$%.2f pnl=$%.2f",
+            position["side"], outcome, contracts, avg_entry_price_cents, fees_cents,
+            total_payout, cost_basis, fees, settlement_pnl
+        )
+        
         return Decimal(str(settlement_pnl))
 
     def get_settlement_pnl_dollars(
@@ -6052,7 +6060,19 @@ class KalshiFillsLedger:
         for instrument_key, position in list(self._open_positions.items()):
             if position["market_ticker"] == market_ticker:
                 found = True
+                # DEBUG: Log position data being used for settlement
+                logger.critical(
+                    "[SETTLEMENT-POSITION-DEBUG] ticker=%s instrument_key=%s outcome=%s side=%s contracts=%s avg_price=%sc fees=%sc",
+                    market_ticker, instrument_key, outcome, position.get("side"), position.get("total_contracts"),
+                    position.get("avg_price_cents"), position.get("fees_cents")
+                )
                 total += self._compute_settlement_pnl(position, outcome)
+        # DEBUG: Log if no position found for the ticker
+        if not found:
+            logger.critical(
+                "[SETTLEMENT-POSITION-NOT-FOUND] ticker=%s has no open position in ledger (open_positions: %s)",
+                market_ticker, list(self._open_positions.keys())
+            )
         return total if found else None
 
     def on_market_price_update(self, market_ticker: str, last_price_cents: int) -> None:

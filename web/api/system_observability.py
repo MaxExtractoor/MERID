@@ -37,7 +37,8 @@ class AlertRule:
 
     def evaluate(self) -> Dict[str, Any]:
         """Evaluate the rule. Returns {firing, severity, name, description, detail}."""
-        raise NotImplementedError
+        # Abstract base class for alert rules - must be implemented by subclasses
+        raise NotImplementedError("AlertRule.evaluate() must be implemented by subclass")
 
     def safe_evaluate(self) -> Dict[str, Any]:
         """Evaluate with logging on exception — use at call sites instead of evaluate().
