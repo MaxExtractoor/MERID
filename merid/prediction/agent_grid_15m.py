@@ -11884,50 +11884,62 @@ class LeanAgent15m:
         else:
             expiry_bucket = "10-15min"
 
+        # FEE-AWARE REGIME CLASSIFICATION (2026-09-20): Replace static 10c-75c range with regime system
+        from merid.event_venues.kalshi.market_regime import classify_market_regime
+        
+        # Classify regime for both YES and NO executable prices
+        yes_regime = classify_market_regime(yes_price_cents, int(seconds_to_expiry))
+        no_regime = classify_market_regime(no_price_cents, int(seconds_to_expiry))
+        
+        # Determine which side is tradable (if any)
+        tradable_side = None
+        tradable_regime = None
+        tradable_price_cents = None
+        
+        if yes_regime is not None:
+            tradable_side = "yes"
+            tradable_regime = yes_regime
+            tradable_price_cents = yes_price_cents
+        elif no_regime is not None:
+            tradable_side = "no"
+            tradable_regime = no_regime
+            tradable_price_cents = no_price_cents
+        
         logger.info(
-            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc yes_in_canonical=%s no_price=%dc no_in_canonical=%s range=10c-75c expiry_bucket=%s",
-            asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range, expiry_bucket
+            "[REGIME-CLASSIFICATION] asset=%s yes_price=%dc yes_regime=%s no_price=%dc no_regime=%s selected_side=%s selected_regime=%s",
+            asset, yes_price_cents, yes_regime.name if yes_regime else "disabled",
+            no_price_cents, no_regime.name if no_regime else "disabled",
+            tradable_side, tradable_regime.name if tradable_regime else "none"
         )
 
-
-
-        # If neither side is in range, skip trading
-
-        if not yes_in_range and not no_in_range:
-
+        # If neither side is in an enabled regime, skip trading
+        if tradable_regime is None:
             logger.info(
-
-                "[PRICE-FILTER-REJECT] asset=%s both sides outside canonical 10c-75c range (yes=%dc, no=%dc) -> SKIP",
-
+                "[REGIME-FILTER-REJECT] asset=%s both sides in disabled regime (yes=%dc, no=%dc) -> SKIP",
                 asset, yes_price_cents, no_price_cents
-
             )
-
             if REJECTION_MONITOR_ENABLED:
-
                 log_price_range_rejection(
-
                     asset=asset,
-
                     yes_price_cents=yes_price_cents,
-
                     no_price_cents=no_price_cents,
-
-                    reason="both sides outside canonical 10c-75c range",
-
+                    reason="both sides in disabled regime",
                     market_id=getattr(market, 'market_id', None),
-
                 )
-
             self._record_signal_rejection(
-                "both_sides_out_of_canonical_range",
+                "both_sides_disabled_regime",
                 market_id=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
                 reference_price=spot_price,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
             )
-
             return None
+
+        # Store regime context for downstream edge calculation
+        # This will be used for fee-aware net edge computation
+        setattr(market, '_selected_regime', tradable_regime)
+        setattr(market, '_selected_side', tradable_side)
+        setattr(market, '_selected_price_cents', tradable_price_cents)
 
 
 
