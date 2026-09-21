@@ -1037,6 +1037,38 @@ class EdgeBreakdown:
 
 
 @dataclass(frozen=True)
+class EntryCostStack:
+    """Single probability-space acceptance hurdle for one executable side."""
+
+    executable_price_prob: float
+    venue_fee_prob: float
+    spread_slippage_prob: float
+    model_uncertainty_prob: float
+    required_net_edge_prob: float
+
+    @property
+    def pi_star(self) -> float:
+        return (
+            self.executable_price_prob
+            + self.venue_fee_prob
+            + self.spread_slippage_prob
+            + self.model_uncertainty_prob
+            + self.required_net_edge_prob
+        )
+
+    def net_edge_before_required(self, p_selected: float) -> float:
+        return p_selected - (
+            self.executable_price_prob
+            + self.venue_fee_prob
+            + self.spread_slippage_prob
+            + self.model_uncertainty_prob
+        )
+
+    def net_edge_after_required(self, p_selected: float) -> float:
+        return p_selected - self.pi_star
+
+
+@dataclass(frozen=True)
 class ConfidenceResult:
     """Confidence must carry provenance and a validity flag.
 
@@ -1302,6 +1334,20 @@ def compute_edge(
         model_risk_reserve=model_risk_reserve,
         gross_edge=gross_edge,
         net_edge=net_edge,
+    )
+
+
+def entry_cost_stack_from_breakdown(
+    breakdown: EdgeBreakdown,
+    required_net_edge: float,
+) -> EntryCostStack:
+    """Translate an edge breakdown into the canonical probability hurdle."""
+    return EntryCostStack(
+        executable_price_prob=breakdown.executable_entry_price,
+        venue_fee_prob=breakdown.entry_fee,
+        spread_slippage_prob=breakdown.exit_cost_reserve,
+        model_uncertainty_prob=breakdown.model_risk_reserve,
+        required_net_edge_prob=required_net_edge,
     )
 
 
@@ -1991,45 +2037,47 @@ def compute_trade_decision(
         gross_edge = Decimal(str(edge_breakdown.gross_edge))
         net_edge = Decimal(str(edge_breakdown.net_edge))
 
-        # 2026-08-28: Per-bucket π* EV gate.
-        # The minimum model probability for a positive risk-adjusted expected
-        # value is (held_price + fee + risk_premium) / 100.  Cheap-tail
-        # contracts require a larger risk premium because the 7-day data showed
-        # severe overconfidence and a 37c average loser.
-        _held_price_cents = int(round(float(selected_outcome_price) * 100.0))
-        _fee_cents = fee_per_contract_cents
-        _risk_premium_cents = _pi_star_risk_premium(_held_price_cents)
-        _pi_star = (_held_price_cents + _fee_cents + _risk_premium_cents) / 100.0
-        if edge_breakdown.p_selected < _pi_star - 1e-9:
-            _pi_star_p = edge_breakdown.p_selected
-            log_rejected_candidate(
-                reason=f"p_selected_below_pi_star:{_pi_star_p:.3f}<{_pi_star:.3f}",
-                run_id=run_id,
-                decision_id=decision_id,
-                asset=asset,
-                ticker=ticker,
-                side=selected_outcome,
-                model_p_selected=float(_pi_star_p),
-                held_price_cents=float(_held_price_cents),
-                gross_edge=float(edge_breakdown.gross_edge),
-                net_edge=float(edge_breakdown.net_edge),
-                edge_threshold=float(yes_min_edge if selected_outcome == "yes" else no_min_edge),
-                pi_star=float(_pi_star),
-                tte_seconds=float(seconds_to_expiry),
-                spot_price=float(spot_price),
-                strike_price=float(strike_price),
-                fee_cents=float(_fee_cents),
-            )
-            selected_outcome = None
-            selected_action = None
-            approved_size_cc = Decimal("0")
-            p_selected = None
-            p_opposite = None
-            selected_outcome_price = None
-            gross_edge = None
-            net_edge = None
-            edge_breakdown = None
-            no_trade_reason = f"p_selected_below_pi_star:{_pi_star_p:.3f}<{_pi_star:.3f}"
+        # The probability hurdle is an algebraic view of the same final
+        # net-edge policy. It must not be a second independent veto.
+        _required_edge = yes_min_edge if selected_outcome == "yes" else no_min_edge
+        _entry_cost_stack = entry_cost_stack_from_breakdown(edge_breakdown, _required_edge)
+        _pi_star = _entry_cost_stack.pi_star
+        _net_edge_before_required = _entry_cost_stack.net_edge_before_required(
+            edge_breakdown.p_selected
+        )
+        _net_edge_after_required = _entry_cost_stack.net_edge_after_required(
+            edge_breakdown.p_selected
+        )
+        indicators.update({
+            "pi_star": _pi_star,
+            "net_edge_before_required": _net_edge_before_required,
+            "net_edge_after_required": _net_edge_after_required,
+            "pi_star_identity_difference": (
+                _net_edge_after_required
+                - (edge_breakdown.net_edge - _required_edge)
+            ),
+            "entry_cost_stack": {
+                "executable_price_prob": _entry_cost_stack.executable_price_prob,
+                "venue_fee_prob": _entry_cost_stack.venue_fee_prob,
+                "spread_slippage_prob": _entry_cost_stack.spread_slippage_prob,
+                "model_uncertainty_prob": _entry_cost_stack.model_uncertainty_prob,
+                "required_net_edge_prob": _entry_cost_stack.required_net_edge_prob,
+            },
+        })
+        logger.info(
+            "[ENTRY-ECONOMICS] asset=%s ticker=%s side=%s best_ask_cents=%.4f "
+            "model_prob=%0.4f pi_star=%0.4f net_edge_before_required=%0.4f "
+            "net_edge_after_required=%0.4f identity_difference=%0.8f decision=ACCEPT",
+            asset,
+            ticker,
+            selected_outcome.upper(),
+            _entry_cost_stack.executable_price_prob * 100.0,
+            edge_breakdown.p_selected,
+            _pi_star,
+            _net_edge_before_required,
+            _net_edge_after_required,
+            _net_edge_after_required - (edge_breakdown.net_edge - _required_edge),
+        )
 
     if selected_outcome is not None:
         # 2026-08-28: Held-side entry price floor.  Cheap-tail contracts have a
