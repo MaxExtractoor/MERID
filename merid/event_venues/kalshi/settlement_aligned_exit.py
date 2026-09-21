@@ -671,6 +671,7 @@ class EvExitEvaluation:
     model_vol_source: str = ""
     model_calibration_version: str = ""
     model_inputs_satisfactory: bool = False
+    model_calibration_no_dual: bool = False
     p_held_raw_cents: Optional[int] = None
     p_held_calibrated_cents: Optional[int] = None
     # Fee/depth audit fields — the exit value is only meaningful when the
@@ -826,13 +827,71 @@ class SettlementAlignedExitEvaluator:
         policy: Optional[EvGatePolicy] = None,
         registry: Optional["ExitEvaluationRegistry"] = None,
         rti_provider: Optional[Callable[[str], Any]] = None,
+        tail_calibrator: Any = _UNSET,
     ) -> None:
         self.policy = policy or default_ev_gate_policy()
         self._registry = registry
         self._rti_provider = rti_provider or _default_rti_provider
+        # _UNSET = lazy-load the production artifact on first use; an explicit
+        # None disables calibration (tests exercise the uncalibrated path).
+        self._tail_calibrator = tail_calibrator
         self._breach_counts: Dict[str, int] = {}
         self._active_sig_keys: Dict[str, str] = {}
         self._lock = threading.Lock()
+
+    def _get_tail_calibrator(self) -> Any:
+        if self._tail_calibrator is _UNSET:
+            try:
+                from merid.risk.probability.tail_calibrator import (
+                    load_tail_calibrator,
+                )
+
+                self._tail_calibrator = load_tail_calibrator()
+            except Exception:
+                self._tail_calibrator = None
+        return self._tail_calibrator
+
+    @staticmethod
+    def _calibrator_artifact_version(calib: Any) -> str:
+        """Content-addressed version for the loaded calibration artifact."""
+        try:
+            import hashlib
+
+            blob = json.dumps(
+                calib.to_dict(), sort_keys=True, default=str
+            ).encode()
+            digest = hashlib.sha256(blob).hexdigest()[:12]
+            n = int(getattr(calib, "n_trades", 0) or 0)
+            return f"tail_pava:n{n}:sha256:{digest}"
+        except Exception:
+            return "tail_pava:unknown"
+
+    def _apply_tail_calibration(
+        self, calib: Any, model_cents: int, held_price_cents: int, held: str
+    ) -> Optional[int]:
+        """Apply the same held-side tail cap the entry path applies.
+
+        Indexed by the *current* held-side executable price (the liquidation
+        context), not the entry price.  Below the calibration floor the model
+        probability is capped at actual win rate + buffer; above it the
+        artifact asserts no cap is needed.  Returns None when the held side
+        only has a provisional dual calibration — treated as uncalibrated.
+        """
+        floor = _env_float("MERID_TAIL_CALIBRATION_PRICE_FLOOR", 0.35)
+        price = held_price_cents / 100.0
+        if price >= floor:
+            return model_cents
+        p_model = model_cents / 100.0
+        try:
+            if held == "yes":
+                return int(round(calib.cap_p_yes(p_model, price) * 100))
+            if held == "no":
+                if getattr(calib, "no_curve_is_dual", False):
+                    return None
+                return int(round(calib.cap_p_no(p_model, price) * 100))
+        except Exception:
+            return None
+        return None
 
     def _clear_breach_counts_locked(self, pos_key: str) -> None:
         """Drop every streak for ``pos_key`` (``mkey|pid``). Caller holds lock."""
@@ -930,15 +989,40 @@ class SettlementAlignedExitEvaluator:
         # recorded as unsatisfactory and becomes a hard blocker, never a silent
         # source of confidence for a gated exit.
         vol_source = self._model_vol_source(unified_state, kalshi_state)
-        calib_version = self._model_calibration_version(
-            position, unified_state, kalshi_state
-        )
-        p_held_cal = self._calibrated_prob_cents(unified_state, kalshi_state, held)
-        if p_held_cal is None and calib_version:
+        # The calibration artifact is authoritative when loaded: its version is
+        # content-addressed and the held-side cap is applied at eval time on
+        # the current executable price — the same transform the entry path
+        # uses.  State-carried labels are a fallback only, and placeholder
+        # values are treated as absent.
+        calib = self._get_tail_calibrator()
+        calib_no_dual = bool(getattr(calib, "no_curve_is_dual", False))
+        if calib is not None:
+            calib_version = self._calibrator_artifact_version(calib)
+        else:
+            calib_version = self._model_calibration_version(
+                position, unified_state, kalshi_state
+            )
+        if calib_version.lower() in ("", "placeholder", "none", "default", "unknown"):
+            calib_version = ""
+
+        floor_cents = int(_env_float("MERID_TAIL_CALIBRATION_PRICE_FLOOR", 0.35) * 100)
+        tail_zone = quote.bid_cents is not None and quote.bid_cents < floor_cents
+        p_held_cal: Optional[int] = None
+        if calib is not None and fair is not None and quote.bid_cents is not None:
+            p_held_cal = self._apply_tail_calibration(
+                calib, fair, quote.bid_cents, held
+            )
+        if p_held_cal is None:
+            p_held_cal = self._calibrated_prob_cents(unified_state, kalshi_state, held)
+        if p_held_cal is None and calib_version and not calib_no_dual:
             p_held_cal = fair  # declared calibration already applied upstream
+        # A NO-held position in the tail zone has only a dual (YES-derived)
+        # calibration — provisional, treated as uncalibrated like entry policy.
+        no_dual_block = held == "no" and calib_no_dual and tail_zone
         model_inputs_ok = (
             vol_source.lower() not in _UNTRUSTED_VOL_SOURCES
             and bool(calib_version)
+            and not no_dual_block
         )
         rti_phase = self._rti_phase(s2e)
 
@@ -973,6 +1057,7 @@ class SettlementAlignedExitEvaluator:
             model_vol_source=vol_source,
             model_calibration_version=calib_version,
             model_inputs_satisfactory=model_inputs_ok,
+            model_calibration_no_dual=calib_no_dual,
             p_held_raw_cents=fair,
             p_held_calibrated_cents=p_held_cal,
             asset=_asset_for_market(mkey),
@@ -1025,9 +1110,12 @@ class SettlementAlignedExitEvaluator:
         if fair is None:
             blockers.append("no_model_valuation")
         if policy.require_calibrated_model and not model_inputs_ok:
+            _calib_label = (
+                "no_dual_provisional" if no_dual_block else (calib_version or "none")
+            )
             blockers.append(
                 "uncalibrated_model_inputs:"
-                f"vol_source={vol_source or 'none'}/calibration={calib_version or 'none'}"
+                f"vol_source={vol_source or 'none'}/calibration={_calib_label}"
             )
         if qty <= 0:
             blockers.append("zero_quantity")
@@ -1065,7 +1153,11 @@ class SettlementAlignedExitEvaluator:
             hold_risk = Decimal(policy.hold_risk_reserve_cents)
             if s2e is not None and s2e <= policy.near_expiry_reserve_below_seconds:
                 hold_risk += Decimal(policy.near_expiry_reserve_cents)
-            cons_hold = Decimal(fair) - uncertainty - hold_risk
+            # Conservative hold is measured on the calibrated held-side
+            # settlement probability, falling back to the raw model value only
+            # when no calibration exists (that case is blocked anyway).
+            cons_prob = p_held_cal if p_held_cal is not None else fair
+            cons_hold = Decimal(cons_prob) - uncertainty - hold_risk
             margin = Decimal(policy.switch_margin_cents)
             breach = net_sell > cons_hold + margin
             ev.exit_fee_cents = str(fee_pc)
@@ -1394,9 +1486,9 @@ class ExitEvaluationRegistry:
     def evaluations_in_window(
         self, since_ts: float, until_ts: Optional[float] = None
     ) -> List[EvExitEvaluation]:
-        """Evaluations whose timestamp falls in [since_ts, until_ts)."""
+        """Evaluations whose timestamp falls in [since_ts, until_ts]."""
         until = until_ts if until_ts is not None else float("inf")
-        return [e for e in self._evals if since_ts <= e.ts < until]
+        return [e for e in self._evals if since_ts <= e.ts <= until]
 
     def evaluations_for(self, market_key: Any) -> List[EvExitEvaluation]:
         mkey = canonical_market_key(market_key)
