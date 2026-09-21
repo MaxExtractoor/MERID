@@ -17651,6 +17651,49 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
 
             ledger = get_order_decision_ledger()
 
+            # Exit decisions (decision_id like "exit-guard-*", parent_decision_id
+            # set, or an exit_* client_order_id) originate outside the entry
+            # decision pipeline and were never start()ed.  Every journaled event
+            # still requires an originating record, so persist a minimal
+            # decision snapshot before appending submission/fill events.
+            if ledger.get(_decision_id) is None:
+                _is_exit_decision = (
+                    getattr(intent, "parent_decision_id", None) is not None
+                    or str(_decision_id).startswith("exit")
+                    or str(getattr(intent, "client_order_id", "") or "").startswith("exit_")
+                )
+                if _is_exit_decision:
+                    try:
+                        from merid.execution.order_decision_schema import OrderDecisionRecord
+
+                        _intent_side_l = (getattr(intent, "side", "") or "").lower()
+                        _selected_side = "no" if "no" in _intent_side_l else (
+                            "yes" if "yes" in _intent_side_l else None
+                        )
+                        ledger.start(
+                            OrderDecisionRecord(
+                                decision_id=_decision_id,
+                                run_id=(
+                                    getattr(intent, "run_id", None)
+                                    or os.environ.get("MERID_RUN_ID")
+                                    or "unknown"
+                                ),
+                                process_id=getattr(intent, "process_id", None),
+                                ticker=getattr(intent, "ticker", "") or "",
+                                asset=getattr(intent, "asset", "") or "",
+                                selected_side=_selected_side,
+                                executable_price_cents=int(getattr(intent, "price_cents", 0) or 0) or None,
+                                parent_decision_id=getattr(intent, "parent_decision_id", None),
+                                signal_source="exit_guard",
+                            )
+                        )
+                    except Exception as start_exc:
+                        logger.warning(
+                            "[ORDER-DECISION-LEDGER] failed to auto-start exit decision_id=%s: %s",
+                            _decision_id,
+                            start_exc,
+                        )
+
             # Map liquidity role to ledger entry mode.
             _entry_mode = "unknown"
             _liquidity_role = getattr(intent, "liquidity_role", "") or ""

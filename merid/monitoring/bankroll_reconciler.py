@@ -358,24 +358,42 @@ class BankrollReconciler:
 
             try:
                 portfolio_cents = await service.get_portfolio_value_cents()
-                record.internal_portfolio_value_cents = portfolio_cents
+                record.internal_portfolio_value_cents = (
+                    int(portfolio_cents) if portfolio_cents is not None else None
+                )
             except Exception as pe:
                 record.notes.append(f"portfolio_value_error:{pe}")
 
             # Live exchange comparison (forces a fresh /portfolio/balance call).
+            # The bankroll service returns Decimal values; normalize to float at
+            # this record boundary so no monetary path mixes Decimal and float.
             consistency = await service.check_consistency()
             record.consistent = consistency.get("consistent")
             record.severity = consistency.get("severity")
-            record.fresh_equity_usd = consistency.get("fresh_equity")
-            record.equity_diff_usd = consistency.get("equity_diff")
-            record.equity_diff_pct = consistency.get("equity_diff_pct")
+            record.fresh_equity_usd = (
+                float(consistency["fresh_equity"])
+                if consistency.get("fresh_equity") is not None
+                else None
+            )
+            record.equity_diff_usd = (
+                float(consistency["equity_diff"])
+                if consistency.get("equity_diff") is not None
+                else None
+            )
+            record.equity_diff_pct = (
+                float(consistency["equity_diff_pct"])
+                if consistency.get("equity_diff_pct") is not None
+                else None
+            )
             record.exchange_available = record.fresh_equity_usd is not None
 
             # Cash consistency: available cash should equal exchange balance.
             if record.fresh_equity_usd is not None and record.internal_cash_usd is not None:
-                record.fresh_cash_usd = record.fresh_equity_usd - (
-                    record.internal_portfolio_value_cents or 0
-                ) / 100.0
+                record.fresh_cash_usd = float(
+                    Decimal(str(record.fresh_equity_usd))
+                    - Decimal(str(record.internal_portfolio_value_cents or 0))
+                    / Decimal("100")
+                )
 
             # Override/augment the service-reported severity with our own
             # percentage/USD thresholds so drift is actionable regardless of

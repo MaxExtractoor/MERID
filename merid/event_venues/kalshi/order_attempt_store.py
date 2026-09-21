@@ -190,18 +190,42 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.ACKNOWLEDGED,
         ExitOrderAttemptState.SUBMISSION_UNKNOWN,
         ExitOrderAttemptState.CANCELED,
+        # The exchange can reject, expire, or fill an order while our local
+        # submit call is still in flight (timeout, late ACK, immediate
+        # marketable-limit execution).  Those outcomes are authoritative and
+        # must be recordable from SUBMITTING.
+        ExitOrderAttemptState.REJECTED_EXCHANGE,
+        ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
+        ExitOrderAttemptState.PARTIALLY_FILLED,
+        ExitOrderAttemptState.FILLED,
     },
     ExitOrderAttemptState.SUBMISSION_UNKNOWN: {
         ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
         ExitOrderAttemptState.ACKNOWLEDGED_LATE,
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED,
+        # Reconciliation can discover any terminal/live state for an unknown
+        # submission; a fill or order record must be able to close it out.
+        ExitOrderAttemptState.ACKNOWLEDGED,
+        ExitOrderAttemptState.RESTING,
+        ExitOrderAttemptState.PARTIALLY_FILLED,
+        ExitOrderAttemptState.FILLED,
+        ExitOrderAttemptState.REJECTED_EXCHANGE,
+        ExitOrderAttemptState.EXPIRED_EXCHANGE,
     },
     ExitOrderAttemptState.RESOLVING_ON_EXCHANGE: {
         ExitOrderAttemptState.ACKNOWLEDGED,
         ExitOrderAttemptState.ACKNOWLEDGED_LATE,
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED,
+        # The lookaside can prove the order is resting, partially filled, or
+        # already filled/rejected/expired on the exchange.
+        ExitOrderAttemptState.RESTING,
+        ExitOrderAttemptState.PARTIALLY_FILLED,
+        ExitOrderAttemptState.FILLED,
+        ExitOrderAttemptState.REJECTED_EXCHANGE,
+        ExitOrderAttemptState.EXPIRED_EXCHANGE,
     },
     ExitOrderAttemptState.ACKNOWLEDGED: {
         ExitOrderAttemptState.RESTING,
@@ -210,6 +234,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
     },
     ExitOrderAttemptState.ACKNOWLEDGED_LATE: {
         ExitOrderAttemptState.RESTING,
@@ -218,6 +243,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
     },
     ExitOrderAttemptState.RESTING: {
         ExitOrderAttemptState.PARTIALLY_FILLED,
@@ -225,6 +251,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
     },
     ExitOrderAttemptState.PARTIALLY_FILLED: {
         ExitOrderAttemptState.FILLED,
@@ -232,6 +259,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
         ExitOrderAttemptState.TERMINAL_UNFILLED,
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
     },
 }
 
@@ -703,6 +731,12 @@ class OrderAttemptStore:
                     attempt_id,
                 )
                 return None
+            if new_state_enum == old_state:
+                # Idempotent same-state re-assertion (e.g. a duplicate submit
+                # marker or a repeated exchange observation).  Return the
+                # current record without bumping state_version so retrying
+                # callers converge instead of failing.
+                return record
             if new_state_enum not in EXIT_VALID_TRANSITIONS.get(old_state, set()):
                 logger.warning(
                     "[EXIT-ORDER-ATTEMPT-STORE] Invalid transition %s -> %s for attempt %s",

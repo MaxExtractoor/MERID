@@ -211,10 +211,11 @@ class TestAutoResumeUnmatched:
         )
         assert breaker.halted
 
-    def test_auto_resume_does_not_clear_breaker(self):
-        # 2026-09-03: auto-resolution of an unmatched fill is not an operator
-        # release.  The breaker must remain halted so admin_release() is the
-        # only path that clears a halt.
+    def test_auto_resume_releases_after_verified_checks(self):
+        # 2026-09-21: when the triggering fill is resolved and reconciliation
+        # proves flat state (no positions, no open orders, no other unmatched
+        # fills), the breaker auto-releases with a durable audit record.  A
+        # process restart is not a recovery path; verified reconciliation is.
         breaker = get_trading_circuit_breaker()
         breaker.halt(
             "unmatched_live_exchange_fill",
@@ -227,7 +228,27 @@ class TestAutoResumeUnmatched:
             fill_state={"found": True, "resolved": True, "unmatched": False, "intent_id": "intent-1"},
             recent_unmatched_count=0,
         )
-        assert breaker.halted, "auto-resume must not clear the circuit breaker"
+        assert not breaker.halted, "verified auto-recovery must release the halt"
+
+    def test_halt_persists_across_restart(self):
+        # A halt is a durable incident: constructing a fresh breaker (process
+        # restart) must restore the halted state from the persisted record.
+        import merid.governance.trading_circuit_breaker as tcb
+
+        breaker = get_trading_circuit_breaker()
+        breaker.halt(
+            "unmatched_live_exchange_fill",
+            metadata={"fill_id": "fid-persist"},
+        )
+        assert breaker.halted
+
+        tcb.TradingCircuitBreaker._instance = None
+        restarted = tcb.TradingCircuitBreaker()
+        try:
+            assert restarted.halted, "halt must survive process restart"
+            assert restarted.reason == "unmatched_live_exchange_fill"
+        finally:
+            restarted.reset()
 
 
 class TestOrderIdentityValidation:
