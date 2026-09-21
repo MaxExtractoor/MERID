@@ -117,8 +117,33 @@ def _make_position(*, side="yes", entry=60, **overrides):
     return SimpleNamespace(**fields)
 
 
-def _make_evaluator(**policy_overrides):
-    """A hermetic evaluator: in-memory registry, no file persistence.
+def _stub_calibrator(*, dual_no: bool = False):
+    """Deterministic tail calibrator for eval-time calibration tests."""
+    from merid.risk.probability.tail_calibrator import TailProbabilityCalibrator
+
+    if dual_no:
+        # Legacy single-curve path makes the NO curve the exact YES dual.
+        return TailProbabilityCalibrator(
+            held_prices=[0.10, 0.20, 0.30],
+            actual_probs=[0.0, 0.05, 0.15],
+            buffer=0.05,
+            n_trades=30,
+            metadata={"source": "test"},
+        )
+    return TailProbabilityCalibrator(
+        yes_held_prices=[0.10, 0.20, 0.30],
+        yes_actual_probs=[0.0, 0.05, 0.15],
+        no_held_prices=[0.70, 0.80, 0.90],
+        no_actual_probs=[0.15, 0.05, 0.0],
+        buffer=0.05,
+        n_trades=30,
+        metadata={"source": "test"},
+    )
+
+
+def _make_evaluator(tail_calibrator=None, **policy_overrides):
+    """A hermetic evaluator: in-memory registry, no file persistence, no
+    production calibration artifact (pass a stub to test calibrated paths).
 
     ``require_calibrated_model`` defaults off here so the economics tests can
     drive the signal path directly; the calibration-prohibition test opts in
@@ -132,6 +157,7 @@ def _make_evaluator(**policy_overrides):
             policy=EvGatePolicy(**policy_kwargs),
             registry=registry,
             rti_provider=lambda _asset: _make_rti(),
+            tail_calibrator=tail_calibrator,
         ),
         registry,
     )
@@ -1070,3 +1096,99 @@ def test_shadow_window_summary_counts():
     assert result["unknown_reason_blocks"] == 1
     assert "BTC" in result["assets"]
     assert result["unmatched_fills"] == 0
+
+
+# ── Eval-time tail calibration (production artifact semantics) ────────────────
+
+def test_tail_calibration_caps_hold_value_at_eval():
+    """The evaluator applies the same held-side tail cap as the entry path,
+    indexed by the current executable bid — not the entry price."""
+    evaluator, _registry = _make_evaluator(
+        tail_calibrator=_stub_calibrator(),
+        require_calibrated_model=True,
+    )
+    position = _make_position(side="yes", entry=60)
+    # Held price 20c < 35c floor; stub curve: p_yes(0.20)=0.05, cap=0.10.
+    state = _make_state(yes_bid=20, yes_ask=22, seconds_to_expiry=600.0)
+    state.annualized_vol_source = "rti_realized"
+
+    ev = evaluator.evaluate(
+        position,
+        market_key=MARKET,
+        canonical_reason="model_invalidation",
+        kalshi_state=state,
+        fair_value_cents=50,  # raw model says 50; calibration caps at 10
+        seconds_to_expiry=600.0,
+        rti_observation=_make_rti(),
+    )
+    assert ev.p_held_calibrated_cents == 10
+    assert ev.p_held_raw_cents == 50
+    assert ev.model_calibration_version.startswith("tail_pava:n30:sha256:")
+    assert ev.model_inputs_satisfactory is True
+    # cons_hold uses the calibrated 10c, not the raw 50c.
+    assert Decimal(ev.conservative_hold_cents) < Decimal(20)
+
+
+def test_above_floor_price_is_calibration_identity():
+    """Above the tail floor the artifact asserts no cap — p_cal == raw."""
+    evaluator, _registry = _make_evaluator(
+        tail_calibrator=_stub_calibrator(),
+        require_calibrated_model=True,
+    )
+    position = _make_position(side="yes", entry=60)
+    state = _make_state(yes_bid=50, yes_ask=52, seconds_to_expiry=600.0)
+    state.annualized_vol_source = "rti_realized"
+
+    ev = evaluator.evaluate(
+        position,
+        market_key=MARKET,
+        canonical_reason="model_invalidation",
+        kalshi_state=state,
+        fair_value_cents=20,
+        seconds_to_expiry=600.0,
+        rti_observation=_make_rti(),
+    )
+    assert ev.p_held_calibrated_cents == 20
+    assert ev.model_inputs_satisfactory is True
+
+
+def test_no_held_tail_with_dual_curve_is_provisional():
+    """NO-held in the tail with only a YES-dual curve blocks as uncalibrated —
+    same fail-closed posture as the NO-tail entry rule."""
+    evaluator, _registry = _make_evaluator(
+        tail_calibrator=_stub_calibrator(dual_no=True),
+        require_calibrated_model=True,
+    )
+    position = _make_position(side="no", entry=60)
+    # NO bid 20c < 35c floor -> tail zone; dual curve -> provisional.
+    state = _make_state(yes_bid=80, yes_ask=82, no_bid=20, no_ask=22,
+                        seconds_to_expiry=600.0)
+    state.annualized_vol_source = "rti_realized"
+
+    ev = evaluator.evaluate(
+        position,
+        market_key=MARKET,
+        canonical_reason="model_invalidation",
+        kalshi_state=state,
+        fair_value_cents=50,
+        seconds_to_expiry=600.0,
+        rti_observation=_make_rti(),
+    )
+    assert ev.decision == EvDecision.HOLD_DATA_INSUFFICIENT
+    assert "no_dual_provisional" in ev.detail
+    assert ev.model_calibration_no_dual is True
+
+    # Same position above the tail floor: dual does not matter (identity).
+    state_ok = _make_state(yes_bid=50, yes_ask=52, no_bid=50, no_ask=52,
+                           seconds_to_expiry=600.0)
+    state_ok.annualized_vol_source = "rti_realized"
+    ev2 = evaluator.evaluate(
+        position,
+        market_key=MARKET,
+        canonical_reason="model_invalidation",
+        kalshi_state=state_ok,
+        fair_value_cents=20,
+        seconds_to_expiry=600.0,
+        rti_observation=_make_rti(),
+    )
+    assert "no_dual_provisional" not in ev2.detail
