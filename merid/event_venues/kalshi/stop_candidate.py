@@ -808,6 +808,44 @@ async def maybe_submit_stop_candidate(
     )
     from merid.event_venues.kalshi.order_router import OrderIntent, OrderResult, TradingMode
 
+    # ── Discretionary trigger classification (2026-09) ───────────────────────
+    # A candidate that passes the submission flag is still not authorized to
+    # trade live when its trigger is discretionary: all discretionary exits
+    # are observe-only until the settlement-aligned EV gate is enabled and
+    # validated.  Operational/emergency triggers (reconciliation, expiry
+    # liquidation, manual, hard risk) keep their mechanical path.  Unknown
+    # triggers fail closed.
+    from merid.event_venues.kalshi.settlement_aligned_exit import (
+        ExitClass,
+        classify_trigger_reason,
+        ev_exit_gate_enabled,
+    )
+
+    trigger_class = classify_trigger_reason(candidate.trigger_reason)
+    if trigger_class == ExitClass.UNKNOWN or (
+        trigger_class == ExitClass.DISCRETIONARY and not ev_exit_gate_enabled()
+    ):
+        reason = (
+            "trigger_reason_unclassified"
+            if trigger_class == ExitClass.UNKNOWN
+            else "discretionary_trigger_observe_only"
+        )
+        logger.critical(
+            "[ALERT][STOP-CANDIDATE-OBSERVE-ONLY] candidate=%s ticker=%s "
+            "trigger=%s class=%s - candidate not submitted (reason=%s)",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+            trigger_class.value,
+            reason,
+        )
+        record_stop_candidate(candidate)
+        return OrderResult(
+            status="rejected",
+            mode=TradingMode.PAPER,
+            reason=reason,
+        )
+
     # 1. Fresh exchange position snapshot.
     t0 = time.monotonic()
     exchange_position_cc, position_avg_price_cents, position_side = (

@@ -5766,6 +5766,50 @@ class KalshiFillsLedger:
                         instrument_key, exited_contracts, partial_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
                     )
 
+                # Settlement-aligned exit audit (2026-09): record the exit fill
+                # against the canonical market key so settlement can compute the
+                # hold-vs-sell counterfactual, and resolve the durable exit
+                # attempt (fills may arrive before the route ack).
+                try:
+                    from merid.event_venues.kalshi.settlement_aligned_exit import (
+                        canonical_market_key,
+                        get_exit_attempt_resolver,
+                        get_exit_eval_registry,
+                        get_exit_evaluator,
+                    )
+
+                    _cf_key = canonical_market_key(fill.market_ticker)
+                    get_exit_eval_registry().record_exit_fill(
+                        market_key=_cf_key,
+                        held_side=str(position.get("side") or ""),
+                        quantity=exited_contracts,
+                        price_cents=fill.price_cents,
+                        fee_cents=fee_dollars_to_cents(fill.fee_cost),
+                        fill_id=fill.fill_id,
+                        client_order_id=getattr(fill, "client_order_id", None),
+                        order_id=getattr(fill, "order_id", None),
+                        entry_price_cents=position.get("avg_price_cents"),
+                        entry_fees_cents=position.get("fees_cents"),
+                        total_entry_qty=old_contracts,
+                    )
+                    get_exit_attempt_resolver().note_fill(
+                        market_key=_cf_key,
+                        fill_id=fill.fill_id,
+                        client_order_id=getattr(fill, "client_order_id", None),
+                        order_id=getattr(fill, "order_id", None),
+                        quantity=exited_contracts,
+                        price_cents=fill.price_cents,
+                    )
+                    # A reduction resets the EV persistence counter: any future
+                    # discretionary sell must re-prove persistence on the
+                    # residual position rather than inheriting a stale streak.
+                    get_exit_evaluator().reset_persistence(_cf_key)
+                except Exception as _cf_exc:
+                    logger.debug(
+                        "[FILLS-LEDGER] exit counterfactual hook failed (non-critical): %s",
+                        _cf_exc,
+                    )
+
         # Check if position is now closed
         if self._position_is_closed(position):
             trade_pnl = self._compute_realized_pnl(position)

@@ -151,7 +151,9 @@ class TestKalshiFillProvenance:
         }
         fill = fresh_ledger._parse_fill(raw, "http_poller")
         assert fill.ledger_schema_version == 3
-        assert fill.canonicalization_version == 1
+        # canonicalization_version was bumped 1 -> 2 with the execution-derived
+        # canonical-fields backfill (2026-09-15, commit 9f84859e).
+        assert fill.canonicalization_version == 2
         assert fill.canonicalization_state == "TRUSTED_LIVE_V1"
         assert fill.canonical_position_side == "no"
         assert fill.canonical_position_action == "buy"

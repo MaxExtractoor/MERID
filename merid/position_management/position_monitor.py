@@ -753,6 +753,19 @@ class PositionMonitor:
             position.exit_price_cents if position.exit_price_cents is not None else "N/A",
         )
 
+        # Drop EV-gate persistence state for the removed position so a stale
+        # breach streak cannot carry into a future position on the same key.
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                get_exit_evaluator,
+            )
+
+            get_exit_evaluator().reset_persistence(
+                market_key=position.market_id, position_id=position.position_id
+            )
+        except Exception:
+            pass
+
         # 2026-08-09: Decimal math for notional; never divide Decimal by float.
         try:
             notional_usd = (
@@ -4037,6 +4050,51 @@ class PositionMonitor:
             position.hard_stop_price_cents,
             position.time_since_entry_seconds,
         )
+
+        # ── Settlement-aligned EV shadow evaluation (2026-09) ────────────────
+        # Every discretionary stop decision is evaluated as a sell-vs-hold EV
+        # comparison against the settlement-aligned model value, using the
+        # confirmed executable same-side bid and a fresh sequence-confirmed
+        # RTI/model observation.  This is observe-only: it never emits an exit
+        # intent, and the live order path is vetoed in
+        # loop_15m._run_exit_price_guard until MERID_ENABLE_EV_EXIT_GATE is
+        # enabled.  Running the eval here builds the per-position persistence
+        # counter and the audit trail used to validate the gate.
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                get_exit_evaluator,
+            )
+
+            ev_eval = get_exit_evaluator().evaluate(
+                position,
+                market_key=position.market_id,
+                held_side=(
+                    position.outcome_side
+                    or position.thesis_side
+                    or position.side.value
+                ),
+                canonical_reason="stop_loss",
+                quantity_contracts=position.size,
+                kalshi_state=kalshi_state,
+                unified_state=unified_state,
+                fair_value_cents=fair_value,
+                executable_bid_cents=executable_exit,
+                book_age_ms=book_age_ms,
+                seconds_to_expiry=seconds_to_expiry,
+            )
+            logger.info(
+                "[EV-EXIT-SHADOW] position=%s market=%s decision=%s detail=%s "
+                "bid=%s fair=%s consecutive=%d",
+                position.position_id[:8],
+                position.market_id,
+                ev_eval.decision.value,
+                ev_eval.detail,
+                ev_eval.bid_cents,
+                ev_eval.model_prob_cents,
+                ev_eval.consecutive_breach,
+            )
+        except Exception as _ev_exc:
+            logger.debug("[EV-EXIT-SHADOW] eval failed (non-critical): %s", _ev_exc)
 
         if fair_value is not None and executable_exit is not None:
             edge_breached = evaluate_edge_stop(

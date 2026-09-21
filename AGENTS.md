@@ -346,3 +346,103 @@ LIVE_ENTRIES_ENABLED
 The final transition back to `LIVE_ENTRIES_ENABLED` requires a successful fresh reconciliation and durable recovery event. It must not occur from an in-memory boolean reset, a direct router call, or an uncoupled `resume()` path.
 
 `auto_execution_mode: 1` must cause the next restart to run this state machine automatically and execute the next eligible live trading decision after `LIVE_ENTRIES_ENABLED` is reached.
+## Settlement-aligned exit gate (2026-09)
+
+All discretionary exits are observe-only until `MERID_ENABLE_EV_EXIT_GATE` is
+enabled in the resolved live config. A discretionary exit is any reason whose
+economic justification is "the model or price says sell" — including
+`stop_loss`, `trailing_stop`/`trail`/`ratchet_trim`, `loss_cut*`,
+`take_profit`/`ratchet_floor`/`scale_out`, `signal_reversal`/`edge_decay`,
+`model_invalidation`, and non-mechanical `time_exit` (`time_stop`,
+`adaptive_timing`).
+
+Operational exits (`reconciliation`, `manual`, market closed/cancellation,
+documented mechanical closeouts) and emergency exits (`expiry_liquidation`,
+hard risk) remain live with their existing mechanical checks. Unknown reasons
+fail closed.
+
+The final authority for a discretionary exit is the settlement-aligned
+sell-vs-hold comparison in
+`merid/event_venues/kalshi/settlement_aligned_exit.py`, enforced at
+`loop_15m._run_exit_price_guard` and at `stop_candidate.maybe_submit_stop_candidate`:
+
+```text
+NetSellValue          = executable same-side bid - exit fee - slippage
+ConservativeHoldValue = calibrated held-side settlement probability
+                        - uncertainty reserve - residual hold risk
+exit allowed          <=> NetSellValue > ConservativeHoldValue + switch_margin
+                        for >= MERID_EXIT_EV_MIN_CONSECUTIVE observations
+```
+
+Entry price is sunk and never enters the decision. Required inputs: a fresh
+sequence-confirmed executable bid for the held side (never the ask, a mid, or
+a synthetic opposite-side conversion) with enough visible depth for the order,
+a fresh sequence-confirmed execution-eligible CF Benchmarks RTI/model
+observation, calibrated model inputs (a default/fallback volatility source or
+missing calibration artifact is a hard blocker), and complete entry
+provenance. Missing or stale data yields `HOLD_DATA_INSUFFICIENT` — never a
+sell.
+
+Evaluator statuses are explicit: `SELL_SIGNALLED` (economics + persistence
+cleared), `HOLD_SELL_VALUE_INFERIOR`, `HOLD_PERSISTENCE_NOT_MET`,
+`HOLD_DATA_INSUFFICIENT`, `HOLD_NEAR_SETTLEMENT_POLICY_REQUIRED` (inside the
+final RTI averaging window, default 60s — a dedicated settlement-phase
+evaluator is required there; ordinary spot/velocity model value is not an
+adequate proxy), `HOLD_OUTSIDE_CANARY_SCOPE` (sell signalled but outside the
+configured canary envelope), `BYPASS_OPERATIONAL`, `BYPASS_EMERGENCY`, and
+`BLOCK_UNKNOWN_REASON`. Only `SELL_SIGNALLED` may authorize a live
+discretionary order, and only while the gate is enabled;
+`MERID_EV_EXIT_GATE_KILL=1` restores observe-only immediately (read live on
+every evaluation — no restart required).
+
+The persistence counter is keyed by (market_pk, position_id, held_side,
+policy_version, canonical reason, model vol/calibration version). Any context
+change, data-validity failure, non-breach, zero quantity, exit attempt start,
+or exit fill resets it — a stale signal can never combine with a later
+unrelated one.
+
+Every evaluation, exit fill, and settlement is recorded so each real exit can
+be replayed against the hold-to-settlement counterfactual, keyed by the
+canonical full market ticker (`exit_evaluations.jsonl`,
+`exit_counterfactuals.jsonl`). Startup emits a machine-readable `EV-EXIT-GATE`
+policy line; whenever the legacy path would have submitted a discretionary
+exit, an `EXIT-LEGACY-INVERSION-AUDIT` record logs the trigger price versus
+the canonical held-side bid and the EV verdict (critical severity on price
+divergence or EV disagreement). Each evaluation records `asset`,
+`visible_bid_depth`, `fee_model_version`, `fee_order_type_assumption`,
+`p_held_raw_cents`/`p_held_calibrated_cents`, `rti_phase`, `model_vol_source`,
+and `model_calibration_version`; the guard annotates evaluations with the
+legacy verdict (`legacy_outcome` record lines) so replay can join the legacy
+comparison population by `evaluation_id`.
+
+### Shadow-validation phase (current)
+
+The gate is OFF. The live campaign runs normal trading across BTC, ETH, SOL,
+XRP, and DOGE with all discretionary exits shadowed. Per 15-minute window the
+loop emits `EV-EXIT-SHADOW-SUMMARY` per asset and `EV-EXIT-SHADOW-GLOBAL`
+(positions evaluated, legacy triggers, EV sell/hold/data-insufficient/
+near-settlement/uncalibrated counts, side mismatches, legacy-EV disagreements,
+median RTI/book age, median bid depth, attempts in flight, unmatched fills).
+`scripts/ev_exit_shadow_report.py` joins `exit_evaluations.jsonl` to
+`exit_counterfactuals.jsonl` by canonical `market_pk` and prints the promotion
+table segmented by asset/side/reason/price bucket/RTI phase: realized vs
+counterfactual hold P&L, exit opportunity cost, win rate, Brier/ECE, data-age
+medians, and invalid-data rate. A high `HOLD_DATA_INSUFFICIENT` rate means the
+inputs are not ready — it is not evidence the gate is too strict. Under pytest
+the singleton registry never writes to `logs/`; `MERID_EV_EXIT_LOG_DIR`
+overrides the directory, `MERID_EV_EXIT_DISABLE_PERSIST` disables writes.
+
+### Canary scope (parsed now, OFF by default)
+
+When the gate is later enabled with `MERID_DISCRETIONARY_EXIT_MODE=ev_gated_canary`,
+a `SELL_SIGNALLED` decision must additionally satisfy the canary envelope or it
+becomes `HOLD_OUTSIDE_CANARY_SCOPE`: `MERID_EV_EXIT_CANARY_ASSETS` (e.g. `BTC`),
+`MERID_EV_EXIT_CANARY_SIDES` (e.g. `YES`), `MERID_EV_EXIT_CANARY_REASONS`
+(first live reason: `value_switch_exit` — the evaluator's own decision, not a
+trailing-stop or take-profit trigger), `MERID_EV_EXIT_MAX_CONTRACTS` (default 1),
+`MERID_EV_EXIT_MAX_ORDERS_PER_WINDOW` (default 1, counted per canonical market
+key at authorization), `MERID_EV_EXIT_MIN_SECONDS_TO_EXPIRY` (120) /
+`MERID_EV_EXIT_MAX_SECONDS_TO_EXPIRY` (600). `MERID_EV_EXIT_REQUIRE_*` flags
+(`FRESH_RTI`, `SEQUENCE_CONFIRMED_BOOK`, `ENTRY_PROVENANCE`,
+`SUFFICIENT_BID_DEPTH`, `CALIBRATED_MODEL`) default to the strict posture.
+Do not widen the envelope without a replay report showing clean behavior.

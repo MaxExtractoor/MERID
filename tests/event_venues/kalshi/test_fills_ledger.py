@@ -182,7 +182,11 @@ class TestFillsLedgerPositionCalculation:
                 "side": "yes",
                 "action": "sell",
                 "count": 60,
-                "price": 52,
+                # Trusted fills carry both legs explicitly (real Kalshi V2
+                # payloads); a single-leg sell is quarantined as
+                # UNTRUSTED_RAW and cannot close a position.
+                "yes_price": 0.52,
+                "no_price": 0.48,
             },
         ]
         
@@ -211,7 +215,9 @@ class TestFillsLedgerPositionCalculation:
                 "side": "yes",
                 "action": "sell",
                 "count": 100,
-                "price": 55,
+                # Both leg prices required for a trusted closing fill.
+                "yes_price": 0.55,
+                "no_price": 0.45,
             },
         ]
         
