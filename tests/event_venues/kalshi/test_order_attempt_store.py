@@ -181,3 +181,113 @@ def test_superseded_attempt_releases_client_order_id(tmp_path):
     )
     assert final is not None
     assert final.state == ExitOrderAttemptState.FILLED.value
+
+
+def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypatch):
+    """The observed orphan: an ACKNOWLEDGED order attempt on an expired market
+    stayed unresolved forever because get_unresolved only looked back 300s.
+    """
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    import merid.event_venues.kalshi.order_attempt_store as oas
+    import merid.event_venues.kalshi.fills_ledger as fl
+    from merid.event_venues.kalshi.fills_poller import FillsPoller
+    from merid.event_venues.kalshi.order_attempt_store import OrderAttemptRecord
+
+    db_path = str(tmp_path / "oa_sweep.db")
+    monkeypatch.setattr(oas, "DEFAULT_DB_PATH", db_path)
+    # No fills ledger -> no filled order ids; ticker resolves via client_tag.
+    monkeypatch.setattr(fl, "get_fills_ledger", lambda: None)
+
+    store = OrderAttemptStore(str(db_path))
+    now = time.time()
+
+    expired_ticker = "KXBTC15M-26SEP210000-00"  # 2026-09-21 00:00 ET, expired
+    live_ticker = "KXBTC15M-30JAN010000-00"     # far future, not expired
+
+    def _attempt(aid, coid, tag, status, age_s):
+        return OrderAttemptRecord(
+            order_attempt_id=aid,
+            client_order_id=coid,
+            decision_id=None,
+            replaces_order_attempt_id=None,
+            intent_id=f"intent_{aid}",
+            client_tag=tag,
+            run_id=None,
+            process_id=None,
+            fingerprint="fp",
+            status=status,
+            created_at=now - age_s,
+            updated_at=now - age_s,
+            payload_json="{}",
+        )
+
+    # Orphan mirroring the observed ACKNOWLEDGED-on-expired-market order.
+    store.persist_attempt(_attempt(
+        "oa_orphan", "merid_orphan01", f"15m_{expired_ticker}_0a1b2c",
+        "ACKNOWLEDGED", 7200,
+    ))
+    # Fresh attempt on an expired ticker — inside the grace window, skip.
+    store.persist_attempt(_attempt(
+        "oa_young", "merid_young001", f"15m_{expired_ticker}_1b2c3d",
+        "ACKNOWLEDGED", 60,
+    ))
+    # Old attempt on a live ticker — must not be swept.
+    store.persist_attempt(_attempt(
+        "oa_live", "merid_live0001", f"15m_{live_ticker}_2c3d4e",
+        "ACKNOWLEDGED", 7200,
+    ))
+
+    # Exit attempts: INTENT_PERSISTED on expired ticker -> CANCELED;
+    # PARTIALLY_FILLED with unconfirmed remainder -> TERMINAL_UNFILLED.
+    ex1 = store.create_exit_attempt(
+        exit_intent_id="xi-1", position_key="pos-1", ticker=expired_ticker,
+        reason="SETTLEMENT_GUARD", client_order_id="co-x1",
+        requested_quantity=100, attempt_id="xa-1",
+    )
+    ex2 = store.create_exit_attempt(
+        exit_intent_id="xi-2", position_key="pos-2", ticker=expired_ticker,
+        reason="SETTLEMENT_GUARD", client_order_id="co-x2",
+        requested_quantity=100, attempt_id="xa-2",
+    )
+    store.transition_exit_attempt("xa-2", "SUBMITTING", actor="test", reason="t")
+    store.transition_exit_attempt("xa-2", "PARTIALLY_FILLED", actor="test", reason="t")
+    conn = store._get_conn()
+    conn.execute(
+        "UPDATE exit_order_attempts SET created_at = ?, confirmed_quantity = 50 WHERE attempt_id IN ('xa-1','xa-2')",
+        (now - 7200,),
+    )
+    conn.commit()
+
+    asyncio.run(FillsPoller._sweep_expired_market_attempts(SimpleNamespace()))
+
+    statuses = {
+        r["order_attempt_id"]: r["status"]
+        for r in conn.execute(
+            "SELECT order_attempt_id, status FROM order_attempts"
+        ).fetchall()
+    }
+    assert statuses["oa_orphan"] == "CANCELED"
+    assert statuses["oa_young"] == "ACKNOWLEDGED"
+    assert statuses["oa_live"] == "ACKNOWLEDGED"
+
+    ex_states = {
+        r["attempt_id"]: r["state"]
+        for r in conn.execute(
+            "SELECT attempt_id, state FROM exit_order_attempts"
+        ).fetchall()
+    }
+    assert ex_states["xa-1"] == ExitOrderAttemptState.CANCELED.value
+    assert ex_states["xa-2"] == ExitOrderAttemptState.TERMINAL_UNFILLED.value
+
+    # Idempotent: a second sweep changes nothing.
+    asyncio.run(FillsPoller._sweep_expired_market_attempts(SimpleNamespace()))
+    statuses2 = {
+        r["order_attempt_id"]: r["status"]
+        for r in conn.execute(
+            "SELECT order_attempt_id, status FROM order_attempts"
+        ).fetchall()
+    }
+    assert statuses2 == statuses

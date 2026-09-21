@@ -424,7 +424,7 @@ def validate_fee_vs_estimate(
 # Version 2 = canonical fields backfilled from raw; Version 3 = execution-derived
 # canonical fields with explicit canonicalization_state and strict legacy rules.
 LEDGER_SCHEMA_VERSION: int = 3
-CANONICALIZATION_VERSION: int = 2
+CANONICALIZATION_VERSION: int = 3
 TRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1", "TRUSTED_PAPER_V1"})
 UNTRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"UNTRUSTED_LEGACY", "UNTRUSTED_RAW", "UNTRUSTED_SIDE_CONFLICT"})
 
@@ -1379,6 +1379,11 @@ class KalshiFillsLedger:
         # the authoritative HTTP/WS fill can promote them without double-applying
         # state.  Key: order_id, value: provisional fill_id.
         self._live_router_fill_ids: Dict[str, str] = {}
+
+        # Provisional live-router fill_ids that were promoted in memory but may
+        # still exist as durable rows.  The next persistence flush deletes them
+        # so a replay cannot double-apply the same economic fill.
+        self._stale_live_router_db_ids: Set[str] = set()
 
         # Index by market for position reconstruction
         self._fills_by_market: Dict[str, List[str]] = {}  # ticker -> [fill_id, ...]
@@ -4763,75 +4768,279 @@ class KalshiFillsLedger:
         return written_count
 
     def _get_instrument_key(self, fill: KalshiFill) -> str:
-        """Get instrument key for position tracking.
+        """Position-tracking key — one signed-YES position per market.
 
-        Args:
-            fill: KalshiFill object
-
-        Returns:
-            Instrument key (e.g., "market_ticker:side")
+        Kalshi reports the same economic position under different canonical
+        side/action forms (a BUY_NO entry arrives as ``yes/sell``; its SELL_NO
+        exit arrives as ``yes/buy``).  Keying positions by ``ticker:side``
+        splits one economic position across two keys and lets complement-form
+        fills create phantom opposite-side positions — the accounting
+        inversion found in the 2026-09-21 audit.  Signed-YES exposure for a
+        market is a scalar, so the correct key is the market ticker alone.
         """
-        _side = fill.canonical_position_side or fill.side
-        return f"{fill.market_ticker}:{_side}"
+        return fill.market_ticker
+
+    def _fill_signed_yes_delta_cc(self, fill: KalshiFill) -> Optional[int]:
+        """Signed YES centi-contract delta for a fill (canonical or derived)."""
+        delta = getattr(fill, "canonical_yes_delta_cc", None)
+        if delta is not None:
+            try:
+                return int(delta)
+            except (TypeError, ValueError):
+                pass
+        side = getattr(fill, "canonical_position_side", None)
+        action = getattr(fill, "canonical_position_action", None)
+        qty_cc = getattr(fill, "quantity_cc", None)
+        if qty_cc is None:
+            try:
+                qty_cc = int(Decimal(str(getattr(fill, "count_fp", 0) or 0)) * 100)
+            except Exception:
+                qty_cc = 0
+        if side in ("yes", "no") and action in ("buy", "sell") and qty_cc:
+            try:
+                return yes_delta(action, side, qty_cc)
+            except Exception:
+                return None
+        return None
+
+    def _is_superseded_live_router_fill(self, fill: KalshiFill) -> bool:
+        """True when a provisional fill's order has an authoritative fill.
+
+        A ``live_router_`` row is a provisional mirror of one economic
+        execution.  Promotion normally renames it to the authoritative
+        fill_id, but if the strict economic match fails the provisional row
+        survives next to the authoritative one.  In that case only the
+        authoritative row may mutate positions/PnL — counting both is the
+        double-apply bug from the 2026-09-21 audit.
+        """
+        fid = getattr(fill, "fill_id", "") or ""
+        if not fid.startswith("live_router_"):
+            return False
+        oid = getattr(fill, "order_id", None)
+        if not oid:
+            return False
+        for other in self._fills.values():
+            if other is fill:
+                continue
+            if getattr(other, "order_id", None) != oid:
+                continue
+            if not str(getattr(other, "fill_id", "") or "").startswith("live_router_"):
+                return True
+        return False
+
+    def _fill_position_effective(self, fill: KalshiFill) -> bool:
+        """True when a ledger fill is allowed to mutate signed-YES exposure."""
+        if getattr(fill, "unmatched", False):
+            return False
+        state = getattr(fill, "canonicalization_state", None)
+        if state is None or state in UNTRUSTED_CANONICALIZATION_STATES:
+            return False
+        if self._is_superseded_live_router_fill(fill):
+            return False
+        return bool(self._fill_signed_yes_delta_cc(fill))
+
+    def _prior_signed_yes_cc(
+        self,
+        market_ticker: str,
+        before_time: Optional[datetime] = None,
+        exclude_fill_id: Optional[str] = None,
+        exclude_order_id: Optional[str] = None,
+    ) -> int:
+        """Signed YES exposure for a market from fills already in the ledger.
+
+        Superseded ``live_router_`` rows are excluded: they overlay the same
+        economic fill as their authoritative counterpart, so counting both
+        doubles the prior exposure.  An un-superseded provisional still
+        counts — it is the only record of that pending exposure.
+        """
+        total = 0
+        for f in self._fills.values():
+            if f.market_ticker != market_ticker:
+                continue
+            if exclude_fill_id and f.fill_id == exclude_fill_id:
+                continue
+            if exclude_order_id and f.order_id == exclude_order_id:
+                continue
+            if self._is_superseded_live_router_fill(f):
+                continue
+            if not self._fill_position_effective(f):
+                continue
+            if before_time is not None:
+                try:
+                    ct = getattr(f, "created_time", None)
+                    if ct is not None and ct >= before_time:
+                        continue
+                except Exception:
+                    pass
+            delta = self._fill_signed_yes_delta_cc(f)
+            if delta:
+                total += delta
+        return total
+
+    def _replay_market_position(self, market_ticker: str) -> Optional[Dict[str, Any]]:
+        """Rebuild the open-position record for a market by replaying its fills.
+
+        Positions are derived state: every trusted fill in ``self._fills`` for
+        the ticker is applied in fill-time order through the signed-YES math.
+        This makes incremental and replay accounting identical and makes
+        provisional-fill promotion naturally idempotent — the promoted row
+        carries the same signed delta, so replaying it mutates nothing new.
+        """
+        def _fill_order_key(f: KalshiFill):
+            ct = getattr(f, "created_time", None)
+            try:
+                ts = ct.timestamp() if ct else 0.0
+            except Exception:
+                ts = 0.0
+            return (ts, f.fill_id or "")
+
+        fills = [
+            f for f in self._fills.values()
+            if f.market_ticker == market_ticker and self._fill_position_effective(f)
+        ]
+        fills.sort(key=_fill_order_key)
+
+        position: Optional[Dict[str, Any]] = None
+        for f in fills:
+            if position is None:
+                position = self._create_new_position(f)
+            else:
+                self._update_position_with_fill(position, f)
+            if self._position_is_closed(position):
+                position = None
+
+        if position is not None:
+            # Carry already-credited partial-exit PnL across the rebuild, but
+            # only while the rebuilt position continues the same segment
+            # (identical opening fill).  A close/reopen boundary resets it.
+            prior = self._open_positions.get(market_ticker)
+            if (
+                prior is not None
+                and position.get("fills")
+                and prior.get("fills")
+                and position["fills"][0] == prior["fills"][0]
+            ):
+                position["realized_credited"] = prior.get(
+                    "realized_credited", Decimal("0")
+                )
+            self._open_positions[market_ticker] = position
+        else:
+            self._open_positions.pop(market_ticker, None)
+        return position
+
+    def _pair_lock_value_for_fill(self, fill: KalshiFill, prior_signed_cc: int) -> Decimal:
+        """Dollar residual locked in YES+NO pairs created by this fill.
+
+        A fill that acquires the leg opposite to the held exposure leaves the
+        account holding a YES+NO pair that settles at $1 per contract —
+        e.g. a ``yes/buy`` fill while holding NO, or a sell-NO intent that
+        Kalshi books as a complement ``yes/buy``.  The fill's cash proceeds
+        alone understate the economics; the locked pair must be counted too.
+        """
+        if not prior_signed_cc:
+            return Decimal("0")
+        delta_cc = self._fill_signed_yes_delta_cc(fill) or 0
+        if not delta_cc or (delta_cc > 0) != (prior_signed_cc < 0):
+            return Decimal("0")
+        can_action = (getattr(fill, "canonical_position_action", None) or getattr(fill, "action", "") or "").lower()
+        can_side = (getattr(fill, "canonical_position_side", None) or getattr(fill, "side", "") or "").lower()
+        # Complement-acquire forms create pairs: a buy-form fill covering the
+        # held side, or a sell-form fill on the held NO leg (Kalshi books a
+        # SELL_NO as a YES buy).  A ``yes/sell`` on a held YES book is a
+        # direct disposal and locks nothing.
+        if can_action == "buy" or can_side == "no":
+            return Decimal(min(abs(delta_cc), abs(prior_signed_cc))) / Decimal(100)
+        return Decimal("0")
 
     def _create_new_position(self, fill: KalshiFill) -> Dict[str, Any]:
         """Create new position state from fill.
 
-        Args:
-            fill: KalshiFill object
-
-        Returns:
-            Position state dictionary
+        The position's held side and basis come from the fill's signed-YES
+        delta and the *held-side* leg price — never the canonical execution
+        leg, which is the counterparty leg for complement-form fills.
         """
-        _side = fill.canonical_position_side or fill.side
+        delta_cc = self._fill_signed_yes_delta_cc(fill) or 0
+        held_side = "yes" if delta_cc > 0 else "no"
+        leg_price = _fill_position_side_price_cents(fill, held_side)
+        if leg_price is None:
+            leg_price = int(fill.price_cents or 0)
+        contracts = (
+            Decimal(abs(delta_cc)) / Decimal(100)
+            if delta_cc
+            else Decimal(str(fill.count_fp or 0))
+        )
         return {
             "market_ticker": fill.market_ticker,
-            "side": _side,
-            "total_contracts": fill.count_fp,
-            "avg_price_cents": fill.price_cents,
-            "total_cost_cents": fill.count_fp * fill.price_cents,
+            "side": held_side,
+            "signed_yes_cc": delta_cc,
+            "total_contracts": contracts,
+            "avg_price_cents": leg_price,
+            "total_cost_cents": contracts * leg_price,
             "fees_cents": fee_dollars_to_cents(fill.fee_cost),
             "fills": [fill.fill_id],
+            "realized_credited": Decimal("0"),
             "created_at": fill.created_time.isoformat(),
         }
 
     def _update_position_with_fill(self, position: Dict[str, Any], fill: KalshiFill) -> None:
-        """Update position state with new fill.
+        """Update position state with new fill (signed-YES semantics).
 
-        Args:
-            position: Existing position state
-            fill: New fill to apply
+        Acquisitions weighted-average the basis at the fill's held-side leg
+        price; reductions release basis at the running average so residual
+        contracts keep their entry basis.  A delta that crosses zero closes
+        the held side and opens the residual on the opposite side.
         """
         position["fills"].append(fill.fill_id)
 
-        # CRITICAL FIX (2026-08-09): sells must REDUCE the position, not add to it.
-        # Previously both buy and sell were treated as additive, so closing fills never
-        # reduced total_contracts and positions were never marked closed.
-        old_contracts = position["total_contracts"]
-        old_cost = position["total_cost_cents"]
+        delta_cc = self._fill_signed_yes_delta_cc(fill) or 0
+        old_signed = position.get("signed_yes_cc")
+        if old_signed is None:
+            # Legacy in-memory positions without signed tracking.
+            sign = 1 if position.get("side") == "yes" else -1
+            old_signed = int(Decimal(str(position.get("total_contracts", 0))) * 100) * sign
+        new_signed = old_signed + delta_cc
+        old_contracts = Decimal(str(position["total_contracts"]))
+        old_cost = Decimal(str(position["total_cost_cents"]))
+        held_side = position.get("side") or ("yes" if old_signed > 0 else "no")
 
-        _action = fill.canonical_position_action or fill.action
-        _side = fill.canonical_position_side or fill.side
-        if _action == "buy":
-            new_cost = fill.count_fp * fill.price_cents
-            total_contracts = old_contracts + fill.count_fp
-            total_cost = old_cost + new_cost
-        else:  # sell
-            # Remove cost basis at average entry to keep remaining contracts' avg correct
-            avg_price = position.get("avg_price_cents") or fill.price_cents or 0
-            removal_cost = fill.count_fp * avg_price
-            total_contracts = old_contracts - fill.count_fp
-            total_cost = old_cost - removal_cost
+        if delta_cc and (old_signed == 0 or (delta_cc > 0) == (old_signed > 0)):
+            # Acquiring more of the held side.
+            add_fp = Decimal(abs(delta_cc)) / Decimal(100)
+            leg_price = _fill_position_side_price_cents(fill, held_side)
+            if leg_price is None:
+                leg_price = int(fill.price_cents or 0)
+            position["total_contracts"] = old_contracts + add_fp
+            position["total_cost_cents"] = old_cost + add_fp * leg_price
+        elif delta_cc:
+            # Reducing the held side — possibly flipping it.
+            avg_price = Decimal(str(position.get("avg_price_cents") or 0))
+            close_fp = Decimal(min(abs(delta_cc), abs(old_signed))) / Decimal(100)
+            remaining_cost = old_cost - close_fp * avg_price
+            if abs(delta_cc) > abs(old_signed):
+                flip_cc = new_signed
+                flip_side = "yes" if flip_cc > 0 else "no"
+                flip_price = _fill_position_side_price_cents(fill, flip_side)
+                if flip_price is None:
+                    flip_price = int(fill.price_cents or 0)
+                flip_fp = Decimal(abs(flip_cc)) / Decimal(100)
+                position["total_contracts"] = flip_fp
+                position["total_cost_cents"] = flip_fp * flip_price
+                held_side = flip_side
+                logger.warning(
+                    "[FILLS-LEDGER] Exposure reversal: market=%s old_signed_cc=%d delta_cc=%d new_signed_cc=%d",
+                    fill.market_ticker, old_signed, delta_cc, new_signed,
+                )
+            else:
+                position["total_contracts"] = old_contracts - Decimal(abs(delta_cc)) / Decimal(100)
+                position["total_cost_cents"] = remaining_cost
 
-        position["total_contracts"] = total_contracts
-        position["total_cost_cents"] = total_cost
-
+        position["signed_yes_cc"] = new_signed
+        if new_signed != 0:
+            position["side"] = "yes" if new_signed > 0 else "no"
+        total_contracts = Decimal(str(position["total_contracts"]))
         if total_contracts > 0:
-            position["avg_price_cents"] = total_cost // total_contracts
-        elif total_contracts < 0:
-            logger.warning(
-                "[FILLS-LEDGER] Oversold position: market=%s side=%s over_by=%d",
-                fill.market_ticker, _side, -total_contracts
+            position["avg_price_cents"] = int(
+                Decimal(str(position["total_cost_cents"])) / total_contracts
             )
 
         # Add fees
@@ -4851,35 +5060,122 @@ class KalshiFillsLedger:
     def _compute_realized_pnl(self, position: Dict[str, Any]) -> Decimal:
         """Compute realized PnL from closed position.
 
-        Args:
-            position: Closed position state
-
-        Returns:
-            Realized PnL in USD
+        Replays the position's fills in order: ``proceeds_dollars`` is the
+        signed cash the exchange booked per fill (fee-inclusive), and a fill
+        that acquires the leg opposite to the held exposure locks a YES+NO
+        pair which settles at $1 per contract.  Both terms are required —
+        using leg prices or wire-form action alone produced the ~$1/contract
+        inversion on complement-form fills.
         """
-        # For Kalshi binary options, realized PnL is calculated from fill proceeds
-        # Sum proceeds from all closing fills minus cost basis and fees
-        total_proceeds = Decimal("0")
-        total_cost = Decimal("0")
-        total_fees = Decimal("0")
-
-        # Iterate through fills in position to calculate total proceeds
+        signed_cc = 0
+        cash = Decimal("0")
+        pairs = Decimal("0")
         for fill_id in position["fills"]:
             fill = self._fills.get(fill_id)
-            if fill:
-                # For sells, proceeds_dollars is the cash received
-                # For buys, proceeds_dollars is negative (cash spent)
-                _can_action = fill.canonical_position_action or fill.action
-                if fill.proceeds_dollars is not None:
-                    if _can_action == "sell":
-                        total_proceeds += fill.proceeds_dollars
-                    else:
-                        total_cost += fill.proceeds_dollars  # Cost is negative for buys
-                total_fees += fill.fee_cost if fill.fee_cost else Decimal("0")
+            if not fill:
+                continue
+            if fill.proceeds_dollars is not None:
+                cash += fill.proceeds_dollars
+            pairs += self._pair_lock_value_for_fill(fill, signed_cc)
+            signed_cc += self._fill_signed_yes_delta_cc(fill) or 0
+        # Each locked YES+NO pair redeems at $1.00 regardless of outcome.
+        return cash + pairs
 
-        # Realized PnL = total proceeds - total cost - total fees
-        realized_pnl = total_proceeds - total_cost - total_fees
-        return realized_pnl
+    def _replay_market_lifecycle_pnl(self, market_ticker: str) -> Tuple[Decimal, Decimal]:
+        """Replay a market's fills and return (closed-segment PnL, open-segment cash).
+
+        Segments split each time signed exposure returns to zero; the open
+        tail is returned separately so callers can distinguish realized from
+        in-flight economics.
+        """
+        fills = [
+            f for f in self._fills.values()
+            if f.market_ticker == market_ticker and self._fill_position_effective(f)
+        ]
+        def _fill_order_key(f: KalshiFill):
+            ct = getattr(f, "created_time", None)
+            try:
+                ts = ct.timestamp() if ct else 0.0
+            except Exception:
+                ts = 0.0
+            return (ts, f.fill_id or "")
+        fills.sort(key=_fill_order_key)
+        signed_cc = 0
+        seg_cash = Decimal("0")
+        seg_pairs = Decimal("0")
+        realized = Decimal("0")
+        for f in fills:
+            if f.proceeds_dollars is not None:
+                seg_cash += f.proceeds_dollars
+            seg_pairs += self._pair_lock_value_for_fill(f, signed_cc)
+            signed_cc += self._fill_signed_yes_delta_cc(f) or 0
+            if signed_cc == 0:
+                realized += seg_cash + seg_pairs
+                seg_cash = Decimal("0")
+                seg_pairs = Decimal("0")
+        return realized, seg_cash + seg_pairs
+
+    def _closing_segment_pnl(self, market_ticker: str) -> Decimal:
+        """PnL of the segment that just closed on this market.
+
+        Replays the market's effective fills in order and returns the cash +
+        pair-lock value accumulated since the last time signed YES exposure
+        crossed zero — i.e. exactly the fills of the segment closed by the
+        most recent fill.  Unlike ``_compute_realized_pnl(position)`` this
+        sees the closing fill itself and is robust to stale position records.
+        """
+        fills = [
+            f for f in self._fills.values()
+            if f.market_ticker == market_ticker and self._fill_position_effective(f)
+        ]
+        def _fill_order_key(f: KalshiFill):
+            ct = getattr(f, "created_time", None)
+            try:
+                ts = ct.timestamp() if ct else 0.0
+            except Exception:
+                ts = 0.0
+            return (ts, f.fill_id or "")
+        fills.sort(key=_fill_order_key)
+        signed_cc = 0
+        seg_value = Decimal("0")
+        last_closed = Decimal("0")
+        for f in fills:
+            if f.proceeds_dollars is not None:
+                seg_value += f.proceeds_dollars
+            seg_value += self._pair_lock_value_for_fill(f, signed_cc)
+            signed_cc += self._fill_signed_yes_delta_cc(f) or 0
+            if signed_cc == 0:
+                last_closed = seg_value
+                seg_value = Decimal("0")
+        return last_closed
+
+    def _recompute_session_realized_pnl(self) -> Decimal:
+        """Recompute session realized PnL by replaying session fills per market."""
+        try:
+            session_date = self._last_session_start_date or self._get_current_session_date()
+            session_start_dt = datetime.fromisoformat(f"{session_date}T00:00:00+00:00")
+        except Exception:
+            session_start_dt = None
+        markets = set()
+        for f in self._fills.values():
+            if not self._fill_position_effective(f):
+                continue
+            if session_start_dt is not None:
+                ct = getattr(f, "created_time", None)
+                if ct is None or ct < session_start_dt:
+                    continue
+            markets.add(f.market_ticker)
+        total = Decimal("0")
+        for market in markets:
+            realized, _open_tail = self._replay_market_lifecycle_pnl(market)
+            total += realized
+            # Partial-exit credits on the still-open segment were already
+            # realized into the session; include them so the recompute does
+            # not silently drop live partial PnL.
+            open_pos = self._open_positions.get(market)
+            if open_pos is not None:
+                total += Decimal(str(open_pos.get("realized_credited") or 0))
+        return total
 
     def _is_same_economic_fill(self, a: KalshiFill, b: KalshiFill) -> bool:
         """Return True if two fills represent the same economic execution.
@@ -5280,20 +5576,47 @@ class KalshiFillsLedger:
             except Exception:
                 pass
 
-        # Recompute proceeds_dollars using the preserved canonical side/action and
-        # the authoritative price legs.  This is the signed cash flow: negative for
-        # buys, positive for sells, net of fee.
+        # Recompute proceeds_dollars from the authoritative legs: the signed
+        # cash the exchange booked for this fill, net of fee.  Buy-form fills
+        # always pay the execution leg price; sell-form fills only credit it
+        # when the account actually holds that side — otherwise the fill
+        # acquired the complement via pair-mint and paid the opposite leg.
         try:
-            price_dollars = existing.yes_price_dollars if can_side == "yes" else existing.no_price_dollars
-            if price_dollars is None and existing.canonical_leg_price_cents is not None:
-                price_dollars = Decimal(str(existing.canonical_leg_price_cents)) / Decimal("100")
-            if price_dollars is not None and existing.count_fp is not None:
-                gross = price_dollars * existing.count_fp
+            exec_side = (existing.execution_outcome_side or can_side or "").lower()
+            exec_price = (
+                existing.yes_price_dollars if exec_side == "yes" else existing.no_price_dollars
+            )
+            opposite_price = (
+                existing.no_price_dollars if exec_side == "yes" else existing.yes_price_dollars
+            )
+            if exec_price is None and existing.canonical_leg_price_cents is not None:
+                exec_price = Decimal(str(existing.canonical_leg_price_cents)) / Decimal("100")
+            if exec_price is not None and existing.count_fp is not None:
+                gross = exec_price * existing.count_fp
                 fee = existing.fee_cost or Decimal("0")
-                if existing.canonical_position_action == "buy":
+                exec_action = (existing.execution_action or existing.canonical_position_action or "").lower()
+                if exec_action == "buy":
                     existing.proceeds_dollars = -gross - fee
                 else:
-                    existing.proceeds_dollars = gross - fee
+                    prior_signed_cc = self._prior_signed_yes_cc(
+                        existing.market_ticker,
+                        before_time=existing.created_time,
+                        exclude_fill_id=existing.fill_id,
+                        exclude_order_id=existing.order_id,
+                    )
+                    held_side = "yes" if prior_signed_cc > 0 else ("no" if prior_signed_cc < 0 else None)
+                    qty_cc_local = int(existing.quantity_cc or (existing.count_fp * 100))
+                    covered_cc = (
+                        min(abs(prior_signed_cc), qty_cc_local)
+                        if held_side == exec_side else 0
+                    )
+                    covered_fp = Decimal(covered_cc) / Decimal(100)
+                    minted_fp = existing.count_fp - covered_fp
+                    existing.proceeds_dollars = (
+                        exec_price * covered_fp
+                        - (opposite_price or Decimal("0")) * minted_fp
+                        - fee
+                    )
         except Exception as e:
             logger.warning(
                 "[FILLS-LEDGER-LIVE-PROMOTE] could not recompute proceeds for %s: %s",
@@ -5324,6 +5647,11 @@ class KalshiFillsLedger:
             existing.fill_id = new_id
             self._reindex_fill_id(old_id, new_id, existing)
             self._live_router_fill_ids[fill.order_id] = new_id
+            # The provisional row may already have been flushed under its old
+            # id; queue it for deletion at the next persistence flush so a DB
+            # replay cannot double-apply the same economic fill.
+            if old_id.startswith("live_router_"):
+                self._stale_live_router_db_ids.add(old_id)
 
         # Both ids have been applied; idempotency must hold for either one.
         self._processed_fill_ids.add(old_id)
@@ -5568,8 +5896,19 @@ class KalshiFillsLedger:
             promoted_id = self._promote_live_router_fill(fill)
             if promoted_id:
                 # The authoritative fill has been merged into the existing live
-                # record.  Do not re-process position/PnL/risk; the live fill
-                # already applied it.  The caller now sees fill.fill_id == promoted_id.
+                # record.  Do not re-apply the fill's delta — the provisional
+                # already mutated exposure once.  Rebuild the market's position
+                # from its fill set so the provisional's estimated legs/fee are
+                # replaced by the authoritative economics.
+                try:
+                    self._replay_market_position(fill.market_ticker)
+                    self._session_realized_pnl = self._recompute_session_realized_pnl()
+                    self._session_unrealized_pnl = self._recompute_unrealized_pnl()
+                except Exception as _promote_rebuild_err:
+                    logger.debug(
+                        "[FILLS-LEDGER] post-promotion position rebuild failed (non-critical): %s",
+                        _promote_rebuild_err,
+                    )
                 return
 
         # Deduplicate fills
@@ -5683,167 +6022,151 @@ class KalshiFillsLedger:
         except Exception as cache_err:
             logger.debug("[FILLS-LEDGER] Could not notify position cache of fill: %s", cache_err)
 
-        # Get or create position
-        instrument_key = self._get_instrument_key(fill)
-        position = self._open_positions.get(instrument_key)
+        # Position bookkeeping is derived state: the market's signed-YES
+        # exposure is rebuilt by replaying its trusted fills in fill order.
+        # Kalshi reports the same economic position under different canonical
+        # forms (a BUY_NO entry arrives as yes/sell; its SELL_NO exit arrives
+        # as yes/buy), so keying a position by the fill's canonical side
+        # splits one position across keys, drops entry fills as "naked sells",
+        # and lets complement-form exits mint phantom opposite-side
+        # positions — the accounting inversion found on 2026-09-21.
+        position_before = self._open_positions.get(fill.market_ticker)
+        old_contracts = (
+            Decimal(str(position_before["total_contracts"])) if position_before else Decimal("0")
+        )
+        old_signed_cc = (
+            int(position_before.get("signed_yes_cc") or 0) if position_before else 0
+        )
+        if position_before is None and _can_action == "sell":
+            # A sell-form fill on a flat book is a complement-form ACQUISITION
+            # (e.g. BUY_NO reported as yes/sell): legitimate, but worth an
+            # audit line since sell-form entries are not the common case.
+            logger.info(
+                "[FILLS-LEDGER] Sell-form fill opens a fresh signed position: market=%s "
+                "side=%s count=%s price=%dc fill_id=%s",
+                fill.market_ticker, _can_side, fill.count_fp, fill.price_cents, fill.fill_id,
+            )
+        position = self._replay_market_position(fill.market_ticker)
+        new_contracts = (
+            Decimal(str(position["total_contracts"])) if position else Decimal("0")
+        )
 
-        if position is None:
-            # CRITICAL FIX (2026-08-24): Naked sell with no recorded open position
-            # under this leg's (ticker:side) key.  The check must be keyed on the
-            # ticker's TOTAL signed-YES exposure, not the leg's canonical side,
-            # because Kalshi replays the same economic fill in counterparty form
-            # (a BUY_NO entry is reported as sell-yes).  The old code missed the
-            # position stored under the opposite side key and removed the
-            # PositionMonitor entry ~10s after entry; the position then rode
-            # unmonitored to settlement at 100% loss (KXXRP15M-26AUG240115-15).
-            # A sell that reaches this branch while the ticker has exposure under
-            # the opposite key is a replay/misclassification, never a valid close.
-            if _can_action == "sell":
-                ticker = fill.market_ticker
-                yes_pos = self._open_positions.get(f"{ticker}:yes")
-                no_pos = self._open_positions.get(f"{ticker}:no")
-                yes_qty_cc = (
-                    int(Decimal(str(yes_pos.get("total_contracts", 0))) * 100) if yes_pos else 0
+        # Any net reduction is an economic exit for the exited portion: feed
+        # the settlement-aligned counterfactual and the exit-attempt resolver
+        # with the HELD side's economics (entry basis, held-side exit price),
+        # never the wire-form leg.
+        if position_before is not None and new_contracts < old_contracts:
+            exited_contracts = old_contracts - new_contracts
+            held_side_before = str(position_before.get("side") or "")
+            held_exit_price_cents = _fill_position_side_price_cents(fill, held_side_before)
+            if held_exit_price_cents is None:
+                held_exit_price_cents = int(fill.price_cents or 0)
+
+            # Realize PnL incrementally only for a true partial exit; a full
+            # close is accounted by the lifecycle replay in the close branch.
+            if new_contracts > 0:
+                partial_pnl = self._compute_partial_exit_pnl(
+                    position_before, fill, exited_contracts, old_signed_cc
                 )
-                no_qty_cc = (
-                    int(Decimal(str(no_pos.get("total_contracts", 0))) * 100) if no_pos else 0
-                )
-                position_yes_cc = yes_qty_cc - no_qty_cc
-                qty_cc = getattr(fill, "quantity_cc", None) or int(
-                    Decimal(str(fill.count_fp or 0)) * 100
-                )
-                fill_delta_cc = getattr(fill, "canonical_yes_delta_cc", None)
-                if fill_delta_cc is None and _can_side in ("yes", "no"):
-                    try:
-                        fill_delta_cc = yes_delta(_can_action, _can_side, qty_cc)
-                    except Exception:
-                        fill_delta_cc = None
-
-                if position_yes_cc != 0:
-                    logger.critical(
-                        "[FILLS-LEDGER-NAKED-SELL-QUARANTINE] ticker=%s side=%s action=%s qty_cc=%s "
-                        "position_yes_cc=%d fill_delta_cc=%s fill_id=%s client_order_id=%s - sell fill "
-                        "reached the naked branch while the ticker has exposure under the opposite "
-                        "side key; quarantined (no monitor removal, no state mutation).",
-                        ticker, _can_side, _can_action, qty_cc, position_yes_cc,
-                        fill_delta_cc, fill.fill_id, getattr(fill, "client_order_id", None),
-                    )
-                    return
-
-                logger.warning(
-                    "[FILLS-LEDGER] Sell fill with no open position in ledger: market=%s side=%s count=%s price=%dc",
-                    fill.market_ticker, _can_side, fill.count_fp, fill.price_cents
-                )
-                # 2026-08-24: Monitor state is owned by position_cache.on_fill
-                # (the canonical fill path).  The ledger's (ticker:side) view
-                # must never remove a monitor entry; position_cache already
-                # removes the monitor position when canonical exposure hits zero.
-                return
-
-            position = self._create_new_position(fill)
-            self._open_positions[instrument_key] = position
-
-            # 2026-08-23: PositionMonitor updates are now centralized in
-            # position_cache.on_fill via the durable fill bus / order router paths.
-            # fills_ledger no longer maintains a parallel monitor state, preventing
-            # stale size, duplicate positions, and divergent provenance.
-        else:
-            # Calculate PnL for partial exit before updating position
-            old_contracts = position["total_contracts"]
-            self._update_position_with_fill(position, fill)
-            new_contracts = position["total_contracts"]
-
-            # If this fill reduced position size, realize PnL incrementally
-            if new_contracts < old_contracts:
-                # Partial exit - realize PnL for the exited portion
-                exited_contracts = old_contracts - new_contracts
-                partial_pnl = self._compute_partial_exit_pnl(position, fill, exited_contracts)
                 if partial_pnl != 0:
                     self._session_realized_pnl += partial_pnl
                     self._update_cumulative_realized_pnl(partial_pnl)
+                    # Mark the credit on the rebuilt position so the eventual
+                    # close does not count these fills a second time.
+                    position["realized_credited"] = position.get(
+                        "realized_credited", Decimal("0")
+                    ) + partial_pnl
                     logger.debug(
-                        "Partial exit realized: %s exited=%d pnl=%s session_realized=%s cumulative_realized=%s",
-                        instrument_key, exited_contracts, partial_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
+                        "Partial exit realized: %s exited=%s pnl=%s session_realized=%s cumulative_realized=%s",
+                        fill.market_ticker, exited_contracts, partial_pnl,
+                        self._session_realized_pnl, self._cumulative_realized_pnl
                     )
 
-                # Settlement-aligned exit audit (2026-09): record the exit fill
-                # against the canonical market key so settlement can compute the
-                # hold-vs-sell counterfactual, and resolve the durable exit
-                # attempt (fills may arrive before the route ack).
-                try:
-                    from merid.event_venues.kalshi.settlement_aligned_exit import (
-                        canonical_market_key,
-                        get_exit_attempt_resolver,
-                        get_exit_eval_registry,
-                        get_exit_evaluator,
-                    )
+            # Settlement-aligned exit audit (2026-09): record the exit fill
+            # against the canonical market key so settlement can compute the
+            # hold-vs-sell counterfactual, and resolve the durable exit
+            # attempt (fills may arrive before the route ack).
+            try:
+                from merid.event_venues.kalshi.settlement_aligned_exit import (
+                    canonical_market_key,
+                    get_exit_attempt_resolver,
+                    get_exit_eval_registry,
+                    get_exit_evaluator,
+                )
 
-                    _cf_key = canonical_market_key(fill.market_ticker)
-                    get_exit_eval_registry().record_exit_fill(
-                        market_key=_cf_key,
-                        held_side=str(position.get("side") or ""),
-                        quantity=exited_contracts,
-                        price_cents=fill.price_cents,
-                        fee_cents=fee_dollars_to_cents(fill.fee_cost),
-                        fill_id=fill.fill_id,
-                        client_order_id=getattr(fill, "client_order_id", None),
-                        order_id=getattr(fill, "order_id", None),
-                        entry_price_cents=position.get("avg_price_cents"),
-                        entry_fees_cents=position.get("fees_cents"),
-                        total_entry_qty=old_contracts,
-                    )
-                    get_exit_attempt_resolver().note_fill(
-                        market_key=_cf_key,
-                        fill_id=fill.fill_id,
-                        client_order_id=getattr(fill, "client_order_id", None),
-                        order_id=getattr(fill, "order_id", None),
-                        quantity=exited_contracts,
-                        price_cents=fill.price_cents,
-                    )
-                    # A reduction resets the EV persistence counter: any future
-                    # discretionary sell must re-prove persistence on the
-                    # residual position rather than inheriting a stale streak.
-                    get_exit_evaluator().reset_persistence(_cf_key)
-                except Exception as _cf_exc:
-                    logger.debug(
-                        "[FILLS-LEDGER] exit counterfactual hook failed (non-critical): %s",
-                        _cf_exc,
-                    )
+                _cf_key = canonical_market_key(fill.market_ticker)
+                get_exit_eval_registry().record_exit_fill(
+                    market_key=_cf_key,
+                    held_side=held_side_before,
+                    quantity=exited_contracts,
+                    price_cents=held_exit_price_cents,
+                    fee_cents=fee_dollars_to_cents(fill.fee_cost),
+                    fill_id=fill.fill_id,
+                    client_order_id=getattr(fill, "client_order_id", None),
+                    order_id=getattr(fill, "order_id", None),
+                    entry_price_cents=position_before.get("avg_price_cents"),
+                    entry_fees_cents=position_before.get("fees_cents"),
+                    total_entry_qty=old_contracts,
+                )
+                get_exit_attempt_resolver().note_fill(
+                    market_key=_cf_key,
+                    fill_id=fill.fill_id,
+                    client_order_id=getattr(fill, "client_order_id", None),
+                    order_id=getattr(fill, "order_id", None),
+                    quantity=exited_contracts,
+                    price_cents=held_exit_price_cents,
+                )
+                # A reduction resets the EV persistence counter: any future
+                # discretionary sell must re-prove persistence on the
+                # residual position rather than inheriting a stale streak.
+                get_exit_evaluator().reset_persistence(_cf_key)
+            except Exception as _cf_exc:
+                logger.debug(
+                    "[FILLS-LEDGER] exit counterfactual hook failed (non-critical): %s",
+                    _cf_exc,
+                )
 
-        # Check if position is now closed
-        if self._position_is_closed(position):
-            trade_pnl = self._compute_realized_pnl(position)
+        # Check if position is now closed: a prior position whose signed
+        # exposure returned to zero after this fill.
+        if position_before is not None and new_contracts == 0:
+            # The closing segment is replayed from the market's fill log so it
+            # includes THIS fill — position_before["fills"] only covers fills
+            # through the previous state and would drop the closing fill's
+            # cash and pair lock.  Partial exits inside the segment were
+            # already credited when they occurred; subtract that credit so
+            # each dollar of the segment is realized exactly once.
+            segment_pnl = self._closing_segment_pnl(fill.market_ticker)
+            already_credited = Decimal(str(position_before.get("realized_credited") or 0))
+            trade_pnl = segment_pnl - already_credited
             self._session_realized_pnl += trade_pnl
             self._update_cumulative_realized_pnl(trade_pnl)
 
             # Determine exit reason based on fill context
-            exit_reason = "SETTLEMENT"  # Default for fills that close positions
-            _can_action = fill.canonical_position_action or fill.action
-            if _can_action == "sell":
+            exit_reason = "EXIT" if getattr(fill, "is_exit", None) else "SETTLEMENT"
+            if not getattr(fill, "is_exit", None) and _can_action == "sell":
                 # Sells that close the position are manual/TP/SL exits from our side
                 exit_reason = "MANUAL"
 
             # Calculate realized R
             realized_r = 0.0
-            avg_price = position.get("avg_price_cents", 0)
+            avg_price = position_before.get("avg_price_cents", 0)
             if avg_price and avg_price > 0:
                 # Risk is the premium paid (held-side price) for both YES and NO.
                 # Using 100 - avg_price for NO would incorrectly flip the NO price
                 # into YES-space and understate the actual capital at risk.
                 risk_cents = avg_price
-                total_contracts = position.get("total_contracts", 1)
+                total_contracts = position_before.get("total_contracts", 1)
                 if risk_cents > 0 and total_contracts > 0:
                     realized_r = float(trade_pnl) / (float(risk_cents) * float(total_contracts))
 
             logger.info(
                 "[EXIT] market=%s side=%s reason=%s realized_R=%.2f asset=N/A confidence=N/A time_in_trade=N/A pnl_cents=%d",
-                fill.market_ticker, position.get("side", "unknown"), exit_reason, realized_r, int(trade_pnl * 100)
+                fill.market_ticker, position_before.get("side", "unknown"), exit_reason, realized_r, int(trade_pnl * 100)
             )
 
-            del self._open_positions[instrument_key]
             logger.info(
                 "Position closed: %s pnl=%s session_realized=%s cumulative_realized=%s",
-                instrument_key, trade_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
+                fill.market_ticker, trade_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
             )
 
             # CRITICAL FIX (2026-07-21): Clear entry window when position is closed
@@ -5914,41 +6237,42 @@ class KalshiFillsLedger:
         # Persist state
         self._persist_session_metadata(self._get_current_session_date())
 
-    def _compute_partial_exit_pnl(self, position: Dict[str, Any], fill: KalshiFill, exited_contracts: int) -> Decimal:
-        """Compute PnL for partial exit from position.
+    def _compute_partial_exit_pnl(
+        self,
+        position_before: Dict[str, Any],
+        fill: KalshiFill,
+        exited_contracts: Decimal,
+        prior_signed_cc: int,
+    ) -> Decimal:
+        """Compute realized PnL for the exited portion of a partial close.
+
+        ``proceeds_dollars`` is the signed cash the exchange booked for this
+        fill (fee-inclusive).  A complement-acquire exit (SELL_NO booked as a
+        YES buy) additionally locks a YES+NO pair worth $1/contract — counted
+        via ``_pair_lock_value_for_fill``.  The released cost basis is the
+        position's running held-side average for the exited contracts.
 
         Args:
-            position: Position state
-            fill: Exit fill
-            exited_contracts: Number of contracts exited
-
-        Returns:
-            Realized PnL for partial exit
+            position_before: Position state before this fill
+            fill: The reducing fill
+            exited_contracts: Contracts closed by this fill (fixed-point)
+            prior_signed_cc: Signed YES exposure before this fill
         """
-        # For partial exit, PnL = (exit_price - avg_entry_price) * exited_contracts - fees
-        # Use the fill's proceeds if available, otherwise calculate from prices
-        _can_action = fill.canonical_position_action or fill.action
-        if _can_action == "sell" and fill.proceeds_dollars is not None:
-            # Proceeds already account for price and quantity
-            exit_proceeds = fill.proceeds_dollars
-            # Calculate cost basis for exited portion in USD
-            avg_entry_price = Decimal(position.get("avg_price_cents", 0)) / Decimal("100")
-            exit_cost = avg_entry_price * exited_contracts
-            exit_fees = fill.fee_cost if fill.fee_cost else Decimal("0")
-            return exit_proceeds - exit_cost - exit_fees
-        elif _can_action == "buy":
-            # Adding to position, no PnL realization
-            return Decimal("0")
-        else:
-            # Fallback calculation
-            exit_price_cents = fill.price_cents
-            avg_entry_price_cents = position["avg_price_cents"]
-            price_diff_cents = exit_price_cents - avg_entry_price_cents
-            pnl_cents = price_diff_cents * exited_contracts
-            pnl_usd = Decimal(pnl_cents) / Decimal("100")
-            # Subtract fees
-            exit_fees = fill.fee_cost if fill.fee_cost else Decimal("0")
-            return pnl_usd - exit_fees
+        cash = fill.proceeds_dollars if fill.proceeds_dollars is not None else Decimal("0")
+        pair_value = self._pair_lock_value_for_fill(fill, prior_signed_cc)
+
+        # Attribute cash and pair value proportionally if the fill exceeded
+        # the exited amount (oversell edge case).
+        fill_qty_fp = Decimal(str(fill.count_fp or 0))
+        exited_fp = Decimal(str(exited_contracts))
+        if fill_qty_fp > 0 and exited_fp < fill_qty_fp:
+            ratio = exited_fp / fill_qty_fp
+            cash = cash * ratio
+            pair_value = pair_value * ratio
+
+        avg_entry_price = Decimal(str(position_before.get("avg_price_cents") or 0)) / Decimal("100")
+        released_basis = avg_entry_price * exited_fp
+        return cash + pair_value - released_basis
 
     def _recompute_unrealized_pnl(self) -> Decimal:
         """Recompute unrealized PnL from all open positions.
@@ -7318,16 +7642,21 @@ class KalshiFillsLedger:
             )
 
         # 2026-08-30: Calculate and assert proceeds_dollars (net cash flow after
-        # fees).  For Kalshi fills the economic identity is:
-        #   proceeds + fee = -(price * count) for a buy
-        #   proceeds + fee = +(price * count) for a sell
-        # If Kalshi also reports proceeds independently, it must agree within a
-        # 1.5c tolerance; otherwise the fill is quarantined as price/count cannot
-        # be trusted.
+        # fees).  Kalshi's book is YES-normalized, so the cash a fill moves
+        # depends on what the account held, not just the wire-form action:
+        #   buy-form fills always PAY the execution leg price;
+        #   sell-form fills CREDIT the leg price only for the portion covered
+        #   by a held contract of that side — the uncovered remainder acquires
+        #   the complement via pair-mint and PAYS the opposite leg price.
+        # Treating every sell-form fill as +price inverted cash by exactly $1
+        # per contract on complement-form entries (2026-09-21 audit).
         proceeds: Optional[Decimal] = None
         _proceeds_side = _execution_outcome_side or _raw_traded_side
         _proceeds_price = (
             yes_price_dollars if _proceeds_side == "yes" else no_price_dollars
+        )
+        _opposite_price = (
+            no_price_dollars if _proceeds_side == "yes" else yes_price_dollars
         )
         if (
             _count_fp > 0
@@ -7335,11 +7664,31 @@ class KalshiFillsLedger:
             and _proceeds_price is not None
             and _execution_action in ("buy", "sell")
         ):
-            _gross_dollars = _proceeds_price * _count_fp
             if _execution_action == "buy":
-                _expected_proceeds = -_gross_dollars - fee_decimal
-            else:  # sell
-                _expected_proceeds = _gross_dollars - fee_decimal
+                _expected_proceeds = -(_proceeds_price * _count_fp) - fee_decimal
+            else:
+                _qty_cc_local = int(_quantity_cc or (_count_fp * 100))
+                _prior_signed_cc = self._prior_signed_yes_cc(
+                    _ticker_for_identity,
+                    before_time=created_time,
+                    exclude_fill_id=str(fill_id),
+                    exclude_order_id=order_id,
+                )
+                _held_side = (
+                    "yes" if _prior_signed_cc > 0
+                    else ("no" if _prior_signed_cc < 0 else None)
+                )
+                _covered_cc = (
+                    min(abs(_prior_signed_cc), _qty_cc_local)
+                    if _held_side == _proceeds_side else 0
+                )
+                _covered_fp = Decimal(_covered_cc) / Decimal(100)
+                _minted_fp = _count_fp - _covered_fp
+                _expected_proceeds = (
+                    _proceeds_price * _covered_fp
+                    - (_opposite_price or Decimal("0")) * _minted_fp
+                    - fee_decimal
+                )
 
             _raw_proceeds = raw.get("proceeds") or raw.get("proceeds_dollars")
             if _raw_proceeds is not None:
@@ -8602,6 +8951,27 @@ class KalshiFillsLedger:
                     elif not is_permanent:
                         logger.warning(f"Failed to persist fill {fill.fill_id}: {e}")
 
+            # Delete provisional live-router rows that were promoted in memory
+            # after they were already flushed.
+            if self._stale_live_router_db_ids:
+                _stale_ids = sorted(self._stale_live_router_db_ids)
+                try:
+                    _placeholders = ",".join(f"${i+1}" for i in range(len(_stale_ids)))
+                    await conn.execute(
+                        f"DELETE FROM kalshi_fills WHERE fill_id IN ({_placeholders})",
+                        *_stale_ids,
+                    )
+                    self._stale_live_router_db_ids.clear()
+                    logger.info(
+                        "[FILLS-LEDGER] deleted %d stale live-router rows post-promotion",
+                        len(_stale_ids),
+                    )
+                except Exception as _stale_err:
+                    logger.warning(
+                        "[FILLS-LEDGER] stale live-router row cleanup failed: %s",
+                        _stale_err,
+                    )
+
             # Aggregate logging for schema errors
             if errors_by_category:
                 for category, count in errors_by_category.items():
@@ -8704,6 +9074,29 @@ class KalshiFillsLedger:
                         )
                     elif not is_permanent:
                         logger.warning(f"Failed to persist fill {fill.fill_id}: {e}")
+
+            # Delete provisional live-router rows that were promoted in memory
+            # after they were already flushed.  Leaving them lets a DB replay
+            # double-apply the same economic fill.
+            if self._stale_live_router_db_ids:
+                _stale_ids = sorted(self._stale_live_router_db_ids)
+                try:
+                    _placeholders = ",".join("?" for _ in _stale_ids)
+                    await self._execute_with_retry(
+                        _db,
+                        f"DELETE FROM kalshi_fills WHERE fill_id IN ({_placeholders})",
+                        tuple(_stale_ids),
+                    )
+                    self._stale_live_router_db_ids.clear()
+                    logger.info(
+                        "[FILLS-LEDGER] deleted %d stale live-router rows post-promotion",
+                        len(_stale_ids),
+                    )
+                except Exception as _stale_err:
+                    logger.warning(
+                        "[FILLS-LEDGER] stale live-router row cleanup failed: %s",
+                        _stale_err,
+                    )
 
             await _db.commit()
 

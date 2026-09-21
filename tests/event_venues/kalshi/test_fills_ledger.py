@@ -631,3 +631,317 @@ class TestFillsLedgerMutexInitialization:
         # Both should succeed
         assert all(results)
         assert ledger.summary()["fills_total"] == 2
+
+
+class TestCounterpartyFormAccounting:
+    """Signed-YES replay accounting for Kalshi complement-form fills.
+
+    Kalshi reports one economic position under different canonical forms: a
+    BUY_NO entry arrives as ``yes/sell`` and its SELL_NO exit arrives as
+    ``yes/buy``.  Positions are tracked per ticker by signed-YES exposure —
+    the old ``ticker:side`` keys split one position across keys, dropped
+    entries as naked sells, and minted phantom opposite-side positions
+    (2026-09-21 audit).
+    """
+
+    @staticmethod
+    def _fill(**kw) -> "KalshiFill":
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill
+
+        defaults = dict(
+            fill_id="fill-x",
+            order_id="ord-x",
+            market_ticker="KXBTC15M-TEST",
+            side="yes",
+            action="sell",
+            count_fp=Decimal("1"),
+            quantity_cc=100,
+            yes_price_dollars=Decimal("0.64"),
+            no_price_dollars=Decimal("0.36"),
+            fee_cost=Decimal("0.01"),
+            proceeds_dollars=Decimal("-0.37"),
+            canonical_position_side="yes",
+            canonical_position_action="sell",
+            canonical_leg_price_cents=64,
+            canonical_yes_delta_cc=-100,
+            canonicalization_state="TRUSTED_LIVE_V1",
+            canonicalization_version=3,
+            unmatched=False,
+            ingestion_source="http_poller",
+            created_time=datetime.now(timezone.utc),
+        )
+        defaults.update(kw)
+        return KalshiFill(**defaults)
+
+    def test_counterparty_entry_creates_no_position(self, ledger: KalshiFillsLedger) -> None:
+        # BUY_NO reported in book form: yes/sell at YES 64c -> NO costs 36c.
+        entry = self._fill(fill_id="fill-entry-1", order_id="ord-entry-1")
+        ledger.on_fill(entry)
+
+        pos = ledger._open_positions.get("KXBTC15M-TEST")
+        assert pos is not None, "counterparty-form entry must open a position"
+        assert pos["side"] == "no"
+        assert pos["signed_yes_cc"] == -100
+        assert pos["total_contracts"] == Decimal("1")
+        assert pos["avg_price_cents"] == 36  # held-side leg, not the YES leg
+
+    def test_complement_exit_closes_and_realizes_pnl(self, ledger: KalshiFillsLedger) -> None:
+        t0 = datetime.now(timezone.utc)
+        entry = self._fill(
+            fill_id="fill-entry-2", order_id="ord-entry-2", created_time=t0,
+        )
+        # SELL_NO reported as a complement YES buy at 29c: pays 29c to lock a
+        # YES+NO pair that settles at $1.
+        exit_fill = self._fill(
+            fill_id="fill-exit-2",
+            order_id="ord-exit-2",
+            side="yes",
+            action="buy",
+            yes_price_dollars=Decimal("0.29"),
+            no_price_dollars=Decimal("0.71"),
+            fee_cost=Decimal("0.0145"),
+            proceeds_dollars=Decimal("-0.3045"),
+            canonical_position_side="yes",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=29,
+            canonical_yes_delta_cc=100,
+            is_exit=True,
+            entry_or_exit="exit",
+            created_time=t0 + timedelta(seconds=30),
+        )
+        ledger.on_fill(entry)
+        ledger.on_fill(exit_fill)
+
+        assert "KXBTC15M-TEST" not in ledger._open_positions, "position must close"
+        # Net segment cash: -0.37 entry + -0.3045 exit + $1.00 pair lock = +0.3255
+        assert abs(ledger._session_realized_pnl - Decimal("0.3255")) < Decimal("0.001"), (
+            f"realized={ledger._session_realized_pnl}"
+        )
+
+    def test_live_router_promotion_single_mutation(self, ledger: KalshiFillsLedger) -> None:
+        t0 = datetime.now(timezone.utc)
+        # Provisional fill created by the router in intent form (BUY_NO).
+        prov = self._fill(
+            fill_id="live_router_ord-3_0",
+            order_id="ord-3",
+            side="no",
+            action="buy",
+            yes_price_dollars=Decimal("0.64"),
+            no_price_dollars=Decimal("0.36"),
+            proceeds_dollars=Decimal("-0.37"),
+            canonical_position_side="no",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=36,
+            canonical_yes_delta_cc=-100,
+            ingestion_source="order_router",
+            created_time=t0,
+        )
+        ledger.on_fill(prov)
+        assert len([f for f in ledger._fills.values() if f.order_id == "ord-3"]) == 1
+
+        # Authoritative exchange fill in book form for the same order.
+        auth = self._fill(
+            fill_id="fill-auth-3",
+            order_id="ord-3",
+            side="yes",
+            action="sell",
+            yes_price_dollars=Decimal("0.64"),
+            no_price_dollars=Decimal("0.36"),
+            proceeds_dollars=Decimal("-0.37"),
+            canonical_position_side="yes",
+            canonical_position_action="sell",
+            canonical_leg_price_cents=64,
+            canonical_yes_delta_cc=-100,
+            created_time=t0 + timedelta(milliseconds=200),
+        )
+        ledger.on_fill(auth)
+
+        fills_for_order = [f for f in ledger._fills.values() if f.order_id == "ord-3"]
+        assert len(fills_for_order) == 1, "promotion must not duplicate the fill"
+        assert fills_for_order[0].fill_id == "fill-auth-3"
+        assert "live_router_ord-3_0" in ledger._stale_live_router_db_ids
+
+        pos = ledger._open_positions.get("KXBTC15M-TEST")
+        assert pos is not None and pos["side"] == "no"
+        assert pos["total_contracts"] == Decimal("1"), "no double-apply after promotion"
+        assert pos["avg_price_cents"] == 36
+
+    def test_partial_exit_credited_once(self, ledger: KalshiFillsLedger) -> None:
+        t0 = datetime.now(timezone.utc)
+        entry = self._fill(
+            fill_id="fill-entry-4",
+            order_id="ord-entry-4",
+            count_fp=Decimal("2"),
+            quantity_cc=200,
+            fee_cost=Decimal("0.02"),
+            proceeds_dollars=Decimal("-0.74"),
+            canonical_yes_delta_cc=-200,
+            created_time=t0,
+        )
+
+        def _exit(fid: str, oid: str, ts) -> "KalshiFill":
+            return self._fill(
+                fill_id=fid,
+                order_id=oid,
+                side="yes",
+                action="buy",
+                yes_price_dollars=Decimal("0.29"),
+                no_price_dollars=Decimal("0.71"),
+                fee_cost=Decimal("0.0145"),
+                proceeds_dollars=Decimal("-0.3045"),
+                canonical_position_side="yes",
+                canonical_position_action="buy",
+                canonical_leg_price_cents=29,
+                canonical_yes_delta_cc=100,
+                is_exit=True,
+                entry_or_exit="exit",
+                created_time=ts,
+            )
+
+        ledger.on_fill(entry)
+        ledger.on_fill(_exit("fill-exit-4a", "ord-exit-4a", t0 + timedelta(seconds=10)))
+        # After the partial: one contract remains, partial PnL credited once.
+        pos = ledger._open_positions.get("KXBTC15M-TEST")
+        assert pos is not None and pos["total_contracts"] == Decimal("1")
+        partial_expected = Decimal("-0.3045") + Decimal("1.0") - Decimal("0.36")
+        assert abs(ledger._session_realized_pnl - partial_expected) < Decimal("0.001")
+
+        ledger.on_fill(_exit("fill-exit-4b", "ord-exit-4b", t0 + timedelta(seconds=20)))
+        assert "KXBTC15M-TEST" not in ledger._open_positions
+        # Total realized = full segment net cash, credited exactly once:
+        # -0.74 entry + 2 * (-0.3045 + $1 pair) = +0.651
+        assert abs(ledger._session_realized_pnl - Decimal("0.651")) < Decimal("0.001"), (
+            f"session_realized={ledger._session_realized_pnl}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_promoted_provisional_row_deleted_from_db(
+        self, ledger: KalshiFillsLedger
+    ) -> None:
+        """A flushed live_router_ row must be deleted after promotion.
+
+        Restart replay must see only the authoritative fill — a stale
+        provisional row would re-apply the mirrored economics.
+        """
+        import aiosqlite
+
+        t0 = datetime.now(timezone.utc)
+        prov = self._fill(
+            fill_id="live_router_ord-p1_0",
+            order_id="ord-p1",
+            market_ticker="KXBTC15M-26SEP220000-00",
+            side="no",
+            action="buy",
+            yes_price_dollars=Decimal("0.64"),
+            no_price_dollars=Decimal("0.36"),
+            proceeds_dollars=Decimal("-0.37"),
+            canonical_position_side="no",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=36,
+            canonical_yes_delta_cc=-100,
+            ingestion_source="order_router",
+            created_time=t0,
+        )
+        ledger.on_fill(prov)
+        await ledger._flush_to_db()
+
+        async with aiosqlite.connect(ledger._db_path) as db:
+            async with db.execute("SELECT fill_id FROM kalshi_fills") as cur:
+                rows = [r[0] for r in await cur.fetchall()]
+        assert rows == ["live_router_ord-p1_0"], f"provisional row must flush first: {rows}"
+
+        auth = self._fill(
+            fill_id="9f8e7d6c-0000-4000-8000-0000000000a1",
+            order_id="ord-p1",
+            market_ticker="KXBTC15M-26SEP220000-00",
+            side="yes",
+            action="sell",
+            yes_price_dollars=Decimal("0.64"),
+            no_price_dollars=Decimal("0.36"),
+            proceeds_dollars=Decimal("-0.37"),
+            canonical_position_side="yes",
+            canonical_position_action="sell",
+            canonical_leg_price_cents=64,
+            canonical_yes_delta_cc=-100,
+            created_time=t0 + timedelta(milliseconds=200),
+        )
+        ledger.on_fill(auth)
+        await ledger._flush_to_db()
+
+        async with aiosqlite.connect(ledger._db_path) as db:
+            async with db.execute("SELECT fill_id FROM kalshi_fills") as cur:
+                rows = sorted(r[0] for r in await cur.fetchall())
+        assert rows == ["9f8e7d6c-0000-4000-8000-0000000000a1"], (
+            f"stale provisional row must be deleted after promotion: {rows}"
+        )
+
+        # Reload from disk: only the authoritative fill may come back.
+        KalshiFillsLedger._initialized = False
+        KalshiFillsLedger._instance = None
+        ledger2 = KalshiFillsLedger()
+        try:
+            loaded = await ledger2.load_from_db()
+            assert loaded == 1, f"expected 1 authoritative fill, loaded {loaded}"
+            reloaded = [f for f in ledger2._fills.values() if f.order_id == "ord-p1"]
+            assert len(reloaded) == 1
+            assert reloaded[0].fill_id == "9f8e7d6c-0000-4000-8000-0000000000a1"
+            pos = ledger2._replay_market_position("KXBTC15M-26SEP220000-00")
+            assert pos is not None and pos["side"] == "no"
+            assert pos["total_contracts"] == Decimal("1")
+            assert pos["avg_price_cents"] == 36
+        finally:
+            await ledger2.shutdown()
+            KalshiFillsLedger._initialized = False
+            KalshiFillsLedger._instance = None
+
+    def test_failed_promotion_superseded_by_authoritative_fill(
+        self, ledger: KalshiFillsLedger
+    ) -> None:
+        """If promotion matching fails (price moved >1c), the provisional row
+        survives — but replay must still count only the authoritative fill.
+        """
+        t0 = datetime.now(timezone.utc)
+        prov = self._fill(
+            fill_id="live_router_ord-6_0",
+            order_id="ord-6",
+            side="no",
+            action="buy",
+            yes_price_dollars=Decimal("0.64"),
+            no_price_dollars=Decimal("0.36"),
+            proceeds_dollars=Decimal("-0.37"),
+            canonical_position_side="no",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=36,
+            canonical_yes_delta_cc=-100,
+            ingestion_source="order_router",
+            created_time=t0,
+        )
+        ledger.on_fill(prov)
+        pos = ledger._open_positions.get("KXBTC15M-TEST")
+        assert pos is not None and pos["total_contracts"] == Decimal("1")
+
+        # Authoritative fill for the same order at a different price — too far
+        # for _is_same_economic_fill, so promotion does not merge the rows.
+        auth = self._fill(
+            fill_id="fill-auth-6",
+            order_id="ord-6",
+            side="yes",
+            action="sell",
+            yes_price_dollars=Decimal("0.60"),
+            no_price_dollars=Decimal("0.40"),
+            proceeds_dollars=Decimal("-0.41"),
+            canonical_position_side="yes",
+            canonical_position_action="sell",
+            canonical_leg_price_cents=60,
+            canonical_yes_delta_cc=-100,
+            created_time=t0 + timedelta(milliseconds=200),
+        )
+        ledger.on_fill(auth)
+
+        pos = ledger._open_positions.get("KXBTC15M-TEST")
+        assert pos is not None, "authoritative fill must still open the position"
+        assert pos["side"] == "no"
+        assert pos["total_contracts"] == Decimal("1"), (
+            f"superseded provisional double-applied: {pos['total_contracts']}"
+        )
+        assert pos["avg_price_cents"] == 40  # authoritative held-side basis
