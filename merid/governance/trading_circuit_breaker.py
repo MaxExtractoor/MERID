@@ -27,6 +27,11 @@ logger = get_logger("trading_circuit_breaker")
 # than the persisted watermark from the last successful reconciliation.
 HTTP_FILL_WATERMARK_PATH = Path("data") / "trading_circuit_breaker_http_watermark.json"
 
+# Durable halt incident record.  A halt must survive process restart: restarting
+# is not a recovery procedure, so the incident is reloaded on boot and only
+# cleared by admin_release() or a verified auto-recovery.
+HALT_STATE_PATH = Path("data") / "trading_circuit_breaker_halt.json"
+
 # Allow grace for an unmatched fill to be matched against a recently submitted
 # but not-yet-persisted intent before the breaker trips.
 PENDING_INTENT_LOOKUP_SECONDS = float(
@@ -66,6 +71,47 @@ def _save_watermark(watermark: datetime) -> None:
         logger.warning("[TRADING-CIRCUIT-BREAKER] Failed to persist HTTP watermark: %s", exc)
 
 
+def _save_halt_record(record: "HaltRecord") -> None:
+    try:
+        HALT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(HALT_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "reason": record.reason,
+                    "timestamp": record.timestamp.isoformat(),
+                    "metadata": record.metadata,
+                },
+                f,
+                default=str,
+            )
+    except Exception as exc:
+        logger.warning("[TRADING-CIRCUIT-BREAKER] Failed to persist halt record: %s", exc)
+
+
+def _load_halt_record() -> Optional["HaltRecord"]:
+    try:
+        if HALT_STATE_PATH.exists():
+            with open(HALT_STATE_PATH, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            ts = payload.get("timestamp")
+            return HaltRecord(
+                reason=payload.get("reason") or "unknown",
+                timestamp=datetime.fromisoformat(ts) if ts else _now(),
+                metadata=payload.get("metadata") or {},
+            )
+    except Exception as exc:
+        logger.warning("[TRADING-CIRCUIT-BREAKER] Failed to load halt record: %s", exc)
+    return None
+
+
+def _clear_halt_record() -> None:
+    try:
+        if HALT_STATE_PATH.exists():
+            HALT_STATE_PATH.unlink()
+    except Exception as exc:
+        logger.warning("[TRADING-CIRCUIT-BREAKER] Failed to clear halt record: %s", exc)
+
+
 @dataclass
 class HaltRecord:
     """Immutable record of a trading halt."""
@@ -93,6 +139,20 @@ class TradingCircuitBreaker:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance._reset()
+                    # A halt is a durable incident: it survives process restart
+                    # and is only cleared by admin_release() or a verified
+                    # auto-recovery, never by rebooting.
+                    persisted = _load_halt_record()
+                    if persisted is not None:
+                        cls._instance._halted = True
+                        cls._instance._halt_record = persisted
+                        cls._instance._autonomous_entries_enabled = False
+                        cls._instance._autonomous_exits_enabled = False
+                        logger.critical(
+                            "[TRADING-CIRCUIT-BREAKER] Restored persisted halt | reason=%s | timestamp=%s",
+                            persisted.reason,
+                            persisted.timestamp.isoformat(),
+                        )
         return cls._instance
 
     def _reset(self) -> None:
@@ -112,6 +172,7 @@ class TradingCircuitBreaker:
             self._http_fill_watermark = _now()
             self._http_seen_fill_ids: Set[str] = set()
             self._http_watermark_initialized = True
+        _clear_halt_record()
 
     def _initialize_watermark(self) -> None:
         if not getattr(self, "_http_watermark_initialized", False):
@@ -158,6 +219,8 @@ class TradingCircuitBreaker:
             self._autonomous_entries_enabled = False
             self._autonomous_exits_enabled = False
 
+        _save_halt_record(record)
+
         logger.critical(
             "[TRADING-CIRCUIT-BREAKER] HALT triggered | reason=%s | metadata=%s",
             reason,
@@ -169,6 +232,7 @@ class TradingCircuitBreaker:
         """Internal resume.  Use only from the logged admin_release() path."""
         with self._lock:
             self._reset()
+        _clear_halt_record()
         logger.critical("[TRADING-CIRCUIT-BREAKER] RESUMED")
 
     def resume(self) -> None:
@@ -480,13 +544,47 @@ class TradingCircuitBreaker:
             )
             return False
 
-        # All safety checks passed.  Write an audit log.  The breaker does NOT
-        # auto-resume; the operator must use admin_release() with a valid token.
+        # All safety checks passed: the triggering fill is resolved, the
+        # exchange is flat, no open orders, and no other unmatched fills are
+        # pending.  This is the verified-recovery path required by the live
+        # contract (HALTED -> RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED): persist
+        # a durable recovery audit record, then release the halt.  Without this
+        # the latch could only be cleared by a process restart, which erases the
+        # symptom without proving reconciliation.
+        audit_payload = {
+            "event": "live_runtime_recovery_passed",
+            "operator": "system_auto_recovery",
+            "previous_halt_reason": self._halt_record.reason if self._halt_record else None,
+            "trigger_fill_id": fill_id,
+            "checks": {
+                "trigger_fill_resolved": True,
+                "exchange_positions": exchange_positions_count,
+                "open_orders": open_orders_count,
+                "recent_unmatched_fills_30m": recent_unmatched_count,
+            },
+        }
+        try:
+            from core.risk_audit_chain import get_risk_audit_chain
+
+            chain = get_risk_audit_chain()
+            record = chain.log_event("risk.trading_halt_released", audit_payload)
+            audit_payload["audit_sequence"] = record.sequence
+            audit_payload["audit_hash"] = record.event_hash
+        except Exception as exc:
+            logger.error(
+                "[TRADING-CIRCUIT-BREAKER] Failed to write recovery audit record: %s", exc
+            )
+
+        self._resume()
         logger.critical(
-            "[TRADING-CIRCUIT-BREAKER] Unmatched live exchange fill resolved: "
-            "fill_id=%s exchange_positions=%d open_orders=%d recent_unmatched=%d. "
-            "Operator must release the circuit breaker via admin_release().",
-            fill_id, exchange_positions_count, open_orders_count, recent_unmatched_count,
+            "[TRADING-CIRCUIT-BREAKER] AUTO-RECOVERY released halt: "
+            "fill_id=%s exchange_positions=%d open_orders=%d recent_unmatched=%d "
+            "audit_sequence=%s",
+            fill_id,
+            exchange_positions_count,
+            open_orders_count,
+            recent_unmatched_count,
+            audit_payload.get("audit_sequence"),
         )
         return True
 

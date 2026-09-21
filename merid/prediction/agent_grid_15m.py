@@ -3589,8 +3589,14 @@ class LeanAgent15m:
 
             # Calculate total exposure (simplified: sum of contract values)
             # CRITICAL FIX (2026-07-23): Handle None avg_price_cents (unknown entry price)
+            # avg_price_cents is a Decimal for REST-synced positions; money math
+            # must stay in Decimal (no float mixing) or this raises TypeError.
             total_exposure = sum(
-                (pos.contracts * pos.avg_price_cents / 100.0) if pos.avg_price_cents is not None else 0.0
+                (
+                    Decimal(str(pos.contracts))
+                    * Decimal(str(pos.avg_price_cents))
+                    / Decimal("100")
+                ) if pos.avg_price_cents is not None else Decimal("0")
                 for pos in open_positions.values()
             )
 
@@ -3607,8 +3613,10 @@ class LeanAgent15m:
                 if profile_adapter and profile_adapter._profile:
 
                     capital = profile_adapter._profile.capital_usd
+                    if capital is not None and not isinstance(capital, Decimal):
+                        capital = Decimal(str(capital))
 
-                    if capital > 0:
+                    if capital is not None and capital > 0:
 
                         heat_ratio = total_exposure / capital
 
@@ -3668,7 +3676,9 @@ class LeanAgent15m:
 
             logger.warning("[PORTFOLIO-HEAT] agent=%s failed to check portfolio heat: %s", self.config.name, e)
 
-            return True, "portfolio_heat_error"
+            # Fail closed: if exposure cannot be computed, the risk check did
+            # not run — it must not silently permit additional exposure.
+            return False, "portfolio_heat_unavailable"
 
 
 

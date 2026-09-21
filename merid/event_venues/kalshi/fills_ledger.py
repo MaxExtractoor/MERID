@@ -3187,28 +3187,41 @@ class KalshiFillsLedger:
             if attempt is not None:
                 _resolved_intent_id = attempt.intent_id
                 _resolved_client_tag = attempt.client_tag
-            else:
-                exit_attempt = store.get_exit_attempt_by_client_order_id(exchange_client_order_id)
-                if exit_attempt is not None:
+
+            # The order-identity layer also persists exit_* client_order_ids
+            # into order_attempts, so an exit fill can resolve there first.
+            # Always consult the exit-attempt table: it owns the exit lifecycle
+            # and must be promoted when the exchange confirms the order.
+            exit_attempt = store.get_exit_attempt_by_client_order_id(exchange_client_order_id)
+            if exit_attempt is not None:
+                if _resolved_intent_id is None:
                     _resolved_intent_id = exit_attempt.exit_intent_id
-                    _resolved_client_tag = exit_attempt.client_order_id
-                    _is_exit = True
-                    # The exchange has now confirmed the order existed; promote the
-                    # durable exit attempt to ACKNOWLEDGED_LATE and record the
-                    # exchange order id so future HTTP fills resolve locally.
-                    try:
-                        from merid.event_venues.kalshi.order_attempt_store import ExitOrderAttemptState
-                        store.transition_exit_attempt(
-                            exit_attempt.attempt_id,
-                            ExitOrderAttemptState.ACKNOWLEDGED_LATE.value,
-                            actor="fills_ledger",
-                            reason="exchange_lookaside_confirmed_order",
-                            exchange_order_id=fill.order_id,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "[FILLS-LEDGER-RESOLVE] Failed to promote exit attempt to ACKNOWLEDGED_LATE"
-                        )
+                _resolved_client_tag = exit_attempt.client_order_id
+                _is_exit = True
+                # The exchange has now confirmed the order existed; promote the
+                # durable exit attempt to ACKNOWLEDGED_LATE and record the
+                # exchange order id so future HTTP fills resolve locally.
+                try:
+                    from merid.event_venues.kalshi.order_attempt_store import ExitOrderAttemptState
+                    store.transition_exit_attempt(
+                        exit_attempt.attempt_id,
+                        ExitOrderAttemptState.ACKNOWLEDGED_LATE.value,
+                        actor="fills_ledger",
+                        reason="exchange_lookaside_confirmed_order",
+                        exchange_order_id=fill.order_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "[FILLS-LEDGER-RESOLVE] Failed to promote exit attempt to ACKNOWLEDGED_LATE"
+                    )
+            elif (
+                str(exchange_client_order_id).startswith("exit_")
+                or str(_resolved_intent_id or "").startswith("intent_exit")
+            ):
+                # No durable exit-attempt row, but the identifiers are
+                # unambiguous: label the fill as an exit so downstream
+                # accounting does not treat it as an entry-side fill.
+                _is_exit = True
 
             if not _resolved_intent_id:
                 # We at least know the client_order_id now, so record the order_id
@@ -6038,7 +6051,7 @@ class KalshiFillsLedger:
         settlement_pnl = total_payout - cost_basis - fees
         
         # DEBUG: Log settlement PnL calculation to diagnose negative WIN bug
-        logger.critical(
+        logger.debug(
             "[SETTLEMENT-PNL-DEBUG] side=%s outcome=%s contracts=%s avg_price=%sc fees=%sc payout=$%.2f cost=$%.2f fees=$%.2f pnl=$%.2f",
             position["side"], outcome, contracts, avg_entry_price_cents, fees_cents,
             total_payout, cost_basis, fees, settlement_pnl
@@ -6061,15 +6074,17 @@ class KalshiFillsLedger:
             if position["market_ticker"] == market_ticker:
                 found = True
                 # DEBUG: Log position data being used for settlement
-                logger.critical(
+                logger.debug(
                     "[SETTLEMENT-POSITION-DEBUG] ticker=%s instrument_key=%s outcome=%s side=%s contracts=%s avg_price=%sc fees=%sc",
                     market_ticker, instrument_key, outcome, position.get("side"), position.get("total_contracts"),
                     position.get("avg_price_cents"), position.get("fees_cents")
                 )
                 total += self._compute_settlement_pnl(position, outcome)
-        # DEBUG: Log if no position found for the ticker
+        # Routine case: the settlement poller scans every settled market in its
+        # fetch window, most of which never had a local position.  This is a
+        # normal miss, not an incident — keep it out of CRITICAL.
         if not found:
-            logger.critical(
+            logger.debug(
                 "[SETTLEMENT-POSITION-NOT-FOUND] ticker=%s has no open position in ledger (open_positions: %s)",
                 market_ticker, list(self._open_positions.keys())
             )
