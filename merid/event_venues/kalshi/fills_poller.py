@@ -10,6 +10,7 @@ This module provides:
 from __future__ import annotations
 import os as _os  # Alias to prevent scope shadowing
 import asyncio
+import json
 import threading
 import time
 from collections import OrderedDict
@@ -355,6 +356,169 @@ class FillsPoller:
             except asyncio.TimeoutError:
                 pass
     
+    async def _sweep_expired_market_attempts(self) -> None:
+        """Terminalize non-terminal order/exit attempts on expired markets.
+
+        A resting order on an expired market is auto-canceled by the exchange
+        and can never produce a new fill, so a ``PERSISTED``/``SUBMITTING``/
+        ``SUBMISSION_UNKNOWN``/``ACKNOWLEDGED`` attempt whose ticker has expired
+        is dead bookkeeping: it retains intent-index state and reservation
+        semantics forever (e.g. an ACKNOWLEDGED entry orphaned by a data-plane
+        outage).  Resolution is evidence-based — the attempt is ``FILLED``
+        when the durable ledger already holds a fill for its exchange order,
+        ``CANCELED`` otherwise.  ``apply_fill_once`` still applies any
+        late-arriving fill regardless of attempt status.
+        """
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import (
+                OrderAttemptStore,
+                ExitOrderAttemptState,
+            )
+            from merid.event_venues.kalshi.position_cache import _is_expired_ticker
+
+            store = OrderAttemptStore()
+
+            # Identity hints: ticker and exchange order_id live in the ledger's
+            # durable intent index keyed by intent_id.
+            intent_index: Dict[str, Dict[str, Any]] = {}
+            try:
+                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+
+                ledger = get_fills_ledger()
+                if ledger is not None:
+                    intent_index = getattr(ledger, "_durable_intent_index", {}) or {}
+                    filled_order_ids = {
+                        getattr(f, "order_id", None)
+                        for f in (ledger.get_fills() or [])
+                    }
+                    filled_order_ids.discard(None)
+                else:
+                    filled_order_ids = set()
+            except Exception as _le:
+                logger.debug("[EXPIRED-SWEEP] ledger unavailable: %s", _le)
+                filled_order_ids = set()
+
+            import re as _re
+            _tag_re = _re.compile(r"^15m_(.+)_[0-9a-f]{6,}$")
+
+            def _resolve(attempt: Any) -> tuple:
+                idx = intent_index.get(attempt.intent_id or "") or {}
+                ticker = idx.get("ticker") or ""
+                if not ticker:
+                    tag = attempt.client_tag or attempt.client_order_id or ""
+                    m = _tag_re.match(tag)
+                    if m:
+                        ticker = m.group(1)
+                return ticker, idx.get("order_id")
+
+            now = time.time()
+            # Grace period: an attempt younger than this may still be resolving
+            # through normal paths even if its ticker parses as expired.
+            grace_s = 900.0
+            swept = 0
+            max_per_cycle = 500
+
+            nonterminal = [
+                "PERSISTED",
+                "SUBMITTING",
+                "SUBMISSION_UNKNOWN",
+                "ACKNOWLEDGED",
+            ]
+            for attempt in store.get_unresolved(
+                lookback_seconds=366 * 86400, statuses=nonterminal
+            ):
+                if swept >= max_per_cycle:
+                    break
+                if now - (attempt.created_at or 0) < grace_s:
+                    continue
+                try:
+                    ticker, order_id = _resolve(attempt)
+                    if not ticker or not _is_expired_ticker(ticker):
+                        continue
+                    resolved = (
+                        "FILLED"
+                        if (order_id and order_id in filled_order_ids)
+                        else "CANCELED"
+                    )
+                    payload: Dict[str, Any] = {}
+                    try:
+                        payload = json.loads(attempt.payload_json or "{}") or {}
+                    except Exception:
+                        payload = {}
+                    payload["expired_market_sweep"] = {
+                        "ticker": ticker,
+                        "order_id": order_id,
+                        "resolved_as": resolved,
+                    }
+                    if store.update_status(attempt.order_attempt_id, resolved, payload=payload):
+                        swept += 1
+                        logger.info(
+                            "[EXPIRED-SWEEP] terminalized attempt=%s status=%s ticker=%s order=%s",
+                            attempt.order_attempt_id[:8], resolved, ticker,
+                            (order_id or "")[:12],
+                        )
+                except Exception as _ae:
+                    logger.debug("[EXPIRED-SWEEP] attempt=%s failed: %s", attempt.order_attempt_id, _ae)
+
+            # Exit attempts: same expiry rule on the FSM table.
+            exit_swept = 0
+            for rec in store.list_nonterminal_exit_attempts():
+                if exit_swept >= max_per_cycle:
+                    break
+                if now - (rec.created_at or 0) < grace_s:
+                    continue
+                try:
+                    ticker = rec.ticker or ""
+                    if not ticker or not _is_expired_ticker(ticker):
+                        continue
+                    if rec.state == ExitOrderAttemptState.PARTIALLY_FILLED.value:
+                        # The filled part is already booked; the remainder can
+                        # never execute on an expired market.
+                        resolved = (
+                            ExitOrderAttemptState.FILLED
+                            if (
+                                rec.confirmed_quantity is not None
+                                and rec.requested_quantity is not None
+                                and rec.confirmed_quantity >= rec.requested_quantity
+                            )
+                            else ExitOrderAttemptState.TERMINAL_UNFILLED
+                        )
+                    elif (
+                        rec.exchange_order_id
+                        and rec.exchange_order_id in filled_order_ids
+                        and rec.state != ExitOrderAttemptState.INTENT_PERSISTED.value
+                    ):
+                        resolved = ExitOrderAttemptState.FILLED
+                    else:
+                        resolved = ExitOrderAttemptState.CANCELED
+                    updated = store.transition_exit_attempt(
+                        rec.attempt_id,
+                        resolved.value,
+                        actor="fills_poller",
+                        reason="expired_market_sweep",
+                    )
+                    if updated is None:
+                        logger.debug(
+                            "[EXPIRED-SWEEP] transition rejected for exit attempt=%s state=%s target=%s",
+                            rec.attempt_id[:8], rec.state, resolved.value,
+                        )
+                        continue
+                    exit_swept += 1
+                    logger.info(
+                        "[EXPIRED-SWEEP] terminalized exit attempt=%s state=%s ticker=%s",
+                        rec.attempt_id[:8], resolved.value, ticker,
+                    )
+                except Exception as _xe:
+                    logger.debug("[EXPIRED-SWEEP] exit attempt=%s failed: %s", rec.attempt_id, _xe)
+
+            if swept or exit_swept:
+                logger.warning(
+                    "[EXPIRED-SWEEP] terminalized %d order attempts and %d exit attempts on expired markets",
+                    swept, exit_swept,
+                )
+        except Exception as _e:
+            logger.warning("[EXPIRED-SWEEP] sweep failed: %s", _e)
+
     async def _reconcile_submission_unknown_records(self, client: Any) -> None:
         """Reconcile all SUBMISSION_UNKNOWN pre-trade gate records.
 
@@ -421,6 +585,12 @@ class FillsPoller:
             # primary recovery path for lost create-order acks; the in-route
             # fast path only runs a 1.5s ``get_order`` lookup.
             await self._reconcile_submission_unknown_records(client)
+
+            # Terminalize non-terminal order/exit attempts on expired markets.
+            # Resting orders are auto-canceled by the exchange at market close,
+            # so a stale ACKNOWLEDGED attempt on an expired ticker is dead
+            # bookkeeping that retains reservation state forever.
+            await self._sweep_expired_market_attempts()
 
             # Get positions from Kalshi through the normalized execution port.
             # Use the fail-closed adapter so missing identity/quantity fields do not

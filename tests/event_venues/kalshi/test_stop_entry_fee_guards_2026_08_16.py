@@ -237,11 +237,11 @@ class TestFeeAccounting:
 # ── Stop-candidate submission ─────────────────────────────────────────────────
 
 
-def _price_stop_candidate():
+def _price_stop_candidate(trigger_reason="POSITION_MONITOR_STOP"):
     return sc.build_stop_candidate(
         market_ticker="KXBTC15M-26AUG160100-00",
         exchange_position_cc=100,  # long 1 YES
-        trigger_reason="POSITION_MONITOR_STOP",
+        trigger_reason=trigger_reason,
         entry_price_cents=55,
         executable_exit_cents=40,
         quote_age_ms=100,
@@ -250,6 +250,23 @@ def _price_stop_candidate():
 
 
 class TestStopCandidateSubmission:
+    @pytest.mark.asyncio
+    async def test_discretionary_trigger_is_observe_only_under_freeze(self, monkeypatch):
+        """POSITION_MONITOR_STOP is a discretionary price stop: under the
+        exit freeze it must record the candidate but never route an order."""
+        monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "1")
+        route_mock = AsyncMock()
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_router.route_order_async", route_mock
+        )
+
+        result = await sc.maybe_submit_stop_candidate(_price_stop_candidate())
+
+        assert route_mock.await_count == 0
+        assert result is not None
+        assert result.status == "rejected"
+        assert result.reason == "discretionary_trigger_observe_only"
+
     @pytest.mark.asyncio
     async def test_stop_trigger_submits_exactly_one_bounded_exit(self, monkeypatch):
         monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "1")
@@ -266,7 +283,9 @@ class TestStopCandidateSubmission:
             "merid.event_venues.kalshi.order_router.route_order_async", route_mock
         )
 
-        result = await sc.maybe_submit_stop_candidate(_price_stop_candidate())
+        result = await sc.maybe_submit_stop_candidate(
+            _price_stop_candidate(trigger_reason="OPERATIONAL_RISK")
+        )
 
         assert route_mock.await_count == 1
         intent = route_mock.await_args.args[0]
@@ -310,8 +329,8 @@ class TestStopCandidateSubmission:
 
     @pytest.mark.asyncio
     async def test_price_stop_does_not_require_model_fair_value(self, monkeypatch):
-        """POSITION_MONITOR_STOP has fair_value_cents=None; it must still be
-        submittable (previously rejected as stop_candidate_no_fair_value)."""
+        """An operational stop candidate with fair_value_cents=None must still
+        be submittable (previously rejected as stop_candidate_no_fair_value)."""
         monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "1")
 
         async def _fake_exposure(ticker, timeout=1.0, fallback_to_cache=True):
@@ -326,7 +345,7 @@ class TestStopCandidateSubmission:
             "merid.event_venues.kalshi.order_router.route_order_async", route_mock
         )
 
-        candidate = _price_stop_candidate()
+        candidate = _price_stop_candidate(trigger_reason="OPERATIONAL_RISK")
         assert candidate.fair_value_cents is None
         result = await sc.maybe_submit_stop_candidate(candidate)
         assert route_mock.await_count == 1

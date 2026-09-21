@@ -608,10 +608,34 @@ def _get_executable_exit_cents(
     return None
 
 
+def _model_fair_value_max_age_s() -> float:
+    try:
+        return max(1.0, float(os.environ.get("MERID_MODEL_FAIR_VALUE_MAX_AGE_MS", "120000")) / 1000.0)
+    except Exception:
+        return 120.0
+
+
 def _get_fair_value_cents(state: Any, held_contract: Literal["yes", "no"]) -> Optional[int]:
     """Return model fair value in the held contract's price space."""
-    # Unified market state carries external_fair_value as P(YES).
+    # The active model's P(YES), published by the agent decision path, is the
+    # most faithful fair value — it is the same probability entries use.  A
+    # stale model value is worse than none: a market whose model stopped
+    # updating must not borrow a frozen probability for a live EV decision.
     unified = state
+    if hasattr(unified, "model_fair_prob") and unified.model_fair_prob is not None:
+        try:
+            prob_ts = float(getattr(unified, "model_fair_prob_ts", 0.0) or 0.0)
+            age_s = time.time() - prob_ts if prob_ts > 0 else float("inf")
+            if age_s <= _model_fair_value_max_age_s():
+                yes_fair = int(round(float(unified.model_fair_prob) * 100))
+                if 1 <= yes_fair <= 99:
+                    if held_contract == "yes":
+                        return yes_fair
+                    return 100 - yes_fair
+        except Exception:
+            pass
+
+    # Unified market state carries external_fair_value as P(YES).
     if hasattr(unified, "external_fair_value") and unified.external_fair_value is not None:
         try:
             yes_fair = int(round(float(unified.external_fair_value) * 100))

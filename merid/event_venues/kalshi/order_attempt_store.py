@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from utils.logger import get_logger
 
@@ -383,17 +383,28 @@ class OrderAttemptStore:
         )
         return [OrderAttemptRecord.from_row(r) for r in cur.fetchall()]
 
-    def get_unresolved(self, lookback_seconds: float = 300.0) -> List[OrderAttemptRecord]:
+    def get_unresolved(
+        self,
+        lookback_seconds: float = 300.0,
+        statuses: Optional[Sequence[str]] = None,
+    ) -> List[OrderAttemptRecord]:
         conn = self._get_conn()
         cutoff = self._now() - lookback_seconds
+        status_list = list(statuses) if statuses is not None else [
+            "SUBMITTING",
+            "SUBMISSION_UNKNOWN",
+            "ACKNOWLEDGED",
+        ]
+        if not status_list:
+            return []
         cur = conn.execute(
-            """
+            f"""
             SELECT * FROM order_attempts
-            WHERE status IN ('SUBMITTING','SUBMISSION_UNKNOWN','ACKNOWLEDGED')
+            WHERE status IN ({','.join('?' for _ in status_list)})
               AND created_at > ?
             ORDER BY created_at ASC
             """,
-            (cutoff,),
+            (*status_list, cutoff),
         )
         return [OrderAttemptRecord.from_row(r) for r in cur.fetchall()]
 

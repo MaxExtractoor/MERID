@@ -518,6 +518,13 @@ class KalshiMarketState:
     depth_10c: int = 0  # total window-based depth (YES + NO)
     last_update_ts: float = 0.0  # monotonic timestamp of last update
 
+    # Model provenance (written by the agent decision path on each evaluation
+    # cycle so exit evaluators see the same model inputs as entries).
+    annualized_vol: Optional[float] = None       # resolved model annualized vol
+    annualized_vol_source: Optional[str] = None  # how the vol was resolved
+    model_fair_prob: Optional[float] = None      # P(YES) from the active model
+    model_fair_prob_ts: float = 0.0              # wall ts of last model write
+
     # Aliases for backward compatibility (OBI filter uses these names)
     @property
     def depth_yes(self) -> int:

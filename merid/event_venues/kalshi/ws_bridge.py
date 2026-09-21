@@ -1273,6 +1273,16 @@ class KalshiWebSocketBridge:
                 await self.stop()
                 await asyncio.sleep(1.0)
                 await self.start(self._subscribed_tickers)
+                if self._ws_data_plane_alive():
+                    logger.critical(
+                        "[CRASH-001] Emergency reconnect restored WS data plane"
+                    )
+                    self._maybe_resume_live_entries_after_reconnect()
+                else:
+                    logger.critical(
+                        "[CRASH-001] Emergency reconnect FAILED - WS data plane "
+                        "still dead; live entries remain halted"
+                    )
 
     def _schedule_emergency_reconnect_on_main_loop(self) -> Optional[Any]:
         """Schedule a full stop/start reconnect on the bridge's main loop.
@@ -1343,8 +1353,21 @@ class KalshiWebSocketBridge:
             # automatically inside the WS client after force_session_reconnect.
             self._subscribed_tickers = list(tickers)
 
+            # Dead WS I/O thread: an in-band recycle cannot run on a dead loop.
+            # Halt live entries (durable fail-closed) and go straight to the
+            # full stop/start reconnect instead of pretending Phase 1 worked.
+            if not self._ws_data_plane_alive():
+                logger.critical(
+                    "[WS-AUTO-RECONNECT] WS data plane dead (thread/loop gone) - "
+                    "skipping in-band recycle, scheduling emergency reconnect"
+                )
+                self._halt_live_entries_for_dead_data_plane("ws_io_thread_dead")
+                self._schedule_emergency_reconnect_on_main_loop()
+                self._reconnect_in_progress = False
+                return
+
             # Phase 1: in-band session recycle on the WS-owned loop.
-            self._request_ws_session_reconnect(reason="stall")
+            recycle = self._request_ws_session_reconnect(reason="stall")
 
             # Give the WS loop a moment to close, reconnect, and resubscribe.
             await asyncio.sleep(2.0)
@@ -1362,8 +1385,10 @@ class KalshiWebSocketBridge:
                 except Exception as e:
                     logger.warning("[WS-AUTO-RECONNECT] market state invalidation failed: %s", e)
 
-            # Verify the WS I/O thread is still running.
-            if self.is_running():
+            # Verify the WS data plane specifically is still alive.  The
+            # forwarder thread alone keeps is_running() True even with a dead
+            # socket, which previously short-circuited Phase 4 forever.
+            if self._ws_data_plane_alive():
                 logger.info("[WS-AUTO-RECONNECT] In-band session recycle completed")
                 self._reconnect_count += 1
                 self._reconnect_in_progress = False
@@ -1372,6 +1397,7 @@ class KalshiWebSocketBridge:
 
             # Phase 4: full emergency reconnect as last resort.
             logger.error("[WS-AUTO-RECONNECT] In-band recycle did not restore connection - scheduling emergency reconnect")
+            self._halt_live_entries_for_dead_data_plane("ws_recycle_failed")
             self._schedule_emergency_reconnect_on_main_loop()
             self._reconnect_in_progress = False
 
@@ -1533,7 +1559,7 @@ class KalshiWebSocketBridge:
         # TEMPORARILY COMMENT OUT: Remove async with entirely to see if this is the stall point
         # async with lock:
         try:
-            if self.is_running():
+            if self.is_running() and self._ws_data_plane_alive():
                 logger.info("[WS-BRIDGE-START] Already running, returning")
                 return
 
@@ -2410,9 +2436,15 @@ class KalshiWebSocketBridge:
                         logger.info("[WS-FORWARD-THREAD] Thread exited")
                         print("[WS-FORWARD-THREAD] Thread exited", flush=True)
                 
-                self._forward_thread = threading.Thread(target=_run_forward_loop_thread, name="kalshi-ws-forwarder", daemon=True)
-                self._forward_thread.start()
-                logger.info("[WS-BRIDGE] Forwarder thread started")
+                if self._forward_thread is not None and self._forward_thread.is_alive():
+                    # A partially-running bridge (dead WS thread, live forwarder)
+                    # can reach start() again — do not double-spawn the
+                    # forwarder or two consumers would split the event queue.
+                    logger.info("[WS-BRIDGE] Forwarder thread already running; not respawning")
+                else:
+                    self._forward_thread = threading.Thread(target=_run_forward_loop_thread, name="kalshi-ws-forwarder", daemon=True)
+                    self._forward_thread.start()
+                    logger.info("[WS-BRIDGE] Forwarder thread started")
             # Start the UI coalescing task
             # TEMPORARILY DISABLED: May be causing event loop hang
             logger.info("[WS-BRIDGE] UI coalesce loop SKIPPED (debugging event loop hang)")
@@ -2567,6 +2599,13 @@ class KalshiWebSocketBridge:
                 except Exception:
                     pass
                 logger.info("[WS-THREAD] WebSocket I/O thread exited")
+                # Fail closed immediately: the market-data plane is gone.
+                # The forwarder-thread stall detector will schedule the
+                # emergency reconnect; entries must not wait for it.
+                try:
+                    self._halt_live_entries_for_dead_data_plane("ws_io_thread_exited")
+                except Exception:
+                    pass
 
         self._ws_thread = threading.Thread(
             target=_ws_thread_main,
@@ -2590,6 +2629,89 @@ class KalshiWebSocketBridge:
         if rest_task is not None and not rest_task.done():
             return True
         return False
+
+    def _ws_data_plane_alive(self) -> bool:
+        """True only when the WebSocket I/O thread AND its event loop are alive.
+
+        ``is_running()`` counts ANY transport thread, so it stays True while
+        the WS data plane is dead (the forwarder thread keeps the bridge
+        "running" on no data).  Stall recovery must check this specifically —
+        otherwise a dead WS thread makes Phase-1 recycle fail while Phase-4
+        emergency reconnect is never reached.
+        """
+        thread = getattr(self, "_ws_thread", None)
+        if thread is None or not thread.is_alive():
+            return False
+        loop = getattr(self, "_ws_loop", None)
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return False
+        return True
+
+    def _halt_live_entries_for_dead_data_plane(self, reason: str) -> None:
+        """Fail closed: halt live entries when the WS data plane is dead.
+
+        AGENTS.md requires LIVE_ENTRIES_HALTED when required WebSocket
+        subscriptions fail or market data becomes stale.  Entries are already
+        blocked transiently by the loop's queue_healthy gate; this makes the
+        halt durable so a dead feed cannot be mistaken for a healthy one.
+        """
+        try:
+            from merid.observability.live_runtime_state import get_live_runtime_state
+            live_state = get_live_runtime_state()
+            if live_state.live_entries_enabled():
+                live_state.halt_entries(
+                    reason,
+                    ["WS_DATA_PLANE_DEAD", "STALE_MARKET_DATA"],
+                )
+                logger.critical(
+                    "[WS-RUNTIME-HALT] live entries halted: %s", reason
+                )
+        except Exception as e:
+            logger.error("[WS-RUNTIME-HALT] failed to halt live entries: %s", e)
+
+    def _maybe_resume_live_entries_after_reconnect(self) -> None:
+        """Re-enable live entries after a confirmed WS data-plane recovery.
+
+        Follows the contract recovery path
+        LIVE_ENTRIES_HALTED -> RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED via a
+        preflight completion.  Per-decision entry gates (queue_healthy,
+        quote_fresh, sequence confirmation) still independently validate that
+        fresh, sequenced data is actually flowing before any entry submits.
+        """
+        try:
+            from merid.observability.live_runtime_state import get_live_runtime_state
+            from merid.config.auto_execution import is_auto_execution_enabled
+            from merid.config.observe_only import is_observe_only
+
+            live_state = get_live_runtime_state()
+            if live_state.live_entries_enabled():
+                return
+            if live_state.state != "LIVE_ENTRIES_HALTED":
+                return
+            reason_codes = set(getattr(live_state, "_reason_codes", []) or [])
+            if "WS_DATA_PLANE_DEAD" not in reason_codes and "STALE_MARKET_DATA" not in reason_codes:
+                return
+            if not self._ws_data_plane_alive():
+                return
+            live_state.transition(
+                "RECOVERY_RUNNING",
+                "ws_data_plane_recovered",
+                reason_codes=["WS_RECOVERED"],
+            )
+            auto_enable = is_auto_execution_enabled() and not is_observe_only()
+            live_state.complete_preflight(
+                auto_enable=auto_enable,
+                preflight_context={
+                    "recovery": "ws_data_plane_reconnect",
+                    "auto_execution_enabled": auto_enable,
+                },
+            )
+            logger.info(
+                "[WS-RUNTIME-RECOVERY] live entries state=%s after WS recovery",
+                live_state.state,
+            )
+        except Exception as e:
+            logger.error("[WS-RUNTIME-RECOVERY] resume attempt failed: %s", e)
 
     def is_forward_loop_stalled(self) -> bool:
         """Check if the forward loop is stalled (no events for > 2s).

@@ -7334,6 +7334,16 @@ class LeanAgent15m:
         if not getattr(self, "_indicator_stacks", None):
             eps = MERID_MODEL_PROBABILITY_EPSILON
             p_yes = max(eps, min(1.0 - eps, p_yes_bachelier))
+            # Publish model provenance onto live market state so the exit
+            # evaluator sees the same vol source/fair value as entries.
+            try:
+                if market_state is not None:
+                    market_state.annualized_vol = float(resolved_vol)
+                    market_state.annualized_vol_source = str(vol_source)
+                    market_state.model_fair_prob = float(p_yes)
+                    market_state.model_fair_prob_ts = time.time()
+            except Exception:
+                pass
             return HybridProbability(
                 p_yes=p_yes,
                 p_yes_bachelier=p_yes_bachelier,
@@ -7530,6 +7540,17 @@ class LeanAgent15m:
             p_yes = max(eps, min(1.0 - eps, p_yes_bachelier))
         else:
             p_yes = max(eps, min(1.0 - eps, p_yes_pre_clip))
+
+        # Publish model provenance onto live market state so the exit
+        # evaluator sees the same vol source/fair value as entries.
+        try:
+            if market_state is not None:
+                market_state.annualized_vol = float(resolved_vol)
+                market_state.annualized_vol_source = str(vol_source)
+                market_state.model_fair_prob = float(p_yes)
+                market_state.model_fair_prob_ts = time.time()
+        except Exception:
+            pass
 
         return HybridProbability(
             p_yes=p_yes,
@@ -18564,3 +18585,11 @@ def _get_effective_depth_thresholds(asset: str, regime: RiskRegime) -> tuple[int
         int(profile.min_depth_yes_base * knobs.depth_mult),
         int(profile.min_depth_no_base * knobs.depth_mult),
     )
+
+
+# Canonical Kalshi fee function — re-exported under the documented alias so
+# callers/tests can verify this module prices fees with the canonical
+# implementation rather than the removed local 7%/1.75c-cap formula.
+from merid.event_venues.kalshi.fees import (
+    calculate_kalshi_fee_cents as canonical_calculate_kalshi_fee_cents,
+)
