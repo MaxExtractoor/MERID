@@ -44,6 +44,14 @@ CONSENSUS_ENGINE_SRC    = ROOT / "core" / "consensus_engine.py"
 AGGREGATOR_SRC          = ROOT / "merid" / "swarm" / "consensus_aggregator.py"
 XTF_SRC                 = ROOT / "merid" / "sentiment" / "cross_timeframe_aggregator.py"
 
+# H2-H9 cover the pre-legacy-removal prediction/consensus stack. Those modules
+# are intentionally absent after the legacy-removal migration; keep H1 active
+# because the market stream remains part of the current runtime.
+LEGACY_PIPELINE_REMOVED = not all(
+    path.exists()
+    for path in (TRADING_AGENT_SRC, DEBATE_SRC, CONSENSUS_ENGINE_SRC, XTF_SRC)
+)
+
 
 def _src(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -110,6 +118,7 @@ class TestH1_TimestampClobber:
 # H2 — Stale sentiment age-gated out of _build_snapshot
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy prediction stack removed")
 class TestH2_SentimentAgeGate:
     """_build_snapshot must check the age of the AssetSentimentContext and
     skip sentiment injection when the context is older than the max threshold.
@@ -193,6 +202,7 @@ class TestH2_SentimentAgeGate:
 # H3 — Debate arbiter gate + fact-check on lift rewards
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy debate stack removed")
 class TestH3_DebateArbiterGate:
     """close_debate must be rejected when no arbiter-role argument is present.
     Debate lift rewards must be zeroed when no argument carries a data reference.
@@ -334,6 +344,7 @@ class TestH3_DebateArbiterGate:
 # H4 — ConsensusEngine suppresses EXECUTE_* for non-crypto domains
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy consensus stack removed")
 class TestH4_DualConsensusDomains:
     """ConsensusResult must carry authoritative_for field.
     _publish_result must suppress EXECUTE_LONG/SHORT for non-crypto domains.
@@ -415,6 +426,7 @@ class TestH4_DualConsensusDomains:
 # H5 — Sentiment lane pinning fixed (multi-lane distribution)
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy sentiment stack removed")
 class TestH5_SentimentLanePinning:
     """push_from_sentiment_bus must push signals to multiple timeframe lanes
     based on source, not exclusively to '15m'.
@@ -497,6 +509,7 @@ class TestH5_SentimentLanePinning:
 # H6 — Auction runs BEFORE Decision / event_bus publish
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy consensus stack removed")
 class TestH6_AuctionMutationOrder:
     """The auction resolution block must precede all publish operations in
     _recompute_consensus so downstream consumers always see the final state.
@@ -569,6 +582,7 @@ class TestH6_AuctionMutationOrder:
 # H7 — Veto scoped by proposal; force_reround extends window; TTL drops stale votes
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy consensus stack removed")
 class TestH7_VetoScopingAndTTL:
     """Hard vetoes must only clear votes matching the veto target proposal.
     force_reround must reset last_consensus_time.
@@ -668,6 +682,7 @@ class TestH7_VetoScopingAndTTL:
 # H8 — ABSTAIN votes counted in denominator; >50% abstain forces NO_ACTION
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy consensus stack removed")
 class TestH8_AbstainQuorum:
     """ABSTAIN signals must widen the effective denominator for quorum calculation.
     When abstention rate > 50%, the engine must force NO_ACTION without executing.
@@ -764,6 +779,7 @@ class TestH8_AbstainQuorum:
 # H9 — sentiment_adjusted flag prevents double adjustment
 # =============================================================================
 
+@pytest.mark.skipif(LEGACY_PIPELINE_REMOVED, reason="legacy prediction stack removed")
 class TestH9_NoDoubleSentimentAdj:
     """MarketSnapshot must carry sentiment_adjusted and sentiment_age_seconds.
     _build_snapshot must set sentiment_adjusted=True after injecting scores.
