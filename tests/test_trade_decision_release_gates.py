@@ -343,7 +343,8 @@ def test_no_dual_tail_cap_skips_moderate_raw_p_no(monkeypatch):
     )
     _ind = d.indicators or {}
     # NO entry is in the cheap-price tail, but the raw p_no should be moderate.
-    assert _ind.get("tail_cap_no_reason") == "dual_moderate_skipped"
+    assert _ind.get("tail_cap_no_reason") == "dual_continuous_shrinkage"
+    assert _ind.get("tail_calibration_no_weight") == 0.0
     assert float(d.p_no_calibrated) > 0.15
 
 
@@ -366,7 +367,8 @@ def test_no_dual_tail_cap_applies_cheap_raw_p_no(monkeypatch):
         no_ask=5.0,
     )
     _ind = d.indicators or {}
-    assert _ind.get("tail_cap_no_reason") == "dual_raw_cheap"
+    assert _ind.get("tail_cap_no_reason") == "dual_continuous_shrinkage"
+    assert _ind.get("tail_calibration_no_weight") == 1.0
     # The raw p_no was cheap and the dual cap should keep it near or below 0.10.
     assert float(d.p_no_calibrated) <= 0.10
 

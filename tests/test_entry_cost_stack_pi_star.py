@@ -13,10 +13,19 @@ import pytest
 
 from merid.prediction.trade_decision import (
     EntryCostStack,
+    _dual_tail_shrinkage_weight,
     compute_edge,
     compute_trade_decision,
     entry_cost_stack_from_breakdown,
 )
+
+
+def test_dual_tail_shrinkage_is_continuous_around_provisional_floor():
+    below = _dual_tail_shrinkage_weight(0.199)
+    at = _dual_tail_shrinkage_weight(0.200)
+    above = _dual_tail_shrinkage_weight(0.201)
+    assert 1.0 > below > at > above > 0.0
+    assert abs(below - above) < 0.1
 
 
 def test_pi_star_equals_full_cost_stack_plus_required_edge():
@@ -187,3 +196,84 @@ def test_eth_near_fair_no_still_fails_required_net_edge(monkeypatch):
     assert d.selected_outcome is None
     assert "p_selected_below_pi_star" not in (d.no_trade_reason or "")
     assert "edge" in (d.no_trade_reason or "")
+
+
+def test_price_floor_rejection_records_shadow_policy(monkeypatch):
+    _patch_economics_isolation(monkeypatch)
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 35.0
+    )
+    d = _make_decision(
+        no_bid=29.0,
+        no_ask=29.0,
+        p_yes_model=0.58,
+        model_uncertainty=0.03,
+    )
+    assert d.selected_outcome is None
+    assert d.no_trade_reason.startswith("held_entry_price_below_floor")
+    assert d.indicators["terminal_decision"] == "REJECT"
+    assert d.indicators["terminal_reason"].startswith("held_entry_price_below_floor")
+    shadow = d.indicators["shadow_policy"]
+    assert shadow["mode"] == "shadow_compare"
+    assert shadow["price_cents"] == 29.0
+    assert shadow["decision"] == "REJECT"
+    assert shadow["terminal_reason"] == "shadow_required_net_edge"
+
+
+def test_shadow_policy_can_admit_low_price_side_without_live_admission(monkeypatch):
+    _patch_economics_isolation(monkeypatch)
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 35.0
+    )
+    d = _make_decision(
+        no_bid=29.0,
+        no_ask=29.0,
+        p_yes_model=0.15,
+        model_uncertainty=0.01,
+    )
+    assert d.selected_outcome is None
+    shadow = d.indicators["shadow_policy"]
+    assert shadow["decision"] == "ACCEPT"
+    assert shadow["terminal_reason"] is None
+    assert d.no_trade_reason.startswith("held_entry_price_below_floor")
+
+
+def test_low_price_canary_admits_only_allowlisted_no_side(monkeypatch):
+    _patch_economics_isolation(monkeypatch)
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 35.0
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_ENTRY_POLICY_MODE", "canary"
+    )
+    d = _make_decision(
+        asset="BTC",
+        no_bid=29.0,
+        no_ask=29.0,
+        p_yes_model=0.55,
+        model_uncertainty=0.01,
+    )
+    assert d.selected_outcome == "no"
+    assert d.approved_size_cc == 100
+    assert d.indicators["canary_policy"]["decision"] == "ACCEPT"
+    assert d.indicators["terminal_reason"] == "low_price_canary_shadow_accept"
+
+
+def test_low_price_canary_rejects_unallowlisted_asset(monkeypatch):
+    _patch_economics_isolation(monkeypatch)
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 35.0
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_ENTRY_POLICY_MODE", "canary"
+    )
+    d = _make_decision(
+        asset="ETH",
+        no_bid=29.0,
+        no_ask=29.0,
+        p_yes_model=0.55,
+        model_uncertainty=0.01,
+    )
+    assert d.selected_outcome is None
+    assert d.no_trade_reason.startswith("held_entry_price_below_floor")
+    assert "canary_policy" not in d.indicators
