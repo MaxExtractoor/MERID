@@ -311,9 +311,13 @@ def port_position_to_ledger_dict(position: Position) -> Dict[str, Any]:
         "side": side,
         "outcome": side,
         # Quantity: quantity_cc is canonical; count_fp/position_fp preserve fractions.
+        # ``position_fp`` follows the exchange's YES-signed convention
+        # (positive=YES, negative=NO) so sign-validating consumers see a
+        # consistent record; ``size`` is the unsigned magnitude here, so the
+        # sign must be re-applied from the normalized side.
         "quantity_cc": quantity_cc,
         "count_fp": str(size),
-        "position_fp": str(size),
+        "position_fp": str(-size if side == "no" else size),
         "contracts": contracts,
         "count": contracts,
         "quantity": contracts,

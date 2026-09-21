@@ -463,7 +463,21 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
 
     observed_wall_ms = _now_ms()
     observed_mono_ns = _now_mono_ns()
-    execution_eligible = source_ts_ms is not None
+    # A source timestamp far in the future is clock skew, not freshness.
+    # Label it invalid and make the observation ineligible rather than letting
+    # a clamped-to-zero age masquerade as a fresh tick.  Modest skew (hundreds
+    # of ms) is tolerated: receive-side freshness is measured from
+    # ``observed_ts_ms``, not the source clock.
+    _FUTURE_SKEW_LIMIT_MS = 2000
+    if source_ts_ms is not None and source_ts_ms - observed_wall_ms > _FUTURE_SKEW_LIMIT_MS:
+        timestamp_quality = "invalid_future"
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_future_skew asset=%s cfb_symbol=%s "
+            "source_ts_ms=%s observed_ts_ms=%s skew_ms=%s",
+            asset, cfb_symbol, source_ts_ms, observed_wall_ms,
+            source_ts_ms - observed_wall_ms,
+        )
+    execution_eligible = source_ts_ms is not None and timestamp_quality != "invalid_future"
     market_digits = get_asset_settlement_digits(asset)
 
     event_loop_lag_ms = data.get("event_loop_lag_ms")

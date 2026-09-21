@@ -80,7 +80,8 @@ function Write-StartupFingerprint {
 
     $manualToken = if ([string]::IsNullOrWhiteSpace($env:MERID_MANUAL_EMERGENCY_TOKEN)) { "absent" } else { "present" }
     $breakerToken = if ([string]::IsNullOrWhiteSpace($env:MERID_BREAKER_RELEASE_TOKEN)) { "absent" } else { "present" }
-    $circuitDisabled = if ([Environment]::GetEnvironmentVariable("MERID_CIRCUIT_BREAKER_DISABLED", "Process") -in ("1", "true")) { "disabled" } else { "enabled" }
+    $circuitDisabledRaw = [Environment]::GetEnvironmentVariable("MERID_CIRCUIT_BREAKER_DISABLED", "Process")
+    $circuitBreakerState = if ($circuitDisabledRaw -in ("1", "true")) { "disabled" } else { "enabled" }
     $circuitObserve = [Environment]::GetEnvironmentVariable("MERID_CIRCUIT_BREAKER_OBSERVE_ONLY", "Process")
     if ([string]::IsNullOrWhiteSpace($circuitObserve)) { $circuitObserve = "not_set" }
 
@@ -91,7 +92,7 @@ function Write-StartupFingerprint {
     Write-Host "[start_15m] MERID_REQUIRE_EXIT_PARENTAGE=$($env:MERID_REQUIRE_EXIT_PARENTAGE)" -ForegroundColor Green
     Write-Host "[start_15m] MERID_EXIT_FIREWALL_OBSERVE_ONLY=$($env:MERID_EXIT_FIREWALL_OBSERVE_ONLY)" -ForegroundColor Green
     Write-Host "[start_15m] MERID_CIRCUIT_BREAKER_OBSERVE_ONLY=$circuitObserve" -ForegroundColor Green
-    Write-Host "[start_15m] MERID_CIRCUIT_BREAKER_DISABLED=$circuitDisabled" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_CIRCUIT_BREAKER_DISABLED=$circuitDisabledRaw (breaker=$circuitBreakerState)" -ForegroundColor Green
     Write-Host "[start_15m] MERID_MANUAL_EMERGENCY_TOKEN=$manualToken" -ForegroundColor Green
     Write-Host "[start_15m] MERID_BREAKER_RELEASE_TOKEN=$breakerToken" -ForegroundColor Green
     Write-Host "[start_15m] legacy_exchange_credentials=$($legacyPresent -join ', ')" -ForegroundColor $(if ($legacyPresent.Count -gt 0) { "Red" } else { "Green" })

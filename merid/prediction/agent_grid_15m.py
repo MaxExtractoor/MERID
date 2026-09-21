@@ -17083,6 +17083,8 @@ class LeanAgentGrid15m:
                         )
                         quantity_cc = int(Decimal(str(pos.size)) * Decimal("100"))
 
+                        _side = (pos.outcome_id or "yes").lower().strip()
+
                         rest_positions.append({
 
                             "market_id": pos.market_id,
@@ -17091,9 +17093,13 @@ class LeanAgentGrid15m:
 
                             "quantity_cc": quantity_cc,
 
-                            "position_fp": str(pos.size),
+                            # YES-signed convention: positive=YES, negative=NO.
+                            # pos.size is an unsigned magnitude; re-apply the
+                            # sign from the outcome side so sign-validating
+                            # consumers see a consistent record.
+                            "position_fp": str(-pos.size if _side == "no" else pos.size),
 
-                            "side": pos.outcome_id or "yes",
+                            "side": _side,
 
                             "avg_price_cents": avg_price_cents,
 
