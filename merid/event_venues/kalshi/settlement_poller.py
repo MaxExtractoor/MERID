@@ -1355,7 +1355,29 @@ class SettlementToGradingBridge:
             )
         except Exception as exc:
             logger.warning(f"Failed to notify position_cache of settlement: {exc}")
-        
+
+        # Settlement-aligned exit counterfactuals (2026-09): resolve the
+        # canonical market key (full ticker/market_id, never a series alias)
+        # and compute hold-to-settlement vs actual-exit P&L for every tracked
+        # position on this market.
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                canonical_market_key,
+                get_exit_eval_registry,
+            )
+
+            _cf_outcome = "yes" if settlement.outcome_str == "YES" else "no"
+            get_exit_eval_registry().on_settlement(
+                canonical_market_key(settlement.market_id or settlement.ticker),
+                _cf_outcome,
+                settlement_price_cents=settlement.settlement_price_cents,
+                settlement_ts=settlement.settlement_time,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[SETTLEMENT-POLLER] EV exit counterfactual failed: %s", exc
+            )
+
         # Durable settlement-outcome log for offline calibration.  Polled
         # outcomes are written as they arrive so the calibration report does
         # not require a separate manual backfill run.

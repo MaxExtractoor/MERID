@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 
@@ -64,32 +65,18 @@ MERID_EXIT_ALLOWED_REASONS = frozenset({
     "reconciliation",
     "manual",
     "ratchet_trim",
+    # The settlement-aligned EV gate's own exit reason.  Still classified
+    # DISCRETIONARY downstream, so it can never submit while the gate is off.
+    "value_switch_exit",
 })
 
-# Map internal ExitReason enum values to canonical audit reasons.
-_EXIT_REASON_CANONICAL_MAP = {
-    "stop_loss": "stop_loss",
-    "trailing_stop": "trailing_stop",
-    "trail": "trailing_stop",
-    "ratchet_trim": "trailing_stop",
-    "take_profit": "take_profit",
-    "time_stop": "time_exit",
-    "adaptive_timing": "time_exit",
-    "stale_data": "reconciliation",
-    "risk": "reconciliation",
-    "candle_reversal": "signal_reversal",
-    "edge_decay": "signal_reversal",
-    "current_edge_reversal": "signal_reversal",
-    "opportunity_cost": "signal_reversal",
-    "model_invalidation": "model_invalidation",
-    "model_invalidation_loss_exit": "model_invalidation",
-    "auto_exit_99c": "expiry_liquidation",
-    "settlement_guard": "expiry_liquidation",
-    "ratchet_floor": "take_profit",
-    "loss_cut_40pct": "stop_loss",
-    "manual": "manual",
-    "scale_out": "take_profit",
-}
+# Map internal ExitReason enum values to canonical audit reasons.  The
+# canonical taxonomy lives in the settlement-aligned exit policy module so the
+# guard, the stop-candidate path, and the EV evaluator share one source of
+# truth; this name remains as a local alias.
+from merid.event_venues.kalshi.settlement_aligned_exit import (
+    EXIT_REASON_CANONICAL_MAP as _EXIT_REASON_CANONICAL_MAP,
+)
 
 # Reasons that may exceed the normal loss bound because they are explicit
 # emergency / near-expiry liquidation paths.
@@ -102,7 +89,11 @@ _MERID_EXIT_STOP_REASONS = frozenset({"stop_loss", "trailing_stop", "loss_cut_40
 # Hard-risk / model-invalidation exits may realize the full position premium
 # if the thesis has broken.  They bypass the discretionary profit floor and
 # are bounded by the position cost basis, not the tight default loss cap.
-_MERID_EXIT_RISK_INVALIDATION_REASONS = frozenset({"signal_reversal", "model_invalidation"})
+_MERID_EXIT_RISK_INVALIDATION_REASONS = frozenset({
+    "signal_reversal",
+    "model_invalidation",
+    "value_switch_exit",
+})
 
 # Single policy owner for "is a loss exit permitted?"  The guard layer decides
 # *whether* a loss is allowed by reason; the price validator only checks quote
@@ -118,6 +109,9 @@ MERID_HARD_RISK_EXIT_REASONS = frozenset({
     "reconciliation",
     "expiry_liquidation",
     "manual",
+    # An EV-approved value switch may realize a bounded loss by design (sell
+    # below entry when the model says holding is worse); still gated.
+    "value_switch_exit",
 })
 MERID_PROFIT_EXIT_REASONS = frozenset({
     "take_profit",
@@ -2002,6 +1996,19 @@ class Kalshi15mLoop:
             logger.error("[15m-LOOP] CRITICAL: PositionMonitor is None - exit policies will not execute!")
             raise RuntimeError("PositionMonitor is None - exit policies will not execute")
 
+        # Emit the machine-readable EV-EXIT-GATE policy line at startup so the
+        # discretionary-exit posture is never silently inferred from defaults.
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                log_ev_exit_gate_policy,
+            )
+
+            log_ev_exit_gate_policy()
+        except Exception as _ev_log_exc:
+            logger.warning(
+                "[STARTUP-EV-EXIT-GATE] failed to emit policy line: %s", _ev_log_exc
+            )
+
         # P2.7.1: Start the trade attribution fact table (non-fatal, best-effort).
         try:
             from merid.monitoring.trade_attribution_fact_table import TradeAttributionTable
@@ -2101,10 +2108,19 @@ def _run_exit_price_guard(
     from merid.event_venues.kalshi.stop_candidate import (
         _book_age_ms,
         _get_executable_exit_cents,
+        _get_fair_value_cents,
         _get_market_state,
         _seconds_to_expiry,
     )
     from merid.event_venues.kalshi.order_intent_contract import persist_order_decision
+    from merid.event_venues.kalshi.settlement_aligned_exit import (
+        EvDecision,
+        ExitClass,
+        classify_canonical_reason,
+        ev_exit_gate_enabled,
+        get_exit_eval_registry,
+        get_exit_evaluator,
+    )
 
     decision_id = f"exit-guard-{uuid.uuid4().hex[:12]}"
     record: Dict[str, Any] = {
@@ -2164,6 +2180,31 @@ def _run_exit_price_guard(
         )
         return False, exit_price_cents, record, decision_id
 
+    # ── Exit-class taxonomy (2026-09) ────────────────────────────────────────
+    # Every exit reason is classified once.  DISCRETIONARY exits (price stops,
+    # profit exits, signal/model-driven exits, non-mechanical time exits) are
+    # observe-only until the settlement-aligned EV gate is enabled AND signals
+    # EXIT.  OPERATIONAL and EMERGENCY exits keep their mechanical checks
+    # below.  UNKNOWN fails closed: a new reason string can never become a live
+    # order by accident.
+    exit_class = classify_canonical_reason(canonical)
+    record["exit_class"] = exit_class.value
+    if exit_class == ExitClass.UNKNOWN:
+        record.update(
+            {"status": "rejected", "reject_reason": "exit_reason_unclassified"}
+        )
+        persist_order_decision(record)
+        logger.critical(
+            "[EXIT-GUARD-REJECT] position=%s market=%s reason=%s - "
+            "Exit reason is allowed but unclassified; failing closed",
+            (getattr(position, "position_id", "") or "")[:8],
+            getattr(position, "market_id", None),
+            canonical,
+        )
+        return False, exit_price_cents, record, decision_id
+    ev_gate_enabled = ev_exit_gate_enabled()
+    record["ev_exit_gate_enabled"] = ev_gate_enabled
+
     held_outcome = (
         getattr(position, "outcome_side", None)
         or getattr(position, "thesis_side", None)
@@ -2202,6 +2243,40 @@ def _run_exit_price_guard(
         "best_ask_cents": best_ask,
         "entry_price_cents": getattr(position, "avg_entry_price_cents", None),
     })
+
+    # ── Settlement-aligned sell-vs-hold EV evaluation (2026-09) ──────────────
+    # Discretionary exits run through the EV evaluator here so the decision is
+    # recorded even when a legacy check below rejects first; the veto at the
+    # approval point is what keeps observe-only exits off the exchange.
+    ev_eval = None
+    if exit_class == ExitClass.DISCRETIONARY:
+        try:
+            ev_eval = get_exit_evaluator().evaluate(
+                position,
+                market_key=getattr(position, "market_id", ""),
+                position_id=str(getattr(position, "position_id", "") or ""),
+                held_side=held_outcome,
+                canonical_reason=canonical,
+                quantity_contracts=count,
+                kalshi_state=ks,
+                unified_state=us,
+                fair_value_cents=_get_fair_value_cents(us or ks, held_outcome),
+                executable_bid_cents=best_bid,
+                book_age_ms=quote_age_ms,
+                seconds_to_expiry=seconds_to_expiry,
+                gate_enabled=ev_gate_enabled,
+            )
+            record["ev_evaluation"] = ev_eval.to_dict()
+        except Exception as ev_exc:
+            # Never break the guard on an eval failure; the veto below treats a
+            # missing eval as non-signal when the gate is enabled.
+            record["ev_evaluation_error"] = str(ev_exc)
+            logger.warning(
+                "[EXIT-GUARD-EV-EVAL-ERR] position=%s market=%s - %s",
+                (getattr(position, "position_id", "") or "")[:8],
+                getattr(position, "market_id", None),
+                ev_exc,
+            )
 
     is_emergency = (
         canonical == "expiry_liquidation"
@@ -2395,6 +2470,124 @@ def _run_exit_price_guard(
             fees,
         )
         return False, exit_price_cents, record, decision_id
+
+    # ── Discretionary-exit veto (2026-09) ────────────────────────────────────
+    # The checks above established that the order is mechanically safe.  For
+    # discretionary reasons the settlement-aligned EV evaluator is the final
+    # authority: while the gate is disabled every discretionary exit is
+    # observe-only (vetoed here with the full legacy result recorded for
+    # replay); when enabled, only a persistent SELL_SIGNALLED decision submits.
+    if exit_class == ExitClass.DISCRETIONARY:
+        record["legacy_would_approve"] = True
+        if ev_eval is not None:
+            record["ev_evaluation_id"] = ev_eval.evaluation_id
+            record["ev_decision"] = ev_eval.decision.value
+            record["ev_detail"] = ev_eval.detail
+            try:
+                get_exit_eval_registry().note_legacy_outcome(
+                    ev_eval.evaluation_id, would_approve=True
+                )
+            except Exception:
+                pass
+        # Legacy-vs-EV inversion audit: every time the legacy path would have
+        # submitted a discretionary exit, record the prices and comparator it
+        # used against the canonical held-side liquidation quote.  A trigger
+        # price that diverges from the held-side bid, or a legacy approval
+        # that disagrees with the EV gate under valid data, is a high-severity
+        # diagnostic — exactly the class of inversion this audit exists to catch.
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                canonical_market_key as _cf_mkey,
+            )
+
+            _audit = {
+                "market_pk": _cf_mkey(getattr(position, "market_id", "")),
+                "held_side": held_outcome,
+                "reason": canonical,
+                "legacy_price_source": "trigger_price_param",
+                "legacy_price_cents": int(exit_price_cents),
+                "canonical_liquidation_bid_cents": best_bid,
+                "legacy_comparator": "exit_guard_loss_floor_and_bounds",
+                "legacy_threshold_cents": limit_cents,
+                "legacy_would_submit": True,
+                "ev_gate_result": ev_eval.decision.value if ev_eval is not None else "unavailable",
+                "book_sequence_confirmed": (
+                    ev_eval.quote_sequence_confirmed if ev_eval is not None else None
+                ),
+                "rti_phase": ev_eval.rti_phase if ev_eval is not None else "",
+                "p_held_raw": ev_eval.p_held_raw_cents if ev_eval is not None else None,
+                "p_held_calibrated": (
+                    ev_eval.p_held_calibrated_cents if ev_eval is not None else None
+                ),
+            }
+            _price_diverges = (
+                best_bid is not None and int(exit_price_cents) != int(best_bid)
+            )
+            _ev_disagrees = (
+                ev_eval is not None and ev_eval.decision != EvDecision.SELL_SIGNALLED
+            )
+            if _price_diverges or _ev_disagrees:
+                logger.critical(
+                    "EXIT-LEGACY-INVERSION-AUDIT %s", json.dumps(_audit, default=str)
+                )
+            else:
+                logger.warning(
+                    "EXIT-LEGACY-INVERSION-AUDIT %s", json.dumps(_audit, default=str)
+                )
+        except Exception as _audit_exc:
+            logger.debug("[EXIT-GUARD] inversion audit log failed: %s", _audit_exc)
+        if not ev_gate_enabled:
+            record.update({
+                "status": "rejected",
+                "reject_reason": "discretionary_exit_observe_only",
+            })
+            persist_order_decision(record)
+            logger.warning(
+                "[EXIT-GUARD-OBSERVE-ONLY] position=%s market=%s reason=%s - "
+                "Discretionary exit vetoed: EV exit gate disabled (observe-only). "
+                "ev_decision=%s ev_detail=%s",
+                (getattr(position, "position_id", "") or "")[:8],
+                getattr(position, "market_id", None),
+                canonical,
+                ev_eval.decision.value if ev_eval is not None else "unavailable",
+                ev_eval.detail if ev_eval is not None else "n/a",
+            )
+            return False, exit_price_cents, record, decision_id
+        if ev_eval is None or ev_eval.decision != EvDecision.SELL_SIGNALLED:
+            ev_state = ev_eval.decision.value if ev_eval is not None else "unavailable"
+            record.update({
+                "status": "rejected",
+                "reject_reason": f"ev_gate_{ev_state.lower()}",
+            })
+            persist_order_decision(record)
+            logger.warning(
+                "[EXIT-GUARD-EV-BLOCK] position=%s market=%s reason=%s - "
+                "EV gate enabled but evaluator did not signal exit "
+                "(ev_decision=%s ev_detail=%s)",
+                (getattr(position, "position_id", "") or "")[:8],
+                getattr(position, "market_id", None),
+                canonical,
+                ev_state,
+                ev_eval.detail if ev_eval is not None else "n/a",
+            )
+            return False, exit_price_cents, record, decision_id
+        record["ev_approved"] = True
+        try:
+            get_exit_eval_registry().note_exit_authorized(
+                ev_eval.market_key
+            )
+        except Exception:
+            pass
+        logger.info(
+            "[EXIT-GUARD-EV-APPROVE] position=%s market=%s reason=%s - "
+            "EV gate signalled exit (net_sell=%s cons_hold=%s consecutive=%d)",
+            (getattr(position, "position_id", "") or "")[:8],
+            getattr(position, "market_id", None),
+            canonical,
+            ev_eval.net_sell_value_cents,
+            ev_eval.conservative_hold_cents,
+            ev_eval.consecutive_breach,
+        )
 
     record["status"] = "approved"
     persist_order_decision(record)
@@ -3207,6 +3400,35 @@ async def _execute_exit_order(
                 "[EXIT-ORDER-ATTEMPT] Failed to create durable exit attempt: %s", attempt_err
             )
 
+        # Register the attempt with the exit-attempt resolver so a fill that
+        # arrives before the route ack resolves the attempt to FILLED instead
+        # of wedging in SUBMITTING.
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                get_exit_attempt_resolver,
+                get_exit_evaluator,
+            )
+
+            _ev_resolver = get_exit_attempt_resolver()
+            _ev_resolver.begin_attempt(
+                attempt_id=(
+                    getattr(durable_exit_attempt, "attempt_id", None)
+                    if durable_exit_attempt is not None
+                    else None
+                ),
+                market_key=position.market_id,
+                position_id=position.position_id,
+                intent_id=intent.intent_id,
+                client_order_id=client_order_id,
+            )
+            # An exit attempt starting resets the EV persistence counter: the
+            # in-flight order is the terminal state of any prior streak.
+            get_exit_evaluator().reset_persistence(
+                position.market_id, position.position_id
+            )
+        except Exception:
+            _ev_resolver = None
+
         # LIFECYCLE-EXIT CANONICAL LOG SCHEMA (machine-parseable, single line)
         logger.info(
             "[LIFECYCLE-EXIT] asset=%s ticker=%s agent_id=%s thesis_side=%s action=%s kalshi_side=%s "
@@ -3313,6 +3535,15 @@ async def _execute_exit_order(
         while True:
             result = await route_order_async(intent)
             route_ok = _confirmed_submission(result)
+            if _ev_resolver is not None:
+                try:
+                    _ev_resolver.note_ack(
+                        client_order_id=intent.client_order_id,
+                        ack_status=getattr(result, "status", None),
+                        exchange_order_id=getattr(result, "order_id", None),
+                    )
+                except Exception:
+                    pass
             if route_ok:
                 break
 
@@ -7397,6 +7628,25 @@ async def _run_one_cycle(self, tick: int) -> None:
             self._run_summary.log_periodic(interval_seconds=3600.0)
         except Exception as e:
             logger.warning("[15m-LOOP] Failed to log periodic summary: %s", e, exc_info=True)
+
+    # EV-exit shadow telemetry: one per-asset + global line per 15m window so
+    # the shadow-validation campaign can be monitored without parsing raw
+    # evaluation records.  Non-fatal by construction.
+    if self._tick % 180 == 0:  # ~15 min at 5s cadence
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                emit_shadow_window_summary,
+                get_exit_attempt_resolver,
+                get_exit_eval_registry,
+            )
+
+            emit_shadow_window_summary(
+                get_exit_eval_registry(), get_exit_attempt_resolver()
+            )
+        except Exception as _ev_sum_exc:
+            logger.warning(
+                "[15m-LOOP] EV shadow summary failed: %s", _ev_sum_exc
+            )
 
 async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = True, allow_new_entries: bool = True) -> list[dict]:
     # Run agent grid cycle with proper error handling and return candidates.

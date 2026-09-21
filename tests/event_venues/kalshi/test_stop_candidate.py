@@ -296,6 +296,12 @@ class TestStopCandidateSubmissionIntent:
 
         stop_candidate._STOP_CANDIDATE_LEDGER_PATH = tmp_path / "stop_candidates.jsonl"
         monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "true")
+        # 2026-09: discretionary triggers additionally require the EV exit
+        # gate; enable it here so the test still exercises intent building.
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.settlement_aligned_exit.ev_exit_gate_enabled",
+            lambda: True,
+        )
 
         cached_position = SimpleNamespace(
             exit_policy_id="ep_test_001",

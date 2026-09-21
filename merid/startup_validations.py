@@ -65,6 +65,7 @@ LIVE_MONEY_PATH_FILES = [
     "merid/event_venues/kalshi/client_v2.py",
     "merid/event_venues/kalshi/execution_risk_firewall.py",
     "merid/event_venues/kalshi/fills_ledger.py",
+    "merid/event_venues/kalshi/settlement_aligned_exit.py",
     "merid/event_venues/kalshi/position_cache.py",
     "merid/event_venues/kalshi/canonical_portfolio_reconciler.py",
     "merid/event_venues/kalshi/binary_price_space.py",

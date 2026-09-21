@@ -108,6 +108,9 @@ class ResolvedLiveConfig:
     stop_loss_enabled: bool = True
     stop_candidate_submission_enabled: bool = False
     unprotected_entries_allowed: bool = False
+    # Settlement-aligned EV exit gate.  False = all discretionary exits are
+    # observe-only (evaluated and recorded, never submitted live).
+    ev_exit_gate_enabled: bool = False
 
     # Time in force
     entry_tif_default: str = "ioc"
@@ -251,6 +254,17 @@ _ENV_OVERRIDES: Dict[str, _EnvOverride] = {
         is_safety_limit=True,
         safety_kind="bool_safe",
         description="Whether stop-loss candidates can be submitted as live orders.",
+    ),
+    "MERID_ENABLE_EV_EXIT_GATE": _EnvOverride(
+        name="MERID_ENABLE_EV_EXIT_GATE",
+        type="bool",
+        is_safety_limit=True,
+        safety_kind="bool_safe",
+        description=(
+            "Whether the settlement-aligned sell-vs-hold EV gate may authorize "
+            "discretionary exits.  When false (default) every discretionary "
+            "exit is observe-only regardless of what any caller requested."
+        ),
     ),
     "MERID_ALLOW_UNPROTECTED_ENTRIES": _EnvOverride(
         name="MERID_ALLOW_UNPROTECTED_ENTRIES",
@@ -416,6 +430,9 @@ _ALLOWED_NON_SAFETY_PREFIXES = {
     "MERID_KILL_",
     "MERID_ERROR_",
     "MERID_EXIT_FIREWALL_",
+    "MERID_EV_",          # EV-exit-gate telemetry/persist/kill knobs
+    "MERID_EXIT_EV_",     # EV-exit-gate policy tunables (margins, reserves, ages)
+    "MERID_DISCRETIONARY_EXIT_MODE",  # observe_only | ev_gated_canary | ev_gated
     "MERID_REQUIRE_",
     "MERID_REQUIRE_EXIT_PARENTAGE",
     "MERID_STOP_SUBMISSION_",
@@ -980,11 +997,26 @@ class LiveConfigResolver:
 
         unprotected_entries = bool(env.get("MERID_ALLOW_UNPROTECTED_ENTRIES", False))
 
+        # Settlement-aligned EV exit gate (2026-09).  Defaults to False: every
+        # discretionary exit is observe-only until the gate has been validated
+        # against replayed entry/exit/fill/settlement histories.  Honored from
+        # env only as an explicit opt-in, same posture as stop-candidate
+        # submission.
+        ev_gate_env = env.get("MERID_ENABLE_EV_EXIT_GATE")
+        ev_gate_enabled = (
+            ev_gate_env is not None
+            and str(ev_gate_env).strip().lower() in ("1", "true", "yes", "on")
+        )
+
         self._invariants_checked.append(
             f"Stop-loss policy: stop_loss_enabled={stop_loss_enabled}; "
             f"stop_candidate_submission_enabled={stop_submission_enabled} "
             f"(env request={env_submission_request!s}); "
             f"unprotected_entries_allowed={unprotected_entries}"
+        )
+        self._invariants_checked.append(
+            f"EV exit gate: ev_exit_gate_enabled={ev_gate_enabled} "
+            f"(env request={ev_gate_env!s}); shadow-only when false"
         )
 
         # ── Edge / confidence economics ───────────────────────────────────────
@@ -1100,6 +1132,7 @@ class LiveConfigResolver:
             stop_loss_enabled=stop_loss_enabled,
             stop_candidate_submission_enabled=stop_submission_enabled,
             unprotected_entries_allowed=unprotected_entries,
+            ev_exit_gate_enabled=ev_gate_enabled,
             entry_tif_default=entry_tif,
             exit_tif_default=exit_tif,
             ioc_auto_below_seconds=ioc_auto,

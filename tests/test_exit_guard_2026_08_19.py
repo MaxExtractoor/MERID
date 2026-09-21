@@ -32,6 +32,25 @@ def _disable_persistence_and_fees(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_ev_gate_state(monkeypatch):
+    """Keep the EV exit gate hermetic: no file persistence, no env enable,
+    and no live RTI fetch (the default provider must not hit the network)."""
+    monkeypatch.setenv("MERID_EV_EXIT_DISABLE_PERSIST", "1")
+    monkeypatch.delenv("MERID_ENABLE_EV_EXIT_GATE", raising=False)
+    monkeypatch.delenv("MERID_EV_EXIT_GATE_KILL", raising=False)
+    import merid.event_venues.kalshi.settlement_aligned_exit as sae
+
+    monkeypatch.setattr(sae, "_default_rti_provider", lambda _asset: None)
+    sae._evaluator = None
+    sae._registry = None
+    sae._resolver = None
+    yield
+    sae._evaluator = None
+    sae._registry = None
+    sae._resolver = None
+
+
+@pytest.fixture(autouse=True)
 def _seed_canonical_position_cache():
     """Seed the canonical cache with an open position for the test market.
 
@@ -151,8 +170,12 @@ def test_emergency_expiry_liquidation_approved():
     assert price == 68
 
 
-def test_stop_loss_approved_within_slippage():
-    """Stop-loss at the stop level minus a small slippage cap is approved."""
+def test_stop_loss_vetoed_observe_only_when_gate_disabled():
+    """Discretionary stop-loss is observe-only while the EV gate is disabled.
+
+    The legacy checks still compute the would-be limit price so the record is
+    replayable, but the order is vetoed at the approval point.
+    """
     position = _make_position(stop_loss_price_cents=70)
     state = _make_state(no_bid=70, no_ask=72)
 
@@ -160,11 +183,14 @@ def test_stop_loss_approved_within_slippage():
         position, "stop_loss", exit_price_cents=70, state=state
     )
 
-    assert approved is True
+    assert approved is False
     assert record["exit_reason_canonical"] == "stop_loss"
-    assert record["limit_cents"] == 68  # stop 70 - 2c slippage
-    assert record["projected_net_pnl_cents"] == -10  # (68-74) - 4
-    assert price == 68
+    assert record["exit_class"] == "discretionary"
+    assert record["reject_reason"] == "discretionary_exit_observe_only"
+    assert record["legacy_would_approve"] is True
+    assert record["limit_cents"] == 68  # stop 70 - 2c slippage (recorded for replay)
+    assert record["projected_net_pnl_cents"] < 0  # bounded loss, recorded for replay
+    assert "ev_evaluation" in record
 
 
 def test_stop_loss_rejected_when_market_gapped_through_slippage():
@@ -181,20 +207,21 @@ def test_stop_loss_rejected_when_market_gapped_through_slippage():
     assert record["reject_reason"] == "stop_beyond_slippage"
 
 
-def test_take_profit_approved_when_profitable():
-    """Take-profit must use the executable bid and clear the min profit floor."""
+def test_take_profit_vetoed_observe_only_when_gate_disabled():
+    """Take-profit is discretionary: observe-only until the EV gate is enabled."""
     position = _make_position()
     state = _make_state(no_bid=84, no_ask=86)
 
-    approved, price, record, _did = _run_guard(
+    approved, _price, record, _did = _run_guard(
         position, "take_profit", exit_price_cents=84, state=state
     )
 
-    assert approved is True
+    assert approved is False
     assert record["exit_reason_canonical"] == "take_profit"
-    assert record["limit_cents"] == 84  # no slippage for profit exits
-    assert record["projected_net_pnl_cents"] >= 5
-    assert price == 84
+    assert record["exit_class"] == "discretionary"
+    assert record["reject_reason"] == "discretionary_exit_observe_only"
+    assert record["legacy_would_approve"] is True
+    assert record["limit_cents"] == 84  # recorded for replay
 
 
 def test_take_profit_rejected_when_not_profitable():
@@ -223,8 +250,8 @@ def test_unknown_exit_reason_rejected():
     assert record["reject_reason"] == "exit_reason_not_allowed"
 
 
-def test_time_exit_with_small_loss_allowed():
-    """A time exit is a forced exit and is allowed to realize a bounded loss."""
+def test_time_exit_with_small_loss_vetoed_observe_only():
+    """Non-mechanical time exits are discretionary: observe-only by default."""
     position = _make_position()
     # 1c gross loss -> net -7 with mocked 4c round-trip fee; forced exit still approves.
     state = _make_state(no_bid=73, no_ask=75)
@@ -233,13 +260,15 @@ def test_time_exit_with_small_loss_allowed():
         position, "time_stop", exit_price_cents=73, state=state
     )
 
-    assert approved is True
+    assert approved is False
     assert record["exit_reason_canonical"] == "time_exit"
+    assert record["exit_class"] == "discretionary"
+    assert record["reject_reason"] == "discretionary_exit_observe_only"
     assert record["projected_net_pnl_cents"] < 0
 
 
-def test_time_exit_break_even_with_zero_slippage():
-    """Break-even time exit is allowed as a forced exit but still pays round-trip fees."""
+def test_time_exit_break_even_vetoed_observe_only():
+    """Break-even time exit is discretionary too; recorded but not submitted."""
     position = _make_position()
     state = _make_state(no_bid=74, no_ask=76)
 
@@ -247,23 +276,25 @@ def test_time_exit_break_even_with_zero_slippage():
         position, "time_stop", exit_price_cents=74, state=state
     )
 
-    assert approved is True
+    assert approved is False
     assert record["exit_reason_canonical"] == "time_exit"
-    assert record["projected_net_pnl_cents"] == -6
-    assert record["projected_net_pnl_cents"] == -6  # gross -2 - 4c fee
+    assert record["reject_reason"] == "discretionary_exit_observe_only"
+    assert record["projected_net_pnl_cents"] < 0  # gross -2 minus round-trip fees
 
 
 def test_quote_freshness_uses_age_threshold():
-    """Quote just under the freshness threshold passes; just over is rejected."""
+    """Quote just under the freshness threshold reaches the gate; just over is rejected."""
     position = _make_position()
     from merid.loop_15m import MERID_EXIT_MAX_QUOTE_AGE_MS
 
-    # Just under the 10,000 ms default: a profitable exit should be approved.
+    # Just under the 10,000 ms default: the quote passes freshness but the
+    # discretionary exit is still vetoed observe-only (gate disabled).
     state = _make_state(no_bid=84, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS - 1)
-    approved, _price, _record, _did = _run_guard(
+    approved, _price, record, _did = _run_guard(
         position, "take_profit", exit_price_cents=84, state=state
     )
-    assert approved is True
+    assert approved is False
+    assert record["reject_reason"] == "discretionary_exit_observe_only"
 
     # Just over the threshold: a profitable exit is rejected for stale quote.
     state = _make_state(no_bid=84, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS + 100)
@@ -274,19 +305,20 @@ def test_quote_freshness_uses_age_threshold():
     assert record["reject_reason"] == "stale_quote"
 
 
-def test_current_edge_reversal_approved_on_profitable_exit():
-    """A current_edge_reversal exit must be canonicalized to signal_reversal and allowed."""
+def test_current_edge_reversal_vetoed_observe_only():
+    """current_edge_reversal canonicalizes to signal_reversal (discretionary, vetoed)."""
     position = _make_position()
     state = _make_state(no_bid=84, no_ask=86)
     state.book_updated_ts = time.monotonic()  # avoid stale quote after slow module import
 
-    approved, price, record, _did = _run_guard(
+    approved, _price, record, _did = _run_guard(
         position, "current_edge_reversal", exit_price_cents=84, state=state
     )
 
-    assert approved is True
+    assert approved is False
     assert record["exit_reason_canonical"] == "signal_reversal"
     assert record["exit_reason_original"] == "current_edge_reversal"
-    assert record["limit_cents"] == 82  # signal_reversal applies 2c slippage to best_bid=84
-    assert record["projected_net_pnl_cents"] == 4  # worst-case (82-74) - 4c round-trip fee
-    assert price == 82
+    assert record["exit_class"] == "discretionary"
+    assert record["reject_reason"] == "discretionary_exit_observe_only"
+    assert record["limit_cents"] == 82  # recorded for replay
+    assert record["projected_net_pnl_cents"] > 0  # worst-case (82-74) minus fees

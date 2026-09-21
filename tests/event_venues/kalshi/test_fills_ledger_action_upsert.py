@@ -149,6 +149,9 @@ async def test_buy_sell_sequence_net_position(ledger):
             "action": act,
             "count": 3,
             "yes_price": 0.6,
+            # Both legs present so the sell can canonicalize as trusted;
+            # a single-leg sell is quarantined and cannot close the position.
+            "no_price": 0.4,
             "fee": 0.0,
             "created_time": "2025-01-01T12:00:00+00:00",
         }
