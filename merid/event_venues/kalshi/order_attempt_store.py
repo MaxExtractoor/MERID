@@ -749,6 +749,20 @@ class OrderAttemptStore:
             expected_version = (
                 expected_state_version if expected_state_version is not None else record.state_version
             )
+            if new_state_enum is ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL:
+                # A superseded record must release its client_order_id: the
+                # UNIQUE constraint would otherwise prevent the superseding
+                # attempt from reusing the same idempotency key for a retry
+                # of the same exit intent.  The tombstone keeps the original
+                # id as a prefix for forensic lookup.
+                conn.execute(
+                    """
+                    UPDATE exit_order_attempts
+                    SET client_order_id = client_order_id || ':superseded:' || substr(attempt_id, 1, 8)
+                    WHERE attempt_id = ?
+                    """,
+                    (attempt_id,),
+                )
             conn.execute(
                 """
                 UPDATE exit_order_attempts

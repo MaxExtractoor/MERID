@@ -3169,7 +3169,8 @@ async def _execute_exit_order(
                 superseded = store.transition_exit_attempt(
                     durable_exit_attempt.attempt_id,
                     ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL.value,
-                    "superseded_for_rearm",
+                    "loop_15m",
+                    reason="superseded_for_rearm",
                 )
                 if superseded:
                     durable_exit_attempt = None
@@ -3337,7 +3338,8 @@ async def _execute_exit_order(
                             OrderAttemptStore().transition_exit_attempt(
                                 durable_exit_attempt.attempt_id,
                                 ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value,
-                                "not_submitted_resubmit_limit_exhausted",
+                                "loop_15m",
+                                reason="not_submitted_resubmit_limit_exhausted",
                             )
                         except Exception:
                             pass
@@ -3395,7 +3397,8 @@ async def _execute_exit_order(
                     OrderAttemptStore().transition_exit_attempt(
                         durable_exit_attempt.attempt_id,
                         ExitOrderAttemptState.REJECTED_EXCHANGE.value,
-                        f"route_status={_result_status} reason={_result_reason}",
+                        "loop_15m",
+                        reason=f"route_status={_result_status} reason={_result_reason}",
                     )
                 except Exception:
                     pass
@@ -3582,7 +3585,8 @@ async def _execute_exit_order(
                     OrderAttemptStore().transition_exit_attempt(
                         durable_exit_attempt.attempt_id,
                         terminal_state,
-                        finalizer_reason,
+                        "loop_15m",
+                        reason=finalizer_reason,
                         exchange_order_id=getattr(result, "order_id", None),
                     )
                 except Exception:
@@ -3632,7 +3636,8 @@ async def _execute_exit_order(
                     OrderAttemptStore().transition_exit_attempt(
                         durable_exit_attempt.attempt_id,
                         partial_state,
-                        finalizer_reason,
+                        "loop_15m",
+                        reason=finalizer_reason,
                         exchange_order_id=getattr(result, "order_id", None),
                     )
                 except Exception:
@@ -3668,7 +3673,8 @@ async def _execute_exit_order(
                     OrderAttemptStore().transition_exit_attempt(
                         durable_exit_attempt.attempt_id,
                         _terminal,
-                        f"finalizer:{finalizer_reason} status={_result_status}",
+                        "loop_15m",
+                        reason=f"finalizer:{finalizer_reason} status={_result_status}",
                         exchange_order_id=getattr(result, "order_id", None),
                     )
                 except Exception:
@@ -3688,7 +3694,8 @@ async def _execute_exit_order(
                 OrderAttemptStore().transition_exit_attempt(
                     durable_exit_attempt.attempt_id,
                     ExitOrderAttemptState.REJECTED_EXCHANGE.value,
-                    f"exception:{error_type} error={e}",
+                    "loop_15m",
+                    reason=f"exception:{error_type} error={e}",
                 )
             except Exception:
                 pass

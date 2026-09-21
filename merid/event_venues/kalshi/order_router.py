@@ -12352,16 +12352,17 @@ async def _route_live(
                 
                 # Get all positions for this asset across all markets
                 from merid.event_venues.kalshi.position_cache import get_position_cache
-                existing_yes = 0
-                existing_no = 0
-                
+                existing_yes = Decimal("0")
+                existing_no = Decimal("0")
+
                 if asset:
                     asset_positions = get_position_cache().get_positions_by_asset(asset)
                     for pos in asset_positions:
-                        if pos.side.lower() == "yes" and pos.contracts > 0:
-                            existing_yes += pos.contracts
-                        elif pos.side.lower() == "no" and pos.contracts < 0:
-                            existing_no += abs(pos.contracts)
+                        _pos_contracts = Decimal(str(getattr(pos, "contracts", 0) or 0))
+                        if pos.side.lower() == "yes" and _pos_contracts > 0:
+                            existing_yes += _pos_contracts
+                        elif pos.side.lower() == "no" and _pos_contracts < 0:
+                            existing_no += abs(_pos_contracts)
                 
                 # Check per-side limit
                 # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
@@ -12377,12 +12378,13 @@ async def _route_live(
                 # Exit orders reduce exposure, so they should not be rejected by per-side limits
                 # CRITICAL FIX (2026-08-10): Use canonical signed-YES exit detection, not raw action.
                 is_exit_order = _is_exit_order(intent)
-                
+                _intent_count = Decimal(str(intent.count or 0))
+
                 if outcome_side == "yes":
                     if is_exit_order:
-                        new_yes_total = existing_yes - intent.count
+                        new_yes_total = existing_yes - _intent_count
                     else:
-                        new_yes_total = existing_yes + intent.count
+                        new_yes_total = existing_yes + _intent_count
                     if new_yes_total > max_yes:
                         logger.warning(
                             f"[POSITION-LIMIT-SIDE-AWARE] Per-side YES limit exceeded for {asset}: outcome_side={outcome_side} new_total={new_yes_total} > max={max_yes} (existing={existing_yes}, new={intent.count}, ticker={intent.ticker})"
@@ -12396,9 +12398,9 @@ async def _route_live(
                         )
                 elif outcome_side == "no":
                     if is_exit_order:
-                        new_no_total = existing_no - intent.count
+                        new_no_total = existing_no - _intent_count
                     else:
-                        new_no_total = existing_no + intent.count
+                        new_no_total = existing_no + _intent_count
                     if new_no_total > max_no:
                         logger.warning(
                             f"[POSITION-LIMIT-SIDE-AWARE] Per-side NO limit exceeded for {asset}: outcome_side={outcome_side} new_total={new_no_total} > max={max_no} (existing={existing_no}, new={intent.count}, ticker={intent.ticker})"
@@ -17330,16 +17332,17 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             
             # Get all positions for this asset across all markets
             from merid.event_venues.kalshi.position_cache import get_position_cache
-            existing_yes = 0
-            existing_no = 0
-            
+            existing_yes = Decimal("0")
+            existing_no = Decimal("0")
+
             if asset:
                 asset_positions = get_position_cache().get_positions_by_asset(asset)
                 for pos in asset_positions:
-                    if pos.side.lower() == "yes" and pos.contracts > 0:
-                        existing_yes += pos.contracts
-                    elif pos.side.lower() == "no" and pos.contracts < 0:
-                        existing_no += abs(pos.contracts)
+                    _pos_contracts = Decimal(str(getattr(pos, "contracts", 0) or 0))
+                    if pos.side.lower() == "yes" and _pos_contracts > 0:
+                        existing_yes += _pos_contracts
+                    elif pos.side.lower() == "no" and _pos_contracts < 0:
+                        existing_no += abs(_pos_contracts)
             
             # Check per-side limit
             # CRITICAL FIX (2026-07-24): Extract outcome_side from intent.side to handle both formats
@@ -17355,12 +17358,13 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             # Exit orders reduce exposure, so they should not be rejected by per-side limits
             # CRITICAL FIX (2026-08-10): Use canonical signed-YES exit detection, not raw action.
             is_exit_order = _is_exit_order(intent)
-            
+            _intent_count = Decimal(str(intent.count or 0))
+
             if outcome_side == "yes":
                 if is_exit_order:
-                    new_yes_total = existing_yes - intent.count
+                    new_yes_total = existing_yes - _intent_count
                 else:
-                    new_yes_total = existing_yes + intent.count
+                    new_yes_total = existing_yes + _intent_count
                 if new_yes_total > max_yes:
                     logger.warning(
                         f"[ORDER-ROUTER-ASYNC] Per-side YES limit exceeded for {asset}: {new_yes_total} > {max_yes} (existing={existing_yes}, new={intent.count}, ticker={intent.ticker})"
@@ -17374,9 +17378,9 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
                     )
             elif outcome_side == "no":
                 if is_exit_order:
-                    new_no_total = existing_no - intent.count
+                    new_no_total = existing_no - _intent_count
                 else:
-                    new_no_total = existing_no + intent.count
+                    new_no_total = existing_no + _intent_count
                 if new_no_total > max_no:
                     logger.warning(
                         f"[ORDER-ROUTER-ASYNC] Per-side NO limit exceeded for {asset}: {new_no_total} > {max_no} (existing={existing_no}, new={intent.count}, ticker={intent.ticker})"

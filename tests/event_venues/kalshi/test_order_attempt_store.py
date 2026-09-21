@@ -112,3 +112,72 @@ def test_exit_attempt_lifecycle_and_concurrency(tmp_path):
         expected_state_version=4,
     )
     assert invalid is None
+
+
+def test_superseded_attempt_releases_client_order_id(tmp_path):
+    """A superseded terminal attempt must free its client_order_id so the
+    re-armed exit retry can create a fresh attempt with the same idempotency
+    key, and lookups must resolve to the new attempt."""
+    db_path = tmp_path / "test_exit_attempts_supersede.db"
+    store = OrderAttemptStore(str(db_path))
+
+    a1 = store.create_exit_attempt(
+        exit_intent_id="intent-exit-1",
+        position_key="pos-9",
+        ticker="KXBTC15M-X",
+        reason="settlement_guard",
+        client_order_id="exit_abc123",
+        requested_quantity=100,
+        attempt_id="attempt-old",
+    )
+    store.transition_exit_attempt(
+        a1.attempt_id, ExitOrderAttemptState.SUBMITTING.value,
+        actor="t", reason="t",
+    )
+    store.transition_exit_attempt(
+        a1.attempt_id, ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+        actor="t", reason="t",
+    )
+    store.transition_exit_attempt(
+        a1.attempt_id, ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value,
+        actor="t", reason="t",
+    )
+
+    sup = store.transition_exit_attempt(
+        a1.attempt_id,
+        ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL.value,
+        actor="loop_15m",
+        reason="superseded_for_rearm",
+    )
+    assert sup is not None
+    assert sup.state == ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL.value
+
+    # The same client_order_id must be reusable without an IntegrityError.
+    a2 = store.create_exit_attempt(
+        exit_intent_id="intent-exit-1",
+        position_key="pos-9",
+        ticker="KXBTC15M-X",
+        reason="settlement_guard",
+        client_order_id="exit_abc123",
+        requested_quantity=100,
+        attempt_id="attempt-new",
+    )
+    assert a2.attempt_id != a1.attempt_id
+    assert a2.state == ExitOrderAttemptState.INTENT_PERSISTED.value
+
+    # Lookup by client_order_id resolves to the live attempt, not the tombstone.
+    got = store.get_exit_attempt_by_client_order_id("exit_abc123")
+    assert got is not None
+    assert got.attempt_id == a2.attempt_id
+
+    # The new attempt can run the full lifecycle.
+    store.transition_exit_attempt(
+        a2.attempt_id, ExitOrderAttemptState.SUBMITTING.value,
+        actor="t", reason="t",
+    )
+    final = store.transition_exit_attempt(
+        a2.attempt_id, ExitOrderAttemptState.FILLED.value,
+        actor="t", reason="t",
+    )
+    assert final is not None
+    assert final.state == ExitOrderAttemptState.FILLED.value
