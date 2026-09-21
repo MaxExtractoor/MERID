@@ -9475,7 +9475,7 @@ class LeanAgent15m:
         self._cycle_decision = {}
         self._last_velocity_value = 0.0
         self._last_velocity_source = "internal_fallback"
-        self._last_velocity_age_ms = -1.0
+        self._last_velocity_age_ms = None
         self._last_velocity_signal_type = "none"
         self._last_signal_vol_context = {}
 
@@ -9740,7 +9740,7 @@ class LeanAgent15m:
         #    diagnostic; stale internal samples are not substituted as a neutral
         #    0.0 observation.
         cb_velocity = 0.0
-        cb_age_ms = -1.0
+        cb_age_ms = None
         cb_signal_type = "none"
         cb_timestamp = 0.0
         source = "internal_fallback"
@@ -9769,7 +9769,19 @@ class LeanAgent15m:
                 if total_weight > 0:
                     final_velocity = weighted_velocity
                     source = "rti_feature_snapshot"
-                    cb_age_ms = snap.feature_age_ms
+                    raw_feature_age_ms = snap.feature_age_ms
+                    cb_age_ms = (
+                        max(0.0, float(raw_feature_age_ms))
+                        if raw_feature_age_ms is not None
+                        else None
+                    )
+                    if raw_feature_age_ms is not None and float(raw_feature_age_ms) < 0:
+                        logger.warning(
+                            "[VELOCITY-AGE-CLAMP] asset=%s source=rti_feature_snapshot "
+                            "raw_age_ms=%.3f clamped_age_ms=0",
+                            asset,
+                            float(raw_feature_age_ms),
+                        )
                     cb_signal_type = "rti_returns"
                     self._last_velocity_source = source
                     self._last_velocity_age_ms = cb_age_ms
@@ -9796,14 +9808,21 @@ class LeanAgent15m:
                     cb_timestamp = cb_timestamp / 1000.0
 
                 signal_age = current_time - cb_timestamp
-                cb_age_ms = signal_age * 1000.0
+                if signal_age < 0:
+                    logger.warning(
+                        "[VELOCITY-AGE-CLAMP] asset=%s source=coinbase "
+                        "raw_age_ms=%.3f clamped_age_ms=0",
+                        asset,
+                        signal_age * 1000.0,
+                    )
+                cb_age_ms = max(0.0, signal_age * 1000.0)
 
                 # Reject obviously bogus future timestamps (> 5 min ahead) or
                 # stale snapshots (outside the asset-specific velocity TTL).
                 # signal_type='none' means the upstream source has no directional
                 # signal this cycle.
                 max_velocity_age_s = _velocity_max_age_ms(asset) / 1000.0
-                if -300.0 < signal_age < max_velocity_age_s and cb_signal_type != 'none':
+                if 0.0 <= signal_age < max_velocity_age_s and cb_signal_type != 'none':
                     # Coinbase snapshot is fresh - use it as the authoritative source.
                     source = "coinbase"
                     final_velocity = cb_velocity
@@ -9846,7 +9865,7 @@ class LeanAgent15m:
         self._last_velocity_signal_type = cb_signal_type
 
         logger.info(
-            "[VELOCITY-SOURCE] asset=%s source=%s signal_type=%s age_ms=%.0f value=%.6f threshold=%.6f passed=%s",
+            "[VELOCITY-SOURCE] asset=%s source=%s signal_type=%s age_ms=%s value=%.6f threshold=%.6f passed=%s",
             asset, source, cb_signal_type, cb_age_ms, final_velocity, velocity_threshold, velocity_passed
         )
 

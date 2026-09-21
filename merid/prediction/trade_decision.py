@@ -54,7 +54,37 @@ TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MI
 # 2026-08-28: raised to 35c to match the cheap-tail filter.  Trades below this
 # floor are only allowed when the model probability is exceptionally high (see
 # MERID_CHEAP_TAIL_P_EXCEPTION).
-MERID_MIN_HELD_PRICE_CENTS = max(35.0, float(os.environ.get("MERID_MIN_HELD_PRICE_CENTS", "35")))
+MERID_MIN_HELD_PRICE_CENTS = max(0.0, float(os.environ.get("MERID_MIN_HELD_PRICE_CENTS", "35")))
+
+# Low-price policy is shadow-only by default. It records the proposed policy
+# without changing live admission until replay and calibration evidence support
+# a separately authorized canary.
+MERID_ENTRY_POLICY_MODE = os.environ.get("MERID_ENTRY_POLICY_MODE", "shadow_compare").strip().lower()
+MERID_SHADOW_MIN_HELD_PRICE_CENTS = float(
+    os.environ.get("MERID_SHADOW_MIN_HELD_PRICE_CENTS", "10")
+)
+MERID_SHADOW_LOW_PRICE_MAX_CENTS = float(
+    os.environ.get("MERID_SHADOW_LOW_PRICE_MAX_CENTS", "34")
+)
+MERID_SHADOW_MIN_NET_EDGE = float(
+    os.environ.get("MERID_SHADOW_MIN_NET_EDGE", "0.08")
+)
+MERID_SHADOW_DEFAULT_MIN_NET_EDGE = float(
+    os.environ.get("MERID_SHADOW_DEFAULT_MIN_NET_EDGE", "0.06")
+)
+MERID_SHADOW_UNCERTAINTY_MULTIPLIER = float(
+    os.environ.get("MERID_SHADOW_UNCERTAINTY_MULTIPLIER", "2.0")
+)
+MERID_LOW_PRICE_CANARY_ASSETS = {
+    value.strip().upper()
+    for value in os.environ.get("MERID_LOW_PRICE_CANARY_ASSETS", "BTC,SOL").split(",")
+    if value.strip()
+}
+MERID_LOW_PRICE_CANARY_SIDES = {
+    value.strip().lower()
+    for value in os.environ.get("MERID_LOW_PRICE_CANARY_SIDES", "no").split(",")
+    if value.strip()
+}
 
 # Very high-confidence cheap-tail exception.  DISABLED by default (threshold 1.0)
 # because 7-day data showed the cheap tail (0-19c held) has a near-zero realized
@@ -78,6 +108,9 @@ MERID_TAIL_CALIBRATION_PRICE_FLOOR = float(os.environ.get("MERID_TAIL_CALIBRATIO
 # real NO curve is fit.
 MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR = float(
     os.environ.get("MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR", "0.20")
+)
+MERID_TAIL_CALIBRATION_NO_DUAL_TRANSITION = float(
+    os.environ.get("MERID_TAIL_CALIBRATION_NO_DUAL_TRANSITION", "0.05")
 )
 
 # Fail-closed gate for externally supplied hybrid p_yes.  Bachelier-only is the
@@ -1001,6 +1034,20 @@ def _pi_star_risk_premium(held_price_cents: int) -> int:
             premium = tier_premium
     return premium
 
+
+def _dual_tail_shrinkage_weight(raw_probability: float) -> float:
+    """Return a continuous provisional-NO calibration weight in [0, 1]."""
+    width = max(1e-9, MERID_TAIL_CALIBRATION_NO_DUAL_TRANSITION)
+    lower = MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR - width
+    upper = MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR + width
+    if raw_probability <= lower:
+        return 1.0
+    if raw_probability >= upper:
+        return 0.0
+    normalized = (upper - raw_probability) / (upper - lower)
+    # Smoothstep avoids a slope discontinuity at either transition boundary.
+    return normalized * normalized * (3.0 - 2.0 * normalized)
+
 # Allowed data-state and regime-label values.
 # `unknown` is a data-quality state; it must never be an economic regime.
 ALLOWED_DATA_STATES = frozenset({"warming_up", "healthy", "stale", "degraded", "invalid"})
@@ -1752,6 +1799,7 @@ def compute_trade_decision(
     tail_cap_yes_reason = "none"
     tail_calibration_yes_configured = False
     tail_calibration_yes_applied = False
+    tail_calibrator = None
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None and yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
@@ -1776,24 +1824,26 @@ def compute_trade_decision(
     tail_cap_no_reason = "none"
     tail_calibration_no_configured = False
     tail_calibration_no_applied = False
+    tail_calibration_no_weight = 0.0
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None and no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
             tail_calibration_no_configured = True
             if tail_calibrator.no_curve_is_dual:
-                if p_no_for_no < MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR:
-                    tail_cap_no_reason = "dual_raw_cheap"
-                    p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
-                    if abs(p_no_for_no - p_no_for_no_pre_cap) > 1e-9:
-                        tail_calibration_no_applied = True
-                else:
-                    tail_cap_no_reason = "dual_moderate_skipped"
-                    logger.info(
-                        "[TAIL-CALIBRATION-NO-DUAL] asset=%s ticker=%s no_entry=%.3f "
-                        "raw_p_no=%.3f >= dual_raw_floor=%.3f; skipping dual NO tail cap",
-                        asset, ticker, no_entry, p_no_for_no,
-                        MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR,
-                    )
+                tail_calibration_no_weight = _dual_tail_shrinkage_weight(p_no_for_no)
+                calibrated_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+                p_no_for_no = p_no_for_no + tail_calibration_no_weight * (
+                    calibrated_no - p_no_for_no
+                )
+                tail_cap_no_reason = "dual_continuous_shrinkage"
+                if abs(p_no_for_no - p_no_for_no_pre_cap) > 1e-9:
+                    tail_calibration_no_applied = True
+                logger.info(
+                    "[TAIL-CALIBRATION-NO-DUAL] asset=%s ticker=%s no_entry=%.3f "
+                    "raw_p_no=%.3f weight=%.4f calibrated_p_no=%.3f",
+                    asset, ticker, no_entry, p_no_for_no_pre_cap,
+                    tail_calibration_no_weight, p_no_for_no,
+                )
             else:
                 tail_cap_no_reason = "real_curve"
                 p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
@@ -1858,6 +1908,20 @@ def compute_trade_decision(
         "tail_guard_violation_yes": tail_guard_violation_yes,
         "tail_guard_violation_no": tail_guard_violation_no,
         "tail_calibration_no_dual_raw_floor": MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR,
+        "tail_calibration_no_dual_transition": MERID_TAIL_CALIBRATION_NO_DUAL_TRANSITION,
+        "tail_calibration_no_weight": tail_calibration_no_weight,
+        "tail_calibration_provenance": (
+            {
+                "n_trades": int(getattr(tail_calibrator, "n_trades", 0)),
+                "buffer": float(getattr(tail_calibrator, "buffer", 0.0)),
+                "metadata": dict(getattr(tail_calibrator, "metadata", {}) or {}),
+                "no_curve_is_dual": bool(getattr(tail_calibrator, "no_curve_is_dual", False)),
+                "yes_bucket_count": len(getattr(tail_calibrator, "yes_held_prices", []) or []),
+                "no_bucket_count": len(getattr(tail_calibrator, "no_held_prices", []) or []),
+            }
+            if tail_calibrator is not None
+            else None
+        ),
     })
 
     fee = fee_per_contract_cents / 100.0
@@ -2067,7 +2131,8 @@ def compute_trade_decision(
         logger.info(
             "[ENTRY-ECONOMICS] asset=%s ticker=%s side=%s best_ask_cents=%.4f "
             "model_prob=%0.4f pi_star=%0.4f net_edge_before_required=%0.4f "
-            "net_edge_after_required=%0.4f identity_difference=%0.8f decision=ACCEPT",
+            "net_edge_after_required=%0.4f identity_difference=%0.8f "
+            "raw_economics=POSITIVE terminal_decision=PENDING",
             asset,
             ticker,
             selected_outcome.upper(),
@@ -2090,36 +2155,133 @@ def compute_trade_decision(
             and edge_breakdown.p_selected < MERID_CHEAP_TAIL_P_EXCEPTION - 1e-9
         ):
             _floor_p = edge_breakdown.p_selected
-            log_rejected_candidate(
-                reason=f"held_entry_price_below_floor:{held_price:.2f}<{min_held_price_cents/100.0:.2f}|p={_floor_p:.3f}",
-                run_id=run_id,
-                decision_id=decision_id,
-                asset=asset,
-                ticker=ticker,
-                side=selected_outcome,
-                model_p_selected=float(_floor_p),
-                held_price_cents=held_price * 100.0,
-                gross_edge=float(edge_breakdown.gross_edge),
-                net_edge=float(edge_breakdown.net_edge),
-                edge_threshold=float(yes_min_edge if selected_outcome == "yes" else no_min_edge),
-                tte_seconds=float(seconds_to_expiry),
-                spot_price=float(spot_price),
-                strike_price=float(strike_price),
-                fee_cents=float(fee) * 100.0,
+            _held_price_cents = round(held_price * 100.0, 6)
+            _shadow_low_price = (
+                MERID_SHADOW_MIN_HELD_PRICE_CENTS
+                <= _held_price_cents
+                <= MERID_SHADOW_LOW_PRICE_MAX_CENTS
             )
-            selected_outcome = None
-            selected_action = None
-            approved_size_cc = Decimal("0")
-            p_selected = None
-            p_opposite = None
-            selected_outcome_price = None
-            gross_edge = None
-            net_edge = None
-            edge_breakdown = None
-            no_trade_reason = (
+            _shadow_min_edge = (
+                MERID_SHADOW_MIN_NET_EDGE
+                if _shadow_low_price
+                else MERID_SHADOW_DEFAULT_MIN_NET_EDGE
+            )
+            _shadow_uncertainty = (
+                edge_breakdown.model_risk_reserve
+                * MERID_SHADOW_UNCERTAINTY_MULTIPLIER
+            )
+            _shadow_required_edge = _shadow_min_edge + max(
+                0.0,
+                _shadow_uncertainty - edge_breakdown.model_risk_reserve,
+            )
+            _shadow_rules = [
+                {
+                    "rule": "shadow_min_entry_price",
+                    "passed": _held_price_cents >= MERID_SHADOW_MIN_HELD_PRICE_CENTS,
+                    "value": _held_price_cents,
+                    "threshold": MERID_SHADOW_MIN_HELD_PRICE_CENTS,
+                },
+                {
+                    "rule": "shadow_required_net_edge",
+                    "passed": edge_breakdown.net_edge >= _shadow_required_edge,
+                    "value": edge_breakdown.net_edge,
+                    "threshold": _shadow_required_edge,
+                },
+            ]
+            _shadow_passed = all(rule["passed"] for rule in _shadow_rules)
+            indicators["shadow_policy"] = {
+                "mode": MERID_ENTRY_POLICY_MODE,
+                "decision": "ACCEPT" if _shadow_passed else "REJECT",
+                "terminal_reason": None
+                if _shadow_passed
+                else next(
+                    rule["rule"]
+                    for rule in _shadow_rules
+                    if not rule["passed"]
+                ),
+                "side": selected_outcome,
+                "price_cents": _held_price_cents,
+                "model_probability": _floor_p,
+                "net_edge": edge_breakdown.net_edge,
+                "uncertainty_reserve": _shadow_uncertainty,
+                "required_net_edge": _shadow_required_edge,
+                "rules": _shadow_rules,
+            }
+            indicators["terminal_decision"] = "REJECT"
+            indicators["terminal_reason"] = (
                 f"held_entry_price_below_floor:{held_price:.2f}<"
-                f"{min_held_price_cents/100.0:.2f}|p={_floor_p:.3f}"
+                f"{min_held_price_cents / 100.0:.2f}"
             )
+            _canary_allowed = (
+                MERID_ENTRY_POLICY_MODE == "canary"
+                and asset.upper() in MERID_LOW_PRICE_CANARY_ASSETS
+                and selected_outcome in MERID_LOW_PRICE_CANARY_SIDES
+                and _shadow_low_price
+                and _shadow_passed
+            )
+            if _canary_allowed:
+                approved_size_cc = min(approved_size_cc, Decimal("100"))
+                indicators["canary_policy"] = {
+                    "version": "low_price_v1",
+                    "decision": "ACCEPT",
+                    "asset_allowlisted": True,
+                    "side_allowlisted": True,
+                    "max_contracts_per_order": 1,
+                    "price_cents": _held_price_cents,
+                }
+                indicators["terminal_decision"] = "PENDING_DOWNSTREAM_GATES"
+                indicators["terminal_reason"] = "low_price_canary_shadow_accept"
+                logger.warning(
+                    "[ENTRY-POLICY-CANARY] asset=%s ticker=%s side=%s price_cents=%.2f "
+                    "contracts=1 decision=ACCEPT downstream_gates=pending",
+                    asset,
+                    ticker,
+                    selected_outcome.upper(),
+                    _held_price_cents,
+                )
+            else:
+                log_rejected_candidate(
+                    reason=f"held_entry_price_below_floor:{held_price:.2f}<{min_held_price_cents/100.0:.2f}|p={_floor_p:.3f}",
+                    run_id=run_id,
+                    decision_id=decision_id,
+                    asset=asset,
+                    ticker=ticker,
+                    side=selected_outcome,
+                    model_p_selected=float(_floor_p),
+                    held_price_cents=held_price * 100.0,
+                    gross_edge=float(edge_breakdown.gross_edge),
+                    net_edge=float(edge_breakdown.net_edge),
+                    edge_threshold=float(yes_min_edge if selected_outcome == "yes" else no_min_edge),
+                    tte_seconds=float(seconds_to_expiry),
+                    spot_price=float(spot_price),
+                    strike_price=float(strike_price),
+                    fee_cents=float(fee) * 100.0,
+                )
+                logger.info(
+                    "[ENTRY-POLICY-SHADOW] asset=%s ticker=%s side=%s price_cents=%.2f "
+                    "decision=%s terminal_reason=%s net_edge=%.4f required_net_edge=%.4f",
+                    asset,
+                    ticker,
+                    selected_outcome.upper(),
+                    _held_price_cents,
+                    indicators["shadow_policy"]["decision"],
+                    indicators["shadow_policy"]["terminal_reason"],
+                    edge_breakdown.net_edge,
+                    _shadow_required_edge,
+                )
+                selected_outcome = None
+                selected_action = None
+                approved_size_cc = Decimal("0")
+                p_selected = None
+                p_opposite = None
+                selected_outcome_price = None
+                gross_edge = None
+                net_edge = None
+                edge_breakdown = None
+                no_trade_reason = (
+                    f"held_entry_price_below_floor:{held_price:.2f}<"
+                    f"{min_held_price_cents/100.0:.2f}|p={_floor_p:.3f}"
+                )
 
     # Final confidence gate: even if a side qualifies, an invalid confidence
     # blocks the trade.  This is the hard no-trade rule for missing/fallback
