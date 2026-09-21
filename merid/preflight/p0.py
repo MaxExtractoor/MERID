@@ -133,6 +133,25 @@ async def run_p0_preflight_checks(
             except Exception as load_err:
                 logger.warning("[P0-PREFLIGHT] fills_ledger load_from_db failed: %s", load_err)
 
+        # REST is authoritative for exchange fills. Reconcile it into the
+        # durable ledger before comparing identities so a fill received while
+        # the process was stopped is recovered instead of reported as a
+        # phantom exchange-only divergence.
+        if hasattr(ledger, "ingest_http_fills"):
+            try:
+                ingested_count, ingested_ids = await ledger.ingest_http_fills(fills)
+                logger.info(
+                    "[P0-PREFLIGHT] REST fills ingested before reconciliation: "
+                    "new=%d ids=%d",
+                    ingested_count,
+                    len(ingested_ids),
+                )
+            except Exception as ingest_err:
+                logger.warning(
+                    "[P0-PREFLIGHT] REST fills ingest failed before reconciliation: %s",
+                    ingest_err,
+                )
+
         # Load the position cache from the exchange so internal state is fresh.
         if hasattr(cache, "load_from_exchange"):
             try:
