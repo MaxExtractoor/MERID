@@ -255,8 +255,8 @@ class FeatureSnapshotBuilder:
                 microstructure_total_delta_pp=total_delta_pp,
                 btc_log_return=btc_log_return,
                 feature_ts=now,
-                feature_age_ms=(now - (rti_obs.source_ts_ms / 1000.0)) * 1000.0
-                if rti_obs is not None and rti_obs.source_ts_ms is not None
+                feature_age_ms=(now - (rti_obs.observed_ts_ms / 1000.0)) * 1000.0
+                if rti_obs is not None and rti_obs.observed_ts_ms is not None
                 else None,
                 feature_valid=feature_valid,
                 missing_reasons=missing,

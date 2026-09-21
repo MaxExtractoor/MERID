@@ -266,6 +266,36 @@ class TestPortPositionToLedgerDict:
         assert result["side"] == "no"
         assert result["contracts"] == 3
 
+    def test_position_fp_is_yes_signed_for_no_position(self):
+        """position_fp must carry the exchange YES-signed convention.
+
+        Regression: the client normalizes negative position_fp into an unsigned
+        count plus side='no'.  If the unsigned magnitude is written back into
+        position_fp, sign-validating consumers see side=no + signed=+N and
+        quarantine the live position, blocking its exits.
+        """
+        position = Position(
+            ticker="KXETH15M-260801",
+            outcome="no",
+            size=Decimal("1"),
+            average_entry_price_cents=35,
+        )
+        result = port_position_to_ledger_dict(position)
+        assert result["side"] == "no"
+        assert Decimal(result["position_fp"]) == Decimal("-1")
+        assert Decimal(result["count_fp"]) == Decimal("1")
+
+    def test_position_fp_is_yes_signed_for_yes_position(self):
+        position = Position(
+            ticker="KXBTC15M-260801",
+            outcome="yes",
+            size=Decimal("2.5"),
+            average_entry_price_cents=42,
+        )
+        result = port_position_to_ledger_dict(position)
+        assert result["side"] == "yes"
+        assert Decimal(result["position_fp"]) == Decimal("2.5")
+
     def test_settled_zero_position(self):
         """A closed position with size 0 should not raise."""
         position = Position(

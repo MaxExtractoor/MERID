@@ -913,8 +913,19 @@ class KalshiMarketCatalog:
         while True:
             iteration_count += 1
             try:
-                logger.info("[CATALOG-REFRESH-LOOP] Iteration %d: Sleeping for %.1fs before next refresh", iteration_count, self._refresh_interval)
-                await asyncio.sleep(self._refresh_interval)
+                # Boundary-aligned sleep: wake ~1.5s after each 15-minute
+                # boundary so newly-opened markets are discovered immediately
+                # instead of waiting up to a full refresh interval past the
+                # rollover.  The sleep never exceeds the normal interval.
+                _now_ts = time.time()
+                _secs_to_boundary = 900.0 - (_now_ts % 900.0)
+                _sleep_s = min(self._refresh_interval, _secs_to_boundary + 1.5)
+                _boundary_aligned = _secs_to_boundary + 1.5 < self._refresh_interval
+                logger.info(
+                    "[CATALOG-REFRESH-LOOP] Iteration %d: Sleeping for %.1fs before next refresh (boundary_aligned=%s)",
+                    iteration_count, _sleep_s, _boundary_aligned,
+                )
+                await asyncio.sleep(_sleep_s)
                 if self._ensure_shutdown_event().is_set():
                     logger.info("[CATALOG-REFRESH-LOOP] Shutdown requested, exiting loop")
                     break
@@ -926,6 +937,21 @@ class KalshiMarketCatalog:
                 except asyncio.TimeoutError:
                     logger.error("[CATALOG-REFRESH-LOOP] Iteration %d: Refresh timed out after 30s", iteration_count)
                     # Continue loop despite timeout
+                # Post-boundary follow-up: Kalshi can list the new 15m markets a
+                # few seconds after the boundary.  If this refresh ran within
+                # ~10s after a boundary, allow one extra refresh so discovery
+                # does not wait another full interval.
+                if (time.time() % 900.0) < 10.0:
+                    logger.info("[CATALOG-REFRESH-LOOP] Post-boundary follow-up refresh scheduled in 4.0s")
+                    await asyncio.sleep(4.0)
+                    if self._ensure_shutdown_event().is_set():
+                        logger.info("[CATALOG-REFRESH-LOOP] Shutdown requested, exiting loop")
+                        break
+                    try:
+                        await asyncio.wait_for(self.refresh(force=True), timeout=30.0)
+                        logger.info("[CATALOG-REFRESH-LOOP] Post-boundary follow-up refresh completed")
+                    except asyncio.TimeoutError:
+                        logger.error("[CATALOG-REFRESH-LOOP] Post-boundary follow-up refresh timed out")
             except Exception as e:
                 logger.exception("[CATALOG-REFRESH-LOOP] Iteration %d: crashed", iteration_count, exc_info=e)
                 # Small backoff to avoid hammering if it's broken
@@ -2579,6 +2605,26 @@ class KalshiMarketCatalog:
                             markets[idx] = fresh_cm
                             # Clear prior failure on successful resolution.
                             self._metadata_failure_count[cm.asset] = 0
+                            # Push resolved strike metadata into the state store
+                            # immediately so is_market_entry_ready() does not
+                            # wait a full feed-loop cycle (~30s) for it.
+                            try:
+                                store = getattr(self, "_state_store", None)
+                                if store is not None:
+                                    store.apply_rest_market({
+                                        "ticker": fresh_cm.market.market_id,
+                                        "underlying": fresh_cm.asset,
+                                        "strike_price": fresh_cm.strike_price,
+                                        "floor_strike": fresh_cm.floor_strike,
+                                        "cap_strike": fresh_cm.cap_strike,
+                                        "exchange_index": getattr(fresh_cm, "exchange_index", None),
+                                        "status": "open",
+                                    })
+                            except Exception as feed_exc:
+                                logger.debug(
+                                    "[CATALOG-METADATA-BACKFILL] market_id=%s state-store prime failed: %s",
+                                    fresh_cm.market.market_id, feed_exc,
+                                )
                             updated = True
                             break
                         else:
@@ -3416,7 +3462,50 @@ class KalshiMarketCatalog:
 
         # Return market with smallest minutes_to_expiry
         live_markets.sort(key=lambda m: m.minutes_to_expiry if hasattr(m, 'minutes_to_expiry') else float('inf'))
-        return live_markets[0]
+        selected = live_markets[0]
+        self._prime_state_store_metadata(selected)
+        return selected
+
+    def _prime_state_store_metadata(self, cm: "CatalogMarket") -> None:
+        """Push known strike/expiry metadata for a selected market into the
+        state store immediately.
+
+        The catalog refresh feed can lag a rollover by tens of seconds; a
+        newly selected 15m market must have ``floor_strike`` /
+        ``window_strike_price`` visible to ``is_market_entry_ready`` on the
+        same cycle it is selected.  Best-effort and idempotent — later REST
+        feeds overwrite with the same authoritative values.
+        """
+        try:
+            if cm.market is None or not getattr(cm.market, "market_id", None):
+                return
+            if cm.floor_strike is None and cm.strike_price is None:
+                return
+            store = getattr(self, "_state_store", None)
+            if store is None:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                store = get_kalshi_market_state_store()
+            existing = store.get(cm.market.market_id)
+            if existing is not None and (
+                getattr(existing, "floor_strike", None)
+                or getattr(existing, "window_strike_price", None)
+                or getattr(existing, "strike_price", None)
+            ):
+                return
+            store.apply_rest_market({
+                "ticker": cm.market.market_id,
+                "underlying": cm.asset,
+                "strike_price": cm.strike_price,
+                "floor_strike": cm.floor_strike,
+                "cap_strike": cm.cap_strike,
+                "exchange_index": getattr(cm, "exchange_index", None),
+                "status": "open",
+            })
+        except Exception as exc:
+            logger.debug(
+                "[CATALOG-METADATA-PRIME] ticker=%s state-store prime failed: %s",
+                getattr(getattr(cm, "market", None), "market_id", "?"), exc,
+            )
 
 
 async def validate_catalog_against_kalshi_api(
