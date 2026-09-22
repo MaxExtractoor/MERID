@@ -1,0 +1,92 @@
+=== TOP FAILURE SIGNATURES ===
+  321 | ModuleNotFoundError: No module named ?
+  163 | FileNotFoundError: [Errno 2] No such file or directory: ?
+   61 | RuntimeError: There is no current event loop in thread ?.
+   45 | AttributeError: ? object has no attribute ?
+   43 | AttributeError: module ? has no attribute ?
+   31 | AssertionError: assert ? in ?&#10; +  where ? = &lt;tests.test_loop_orchestration_ui.TestUseLoopOrchestrationHook object
+   30 | AttributeError: &lt;module ? from ?&gt; does not have the attribute ?
+   26 | AssertionError: Expected ? to have been called once. Called 0 times.
+   26 | AssertionError: Endpoint key ? missing from constants.ts&#10;assert ? in '// MERID Configuration Constants\n\n// Environ
+   23 | TypeError: CachedPosition.__init__() missing 1 required positional argument: ?
+   22 | UnicodeDecodeError: ? codec can't decode byte 0x90 in position 708755: character maps to &lt;undefined&gt;
+   21 | ValueError: too many values to unpack (expected 3)
+   20 | AssertionError: assert ? in ?&#10; +  where ? = &lt;tests.test_loop_orchestration_ui.TestLoopOrchestrationView object at
+   18 | AssertionError: assert ? in '// MERID Configuration Constants\n\n// Environment-based URLs - fallback for non-Vite envir
+   17 | assert None is not None
+   17 | AssertionError: ? not found in '&quot;&quot;&quot;Kalshi Continuous Trader — async server module.\n\nThis is the canonic
+   16 | AssertionError: assert ? in ?&#10; +  where ? = &lt;tests.test_loop_orchestration_ui.TestLoopPipelineDiagram object at 0
+   16 | KeyError: ?
+   14 | AssertionError: assert ? in ?&#10; +  where ? = &lt;tests.test_loop_orchestration_ui.TestStageHealthCards object at 0x00
+   14 | AttributeError: type object ? has no attribute ?
+   13 | assert True is False
+   13 | AssertionError: assert ? in ?&#10; +  where ? = &lt;tests.test_loop_orchestration_ui.TestWiringStatusPanel object at 0x0
+   12 | assert 401 == 200&#10; +  where 401 = &lt;Response [401 Unauthorized]&gt;.status_code
+   12 | TypeError: unsupported operand type(s) for -: ? and ?
+   11 | AssertionError: assert ? in ?&#10; +  where ? = &lt;tests.test_loop_orchestration_ui.TestLoopCadenceChart object at 0x00
+   11 | AssertionError: Missing file: web/react/src/views/ObservabilityView.tsx&#10;assert False&#10; +  where False = &lt;funct
+   10 | httpx.ConnectError: [WinError 10061] No connection could be made because the target machine actively refused it
+   10 | AssertionError: Missing file: web/react/src/hooks/useSLOMetrics.ts&#10;assert False&#10; +  where False = &lt;function i
+    9 | TypeError: ? not supported between instances of ? and ?
+    9 | TypeError: assert_exit_delta() got an unexpected keyword argument ?
+    9 | AssertionError: Missing file: web/react/src/hooks/useLiveOdds.ts&#10;assert False&#10; +  where False = &lt;function isf
+    9 | AssertionError: Missing file: web/react/src/views/BettingConsensusView.tsx&#10;assert False&#10; +  where False = &lt;fu
+    8 | AssertionError: assert ? in ?&#10; +  where ? = &lt;tests.test_loop_orchestration_ui.TestIntegration object at 0x000001D
+    7 | AssertionError: assert False&#10; +  where False = exists()&#10; +    where exists = WindowsPath(?).exists
+    7 | ValueError: substring not found
+    6 | assert ? in 'import React, { useState, useRef, useCallback, lazy, Suspense } from &quot;react&quot;;\nimport { QueryClie
+    6 | RuntimeError: Cannot transition directly from MOCK to LIVE. Switch to PAPER first and verify the system.
+    6 | Failed: DID NOT RAISE &lt;class ?&gt;
+    6 | AssertionError: assert ? in {}&#10; +  where {} = &lt;merid.event_venues.kalshi.position_cache.KalshiPositionCache objec
+    6 | AssertionError: assert ? in {}
+
+=== TOP ERROR SIGNATURES (non-IO) ===
+   36 | failed on setup with &quot;TypeError: create_app() got an unexpected keyword argument ?&quot;
+    8 | failed on setup with &quot;worker ? crashed while running ?&quot;
+    8 | failed on setup with &quot;AttributeError: module ? has no attribute ?&quot;
+    6 | failed on setup with &quot;ImportError: cannot import name ? from ? (C:\Dev\MERID\merid\trading\kalshi_continuous_trader
+    3 | failed on setup with &quot;ModuleNotFoundError: No module named ?&quot;
+
+=== TOP FAILING FILES ===
+   40 | tests.test_exit_fill_without_position_fix_2026_07_21.TestCrossAssetExitInvariant
+   32 | tests.test_loop_orchestration_ui.TestUseLoopOrchestrationHook
+   27 | tests.test_ui_robustness.TestAPIEndpointsCompleteness
+   24 | tests.test_capital_ladder.TestStructuralInvariants
+   21 | tests.test_loop_orchestration_ui.TestLoopOrchestrationView
+   18 | tests.test_loop_orchestration_ui.TestLoopPipelineDiagram
+   17 | tests.test_sprint42_displayname_timeouts.TestDisplayName
+   16 | tests.test_sprint41_react_memo.TestReactMemoWrapped
+   15 | tests.test_capital_ladder.TestRiskInvariants
+   15 | tests.test_capital_ladder.TestPerformanceInvariants
+   15 | tests.test_loop_orchestration_ui.TestStageHealthCards
+   14 | tests.test_loop_orchestration_ui.TestLoopCadenceChart
+   14 | tests.test_loop_orchestration_ui.TestWiringStatusPanel
+   13 | tests.test_kalshi_grid_wiring.TestKalshiGridViewComponent
+   12 | tests.test_exit_finalizer
+   12 | tests.test_kalshi_grid_wiring.TestSocialBroadcaster
+   11 | tests.test_cap_wiring_2026_08_03.TestTimeScaledSpreadCap
+   11 | tests.test_flow.TestFlowRisk
+   11 | tests.test_exit_fill_without_position_fix_2026_07_21.TestExitFillWithoutPositionFix
+   11 | tests.test_kalshi_grid_wiring.TestTradingAgentPersistence
+   11 | tests.test_live_odds_slo_viz.TestUseSLOMetricsHook
+   11 | tests.test_live_odds_slo_viz.TestObservabilityViewIntegration
+   10 | tests.test_loop_orchestration_ui.TestIntegration
+   10 | tests.test_trading_lifecycle_audit.TestC2RecordPnlWiredIntoWSFillHandler
+    9 | tests.test_prediction_audit_regressions.TestBUGL8_WarmingUpState
+
+=== TOP ERRORING FILES ===
+   47 | tests.test_agent_grid_15m_integration
+   40 | tests.test_allocator_exit_instrumentation
+   38 | tests.risk.test_crypto_term_structure
+   30 | tests.test_production_startup_validation
+   23 | tests.test_performance_metrics
+   23 | tests.test_spread_cap_regression
+   22 | tests.test_quantitative_gates.TestQuantitativeGates
+   22 | tests.test_kalshi_only_profile.TestKalshiOnlyProfile
+   21 | tests.test_pipeline_blocker_analysis.TestTradingPipelineAnalyzer
+   21 | tests.test_sprint25_keyboard_a11y.TestKeyboardA11yViews
+   20 | tests.test_betting.TestBettingModels
+   18 | tests.test_sprint20_loading_states.TestLoadingStatePresent
+   17 | tests.test_blockchain_v2.TestWalletService
+   17 | tests.test_blockchain_v2.TestComplianceRegistry
+   16 | tests.test_blockchain_v2.TestBlockchainGateway

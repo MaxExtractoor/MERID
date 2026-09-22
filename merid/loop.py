@@ -546,7 +546,9 @@ class MeridLoop:
             import json
             from datetime import datetime
             
-            snapshot_dir = Path("data/profile_snapshots")
+            snapshot_dir = Path(
+                os.environ.get("MERID_PROFILE_SNAPSHOTS_DIR", "data/profile_snapshots")
+            )
             snapshot_dir.mkdir(parents=True, exist_ok=True)
             
             # Save with timestamp

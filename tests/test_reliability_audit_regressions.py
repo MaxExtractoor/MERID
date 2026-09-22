@@ -17,15 +17,18 @@ Test classes (one per bug):
 
 All tests are static (no running server, no live API calls).
 
-NOTE: This test file is skipped because it tests reliability audit fixes that are
-unrelated to the Kalshi config migration task. These tests require settings fields
-and legacy config fields that are not part of the config migration scope.
+2026-09-22 audit: the file was blanket-skipped during an unrelated config
+migration ("unrelated to config migration"), concealing 66 passing regression
+tests and 9 real failures. The skip was removed and each failure classified:
+BUG-01 fixed by wiring _load_kalshi_settings to merid.settings and adding the
+missing KALSHI_MAX_RETRIES field; BUG-02 record_failure tests deleted as
+obsolete (contract deliberately rejected by the documented STARTUP FIX in
+client.py::_authenticate_password); BUG-04/06/08 source-grep assertions updated
+to match evolved implementations; BUG-07 FakeLoop fixed for create_task(name=).
 """
 from __future__ import annotations
 
 import pytest
-
-pytestmark = pytest.mark.skip(reason="Tests reliability audit fixes unrelated to config migration")
 
 import asyncio
 import json
@@ -62,38 +65,32 @@ class TestBUG01_ResilienceConstantsFromSettings:
     """client.py must load KALSHI_MAX_RETRIES, KALSHI_CIRCUIT_FAILURE_THRESHOLD, etc.
     from merid.settings at import time, not hardcode them as bare literals."""
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_settings_has_kalshi_max_retries(self):
         src = _src(SETTINGS_SRC)
         assert "KALSHI_MAX_RETRIES" in src, (
             "BUG-01: KALSHI_MAX_RETRIES field not found in merid/settings.py"
         )
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_settings_has_circuit_failure_threshold(self):
         src = _src(SETTINGS_SRC)
         assert "KALSHI_CIRCUIT_FAILURE_THRESHOLD" in src, (
             "BUG-01: KALSHI_CIRCUIT_FAILURE_THRESHOLD field not found in merid/settings.py"
         )
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_settings_has_circuit_recovery_timeout(self):
         src = _src(SETTINGS_SRC)
         assert "KALSHI_CIRCUIT_RECOVERY_TIMEOUT" in src
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_settings_has_max_concurrent_requests(self):
         src = _src(SETTINGS_SRC)
         assert "KALSHI_MAX_CONCURRENT_REQUESTS" in src
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_settings_has_per_operation_timeout_fields(self):
         src = _src(SETTINGS_SRC)
         for field in ("KALSHI_CONNECT_TIMEOUT", "KALSHI_READ_TIMEOUT",
                       "KALSHI_WRITE_TIMEOUT", "KALSHI_POOL_TIMEOUT"):
             assert field in src, f"BUG-01/04: {field} field not found in merid/settings.py"
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_client_loads_from_settings_at_module_level(self):
         src = _src(CLIENT_SRC)
         # The try/except block that imports from merid.settings must be present
@@ -101,7 +98,6 @@ class TestBUG01_ResilienceConstantsFromSettings:
             "BUG-01: client.py does not load from merid.settings at module level"
         )
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_client_has_fallback_defaults(self):
         src = _src(CLIENT_SRC)
         # Must have an except block with literal fallbacks for test environments
@@ -109,7 +105,6 @@ class TestBUG01_ResilienceConstantsFromSettings:
             "BUG-01: fallback literal for KALSHI_MAX_RETRIES not found in client.py"
         )
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_settings_fields_are_pydantic_field(self):
         src = _src(SETTINGS_SRC)
         # Each resilience field must use Field(default=...) not bare assignment
@@ -119,7 +114,6 @@ class TestBUG01_ResilienceConstantsFromSettings:
             "BUG-01: KALSHI_MAX_RETRIES must be typed Pydantic Field, not bare assignment"
         )
 
-    @pytest.mark.skip(reason="Settings fields not present - unrelated to config migration")
     def test_settings_resilience_values_are_reasonable_defaults(self):
         """Smoke-import the Settings class and verify default values are sensible."""
         from merid.settings import Settings
@@ -142,21 +136,17 @@ class TestBUG02_AuthPasswordCircuitFailure:
     """_authenticate_password's except clause must include httpx.HTTPStatusError
     and call self._circuit_breaker.record_failure(e)."""
 
-    @pytest.mark.skip(reason="Code pattern check unrelated to config migration")
     def test_http_status_error_in_except_clause(self):
         src = _src(CLIENT_SRC)
         assert "httpx.HTTPStatusError" in src, (
             "BUG-02: httpx.HTTPStatusError not caught in client.py"
         )
 
-    @pytest.mark.skip(reason="Code pattern check unrelated to config migration")
-    def test_record_failure_called_on_auth_error(self):
-        src = _src(CLIENT_SRC)
-        assert "_circuit_breaker.record_failure" in src, (
-            "BUG-02: _circuit_breaker.record_failure not called on auth error"
-        )
+    # NOTE (2026-09-22 audit): the record_failure-on-auth-error contract was
+    # deliberately removed by the STARTUP FIX in client.py::_authenticate_password
+    # (concurrent agent auth during startup would trip the circuit and block all
+    # trading). The two tests asserting that contract were deleted as obsolete.
 
-    @pytest.mark.skip(reason="Code pattern check unrelated to config migration")
     def test_except_clause_includes_both_error_types(self):
         src = _src(CLIENT_SRC)
         lines = src.splitlines()
@@ -166,48 +156,12 @@ class TestBUG02_AuthPasswordCircuitFailure:
             "BUG-02: no 'except ... httpx.HTTPStatusError' line found in client.py"
         )
 
-    @pytest.mark.skip(reason="Code pattern check unrelated to config migration")
     def test_bug02_bitmask_comment_present(self):
         src = _src(CLIENT_SRC)
         assert "BUG-2" in src, (
             "BUG-02: fix comment 'BUG-2' not found in client.py"
         )
 
-    @pytest.mark.skip(reason="Requires KalshiConfig with email/password - unified config doesn't support these fields")
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_record_failure_called_on_http_status_error(self):
-        """Integration: HTTPStatusError during auth must invoke record_failure."""
-        import httpx
-        from merid.event_venues.kalshi.kalshi_config import KalshiConfig
-
-        cfg = KalshiConfig(email="user@test.com", password="pass", env="demo")
-
-        with patch("merid.event_venues.kalshi.client.get_circuit_breaker") as mock_get_cb:
-            mock_cb = MagicMock()
-            mock_cb.record_failure = AsyncMock()
-            mock_get_cb.return_value = mock_cb
-
-            from merid.event_venues.kalshi import client as _client_mod
-            from merid.event_venues.kalshi.client import KalshiVenueClient
-
-            client = KalshiVenueClient(config=cfg)
-            client._circuit_breaker = mock_cb
-
-            # Simulate an HTTP client that raises HTTPStatusError on POST
-            mock_response = MagicMock()
-            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-                "401 Unauthorized",
-                request=MagicMock(),
-                response=MagicMock(status_code=401),
-            )
-            mock_http = AsyncMock()
-            mock_http.post = AsyncMock(return_value=mock_response)
-            client._http_client = mock_http
-
-            with pytest.raises(httpx.HTTPStatusError):
-                await client._authenticate_password()
-
-            mock_cb.record_failure.assert_called_once()
 
 
 # =============================================================================
@@ -371,9 +325,10 @@ class TestBUG04_PerOperationTimeouts:
 
     def test_timeout_vars_sourced_from_settings_block(self):
         src = _src(CLIENT_SRC)
-        assert "_KALSHI_CONNECT_TIMEOUT: float = _s.KALSHI_CONNECT_TIMEOUT" in src, (
-            "BUG-04: _KALSHI_CONNECT_TIMEOUT not loaded from settings"
-        )
+        import re
+        assert re.search(
+            r"_KALSHI_CONNECT_TIMEOUT\s*(?::\s*float)?\s*=\s*_s\.KALSHI_CONNECT_TIMEOUT", src
+        ), "BUG-04: _KALSHI_CONNECT_TIMEOUT not loaded from settings"
 
     @pytest.mark.asyncio
     async def test_new_http_client_uses_timeout_object(self):
@@ -564,9 +519,12 @@ class TestBUG06_WSReconnectSubscriptionSplit:
 
     def test_no_old_startswith_orderbook_filter(self):
         src = _src(WS_SRC)
-        # Old buggy pattern: [s for s in self._subscriptions if not s.startswith("orderbook:")]
-        assert 'if not s.startswith("orderbook:")' not in src, (
-            "BUG-06: old subscription filter 'not s.startswith(\"orderbook:\")' still in _reconnect"
+        # Old buggy pattern dropped every "orderbook:" subscription on resubscribe.
+        # The fixed filter may still reference startswith("orderbook:") but only to
+        # KEEP orderbook subs whose ticker is in keep_tickers_set.
+        assert 's.replace("orderbook:", "") in keep_tickers_set' in src, (
+            "BUG-06: _reconnect does not retain orderbook subscriptions for kept "
+            "tickers (keep_tickers_set refinement missing)"
         )
 
     def test_subscribe_quotes_tracks_both_sets_independently(self):
@@ -691,8 +649,9 @@ class TestBUG07_RateLimitedBackoffNotReconnect:
         scheduled = []
 
         class FakeLoop:
-            def create_task(self, coro):
+            def create_task(self, coro, **kwargs):
                 scheduled.append(coro)
+                coro.close()  # fake loop never runs it — close to avoid "never awaited" warning
                 return MagicMock()
 
         with patch("asyncio.get_running_loop", return_value=FakeLoop()):
@@ -755,18 +714,22 @@ class TestBUG08_JsonFormatterTradingDimensions:
     def test_loop_calls_set_task_context_in_tick(self):
         src = _src(LOOP_SRC)
         lines = src.splitlines()
+        # tick() delegates to _tick_body(); scan the tick implementation region,
+        # i.e. everything from `async def tick(` through the end of `_tick_body`.
         in_tick = False
         found_call = False
         for line in lines:
-            if "async def tick(" in line:
+            if "async def tick(" in line or "async def _tick_body(" in line:
                 in_tick = True
-            if in_tick and "async def " in line and "async def tick(" not in line:
+                continue
+            if in_tick and "async def " in line and "tick" not in line:
                 break
             if in_tick and "set_task_context(" in line:
                 found_call = True
                 break
         assert found_call, (
-            "BUG-08: set_task_context() not called inside MeridLoop.tick()"
+            "BUG-08: set_task_context() not called inside MeridLoop tick path "
+            "(tick() or _tick_body())"
         )
 
     def test_json_formatter_venue_from_contextvar(self):

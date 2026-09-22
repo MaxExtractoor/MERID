@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -238,7 +239,9 @@ class RiskGuard:
         self._hourly_trades: List[float] = []
 
         # T-054: Persist drawdown state
-        self._risk_state_path = Path("data/risk_state.json")
+        self._risk_state_path = Path(
+            os.environ.get("MERID_RISK_STATE_PATH", "data/risk_state.json")
+        )
         self._load_risk_state()
 
         logger.info("RiskGuard initialized")

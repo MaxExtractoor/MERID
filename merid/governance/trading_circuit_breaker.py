@@ -25,12 +25,16 @@ logger = get_logger("trading_circuit_breaker")
 
 # HTTP fills are operationally live only if their exchange timestamp is newer
 # than the persisted watermark from the last successful reconciliation.
-HTTP_FILL_WATERMARK_PATH = Path("data") / "trading_circuit_breaker_http_watermark.json"
+HTTP_FILL_WATERMARK_PATH = Path(
+    os.environ.get("MERID_CB_HTTP_WATERMARK_PATH", "data/trading_circuit_breaker_http_watermark.json")
+)
 
 # Durable halt incident record.  A halt must survive process restart: restarting
 # is not a recovery procedure, so the incident is reloaded on boot and only
 # cleared by admin_release() or a verified auto-recovery.
-HALT_STATE_PATH = Path("data") / "trading_circuit_breaker_halt.json"
+HALT_STATE_PATH = Path(
+    os.environ.get("MERID_CB_HALT_STATE_PATH", "data/trading_circuit_breaker_halt.json")
+)
 
 # Allow grace for an unmatched fill to be matched against a recently submitted
 # but not-yet-persisted intent before the breaker trips.

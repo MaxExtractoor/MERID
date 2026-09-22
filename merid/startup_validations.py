@@ -1204,7 +1204,9 @@ def validate_no_test_fills_in_database() -> None:
     """
     log_startup_phase("validate_no_test_fills_in_database", "merid.startup_validations")
     
-    db_path = Path("data/kalshi_fills.db")
+    db_path = Path(
+        os.environ.get("MERID_FILLS_DB_PATH", "data/kalshi_fills.db")
+    )
     if not db_path.exists():
         logger.info("TEST-FILLS-DB: No fills database found (clean state)")
         return

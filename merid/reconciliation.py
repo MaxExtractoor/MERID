@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -38,7 +39,9 @@ from utils.logger import get_logger
 logger = get_logger("merid.reconciliation")
 
 # Persist last reconciliation report for debugging
-_REPORT_PATH = Path("data/reconciliation_report.json")
+_REPORT_PATH = Path(
+    os.environ.get("MERID_RECONCILIATION_REPORT_PATH", "data/reconciliation_report.json")
+)
 
 # Module-level cache of last reconciliation result — protected by _recon_lock
 _recon_lock = threading.Lock()

@@ -322,3 +322,72 @@ def test_current_edge_reversal_vetoed_observe_only():
     assert record["reject_reason"] == "discretionary_exit_observe_only"
     assert record["limit_cents"] == 82  # recorded for replay
     assert record["projected_net_pnl_cents"] > 0  # worst-case (82-74) minus fees
+
+
+def _break_position_cache(mp):
+    """Force the canonical position check inside the guard to raise.
+
+    Takes a ``monkeypatch.context()`` manager, not the fixture itself: the
+    conftest teardown fixture also calls ``get_position_cache`` and would hit
+    the patched-in exception if the patch outlived the test body.
+    """
+    def _boom():
+        raise RuntimeError("position cache unavailable")
+
+    mp.setattr(
+        "merid.event_venues.kalshi.position_cache.get_position_cache", _boom
+    )
+
+
+def test_discretionary_exit_fails_closed_on_cache_error(monkeypatch):
+    """A cache/reconciliation error must never produce a discretionary submit."""
+    with monkeypatch.context() as m:
+        _break_position_cache(m)
+        position = _make_position()
+        state = _make_state(no_bid=84, no_ask=86)
+
+        approved, _price, record, _did = _run_guard(
+            position, "take_profit", exit_price_cents=84, state=state
+        )
+
+    assert approved is False
+    assert record["status"] == "rejected"
+    assert record["reject_reason"] == "canonical_position_check_unavailable"
+    assert record["exit_class"] == "discretionary"
+
+
+def test_unknown_reason_fails_closed_on_cache_error(monkeypatch):
+    """Unclassified reasons also fail closed when canonical state is unreadable."""
+    with monkeypatch.context() as m:
+        _break_position_cache(m)
+        position = _make_position()
+        state = _make_state(no_bid=84, no_ask=86)
+
+        approved, _price, record, _did = _run_guard(
+            position, "totally_unmapped_reason", exit_price_cents=50, state=state
+        )
+
+    assert approved is False
+    assert record["status"] == "rejected"
+    assert record["reject_reason"] == "canonical_position_check_unavailable"
+    assert record["exit_class"] == "unknown"
+
+
+def test_operational_exit_fails_open_to_intent_contract_on_cache_error(monkeypatch):
+    """Operational exits keep defense-in-depth: cache failure defers to the
+    intent contract's authoritative signed-YES revalidation, so the guard must
+    continue to its downstream checks (here: stale_quote rejection)."""
+    with monkeypatch.context() as m:
+        _break_position_cache(m)
+        position = _make_position()
+        # "stale_data" canonicalizes to "reconciliation" (OPERATIONAL).
+        state = _make_state(no_bid=42, no_ask=44, age_ms=12_264)
+
+        approved, _price, record, _did = _run_guard(
+            position, "stale_data", exit_price_cents=36, state=state
+        )
+
+    assert approved is False
+    # Reached the quote-freshness gate -> the cache error did not block or approve.
+    assert record["reject_reason"] == "stale_quote"
+    assert record["exit_reason_canonical"] == "reconciliation"

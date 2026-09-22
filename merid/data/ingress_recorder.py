@@ -44,7 +44,9 @@ class IngressRecorderConfig:
     """Runtime configuration for the ingress recorder."""
 
     enabled: bool = False
-    base_dir: Path = Path("data/ingress")
+    base_dir: Path = Path(
+        os.environ.get("MERID_INGRESS_DIR", "data/ingress")
+    )
     queue_size: int = 100_000
     rotation_minutes: int = 60
     rotation_bytes: int = 1_000_000_000  # 1 GB

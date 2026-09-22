@@ -3752,7 +3752,7 @@ class KalshiWebSocketBridge:
                     action=(
                         getattr(row, 'canonical_position_action', None)
                         or getattr(row, 'action', '')
-                        or 'buy'
+                        or ''
                     ).lower(),
                     is_exit=getattr(row, 'is_exit', None),
                     canonicalization_state=getattr(row, 'canonicalization_state', None),
@@ -5306,24 +5306,31 @@ class KalshiWebSocketBridge:
                         "side": fill_side,
                         "price_cents": int(fill.get("price", 0) * 100),
                         "count": int(fill.get("count") or fill.get("contracts", 1)),
-                        "action": fill.get("action", "buy"),
+                        "action": str(fill.get("action") or "").lower(),
                         "ts": fill.get("created_time") or fill.get("ts"),
                         "client_order_id": fill.get("client_order_id"),
                     }
-                    
+                    # Fail-closed: never fabricate a buy for a missing action.
+                    if ws_fill["action"] not in ("buy", "sell"):
+                        logger.error(
+                            "[WS-BRIDGE-ACTION-INVALID] Discarding fill with missing/invalid action: %s",
+                            fill.get("action"),
+                        )
+                        continue
+
                     # Ingest into fills ledger
                     is_new = await ledger.ingest_ws_fill(ws_fill)
                     if is_new:
                         new_fill_count += 1
                     else:
                         duplicate_count += 1
-                        
+
                 except Exception as fill_exc:
                     logger.debug(
                         "[WS-RECONNECT-SYNC] Error processing REST fill: %s",
                         fill_exc
                     )
-            
+
             logger.info(
                 "[WS-RECONNECT-SYNC] REST sync complete: %d new fills, %d duplicates",
                 new_fill_count, duplicate_count
@@ -5387,11 +5394,18 @@ async def _sync_fills_with_rest_on_reconnect(self) -> None:
                     "side": fill_side,
                     "price_cents": int(fill.get("price", 0) * 100),
                     "count": int(fill.get("count") or fill.get("contracts", 1)),
-                    "action": fill.get("action", "buy"),
+                    "action": str(fill.get("action") or "").lower(),
                     "ts": fill.get("created_time") or fill.get("ts"),
                     "client_order_id": fill.get("client_order_id"),
                 }
-                
+                # Fail-closed: never fabricate a buy for a missing action.
+                if ws_fill["action"] not in ("buy", "sell"):
+                    logger.error(
+                        "[WS-BRIDGE-ACTION-INVALID] Discarding fill with missing/invalid action: %s",
+                        fill.get("action"),
+                    )
+                    continue
+
                 # Ingest into fills ledger
                 is_new = await ledger.ingest_ws_fill(ws_fill)
                 if is_new:

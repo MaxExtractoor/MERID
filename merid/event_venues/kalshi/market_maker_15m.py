@@ -316,19 +316,27 @@ class MarketMaker15m:
         price = self.config.phase2_price_cents
         size = self.config.phase2_contracts
         
-        # Determine winning side based on current market price
-        # If YES ask < 50c, market favors YES (buy YES)
-        # If NO ask < 50c, market favors NO (buy NO)
-        # Default to YES if no clear signal
-        side = "yes"
+        # Determine winning side based on current market price.
+        # If YES ask < 50c, market favors YES (buy YES).
+        # If NO ask < 50c, market favors NO (buy NO).
+        # If neither side has a clear signal, emit NO directional quote —
+        # fabricating a YES side here would place an unjustified directional
+        # entry on a coin-flip market (dangerous-default defect class).
         if yes_ask and yes_ask < 50:
             side = "yes"
         elif no_ask and no_ask < 50:
             side = "no"
-        
+        else:
+            logger.info(
+                "[MM-15M-PHASE2] No directional signal for %s (yes_ask=%s no_ask=%s); "
+                "no quote generated",
+                ticker, yes_ask, no_ask,
+            )
+            return quotes
+
         # Clamp to valid range
         price = max(10, min(75, price))
-        
+
         quotes.append(Quote(ticker, side, "buy", price, size, MarketMakingPhase.PHASE2_DIRECTIONAL))
         
         logger.info(

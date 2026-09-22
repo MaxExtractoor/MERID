@@ -2158,9 +2158,39 @@ def _run_exit_price_guard(
             )
             return False, exit_price_cents, record, decision_id
     except Exception as exc:
-        # Fail open to the existing downstream gates rather than blocking a real
-        # exit when the cache is momentarily unavailable.
-        logger.debug("[EXIT-GUARD] canonical position check unavailable: %s", exc)
+        # Class-aware failure handling (2026-09-21): a cache/reconciliation
+        # error must never produce a discretionary submit.  Discretionary and
+        # unclassified exits fail closed here; only operational/emergency exits
+        # (reconciliation, manual, expiry liquidation, hard risk) may fall
+        # through to the intent contract's authoritative signed-YES
+        # revalidation, which remains defense in depth — not authorization.
+        _orig, _canon = _canonicalize_exit_reason(exit_reason)
+        _exc_class = classify_canonical_reason(_canon)
+        if _exc_class not in (ExitClass.OPERATIONAL, ExitClass.EMERGENCY):
+            record.update({
+                "status": "rejected",
+                "reject_reason": "canonical_position_check_unavailable",
+                "exit_reason_original": _orig,
+                "exit_reason_canonical": _canon,
+                "exit_class": _exc_class.value,
+            })
+            persist_order_decision(record)
+            logger.critical(
+                "[EXIT-GUARD-REJECT] position=%s market=%s reason=%s - "
+                "Canonical position check failed for %s exit; failing closed: %s",
+                (getattr(position, "position_id", "") or "")[:8],
+                getattr(position, "market_id", None),
+                _canon,
+                _exc_class.value,
+                exc,
+            )
+            return False, exit_price_cents, record, decision_id
+        logger.warning(
+            "[EXIT-GUARD] canonical position check unavailable for %s exit "
+            "(fail-open to intent-contract validation): %s",
+            _exc_class.value,
+            exc,
+        )
 
     original, canonical = _canonicalize_exit_reason(exit_reason)
     record["exit_reason_original"] = original
@@ -5429,11 +5459,15 @@ async def _run_loop(self) -> None:
                                                 else:
                                                     price_cents = yes_mid
                                 if price_cents <= 0:
-                                    logger.warning(
-                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 42c placeholder (midpoint of 10-75c canonical range)",
+                                    # CRITICAL FIX (2026-09-21): no real price means no
+                                    # honest size either — the old 42c placeholder sized
+                                    # orders against a fabricated coordinate.  Skip the
+                                    # candidate instead.
+                                    logger.error(
+                                        "[15m-LOOP] No real price available for sizing ticker=%s - SKIPPING (no fabricated price)",
                                         ticker
                                     )
-                                    price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                                    continue
                                 
                                 # Get edge, confidence, and model_prob from candidate
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
@@ -8078,6 +8112,19 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             logger.warning("[15M-LOOP] Candidate missing ticker, skipping")
             return False
 
+        # CRITICAL FIX (2026-09-21): Reject missing side/action up-front.  The
+        # canonical-range and exit-policy code below used `or "yes"` defaults;
+        # the rejection at OrderIntent construction still caught it, but every
+        # downstream use of candidate["side"] must assume it is valid.
+        if not candidate.get("side") or not candidate.get("action"):
+            self._rejection_counters["other"] += 1
+            logger.warning(
+                "[15M-LOOP] REJECTING CANDIDATE: missing side=%s or action=%s for ticker=%s - "
+                "preventing systematic YES bias by rejecting incomplete data",
+                candidate.get("side"), candidate.get("action"), ticker
+            )
+            return False
+
         # 2026-08-29: Extract the authoritative TradeDecision up-front.  The EV
         # gate approved a specific executable price and quantity; the order must
         # not drift to a different price downstream.
@@ -8215,9 +8262,20 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         from merid.event_venues.kalshi.binary_price_space import (
             is_price_in_canonical_range,
             get_canonical_price_range,
+            _try_parse_side,
         )
 
-        _candidate_side = (candidate.get("side") or "yes").lower()
+        # Side was already required non-empty up-front; here it must also parse
+        # to a canonical outcome (yes/no or buy_*/sell_* alias).  An unparsable
+        # side must reject — never fabricate "yes" for the range check.
+        _candidate_side = _try_parse_side(candidate.get("side"))
+        if _candidate_side is None:
+            self._rejection_counters["other"] += 1
+            logger.warning(
+                "[15M-LOOP] REJECTING CANDIDATE: unparsable side=%r for ticker=%s",
+                candidate.get("side"), ticker,
+            )
+            return False
         _candidate_price_cents = int(candidate.get("price_cents", 0) or 0)
         min_price_cents, max_price_cents = get_canonical_price_range(_candidate_side)
         if (
@@ -8268,8 +8326,11 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             price_cents = max(min_price_cents, min(max_price_cents, raw_price_cents))
                             logger.info("[15M-LOOP] ticker=%s NO order: YES_mid_cents=%.2f -> NO_mid=%d (raw=%d, clamped=%d)", ticker, market_state.mid_cents, price_cents, raw_price_cents, price_cents)
                         else:
-                            logger.warning("[15M-LOOP] NO order but no market state data for %s, using default 42c", ticker)
-                            price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                            # CRITICAL FIX (2026-09-21): missing executable NO price must
+                            # fail closed; the old 42c default fabricated an economic
+                            # coordinate that could reach the exchange.
+                            logger.error("[15M-LOOP] NO order but no market state data for %s - REJECTING (no fabricated price)", ticker)
+                            return False
                     else:
                         # YES order: use YES mid-price
                         if market_state.mid_cents:
@@ -8286,14 +8347,19 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             price_cents = max(min_price_cents, min(max_price_cents, raw_price_cents))
                             logger.info("[15M-LOOP] ticker=%s YES order: price_cents from bid/ask mid=%d (raw=%d, clamped=%d) (bid=%d, ask=%d)", ticker, price_cents, raw_price_cents, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
                         else:
-                            logger.warning("[15M-LOOP] YES order but no market state data for %s, using default 42c", ticker)
-                            price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                            # CRITICAL FIX (2026-09-21): missing executable YES price
+                            # must fail closed; never fabricate a price.
+                            logger.error("[15M-LOOP] YES order but no market state data for %s - REJECTING (no fabricated price)", ticker)
+                            return False
                 else:
-                    logger.warning("[15M-LOOP] No market state available for %s, using default 42c", ticker)
-                    price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                    # CRITICAL FIX (2026-09-21): missing market state means no
+                    # executable price exists; the old 42c default could place a
+                    # live order at a fabricated coordinate.
+                    logger.error("[15M-LOOP] No market state available for %s - REJECTING (no fabricated price)", ticker)
+                    return False
             except Exception as e:
-                logger.warning("[15M-LOOP] Failed to get price from market state for %s: %s", ticker, e)
-                price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
+                logger.error("[15M-LOOP] Failed to get price from market state for %s: %s - REJECTING (no fabricated price)", ticker, e)
+                return False
 
         # Kalshi prices are whole cents; normalize any float/numpy scalar that may
         # have leaked through from market-state arithmetic before building the intent.
@@ -8312,11 +8378,15 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "net_edge_cents": edge_cents,
                     "confidence": float(confidence) if confidence is not None else 0.5,
                 }
-            _side_for_policy = candidate.get("side", "yes") or "yes"
+            _side_for_policy = _try_parse_side(candidate.get("side"))
+            if _side_for_policy is None:
+                raise ValueError(
+                    f"unparsable candidate side {candidate.get('side')!r} for ticker={ticker}"
+                )
             strip_context = {
                 "entry_price_cents": price_cents,
                 "entry_model_probability": float(model_prob) if model_prob is not None else None,
-                "thesis_side": str(_side_for_policy).lower(),
+                "thesis_side": _side_for_policy,
             }
             exit_policy = resolve_exit_policy(
                 edge_result=edge_result,

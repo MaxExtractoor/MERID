@@ -47,11 +47,30 @@ def _read(path: Path) -> str:
         return ""
 
 
+# AUDIT-2026-09-22-04: The Sprint-12 cognitive UI was never implemented in
+# this tree — none of the React files (CognitiveView, useCognitive,
+# useRealityDebug, RealityDebugPanel, RegimeTagCloud, HypothesisTimeline)
+# have any git history, constants.ts defines no COGNITIVE endpoints, and
+# web/main.py never mounts cognitive_api.  Only the orphan backend modules
+# (merid/cognitive/*, web/api/cognitive_api.py) exist.  strict xfail keeps
+# the spec executable: if the UI lands, XPASS forces cleanup.  Expiry
+# 2026-10-15 — if the feature is abandoned by then, delete these classes.
+_UI_UNIMPLEMENTED = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "DEFECT AUDIT-2026-09-22-04: Sprint-12 cognitive UI frontend and API "
+        "wiring never implemented (React files absent, no constants, router "
+        "not mounted). Expiry 2026-10-15."
+    ),
+)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # §1  Endpoint Constants
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestEndpointConstants:
     """Verify all cognitive layer constants are defined."""
 
@@ -102,6 +121,7 @@ class TestEndpointConstants:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestUseCognitiveHook:
     """Verify useCognitive hook structure, types, and exports."""
 
@@ -237,6 +257,7 @@ class TestUseCognitiveHook:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestUseRealityDebugHook:
     """Verify useRealityDebug hook structure, types, and exports."""
 
@@ -425,6 +446,7 @@ class TestUseRealityDebugHook:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestRealityDebugPanel:
     """Verify reality debug panel component structure."""
 
@@ -506,6 +528,7 @@ class TestRealityDebugPanel:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestRegimeTagCloud:
     """Verify regime tag cloud component structure."""
 
@@ -589,6 +612,7 @@ class TestRegimeTagCloud:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestHypothesisTimeline:
     """Verify hypothesis timeline component structure."""
 
@@ -676,6 +700,7 @@ class TestHypothesisTimeline:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestCognitiveView:
     """Verify the main view assembles all components correctly."""
 
@@ -890,6 +915,7 @@ class TestCognitiveView:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestNavigationWiring:
     """Verify App.tsx and Sidebar.tsx are wired correctly."""
 
@@ -1024,6 +1050,7 @@ class TestBackendAPIs:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_UI_UNIMPLEMENTED
 class TestIntegration:
     """Cross-file consistency checks."""
 

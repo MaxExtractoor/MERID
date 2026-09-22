@@ -1063,9 +1063,9 @@ class Settings(BaseSettings):
     # hardware + spotty internet. Circuit opens after 20 failures (was 10), longer
     # timeouts for slow connections, extended recovery periods.
     # =============================================================================
+    KALSHI_MAX_RETRIES: int = Field(default=3, description="Max HTTP retry attempts per request")
     KALSHI_BACKOFF_BASE: float = Field(default=2.0, description="Exponential backoff base (seconds)")
     KALSHI_CIRCUIT_FAILURE_THRESHOLD: int = Field(default=20, description="Failures before circuit opens (was 10, now 20)")
-    KALSHI_CIRCUIT_RECOVERY_TIMEOUT: float = Field(default=60.0, description="Seconds before circuit tries half-open (was 30, now 60)")
     KALSHI_CIRCUIT_RECOVERY_TIMEOUT: float = Field(default=60.0, description="Seconds before circuit tries half-open (was 30, now 60)")
     KALSHI_MAX_CONCURRENT_REQUESTS: int = Field(default=10, description="Max concurrent HTTP requests to Kalshi API")
     KALSHI_CONNECT_TIMEOUT: float = Field(default=15.0, description="TCP connect timeout (seconds) (was 10, now 15) - BUG-FIX (2026-05-07)")
@@ -1136,6 +1136,14 @@ class Settings(BaseSettings):
                 logger.info(
                     "[RISK-CONFIG] Replay mode: skipping live Kalshi balance fetch; "
                     "balance must be provided by the tape config snapshot or settings."
+                )
+                kalshi_balance = 0.0
+            elif self.MERID_ENV.lower() in ("testing", "test"):
+                # Tests must never hit the live Kalshi API or consume real
+                # credentials at import time.
+                logger.info(
+                    "[RISK-CONFIG] Test environment: skipping live Kalshi "
+                    "balance fetch; bankroll fixtures provide capital."
                 )
                 kalshi_balance = 0.0
             else:

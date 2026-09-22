@@ -166,7 +166,7 @@ class RealTimePnLComputer:
         return PnLUpdate(
             ticker=position.ticker,
             unrealized_pnl_cents=unrealized_pnl_cents,
-            unrealized_pnl_usd=unrealized_pnl_cents / 100.0,
+            unrealized_pnl_usd=float(unrealized_pnl_cents) / 100.0,
             mark_price_cents=mark_price_cents,
             quantity=position.quantity,
             avg_entry_price_cents=position.avg_entry_price_cents,
@@ -207,7 +207,7 @@ class RealTimePnLComputer:
         return PortfolioPnLUpdate(
             account_id=account_id,
             total_unrealized_pnl_cents=total_unrealized_pnl_cents,
-            total_unrealized_pnl_usd=total_unrealized_pnl_cents / 100.0,
+            total_unrealized_pnl_usd=float(total_unrealized_pnl_cents) / 100.0,
             position_updates=position_updates,
         )
     

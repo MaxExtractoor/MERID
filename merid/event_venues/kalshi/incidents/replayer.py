@@ -146,7 +146,7 @@ def load_scenario(path: Path) -> IncidentScenario:
             IncidentPosition(
                 market_id=p["market_id"],
                 series_ticker=p.get("series_ticker", ""),
-                side=p.get("side", "yes"),
+                side=p.get("side") or "",
                 size=p.get("size", 1),
                 avg_entry_price_cents=int(p.get("avg_entry_price_cents", 0)),
                 entry_fill_price_cents=int(p.get("entry_fill_price_cents", 0)),

@@ -324,15 +324,27 @@ class KalshiTrader:
             # Close by selling the held side
             side = "sell" if pos.size > 0 else "buy"
             size = abs(pos.size)
-            outcome = pos.outcome_id or "yes"
-            
+            # CRITICAL FIX (2026-09-21): a missing outcome must not default to
+            # "yes" — closing an unknown-side position as YES would sell the
+            # wrong leg and *increase* NO exposure instead of reducing it.
+            outcome = (pos.outcome_id or "").lower()
+            if outcome not in ("yes", "no"):
+                logger.error(
+                    "close_position: position on %s has undetermined outcome_id=%r - SKIPPING close (no fabricated direction)",
+                    ticker, getattr(pos, "outcome_id", None),
+                )
+                continue
+
             # PRODUCTION-FIX: Use actual market price from KalshiMarketStateStore instead of hardcoded 50c
+            # CRITICAL FIX (2026-09-21): mid_cents is the YES mid; a NO position's
+            # own-side price is the complement (100 - yes_mid).  Quoting a NO
+            # order in YES space prices the close at the wrong coordinate.
             price_est = 50  # Fallback if market state unavailable
             try:
                 from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                 state = get_kalshi_market_state_store().get_unified(ticker)
                 if state and state.mid_cents > 0:
-                    price_est = state.mid_cents
+                    price_est = state.mid_cents if outcome == "yes" else (100 - int(round(state.mid_cents)))
             except Exception as _exc:
                 logger.debug("close_position: failed to fetch market state for %s, using 50c fallback: %s", ticker, _exc)
             

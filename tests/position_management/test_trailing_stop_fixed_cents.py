@@ -26,6 +26,7 @@ class TestTrailingStopFixedCents:
         repeated runs of this module see the previous run's exit as already
         in-flight and skip the new trigger.
         """
+        import os
         from pathlib import Path
         import json
 
@@ -36,7 +37,12 @@ class TestTrailingStopFixedCents:
             monitor._exit_intent_in_flight.clear()
             monitor._exit_registry.clear()
 
-        path = Path(__file__).resolve().parents[2] / "data" / "exit_intents.json"
+        path = Path(
+            os.environ.get(
+                "MERID_EXIT_INTENT_PERSISTENCE_PATH",
+                Path(__file__).resolve().parents[2] / "data" / "exit_intents.json",
+            )
+        )
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))

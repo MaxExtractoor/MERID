@@ -170,7 +170,7 @@ class KalshiExecutor:
             return [
                 {
                     "ticker": p.market_id,
-                    "outcome": p.outcome_id or "yes",
+                    "outcome": p.outcome_id or None,
                     "size": float(p.size),
                     "avg_price": float(p.average_entry_price),
                     "unrealized_pnl": float(p.unrealized_pnl) if p.unrealized_pnl is not None else 0.0,

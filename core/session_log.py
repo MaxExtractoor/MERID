@@ -32,7 +32,7 @@ _SESSION_ID: str = uuid.uuid4().hex[:12]
 _SESSION_START: float = time.time()
 _SESSION_BRACKET: Optional[str] = None  # e.g. "Sandbox ($1K)", "Rookie ($5K)"
 
-LOG_FILE = Path("data/session_log.jsonl")
+LOG_FILE = Path(os.environ.get("MERID_SESSION_LOG_PATH", "data/session_log.jsonl"))
 _FLUSH_INTERVAL = 30  # seconds between disk flushes
 _RELOAD_LIMIT = 200   # max events to reload from previous session
 

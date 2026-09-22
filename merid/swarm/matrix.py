@@ -370,8 +370,8 @@ class SwarmMatrixBuilder:
                     price = float(fill.get("price_cents", 0))
                     fee = float(fill.get("fee_cents", 0))
                     count = max(1, int(fill.get("count", 1)))
-                    action = str(fill.get("action", "buy")).lower()
-                    if price <= 0:
+                    action = str(fill.get("action") or "").lower()
+                    if action not in ("buy", "sell") or price <= 0:
                         continue
                     # Rough return: (payout - cost - fee) / cost
                     cost = price * count

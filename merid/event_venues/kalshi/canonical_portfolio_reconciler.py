@@ -89,9 +89,14 @@ def _extract_position_outcome(pos: Any) -> str:
 
     Handles CachedPosition, REST dicts, and other position records uniformly
     without relying on a possibly-missing ``outcome`` attribute.
+
+    CRITICAL FIX (2026-09-21): returns "" when the outcome cannot be
+    determined.  The previous ``"yes"`` default silently fabricated YES
+    exposure for records with missing direction; callers must treat "" as
+    unknown, not as YES.
     """
     if pos is None:
-        return "yes"
+        return ""
     outcome = (
         getattr(pos, "outcome", None)
         or getattr(pos, "thesis_side", None)
@@ -101,19 +106,31 @@ def _extract_position_outcome(pos: Any) -> str:
     if outcome:
         return str(outcome)
     if isinstance(pos, dict):
-        return pos.get("outcome") or pos.get("side") or "yes"
-    return "yes"
+        return pos.get("outcome") or pos.get("side") or ""
+    return ""
 
 
 def _yes_exposure_cc(side: str, quantity_fp: Decimal) -> int:
     """Convert whole-contract position into signed-YES centi-contracts.
 
     Positive = long YES, negative = long NO.
+
+    CRITICAL FIX (2026-09-21): an unrecognized side contributes 0 exposure
+    (and a critical log) rather than silently defaulting to long YES.  The
+    resulting exchange-vs-local divergence surfaces as a reconciliation
+    mismatch instead of fabricating direction.
     """
     qcc = int(quantity_fp * Decimal("100"))
     if side == "no":
         return -qcc
-    return qcc
+    if side == "yes":
+        return qcc
+    logger.critical(
+        "[CANONICAL-RECONCILER] unknown outcome side %r for qty=%s - "
+        "contributing 0 signed-YES exposure (was silently treated as YES)",
+        side, qcc,
+    )
+    return 0
 
 
 def _yes_exposure_from_qcc(side: str, qcc: int) -> int:
@@ -121,7 +138,14 @@ def _yes_exposure_from_qcc(side: str, qcc: int) -> int:
     qcc = int(qcc)
     if side == "no":
         return -qcc
-    return qcc
+    if side == "yes":
+        return qcc
+    logger.critical(
+        "[CANONICAL-RECONCILER] unknown outcome side %r for qcc=%s - "
+        "contributing 0 signed-YES exposure (was silently treated as YES)",
+        side, qcc,
+    )
+    return 0
 
 
 def _is_expired_market(ticker: str) -> bool:
@@ -379,10 +403,14 @@ class CanonicalPortfolioReconciler:
         for market_id, pos in exchange_positions.items():
             ticker = market_id
             qty = Decimal(str(pos.get("quantity_fp", pos.get("contracts", 0))))
+            # Missing exchange outcome is unknown (""), never fabricated YES —
+            # _yes_exposure_cc("") returns 0 so the position is flagged as a
+            # divergence rather than silently mis-signed.
+            exchange_outcome = pos.get("outcome") or ""
             positions_by_ticker[ticker] = CanonicalPosition(
                 ticker=ticker,
                 market_id=market_id,
-                outcome=pos.get("outcome", "yes"),
+                outcome=exchange_outcome,
                 quantity_fp=qty,
                 avg_entry_price_cents=int(pos.get("avg_price_cents", 0) or 0),
                 entry_order_id=pos.get("entry_order_id"),
@@ -390,7 +418,7 @@ class CanonicalPortfolioReconciler:
                 provenance=PositionProvenance.EXCHANGE_REST,
                 timestamp=time.monotonic(),
                 yes_exposure_cc=_yes_exposure_cc(
-                    pos.get("outcome", "yes"),
+                    exchange_outcome,
                     qty,
                 ),
             )
@@ -423,10 +451,13 @@ class CanonicalPortfolioReconciler:
                 continue
             qty = Decimal(str(pos.get("contracts", 0)))
             ticker = market_id
+            # CRITICAL FIX (2026-09-21): missing side resolves to "" (unknown),
+            # not a fabricated "yes"; exposure helpers treat it as zero + alert.
+            _ledger_side = pos.get("side") or ""
             positions_by_ticker[ticker] = CanonicalPosition(
                 ticker=ticker,
                 market_id=market_id,
-                outcome=pos.get("side", "yes"),
+                outcome=_ledger_side,
                 quantity_fp=qty,
                 avg_entry_price_cents=int(pos.get("avg_price_cents", 0) or 0),
                 entry_order_id=pos.get("entry_order_id"),
@@ -434,7 +465,7 @@ class CanonicalPortfolioReconciler:
                 provenance=PositionProvenance.LOCAL_LEDGER,
                 timestamp=time.monotonic(),
                 yes_exposure_cc=_yes_exposure_cc(
-                    pos.get("side", "yes"),
+                    _ledger_side,
                     qty,
                 ),
             )
@@ -478,14 +509,14 @@ class CanonicalPortfolioReconciler:
         # Aggregate exposure.
         exchange_exposure_cc = sum(
             _yes_exposure_cc(
-                pos.get("outcome", "yes"),
+                pos.get("outcome") or "",
                 Decimal(str(pos.get("quantity_fp", pos.get("contracts", 0)))),
             )
             for pos in exchange_positions.values()
         )
         ledger_exposure_cc = sum(
             _yes_exposure_cc(
-                pos.get("side", "yes"),
+                pos.get("side") or "",
                 Decimal(str(pos.get("contracts", 0))),
             )
             for pos in ledger_positions.values()
@@ -500,7 +531,7 @@ class CanonicalPortfolioReconciler:
 
         reserved_exposure_cc = sum(
             _yes_exposure_cc(
-                order.get("side", "yes"),
+                order.get("side") or "",
                 Decimal(str(order.get("remaining_quantity", order.get("quantity", 0)))),
             )
             for order in working_orders
@@ -508,7 +539,7 @@ class CanonicalPortfolioReconciler:
         reserved_gross_cc = sum(
             abs(
                 _yes_exposure_cc(
-                    order.get("side", "yes"),
+                    order.get("side") or "",
                     Decimal(str(order.get("remaining_quantity", order.get("quantity", 0)))),
                 )
             )
@@ -541,11 +572,11 @@ class CanonicalPortfolioReconciler:
             cac = cache_positions.get(ticker)
 
             exp_cc = _yes_exposure_cc(
-                exp.get("outcome", "yes"),
+                exp.get("outcome") or "",
                 Decimal(str(exp.get("quantity_fp", exp.get("contracts", 0)))),
             )
             led_cc = _yes_exposure_cc(
-                led.get("side", "yes"),
+                led.get("side") or "",
                 Decimal(str(led.get("contracts", 0))),
             )
             cac_cc = (
@@ -694,7 +725,9 @@ class CanonicalPortfolioReconciler:
                 qty_fp = Decimal(str(qty)) if qty is not None else Decimal("0")
                 out.append({
                     "ticker": market_id,
-                    "outcome": pos.get("outcome", pos.get("side", "yes")),
+                    # CRITICAL FIX (2026-09-21): no "yes" fabrication for
+                    # missing direction — unknown side serializes as "".
+                    "outcome": pos.get("outcome") or pos.get("side") or "",
                     "quantity_fp": str(qty_fp),
                     "quantity_cc": int(qty_fp * Decimal("100")),
                     "avg_price_cents": int(pos.get("avg_price_cents", 0) or 0),
@@ -708,7 +741,7 @@ class CanonicalPortfolioReconciler:
                     qty_fp = Decimal(str(qty)) if qty is not None else Decimal("0")
                     out.append({
                         "ticker": market_id,
-                        "outcome": getattr(pos, "outcome", getattr(pos, "side", "yes")) or "yes",
+                        "outcome": getattr(pos, "outcome", getattr(pos, "side", "")) or "",
                         "quantity_fp": str(qty_fp),
                         "quantity_cc": int(qty_fp * Decimal("100")),
                         "avg_price_cents": int(getattr(pos, "avg_price_cents", 0) or 0),
@@ -910,7 +943,7 @@ class CanonicalPortfolioReconciler:
                         exp = exchange_positions[ticker]
                         qty_fp = Decimal(str(exp.get("quantity_fp", exp.get("contracts", 0))))
                         qty_cc = int(qty_fp * Decimal("100"))
-                        side = exp.get("outcome", "yes")
+                        side = exp.get("outcome") or ""
 
                         existing = cache.get_position(ticker)
                         existing_tp = getattr(existing, "take_profit_price_cents", None)
@@ -999,9 +1032,11 @@ class CanonicalPortfolioReconciler:
                     "market_id": recomputed.market_id,
                     "contracts": int(recomputed.contracts),
                     "quantity_cc": int(recomputed.quantity_cc or (recomputed.contracts * 100)),
-                    "side": recomputed.thesis_side or "yes",
-                    "thesis_side": recomputed.thesis_side or "yes",
-                    "outcome_side": recomputed.outcome_side or recomputed.thesis_side or "yes",
+                    # CRITICAL FIX (2026-09-21): a rebuilt position with no
+                    # determinable side must surface as unknown, not "yes".
+                    "side": recomputed.thesis_side or "",
+                    "thesis_side": recomputed.thesis_side or "",
+                    "outcome_side": recomputed.outcome_side or recomputed.thesis_side or "",
                     "avg_price_cents": recomputed.avg_price_cents,
                     "entry_price_state": getattr(recomputed, "entry_price_state", "unknown"),
                     "take_profit_price_cents": getattr(recomputed, "take_profit_price_cents", None) or existing_tp,
@@ -1420,7 +1455,9 @@ class CanonicalPortfolioReconciler:
             return {
                 pos.market_id: {
                     "market_id": pos.market_id,
-                    "outcome": pos.outcome_id or "yes",
+                    # CRITICAL FIX (2026-09-21): missing exchange outcome is
+                    # unknown ("") — never fabricate YES exposure.
+                    "outcome": pos.outcome_id or "",
                     "contracts": float(pos.size) if pos.size else 0.0,
                     "quantity_fp": Decimal(str(pos.size)) if pos.size else Decimal("0"),
                     "avg_price_cents": int(
