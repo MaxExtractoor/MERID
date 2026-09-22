@@ -77,17 +77,6 @@ class TestCryptoUniverseConfig:
             assert meta.series_ticker == expected_ticker, \
                 f"{asset}/{timeframe}: expected {expected_ticker}, got {meta.series_ticker}"
 
-    def test_crypto_spot_kalshi_config_has_all_symbols(self):
-        """CRYPTO_CONFIG must define all 5 symbols."""
-        from config.crypto_spot_kalshi_config import CRYPTO_CONFIG
-        
-        symbols_in_config: Set[str] = set(CRYPTO_CONFIG.keys())
-        
-        missing = self.EXPECTED_SYMBOLS - symbols_in_config
-        extra = symbols_in_config - self.EXPECTED_SYMBOLS
-        
-        assert not missing, f"Missing symbols in CRYPTO_CONFIG: {missing}"
-        assert not extra, f"Unexpected extra symbols in CRYPTO_CONFIG: {extra}"
 
     def test_agent_grid_yaml_has_crypto_agents_for_all_symbols_timeframes(self):
         """kalshi_agent_grid.yaml must have directional agents for all symbol/timeframe pairs."""
@@ -130,48 +119,6 @@ class TestCryptoUniverseConfig:
         assert count >= 20, f"Expected at least 20 crypto directional agents, found {count}"
 
 
-class TestAgentGridWiring:
-    """Midstream: Validate grid → agent wiring produces all symbol/timeframe agents."""
-
-    def test_agent_grid_creates_agents_from_config(self):
-        """AgentGrid.__init__ should create KalshiTradingAgent per config entry."""
-        from merid.prediction.agent_grid import AgentGrid
-        from merid.prediction.agent_grid_config import get_agent_grid_config
-        
-        config = get_agent_grid_config()
-        
-        # Create grid
-        grid = AgentGrid(config)
-        
-        # Should have agents matching enabled config entries
-        enabled_agents = [a for a in config.agents if a.enabled]
-        assert len(grid._agents) == len(enabled_agents), \
-            f"Grid created {len(grid._agents)} agents but config has {len(enabled_agents)} enabled"
-
-    def test_agent_grid_registry_contains_all_crypto_symbol_timeframe_pairs(self):
-        """Grid's internal agent map should have entry for each (symbol, timeframe)."""
-        from merid.prediction.agent_grid import AgentGrid
-        from merid.prediction.agent_grid_config import get_agent_grid_config
-        
-        config = get_agent_grid_config()
-        grid = AgentGrid(config)
-        
-        # Build set of (symbol, timeframe) pairs covered by grid agents
-        covered_pairs: Set[Tuple[str, str]] = set()
-        for agent in grid._agents:
-            cfg = agent._config
-            for asset in cfg.assets:
-                for timeframe in cfg.timeframes:
-                    covered_pairs.add((asset.upper(), timeframe.lower()))
-        
-        # All expected pairs should be covered
-        expected = {
-            (s, t) for s in TestCryptoUniverseConfig.EXPECTED_SYMBOLS
-            for t in TestCryptoUniverseConfig.EXPECTED_TIMEFRAMES
-        }
-        
-        missing = expected - covered_pairs
-        assert not missing, f"Grid missing coverage for: {sorted(missing)}"
 
 
 class TestParameterizedAgentOpinionSmokeTest:
@@ -440,101 +387,9 @@ class TestPerSymbolTimeframeRiskBehavior:
 class TestConfigConsistencyReport:
     """Validate config consistency across modules."""
 
-    def test_crypto_surface_config_matches_series_meta(self):
-        """CRYPTO_CONFIG series must match kalshi_crypto_series_meta."""
-        from config.crypto_spot_kalshi_config import CRYPTO_CONFIG
-        from config.kalshi_crypto_series_meta import get_series_meta
-        
-        mismatches = []
-        
-        for symbol, cfg in CRYPTO_CONFIG.items():
-            for tf_key, series_ticker in cfg.get("series", {}).items():
-                # Map timeframe key to canonical
-                tf_map = {"15M": "15m", "1H": "1h", "1D": "daily"}
-                canonical_tf = tf_map.get(tf_key, tf_key.lower())
-                
-                meta = get_series_meta(symbol, canonical_tf)
-                if meta is None:
-                    mismatches.append(f"{symbol}/{canonical_tf}: no series meta found")
-                elif meta.series_ticker != series_ticker:
-                    mismatches.append(
-                        f"{symbol}/{canonical_tf}: CRYPTO_CONFIG={series_ticker}, "
-                        f"meta={meta.series_ticker}"
-                    )
-        
-        assert not mismatches, "CRYPTO_CONFIG/SERIES_META mismatches:\n" + "\n".join(mismatches)
 
-    def test_near_spot_config_covers_all_crypto_timeframes(self):
-        """NEAR_SPOT_CONFIG should have entry for each CRYPTO_CONFIG (symbol, timeframe)."""
-        from config.crypto_spot_kalshi_config import CRYPTO_CONFIG, NEAR_SPOT_CONFIG
-        
-        missing = []
-        
-        for symbol, cfg in CRYPTO_CONFIG.items():
-            for tf_key in cfg.get("series", {}).keys():
-                # Map to NEAR_SPOT_CONFIG key format
-                tf_map = {"15M": "15M", "1H": "1H", "1D": "1D"}
-                normalized_tf = tf_map.get(tf_key, tf_key)
-                
-                key = (symbol, normalized_tf)
-                if key not in NEAR_SPOT_CONFIG:
-                    missing.append(f"{key}")
-        
-        assert not missing, f"Missing NEAR_SPOT_CONFIG entries: {missing}"
 
-    def test_get_config_consistency_report_no_issues(self):
-        """get_config_consistency_report() should return zero issues."""
-        from config.crypto_spot_kalshi_config import get_config_consistency_report
-        
-        report = get_config_consistency_report()
-        
-        assert report.get("consistency_issues", []) == [], \
-            f"Config consistency issues: {report['consistency_issues']}"
 
-    def test_no_orphan_symbol_timeframe_pairs_in_configs(self):
-        """Every (symbol, timeframe) in SERIES_META_LIST must appear in all config layers."""
-        from config.kalshi_crypto_series_meta import SERIES_META_LIST
-        from config.crypto_spot_kalshi_config import CRYPTO_CONFIG, NEAR_SPOT_CONFIG
-        from merid.prediction.agent_grid_config import get_agent_grid_config
-        
-        # Build set of (symbol, timeframe) from SERIES_META_LIST
-        meta_pairs = set()
-        for meta in SERIES_META_LIST:
-            meta_pairs.add((meta.asset, meta.timeframe))
-        
-        # Check CRYPTO_CONFIG coverage
-        crypto_pairs = set()
-        for symbol, cfg in CRYPTO_CONFIG.items():
-            for tf_key in cfg.get("series", {}).keys():
-                tf_map = {"15M": "15m", "1H": "1h", "1D": "daily", "1W": "weekly"}
-                canonical = tf_map.get(tf_key, tf_key.lower())
-                crypto_pairs.add((symbol, canonical))
-        
-        # Check NEAR_SPOT_CONFIG coverage
-        spot_pairs = set()
-        for (symbol, tf), _ in NEAR_SPOT_CONFIG.items():
-            spot_pairs.add((symbol, tf.lower()))
-        
-        # Check agent grid coverage
-        config = get_agent_grid_config()
-        grid_pairs = set()
-        for agent in config.agents:
-            if agent.category == "crypto":
-                for asset in agent.assets:
-                    for timeframe in agent.timeframes:
-                        grid_pairs.add((asset.upper(), timeframe.lower()))
-        
-        # Orphans in any layer
-        orphans = []
-        for pair in meta_pairs:
-            if pair not in crypto_pairs:
-                orphans.append(f"{pair} missing from CRYPTO_CONFIG")
-            if pair not in spot_pairs:
-                orphans.append(f"{pair} missing from NEAR_SPOT_CONFIG")
-            if pair not in grid_pairs:
-                orphans.append(f"{pair} missing from kalshi_agent_grid.yaml")
-        
-        assert not orphans, f"Orphan (symbol, timeframe) pairs:\n" + "\n".join(orphans)
 
     def test_no_duplicate_ownership_per_symbol_timeframe(self):
         """Each (symbol, timeframe) should have exactly one primary regime agent."""

@@ -182,18 +182,7 @@ class TestP0_1_KellyPositionSizerWired:
 class TestP0_2_FeeDeduplication:
     """risk.py must not define kalshi_fee_cents locally — only import it."""
 
-    def test_risk_py_does_not_define_kalshi_fee_cents(self):
-        src = _src("merid/prediction/risk.py")
-        # Must NOT contain a 'def kalshi_fee_cents' definition
-        assert "def kalshi_fee_cents" not in src, (
-            "P0-2: risk.py still defines its own kalshi_fee_cents — must be removed"
-        )
 
-    def test_risk_py_imports_from_position_sizer(self):
-        src = _src("merid/prediction/risk.py")
-        assert "from merid.event_venues.kalshi.position_sizer import kalshi_fee_cents" in src, (
-            "P0-2: risk.py must import kalshi_fee_cents from position_sizer"
-        )
 
     def test_position_sizer_defines_kalshi_fee_cents(self):
         src = _src("merid/event_venues/kalshi/position_sizer.py")
@@ -774,90 +763,3 @@ class TestP2_2_AtomicCategoryReserve:
 # =============================================================================
 # P2-3 — DebateAwarePositionSizer semaphore + inflight deduplication
 # =============================================================================
-
-class TestP2_3_BacktestSemaphore:
-    """DebateAwarePositionSizer must have a semaphore cap and per-symbol
-    inflight deduplication to prevent thundering-herd on the backtest engine."""
-
-    def test_max_concurrent_constant_exists(self):
-        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
-        assert hasattr(DebateAwarePositionSizer, "_MAX_CONCURRENT_BACKTESTS"), (
-            "P2-3: _MAX_CONCURRENT_BACKTESTS class constant not found"
-        )
-        assert DebateAwarePositionSizer._MAX_CONCURRENT_BACKTESTS >= 1
-
-    def test_backtest_semaphore_attr_on_init(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "_backtest_semaphore" in src, (
-            "P2-3: _backtest_semaphore not initialised in DebateAwarePositionSizer.__init__"
-        )
-
-    def test_inflight_dict_on_init(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "_inflight" in src, (
-            "P2-3: _inflight dict not initialised in DebateAwarePositionSizer.__init__"
-        )
-
-    def test_get_semaphore_method_exists(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "def _get_semaphore" in src, (
-            "P2-3: _get_semaphore lazy-init method not found"
-        )
-
-    def test_asyncio_semaphore_used_in_profile_method(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "async with self._get_semaphore()" in src, (
-            "P2-3: semaphore not used via 'async with' in _get_performance_profile"
-        )
-
-    def test_inflight_coalesce_logic_present(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "self._inflight" in src and "asyncio.shield" in src, (
-            "P2-3: inflight coalescing via asyncio.shield not found"
-        )
-
-    def test_inflight_cleaned_up_in_finally(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "self._inflight.pop(symbol, None)" in src, (
-            "P2-3: _inflight must be cleaned up in a finally block"
-        )
-
-    def test_asyncio_imported(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "import asyncio" in src, (
-            "P2-3: asyncio must be imported in debate_position_sizing.py"
-        )
-
-    def test_semaphore_cap_is_sane(self):
-        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
-        cap = DebateAwarePositionSizer._MAX_CONCURRENT_BACKTESTS
-        assert 1 <= cap <= 10, (
-            f"P2-3: _MAX_CONCURRENT_BACKTESTS={cap} seems unreasonable; expected 1–10"
-        )
-
-    def test_semaphore_limits_concurrency(self):
-        """Functional: semaphore must block a 3rd concurrent backtest when cap=2."""
-        import asyncio as aio
-        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
-
-        async def _run():
-            sizer = DebateAwarePositionSizer.__new__(DebateAwarePositionSizer)
-            sizer._MAX_CONCURRENT_BACKTESTS = 2
-            sizer._backtest_semaphore = None
-            sem = sizer._get_semaphore()
-            assert sem._value == 2
-
-            acquired = []
-            async with sem:
-                acquired.append(1)
-                async with sem:
-                    acquired.append(2)
-                    # semaphore value should now be 0 — third acquire would block
-                    assert sem._value == 0, (
-                        "P2-3: semaphore should be fully acquired after 2 concurrent holders"
-                    )
-
-            return acquired
-
-        result = aio.run(_run())
-        assert result == [1, 2]

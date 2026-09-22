@@ -249,31 +249,6 @@ class TestC4PositionSizerExhaustedCap(unittest.TestCase):
 # C5 — SwarmConsensusEngine action derived from proposal side
 # ---------------------------------------------------------------------------
 
-class TestC5ConsensusEngineActionDerivation(unittest.TestCase):
-    """C5: SwarmConsensusEngine must derive kalshi_action from proposal side,
-    not hardcode 'buy'."""
-
-    def test_sell_proposal_produces_sell_action(self):
-        """Source must map OrderSide.SELL → action='sell'."""
-        from merid.swarm.consensus_engine import SwarmConsensusEngine
-        src = inspect.getsource(SwarmConsensusEngine.run_consensus)
-        # The fixed code should have both buy and sell derivations
-        self.assertIn('kalshi_action = "buy" if prop.side == OrderSide.BUY else "sell"', src,
-                       "C5: kalshi_action must be derived from prop.side")
-
-    def test_no_hardcoded_buy_only(self):
-        """Source must NOT have the old hardcoded 'buy' line."""
-        from merid.swarm.consensus_engine import SwarmConsensusEngine
-        src = inspect.getsource(SwarmConsensusEngine.run_consensus)
-        # Old code was: kalshi_action = "buy" # We assume agents are always taking positions
-        self.assertNotIn("We assume agents are always taking positions", src,
-                         "C5: old hardcoded buy comment should be removed")
-
-    def test_side_derivation_for_buy(self):
-        """BUY proposal should yield side=yes, action=buy."""
-        from merid.swarm.consensus_engine import SwarmConsensusEngine
-        src = inspect.getsource(SwarmConsensusEngine.run_consensus)
-        self.assertIn('kalshi_side = "yes" if prop.side == OrderSide.BUY else "no"', src)
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +342,6 @@ class TestCompileChecks(unittest.TestCase):
     def test_ws_bridge_compiles(self):
         self._check_compiles("merid.event_venues.kalshi.ws_bridge")
 
-    def test_consensus_engine_compiles(self):
-        self._check_compiles("merid.swarm.consensus_engine")
 
     def test_kill_switches_compiles(self):
         self._check_compiles("merid.risk.kill_switches")

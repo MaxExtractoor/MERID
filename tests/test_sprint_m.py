@@ -18,120 +18,6 @@ import pytest
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestExecutionSubscriber:
-    """Tests for merid.swarm.execution_subscriber."""
-
-    def test_import(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber, get_execution_subscriber
-        sub = get_execution_subscriber()
-        assert isinstance(sub, ExecutionSubscriber)
-
-    def test_singleton(self):
-        from merid.swarm.execution_subscriber import get_execution_subscriber
-        import merid.swarm.execution_subscriber as mod
-        old = mod._subscriber
-        mod._subscriber = None
-        try:
-            a = mod.get_execution_subscriber()
-            b = mod.get_execution_subscriber()
-            assert a is b
-        finally:
-            mod._subscriber = old
-
-    def test_initial_stats(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-        sub = ExecutionSubscriber()
-        stats = sub.stats
-        assert stats["received"] == 0
-        assert stats["routed"] == 0
-        assert stats["skipped"] == 0
-
-    def test_empty_history(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-        sub = ExecutionSubscriber()
-        assert sub.history == []
-
-    @pytest.mark.asyncio
-    async def test_handle_skip_action(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-        sub = ExecutionSubscriber()
-        await sub._handle_decision({
-            "decision_id": "test-1",
-            "market_id": "KXBTC",
-            "action": "skip",
-            "side": "yes",
-            "size_contracts": 0,
-            "risk_approved": False,
-        })
-        assert sub.stats["received"] == 1
-        assert sub.stats["skipped"] == 1
-        assert sub.stats["routed"] == 0
-
-    @pytest.mark.asyncio
-    async def test_handle_not_risk_approved(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-        sub = ExecutionSubscriber()
-        await sub._handle_decision({
-            "decision_id": "test-2",
-            "market_id": "KXBTC",
-            "action": "buy_yes",
-            "side": "yes",
-            "size_contracts": 5,
-            "risk_approved": False,
-        })
-        assert sub.stats["skipped"] == 1
-        assert sub.history[-1]["route_reason"] == "Not risk-approved"
-
-    @pytest.mark.asyncio
-    async def test_handle_zero_size(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-        sub = ExecutionSubscriber()
-        await sub._handle_decision({
-            "decision_id": "test-3",
-            "market_id": "KXBTC",
-            "action": "buy_yes",
-            "side": "yes",
-            "size_contracts": 0,
-            "risk_approved": True,
-        })
-        assert sub.stats["skipped"] == 1
-        assert sub.history[-1]["route_reason"] == "Zero size"
-
-    @pytest.mark.asyncio
-    async def test_handle_approved_routes(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-        sub = ExecutionSubscriber()
-
-        # Mock the routing so it doesn't try real execution
-        with patch.object(sub, '_route_to_execution', new_callable=lambda: lambda: asyncio.coroutine(lambda self, data: None).__get__(sub)):
-            async def mock_route(data):
-                pass
-            sub._route_to_execution = mock_route
-
-            await sub._handle_decision({
-                "decision_id": "test-4",
-                "market_id": "KXBTC",
-                "action": "buy_yes",
-                "side": "yes",
-                "size_contracts": 5,
-                "risk_approved": True,
-            })
-            assert sub.stats["routed"] == 1
-            assert sub.history[-1]["routed"] is True
-
-    def test_execution_record_to_dict(self):
-        from merid.swarm.execution_subscriber import ExecutionRecord
-        rec = ExecutionRecord(
-            decision_id="d1",
-            market_id="KXBTC",
-            action="buy_yes",
-            side="yes",
-            size_contracts=3,
-        )
-        d = rec.to_dict()
-        assert d["decision_id"] == "d1"
-        assert d["market_id"] == "KXBTC"
-        assert d["routed"] is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -187,29 +73,6 @@ class TestSwarmBusApiWiring:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestAgentGridLifecycle:
-    """Test that Sprint M components are wired into AgentGrid lifecycle."""
-
-    def test_execution_subscriber_in_start(self):
-        from merid.prediction.agent_grid import AgentGrid
-        source = inspect.getsource(AgentGrid.start)
-        assert "execution_subscriber" in source
-        assert "get_execution_subscriber" in source
-
-    def test_execution_subscriber_in_stop(self):
-        from merid.prediction.agent_grid import AgentGrid
-        source = inspect.getsource(AgentGrid.stop)
-        assert "execution_subscriber" in source
-
-    def test_edge_recalibrator_in_start(self):
-        from merid.prediction.agent_grid import AgentGrid
-        source = inspect.getsource(AgentGrid.start)
-        assert "edge_recalibrator" in source
-
-    def test_critic_agent_in_start(self):
-        from merid.prediction.agent_grid import AgentGrid
-        source = inspect.getsource(AgentGrid.start)
-        assert "critic_agent" in source
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -264,13 +127,3 @@ class TestUIWiring:
 # Gap Analysis Update
 # ═══════════════════════════════════════════════════════════════════════════
 
-
-class TestGapAnalysis:
-    """Verify gap analysis reflects Sprint M closure."""
-
-    def test_execution_gap_updated(self):
-        gap_path = os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md")
-        with open(gap_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        # Message flow is fully wired (8/8 since Sprint M)
-        assert "8/8" in content

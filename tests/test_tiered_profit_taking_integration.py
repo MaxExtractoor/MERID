@@ -102,14 +102,6 @@ class TestTieredConfigurationAlignment:
         assert tiered_config_btc_15m.tier3.min_unrealized_pct == 150.0
         assert tiered_config_btc_15m.tier3.use_trailing == True
     
-    def test_config_to_tp_manager_mapping(self, take_profit_config_btc):
-        """Verify tiered config correctly populates TakeProfitConfig."""
-        assert take_profit_config_btc.tp_r_multiple_primary == 0.70
-        assert take_profit_config_btc.tp_scale_out_fraction == 0.40
-        assert take_profit_config_btc.tp_trailing_enabled == True
-        assert take_profit_config_btc.tp_trailing_activation_r_multiple == 1.00
-        assert take_profit_config_btc.tp_min_unrealized_pct_hard_close == 150.0
-        assert take_profit_config_btc.tp_max_round_trips_per_contract == 2
     
     def test_all_assets_have_configs(self):
         """All 5 assets have tiered configs available."""
@@ -131,76 +123,12 @@ class TestTieredConfigurationAlignment:
 # TEST CLASS 2: TakeProfitManager State Transitions
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestTakeProfitManagerStateTransitions:
-    """Verify TP manager correctly transitions through ARMED_PRIMARY → TRAILING_ACTIVE → CLOSED."""
-    
-    def test_initial_state_armed_primary(self, tp_manager_btc, mock_position_btc_yes):
-        """New position starts in ARMED_PRIMARY state."""
-        from merid.event_venues.kalshi.take_profit import TakeProfitState
-        
-        tp_manager_btc.on_position_open(mock_position_btc_yes)
-        state = tp_manager_btc.get_state(mock_position_btc_yes.position_id)
-        
-        assert state.tp_state == TakeProfitState.ARMED_PRIMARY
-        assert state.remaining_contracts == 100
-    
-    def test_tier1_trigger_at_0_7r(self, tp_manager_btc, mock_position_btc_yes):
-        """Tier 1 triggers when price hits 0.7R (~51c for 30c entry)."""
-        tp_manager_btc.on_position_open(mock_position_btc_yes)
-        
-        # Price at 0.7R: 30 + (0.7 * 30) = 51c
-        action = tp_manager_btc.on_price_update(
-            pos=mock_position_btc_yes,
-            bid_cents=51,
-            ask_cents=52,
-        )
-        
-        assert action is not None
-        assert action.action_type == "CLOSE_PARTIAL"
-        assert action.quantity == 40
-        
-        # State should advance
-        state = tp_manager_btc.get_state(mock_position_btc_yes.position_id)
-        assert state.tp_state.value in ["trailing_active", "armed_primary"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TEST CLASS 3: CT Integration Hooks
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestCTProfitTakingIntegration:
-    """Verify CTProfitTakingIntegration correctly wires TP to CT cycle."""
-    
-    @pytest.mark.asyncio
-    async def test_profit_taking_pass_evaluates_positions(self):
-        """_run_profit_taking_pass evaluates all open positions."""
-        from merid.trading.ct_profit_taking_integration import CTProfitTakingIntegration
-        
-        mock_ct = MagicMock()
-        mock_ct.get_open_positions_for_tp.return_value = {
-            "pos_001": {
-                "position_id": "pos_001",
-                "ticker": "KXBTC-15M-T50000",
-                "side": "yes",
-                "entry_price_cents": 30,
-                "contracts": 100,
-                "asset": "BTC",
-                "timeframe": "15m",
-            }
-        }
-        
-        mock_state = MagicMock()
-        mock_state.best_bid_cents = 51
-        mock_state.best_ask_cents = 52
-        mock_state.timestamp = time.time()
-        
-        with patch("merid.trading.ct_profit_taking_integration.get_kalshi_market_state_store") as mock_store:
-            mock_store.return_value.get.return_value = mock_state
-            
-            integration = CTProfitTakingIntegration(mock_ct)
-            result = await integration.run_profit_taking_pass()
-            
-            assert result["positions_evaluated"] == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

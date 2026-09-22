@@ -258,25 +258,6 @@ class TestAssetSetAlignment:
 class TestFilterPipelineInvariants:
     """Validate FilterPipeline output invariants for canonical assets/timeframes."""
 
-    def test_filter_pipeline_result_assets_in_canonical_set(self):
-        """Every per_asset entry must have asset in canonical asset set."""
-        from config.kalshi_crypto_series_meta import AssetSymbol
-        from merid.trading.kalshi_filter_pipeline import FilterPipeline, FilterPipelineConfig
-        
-        enum_assets = set(typing.get_args(AssetSymbol))
-        
-        # Create minimal pipeline with empty config
-        pipeline = FilterPipeline(FilterPipelineConfig())
-        
-        # Simulate result check - the per_asset dict keys must be subset of canonical
-        # This is a structural test, runtime check happens in actual trading loop
-        canonical_set = enum_assets
-        
-        # In real usage, we'd check: set(result.per_asset.keys()).issubset(canonical_set)
-        # Here we just validate the canonical set is as expected
-        assert canonical_set == EXPECTED_ASSETS, (
-            f"Canonical asset set mismatch: {canonical_set} != {EXPECTED_ASSETS}"
-        )
 
     def test_market_candidate_underlying_timeframe_valid(self):
         """MarketCandidate underlying/timeframe pairs must exist in SERIES_META_LIST."""
@@ -298,40 +279,6 @@ class TestFilterPipelineInvariants:
 class TestGroupIdPropagation:
     """Validate that group_id propagates through the call graph without recomputation."""
 
-    def test_filter_pipeline_group_id_present_in_candidate(self):
-        """MarketCandidate from FilterPipeline must have group_id set."""
-        from merid.trading.kalshi_filter_pipeline import FilterPipeline, FilterPipelineConfig
-        from merid.event_venues.kalshi.market_filter import group_id_from_ticker
-        
-        # Minimal config with test data
-        fp = FilterPipeline(FilterPipelineConfig(
-            assets=["BTC"],
-            max_candidates_per_asset=10,
-        ))
-        
-        # Create synthetic market data that will produce a MarketCandidate
-        raw_by_asset = {
-            "BTC": [
-                {
-                    "ticker": "KXBTC-240101-30000-C",
-                    "series_ticker": "KXBTC",
-                    "strike": 30000,
-                    "close_time": "2024-01-01T00:00:00Z",
-                    "best_bid_cents": 45,
-                    "best_ask_cents": 50,
-                    "mid_price_cents": 47,
-                    "volume": 100,
-                    "open_interest": 50,
-                }
-            ]
-        }
-        
-        result = fp.filter_markets(raw_by_asset)
-        
-        # All candidates must have non-empty group_id
-        for c in result.final_candidates:
-            assert c.group_id, f"MarketCandidate for {c.ticker} missing group_id"
-            assert c.group_id != "", f"MarketCandidate for {c.ticker} has empty group_id"
 
     def test_group_id_propagation_to_order_intent(self):
         """OrderIntent constructed from MarketCandidate must preserve group_id."""

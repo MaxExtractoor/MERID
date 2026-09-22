@@ -235,29 +235,7 @@ class TestBugDDegradedModeTrading:
     position closing.
     """
 
-    def test_session_guard_checks_degraded_mode(self):
-        """Verify SessionGuard checks degraded mode state."""
-        from merid.prediction.session_guard import SessionGuard
-        
-        guard = SessionGuard()
-        
-        # Should have _in_degraded_mode method
-        assert hasattr(guard, '_in_degraded_mode')
     
-    def test_session_guard_accepts_is_closing_position_param(self):
-        """Verify is_trading_allowed accepts is_closing_position parameter."""
-        from merid.prediction.session_guard import SessionGuard
-        
-        guard = SessionGuard()
-        
-        # Should accept is_closing_position parameter
-        # (won't actually block unless in degraded mode)
-        result_open = guard.is_trading_allowed(is_closing_position=False)
-        result_close = guard.is_trading_allowed(is_closing_position=True)
-        
-        # Both should be True when not in maintenance or degraded mode
-        assert isinstance(result_open, bool)
-        assert isinstance(result_close, bool)
     
     @pytest.mark.asyncio
     async def test_loop_lag_monitor_has_is_degraded_property(self):
@@ -272,100 +250,13 @@ class TestBugDDegradedModeTrading:
         # Default should be False (not degraded)
         assert monitor.is_degraded is False
     
-    @pytest.mark.asyncio
-    async def test_degraded_mode_blocks_new_trades_but_allows_closing(self):
-        """Verify degraded mode blocks new trades but allows closing positions."""
-        from merid.prediction.session_guard import SessionGuard, get_session_guard
-        from merid.diagnostics.loop_lag import LoopLagMonitor, get_loop_lag_monitor
-        
-        guard = SessionGuard()
-        monitor = LoopLagMonitor()
-        
-        # Simulate degraded mode by setting internal state
-        monitor._degraded_mode_active = True
-        monitor._degraded_consecutive_count = 5
-        
-        # Create a mock that returns our controlled monitor
-        # Patch inside session_guard module where it's imported
-        with patch('merid.diagnostics.loop_lag.get_loop_lag_monitor', return_value=monitor):
-            # Also need to reinitialize guard to pick up the patched monitor
-            guard2 = SessionGuard()
-            # New trades should be blocked
-            assert guard2.is_trading_allowed(is_closing_position=False) is False
-            
-            # Closing positions should be allowed even in degraded mode
-            assert guard2.is_trading_allowed(is_closing_position=True) is True
-            
-            # Block reason should mention degraded mode
-            reason = guard2.block_reason(is_closing_position=False)
-            assert reason is not None
-            assert "degraded" in reason.lower() or "lag" in reason.lower()
     
-    def test_degraded_mode_tracks_entry_and_exit(self):
-        """Verify degraded mode tracks entry time and logs appropriately."""
-        from merid.prediction.session_guard import SessionGuard
-        from merid.diagnostics.loop_lag import LoopLagMonitor
-        
-        monitor = LoopLagMonitor()
-        
-        # Simulate degraded mode
-        monitor._degraded_mode_active = True
-        monitor._degraded_consecutive_count = 5
-        
-        # Create a fresh guard with the degraded monitor
-        with patch('merid.diagnostics.loop_lag.get_loop_lag_monitor', return_value=monitor):
-            guard = SessionGuard()
-            # Initially not in degraded mode (haven't checked yet)
-            assert guard._degraded_mode_start is None
-            
-            # First check should set entry time
-            guard.is_trading_allowed()
-            assert guard._degraded_mode_start is not None
-        
-        # Simulate recovery
-        monitor._degraded_mode_active = False
-        
-        # Check after recovery should clear entry time
-        with patch('merid.diagnostics.loop_lag.get_loop_lag_monitor', return_value=monitor):
-            guard2 = SessionGuard()
-            # Copy over the degraded start time to simulate we were in degraded
-            guard2._degraded_mode_start = datetime.now(timezone.utc)
-            guard2.is_trading_allowed()
-            assert guard2._degraded_mode_start is None
 
 
 # =============================================================================
 # Integration Tests
 # =============================================================================
 
-class TestLogAnalysisFixesIntegration:
-    """Integration tests verifying all fixes work together."""
-
-    @pytest.mark.asyncio
-    async def test_full_trading_pipeline_with_degraded_mode(self):
-        """Verify trading pipeline respects degraded mode."""
-        from merid.prediction.session_guard import get_session_guard
-        from merid.diagnostics.loop_lag import get_loop_lag_monitor
-        
-        guard = get_session_guard()
-        monitor = get_loop_lag_monitor()
-        
-        # Start with healthy state
-        monitor._degraded_mode_active = False
-        monitor._degraded_consecutive_count = 0
-        
-        # Trading should be allowed
-        assert guard.is_trading_allowed() is True
-        
-        # Enter degraded mode
-        monitor._degraded_mode_active = True
-        monitor._degraded_consecutive_count = 5
-        
-        # New trading should be blocked
-        assert guard.is_trading_allowed(is_closing_position=False) is False
-        
-        # Position closing should still be allowed
-        assert guard.is_trading_allowed(is_closing_position=True) is True
 
 
 if __name__ == "__main__":

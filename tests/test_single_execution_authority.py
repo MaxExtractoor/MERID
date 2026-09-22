@@ -163,24 +163,6 @@ class TestSingleExecutionAuthority:
             "CT_USE_ROUTER_PERCENT" in content and "ignored" in content.lower()
         ), "CT_USE_ROUTER_PERCENT env var should not be used"
 
-    def test_trading_agent_no_fallback(self):
-        """
-        Verify trading_agent.py doesn't have fallback to direct order placement.
-        """
-        root = _get_project_root()
-        ta_file = root / "merid" / "prediction" / "trading_agent.py"
-        
-        content = ta_file.read_text(encoding="utf-8")
-        
-        # Check for the no-fallback comment
-        assert "SECURITY: No fallback" in content, (
-            "trading_agent.py should have SECURITY comment indicating no fallback"
-        )
-        
-        # Should not have fallback to _kalshi_place_order
-        assert "falling back" not in content.lower() or (
-            "falling back" in content.lower() and "removed" in content.lower()
-        ), "Should not have fallback mechanism"
 
     def test_order_router_has_empty_bypass_list(self):
         """

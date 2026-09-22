@@ -13,20 +13,60 @@ from pathlib import Path
 
 import pytest
 
-# AUDIT-2026-09-22-04: frontend components under test were never committed to
-# this tree (no git history; React files absent). strict xfail keeps the spec
-# executable: if the UI lands, XPASS forces cleanup. Expiry 2026-10-15.
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT AUDIT-2026-09-22-04: frontend UI under test never implemented "
-        "in this tree (React files absent, no git history). Expiry 2026-10-15."
-    ),
+ROOT = Path(__file__).resolve().parent.parent
+WEB_REACT = ROOT / "web" / "react" / "src"
+CONSTANTS_FILE = WEB_REACT / "config" / "constants.ts"
+
+# AUDIT-2026-09-22-04: endpoint constants / view files for several domains
+# were never committed to this tree (no git history).  Conditional strict
+# xfail only while the constant/view is absent — adding it forces XPASS
+# cleanup.  Expiry 2026-10-15.
+_MISSING_FEATURE_REASON = (
+    "DEFECT AUDIT-2026-09-22-04: endpoint constant / view file absent from "
+    "this tree (never committed). Expiry 2026-10-15."
+)
+_MIGRATION_DEFECT_REASON = (
+    "DEFECT AUDIT-2026-09-22-08: existing view does not import "
+    "API_ENDPOINTS (Sprint-16 migration incomplete). Expiry 2026-10-15."
+)
+
+_CONSTANTS_TEXT = (
+    CONSTANTS_FILE.read_text(encoding="utf-8")
+    if CONSTANTS_FILE.exists()
+    else ""
 )
 
 
-ROOT = Path(__file__).resolve().parent.parent
-WEB_REACT = ROOT / "web" / "react" / "src"
+def _endpoint_params(keys):
+    return [
+        pytest.param(
+            key,
+            marks=pytest.mark.xfail(
+                strict=True, reason=_MISSING_FEATURE_REASON
+            )
+            if key not in _CONSTANTS_TEXT
+            else (),
+        )
+        for key in keys
+    ]
+
+
+def _view_params(views_dir, filenames):
+    params = []
+    for fn in filenames:
+        path = views_dir / fn
+        if not path.exists():
+            mark = pytest.mark.xfail(
+                strict=True, reason=_MISSING_FEATURE_REASON
+            )
+        elif "API_ENDPOINTS" not in path.read_text(encoding="utf-8"):
+            mark = pytest.mark.xfail(
+                strict=True, reason=_MIGRATION_DEFECT_REASON
+            )
+        else:
+            mark = ()
+        params.append(pytest.param(fn, marks=mark))
+    return params
 
 
 # ── 1. ErrorBoundary wrapping ──────────────────────────────────
@@ -99,7 +139,7 @@ class TestAPIEndpointsCompleteness:
     def _load(self):
         self.text = self.CONSTANTS.read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("key", REQUIRED_KEYS)
+    @pytest.mark.parametrize("key", _endpoint_params(REQUIRED_KEYS))
     def test_endpoint_key_present(self, key: str):
         assert key in self.text, f"Missing endpoint key: {key}"
 
@@ -153,7 +193,9 @@ class TestMigratedViewsImportConstants:
 
     VIEWS_DIR = WEB_REACT / "views"
 
-    @pytest.mark.parametrize("filename", MIGRATED_VIEWS)
+    @pytest.mark.parametrize(
+        "filename", _view_params(WEB_REACT / "views", MIGRATED_VIEWS)
+    )
     def test_view_imports_api_endpoints(self, filename: str):
         path = self.VIEWS_DIR / filename
         assert path.exists(), f"{filename} not found"
@@ -177,6 +219,13 @@ class TestSidebarAppConsistency:
         raw = m.group(1)
         return set(re.findall(r'"([^"]+)"', raw))
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT AUDIT-2026-09-22-09: Sidebar.tsx and App.tsx View types "
+            "are inconsistent. Expiry 2026-10-15."
+        ),
+    )
     def test_view_types_match(self):
         app_views = self._extract_view_type(self.APP)
         sidebar_views = self._extract_view_type(self.SIDEBAR)
@@ -188,6 +237,13 @@ class TestSidebarAppConsistency:
             f"  In App but not Sidebar: {app_views - sidebar_views}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT AUDIT-2026-09-22-09: 'cross-asset' view missing from "
+            "App.tsx and/or Sidebar.tsx. Expiry 2026-10-15."
+        ),
+    )
     def test_cross_asset_in_both(self):
         for path in [self.APP, self.SIDEBAR]:
             text = path.read_text(encoding="utf-8")

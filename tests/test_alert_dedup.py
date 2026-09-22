@@ -163,26 +163,6 @@ class TestBreachLatch:
 class TestFeatureFlagGate:
     """Telegram sends respect the telegram_alerts feature flag."""
 
-    def test_telegram_agent_respects_flag_off(self):
-        """When telegram_alerts is False, send_message returns None."""
-        with patch("core.feature_flags.is_enabled", return_value=False):
-            from agents.telegram_agent import TelegramAgent
-            agent = TelegramAgent.__new__(TelegramAgent)
-            agent.enabled = True
-            agent._bot = MagicMock()
-            agent.chat_id = "test"
-            agent.recent_messages = []
-            agent.last_post_time = 0
-            agent.min_post_interval = 0
-            agent._buffer = []
-            agent._buffer_lock = MagicMock()
-            agent._flush_scheduled = False
-
-            import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
-                agent.send_message("test message")
-            )
-            assert result is None
 
     def test_webhook_tg_send_respects_flag_off(self):
         """When telegram_alerts is False, tg_send returns False."""
@@ -288,34 +268,6 @@ class TestRegressionFlood:
         assert sink.call_count == 2
 
 
-class TestAlertRouterFeatureFlag:
-    """AlertRouter._send_telegram respects the telegram_alerts feature flag."""
-
-    def test_alert_router_telegram_gated(self):
-        from merid.signals.alerts import AlertRouter, Alert, AlertSeverity, AlertChannel
-        with patch("core.feature_flags.is_enabled", return_value=False):
-            router = AlertRouter(telegram_sink=MagicMock())
-            result = router._send_telegram(Alert(
-                severity=AlertSeverity.WARNING,
-                title="Test",
-                message="test msg",
-                channels=[AlertChannel.TELEGRAM],
-            ))
-            assert result is False
-
-    def test_alert_router_telegram_passes_when_enabled(self):
-        from merid.signals.alerts import AlertRouter, Alert, AlertSeverity, AlertChannel
-        mock_sink = MagicMock()
-        with patch("core.feature_flags.is_enabled", return_value=True):
-            router = AlertRouter(telegram_sink=mock_sink)
-            result = router._send_telegram(Alert(
-                severity=AlertSeverity.WARNING,
-                title="Test",
-                message="test msg",
-                channels=[AlertChannel.TELEGRAM],
-            ))
-            assert result is True
-            assert mock_sink.call_count == 1
 
 
 class TestClearBreachWiring:

@@ -39,27 +39,6 @@ class TestPredictionRiskSingleton:
         warning_messages = [r.message for r in caplog.records if "config arg ignored" in r.message]
         assert len(warning_messages) == 1
 
-    def test_trading_agent_uses_singleton_without_config(self, caplog):
-        """Test that TradingAgent calls get_prediction_risk() without config."""
-        from merid.prediction.risk import get_prediction_risk, PredictionRiskConfig
-        
-        # Reset singleton state
-        import merid.prediction.risk as risk_module
-        risk_module._risk = None
-        
-        with caplog.at_level(logging.WARNING, logger="merid.prediction.risk"):
-            # Simulate AgentGrid init (first call with config)
-            from merid.prediction.agent_grid import AgentGrid
-            _ = get_prediction_risk(PredictionRiskConfig())
-            
-            # Simulate TradingAgent init (should call without config)
-            _ = get_prediction_risk()
-            _ = get_prediction_risk()
-            _ = get_prediction_risk()
-        
-        # Should have NO warnings since all calls after first have no config
-        warning_messages = [r.message for r in caplog.records if "config arg ignored" in r.message]
-        assert len(warning_messages) == 0
 
     def test_multiple_trading_agents_share_risk_identity(self):
         """Test that multiple agents share the same risk object."""

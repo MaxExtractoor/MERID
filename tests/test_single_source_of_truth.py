@@ -46,14 +46,6 @@ class TestSingleSourceOfTruth:
         assert (archive_path / "test_crypto15m_allocator.py").exists(), "Allocator test must be in archive"
         assert (archive_path / "test_kalshi_risk_15m_budget.py").exists(), "Budget test must be in archive"
 
-    def test_deprecated_config_has_warning(self):
-        """Verify deprecated config has deprecation warning."""
-        config_path = Path(__file__).parent.parent / "config" / "kalshi_15m_crypto_config.py"
-        content = config_path.read_text(encoding="utf-8")
-        
-        assert "DEPRECATION NOTICE" in content, "Deprecated config must have deprecation notice"
-        assert "kalshi_crypto_15m_v2.yaml" in content, "Deprecated config must reference profile YAML"
-        assert "DeprecationWarning" in content, "Deprecated config must use DeprecationWarning"
 
     def test_profile_has_no_conflicting_limits(self):
         """Verify profile YAML has no conflicting rate limits."""

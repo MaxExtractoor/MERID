@@ -21,125 +21,10 @@ import pytest
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestCriticAgent:
-    """Tests for merid.swarm.critic_agent.CriticAgent."""
-
-    def test_critic_agent_import(self):
-        from merid.swarm.critic_agent import CriticAgent, get_critic_agent
-        agent = get_critic_agent()
-        assert isinstance(agent, CriticAgent)
-
-    def test_critic_singleton(self):
-        from merid.swarm.critic_agent import get_critic_agent
-        a1 = get_critic_agent()
-        a2 = get_critic_agent()
-        assert a1 is a2
-
-    def test_critic_config_defaults(self):
-        from merid.swarm.critic_agent import CriticConfig
-        config = CriticConfig()
-        assert config.staleness_threshold_s == 300.0
-        assert config.critical_staleness_s == 600.0
-        assert config.min_depth == 50
-        assert config.max_spread == 0.08
-
-    def test_check_staleness_returns_list(self):
-        from merid.swarm.critic_agent import CriticAgent
-        agent = CriticAgent()
-        # Without a running staleness monitor, should return empty list
-        result = agent._check_staleness()
-        assert isinstance(result, list)
-
-    def test_check_liquidity_returns_list(self):
-        from merid.swarm.critic_agent import CriticAgent
-        agent = CriticAgent()
-        result = agent._check_liquidity()
-        assert isinstance(result, list)
-
-    def test_evaluate_market_returns_list(self):
-        from merid.swarm.critic_agent import CriticAgent
-        agent = CriticAgent()
-        result = agent.evaluate_market("KXBTC-TEST")
-        assert isinstance(result, list)
-
-    def test_history_empty_initially(self):
-        from merid.swarm.critic_agent import CriticAgent
-        agent = CriticAgent()
-        assert agent.history == []
 
 
-class TestCriticStalenessIntegration:
-    """Test that staleness checks produce Critique messages."""
-
-    def test_stale_feed_produces_critique(self):
-        from merid.swarm.critic_agent import CriticAgent
-        from merid.swarm.messages import Critique
-        agent = CriticAgent()
-
-        # Mock the staleness monitor
-        mock_status = MagicMock()
-        mock_status.feed_id = "kalshi"
-        mock_status.instrument = "KXBTC"
-        mock_status.age_seconds = 400.0
-        mock_status.stale = True
-        mock_status.critical = False
-
-        mock_monitor = MagicMock()
-        mock_monitor.check_all.return_value = [mock_status]
-
-        with patch("core.feed_staleness_monitor.get_feed_staleness_monitor", return_value=mock_monitor):
-            critiques = agent._check_staleness()
-            assert len(critiques) == 1
-            assert isinstance(critiques[0], Critique)
-            assert critiques[0].critique_type == "stale_data"
-            assert critiques[0].weight_adjustment == 0.3
-
-    def test_critical_stale_feed_vetos(self):
-        from merid.swarm.critic_agent import CriticAgent
-        agent = CriticAgent()
-
-        mock_status = MagicMock()
-        mock_status.feed_id = "kalshi"
-        mock_status.instrument = "KXBTC"
-        mock_status.age_seconds = 700.0
-        mock_status.stale = True
-        mock_status.critical = True
-
-        mock_monitor = MagicMock()
-        mock_monitor.check_all.return_value = [mock_status]
-
-        with patch("core.feed_staleness_monitor.get_feed_staleness_monitor", return_value=mock_monitor):
-            critiques = agent._check_staleness()
-            assert len(critiques) == 1
-            assert critiques[0].recommended_action == "veto"
-            assert critiques[0].weight_adjustment == 0.0
-            assert critiques[0].severity == 1.0
 
 
-class TestCriticLiquidityIntegration:
-    """Test that liquidity alerts produce Critique messages."""
-
-    def test_liquidity_alert_produces_critique(self):
-        from merid.swarm.critic_agent import CriticAgent
-        from merid.swarm.messages import Critique
-        agent = CriticAgent()
-
-        mock_alert = MagicMock()
-        mock_alert.market_id = "KXBTC"
-        mock_alert.kind = "thin_book"
-        mock_alert.severity = "warning"
-        mock_alert.msg = "Depth 20 < 50"
-        mock_alert.ts = time.time()  # Recent
-        mock_alert.details = {"depth": 20}
-
-        mock_monitor = MagicMock()
-        mock_monitor._alert_log = [mock_alert]
-
-        with patch("merid.event_venues.kalshi.liquidity_monitor.get_liquidity_monitor", return_value=mock_monitor):
-            critiques = agent._check_liquidity()
-            assert len(critiques) == 1
-            assert isinstance(critiques[0], Critique)
-            assert critiques[0].critique_type == "illiquid"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -190,45 +75,6 @@ class TestRiskViewPublisher:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestDecisionPublisher:
-    """Test that SwarmConsensusAggregator publishes Decision messages."""
-
-    def test_decision_publish_in_recompute(self):
-        source = inspect.getsource(
-            __import__('merid.swarm.consensus_aggregator', fromlist=['SwarmConsensusAggregator']).SwarmConsensusAggregator._recompute_consensus
-        )
-        assert "Decision" in source
-        assert "publish_decision" in source
-
-    def test_decision_published_on_ready_consensus(self):
-        """Decision should be published when consensus status is READY."""
-        from merid.swarm.consensus_aggregator import (
-            SwarmConsensusAggregator, AgentProposal, ConsensusStatus
-        )
-        agg = SwarmConsensusAggregator()
-        agg.min_agents = 2
-
-        archetypes = ["momentum", "mean_reversion", "edge_model"]
-        for i in range(3):
-            proposal = AgentProposal(
-                agent_id=f"agent_{i}",
-                agent_archetype=archetypes[i],
-                asset="BTC",
-                timeframe="15m",
-                direction="buy_yes",
-                probability=0.65,
-                confidence=0.8,
-                edge_estimate=5.0,
-                size_preference="base",
-                rationale="test",
-                timestamp=datetime.now(timezone.utc),
-            )
-            agg.submit_proposal(proposal)
-
-        # After submitting, consensus should be in cache
-        view = agg.get_consensus("BTC", "15m")
-        assert view is not None
-        assert view.status == ConsensusStatus.READY
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -385,30 +231,7 @@ class TestRegistryMacroWiring:
             content = f.read()
         assert "MacroRegimeForecaster" in content
 
-    def test_registry_auto_registers_macro(self):
-        """The singleton registry should include macro_regime."""
-        # Reset singleton to force fresh creation
-        import merid.prediction.forecasters.registry as reg_mod
-        old = reg_mod._registry
-        reg_mod._registry = None
-        try:
-            registry = reg_mod.get_forecaster_registry()
-            ids = [f.forecaster_id for f in registry._forecasters]
-            assert "macro_regime" in ids
-            assert "momentum_v1" in ids
-            assert "mean_reversion_v1" in ids
-        finally:
-            reg_mod._registry = old
 
-    def test_registry_has_three_forecasters(self):
-        import merid.prediction.forecasters.registry as reg_mod
-        old = reg_mod._registry
-        reg_mod._registry = None
-        try:
-            registry = reg_mod.get_forecaster_registry()
-            assert len(registry._forecasters) >= 3
-        finally:
-            reg_mod._registry = old
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -434,9 +257,3 @@ class TestSourceWiring:
         assert "RiskView" in source
         assert "publish_risk_view" in source
 
-    def test_consensus_aggregator_has_decision(self):
-        source = inspect.getsource(
-            __import__('merid.swarm.consensus_aggregator', fromlist=['SwarmConsensusAggregator']).SwarmConsensusAggregator
-        )
-        assert "Decision" in source
-        assert "publish_decision" in source

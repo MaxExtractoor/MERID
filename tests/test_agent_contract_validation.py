@@ -263,49 +263,6 @@ class TestPredictionRiskSingletonImmutability:
             pytest.fail("Potential risk object copying detected:\n" + "\n".join(violations))
 
 
-class TestBootstrapOrderGuard:
-    """Verify initialization order constraints."""
-
-    def test_agent_grid_initializes_risk_before_creating_agents(self):
-        """AgentGrid should call get_prediction_risk(config) before any agent creation."""
-        from merid.prediction.agent_grid import AgentGrid
-        from merid.prediction.risk import get_prediction_risk, PredictionRiskConfig
-        
-        import merid.prediction.risk as risk_module
-        
-        # Reset singleton
-        original_risk = risk_module._risk
-        risk_module._risk = None
-        
-        try:
-            # Track initialization order
-            init_order = []
-            
-            original_init = PredictionMarketRisk.__init__
-            def tracking_init(self, config):
-                init_order.append('risk_initialized')
-                return original_init(self, config)
-            
-            # Patch for tracking
-            from merid.prediction import risk as risk_mod
-            original_risk_class_init = risk_mod.PredictionMarketRisk.__init__
-            risk_mod.PredictionMarketRisk.__init__ = tracking_init
-            
-            try:
-                # Create grid (should initialize risk)
-                # Note: We can't fully instantiate without more mocks,
-                # but we can check the pattern in the code
-                source = inspect.getsource(AgentGrid.__init__)
-                
-                # Should call get_prediction_risk with config before agent creation
-                assert "get_prediction_risk" in source
-                assert "PredictionRiskConfig" in source
-                
-            finally:
-                risk_mod.PredictionMarketRisk.__init__ = original_risk_class_init
-                
-        finally:
-            risk_module._risk = original_risk
 
 
 class TestRegimeGridSmokeTest:

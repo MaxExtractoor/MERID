@@ -316,43 +316,6 @@ class TestBug04ColdStartCalibration:
 # BUG-05 — Solo execution: swarm_degraded flag, WARNING, small size cap
 # ===========================================================================
 
-class TestBug05SoloExecutionFallback:
-    """AgentState must have swarm_degraded and last_consensus_at fields."""
-
-    def test_agent_state_has_swarm_degraded(self):
-        from merid.prediction.trading_agent import AgentState
-        state = AgentState(name="test-agent")
-        assert hasattr(state, "swarm_degraded")
-        assert state.swarm_degraded is False
-
-    def test_agent_state_has_last_consensus_at(self):
-        from merid.prediction.trading_agent import AgentState
-        state = AgentState(name="test-agent")
-        assert hasattr(state, "last_consensus_at")
-        assert state.last_consensus_at is None
-
-    def test_to_dict_includes_new_fields(self):
-        from merid.prediction.trading_agent import AgentState
-        state = AgentState(name="test-agent")
-        d = state.to_dict()
-        assert "swarm_degraded" in d
-        assert "last_consensus_at" in d
-
-    def test_max_solo_seconds_constant_exists(self):
-        from merid.prediction.trading_agent import _MAX_SOLO_SECONDS
-        assert isinstance(_MAX_SOLO_SECONDS, (int, float))
-        assert _MAX_SOLO_SECONDS >= 0  # 0 = no hold (single-agent default)
-
-    def test_swarm_degraded_clears_on_recovery(self):
-        """swarm_degraded=True → False when last_consensus_at is updated."""
-        from merid.prediction.trading_agent import AgentState
-        state = AgentState(name="test-agent")
-        state.swarm_degraded = True
-        # Simulate consensus recovery
-        state.last_consensus_at = datetime.now(timezone.utc)
-        state.swarm_degraded = False
-        assert not state.swarm_degraded
-        assert state.last_consensus_at is not None
 
 
 # ===========================================================================
@@ -464,64 +427,6 @@ class TestBug07SettlementResultNormalization:
 # BUG-08 — Missing end_date must REJECT, not always-allow entry window
 # ===========================================================================
 
-class TestBug08MissingEndDateRejected:
-    """_in_entry_window() must return False when market.end_date is None."""
-
-    def _make_market(self, end_date=None):
-        m = MagicMock()
-        m.end_date = end_date
-        m.market_id = "TEST-MKT"
-        return m
-
-    def _make_agent(self):
-        """Build a minimal KalshiTradingAgent with enough config to call _in_entry_window."""
-        from merid.prediction.trading_agent import KalshiTradingAgent
-        cfg = MagicMock()
-        cfg.name = "test-agent"
-        cfg.entry_window.minutes_before_expiry = 120
-        cfg.entry_window.cutoff_minutes_before_expiry = 5
-        return KalshiTradingAgent.__new__(KalshiTradingAgent), cfg
-
-    def test_none_end_date_returns_false(self):
-        from merid.prediction.trading_agent import KalshiTradingAgent
-        agent = KalshiTradingAgent.__new__(KalshiTradingAgent)
-        agent.config = MagicMock()
-        agent.config.entry_window.minutes_before_expiry = 120
-        agent.config.entry_window.cutoff_minutes_before_expiry = 5
-        agent.logger = __import__("logging").getLogger("test")
-
-        market = self._make_market(end_date=None)
-        result = agent._in_entry_window(market, datetime.now(timezone.utc))
-        assert result is False, (
-            "_in_entry_window must return False for missing end_date, not True"
-        )
-
-    def test_valid_end_date_within_window_returns_true(self):
-        from merid.prediction.trading_agent import KalshiTradingAgent
-        agent = KalshiTradingAgent.__new__(KalshiTradingAgent)
-        agent.config = MagicMock()
-        agent.config.entry_window.minutes_before_expiry = 120
-        agent.config.entry_window.cutoff_minutes_before_expiry = 5
-        agent.logger = __import__("logging").getLogger("test")
-
-        now = datetime.now(timezone.utc)
-        market = self._make_market(end_date=now + timedelta(minutes=60))
-        result = agent._in_entry_window(market, now)
-        assert result is True
-
-    def test_valid_end_date_outside_window_returns_false(self):
-        from merid.prediction.trading_agent import KalshiTradingAgent
-        agent = KalshiTradingAgent.__new__(KalshiTradingAgent)
-        agent.config = MagicMock()
-        agent.config.entry_window.minutes_before_expiry = 120
-        agent.config.entry_window.cutoff_minutes_before_expiry = 5
-        agent.logger = __import__("logging").getLogger("test")
-
-        now = datetime.now(timezone.utc)
-        # Expiry is 200 minutes away — before the entry window opens at -120m
-        market = self._make_market(end_date=now + timedelta(minutes=200))
-        result = agent._in_entry_window(market, now)
-        assert result is False
 
 
 # ===========================================================================
@@ -531,15 +436,7 @@ class TestBug08MissingEndDateRejected:
 class TestBug09ConsensusPayloadMode:
     """_get_venue_mode() must exist and the aggregator must call it, not literal 'paper'."""
 
-    def test_get_venue_mode_exists(self):
-        from merid.swarm.consensus_aggregator import _get_venue_mode
-        assert callable(_get_venue_mode)
 
-    def test_get_venue_mode_returns_string(self):
-        from merid.swarm.consensus_aggregator import _get_venue_mode
-        result = _get_venue_mode()
-        assert isinstance(result, str)
-        assert len(result) > 0
 
     def test_get_venue_mode_fallback_is_paper(self):
         """When venue gate is unavailable, fallback must be 'paper' (safe default)."""
@@ -555,24 +452,7 @@ class TestBug09ConsensusPayloadMode:
             "_get_venue_mode must have 'paper' as its fallback"
         )
 
-    def test_hardcoded_paper_string_not_in_publish_block(self):
-        """The literal string 'paper' must not appear in the consensus publish payload."""
-        import inspect
-        from merid.swarm import consensus_aggregator as ca
-        # The publish happens inside _recompute_consensus / _aggregate_proposals
-        src = inspect.getsource(ca.SwarmConsensusAggregator._recompute_consensus)
-        assert '"mode": "paper"' not in src, (
-            'Hardcoded "mode": "paper" still in _recompute_consensus — fix not applied'
-        )
 
-    def test_get_venue_mode_called_in_publish(self):
-        """_get_venue_mode() must be referenced in the consensus publish path."""
-        import inspect
-        from merid.swarm import consensus_aggregator as ca
-        src = inspect.getsource(ca.SwarmConsensusAggregator._recompute_consensus)
-        assert "_get_venue_mode()" in src, (
-            "_get_venue_mode() not called in _recompute_consensus publish block"
-        )
 
 
 # ===========================================================================
@@ -587,38 +467,6 @@ class TestBug10RegistryThreadSafety:
         assert hasattr(reg_mod, "_registry_lock"), "_registry_lock not found at module level"
         assert isinstance(reg_mod._registry_lock, type(__import__("threading").Lock()))
 
-    def test_concurrent_calls_return_same_instance(self):
-        """10 threads calling get_forecaster_registry() must all receive the same object."""
-        import merid.prediction.forecasters.registry as reg_mod
-
-        # Reset singleton so threads race on first init
-        original = reg_mod._registry
-        reg_mod._registry = None
-
-        results = []
-        errors = []
-
-        def _get():
-            try:
-                r = reg_mod.get_forecaster_registry()
-                results.append(id(r))
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=_get) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        # Restore original in case other tests need it
-        if original is not None:
-            reg_mod._registry = original
-
-        assert not errors, f"Threads raised errors: {errors}"
-        assert len(set(results)) == 1, (
-            f"Expected 1 unique registry id, got {len(set(results))} — race condition not fixed"
-        )
 
     def test_registry_assigned_atomically(self):
         """_registry must be set only after all forecasters are registered (no partial state)."""

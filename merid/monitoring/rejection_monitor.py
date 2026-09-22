@@ -26,6 +26,7 @@ Usage in production code:
 """
 
 import json
+import os
 import asyncio
 import threading
 from datetime import datetime, timezone
@@ -79,7 +80,7 @@ class RejectionMonitor:
     
     def __init__(
         self,
-        output_dir: str = "data/rejections",
+        output_dir: str = os.environ.get("MERID_REJECTIONS_DIR", "data/rejections"),
         max_memory_events: int = 10000,
         enable_file_logging: bool = True,
         sampling_rate: float = 1.0,  # 1.0 = log all, 0.1 = log 10%
@@ -291,7 +292,7 @@ _monitor_lock = threading.Lock()
 
 
 def get_rejection_monitor(
-    output_dir: str = "data/rejections",
+    output_dir: str = os.environ.get("MERID_REJECTIONS_DIR", "data/rejections"),
     max_memory_events: int = 10000,
     enable_file_logging: bool = True,
     sampling_rate: float = 1.0,

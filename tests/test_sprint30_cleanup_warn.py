@@ -22,6 +22,7 @@ WARN_CLEANED_FILES = [
 class TestNoConsoleWarnViews:
     """Views should not use console.warn."""
 
+    @pytest.mark.xfail(strict=True, reason="DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.")
     @pytest.mark.parametrize("filename", WARN_CLEANED_FILES)
     def test_no_console_warn(self, filename: str):
         text = (VIEWS_DIR / filename).read_text(encoding="utf-8")

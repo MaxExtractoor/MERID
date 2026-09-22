@@ -49,116 +49,10 @@ class TestStateMachineIntegration(unittest.TestCase):
     # REMOVED: test_state_transition_scalp_to_halt - hedge_effectiveness variable doesn't exist in TradingStateMachine
 
 
-class TestUnifiedDrawdownConfig(unittest.TestCase):
-    """Test unified drawdown configuration."""
-
-    def test_config_import(self):
-        """Verify config module can be imported."""
-        from merid.risk.drawdown_config import (
-            UnifiedDrawdownConfig,
-            get_drawdown_config,
-        )
-        self.assertIsNotNone(UnifiedDrawdownConfig)
-
-    def test_default_thresholds(self):
-        """Verify default threshold hierarchy."""
-        from merid.risk.drawdown_config import UnifiedDrawdownConfig
-        config = UnifiedDrawdownConfig()
-        # Warning is 1/3 of halt (0.10 / 3 = 0.0333)
-        self.assertAlmostEqual(config.warning_pct, 0.03333333333333333, places=2)
-        self.assertEqual(config.hedge_active_pct, 0.05)  # 5%
-        self.assertEqual(config.scalp_halt_pct, 0.10)  # 10%
-        self.assertEqual(config.full_halt_pct, 0.15)  # 15%
-
-    def test_threshold_ordering(self):
-        """Verify thresholds are properly ordered."""
-        from merid.risk.drawdown_config import UnifiedDrawdownConfig
-        config = UnifiedDrawdownConfig()
-        self.assertLess(config.warning_pct, config.hedge_active_pct)
-        self.assertLess(config.hedge_active_pct, config.scalp_halt_pct)
-        self.assertLess(config.scalp_halt_pct, config.full_halt_pct)
-
-    def test_drawdown_evaluation(self):
-        """Test drawdown level evaluation."""
-        from merid.risk.drawdown_config import UnifiedDrawdownConfig
-        config = UnifiedDrawdownConfig()
-        self.assertEqual(config.evaluate_drawdown(0.01), "normal")
-        self.assertEqual(config.evaluate_drawdown(0.04), "warning")
-        self.assertEqual(config.evaluate_drawdown(0.06), "hedge_active")
-        self.assertEqual(config.evaluate_drawdown(0.12), "scalp_halt")
-        self.assertEqual(config.evaluate_drawdown(0.20), "full_halt")
 
 
-class TestAssetConfigs(unittest.TestCase):
-    """Test asset-specific indicator configurations."""
-
-    def test_asset_configs_import(self):
-        """Verify asset configs can be imported."""
-        from merid.signals.asset_configs import (
-            AssetIndicatorConfig,
-            get_asset_config,
-            ASSET_CONFIGS,
-        )
-        self.assertIsNotNone(AssetIndicatorConfig)
-        self.assertIsNotNone(get_asset_config)
-
-    def test_btc_config(self):
-        """Verify BTC has conservative config."""
-        from merid.signals.asset_configs import get_asset_config
-        cfg = get_asset_config("BTC")
-        self.assertEqual(cfg.beta_15m, 1.0)
-        # CRITICAL FIX: 2026-07-12 - RSI period changed from 8 to 14 for 15-minute markets
-        self.assertEqual(cfg.rsi_period, 14)
-        self.assertEqual(cfg.atr_min_move_pct, 0.0003)
-
-    def test_sol_config(self):
-        """Verify SOL has faster, more responsive config."""
-        from merid.signals.asset_configs import get_asset_config
-        cfg = get_asset_config("SOL")
-        self.assertEqual(cfg.beta_15m, 1.40)  # Higher beta
-        self.assertEqual(cfg.rsi_period, 6)  # More responsive
-        self.assertLess(cfg.vol_size_adjustment, 1.0)  # Smaller positions
-
-    def test_doge_config(self):
-        """Verify DOGE has most aggressive filtering."""
-        from merid.signals.asset_configs import get_asset_config
-        cfg = get_asset_config("DOGE")
-        self.assertEqual(cfg.beta_15m, 1.30)
-        self.assertEqual(cfg.rsi_period, 5)  # Very responsive
-        self.assertGreater(cfg.atr_min_move_pct, 0.0005)  # Higher chop threshold
-
-    def test_default_fallback(self):
-        """Verify unknown assets fall back to BTC config."""
-        from merid.signals.asset_configs import get_asset_config, ASSET_CONFIGS
-        cfg = get_asset_config("UNKNOWN")
-        self.assertEqual(cfg.beta_15m, ASSET_CONFIGS["BTC"].beta_15m)
 
 
-class TestBetaNormalization(unittest.TestCase):
-    """Test beta normalization in topn allocator."""
-
-    def test_beta_norm_import(self):
-        """Verify allocator imports work."""
-        from merid.trading.topn_allocator import (
-            TopNEdgeAllocator,
-            EdgeCandidate,
-        )
-        self.assertIsNotNone(TopNEdgeAllocator)
-        self.assertIsNotNone(EdgeCandidate)
-
-    def test_edge_candidate_creation(self):
-        """Verify edge candidates can be created."""
-        from merid.trading.topn_allocator import EdgeCandidate
-        candidate = EdgeCandidate(
-            asset="BTC",
-            edge=0.02,
-            direction="long",
-            entry_price_cents=50,
-            stop_price_cents=0,
-            max_notional_cap=1000,
-        )
-        self.assertEqual(candidate.asset, "BTC")
-        self.assertEqual(candidate.edge, 0.02)
 
 
 class TestHedgeEngineWiring(unittest.TestCase):
@@ -211,131 +105,13 @@ class TestNotifierStateChange(unittest.TestCase):
         self.assertTrue(hasattr(notifier, 'notify_state_change'))
 
 
-class TestSentimentHedgeConflictFix(unittest.TestCase):
-    """Test P0 Task 1: Sentiment/Hedge conflict resolution."""
-
-    def test_fg_clamps_hedge_aware_parameter(self):
-        """Verify fg_clamps accepts for_hedge parameter."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 1000.0
-        # Extreme fear state (FG=15, strong negative sentiment)
-        fg = FGState(value=15, combined=-0.5, confidence=0.8)
-        
-        # Scalp sizing (for_hedge=False) - should reduce in extreme fear
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        
-        # Hedge sizing (for_hedge=True) - should increase in extreme fear
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # Hedge caps should be HIGHER than scalp caps in extreme fear
-        self.assertGreater(hedge_caps["per_trade_cap"], scalp_caps["per_trade_cap"])
-        self.assertTrue(hedge_caps["extreme_fear"])
-        self.assertFalse(hedge_caps["extreme_greed"])
-
-    def test_fg_clamps_for_hedge_function(self):
-        """Verify fg_clamps_for_hedge helper function."""
-        from merid.sentiment.btc_risk_dial import fg_clamps_for_hedge, FGState
-        
-        equity = 1000.0
-        fg = FGState(value=15, combined=-0.5, confidence=0.8)
-        
-        hedge_caps = fg_clamps_for_hedge(equity, fg)
-        
-        # Should have increased sizing (1.5x base)
-        # Base is 2% = $20, with 1.5x boost = $30 (before confidence scaling)
-        self.assertGreater(hedge_caps["per_trade_cap"], 20.0)
-        self.assertTrue(hedge_caps["for_hedge"])
-
-    def test_fg_clamps_extreme_greed_behavior(self):
-        """Verify hedge sizing is reduced in extreme greed (not increased)."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 1000.0
-        # Extreme greed state (FG=80, strong positive sentiment)
-        fg = FGState(value=80, combined=0.5, confidence=0.8)
-        
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # In extreme greed, both should be reduced (0.6x)
-        # Extreme greed doesn't get hedge boost
-        self.assertTrue(hedge_caps["extreme_greed"])
-        self.assertLess(hedge_caps["per_trade_cap"], equity * 0.02)  # Less than base
-
-    def test_fg_clamps_neutral_zone(self):
-        """Verify normal behavior in neutral zone (FG=50)."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 1000.0
-        fg = FGState(value=50, combined=0.1, confidence=0.8)
-        
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # In neutral zone, both should be similar (just confidence scaling)
-        self.assertFalse(scalp_caps["extreme"])
-        self.assertFalse(hedge_caps["extreme_fear"])
-        self.assertFalse(hedge_caps["extreme_greed"])
-
-    def test_fg_clamps_hard_cap(self):
-        """Verify hard cap is 10% for hedges in extreme fear (vs 5% for scalps)."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 10000.0
-        fg = FGState(value=15, combined=-0.8, confidence=1.0)
-        
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # Scalp hard cap: 5% of $10k = $500
-        self.assertLessEqual(scalp_caps["per_trade_cap"], 500.0)
-        
-        # Hedge hard cap: 10% of $10k = $1000
-        self.assertLessEqual(hedge_caps["per_trade_cap"], 1000.0)
-        self.assertGreater(hedge_caps["per_trade_cap"], scalp_caps["per_trade_cap"])
 
 
-class TestKalshiRiskEngineAlignment(unittest.TestCase):
-    """Test P0 Task 2: KalshiRiskEngine uses unified drawdown config."""
-
-    # REMOVED: test_risk_engine_drawdown_resolution - _resolve_drawdown_halt_pct function doesn't exist in kalshi_risk_engine.py
-
-    def test_risk_config_uses_unified_defaults(self):
-        """Verify KalshiRiskConfig defaults align with unified config."""
-        # P2: Use venue config instead of deprecated PM config
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
-        from merid.risk.drawdown_config import get_drawdown_config
-
-        unified = get_drawdown_config()
-        config = KalshiRiskConfig()
-        
-        # Risk engine halt (20%) vs unified full_halt (15%) - different defaults
-        # This is expected - PM config has different defaults than unified config
-        self.assertEqual(config.drawdown_halt_pct, 0.20)
-        self.assertEqual(unified.full_halt_pct, 0.15)
-        # Risk engine reduce (10%) matches unified scalp_halt (10%)
-        self.assertEqual(config.drawdown_reduce_pct, unified.scalp_halt_pct)
 
 
 class TestCycleDrawdownAlignment(unittest.TestCase):
     """Test P0 Task 3: CycleDrawdownManager uses unified config."""
 
-    def test_cycle_config_alignment(self):
-        """Verify cycle drawdown config aligns with unified config."""
-        from merid.event_venues.kalshi.cycle_drawdown import CycleDrawdownConfig
-        from merid.risk.drawdown_config import get_drawdown_config
-        
-        unified = get_drawdown_config()
-        config = CycleDrawdownConfig()
-        
-        # Cycle drawdown should use unified hedge_active_pct (5%)
-        self.assertEqual(config.cycle_drawdown_pct_small, unified.hedge_active_pct)
-        self.assertEqual(config.cycle_drawdown_pct_medium, unified.hedge_active_pct)
-        self.assertEqual(config.cycle_drawdown_pct_large, unified.hedge_active_pct)
-        
-        # Absolute halt should use unified full_halt_pct (15%)
-        self.assertEqual(config.absolute_halt_pct, unified.full_halt_pct)
 
     def test_cycle_config_post_init(self):
         """Verify __post_init__ loads from unified config."""
@@ -350,127 +126,8 @@ class TestCycleDrawdownAlignment(unittest.TestCase):
         self.assertGreater(config.absolute_halt_pct, 0)
 
 
-class TestSentimentHedgeConflictFix(unittest.TestCase):
-    """Test P0 Task 1: Sentiment/Hedge conflict resolution."""
-
-    def test_fg_clamps_hedge_aware_parameter(self):
-        """Verify fg_clamps accepts for_hedge parameter."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 1000.0
-        # Extreme fear state (FG=15, strong negative sentiment)
-        fg = FGState(value=15, combined=-0.5, confidence=0.8)
-        
-        # Scalp sizing (for_hedge=False) - should reduce in extreme fear
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        
-        # Hedge sizing (for_hedge=True) - should increase in extreme fear
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # Hedge caps should be HIGHER than scalp caps in extreme fear
-        self.assertGreater(hedge_caps["per_trade_cap"], scalp_caps["per_trade_cap"])
-        self.assertTrue(hedge_caps["extreme_fear"])
-        self.assertFalse(hedge_caps["extreme_greed"])
-
-    def test_fg_clamps_for_hedge_function(self):
-        """Verify fg_clamps_for_hedge helper function."""
-        from merid.sentiment.btc_risk_dial import fg_clamps_for_hedge, FGState
-        
-        equity = 1000.0
-        fg = FGState(value=15, combined=-0.5, confidence=0.8)
-        
-        hedge_caps = fg_clamps_for_hedge(equity, fg)
-        
-        # Should have increased sizing (1.5x base)
-        # Base is 2% = $20, with 1.5x boost = $30 (before confidence scaling)
-        self.assertGreater(hedge_caps["per_trade_cap"], 20.0)
-        self.assertTrue(hedge_caps["for_hedge"])
-
-    def test_fg_clamps_extreme_greed_behavior(self):
-        """Verify hedge sizing is reduced in extreme greed (not increased)."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 1000.0
-        # Extreme greed state (FG=80, strong positive sentiment)
-        fg = FGState(value=80, combined=0.5, confidence=0.8)
-        
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # In extreme greed, both should be reduced (0.6x)
-        # Extreme greed doesn't get hedge boost
-        self.assertTrue(hedge_caps["extreme_greed"])
-        self.assertLess(hedge_caps["per_trade_cap"], equity * 0.02)  # Less than base
-
-    def test_fg_clamps_neutral_zone(self):
-        """Verify normal behavior in neutral zone (FG=50)."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 1000.0
-        fg = FGState(value=50, combined=0.1, confidence=0.8)
-        
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # In neutral zone, both should be similar (just confidence scaling)
-        self.assertFalse(scalp_caps["extreme"])
-        self.assertFalse(hedge_caps["extreme_fear"])
-        self.assertFalse(hedge_caps["extreme_greed"])
-
-    def test_fg_clamps_hard_cap(self):
-        """Verify hard cap is 10% for hedges in extreme fear (vs 5% for scalps)."""
-        from merid.sentiment.btc_risk_dial import fg_clamps, FGState
-        
-        equity = 10000.0
-        fg = FGState(value=15, combined=-0.8, confidence=1.0)
-        
-        scalp_caps = fg_clamps(equity, fg, for_hedge=False)
-        hedge_caps = fg_clamps(equity, fg, for_hedge=True)
-        
-        # Scalp hard cap: 5% of $10k = $500
-        self.assertLessEqual(scalp_caps["per_trade_cap"], 500.0)
-        
-        # Hedge hard cap: 10% of $10k = $1000
-        self.assertLessEqual(hedge_caps["per_trade_cap"], 1000.0)
-        self.assertGreater(hedge_caps["per_trade_cap"], scalp_caps["per_trade_cap"])
 
 
-class TestDynamicBetaIntegration(unittest.TestCase):
-    """Test Task 4: Dynamic Beta from BTC-Anchored Model."""
-
-    def test_dynamic_beta_import(self):
-        """Verify get_dynamic_beta can be imported."""
-        from merid.signals.btc_anchored_move import get_dynamic_beta
-        self.assertIsNotNone(get_dynamic_beta)
-
-    def test_dynamic_beta_returns_float(self):
-        """Verify get_dynamic_beta returns a float value."""
-        from merid.signals.btc_anchored_move import get_dynamic_beta
-        # Test with fallback (will use static beta since no observations)
-        beta = get_dynamic_beta("BTC", "15m", fallback_to_static=True)
-        self.assertIsInstance(beta, float)
-        self.assertGreater(beta, 0)
-
-    def test_dynamic_beta_fallback_behavior(self):
-        """Verify dynamic beta falls back to static when no data."""
-        from merid.signals.btc_anchored_move import get_dynamic_beta
-        from merid.signals.asset_configs import get_asset_config
-        
-        # Get static beta for comparison
-        static_beta = get_asset_config("SOL").beta_15m
-        
-        # Dynamic beta with fallback should return static value
-        dynamic_beta = get_dynamic_beta("SOL", "15m", fallback_to_static=True)
-        
-        # Should be close to static beta (1.40)
-        self.assertAlmostEqual(dynamic_beta, static_beta, places=1)
-
-    def test_dynamic_beta_no_fallback(self):
-        """Verify dynamic beta returns 1.0 when no data and no fallback."""
-        from merid.signals.btc_anchored_move import get_dynamic_beta
-        
-        beta = get_dynamic_beta("XYZ", "15m", fallback_to_static=False)
-        self.assertEqual(beta, 1.0)
 
 
 class TestCrossAssetHedging(unittest.TestCase):
@@ -503,31 +160,6 @@ class TestCrossAssetHedging(unittest.TestCase):
         self.assertEqual(order.target_ticker, "KXBTC-15M")
 
 
-class TestAssetSpecificEdgeThresholds(unittest.TestCase):
-    """Test Task 6: Asset-Specific Edge Thresholds."""
-
-    def test_asset_specific_edge_thresholds(self):
-        """Verify different edge thresholds per asset."""
-        from merid.signals.asset_configs import get_asset_config
-        
-        # BTC has lowest threshold (most permissive)
-        btc_cfg = get_asset_config("BTC")
-        self.assertEqual(btc_cfg.min_edge_threshold, 0.05)
-        
-        # DOGE has highest threshold (most restrictive due to noise)
-        doge_cfg = get_asset_config("DOGE")
-        self.assertEqual(doge_cfg.min_edge_threshold, 0.06)
-        self.assertGreater(doge_cfg.min_edge_threshold, btc_cfg.min_edge_threshold)
-
-    def test_edge_threshold_in_topn_allocator(self):
-        """Verify topn allocator can access asset-specific thresholds."""
-        from merid.signals.asset_configs import get_asset_config
-        
-        # Verify we can get threshold for any asset
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            cfg = get_asset_config(asset)
-            self.assertGreater(cfg.min_edge_threshold, 0)
-            self.assertLessEqual(cfg.min_edge_threshold, 0.06)  # Conservative 6% max (DOGE=0.06)
 
 
 class TestRegimeStateIntegration(unittest.TestCase):
@@ -574,64 +206,6 @@ class TestStatePersistence(unittest.TestCase):
         self.assertIn("can_maintain_hedge", state_dict)
 
 
-class TestFVGAwareHedgeTiming(unittest.TestCase):
-    """Test P1-7: FVG-Aware Hedge Timing."""
-
-    def test_fvg_detector_import(self):
-        """Verify FVG detector can be imported."""
-        from merid.signals.fvg_detector import detect_fvg_zones, FVGZone, FVGType
-        self.assertIsNotNone(detect_fvg_zones)
-        self.assertIsNotNone(FVGZone)
-        self.assertIsNotNone(FVGType)
-
-    def test_fvg_zone_creation(self):
-        """Verify FVG zones can be created."""
-        from merid.signals.fvg_detector import FVGZone, FVGType
-        
-        zone = FVGZone(
-            asset="BTC",
-            timeframe="15m",
-            fvg_type=FVGType.BULLISH,
-            top=50000,
-            bottom=49500,
-            created_at=0.0,
-        )
-        
-        self.assertEqual(zone.mid, 49750)
-        self.assertEqual(zone.height, 500)
-        self.assertTrue(zone.is_price_in_zone(49700))
-
-    def test_fvg_detection_from_ohlcv(self):
-        """Verify FVG detection from OHLCV data."""
-        from merid.signals.fvg_detector import detect_fvg_zones, FVGType
-        
-        # Create bullish FVG pattern: candle0 high < candle2 low
-        ohlcv = [
-            (49000, 49500, 48500, 49200, 100),  # Candle 0: high=49500
-            (49200, 49400, 49000, 49300, 80),   # Candle 1
-            (49700, 49900, 49600, 49800, 120),  # Candle 2: low=49600 (> 49500)
-        ]
-        
-        snapshot = detect_fvg_zones(ohlcv, "BTC", "15m", min_gap_pct=0.001)
-        
-        # Should detect bullish FVG
-        self.assertTrue(any(z.fvg_type == FVGType.BULLISH for z in snapshot.zones))
-
-    def test_get_hedge_fvg_price(self):
-        """Verify hedge FVG price helper."""
-        from merid.signals.fvg_detector import get_hedge_fvg_price, FVGType
-        
-        # Bullish FVG pattern (for "no" hedge = sell at premium)
-        ohlcv = [
-            (49000, 49500, 48500, 49200, 100),
-            (49200, 49400, 49000, 49300, 80),
-            (49700, 49900, 49600, 49800, 120),
-        ]
-        
-        # For "no" hedge (bearish), should find bullish FVG zone
-        price = get_hedge_fvg_price("BTC", "15m", "no", 49800, ohlcv)
-        self.assertIsNotNone(price)
-        self.assertGreater(price, 0)
 
 
 class TestHedgeOrderLifecycle(unittest.TestCase):

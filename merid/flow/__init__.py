@@ -28,7 +28,7 @@ from merid.flow.models import (
 )
 from merid.flow.store import FlowStore, get_flow_store
 from merid.flow.sniper import SniperExecutor, get_sniper_executor
-from merid.flow.risk import FlowDomainRisk, get_flow_risk
+from merid.flow.flow_risk import FlowDomainRisk, get_flow_risk
 
 __all__ = [
     "Chain",

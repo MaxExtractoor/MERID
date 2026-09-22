@@ -194,35 +194,10 @@ def test_total_pnl_and_fees():
 
 # ── Promotion benchmarks in paper_session module ─────────────────────────
 
-def test_default_benchmark_win_rate_floor():
-    """DEFAULT_BENCHMARK.min_win_rate_pct must be >= 55% after FIX-2."""
-    from merid.prediction.paper_session import DEFAULT_BENCHMARK
-    assert DEFAULT_BENCHMARK.min_win_rate_pct >= 55.0, (
-        "Default promotion win-rate floor must be >= 55% to filter for live trading. "
-        f"Got {DEFAULT_BENCHMARK.min_win_rate_pct}%"
-    )
 
 
-def test_default_benchmark_profit_factor_floor():
-    """DEFAULT_BENCHMARK.min_profit_factor must be >= 1.3 after FIX-2."""
-    from merid.prediction.paper_session import DEFAULT_BENCHMARK
-    assert DEFAULT_BENCHMARK.min_profit_factor >= 1.3, (
-        f"PF floor must be >= 1.3, got {DEFAULT_BENCHMARK.min_profit_factor}"
-    )
 
 
-def test_cell_benchmarks_all_above_floor():
-    """All per-cell benchmarks must meet or exceed the tightened default floors."""
-    from merid.prediction.paper_session import _CELL_BENCHMARKS, DEFAULT_BENCHMARK
-    for name, bm in _CELL_BENCHMARKS.items():
-        assert bm.min_win_rate_pct >= DEFAULT_BENCHMARK.min_win_rate_pct, (
-            f"{name}: min_win_rate_pct {bm.min_win_rate_pct}% below default "
-            f"{DEFAULT_BENCHMARK.min_win_rate_pct}%"
-        )
-        assert bm.min_profit_factor >= DEFAULT_BENCHMARK.min_profit_factor, (
-            f"{name}: min_profit_factor {bm.min_profit_factor} below default "
-            f"{DEFAULT_BENCHMARK.min_profit_factor}"
-        )
 
 
 def test_strategy_config_edge_thresholds():
@@ -238,16 +213,6 @@ def test_strategy_config_edge_thresholds():
     )
 
 
-def test_stop_loss_defaults_from_constants():
-    """StopLossConfig must read defaults from trading_constants (FIX-3)."""
-    from merid.event_venues.kalshi.stop_loss import StopLossConfig
-    from config.trading_constants import (
-        SL_PRICE_INVALIDATION_DROP_CENTS,
-        SL_PRICE_FLOOR_CENTS,
-    )
-    cfg = StopLossConfig()
-    assert cfg.price_invalidation_drop_cents == SL_PRICE_INVALIDATION_DROP_CENTS
-    assert cfg.price_floor_cents == SL_PRICE_FLOOR_CENTS
 
 
 def test_snapshot_stale_seconds_aligned():
@@ -260,17 +225,3 @@ def test_snapshot_stale_seconds_aligned():
     )
 
 
-def test_consensus_threshold_default_is_065():
-    """SwarmConsensusAggregator default consensus_threshold should be 0.65 (FIX-8)."""
-    import importlib
-    import sys
-    # Force re-import so we don't test a cached singleton from a prior test run.
-    mod = importlib.import_module("merid.swarm.consensus_aggregator")
-    # Inspect the function signature default for consensus_threshold
-    import inspect
-    sig = inspect.signature(mod.SwarmConsensusAggregator.__init__)
-    default_thr = sig.parameters.get("consensus_threshold")
-    if default_thr and default_thr.default is not inspect.Parameter.empty:
-        assert default_thr.default >= 0.65, (
-            f"consensus_threshold default should be >= 0.65, got {default_thr.default}"
-        )

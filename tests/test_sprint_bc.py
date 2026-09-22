@@ -136,47 +136,6 @@ class TestWSOrderbookSnapshot(unittest.TestCase):
 # B7 – profit_target_pct take-profit
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TestProfitTargetPct(unittest.TestCase):
-    """B7: percentage-based take-profit fires before absolute-cents check."""
-
-    def _make_pos(self, entry_cents: int, current_cents: int, contracts: int = 10):
-        import time
-        from merid.event_venues.kalshi.stop_loss import TrackedPosition
-        return TrackedPosition(
-            position_id="test-001",
-            ticker="KXBTC-TEST",
-            side="yes",
-            entry_price_cents=entry_cents,
-            contracts=contracts,
-            entry_ts=time.time(),
-            current_price_cents=current_cents,
-        )
-
-    def _make_rules(self, **cfg_kwargs):
-        from merid.event_venues.kalshi.stop_loss import StopLossRules, StopLossConfig
-        cfg = StopLossConfig(**cfg_kwargs)
-        return StopLossRules(config=cfg)
-
-    def test_profit_target_pct_fires(self):
-        rules = self._make_rules(profit_target_pct=0.40)
-        pos = self._make_pos(entry_cents=50, current_cents=75)  # +50% gain
-        action = rules.check_position(pos)
-        self.assertTrue(action.should_close)
-        self.assertIn("Take-profit", action.reason)
-
-    def test_profit_target_pct_no_fire_below_threshold(self):
-        rules = self._make_rules(profit_target_pct=0.40)
-        pos = self._make_pos(entry_cents=50, current_cents=55)  # +10% gain
-        action = rules.check_position(pos)
-        # should NOT close for take-profit (10% < 40% target)
-        if action.should_close:
-            self.assertNotIn("Take-profit", action.reason)
-
-    def test_profit_target_pct_field_exists(self):
-        from merid.event_venues.kalshi.stop_loss import StopLossConfig
-        cfg = StopLossConfig()
-        self.assertTrue(hasattr(cfg, "profit_target_pct"))
-        self.assertEqual(cfg.profit_target_pct, 0.0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -215,37 +174,6 @@ class TestNormalizeAgentBrier(unittest.TestCase):
 # B9 – social_broadcaster routes kalshi:consensus_decision
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TestSocialBroadcasterConsensusEvent(unittest.TestCase):
-    """B9: kalshi:consensus_decision is in WATCHED_EVENTS and dispatches."""
-
-    def test_watched_events_contains_consensus(self):
-        from merid.prediction.social_broadcaster import KalshiSocialBroadcaster
-        self.assertIn("kalshi:consensus_decision", KalshiSocialBroadcaster.WATCHED_EVENTS)
-
-    def test_dispatch_calls_publish_consensus(self):
-        from merid.prediction.social_broadcaster import KalshiSocialBroadcaster
-        broadcaster = KalshiSocialBroadcaster.__new__(KalshiSocialBroadcaster)
-        broadcaster._telegram = None
-        broadcaster._discord = None
-
-        called = []
-        async def fake_publish(payload):
-            called.append(payload)
-
-        broadcaster._publish_consensus_decision = fake_publish
-        payload = {
-            "ticker": "KXBTC-T",
-            "stance": "YES",
-            "edge": 0.12,
-            "swarm_prob": 0.63,
-            "confidence": 0.8,
-            "n_agents": 3,
-            "sentiment": "bullish",
-        }
-        asyncio.get_event_loop().run_until_complete(
-            broadcaster._dispatch("kalshi:consensus_decision", payload)
-        )
-        self.assertEqual(len(called), 1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

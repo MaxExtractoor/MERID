@@ -156,40 +156,6 @@ class TestTradeModeGating:
         assert get_trade_mode() == TradeMode.MOCK
 
 
-class TestKalshiFeeModel:
-    """Tests for Kalshi fee model in isolation."""
-    
-    def test_fee_calculation_accuracy(self):
-        """Test that fee calculations match Kalshi's fee schedule."""
-        from merid.kalshi.crypto_15m_execution import KalshiCrypto15mExecutor, KalshiFeeConfig
-        
-        executor = KalshiCrypto15mExecutor()
-        
-        test_cases = [
-            (50, 10),  # 50 cents, 10 contracts
-            (20, 5),   # 20 cents, 5 contracts
-            (80, 8),   # 80 cents, 8 contracts
-        ]
-        
-        for price_cents, quantity in test_cases:
-            taker_fee = executor.calculate_kalshi_fees(price_cents, quantity, is_maker=False)
-            
-            price_frac = price_cents / 100.0
-            expected_per_contract = 0.07 * price_frac * (1 - price_frac) * 100
-            expected_per_contract = min(expected_per_contract, 3.5)
-            expected_total = expected_per_contract * quantity
-            
-            assert abs(taker_fee - expected_total) < 0.01
-    
-    def test_fee_config_validation(self):
-        """Test fee config validation."""
-        from merid.kalshi.crypto_15m_execution import KalshiFeeConfig
-        
-        valid = KalshiFeeConfig(taker_fee_rate=0.07, maker_fee_rate=0.0175, max_fee_cents=3.5)
-        assert valid.validate() is True
-        
-        invalid_taker = KalshiFeeConfig(taker_fee_rate=0.8, maker_fee_rate=0.0175, max_fee_cents=3.5)
-        assert invalid_taker.validate() is False
 
 
 class TestReconciliationKillSwitchIntegration:

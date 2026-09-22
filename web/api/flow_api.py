@@ -129,7 +129,7 @@ def _get_sniper():
 
 
 def _get_risk():
-    from merid.flow.risk import get_flow_risk
+    from merid.flow.flow_risk import get_flow_risk
     return get_flow_risk()
 
 

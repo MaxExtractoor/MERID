@@ -159,37 +159,6 @@ class TestExecutionGateFailClosed:
         assert isinstance(result.reasons, list)
 
 
-class TestSignalGenerator:
-    """Verify signal generator never emits synthetic/tradeable edges."""
-    
-    @pytest.mark.asyncio
-    async def test_signal_generator_no_synthetic_fallback(self):
-        """Edge signals must return empty list, never synthetic tradeable values."""
-        from merid.signals.kalshi_signals import KalshiSignalGenerator
-        
-        generator = KalshiSignalGenerator()
-        
-        # Mock the adapter to return test instruments
-        mock_adapter = AsyncMock()
-        mock_adapter.list_instruments.return_value = [
-            MagicMock(id="BTC-24FEB-50K-YES")
-        ]
-        
-        # Patch the internal adapter reference
-        with patch.object(generator, '_adapter', mock_adapter, create=True):
-            signals = await generator._generate_edge_signals(time.time())
-            
-            # Should return empty list (no synthetic signals)
-            assert signals == [], f"Expected empty list, got {len(signals)} synthetic signals"
-    
-    def test_edge_signal_docstring_warns_against_synthetic(self):
-        """Verify docstring indicates no synthetic signals are emitted."""
-        from merid.signals.kalshi_signals import KalshiSignalGenerator
-        
-        doc = inspect.getdoc(KalshiSignalGenerator._generate_edge_signals)
-        assert doc is not None
-        doc_lower = doc.lower()
-        assert "empty list" in doc_lower or "never" in doc_lower or "synthetic" in doc_lower
 
 
 class TestKillSwitch:

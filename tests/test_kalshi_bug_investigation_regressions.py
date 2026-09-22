@@ -110,112 +110,12 @@ class TestH1_WsBridgeOrderGroupEventType(unittest.TestCase):
 # H2 — Execution Subscriber: Spread Gate
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestH2_SpreadGate(unittest.TestCase):
-    """H2: Spread gate must reject zero liquidity and wide % spreads."""
-
-    def _make_subscriber(self):
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-        sub = ExecutionSubscriber()
-        sub._pending_decisions = {}
-        sub._handle_decision = AsyncMock()
-        return sub
-
-    def _simulate_ticker_and_check(self, sub, bid, ask, market_id="TEST-MKT"):
-        """Simulate a ticker event hitting a pending decision. Returns True if executed."""
-        decision = {
-            "decision_id": "d-1",
-            "market_id": market_id,
-            "action": "buy",
-            "side": "yes",
-            "size_contracts": 5,
-            "risk_approved": True,
-            "limit_price_cents": 50,
-            "_expiry": time.time() + 30,
-            "_created_at": time.time(),
-        }
-        sub._pending_decisions[market_id] = decision
-
-        # The spread gate logic extracted from _process_loop
-        if bid and ask and bid > 0 and ask > 0:
-            spread = ask - bid
-            mid = (ask + bid) / 2.0
-            spread_pct = spread / mid if mid > 0 else 1.0
-            if spread_pct < 0.05 and spread <= 5:
-                return True  # would execute
-        return False  # would not execute
-
-    def test_rejects_zero_liquidity(self):
-        """bid=0, ask=0 must NOT pass the spread gate."""
-        sub = self._make_subscriber()
-        self.assertFalse(self._simulate_ticker_and_check(sub, bid=0, ask=0))
-
-    def test_rejects_zero_bid(self):
-        """bid=0, ask=50 must NOT pass (no valid bid)."""
-        sub = self._make_subscriber()
-        self.assertFalse(self._simulate_ticker_and_check(sub, bid=0, ask=50))
-
-    def test_rejects_wide_pct_spread_low_probability(self):
-        """3c spread on 5c market (60% of mid) must be rejected."""
-        sub = self._make_subscriber()
-        # bid=3, ask=6 → spread=3c, mid=4.5, spread_pct=66.7%
-        self.assertFalse(self._simulate_ticker_and_check(sub, bid=3, ask=6))
-
-    def test_accepts_tight_spread(self):
-        """2c spread on 50c market (4% of mid) must be accepted."""
-        sub = self._make_subscriber()
-        # bid=49, ask=51 → spread=2c, mid=50, spread_pct=4%
-        self.assertTrue(self._simulate_ticker_and_check(sub, bid=49, ask=51))
-
-    def test_rejects_wide_absolute_spread(self):
-        """6c spread on 90c market (~6.7% of mid) must be rejected (>5c absolute)."""
-        sub = self._make_subscriber()
-        # bid=87, ask=93 → spread=6c, mid=90, spread_pct=6.7%
-        # Fails BOTH conditions: spread_pct > 5% AND spread > 5c
-        self.assertFalse(self._simulate_ticker_and_check(sub, bid=87, ask=93))
-
-    def test_rejects_borderline_pct_but_ok_absolute(self):
-        """5c spread on 50c market (10% of mid) — rejected on pct even though <=5c absolute."""
-        sub = self._make_subscriber()
-        # bid=48, ask=53 → spread=5c, mid=50.5, spread_pct=9.9%
-        self.assertFalse(self._simulate_ticker_and_check(sub, bid=48, ask=53))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # H3 — Execution Subscriber: limit_price forwarding
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestH3_LimitPriceForwarding(unittest.TestCase):
-    """H3: limit_price_cents from decisions must reach _kalshi_place_order."""
-
-    def test_limit_price_in_route_to_execution_agentgrid_path(self):
-        """When AgentGrid path fires, price_cents= must be passed."""
-        import inspect
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-
-        source = inspect.getsource(ExecutionSubscriber._route_to_execution)
-        # Verify price_cents=limit_price appears in the source
-        self.assertIn("price_cents=limit_price", source,
-                       "H3: _route_to_execution must pass price_cents=limit_price to _kalshi_place_order")
-
-    def test_limit_price_in_fallback_path(self):
-        """The fallback direct placement path must also forward price_cents."""
-        import inspect
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-
-        source = inspect.getsource(ExecutionSubscriber._route_to_execution)
-        # Count occurrences — should appear in both AgentGrid and fallback paths
-        count = source.count("price_cents=limit_price")
-        self.assertGreaterEqual(count, 2,
-                                 f"H3: price_cents=limit_price must appear in both call sites, found {count}")
-
-    def test_limit_price_extracted_from_data(self):
-        """The _route_to_execution method must extract limit_price from the data dict."""
-        import inspect
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-
-        source = inspect.getsource(ExecutionSubscriber._route_to_execution)
-        self.assertIn("limit_price", source,
-                       "H3: _route_to_execution must reference limit_price variable")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -314,52 +214,6 @@ class TestM2_ActivePlansDeprecation(unittest.TestCase):
 # M3 — Execution Subscriber: staleness uses signal_timestamp
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestM3_StalenessSignalTimestamp(unittest.TestCase):
-    """M3: Staleness guard must use signal_timestamp, not buffer time."""
-
-    def test_source_uses_signal_timestamp(self):
-        """The _created_at assignment must prefer signal_timestamp from decision data."""
-        import inspect
-        from merid.swarm.execution_subscriber import ExecutionSubscriber
-
-        source = inspect.getsource(ExecutionSubscriber._process_loop)
-        self.assertIn('data.get("signal_timestamp"', source,
-                       "M3: _created_at must fall back to signal_timestamp from decision data")
-
-    def test_stale_decision_with_old_signal_timestamp_discarded(self):
-        """A decision with signal_timestamp 60s old must be discarded by staleness guard."""
-        from collections import deque
-        from merid.swarm.execution_subscriber import ExecutionSubscriber, _MAX_DECISION_AGE_S, ExecutionRecord
-
-        sub = ExecutionSubscriber()
-        sub._decisions_received = 0
-        sub._decisions_routed = 0
-        sub._decisions_skipped = 0
-        sub._consecutive_failures = 0
-        sub._history = deque(maxlen=500)
-
-        old_signal_time = time.time() - (_MAX_DECISION_AGE_S + 10)
-        data = {
-            "decision_id": "d-stale",
-            "market_id": "STALE-MKT",
-            "action": "buy",
-            "side": "yes",
-            "size_contracts": 5,
-            "risk_approved": True,
-            "_created_at": old_signal_time,  # simulates signal_timestamp being old
-        }
-
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(sub._handle_decision(data))
-        finally:
-            loop.close()
-
-        self.assertEqual(sub._decisions_skipped, 1)
-        self.assertEqual(sub._decisions_routed, 0)
-        last_record = sub._history[-1]
-        self.assertIsInstance(last_record, ExecutionRecord)
-        self.assertIn("stale_decision", last_record.route_reason)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

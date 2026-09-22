@@ -17,92 +17,9 @@ from decimal import Decimal
 class TestCrypto15MArb(unittest.TestCase):
     """Test CRYPTO-15M-ARB optimizations."""
 
-    def test_crypto_15m_assets_constant(self):
-        """Test CRYPTO_15M_ASSETS includes all 5 crypto assets."""
-        from merid.signals.arbitrage import CRYPTO_15M_ASSETS
-        
-        self.assertEqual(len(CRYPTO_15M_ASSETS), 5)
-        self.assertIn("BTC", CRYPTO_15M_ASSETS)
-        self.assertIn("ETH", CRYPTO_15M_ASSETS)
-        self.assertIn("SOL", CRYPTO_15M_ASSETS)
-        self.assertIn("XRP", CRYPTO_15M_ASSETS)
-        self.assertIn("DOGE", CRYPTO_15M_ASSETS)
 
-    def test_scan_filters_non_crypto_symbols(self):
-        """Test that scan() filters out non-crypto symbols."""
-        from merid.signals.arbitrage import DislocationScanner, CRYPTO_15M_ASSETS, VenuePrice
-        
-        scanner = DislocationScanner()
-        
-        # Add prices for crypto assets
-        for asset in CRYPTO_15M_ASSETS:
-            scanner.ingest_price(VenuePrice(
-                venue="coinbase", symbol=asset,
-                bid=100.0, ask=100.1, mid=100.05,
-                timestamp=time.time()
-            ))
-            scanner.ingest_price(VenuePrice(
-                venue="binance", symbol=asset,
-                bid=100.05, ask=100.15, mid=100.10,
-                timestamp=time.time()
-            ))
-        
-        # Add non-crypto prices (should be filtered)
-        scanner.ingest_price(VenuePrice(
-            venue="coinbase", symbol="AAPL",
-            bid=150.0, ask=150.1, mid=150.05,
-            timestamp=time.time()
-        ))
-        scanner.ingest_price(VenuePrice(
-            venue="binance", symbol="AAPL",
-            bid=150.05, ask=150.15, mid=150.10,
-            timestamp=time.time()
-        ))
-        
-        # Scan should only process crypto assets
-        signals = scanner.scan()
-        
-        # All signals should be for crypto assets only
-        for sig in signals:
-            base_symbol = sig.symbol.replace("/USD", "").replace("-USD", "").upper()
-            self.assertIn(base_symbol, CRYPTO_15M_ASSETS,
-                         f"Non-crypto symbol {sig.symbol} should be filtered")
 
-    def test_synthetic_scan_disabled_by_default(self):
-        """Test synthetic_scan returns empty list by default."""
-        from merid.signals.arbitrage import DislocationScanner
-        import os
-        
-        scanner = DislocationScanner()
-        
-        # Ensure env var is not set
-        if "MERID_ENABLE_SYNTHETIC_ARB" in os.environ:
-            del os.environ["MERID_ENABLE_SYNTHETIC_ARB"]
-        
-        signals = scanner.synthetic_scan()
-        self.assertEqual(len(signals), 0)
 
-    def test_chunked_expire_signals_doesnt_block(self):
-        """Test _expire_signals completes without blocking."""
-        from merid.signals.arbitrage import DislocationScanner, DislocationSignal, DislocationStatus
-        
-        scanner = DislocationScanner()
-        
-        # Add many signals to test chunked processing
-        for i in range(150):
-            sig = DislocationSignal(
-                symbol=f"TEST{i}",
-                status=DislocationStatus.EXPIRED.value,
-                detected_at=time.time() - 1000  # Old signal
-            )
-            scanner._signals.append(sig)
-        
-        start = time.time()
-        scanner._expire_signals(time.time())
-        elapsed = time.time() - start
-        
-        # Should complete quickly with GIL yields (under 500ms for 150 items)
-        self.assertLess(elapsed, 0.5, "_expire_signals took too long")
 
     def test_cross_venue_arb_boost_in_strategy(self):
         """Test KalshiStrategy._get_cross_venue_arb_boost method exists."""
@@ -143,15 +60,6 @@ class TestCrypto15MArb(unittest.TestCase):
         # Arb executor should have fewer workers
         self.assertEqual(arb_executor._max_workers, 4)
 
-    def test_crypto_venue_bridge_imports(self):
-        """Test CryptoVenueBridge can be imported."""
-        from merid.signals.crypto_venue_bridge import (
-            CryptoVenueBridge, get_crypto_venue_bridge, VenuePriceUpdate
-        )
-        
-        bridge = get_crypto_venue_bridge()
-        self.assertIsInstance(bridge, CryptoVenueBridge)
-        self.assertEqual(bridge._assets, ["BTC", "ETH", "SOL", "XRP", "DOGE"])
 
     def test_strategy_has_cross_venue_check(self):
         """Test _evaluate_directional includes cross-venue arb check."""

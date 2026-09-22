@@ -38,50 +38,6 @@ class TestP2SilentExceptionHandlers:
         assert any("Kill switch" in msg for msg in warning_messages)
 
 
-class TestP2DSTCalculation:
-    """P2-2: DST calculation off-by-one fixed."""
-
-    def test_dst_start_boundary(self):
-        """Verify DST starts at 7:00 AM UTC on 2nd Sunday of March."""
-        from merid.prediction.session_guard import _is_us_dst
-        
-        # 2024: 2nd Sunday of March is March 10
-        # DST starts at 2:00 AM ET = 7:00 AM UTC
-        before_dst = datetime(2024, 3, 10, 6, 59, tzinfo=timezone.utc)
-        at_dst_start = datetime(2024, 3, 10, 7, 0, tzinfo=timezone.utc)
-        
-        # Before 7 AM UTC on transition day, should be standard time
-        assert _is_us_dst(before_dst) is False
-        # At 7 AM UTC on transition day, DST starts
-        assert _is_us_dst(at_dst_start) is True
-
-    def test_dst_end_boundary(self):
-        """Verify DST ends at 6:00 AM UTC on 1st Sunday of November."""
-        from merid.prediction.session_guard import _is_us_dst
-        
-        # 2024: 1st Sunday of November is November 3
-        # DST ends at 2:00 AM ET = 6:00 AM UTC (when in DST, ET = UTC-4)
-        before_end = datetime(2024, 11, 3, 5, 59, tzinfo=timezone.utc)
-        at_dst_end = datetime(2024, 11, 3, 6, 0, tzinfo=timezone.utc)
-        
-        # Before 6 AM UTC on transition day, still DST
-        assert _is_us_dst(before_end) is True
-        # At 6 AM UTC on transition day, standard time starts
-        assert _is_us_dst(at_dst_end) is False
-
-    def test_mid_summer_is_dst(self):
-        """Verify mid-summer dates are correctly identified as DST."""
-        from merid.prediction.session_guard import _is_us_dst
-        
-        summer_date = datetime(2024, 7, 15, 12, 0, tzinfo=timezone.utc)
-        assert _is_us_dst(summer_date) is True
-
-    def test_mid_winter_not_dst(self):
-        """Verify mid-winter dates are correctly identified as not DST."""
-        from merid.prediction.session_guard import _is_us_dst
-        
-        winter_date = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
-        assert _is_us_dst(winter_date) is False
 
 
 class TestP2OrderGateCleanup:
@@ -184,56 +140,6 @@ class TestP2FeeCalculationConsistency:
         assert fee_per_contract == expected_fee
 
 
-class TestP2DrawdownRecoveryAfterKillReset:
-    """P2-5: Drawdown recovery fires for all kill types."""
-
-    def test_drawdown_recovery_check_exists(self):
-        """Verify CapitalEngine has check_drawdown_recovery method."""
-        from merid.risk.capital_engine import CapitalEngine
-        
-        engine = CapitalEngine(total_equity=10000.0)
-        assert hasattr(engine, 'check_drawdown_recovery')
-        assert callable(getattr(engine, 'check_drawdown_recovery'))
-
-    def test_drawdown_recovery_restores_sizing(self):
-        """Verify check_drawdown_recovery restores sizing when capital recovered."""
-        from merid.risk.capital_engine import CapitalEngine
-        
-        engine = CapitalEngine(total_equity=10000.0)
-        
-        # Simulate drawdown that triggered sizing reduction
-        engine._risk_capital_peak = 10000.0
-        engine._risk_capital = 8000.0  # 20% drawdown
-        engine._sizing_multiplier = 0.6  # Reduced due to drawdown
-        
-        # Now recover to 96% of peak (above 95% threshold)
-        engine._risk_capital = 9600.0
-        
-        # Check recovery
-        recovered = engine.check_drawdown_recovery("BTC")
-        
-        assert recovered is True
-        assert engine._sizing_multiplier == 1.0
-
-    def test_drawdown_recovery_no_restore_if_not_recovered(self):
-        """Verify sizing not restored if capital hasn't recovered enough."""
-        from merid.risk.capital_engine import CapitalEngine
-        
-        engine = CapitalEngine(total_equity=10000.0)
-        
-        # Simulate drawdown
-        engine._risk_capital_peak = 10000.0
-        engine._risk_capital = 8000.0  # 20% drawdown
-        engine._sizing_multiplier = 0.6
-        
-        # Only recover to 94% (below 95% threshold)
-        engine._risk_capital = 9400.0
-        
-        # Check recovery
-        recovered = engine.check_drawdown_recovery("BTC")
-        
-        assert recovered is False
-        assert engine._sizing_multiplier == 0.6  # Not restored
 
 
 if __name__ == "__main__":

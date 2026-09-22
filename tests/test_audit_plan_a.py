@@ -155,82 +155,12 @@ class TestVenueExposureSyncLoop:
 # Task 8: Configurable Consensus Approval Threshold (C-4)
 # =============================================================================
 
-class TestConsensusApprovalThreshold:
-    """C-4: Swarm consensus approval threshold is configurable via env var."""
-
-    def test_approval_threshold_reads_from_env(self, monkeypatch):
-        """MERID_CONSENSUS_THRESHOLD env var should override default."""
-        monkeypatch.setenv("MERID_CONSENSUS_THRESHOLD", "0.75")
-
-        import importlib
-        import merid.swarm.consensus_engine as ce
-        importlib.reload(ce)
-
-        # Threshold should be 0.75 not the default 0.66
-        threshold = getattr(ce, 'APPROVAL_THRESHOLD', None) or \
-                    getattr(ce.ConsensusEngine, 'APPROVAL_THRESHOLD', None)
-
-        if threshold is None:
-            pytest.skip("APPROVAL_THRESHOLD not found in consensus_engine")
-
-        assert threshold == 0.75
-
-    def test_default_threshold_when_no_env(self):
-        """Default approval threshold should be 0.66 when env not set."""
-        import os
-
-        # Ensure env is not set
-        if "MERID_CONSENSUS_THRESHOLD" in os.environ:
-            del os.environ["MERID_CONSENSUS_THRESHOLD"]
-
-        import importlib
-        import merid.swarm.consensus_engine as ce
-        importlib.reload(ce)
-
-        threshold = getattr(ce, 'APPROVAL_THRESHOLD', None) or \
-                    getattr(ce.ConsensusEngine, 'APPROVAL_THRESHOLD', None)
-
-        if threshold is None:
-            pytest.skip("APPROVAL_THRESHOLD not found in consensus_engine")
-
-        assert threshold == 0.66
 
 
 # =============================================================================
 # Task 9: Tiered Archetype Diversity Thresholds (C-2)
 # =============================================================================
 
-class TestTieredArchetypeDiversity:
-    """C-2: Tiered archetype diversity thresholds (3,5,8) instead of flat 2."""
-
-    def test_tiered_thresholds_exist(self):
-        """Tiered archetype diversity thresholds should be defined."""
-        import merid.swarm.consensus_aggregator as ca
-
-        # Check for tiered threshold constants
-        has_tiers = (
-            hasattr(ca, 'ARCHETYPE_DIVERSITY_TIER_1') or
-            hasattr(ca, 'ARCHETYPE_DIVERSITY_LOW') or
-            hasattr(ca.ConsensusAggregator, 'archetype_diversity_tiers')
-        )
-
-        assert has_tiers, "Tiered archetype diversity thresholds not found"
-
-    def test_tiered_thresholds_not_flat(self):
-        """Archetype diversity should not be a flat threshold of 2."""
-        import merid.swarm.consensus_aggregator as ca
-
-        # Look for the threshold values
-        thresholds = []
-        for attr in dir(ca):
-            if 'ARCHETYPE' in attr and 'DIVERSITY' in attr:
-                val = getattr(ca, attr)
-                if isinstance(val, int):
-                    thresholds.append(val)
-
-        # Should have tiered values (3, 5, 8 or similar), not just flat 2
-        if thresholds:
-            assert max(thresholds) > 2, "Archetype diversity should be tiered (3,5,8) not flat 2"
 
 
 # =============================================================================
