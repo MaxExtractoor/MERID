@@ -695,6 +695,7 @@ except ImportError:
 try:
     from merid.event_venues.kalshi.binary_price_space import (
         is_price_in_canonical_range,
+        get_canonical_price_range,
         is_price_in_tail_experiment_band,
         is_price_in_longshot_exclusion_band,
         classify_tail_band_shadow_state,
@@ -6660,7 +6661,7 @@ class LeanAgent15m:
 
         # Check if price is within canonical 10c-75c range
 
-        if 10 <= raw_price_cents <= 75:
+        if (is_price_in_canonical_range(raw_price_cents, signal_side) if PRICE_SPACE_AVAILABLE else (10 <= raw_price_cents <= 75)):
 
             # Price is already in the side-appropriate range - use it directly
 
@@ -6708,11 +6709,11 @@ class LeanAgent15m:
                     if signal_side == "yes":
                         # Cheapest YES ask = 100 - NO bid; search no_bids.
                         levels = getattr(market_state, 'no_bids', [])
-                        range_min, range_max = 10, 75
+                        range_min, range_max = get_canonical_price_range("yes")
                     else:
                         # Cheapest NO ask = 100 - YES bid; search yes_bids.
                         levels = getattr(market_state, 'yes_bids', [])
-                        range_min, range_max = 10, 75
+                        range_min, range_max = get_canonical_price_range("no")
 
                     if levels:
 
@@ -6835,8 +6836,14 @@ class LeanAgent15m:
         # means an 80c NO is equivalent to a 20c YES; there is no need to allow
         # either side to trade outside 10-75, and order_intent_contract rejects
         # such prices with `invalid_price`.
-        price_min, price_max = 10, 75
-        range_str = "10c-75c"
+        if PRICE_SPACE_AVAILABLE:
+            try:
+                price_min, price_max = get_canonical_price_range(signal_side)
+            except (ValueError, SideValidationError):
+                price_min, price_max = 1, 0  # unparseable side -> empty range -> drop
+        else:
+            price_min, price_max = 10, 75
+        range_str = f"{price_min}c-{price_max}c"
 
         if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
@@ -9179,7 +9186,7 @@ class LeanAgent15m:
 
         # Check if price is within canonical 10c-75c range
 
-        if 10 <= raw_price_cents <= 75:
+        if (is_price_in_canonical_range(raw_price_cents, signal_side) if PRICE_SPACE_AVAILABLE else (10 <= raw_price_cents <= 75)):
 
             # Price is already in the side-appropriate range - use it directly
 
@@ -9227,11 +9234,11 @@ class LeanAgent15m:
                     if signal_side == "yes":
                         # Cheapest YES ask = 100 - NO bid; search no_bids.
                         levels = getattr(market_state, 'no_bids', [])
-                        range_min, range_max = 10, 75
+                        range_min, range_max = get_canonical_price_range("yes")
                     else:
                         # Cheapest NO ask = 100 - YES bid; search yes_bids.
                         levels = getattr(market_state, 'yes_bids', [])
-                        range_min, range_max = 10, 75
+                        range_min, range_max = get_canonical_price_range("no")
 
                     if levels:
 
@@ -9354,8 +9361,14 @@ class LeanAgent15m:
         # means an 80c NO is equivalent to a 20c YES; there is no need to allow
         # either side to trade outside 10-75, and order_intent_contract rejects
         # such prices with `invalid_price`.
-        price_min, price_max = 10, 75
-        range_str = "10c-75c"
+        if PRICE_SPACE_AVAILABLE:
+            try:
+                price_min, price_max = get_canonical_price_range(signal_side)
+            except (ValueError, SideValidationError):
+                price_min, price_max = 1, 0  # unparseable side -> empty range -> drop
+        else:
+            price_min, price_max = 10, 75
+        range_str = f"{price_min}c-{price_max}c"
 
         if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 
@@ -14601,7 +14614,7 @@ class LeanAgent15m:
 
         # Check if price is within canonical 10c-75c range
 
-        if 10 <= raw_price_cents <= 75:
+        if (is_price_in_canonical_range(raw_price_cents, signal_side) if PRICE_SPACE_AVAILABLE else (10 <= raw_price_cents <= 75)):
 
             # Price is already in the side-appropriate range - use it directly
 
@@ -14649,11 +14662,11 @@ class LeanAgent15m:
                     if signal_side == "yes":
                         # Cheapest YES ask = 100 - NO bid; search no_bids.
                         levels = getattr(market_state, 'no_bids', [])
-                        range_min, range_max = 10, 75
+                        range_min, range_max = get_canonical_price_range("yes")
                     else:
                         # Cheapest NO ask = 100 - YES bid; search yes_bids.
                         levels = getattr(market_state, 'yes_bids', [])
-                        range_min, range_max = 10, 75
+                        range_min, range_max = get_canonical_price_range("no")
 
                     if levels:
 
@@ -14776,8 +14789,14 @@ class LeanAgent15m:
         # means an 80c NO is equivalent to a 20c YES; there is no need to allow
         # either side to trade outside 10-75, and order_intent_contract rejects
         # such prices with `invalid_price`.
-        price_min, price_max = 10, 75
-        range_str = "10c-75c"
+        if PRICE_SPACE_AVAILABLE:
+            try:
+                price_min, price_max = get_canonical_price_range(signal_side)
+            except (ValueError, SideValidationError):
+                price_min, price_max = 1, 0  # unparseable side -> empty range -> drop
+        else:
+            price_min, price_max = 10, 75
+        range_str = f"{price_min}c-{price_max}c"
 
         if clamped_price_cents is None or not (price_min <= clamped_price_cents <= price_max):
 

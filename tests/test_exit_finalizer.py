@@ -107,6 +107,7 @@ def _base_attempt():
         pre_submit_snapshot_version=0,
         submit_started_at_ns=0,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
 
 
@@ -118,6 +119,7 @@ def test_finalize_full_exit_success():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -168,6 +170,7 @@ def test_finalize_rejects_stale_snapshot_version():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -193,6 +196,7 @@ def test_finalize_rejects_snapshot_preceding_submission():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=2_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -260,6 +264,7 @@ def test_finalize_rejects_fill_less_than_submitted():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="partial_live",
@@ -285,6 +290,7 @@ def test_finalize_rejects_remaining_quantity():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="partial_live",
@@ -328,6 +334,7 @@ def test_finalize_rejects_working_order_remaining():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -369,6 +376,7 @@ def test_finalize_rejects_remaining_exchange_position():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -394,6 +402,7 @@ def test_finalize_allows_zero_fill_zero_remaining():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="unfilled_ioc",
@@ -419,6 +428,7 @@ def test_finalize_compares_to_submitted_not_requested():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("0.49"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -460,6 +470,7 @@ def test_finalize_full_exit_no_position_positive():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -501,6 +512,7 @@ def test_finalize_full_exit_no_position_remains_negative():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -538,6 +550,7 @@ def test_finalize_full_exit_no_position_zero():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -568,6 +581,7 @@ def test_finalize_full_exit_pagination_incomplete():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -593,6 +607,7 @@ def test_finalize_rejects_when_snapshot_version_unchanged():
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1_000_000,
         submitted_count_fp=Decimal("1.00"),
+        reduce_only=False,
     )
     result = _FakeOrderResult(
         status="filled_live",
@@ -608,3 +623,58 @@ def test_finalize_rejects_when_snapshot_version_unchanged():
     )
     assert allowed is False
     assert reason == "NO_POST_ORDER_SNAPSHOT"
+
+
+def test_finalize_reduce_only_exit_on_full_fill_without_authoritative_snapshot():
+    """Reduce-only exits finalize on a confirmed full fill even when the
+    broader portfolio snapshot is not authoritative (deliberate 2026 contract:
+    exits must be able to close risk during a latched reconciliation break)."""
+    ticker = "KXBTC15M-26AUG192030-30"
+    # Non-authoritative snapshot: pagination incomplete
+    snapshot = _make_snapshot(version=0, wall_ns=500_000, pagination_complete=False)
+    attempt = ExitOrderAttempt(
+        pre_submit_snapshot_version=0,
+        submit_started_at_ns=1_000_000,
+        submitted_count_fp=Decimal("1.00"),
+        reduce_only=True,
+    )
+    result = _FakeOrderResult(
+        status="filled_live",
+        fill={"executed_quantity_cc": 100, "remaining_quantity_cc": 0},
+    )
+
+    allowed, reason = can_finalize_full_exit(
+        snapshot=snapshot,
+        attempt=attempt,
+        order_result=result,
+        position_key=ticker,
+        now_ns=3_000_000,
+    )
+    assert allowed is True
+    assert reason == "REDUCE_ONLY_EXIT_FULLY_FILLED"
+
+
+def test_finalize_reduce_only_rejects_partial_fill():
+    """Reduce-only path still refuses finalization when fill != submitted."""
+    ticker = "KXBTC15M-26AUG192030-30"
+    snapshot = _make_snapshot(version=2, wall_ns=2_000_000)
+    attempt = ExitOrderAttempt(
+        pre_submit_snapshot_version=1,
+        submit_started_at_ns=1_000_000,
+        submitted_count_fp=Decimal("1.00"),
+        reduce_only=True,
+    )
+    result = _FakeOrderResult(
+        status="partial_fill",
+        fill={"executed_quantity_cc": 50, "remaining_quantity_cc": 0},
+    )
+
+    allowed, reason = can_finalize_full_exit(
+        snapshot=snapshot,
+        attempt=attempt,
+        order_result=result,
+        position_key=ticker,
+        now_ns=3_000_000,
+    )
+    assert allowed is False
+    assert reason == "FILL_COUNT_NOT_EQUAL_SUBMITTED"

@@ -107,6 +107,8 @@ for _env_key, _fname in {
     "MERID_ENTRY_PROVENANCE_PATH": "entry_provenance_snapshots.json",
     "MERID_PROMOTION_STATES_PATH": "promotion_states.json",
     "MERID_RISK_STATE_PATH": "risk_state.json",
+    "MERID_RISK_AUDIT_LOG": "risk_audit_chain.jsonl",
+    "MERID_HEALTH_DIAGNOSTIC_PATH": "health_diagnostic.txt",
     "MERID_WARMUP_SNAPSHOTS_DIR": "warmup_snapshots",
     "MERID_RUN_SUMMARIES_DIR": "run_summaries",
     "MERID_INGRESS_DIR": "ingress",
@@ -692,6 +694,42 @@ def reset_scalper_env_vars(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_applied_fill_ids(tmp_path, monkeypatch):
+    """Per-test applied-fill-id journal.
+
+    KalshiPositionCache persists applied fill_ids to MERID_APPLIED_FILL_IDS_PATH
+    for restart-safe idempotency.  The session pin points at a shared scratch
+    file, so fill_ids leak between tests (a fill_id used in test N is reported
+    'already applied' in test N+1).  Give every test a fresh journal.
+    """
+    monkeypatch.setenv(
+        "MERID_APPLIED_FILL_IDS_PATH",
+        str(tmp_path / "kalshi_applied_fill_ids.json"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _ensure_current_event_loop():
+    """Guarantee a current event loop for sync tests.
+
+    Python 3.11's asyncio.get_event_loop() raises RuntimeError on the main
+    thread when no loop is set.  Tests that call asyncio.run() (or close the
+    default loop) poison the thread for later tests in the same worker,
+    producing order-dependent "There is no current event loop" failures.
+    Install a fresh loop when the current one is missing or already closed.
+    """
+    import asyncio as _aio
+
+    try:
+        loop = _aio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        _aio.set_event_loop(_aio.new_event_loop())
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_replay_dispatcher_for_isolation(monkeypatch):
     """Reset the replay dispatcher singleton before/after every test.
 
@@ -856,7 +894,7 @@ def mock_websocket():
 
 
 @pytest.fixture
-def missing_endpoints_client():
+def missing_endpoints_client(monkeypatch):
     """Minimal FastAPI TestClient containing only the missing_endpoints router.
 
     Usage in tests::
@@ -866,6 +904,7 @@ def missing_endpoints_client():
             assert resp.status_code == 200
     """
     from web.api.missing_endpoints import router as missing_router
+    monkeypatch.setenv("MERID_SKIP_AUTH_FOR_TESTS", "1")
     app = FastAPI()
     app.include_router(missing_router)
     return TestClient(app)
@@ -1075,17 +1114,22 @@ def _reset_trading_circuit_breaker_between_tests():
     unmatched live fills.  Tests that exercise unmatched-fill paths must not
     leave subsequent tests in a permanently halted state.
     """
-    try:
-        from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
-        get_trading_circuit_breaker().reset()
-    except (ImportError, AttributeError):
-        pass
+    def _do_reset():
+        try:
+            from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
+            get_trading_circuit_breaker().reset()
+        except (ImportError, AttributeError):
+            pass
+        try:
+            # Reset the durable risk-audit-chain singleton so test entries do
+            # not accumulate in shared state between tests.
+            import core.risk_audit_chain as _rac
+            _rac._audit_chain_instance = None
+        except (ImportError, AttributeError):
+            pass
+    _do_reset()
     yield
-    try:
-        from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
-        get_trading_circuit_breaker().reset()
-    except (ImportError, AttributeError):
-        pass
+    _do_reset()
 
 
 @pytest.fixture(autouse=True)
@@ -1101,7 +1145,9 @@ def _reset_global_slot_allocator_between_tests():
         from merid.risk.global_slot_allocator import reset_global_slot_allocator
         reset_global_slot_allocator()
         from merid.event_venues.kalshi.position_cache import get_position_cache
-        get_position_cache().clear_sync()
+        _pc = get_position_cache()
+        _pc.clear_sync()
+        _pc._applied_fill_ids.clear()
     except (ImportError, AttributeError):
         pass
     yield
@@ -1109,7 +1155,9 @@ def _reset_global_slot_allocator_between_tests():
         from merid.risk.global_slot_allocator import reset_global_slot_allocator
         reset_global_slot_allocator()
         from merid.event_venues.kalshi.position_cache import get_position_cache
-        get_position_cache().clear_sync()
+        _pc = get_position_cache()
+        _pc.clear_sync()
+        _pc._applied_fill_ids.clear()
     except (ImportError, AttributeError):
         pass
 

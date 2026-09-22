@@ -559,7 +559,7 @@ def _map_exit_reason_to_intent_contract(exit_reason_str: str) -> "ExitReason":
 # cycle (open+write+flush), adding disk-fsync latency to the hot path - implicated
 # in Windows ProactorEventLoop stalls. These writes are now DISABLED by default and
 # gated behind MERID_LOOP_DIAG_FILE=1 for on-demand debugging.
-_DIAG_FILE_PATH = "c:\\Dev\\MERID\\web\\health_diagnostic.txt"
+_DIAG_FILE_PATH = os.getenv("MERID_HEALTH_DIAGNOSTIC_PATH", "c:\\Dev\\MERID\\web\\health_diagnostic.txt")
 _DIAG_FILE_ENABLED = os.getenv("MERID_LOOP_DIAG_FILE", "").strip().lower() in ("1", "true", "yes", "on")
 
 

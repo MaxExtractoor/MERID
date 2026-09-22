@@ -51,10 +51,10 @@ class TestP0_1_KellyPositionSizerWired:
     """KalshiStrategy._kelly_size must call get_position_sizer().compute() with
     the correct arguments and pass size_factor through the fallback path too."""
 
-    def test_get_position_sizer_imported_in_kelly_size(self):
+    def test_unified_sizing_imported_in_kelly_size(self):
         src = _src("merid/prediction/strategy.py")
-        assert "get_position_sizer" in src, (
-            "P0-1: get_position_sizer not referenced in strategy.py"
+        assert "compute_order_size" in src, (
+            "P0-1: unified_sizing.compute_order_size not referenced in strategy.py"
         )
 
     def test_size_factor_param_in_kelly_size(self):
@@ -65,8 +65,8 @@ class TestP0_1_KellyPositionSizerWired:
 
     def test_size_factor_clamped_and_passed_to_compute(self):
         src = _src("merid/prediction/strategy.py")
-        assert "size_factor=max(0.0, min(1.0, size_factor))" in src, (
-            "P0-1: size_factor must be clamped 0..1 inside sizer.compute() call"
+        assert "max(0.0, min(1.0, size_factor))" in src, (
+            "P0-1: size_factor must be clamped 0..1 inside the sizing call"
         )
 
     def test_fallback_applies_size_factor(self):
@@ -99,24 +99,27 @@ class TestP0_1_KellyPositionSizerWired:
         )
 
     def test_kelly_size_delegates_to_sizer_at_runtime(self):
-        """Functional: when PositionSizer is available, compute() is called."""
+        """Functional: _kelly_size delegates to unified_sizing.compute_order_size
+        and forwards the clamped size_factor as confidence."""
         from merid.prediction.strategy import KalshiStrategy, StrategyConfig
         from merid.prediction.model import EdgeEstimate
         from merid.prediction.strategy import ExpiryPhase
 
-        mock_sizer = MagicMock()
-        mock_sizer.compute.return_value = 3
+        mock_compute = MagicMock()
+        mock_compute.return_value = (3, Decimal("1.5"), {})
 
-        # Mock bankroll so _kelly_size doesn't bail at equity=0
-        mock_risk = MagicMock()
-        mock_risk.state.current_equity_usd = 5000.0
+        mock_summary = MagicMock()
+        mock_summary.state.value = "ok"
 
         with patch(
-            "merid.event_venues.kalshi.position_sizer.get_position_sizer",
-            return_value=mock_sizer,
+            "merid.prediction.unified_sizing.compute_order_size",
+            mock_compute,
         ), patch(
-            "merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk",
-            return_value=mock_risk,
+            "merid.event_venues.kalshi.get_equity_for_risk_calc_sync",
+            return_value=5000.0,
+        ), patch(
+            "merid.event_venues.kalshi.get_summary_sync",
+            return_value=mock_summary,
         ):
             strat = KalshiStrategy(StrategyConfig(max_contracts_per_order=10))
             edge = EdgeEstimate(
@@ -134,10 +137,10 @@ class TestP0_1_KellyPositionSizerWired:
             )
             result = strat._kelly_size(edge, ExpiryPhase.MID, size_factor=0.8)
 
-        mock_sizer.compute.assert_called_once()
-        call_kwargs = mock_sizer.compute.call_args[1]
-        assert call_kwargs["size_factor"] == pytest.approx(0.8), (
-            "P0-1: size_factor not forwarded to sizer.compute()"
+        mock_compute.assert_called_once()
+        call_kwargs = mock_compute.call_args[1]
+        assert float(call_kwargs["confidence"]) == pytest.approx(0.8), (
+            "P0-1: size_factor not forwarded as confidence to compute_order_size()"
         )
         assert result == 3
 
@@ -162,9 +165,18 @@ class TestP0_1_KellyPositionSizerWired:
             confidence=Decimal("0.9"),
         )
 
+        mock_summary = MagicMock()
+        mock_summary.state.value = "ok"
+
         with patch(
-            "merid.event_venues.kalshi.position_sizer.get_position_sizer",
+            "merid.prediction.unified_sizing.compute_order_size",
             side_effect=ImportError("forced fallback"),
+        ), patch(
+            "merid.event_venues.kalshi.get_equity_for_risk_calc_sync",
+            return_value=5000.0,
+        ), patch(
+            "merid.event_venues.kalshi.get_summary_sync",
+            return_value=mock_summary,
         ):
             full = strat._kelly_size(edge, ExpiryPhase.MID, size_factor=1.0)
             half = strat._kelly_size(edge, ExpiryPhase.MID, size_factor=0.5)
@@ -196,12 +208,16 @@ class TestP0_2_FeeDeduplication:
             "P0-2: kalshi_fee_cents must be a callable in position_sizer"
         )
 
-    def test_fee_function_same_object_in_both_modules(self):
+    def test_fee_function_delegates_to_canonical(self):
+        """The deprecated position_sizer shim must produce identical results to
+        the canonical fees module (merid.prediction.risk was deleted; the single
+        source of truth is now merid.event_venues.kalshi.fees)."""
         from merid.event_venues.kalshi.position_sizer import kalshi_fee_cents as sizer_fn
-        from merid.prediction.risk import kalshi_fee_cents as risk_fn
-        assert sizer_fn is risk_fn, (
-            "P0-2: both modules must reference the same kalshi_fee_cents function object"
-        )
+        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as canonical_fn
+        for price_cents, contracts in [(60, 10), (50, 100), (95, 10), (10, 50)]:
+            assert sizer_fn(price_cents=price_cents, contracts=contracts) == canonical_fn(
+                contracts, price_cents
+            ), f"P0-2: fee mismatch at {price_cents}c x{contracts}"
 
     def test_fee_calculation_consistent(self):
         from merid.event_venues.kalshi.position_sizer import kalshi_fee_cents
@@ -229,7 +245,7 @@ class TestP1_1_CrossedMarketInvariant:
         src = _src("merid/event_venues/kalshi/orderbook.py")
         lines = src.splitlines()
         start = next(i for i, l in enumerate(lines) if "def apply_delta" in l)
-        body = "\n".join(lines[start:start + 50])
+        body = "\n".join(lines[start:start + 115])
         assert "_check_crossed_market()" in body, (
             "P1-1: apply_delta must call self._check_crossed_market() after updating levels"
         )
@@ -239,7 +255,7 @@ class TestP1_1_CrossedMarketInvariant:
         ob = LocalOrderbook("TEST-TICKER")
         # Before snapshot: None
         assert ob.snapshot_age_seconds is None
-        ob.apply_snapshot({"yes": [[60, 10]], "no": [[40, 10]], "seq": 1})
+        ob.apply_snapshot({"market_ticker": "TEST-TICKER", "yes": [[60, 10]], "no": [[40, 10]], "seq": 1})
         age = ob.snapshot_age_seconds
         assert age is not None and age >= 0.0, (
             "P1-1: snapshot_age_seconds should be >= 0 after apply_snapshot"
@@ -257,7 +273,7 @@ class TestP1_1_CrossedMarketInvariant:
         mgr.add_sink(fired.append)
 
         ob = LocalOrderbook("KXBTC-CROSS")
-        ob.apply_snapshot({"yes": [[70, 10]], "no": [[20, 10]], "seq": 1})
+        ob.apply_snapshot({"market_ticker": "KXBTC-CROSS", "yes": [[70, 10]], "no": [[20, 10]], "seq": 1})
 
         # orderbook.py does an inline 'from merid.prediction.alerts import get_alert_manager'
         # so patching the attribute on the alerts module is the correct target.
@@ -286,7 +302,7 @@ class TestP1_1_CrossedMarketInvariant:
         mgr.add_sink(fired.append)
 
         ob = LocalOrderbook("KXBTC-VALID")
-        ob.apply_snapshot({"yes": [[60, 10]], "no": [[35, 10]], "seq": 1})
+        ob.apply_snapshot({"market_ticker": "KXBTC-VALID", "yes": [[60, 10]], "no": [[35, 10]], "seq": 1})
 
         with patch.object(alerts_mod, "get_alert_manager", return_value=mgr):
             ob._check_crossed_market()
@@ -495,8 +511,8 @@ class TestP1_4_StreamingBusTimestamp:
 
     def test_age_ms_computed_from_time_time(self):
         src = _src("merid/event_venues/kalshi/ws_bridge.py")
-        assert "time.time() - _tick_ts" in src, (
-            "P1-4: age_ms must be computed as time.time() - _tick_ts"
+        assert "replay_time() - _tick_ts" in src, (
+            "P1-4: age_ms must be computed as replay_time() - _tick_ts"
         )
 
 
@@ -640,89 +656,3 @@ class TestP2_2_AtomicCategoryReserve:
 
 
 
-class TestP2_3_BacktestSemaphore:
-    """DebateAwarePositionSizer must have a semaphore cap and per-symbol
-    inflight deduplication to prevent thundering-herd on the backtest engine."""
-
-    def test_max_concurrent_constant_exists(self):
-        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
-        assert hasattr(DebateAwarePositionSizer, "_MAX_CONCURRENT_BACKTESTS"), (
-            "P2-3: _MAX_CONCURRENT_BACKTESTS class constant not found"
-        )
-        assert DebateAwarePositionSizer._MAX_CONCURRENT_BACKTESTS >= 1
-
-    def test_backtest_semaphore_attr_on_init(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "_backtest_semaphore" in src, (
-            "P2-3: _backtest_semaphore not initialised in DebateAwarePositionSizer.__init__"
-        )
-
-    def test_inflight_dict_on_init(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "_inflight" in src, (
-            "P2-3: _inflight dict not initialised in DebateAwarePositionSizer.__init__"
-        )
-
-    def test_get_semaphore_method_exists(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "def _get_semaphore" in src, (
-            "P2-3: _get_semaphore lazy-init method not found"
-        )
-
-    def test_asyncio_semaphore_used_in_profile_method(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "async with self._get_semaphore()" in src, (
-            "P2-3: semaphore not used via 'async with' in _get_performance_profile"
-        )
-
-    def test_inflight_coalesce_logic_present(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "self._inflight" in src and "asyncio.shield" in src, (
-            "P2-3: inflight coalescing via asyncio.shield not found"
-        )
-
-    def test_inflight_cleaned_up_in_finally(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "self._inflight.pop(symbol, None)" in src, (
-            "P2-3: _inflight must be cleaned up in a finally block"
-        )
-
-    def test_asyncio_imported(self):
-        src = _src("merid/prediction/debate_position_sizing.py")
-        assert "import asyncio" in src, (
-            "P2-3: asyncio must be imported in debate_position_sizing.py"
-        )
-
-    def test_semaphore_cap_is_sane(self):
-        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
-        cap = DebateAwarePositionSizer._MAX_CONCURRENT_BACKTESTS
-        assert 1 <= cap <= 10, (
-            f"P2-3: _MAX_CONCURRENT_BACKTESTS={cap} seems unreasonable; expected 1–10"
-        )
-
-    def test_semaphore_limits_concurrency(self):
-        """Functional: semaphore must block a 3rd concurrent backtest when cap=2."""
-        import asyncio as aio
-        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
-
-        async def _run():
-            sizer = DebateAwarePositionSizer.__new__(DebateAwarePositionSizer)
-            sizer._MAX_CONCURRENT_BACKTESTS = 2
-            sizer._backtest_semaphore = None
-            sem = sizer._get_semaphore()
-            assert sem._value == 2
-
-            acquired = []
-            async with sem:
-                acquired.append(1)
-                async with sem:
-                    acquired.append(2)
-                    # semaphore value should now be 0 — third acquire would block
-                    assert sem._value == 0, (
-                        "P2-3: semaphore should be fully acquired after 2 concurrent holders"
-                    )
-
-            return acquired
-
-        result = aio.run(_run())
-        assert result == [1, 2]

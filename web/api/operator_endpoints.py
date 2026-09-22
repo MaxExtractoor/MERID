@@ -14,6 +14,9 @@ logger = get_logger(__name__)
 # Track process start time for uptime calculation
 _PROCESS_START = time.time()
 
+# Module-level environment snapshot; tests may patch this to simulate production.
+_MERID_ENV = os.getenv("MERID_ENV", "development").lower()
+
 # Deferred security assertion: warn loudly if operator token is unset in production.
 # Runs once on first request (not at import time) to avoid dotenv loading-order races.
 _operator_token_checked = False

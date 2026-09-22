@@ -46,13 +46,18 @@ def _ensure_app() -> FastAPI:
     return _app
 
 
-def create_app() -> FastAPI:
+def create_app(lifespan: Optional[Any] = None) -> FastAPI:
     """Create and configure the legacy FastAPI app.
 
     Imports routers safely so that missing optional modules do not prevent
-    the stub from being created in test environments.
+    the stub from being created in test environments.  ``lifespan`` lets
+    callers (tests) inject a no-op lifespan so the real startup sequence
+    never runs under TestClient.
     """
-    app = _ensure_app()
+    if lifespan is not None:
+        app = FastAPI(title="MERID Legacy Stub", lifespan=lifespan)
+    else:
+        app = _ensure_app()
 
     kalshi_api_router = _si("web.api.kalshi_api")
     sidebar_config_router = _si("web.api.sidebar_config")
@@ -61,13 +66,13 @@ def create_app() -> FastAPI:
     swarm_bus_api_router = _si("web.api.swarm_bus_api")
 
     if kalshi_api_router is not None:
-        _reg(kalshi_api_router)
+        _reg(kalshi_api_router, app)
     if sidebar_config_router is not None:
-        _reg(sidebar_config_router)
+        _reg(sidebar_config_router, app)
     if kalshi_continuous_trader_api_router is not None:
-        _reg(kalshi_continuous_trader_api_router)
+        _reg(kalshi_continuous_trader_api_router, app)
     if swarm_bus_api_router is not None:
-        _reg(swarm_bus_api_router)
+        _reg(swarm_bus_api_router, app)
 
     return app
 

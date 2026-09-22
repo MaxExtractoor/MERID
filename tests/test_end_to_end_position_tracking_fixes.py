@@ -89,7 +89,7 @@ class TestFix3PriceRepeatCheckInPositionCache:
 
     @pytest.mark.asyncio
     async def test_price_repeat_check_added_to_position_cache(self):
-        """Test that price repeat check was added to position_cache.on_fill()."""
+        """Test that price repeat check was added to position_cache.on_fill(, canonicalization_state="TRUSTED_LIVE_V1")."""
         from merid.event_venues.kalshi.position_cache import get_position_cache
 
         cache = get_position_cache()

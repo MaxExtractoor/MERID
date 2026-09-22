@@ -9,6 +9,8 @@ Run with: pytest tests/test_cross_view_invariants.py -v
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.prod_integration
 from decimal import Decimal
 from typing import Dict, List, Any
 from datetime import datetime, timezone
@@ -335,10 +337,20 @@ class TestKillSwitchInvariants:
 
 @pytest.fixture
 def api_client():
-    """Fixture to provide API client for tests."""
+    """Fixture to provide API client for tests.
+
+    These are prod-integration invariants that require a running MERID server.
+    Skip only when the service is genuinely unreachable — never mask a real
+    failure once a connection is established.
+    """
     import httpx
     base_url = "http://localhost:8000"
     client = httpx.Client(base_url=base_url, timeout=30.0)
+    try:
+        client.get("/api/v1/notifications", timeout=5.0)
+    except httpx.ConnectError:
+        client.close()
+        pytest.skip("MERID server not running at localhost:8000 — prod-integration test")
     yield client
     client.close()
 

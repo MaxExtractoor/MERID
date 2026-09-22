@@ -46,6 +46,8 @@ def _build_seeded_engine(price: float = 68000.0):
     engine.position_counter = 0
     engine.current_prices = {"BTC-USD": price, "BTC/USD": price}
     engine.price_feed = None
+    engine.fee_bps = dict(PaperTradingEngine.DEFAULT_FEE_BPS)
+    engine.total_fees_paid = 0.0
     engine._listeners = {"trade": set(), "summary": set(), "position": set()}
     engine._summary_dirty = False
     engine._positions_dirty = False
@@ -70,6 +72,8 @@ def _build_seeded_engine(price: float = 68000.0):
 
     feed = MagicMock()
     feed.price_cache = {"BTC/USD": pd_mock}
+    # The submit endpoint maps BTC-USD → BTC/USDT for the current-price lookup
+    feed.get_price_cache.return_value = {"BTC/USDT": pd_mock}
     feed.last_successful_fetch = {"kraken": time.time()}
     feed.get_all_prices.return_value = feed.price_cache.copy()
 
@@ -193,16 +197,10 @@ class TestGoldenPathTradeLoop:
                     assert "_stub" not in analytics, "Analytics should be real after trade"
                     assert analytics["total_trades"] >= 1
 
-                    # ── Step 5: Verify system health probes pass ──
-                    resp = client.get("/api/v1/system/health")
-                    assert resp.status_code == 200
-                    health = resp.json()
-                    assert isinstance(health, list)
-                    assert len(health) >= 4
-                    api_server = next(c for c in health if c["component"] == "API Server")
-                    assert api_server["status"] == "online"
+                    # (The /api/v1/system/health component-probe endpoint was
+                    # removed with the legacy stack — see test_realfirst_endpoints.)
 
-                    # ── Step 6: Verify trade fill notification was emitted ──
+                    # ── Step 5: Verify trade fill notification was emitted ──
                     resp = client.get("/api/v1/notifications")
                     assert resp.status_code == 200
                     notifs = resp.json()
@@ -263,10 +261,14 @@ class TestGoldenPathTradeLoop:
         with patch.dict("sys.modules", broken):
             client = missing_endpoints_client
 
-            # Freshness → stub
+            # Freshness → KALSHI_ONLY mode returns real Kalshi feed freshness
+            # (not a stub) when the crypto price feed is unavailable.
             resp = client.get("/api/v1/data/freshness")
             assert resp.status_code == 200
-            assert resp.json().get("_stub") is True
+            freshness = resp.json()
+            assert freshness.get("_stub") is not True
+            assert "feeds" in freshness
+            assert "overall_status" in freshness
 
             # Analytics → stub
             resp = client.get("/api/v1/analytics/overview")
@@ -282,7 +284,15 @@ class TestGoldenPathTradeLoop:
             result = resp.json()
             assert result.get("success") is False
 
-            # Blockchain health → stub
-            resp = client.get("/api/v1/blockchain/health")
+            # Blockchain health lives on real_data_endpoints — feed failure
+            # yields explicit offline providers rather than a _stub payload.
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+            from web.api.real_data_endpoints import router as real_router
+            real_app = FastAPI()
+            real_app.include_router(real_router)
+            resp = TestClient(real_app).get("/api/v1/blockchain/health")
             assert resp.status_code == 200
-            assert resp.json().get("_stub") is True
+            chain_health = resp.json()
+            assert chain_health.get("_stub") is not True
+            assert chain_health["overall_status"] == "degraded"

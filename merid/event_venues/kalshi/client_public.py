@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -255,7 +256,7 @@ class KalshiPublicDataClient:
                     loop = asyncio.get_running_loop()
                     if loop.is_closed():
                         logger.warning("[KALSHI-CLIENT] Event loop is closed - skipping API call for series=%s", series_ticker)
-                        health_log_path = Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"
+                        health_log_path = Path(os.getenv("MERID_HEALTH_DIAGNOSTIC_PATH") or (Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"))
                         with open(health_log_path, "a") as f:
                             f.write(f"[{datetime.now(timezone.utc)}] KALSHI_API_ERROR series={series_ticker} err=event loop closed\n")
                             f.flush()
@@ -263,7 +264,7 @@ class KalshiPublicDataClient:
                 except RuntimeError:
                     # No running loop - skip the call
                     logger.warning("[KALSHI-CLIENT] No running event loop - skipping API call for series=%s", series_ticker)
-                    health_log_path = Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"
+                    health_log_path = Path(os.getenv("MERID_HEALTH_DIAGNOSTIC_PATH") or (Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"))
                     with open(health_log_path, "a") as f:
                         f.write(f"[{datetime.now(timezone.utc)}] KALSHI_API_ERROR series={series_ticker} err=no running event loop\n")
                         f.flush()
@@ -272,7 +273,7 @@ class KalshiPublicDataClient:
                 http = self._get_http()
                 base_url = str(http.base_url) if hasattr(http, 'base_url') else "unknown"
                 # CRITICAL DIAGNOSTIC: Log API call before making it
-                health_log_path = Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"
+                health_log_path = Path(os.getenv("MERID_HEALTH_DIAGNOSTIC_PATH") or (Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"))
                 with open(health_log_path, "a") as f:
                     f.write(f"[{datetime.now(timezone.utc)}] KALSHI_API_CALL series={series_ticker} base_url={base_url} params={params}\n")
                     f.flush()
@@ -292,7 +293,7 @@ class KalshiPublicDataClient:
                     exc,
                 )
                 # CRITICAL DIAGNOSTIC: Log API error
-                health_log_path = Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"
+                health_log_path = Path(os.getenv("MERID_HEALTH_DIAGNOSTIC_PATH") or (Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"))
                 with open(health_log_path, "a") as f:
                     f.write(f"[{datetime.now(timezone.utc)}] KALSHI_API_ERROR series={series_ticker} err={exc}\n")
                     f.flush()
@@ -371,7 +372,7 @@ class KalshiPublicDataClient:
             st = m.get("series_ticker") or series_ticker
 
             # CRITICAL DIAGNOSTIC: Log timestamp parsing
-            health_log_path = Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"
+            health_log_path = Path(os.getenv("MERID_HEALTH_DIAGNOSTIC_PATH") or (Path(__file__).parent.parent.parent.parent / "web" / "health_diagnostic.txt"))
             with open(health_log_path, "a") as f:
                 f.write(f"[{datetime.now(timezone.utc)}] KALSHI_TIMESTAMP_PARSE market_id={market_id} close_ts={close_ts} type={type(close_ts)} close_time={m.get('close_time')}\n")
                 f.flush()

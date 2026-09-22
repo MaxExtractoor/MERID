@@ -61,7 +61,8 @@ class TestNormalFillPath:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Verify cache updated
@@ -86,7 +87,8 @@ class TestNormalFillPath:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Simulate REST API response matching cache
@@ -129,7 +131,8 @@ class TestPartialFillPath:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         position = cache.get_position("KXBTC15M-26APR192030-30")
@@ -144,7 +147,8 @@ class TestPartialFillPath:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_124",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Verify additive update (10 total, not 5)
@@ -168,7 +172,8 @@ class TestPartialFillPath:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         position = cache.get_position("KXBTC15M-26APR192030-30")
@@ -194,7 +199,8 @@ class TestWebSocketGap:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Simulate WebSocket gap - position changes externally
@@ -233,7 +239,8 @@ class TestWebSocketGap:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # First sync from REST (same state)
@@ -275,7 +282,8 @@ class TestMissedFillEvent:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Simulate missed fill event - REST shows 15 contracts
@@ -312,7 +320,8 @@ class TestMissedFillEvent:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # REST shows different state (drift)
@@ -352,7 +361,8 @@ class TestManualExternalChange:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # External change: position closed externally (0 contracts)
@@ -390,7 +400,8 @@ class TestManualExternalChange:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # External change: different side
@@ -428,7 +439,8 @@ class TestStartupWithStaleCache:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Startup sync from REST (actual state: 0 contracts, position closed)
@@ -457,7 +469,8 @@ class TestStartupWithStaleCache:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Update last_sync to simulate fresh state
@@ -499,7 +512,8 @@ class TestReconciliationAssertions:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # REST sync
@@ -535,7 +549,8 @@ class TestReconciliationAssertions:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Clear cache to simulate uncertain state after reconnect
@@ -573,7 +588,8 @@ class TestReconciliationAssertions:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Missed fill: REST shows 15
@@ -608,7 +624,8 @@ class TestReconciliationAssertions:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         cache._last_sync = datetime.now(timezone.utc)  # Fresh
         
@@ -649,7 +666,8 @@ class TestReconciliationAssertions:
             side="buy",
             client_order_id="test_order_1",
             fill_id="fill_123",
-            action="buy"
+            action="buy",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Mismatch: REST shows different state

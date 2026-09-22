@@ -273,7 +273,7 @@ class TestYesPrimaryTP:
         action = feed_price(mgr, pos, 45, bid=45, ask=46)
         assert action is not None
         assert action.action_type == "CLOSE_FULL"
-        mgr.on_fill(pos.position_id, 10)
+        mgr.on_fill(pos.position_id, 10, canonicalization_state="TRUSTED_LIVE_V1")
         ps = mgr.get_state(pos.position_id)
         assert ps.tp_state == TakeProfitState.CLOSED
 
@@ -282,7 +282,7 @@ class TestYesPrimaryTP:
         action = feed_price(self.mgr, self.pos, 45, bid=45, ask=46)
         assert action is not None
         # Partial fill of only 3 (not 5)
-        self.mgr.on_fill(self.pos.position_id, 3)
+        self.mgr.on_fill(self.pos.position_id, 3, canonicalization_state="TRUSTED_LIVE_V1")
         ps = self.mgr.get_state(self.pos.position_id)
         assert ps.remaining_contracts == 10 - 3
         # State should not be CLOSED yet (still 7 remaining with trailing disabled → CLOSED)
@@ -329,7 +329,7 @@ class TestYesTrailingTP:
         # Fire primary
         action = feed_price(self.mgr, self.pos, target, bid=target, ask=target + 1)
         assert action is not None, "Primary should have fired"
-        self.mgr.on_fill(self.pos.position_id, action.quantity)
+        self.mgr.on_fill(self.pos.position_id, action.quantity, canonicalization_state="TRUSTED_LIVE_V1")
         return target
 
     def test_after_primary_state_is_trailing(self):
@@ -369,7 +369,7 @@ class TestYesTrailingTP:
         feed_price(self.mgr, self.pos, 55, bid=55, ask=56)
         action = feed_price(self.mgr, self.pos, 49, bid=49, ask=50)
         assert action is not None
-        self.mgr.on_fill(self.pos.position_id, action.quantity)
+        self.mgr.on_fill(self.pos.position_id, action.quantity, canonicalization_state="TRUSTED_LIVE_V1")
         ps = self.mgr.get_state(self.pos.position_id)
         assert ps.tp_state == TakeProfitState.CLOSED
 
@@ -428,7 +428,7 @@ class TestNoPositionTP:
         target = ps.primary_target_cents
         # Fire primary
         action = feed_price(self.mgr, self.pos, target, bid=target - 1, ask=target)
-        self.mgr.on_fill(self.pos.position_id, action.quantity)
+        self.mgr.on_fill(self.pos.position_id, action.quantity, canonicalization_state="TRUSTED_LIVE_V1")
         # Price continues to fall (YES price 60 → 55 → 50)
         for p in (60, 55, 50):
             feed_price(self.mgr, self.pos, p, bid=p - 1, ask=p)
@@ -440,7 +440,7 @@ class TestNoPositionTP:
         ps = self.mgr.get_state(self.pos.position_id)
         target = ps.primary_target_cents
         action = feed_price(self.mgr, self.pos, target, bid=target - 1, ask=target)
-        self.mgr.on_fill(self.pos.position_id, action.quantity)
+        self.mgr.on_fill(self.pos.position_id, action.quantity, canonicalization_state="TRUSTED_LIVE_V1")
         # Fall to 50¢
         feed_price(self.mgr, self.pos, 50, bid=49, ask=50)
         # Rise back to 56¢ (giveback 6¢ > threshold 5¢)
@@ -541,7 +541,7 @@ class TestReentryGate:
         self.mgr.on_position_open(pos)
         action = feed_price(self.mgr, pos, exit_price, bid=exit_price, ask=exit_price + 1)
         if action:
-            self.mgr.on_fill(pos.position_id, action.quantity)
+            self.mgr.on_fill(pos.position_id, action.quantity, canonicalization_state="TRUSTED_LIVE_V1")
         self.mgr.on_position_closed(ticker, "take_profit_primary")
         self.mgr.record_exit_price(ticker, exit_price)
 
@@ -817,7 +817,7 @@ class TestIntegrationFullCycle:
         assert action1 is not None
         assert action1.action_type == "CLOSE_PARTIAL"
         assert action1.quantity == 5
-        mgr.on_fill(pos.position_id, 5)
+        mgr.on_fill(pos.position_id, 5, canonicalization_state="TRUSTED_LIVE_V1")
         pos.contracts = 5
 
         # Now trailing active
@@ -837,7 +837,7 @@ class TestIntegrationFullCycle:
         assert "trailing_giveback_exceeded" in action2.reason
         assert action2.quantity == 5
 
-        mgr.on_fill(pos.position_id, 5)
+        mgr.on_fill(pos.position_id, 5, canonicalization_state="TRUSTED_LIVE_V1")
         assert mgr.get_state(pos.position_id).tp_state == TakeProfitState.CLOSED
 
     def test_yes_15m_btc_no_trail_full_close(self):

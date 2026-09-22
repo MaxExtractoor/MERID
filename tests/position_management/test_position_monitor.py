@@ -1416,7 +1416,7 @@ class TestPositionMonitorPositionCacheIntegration:
     
     @pytest.mark.asyncio
     async def test_position_cache_adds_to_monitor_on_new_position(self):
-        """Test that position_cache.on_fill() adds new positions to PositionMonitor.
+        """Test that position_cache.on_fill(, canonicalization_state="TRUSTED_LIVE_V1") adds new positions to PositionMonitor.
         
         This test verifies the fix for the bug where new positions were not being
         added to the PositionMonitor, preventing TP/SL enforcement.
@@ -1475,7 +1475,7 @@ class TestPositionMonitorPositionCacheIntegration:
     @patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk')
     @pytest.mark.asyncio
     async def test_position_cache_removes_from_monitor_on_close(self, mock_get_kalshi_risk, mock_get_envelope):
-        """Test that position_cache.on_fill() removes positions from PositionMonitor when closed.
+        """Test that position_cache.on_fill(, canonicalization_state="TRUSTED_LIVE_V1") removes positions from PositionMonitor when closed.
         
         This test verifies the fix for the bug where closed positions were not being
         removed from the PositionMonitor, causing it to track stale positions.
@@ -1568,7 +1568,7 @@ class TestPositionMonitorPositionCacheIntegration:
     @patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope')
     @pytest.mark.asyncio
     async def test_position_cache_records_close_on_position_close(self, mock_get_envelope):
-        """Test that position_cache.on_fill() calls record_close() when position closes.
+        """Test that position_cache.on_fill(, canonicalization_state="TRUSTED_LIVE_V1") calls record_close() when position closes.
         
         This test verifies the fix for the bug where record_close() was not being called
         with the asset parameter, causing asset_notional to grow without bound.

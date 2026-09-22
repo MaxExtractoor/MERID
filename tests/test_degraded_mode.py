@@ -26,15 +26,24 @@ def decide(
     markets_present: bool = True,
     ready_assets_count: int = 5,
     min_ready_for_normal: int = 2,
+    md_fresh_count: int = 0,
+    spot_fresh_count: int = 0,
 ):
-    """Declarative wrapper around the production decision function."""
-    return compute_loop_state(
+    """Declarative wrapper around the production decision function.
+
+    Returns (loop_state, execution_mode, execution_ready); the fourth
+    production return value (allow_new_entries) is dropped for brevity.
+    """
+    loop_state, execution_mode, execution_ready, _allow_new = compute_loop_state(
         infra_ready=infra_ready,
         markets_expected=markets_expected,
         markets_present=markets_present,
         ready_assets_count=ready_assets_count,
+        md_fresh_count=md_fresh_count,
+        spot_fresh_count=spot_fresh_count,
         min_ready_for_normal=min_ready_for_normal,
     )
+    return loop_state, execution_mode, execution_ready
 
 
 class TestLoopStateSelection:
@@ -43,10 +52,10 @@ class TestLoopStateSelection:
     @pytest.mark.parametrize(
         "infra_ready,markets_expected,markets_present,expected_state",
         [
-            # Infra broken -> HALT regardless of markets
-            (False, True, True, "HALT"),
-            (False, True, False, "HALT"),
-            (False, False, False, "HALT"),
+            # Infra broken + no fresh MD/spot -> HALT_CRITICAL regardless of markets
+            (False, True, True, "HALT_CRITICAL"),
+            (False, True, False, "HALT_CRITICAL"),
+            (False, False, False, "HALT_CRITICAL"),
             # Infra OK + strips present -> ACTIVE (present beats "not expected")
             (True, True, True, "ACTIVE"),
             (True, False, True, "ACTIVE"),
@@ -73,11 +82,11 @@ class TestExecutionModeWithinActive:
     @pytest.mark.parametrize(
         "ready_count,expected_mode,expected_ready",
         [
-            (5, "NORMAL", True),
-            (3, "NORMAL", True),
-            (2, "NORMAL", True),          # threshold: >=2 -> NORMAL
-            (1, "DEGRADED", True),        # exactly 1 ready -> still trade it
-            (0, "ACTIVE-HALT", False),    # strips present but nothing tradable -> red flag
+            (5, "RUN_NORMAL", True),
+            (3, "RUN_NORMAL", True),
+            (2, "RUN_NORMAL", True),          # threshold: >=2 -> RUN_NORMAL
+            (1, "RUN_DEGRADED", True),        # exactly 1 ready -> still trade it
+            (0, "HALT_CRITICAL", False),      # strips present but nothing tradable -> red flag
         ],
     )
     def test_active_modes(self, ready_count, expected_mode, expected_ready):
@@ -89,15 +98,15 @@ class TestExecutionModeWithinActive:
     def test_degraded_still_trades(self):
         """DEGRADED (1 ready asset) is NOT a kill-switch: execution_ready stays True."""
         _, mode, ready = decide(markets_present=True, ready_assets_count=1)
-        assert mode == "DEGRADED"
+        assert mode == "RUN_DEGRADED"
         assert ready is True
 
     def test_custom_normal_threshold(self):
         """min_ready_for_normal is parameterizable (e.g. require 3 for NORMAL)."""
         _, mode, _ = decide(markets_present=True, ready_assets_count=2, min_ready_for_normal=3)
-        assert mode == "DEGRADED"
+        assert mode == "RUN_DEGRADED"
         _, mode, _ = decide(markets_present=True, ready_assets_count=3, min_ready_for_normal=3)
-        assert mode == "NORMAL"
+        assert mode == "RUN_NORMAL"
 
 
 class TestZeroReadyIsNotAlwaysHalt:
@@ -122,15 +131,15 @@ class TestZeroReadyIsNotAlwaysHalt:
     def test_zero_ready_with_markets_is_active_halt(self):
         loop_state, mode, ready = decide(markets_present=True, ready_assets_count=0)
         assert loop_state == "ACTIVE"
-        assert mode == "ACTIVE-HALT"   # red flag: strips exist but nothing tradable
+        assert mode == "HALT_CRITICAL"   # red flag: strips exist but nothing tradable
         assert ready is False
 
     def test_infra_down_is_halt_even_with_markets(self):
         loop_state, mode, ready = decide(
             infra_ready=False, markets_present=True, ready_assets_count=5
         )
-        assert loop_state == "HALT"
-        assert mode == "NONE"
+        assert loop_state == "HALT_CRITICAL"
+        assert mode == "HALT_CRITICAL"
         assert ready is False
 
 
@@ -138,21 +147,21 @@ class TestExecutionModeOnlyMeaningfulWhenActive:
     """Outside ACTIVE, execution_mode is NONE regardless of ready_assets_count."""
 
     @pytest.mark.parametrize(
-        "infra_ready,markets_expected,markets_present",
+        "infra_ready,markets_expected,markets_present,expected_mode",
         [
-            (False, True, True),    # HALT
-            (True, True, False),    # WAITING
-            (True, False, False),   # IDLE
+            (False, True, True, "HALT_CRITICAL"),   # HALT family (no fresh MD/spot)
+            (True, True, False, "NONE"),            # WAITING
+            (True, False, False, "NONE"),           # IDLE
         ],
     )
-    def test_mode_is_none_outside_active(self, infra_ready, markets_expected, markets_present):
+    def test_mode_is_none_outside_active(self, infra_ready, markets_expected, markets_present, expected_mode):
         _, mode, ready = decide(
             infra_ready=infra_ready,
             markets_expected=markets_expected,
             markets_present=markets_present,
             ready_assets_count=5,  # even with all assets "ready"
         )
-        assert mode == "NONE"
+        assert mode == expected_mode
         assert ready is False
 
 

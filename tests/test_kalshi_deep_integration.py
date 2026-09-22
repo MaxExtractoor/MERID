@@ -456,6 +456,8 @@ class TestWsBridge(unittest.TestCase):
         from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
         bridge = KalshiWebSocketBridge.__new__(KalshiWebSocketBridge)
         bridge._task = None
+        bridge._ws_thread = None
+        bridge._forward_thread = None
         bridge._events_forwarded = 42
         bridge._subscribed_tickers = ["BTC-TEST"]
         summary = bridge.summary()
@@ -932,8 +934,8 @@ class TestClientFixes(unittest.TestCase):
 
     def test_rsa_message_format(self):
         """RSA signs: timestamp_ms + METHOD + path only (no body per Kalshi v2 spec)."""
-        self.assertIn("ts_ms + method.upper() + path", self.source)
-        self.assertNotIn("ts_ms + method.upper() + path + body", self.source)
+        self.assertIn("ts_ms + method.upper() + signing_path", self.source)
+        self.assertNotIn("ts_ms + method.upper() + signing_path + body", self.source)
 
     def test_order_path_portfolio(self):
         """Orders go to /portfolio/orders, not /orders."""
@@ -2893,6 +2895,7 @@ class TestOrderRouter(unittest.TestCase):
         risk_ctrl = MagicMock()
         risk_ctrl.can_trade.return_value = True
         with patch("merid.event_venues.kalshi.order_router.get_venue_gate", return_value=venue_gate), \
+             patch("merid.event_venues.kalshi.order_router.can_submit_live_entry", return_value=True), \
              patch("merid.event_venues.kalshi.order_gate.get_pre_trade_gate", return_value=pre_gate), \
              patch("merid.risk.kill_switches.risk_controller", risk_ctrl):
             result = asyncio.run(route_order_async(intent))
@@ -2947,6 +2950,7 @@ class TestOrderRouter(unittest.TestCase):
         risk_ctrl._kill_details = None
 
         with patch("merid.event_venues.kalshi.order_router.get_venue_gate", return_value=venue_gate), \
+             patch("merid.event_venues.kalshi.order_router.can_submit_live_entry", return_value=True), \
              patch("merid.event_venues.kalshi.client.get_kalshi_client", return_value=client), \
              patch("merid.event_venues.kalshi.order_gate.get_pre_trade_gate", return_value=pre_gate), \
              patch("merid.risk.kill_switches.risk_controller", risk_ctrl):
@@ -3111,7 +3115,7 @@ class TestSidebarWiring(unittest.TestCase):
 
     def test_main_includes_sidebar_router(self):
         source = (ROOT / "web" / "main.py").read_text(encoding="utf-8")
-        self.assertIn("_reg(sidebar_config_router)", source)
+        self.assertIn("_reg(sidebar_config_router", source)
 
     def test_frontend_constants(self):
         source = (ROOT / "web" / "react" / "src" / "config" / "constants.ts").read_text(encoding="utf-8")

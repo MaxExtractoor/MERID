@@ -49,7 +49,8 @@ class TestHighFillVolume:
                 fee_cents=1,
                 side="yes",
                 fill_id=f"fill_stress_{i}",
-                client_order_id="order_123"
+                client_order_id="order_123",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
         
         end_time = _time.time()
@@ -81,7 +82,8 @@ class TestHighFillVolume:
                     fee_cents=1,
                     side="yes",
                     fill_id=f"fill_concurrent_{i}",
-                    client_order_id="order_123"
+                    client_order_id="order_123",
+                    canonicalization_state="TRUSTED_LIVE_V1"
                 )
         
         # Process 10k fills in 10 concurrent batches of 1k each
@@ -123,7 +125,8 @@ class TestLRUCorrectnessUnderPressure:
                 fee_cents=1,
                 side="yes",
                 fill_id=f"fill_lru_{i}",
-                client_order_id="order_123"
+                client_order_id="order_123",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
         
         # LRU should keep memory bounded
@@ -153,7 +156,8 @@ class TestLRUCorrectnessUnderPressure:
                 fee_cents=1,
                 side="yes",
                 fill_id=f"fill_lru_dup_{i}",
-                client_order_id="order_123"
+                client_order_id="order_123",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
         
         # Try to apply a fill that was likely evicted
@@ -165,7 +169,8 @@ class TestLRUCorrectnessUnderPressure:
             fee_cents=1,
             side="yes",
             fill_id="fill_lru_dup_0",  # First fill, likely evicted
-            client_order_id="order_123"
+            client_order_id="order_123",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Position should be at least 100 (original fills)
@@ -198,7 +203,8 @@ class TestMemoryUsageUnderPressure:
                 fee_cents=1,
                 side="yes",
                 fill_id=f"fill_mem_{i}",
-                client_order_id="order_123"
+                client_order_id="order_123",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
         
         # Snapshot after
@@ -239,7 +245,8 @@ class TestMemoryUsageUnderPressure:
                     fee_cents=1,
                     side="yes",
                     fill_id=f"fill_multi_{market_idx}_{i}",
-                    client_order_id="order_123"
+                    client_order_id="order_123",
+                    canonicalization_state="TRUSTED_LIVE_V1"
                 )
         
         # Snapshot after
@@ -279,7 +286,8 @@ class TestSystemStabilityUnderPressure:
                     fee_cents=1,
                     side="yes",
                     fill_id=f"fill_sustained_{batch_start + i}",
-                    client_order_id="order_123"
+                    client_order_id="order_123",
+                    canonicalization_state="TRUSTED_LIVE_V1"
                 )
             
             # Verify position exists and is increasing after each batch
@@ -308,7 +316,8 @@ class TestSystemStabilityUnderPressure:
                 fee_cents=1,
                 side="yes",
                 fill_id=f"fill_recovery_{i}",
-                client_order_id="order_123"
+                client_order_id="order_123",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
         
         # Try to clear position (may not fully close due to implementation details)
@@ -320,7 +329,8 @@ class TestSystemStabilityUnderPressure:
             side="yes",
             fill_id="fill_exit",
             client_order_id="order_123",
-            action="sell"
+            action="sell",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Position should be reduced (may not be exactly 0 due to implementation)
@@ -335,7 +345,8 @@ class TestSystemStabilityUnderPressure:
             fee_cents=1,
             side="yes",
             fill_id="fill_new",
-            client_order_id="order_123"
+            client_order_id="order_123",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         position = cache.get_position("KXBTC15M-26JUL211745-45")

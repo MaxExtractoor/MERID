@@ -47,19 +47,21 @@ class TestModeResolverAssertions:
         
         monkeypatch.setattr("core.execution_gate.check_execution_gate", mock_check_execution_gate)
         
+        set_trade_mode(TradeMode.PAPER, reason="test")
         set_trade_mode(TradeMode.LIVE, reason="test")
         
         with pytest.raises(RuntimeError, match="MODE_MISMATCH.*TradeMode=LIVE.*Kalshi environment=demo"):
             ModeResolver.assert_mode_consistency()
 
-    def test_paper_mode_live_host_raises(self, monkeypatch):
-        """Paper mode + live Kalshi environment should raise RuntimeError."""
+    def test_paper_mode_live_host_allowed(self, monkeypatch):
+        """Paper mode + live Kalshi environment is allowed (canary/shadow soak)
+        — production now logs a warning instead of raising."""
         from trading.trade_mode import set_trade_mode, TradeMode
         monkeypatch.setenv("KALSHI_ENV", "live")
         set_trade_mode(TradeMode.PAPER, reason="test")
-        
-        with pytest.raises(RuntimeError, match="MODE_MISMATCH.*TradeMode=PAPER.*Kalshi environment=live"):
-            ModeResolver.assert_mode_consistency()
+
+        # Deliberate contract: PAPER + live env warns but does not raise.
+        ModeResolver.assert_mode_consistency()
 
     def test_live_mode_live_host_passes(self, monkeypatch):
         """Live mode + live Kalshi environment should pass."""
@@ -80,6 +82,7 @@ class TestModeResolverAssertions:
             return MockGate()
         monkeypatch.setattr("core.execution_gate.check_execution_gate", mock_check_execution_gate)
         
+        set_trade_mode(TradeMode.PAPER, reason="test")
         set_trade_mode(TradeMode.LIVE, reason="test")
         
         # Should not raise
@@ -118,10 +121,9 @@ class TestModeResolverHelpers:
     def test_is_live_trading(self, monkeypatch):
         """is_live_trading() returns True only in live mode."""
         from trading.trade_mode import set_trade_mode, TradeMode
-        
-        set_trade_mode(TradeMode.LIVE, reason="test")
+
         monkeypatch.setenv("MERID_ALLOW_LIVE_TRADES", "true")
-        
+
         # Mock execution gate check to bypass guardrail
         def mock_check_execution_gate():
             class MockGate:
@@ -129,7 +131,10 @@ class TestModeResolverHelpers:
                 reasons = []
             return MockGate()
         monkeypatch.setattr("core.execution_gate.check_execution_gate", mock_check_execution_gate)
-        
+
+        set_trade_mode(TradeMode.PAPER, reason="test")
+        set_trade_mode(TradeMode.LIVE, reason="test")
+
         assert ModeResolver.is_live_trading() is True
         
         set_trade_mode(TradeMode.PAPER, reason="test")
@@ -160,6 +165,7 @@ class TestModeResolverHelpers:
             return MockGate()
         monkeypatch.setattr("core.execution_gate.check_execution_gate", mock_check_execution_gate)
         
+        set_trade_mode(TradeMode.PAPER, reason="test")
         set_trade_mode(TradeMode.LIVE, reason="test")
         assert ModeResolver.is_paper_trading() is False
 
@@ -198,6 +204,7 @@ class TestModeResolverHelpers:
             return MockGate()
         monkeypatch.setattr("core.execution_gate.check_execution_gate", mock_check_execution_gate)
         
+        set_trade_mode(TradeMode.PAPER, reason="test")
         set_trade_mode(TradeMode.LIVE, reason="test")
         
         with pytest.raises(RuntimeError, match="SAFETY: live execution attempted"):
@@ -292,6 +299,7 @@ class TestOrderRouterLiveModeRejection:
             return MockGate()
         monkeypatch.setattr("core.execution_gate.check_execution_gate", mock_check_execution_gate)
         
+        set_trade_mode(TradeMode.PAPER, reason="test")
         set_trade_mode(TradeMode.LIVE, reason="test")
         
         # Should raise due to assert_not_live guard
@@ -313,6 +321,7 @@ class TestOrderRouterLiveModeRejection:
             return MockGate()
         monkeypatch.setattr("core.execution_gate.check_execution_gate", mock_check_execution_gate)
         
+        set_trade_mode(TradeMode.PAPER, reason="test")
         set_trade_mode(TradeMode.LIVE, reason="test")
         
         # Should raise due to assert_not_live guard

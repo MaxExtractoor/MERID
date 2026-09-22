@@ -1,0 +1,187 @@
+x..xxxxxxxx.x.xxx.xxxx.........+++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Captured stderr ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2026-09-22 13:54:38 | INFO | merid.promotion_report | Promotion report: starting Ring 2 (paper matrix SLOs)
+2026-09-22 13:54:38 | INFO | merid.promotion_report | Promotion report: starting Ring 2 (paper matrix SLOs)
+~~~~~~~~~~~~~~~~~ Stack of Thread-41 (_readerthread) (14252) ~~~~~~~~~~~~~~~~~~
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 982, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1599, in _readerthread
+    buffer.append(fh.read())
+~~~~~~~~~~~~~~~~~ Stack of Thread-40 (_readerthread) (11336) ~~~~~~~~~~~~~~~~~~
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 982, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1599, in _readerthread
+    buffer.append(fh.read())
+~~~~~~~~~~~~~~~~~ Stack of Thread-39 (_readerthread) (12468) ~~~~~~~~~~~~~~~~~~
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 982, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1599, in _readerthread
+    buffer.append(fh.read())
+~~~~~~~~~~~~~~~~~ Stack of Thread-38 (_readerthread) (11480) ~~~~~~~~~~~~~~~~~~
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 982, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1599, in _readerthread
+    buffer.append(fh.read())
+~~~~~~~~~~~~~~~~~~ Stack of Thread-37 (_do_shutdown) (14980) ~~~~~~~~~~~~~~~~~~
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 982, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 580, in _do_shutdown
+    self._default_executor.shutdown(wait=True)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\concurrent\futures\thread.py", line 235, in shutdown
+    t.join()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1119, in join
+    self._wait_for_tstate_lock()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1139, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+~~~~~~~~~~~~~~~~~~~~~~ Stack of guard-promo-init (14988) ~~~~~~~~~~~~~~~~~~~~~~
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 982, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Dev\MERID\merid\execution_guard.py", line 317, in _bg_promo
+    self.sync_promotion_report()
+  File "C:\Dev\MERID\merid\execution_guard.py", line 421, in sync_promotion_report
+    report = get_cached_promotion_report(gauntlet_cycles=5)
+  File "C:\Dev\MERID\merid\promotion_report.py", line 704, in get_cached_promotion_report
+    _cached_report = generate_promotion_report(gauntlet_cycles=gauntlet_cycles)
+  File "C:\Dev\MERID\merid\promotion_report.py", line 660, in generate_promotion_report
+    ring2 = _run_paper_matrix()
+  File "C:\Dev\MERID\merid\promotion_report.py", line 509, in _run_paper_matrix
+    result = subprocess.run(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1628, in _communicate
+    self.stdout_thread.join(self._remaining_time(endtime))
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1123, in join
+    self._wait_for_tstate_lock(timeout=max(timeout, 0))
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1139, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+~~~~~~~~~~~~~~~~~~~~~~~~~ Stack of asyncio_0 (12576) ~~~~~~~~~~~~~~~~~~~~~~~~~~
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 982, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\concurrent\futures\thread.py", line 83, in _worker
+    work_item.run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\concurrent\futures\thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "C:\Dev\MERID\merid\loop.py", line 2237, in _sync_promotion
+    guard.sync_promotion_report()
+  File "C:\Dev\MERID\merid\execution_guard.py", line 421, in sync_promotion_report
+    report = get_cached_promotion_report(gauntlet_cycles=5)
+  File "C:\Dev\MERID\merid\promotion_report.py", line 704, in get_cached_promotion_report
+    _cached_report = generate_promotion_report(gauntlet_cycles=gauntlet_cycles)
+  File "C:\Dev\MERID\merid\promotion_report.py", line 660, in generate_promotion_report
+    ring2 = _run_paper_matrix()
+  File "C:\Dev\MERID\merid\promotion_report.py", line 509, in _run_paper_matrix
+    result = subprocess.run(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\subprocess.py", line 1628, in _communicate
+    self.stdout_thread.join(self._remaining_time(endtime))
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1123, in join
+    self._wait_for_tstate_lock(timeout=max(timeout, 0))
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1139, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+~~~~~~~~~~~~~~~~~~~~~~~~~ Stack of MainThread (11860) ~~~~~~~~~~~~~~~~~~~~~~~~~
+  File "C:\Dev\MERID\audit\trace_data_writes.py", line 41, in <module>
+    pytest.main(
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\config\__init__.py", line 199, in main
+    ret: ExitCode | int = config.hook.pytest_cmdline_main(config=config)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\main.py", line 318, in wrap_session
+    session.exitstatus = doit(config, session) or 0
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\main.py", line 372, in _main
+    config.hook.pytest_runtestloop(session=session)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\main.py", line 396, in pytest_runtestloop
+    item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\runner.py", line 118, in pytest_runtest_protocol
+    runtestprotocol(item, nextitem=nextitem)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\runner.py", line 142, in runtestprotocol
+    reports.append(call_and_report(item, "teardown", log, nextitem=nextitem))
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\runner.py", line 244, in call_and_report
+    call = CallInfo.from_call(
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\runner.py", line 353, in from_call
+    result: TResult | None = func()
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\runner.py", line 245, in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\runner.py", line 194, in pytest_runtest_teardown
+    item.session._setupstate.teardown_exact(nextitem)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\runner.py", line 555, in teardown_exact
+    fin()
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\fixtures.py", line 1042, in finish
+    fin()
+  File "C:\Dev\MERID\.venv\Lib\site-packages\_pytest\fixtures.py", line 924, in _teardown_yield_fixture
+    next(it)
+  File "C:\Dev\MERID\.venv\Lib\site-packages\pytest_asyncio\plugin.py", line 817, in _scoped_runner
+    runner.__exit__(None, None, None)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 63, in __exit__
+    self.close()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 73, in close
+    loop.run_until_complete(loop.shutdown_default_executor())
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1898, in _run_once
+    event_list = self._selector.select(timeout)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 444, in select
+    self._poll(timeout)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 825, in _poll
+    status = _overlapped.GetQueuedCompletionStatus(self._iocp, ms)
++++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++

@@ -97,8 +97,8 @@ class TestBearishSignalToNOEntryToExit:
         
         # Validate invariants
         expected_post_position_size = assert_exit_delta(
-            pre_position_size=pre_position_size,
-            count=count,
+            pre_position_size_cc=pre_position_size,
+            count_cc=count,
             market_id=market_id,
             position_id=position_id
         )
@@ -196,8 +196,8 @@ class TestBullishSignalToYESEntryToExit:
         
         # Validate invariants
         expected_post_position_size = assert_exit_delta(
-            pre_position_size=pre_position_size,
-            count=count,
+            pre_position_size_cc=pre_position_size,
+            count_cc=count,
             market_id=market_id,
             position_id=position_id
         )
@@ -227,8 +227,8 @@ class TestPartialExitScenarios:
         position_id = "test_position_123"
         
         expected_post_position_size = assert_exit_delta(
-            pre_position_size=pre_position_size,
-            count=count,
+            pre_position_size_cc=pre_position_size,
+            count_cc=count,
             market_id=market_id,
             position_id=position_id
         )
@@ -245,8 +245,8 @@ class TestPartialExitScenarios:
         position_id = "test_position_123"
         
         expected_post_position_size = assert_exit_delta(
-            pre_position_size=pre_position_size,
-            count=count,
+            pre_position_size_cc=pre_position_size,
+            count_cc=count,
             market_id=market_id,
             position_id=position_id
         )
@@ -307,8 +307,8 @@ class TestRegimeShiftDoesNotBiasToYES:
         position_id = "test_position_123"
         
         expected_post_position_size = assert_exit_delta(
-            pre_position_size=pre_position_size,
-            count=count,
+            pre_position_size_cc=pre_position_size,
+            count_cc=count,
             market_id=market_id,
             position_id=position_id
         )
@@ -344,8 +344,8 @@ class TestExitCannotCreateExposure:
         
         with pytest.raises(RuntimeError, match="EXIT-INVARIANT-VIOLATION"):
             assert_exit_delta(
-                pre_position_size=pre_position_size,
-                count=count,
+                pre_position_size_cc=pre_position_size,
+                count_cc=count,
                 market_id=market_id,
                 position_id=position_id
             )
@@ -361,8 +361,8 @@ class TestExitCannotCreateExposure:
         
         with pytest.raises(RuntimeError, match="EXIT-INVARIANT-VIOLATION"):
             assert_exit_delta(
-                pre_position_size=pre_position_size,
-                count=count,
+                pre_position_size_cc=pre_position_size,
+                count_cc=count,
                 market_id=market_id,
                 position_id=position_id
             )
@@ -378,8 +378,8 @@ class TestExitCannotCreateExposure:
         
         with pytest.raises(RuntimeError, match="EXIT-INVARIANT-VIOLATION"):
             assert_exit_delta(
-                pre_position_size=pre_position_size,
-                count=count,
+                pre_position_size_cc=pre_position_size,
+                count_cc=count,
                 market_id=market_id,
                 position_id=position_id
             )
@@ -430,8 +430,8 @@ class TestRouterDefenseInDepth:
         
         # Upstream validation
         expected_post_position_size = assert_exit_delta(
-            pre_position_size=pre_position_size,
-            count=count,
+            pre_position_size_cc=pre_position_size,
+            count_cc=count,
             market_id=market_id,
             position_id=position_id
         )
