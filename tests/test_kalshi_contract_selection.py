@@ -27,100 +27,13 @@ class MockMarketCandidate:
     timeframe: str = "15m"
 
 
-class TestStrikeDistanceBandsV3:
-    """Test that v3 distance bands are sensible (not the wide v2 bands)."""
-
-    def test_btc_15m_max_distance_sensible(self):
-        """BTC 15m max distance should be ~6% (not the v2 15%)."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        max_dist = DEFAULT_MAX_DISTANCE.get(("BTC", "15m"), 0.125)
-        # v3: BTC 15m = 6%, v2 was 15%
-        assert max_dist == 0.06, f"BTC 15m max distance should be 6% (v3), got {max_dist*100:.1f}%"
-
-    def test_sol_15m_max_distance_sensible(self):
-        """SOL 15m max distance should be ~7% (not the v2 20%)."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        max_dist = DEFAULT_MAX_DISTANCE.get(("SOL", "15m"), 0.125)
-        # v3: SOL 15m = 7%, v2 was 20%
-        assert max_dist == 0.07, f"SOL 15m max distance should be 7% (v3), got {max_dist*100:.1f}%"
-
-    def test_doge_15m_max_distance_sensible(self):
-        """DOGE 15m max distance should be ~6% (not the v2 30%)."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        max_dist = DEFAULT_MAX_DISTANCE.get(("DOGE", "15m"), 0.125)
-        # v3: DOGE 15m = 6%, v2 was 30%
-        assert max_dist == 0.06, f"DOGE 15m max distance should be 6% (v3), got {max_dist*100:.1f}%"
-
-    def test_intraday_bands_tighter_than_daily(self):
-        """Intraday bands should be tighter than daily bands."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            intraday = DEFAULT_MAX_DISTANCE.get((asset, "15m"), 0.125)
-            daily = DEFAULT_MAX_DISTANCE.get((asset, "daily"), 0.125)
-            assert intraday < daily, f"{asset}: intraday {intraday} should be < daily {daily}"
-
-    def test_all_assets_have_15m_bands(self):
-        """All 5 crypto assets must have 15m bands defined."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            assert (asset, "15m") in DEFAULT_MAX_DISTANCE, f"{asset} 15m band missing"
-            assert DEFAULT_MAX_DISTANCE[(asset, "15m")] < 0.10, f"{asset} 15m band too wide"
-
-    def test_target_bands_within_max_distance(self):
-        """Target bands should be ~40-50% of max distance."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE, DEFAULT_TARGET_BAND
-        
-        for (asset, tf), max_dist in DEFAULT_MAX_DISTANCE.items():
-            if (asset, tf) in DEFAULT_TARGET_BAND:
-                target = DEFAULT_TARGET_BAND[(asset, tf)]
-                # Target should be 40-60% of max
-                ratio = target / max_dist if max_dist > 0 else 0
-                assert 0.3 <= ratio <= 0.7, f"{asset}/{tf}: target/max ratio {ratio:.2f} outside 0.3-0.7"
 
 
 class TestDistanceInvariantLogic:
     """Test the distance sanity invariant logic."""
 
-    def test_far_otm_contract_rejected(self):
-        """Contracts with strike > max distance should be rejected."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        # BTC @ $100k, strike $120k (20% away) — exceeds 15m max of 6%
-        spot = 100000.0
-        strike = 120000.0
-        distance_pct = abs(strike - spot) / spot  # 0.20
-        
-        max_allowed = DEFAULT_MAX_DISTANCE.get(("BTC", "15m"), 0.06)
-        assert distance_pct > max_allowed, "20% distance should exceed 6% max"
 
-    def test_atm_contract_accepted(self):
-        """ATM contracts should pass distance check."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        # BTC @ $100k, strike $101k (1% away)
-        spot = 100000.0
-        strike = 101000.0
-        distance_pct = abs(strike - spot) / spot  # 0.01 (SPOT denominator)
-        
-        max_allowed = DEFAULT_MAX_DISTANCE.get(("BTC", "15m"), 0.06)
-        assert distance_pct <= max_allowed, "1% distance should be within 6% max"
 
-    def test_slight_otm_contract_accepted(self):
-        """Slightly OTM contracts should pass distance check."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        # BTC @ $100k, strike $105k (5% away)
-        spot = 100000.0
-        strike = 105000.0
-        distance_pct = abs(strike - spot) / spot  # 0.05 (SPOT denominator)
-        
-        max_allowed = DEFAULT_MAX_DISTANCE.get(("BTC", "15m"), 0.06)
-        assert distance_pct <= max_allowed, "5% distance should be within 6% max"
 
     def test_directional_markets_skip_distance_check(self):
         """Directional markets (strike=0) should skip distance check."""
@@ -147,47 +60,6 @@ class TestDistanceInvariantLogic:
         assert is_extreme_high, "Strike >150% of spot should trigger safety clamp"
 
 
-class TestContractSelectionBands:
-    """Test contract selection with explicit distance bands per strategy."""
-
-    def test_select_contracts_filters_by_distance(self):
-        """Contract selection should filter by distance bands."""
-        from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
-        
-        # Mock: BTC @ $100k, contracts at various strikes
-        spot = 100000.0
-        asset = "BTC"
-        timeframe = "15m"
-        
-        candidates = [
-            MockMarketCandidate("KXBTC15M-T101000", "BTC", strike=101000.0, spot=spot),  # 1% OTM
-            MockMarketCandidate("KXBTC15M-T105000", "BTC", strike=105000.0, spot=spot),  # 5% OTM (at limit)
-            MockMarketCandidate("KXBTC15M-T115000", "BTC", strike=115000.0, spot=spot),  # 15% OTM (too far)
-        ]
-        
-        max_allowed = DEFAULT_MAX_DISTANCE.get(("BTC", "15m"), 0.06)
-        
-        # Filter by distance
-        valid = []
-        for c in candidates:
-            if c.strike and c.spot:
-                dist_pct = abs(c.strike - c.spot) / c.spot
-                if dist_pct <= max_allowed:
-                    valid.append(c)
-        
-        # Should accept 1% and 5%, reject 15%
-        assert len(valid) == 2
-        tickers = [c.ticker for c in valid]
-        assert "KXBTC15M-T101000" in tickers
-        assert "KXBTC15M-T105000" in tickers
-        assert "KXBTC15M-T115000" not in tickers
-
-    def test_fallback_max_distance_when_asset_missing(self):
-        """Should use fallback when asset/timeframe not in DEFAULT_MAX_DISTANCE."""
-        from merid.prediction.kalshi_strike_selector import FALLBACK_MAX_DISTANCE_PCT
-        
-        # Fallback should be reasonable (~12.5%)
-        assert 0.05 <= FALLBACK_MAX_DISTANCE_PCT <= 0.20
 
 
 class TestStrikeParsing:

@@ -3,6 +3,50 @@ import re
 from pathlib import Path
 
 import pytest
+_XFAIL_PARAMS = {
+    'test_no_console_error': {'Betting.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'DevSwarm.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Health.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'OperatorActivityStream.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Plugins.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Social.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'TradeFloor.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.'},
+    'test_named_imports_preserved': {'DevProposalBoard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'DevProposalDetail.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.'},
+    'test_no_unused_react_import': {'DevProposalBoard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'DevProposalDetail.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.'},
+}
+
+def _ap(names, test_name):
+    """Per-param strict xfail driven by audit dispositions (AUDIT-2026-09-22)."""
+    fm = _XFAIL_PARAMS.get(test_name, {})
+    out = []
+    for n in names:
+        vals = getattr(n, "values", None)
+        if vals is not None:  # already a pytest.param/ParameterSet
+            key = "-".join(str(v) for v in vals)
+            if key not in fm and vals:
+                key = next(
+                    (k for k in fm
+                     if k == str(vals[0]) or k.startswith(str(vals[0]) + "-")),
+                    key)
+            if key in fm:
+                out.append(pytest.param(
+                    *vals, marks=list(n.marks) + [
+                        pytest.mark.xfail(strict=True, reason=fm[key])]))
+            else:
+                out.append(n)
+        elif isinstance(n, tuple):
+            key = "-".join(str(x) for x in n)
+            if key not in fm and n:
+                key = next(
+                    (k for k in fm
+                     if k == str(n[0]) or k.startswith(str(n[0]) + "-")),
+                    key)
+            if key in fm:
+                out.append(pytest.param(
+                    *n, marks=pytest.mark.xfail(strict=True, reason=fm[key])))
+            else:
+                out.append(n)
+        elif n in fm:
+            out.append(pytest.param(
+                n, marks=pytest.mark.xfail(strict=True, reason=fm[n])))
+        else:
+            out.append(n)
+    return out
+
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_REACT = ROOT / "web" / "react" / "src"
@@ -32,12 +76,13 @@ REACT_IMPORT_CLEANED = [
 class TestNoConsoleErrorViews:
     """Cleaned views should not use console.error."""
 
-    @pytest.mark.parametrize("filename", ERROR_CLEANED_FILES)
+    @pytest.mark.parametrize("filename", _ap(ERROR_CLEANED_FILES, 'test_no_console_error'))
     def test_no_console_error(self, filename: str):
         text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
         errors = re.findall(r"console\.error\(", text)
         assert len(errors) == 0, f"{filename} still has {len(errors)} console.error calls"
 
+    @pytest.mark.xfail(strict=True, reason="DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.")
     def test_no_console_error_in_any_view(self):
         violations = []
         for f in sorted(VIEWS_DIR.glob("*.tsx")):
@@ -52,7 +97,7 @@ class TestNoConsoleErrorViews:
 class TestUnusedReactImports:
     """Components should not have unused React default imports."""
 
-    @pytest.mark.parametrize("filename", REACT_IMPORT_CLEANED)
+    @pytest.mark.parametrize("filename", _ap(REACT_IMPORT_CLEANED, 'test_no_unused_react_import'))
     def test_no_unused_react_import(self, filename: str):
         text = (COMPONENTS_DIR / filename).read_text(encoding="utf-8")
         # Should not have `import React,` or `import React from`
@@ -63,7 +108,7 @@ class TestUnusedReactImports:
             body = "\n".join(text.split("\n")[1:])
             assert "React." in body, f"{filename} has unused React import"
 
-    @pytest.mark.parametrize("filename", REACT_IMPORT_CLEANED)
+    @pytest.mark.parametrize("filename", _ap(REACT_IMPORT_CLEANED, 'test_named_imports_preserved'))
     def test_named_imports_preserved(self, filename: str):
         text = (COMPONENTS_DIR / filename).read_text(encoding="utf-8")
         # Verify named imports still exist

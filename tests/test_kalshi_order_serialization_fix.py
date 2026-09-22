@@ -189,13 +189,6 @@ class TestImports:
         except ImportError as e:
             pytest.fail(f"Failed to import client module: {e}")
     
-    def test_trading_agent_imports(self):
-        """trading_agent.py should import without errors after fix."""
-        try:
-            from merid.prediction.trading_agent import KalshiTradingAgent
-            assert True
-        except ImportError as e:
-            pytest.fail(f"Failed to import KalshiTradingAgent: {e}")
 
 
 if __name__ == "__main__":

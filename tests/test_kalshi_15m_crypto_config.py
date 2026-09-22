@@ -241,11 +241,6 @@ class TestExitPolicies:
 class TestEdgeThresholds:
     """Tests for edge thresholds (Section 5)."""
     
-    def test_all_assets_have_volatility_thresholds(self):
-        """All assets have volatility-tiered thresholds."""
-        from config.kalshi_15m_crypto_config import VOLATILITY_TIERED_BASE_THRESHOLDS
-        for asset in KALSHI_15M_CRYPTO_ASSETS:
-            assert asset in VOLATILITY_TIERED_BASE_THRESHOLDS
     
     def test_get_base_edge_threshold(self):
         """Base edge threshold lookup works correctly."""

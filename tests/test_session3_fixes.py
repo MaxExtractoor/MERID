@@ -114,56 +114,6 @@ class TestAgentPerformanceMetricsBasic:
 
 # ── 3. SwarmOrchestrator.review_portfolio_risk() ─────────────────────
 
-class TestSwarmOrchestratorPortfolioRisk:
-    """review_portfolio_risk must handle portfolio snapshots (not trade intents)."""
-
-    def _make_orchestrator(self):
-        from merid.swarm.orchestrator import SwarmOrchestrator
-        return SwarmOrchestrator(enabled=True)
-
-    def test_method_exists(self):
-        orch = self._make_orchestrator()
-        assert hasattr(orch, "review_portfolio_risk")
-
-    def test_healthy_portfolio_approved(self):
-        orch = self._make_orchestrator()
-        result = asyncio.get_event_loop().run_until_complete(
-            orch.review_portfolio_risk({
-                "total_notional": 5000.0,
-                "daily_pnl": 100.0,
-                "margin_util": 30.0,
-                "drawdown_pct": 2.0,
-                "breaches": [],
-            })
-        )
-        assert result["approved"] is True
-        assert result["risk_score"] < 0.8
-
-    def test_high_risk_portfolio_flagged(self):
-        orch = self._make_orchestrator()
-        result = asyncio.get_event_loop().run_until_complete(
-            orch.review_portfolio_risk({
-                "total_notional": 50000.0,
-                "daily_pnl": -1000.0,
-                "margin_util": 90.0,
-                "drawdown_pct": 15.0,
-                "breaches": ["max_daily_loss", "margin_limit"],
-            })
-        )
-        assert result["approved"] is False
-        assert result["risk_score"] >= 0.8
-
-    def test_review_intent_rejects_portfolio_snapshot(self):
-        """review_intent should still reject portfolio snapshots (missing required fields)."""
-        orch = self._make_orchestrator()
-        result = asyncio.get_event_loop().run_until_complete(
-            orch.review_intent({
-                "total_notional": 5000.0,
-                "daily_pnl": 100.0,
-            })
-        )
-        assert result["approved"] is False
-        assert result["reason"] == "missing_required_fields"
 
 
 # ── 4. PerpContext cascading fallback ─────────────────────────────────

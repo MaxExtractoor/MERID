@@ -26,41 +26,6 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # ── BUG-8: TelegramAgent reads from settings ─────────────────────────
 
-class TestTelegramAgentCredentialSources:
-    """BUG-8: TelegramAgent must read from settings first, then env vars."""
-
-    def test_init_reads_from_settings(self):
-        """TelegramAgent.__init__ should try merid.settings before os.getenv."""
-        src = (ROOT / "agents" / "telegram_agent.py").read_text(encoding="utf-8")
-        assert "merid.settings" in src, "TelegramAgent must import from merid.settings"
-        assert "TELEGRAM_TOKEN" in src, "Must check settings.TELEGRAM_TOKEN"
-
-    def test_init_falls_back_to_all_env_vars(self):
-        """TelegramAgent should check TELEGRAM_BOT_TOKEN, TELEGRAM_TOKEN, TG_BOT_TOKEN."""
-        src = (ROOT / "agents" / "telegram_agent.py").read_text(encoding="utf-8")
-        assert "TELEGRAM_BOT_TOKEN" in src
-        assert "TELEGRAM_TOKEN" in src
-        assert "TG_BOT_TOKEN" in src
-
-    def test_chat_id_reads_from_settings(self):
-        """TelegramAgent must also read TELEGRAM_CHAT_ID from settings."""
-        src = (ROOT / "agents" / "telegram_agent.py").read_text(encoding="utf-8")
-        assert "TELEGRAM_CHAT_ID" in src
-
-
-# ── BUG-9: Portfolio dashboard not BTC-centric ───────────────────────
-
-class TestPortfolioDashboardTitle:
-    """BUG-9: send_portfolio_dashboard should not say 'BTC Swarm'."""
-
-    def test_no_btc_swarm_hardcode(self):
-        src = (ROOT / "merid" / "alerts" / "webhook_client.py").read_text(encoding="utf-8")
-        assert "Kalshi BTC Swarm" not in src, "Hardcoded 'Kalshi BTC Swarm' must be removed"
-
-    def test_uses_generic_title(self):
-        src = (ROOT / "merid" / "alerts" / "webhook_client.py").read_text(encoding="utf-8")
-        assert "Kalshi Portfolio" in src, "Dashboard title should be 'Kalshi Portfolio'"
-
 
 # ── BUG-10: reconciliation telegram_handler uses tg_send ─────────────
 

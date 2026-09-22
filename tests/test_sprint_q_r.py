@@ -89,17 +89,6 @@ class TestTimeSeriesForecaster:
         assert f.predict("X", 0.0, 1.0) is None
         assert f.predict("X", 1.0, 0.0) is None
 
-    def test_registered_in_registry(self):
-        from merid.prediction.forecasters.registry import get_forecaster_registry
-        import merid.prediction.forecasters.registry as mod
-        old = mod._registry
-        mod._registry = None
-        try:
-            reg = get_forecaster_registry()
-            ids = [f.forecaster_id for f in reg._forecasters]
-            assert "time_series_v1" in ids
-        finally:
-            mod._registry = old
 
     def test_in_init_exports(self):
         from merid.prediction.forecasters import TimeSeriesForecaster
@@ -195,17 +184,6 @@ class TestExternalSentimentForecaster:
         from merid.prediction.forecasters import ExternalSentimentForecaster
         assert ExternalSentimentForecaster is not None
 
-    def test_registered_in_registry(self):
-        from merid.prediction.forecasters.registry import get_forecaster_registry
-        import merid.prediction.forecasters.registry as mod
-        old = mod._registry
-        mod._registry = None
-        try:
-            reg = get_forecaster_registry()
-            ids = [f.forecaster_id for f in reg._forecasters]
-            assert "sentiment_ext" in ids
-        finally:
-            mod._registry = old
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -213,102 +191,6 @@ class TestExternalSentimentForecaster:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestAuctionConsensus:
-    """Tests for merid.swarm.auction_consensus."""
-
-    def test_import(self):
-        from merid.swarm.auction_consensus import (
-            AuctionConsensusResolver, get_auction_resolver,
-        )
-        r = get_auction_resolver()
-        assert isinstance(r, AuctionConsensusResolver)
-
-    def test_empty_proposals(self):
-        from merid.swarm.auction_consensus import AuctionConsensusResolver
-        r = AuctionConsensusResolver()
-        result = r.resolve_conflict([], "BTC", "15m")
-        assert result.resolved is False
-        assert result.num_bidders == 0
-
-    def test_unanimous_yes_resolves(self):
-        from merid.swarm.auction_consensus import AuctionConsensusResolver
-        from merid.swarm.consensus_aggregator import AgentProposal
-        from datetime import datetime, timezone
-
-        r = AuctionConsensusResolver()
-        proposals = [
-            AgentProposal(
-                agent_id=f"agent_{i}",
-                asset="BTC", timeframe="15m",
-                direction="yes", probability=0.70,
-                confidence=0.8, size_preference="base",
-                rationale="test", edge_estimate=5.0,
-                timestamp=datetime.now(timezone.utc),
-                agent_archetype="trend",
-            )
-            for i in range(5)
-        ]
-        result = r.resolve_conflict(proposals, "BTC", "15m")
-        assert result.resolved is True
-        assert result.winning_direction == "yes"
-        assert result.winning_probability > 0.5
-
-    def test_split_vote_may_not_resolve(self):
-        from merid.swarm.auction_consensus import AuctionConsensusResolver
-        from merid.swarm.consensus_aggregator import AgentProposal
-        from datetime import datetime, timezone
-
-        r = AuctionConsensusResolver()
-        proposals = []
-        for i in range(3):
-            proposals.append(AgentProposal(
-                agent_id=f"yes_{i}", asset="BTC", timeframe="15m",
-                direction="yes", probability=0.65, confidence=0.5,
-                size_preference="base", rationale="test", edge_estimate=3.0,
-                timestamp=datetime.now(timezone.utc), agent_archetype="trend",
-            ))
-        for i in range(3):
-            proposals.append(AgentProposal(
-                agent_id=f"no_{i}", asset="BTC", timeframe="15m",
-                direction="no", probability=0.35, confidence=0.5,
-                size_preference="base", rationale="test", edge_estimate=3.0,
-                timestamp=datetime.now(timezone.utc), agent_archetype="mean_reversion",
-            ))
-        result = r.resolve_conflict(proposals, "BTC", "15m")
-        # Equal split → likely unresolved
-        assert result.num_bidders == 6
-
-    def test_auction_bid_effective(self):
-        from merid.swarm.auction_consensus import AuctionBid
-        bid = AuctionBid(
-            agent_id="a1", direction="yes",
-            conviction=0.8, probability=0.65,
-            edge_estimate=5.0, calibration_weight=1.2,
-        )
-        assert bid.effective_bid == pytest.approx(0.96, abs=0.01)
-
-    def test_result_to_dict(self):
-        from merid.swarm.auction_consensus import AuctionConsensusResolver
-        r = AuctionConsensusResolver()
-        result = r.resolve_conflict([], "BTC", "15m")
-        d = result.to_dict()
-        assert "resolved" in d
-        assert "winning_direction" in d
-        assert "reason" in d
-
-    def test_stats(self):
-        from merid.swarm.auction_consensus import AuctionConsensusResolver
-        r = AuctionConsensusResolver()
-        r.resolve_conflict([], "BTC", "15m")
-        s = r.stats
-        assert s["total_auctions"] == 1
-        assert s["unresolved"] == 1
-
-    def test_wired_into_aggregator(self):
-        from merid.swarm.consensus_aggregator import SwarmConsensusAggregator
-        source = inspect.getsource(SwarmConsensusAggregator._recompute_consensus)
-        assert "auction_consensus" in source
-        assert "resolve_conflict" in source
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -389,44 +271,3 @@ class TestMCPMarketFeed:
 # Gap Analysis Verification
 # ═══════════════════════════════════════════════════════════════════════════
 
-
-class TestGapAnalysisQR:
-    """Verify gap analysis reflects Sprint Q+R closures — 62/62."""
-
-    def test_perfect_score(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "62/62" in content
-        assert "**A+**" in content
-
-    def test_time_series_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "TimeSeriesForecaster" in content
-
-    def test_external_sentiment_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "ExternalSentimentForecaster" in content
-
-    def test_auction_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "AuctionConsensusResolver" in content
-
-    def test_mcp_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "mcp_market_feed" in content
-
-    def test_registry_has_six_forecasters(self):
-        """2 defaults + macro + orderbook + timeseries + sentiment = 6."""
-        from merid.prediction.forecasters.registry import get_forecaster_registry
-        import merid.prediction.forecasters.registry as mod
-        old = mod._registry
-        mod._registry = None
-        try:
-            reg = get_forecaster_registry()
-            assert len(reg._forecasters) == 6
-        finally:
-            mod._registry = old

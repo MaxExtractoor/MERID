@@ -301,13 +301,6 @@ class TestObservabilityProbeFailures:
         assert result["severity"] == "warning"
         assert "probe_error" in result["detail"]
 
-    def test_opinion_freshness_probe_failure_fires(self):
-        from web.api.system_observability import OpinionFreshnessAlert
-        import merid.prediction.consensus as _m
-        self._assert_fires_on_runtime_error(
-            OpinionFreshnessAlert,
-            "merid.prediction.consensus.get_prediction_consensus_store",
-        )
 
     def test_circuit_breaker_open_probe_failure_fires(self):
         from web.api.system_observability import CircuitBreakerOpenAlert
@@ -333,13 +326,6 @@ class TestObservabilityProbeFailures:
             "merid.signals.ws_price_feed.get_ws_feed_manager",
         )
 
-    def test_no_debate_activity_probe_failure_fires(self):
-        from web.api.system_observability import NoDebateActivityAlert
-        import merid.prediction.debate as _m
-        self._assert_fires_on_runtime_error(
-            NoDebateActivityAlert,
-            "merid.prediction.debate.get_debate_store",
-        )
 
 
 # ---------------------------------------------------------------------------

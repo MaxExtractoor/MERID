@@ -27,66 +27,6 @@ if _root not in sys.path:
     sys.path.insert(0, _root)
 
 
-class TestFix1_TrackedPositionContracts(unittest.TestCase):
-    """FIX-1: TrackedPosition.size → .contracts in trading_agent.py."""
-
-    def test_tracked_position_has_contracts_attribute(self):
-        from merid.event_venues.kalshi.stop_loss import TrackedPosition
-        tp = TrackedPosition(
-            position_id="test:yes:synced",
-            ticker="KXBTC-TEST",
-            side="yes",
-            entry_price_cents=55,
-            contracts=10,
-            entry_ts=1000.0,
-        )
-        self.assertEqual(tp.contracts, 10)
-        self.assertFalse(hasattr(tp, "size"), "TrackedPosition must NOT have a .size attribute")
-
-    def test_trading_agent_uses_contracts_not_size(self):
-        """Parse trading_agent.py AST to confirm no .size on TrackedPosition."""
-        path = os.path.join(_root, "merid", "prediction", "trading_agent.py")
-        with open(path, "r", encoding="utf-8") as f:
-            source = f.read()
-        tree = ast.parse(source)
-        
-        # Find all attribute accesses of ".size" on objects named "pos"
-        bad_hits = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr == "size":
-                if isinstance(node.value, ast.Name) and node.value.id == "pos":
-                    bad_hits.append(node.lineno)
-        self.assertEqual(bad_hits, [], f"Found pos.size at lines {bad_hits} — should be pos.contracts")
-
-
-class TestFix2_TestFixtureFilter(unittest.TestCase):
-    """FIX-2: Test fixture fills filtered from DB load and ingestion."""
-
-    def test_is_test_fixture_fill(self):
-        from merid.event_venues.kalshi.fills_ledger import _is_test_fixture_fill
-        # Test fixtures
-        self.assertTrue(_is_test_fixture_fill("fill_integrity_000"))
-        self.assertTrue(_is_test_fixture_fill("fill_a_001"))
-        self.assertTrue(_is_test_fixture_fill("fill_ghost_resolved_001"))
-        self.assertTrue(_is_test_fixture_fill("fill_immutable_001"))
-        self.assertTrue(_is_test_fixture_fill("fill_legit_001"))
-        self.assertTrue(_is_test_fixture_fill("fill_test_abc"))
-        self.assertTrue(_is_test_fixture_fill("test_fill_123"))
-        self.assertTrue(_is_test_fixture_fill("fill_dup_001"))
-        self.assertTrue(_is_test_fixture_fill("fill_stale_001"))
-        # Real Kalshi fill IDs (UUID-like)
-        self.assertFalse(_is_test_fixture_fill("a1b2c3d4-e5f6-7890-abcd-ef1234567890"))
-        self.assertFalse(_is_test_fixture_fill("12345678-abcd-ef01-2345-678901234567"))
-        # Empty / None
-        self.assertTrue(_is_test_fixture_fill(""))
-        self.assertTrue(_is_test_fixture_fill(None))
-
-    def test_test_fill_prefixes_constant_exists(self):
-        from merid.event_venues.kalshi.fills_ledger import _TEST_FILL_PREFIXES
-        self.assertIsInstance(_TEST_FILL_PREFIXES, tuple)
-        self.assertGreater(len(_TEST_FILL_PREFIXES), 5)
-
-
 class TestFix4_StartingBalance(unittest.TestCase):
     """FIX-4: starting_balance no longer hardcoded to 10000."""
 

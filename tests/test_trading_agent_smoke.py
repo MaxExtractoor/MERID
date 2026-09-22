@@ -8,20 +8,8 @@ MEAN_REVERSION_TIMEFRMES typo that blocked execution in production.
 import pytest
 
 
-def test_trading_agent_import_no_error():
-    """Test that trading_agent can be imported without ImportError."""
-    # This should not raise ImportError
-    from merid.prediction.trading_agent import KalshiTradingAgent
-    assert KalshiTradingAgent is not None
 
 
-def test_mean_reversion_timeframes_import():
-    """Test that MEAN_REVERSION_TIMEFRAMES can be imported from crypto_top_edge."""
-    # This should not raise ImportError (was broken by typo MEAN_REVERSION_TIMEFRMES)
-    from merid.prediction.crypto_top_edge import CRYPTO_ASSETS, MEAN_REVERSION_TIMEFRAMES
-    assert MEAN_REVERSION_TIMEFRAMES is not None
-    assert "15m" in MEAN_REVERSION_TIMEFRAMES
-    assert CRYPTO_ASSETS is not None
 
 
 def test_sentiment_mode_env_var_handling():

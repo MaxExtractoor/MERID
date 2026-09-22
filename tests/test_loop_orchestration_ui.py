@@ -25,18 +25,6 @@ from typing import Any, Dict, List
 
 import pytest
 
-# AUDIT-2026-09-22-04: frontend components under test were never committed to
-# this tree (no git history; React files absent). strict xfail keeps the spec
-# executable: if the UI lands, XPASS forces cleanup. Expiry 2026-10-15.
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT AUDIT-2026-09-22-04: frontend UI under test never implemented "
-        "in this tree (React files absent, no git history). Expiry 2026-10-15."
-    ),
-)
-
-
 # ── Paths ──────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,11 +50,35 @@ def _read(path: Path) -> str:
         return ""
 
 
+# AUDIT-2026-09-22-04: the Sprint-11 loop-orchestration frontend was never
+# committed to this tree (React files absent, no git history, constants
+# missing).  Marks below are scoped per class: file-bound classes get a
+# conditional strict xfail that drops off once the file lands; classes
+# asserting an absent feature on existing files get unconditional strict
+# xfail.  Expiry 2026-10-15.
+_MISSING_UI_REASON = (
+    "DEFECT AUDIT-2026-09-22-04: loop-orchestration UI under test never "
+    "implemented in this tree (files/constants absent). Expiry 2026-10-15."
+)
+
+
+def _missing_file(path: Path):
+    return pytest.mark.xfail(
+        not path.exists(), strict=True, reason=_MISSING_UI_REASON
+    )
+
+
+_ABSENT_FEATURE = pytest.mark.xfail(
+    strict=True, reason=_MISSING_UI_REASON
+)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # §1  Endpoint Constants
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_ABSENT_FEATURE
 class TestEndpointConstants:
     """Verify all loop orchestration constants are defined."""
 
@@ -113,6 +125,7 @@ class TestEndpointConstants:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_missing_file(HOOK_FILE)
 class TestUseLoopOrchestrationHook:
     """Verify hook file structure, types, and exports."""
 
@@ -223,6 +236,7 @@ class TestUseLoopOrchestrationHook:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_missing_file(PIPELINE_DIAGRAM_FILE)
 class TestLoopPipelineDiagram:
     """Verify pipeline diagram component structure."""
 
@@ -297,6 +311,7 @@ class TestLoopPipelineDiagram:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_missing_file(CADENCE_CHART_FILE)
 class TestLoopCadenceChart:
     """Verify cadence chart component structure."""
 
@@ -354,6 +369,7 @@ class TestLoopCadenceChart:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_missing_file(STAGE_CARDS_FILE)
 class TestStageHealthCards:
     """Verify stage health cards component structure."""
 
@@ -420,6 +436,7 @@ class TestStageHealthCards:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_missing_file(WIRING_PANEL_FILE)
 class TestWiringStatusPanel:
     """Verify wiring status panel component structure."""
 
@@ -478,6 +495,7 @@ class TestWiringStatusPanel:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_missing_file(VIEW_FILE)
 class TestLoopOrchestrationView:
     """Verify the main view assembles all components correctly."""
 
@@ -562,6 +580,7 @@ class TestLoopOrchestrationView:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_ABSENT_FEATURE
 class TestNavigationWiring:
     """Verify App.tsx and Sidebar.tsx are wired correctly."""
 
@@ -648,7 +667,9 @@ class TestBackendAPIs:
         assert "alerts" in self.obs_src
 
     def test_system_health_endpoint(self):
-        assert "/api/system/health" in self.health_src
+        # Router is mounted as prefix="/system" + @router.get("/health").
+        assert 'prefix="/system"' in self.health_src
+        assert '"/health"' in self.health_src
 
     def test_system_health_returns_services(self):
         assert "services" in self.health_src
@@ -662,6 +683,7 @@ class TestBackendAPIs:
 # ═══════════════════════════════════════════════════════════════════
 
 
+@_ABSENT_FEATURE
 class TestIntegration:
     """Cross-file consistency checks."""
 

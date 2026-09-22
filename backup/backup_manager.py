@@ -9,6 +9,7 @@ Version: 1.0.0
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import shutil
 from pathlib import Path
@@ -121,7 +122,7 @@ class BackupManager:
     - Job history
     """
     
-    def __init__(self, backup_dir: str = "data/backups"):
+    def __init__(self, backup_dir: str = os.environ.get("MERID_BACKUP_DIR", "data/backups")):
         self.logger = get_logger("backup.manager")
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(parents=True, exist_ok=True)

@@ -102,6 +102,7 @@ for _env_key, _fname in {
     "MERID_RECONCILIATION_REPORT_PATH": "reconciliation_report.json",
     "MERID_SESSION_METADATA_PATH": "kalshi_session_metadata.json",
     "MERID_PAPER_LADDER_STATE_PATH": "paper_ladder_state.json",
+    "MERID_PAPER_POSITIONS_PATH": "paper_positions.json",
     "MERID_PROB_ACCURACY_DB": "prob_accuracy.db",
     "MERID_ENTRY_PROVENANCE_PATH": "entry_provenance_snapshots.json",
     "MERID_PROMOTION_STATES_PATH": "promotion_states.json",
@@ -114,6 +115,8 @@ for _env_key, _fname in {
     "MERID_PROFILE_SNAPSHOTS_DIR": "profile_snapshots",
     "MERID_KALSHI_ORDER_ATTEMPT_DB": "kalshi_order_attempts.db",
     "MERID_SESSION_LOG_PATH": "session_log.jsonl",
+    "MERID_REJECTIONS_DIR": "rejections",
+    "MERID_BACKUP_DIR": "backups",
 }.items():
     # Force-set (not setdefault): a developer env pointing at real data/ paths
     # must not leak production state into the test process.

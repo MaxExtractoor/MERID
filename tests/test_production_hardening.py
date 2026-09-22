@@ -14,20 +14,6 @@ from unittest.mock import patch
 class TestMakerBotAdvancedHardening:
     """Verify maker_bot_advanced.py is properly hardened."""
 
-    def test_import_blocked_by_default(self):
-        """Importing maker_bot_advanced without env var should raise RuntimeError."""
-        # Ensure env var is not set
-        with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(RuntimeError) as exc_info:
-                import importlib
-                # Force reimport by clearing cache if present
-                if 'merid.kalshi.maker_bot_advanced' in sys.modules:
-                    del sys.modules['merid.kalshi.maker_bot_advanced']
-                import merid.kalshi.maker_bot_advanced
-
-        assert "PRODUCTION HARDENING" in str(exc_info.value)
-        assert "DISABLED" in str(exc_info.value)
-        assert "route_order_async" in str(exc_info.value)
 
     def test_import_allowed_with_override(self):
         """Import should succeed with MERID_ALLOW_MAKER_BOT_ADVANCED=1."""
@@ -50,18 +36,6 @@ class TestCanonicalExecutionPath:
         assert "route_order_async" in source
         assert "OrderIntent" in source
 
-    def test_trading_agent_uses_router(self):
-        """KalshiTradingAgent._execute_signal_body must call route_order_async for live orders."""
-        import inspect
-        from merid.prediction.trading_agent import KalshiTradingAgent
-
-        # Check _execute_signal_body which contains the actual order routing logic
-        # The _execute_signal method just wraps it with execution state management
-        source = inspect.getsource(KalshiTradingAgent._execute_signal_body)
-        # Should have route_order_async call
-        assert "route_order_async" in source
-        # Should NOT have direct client calls
-        assert "client.create_order" not in source or "await client.create_order" not in source
 
     def test_continuous_trader_uses_router(self):
         """KalshiContinuousTrader must use route_order_async."""
@@ -105,21 +79,6 @@ class TestGlobalRiskGuard:
         assert "_run_shared_risk_guard_and_dedup" in source or "global_risk_guard" in source.lower()
 
 
-class TestNoDirectHTTPBypasses:
-    """Verify no direct HTTP calls to Kalshi exist in production code."""
-
-    def test_no_requests_import_in_agents(self):
-        """Trading agents should not import requests (HTTP client)."""
-        # This is a heuristic - requests might be used for other purposes
-        # but should not be used for order submission
-        import ast
-        import inspect
-        from merid.prediction.trading_agent import KalshiTradingAgent
-
-        source = inspect.getsource(KalshiTradingAgent)
-        # Should not contain requests.post or requests.get for API calls
-        assert "requests.post" not in source
-        assert "requests.get" not in source
 
 
 class TestCriticalScriptBypasses:

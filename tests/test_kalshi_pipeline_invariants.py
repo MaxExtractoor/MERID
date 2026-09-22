@@ -29,15 +29,6 @@ os.environ["PYTEST_CURRENT_TEST"] = "true"
 class TestKalshiBaseUrlInvariant:
     """GAP-UPSTREAM-1: BASE_URL env var validation."""
 
-    def test_base_url_reads_from_env_var(self):
-        """Verify kalshi_market_data reads BASE_URL from environment."""
-        from merid.sentiment import kalshi_market_data
-
-        # The module should have imported BASE_URL from env
-        assert hasattr(kalshi_market_data, "BASE_URL")
-        # Should default to demo endpoint if env not set
-        assert "external-api.demo.kalshi.co" in kalshi_market_data.BASE_URL or \
-               "external-api.kalshi.com" in kalshi_market_data.BASE_URL
 
     def test_strategies_use_env_aware_base_url(self):
         """Verify strategy modules use env-aware BASE URLs."""
@@ -170,30 +161,6 @@ class TestKalshiBaseUrlInvariant:
         assert "KALSHI_API_BASE_URL" in source
         assert "os.getenv" in source
 
-    def test_maker_bot_advanced_module_level_env_aware(self):
-        """Verify maker_bot_advanced module-level BASE uses env."""
-        import inspect
-
-        # Read source directly to avoid import errors
-        with open("merid/kalshi/maker_bot_advanced.py", "r", encoding="utf-8") as f:
-            source = f.read()
-
-        # Check for env-aware BASE definition at module level
-        # Should have os.getenv for BASE definition instead of hardcoded
-        assert 'os.getenv("KALSHI_API_BASE_URL"' in source
-        assert 'os.getenv("KALSHI_WS_URL"' in source
-
-        # Should NOT have hardcoded module-level BASE with api.elections
-        # (allowing hardcoded in classes that haven't been fixed yet)
-        lines = source.split('\n')
-        module_level = True
-        for line in lines:
-            if line.startswith('class '):
-                module_level = False
-            if module_level and 'BASE = ' in line and 'api.elections' in line:
-                pytest.fail(f"Found hardcoded api.elections at module level: {line}")
-            if module_level and 'WS_URL = ' in line and 'api.elections' in line:
-                pytest.fail(f"Found hardcoded ws_url at module level: {line}")
 
 
 class TestSignalSourceTaxonomy:
@@ -242,38 +209,6 @@ class TestSignalSourceTaxonomy:
         result = KalshiSignalSource.validate_sources(canonical, context="test")
         assert result == canonical
 
-    def test_opinion_strategy_uses_canonical_sources(self):
-        """Verify KalshiLiveMarketStrategy uses canonical signal sources."""
-        from merid.prediction.opinion_strategy import KalshiLiveMarketStrategy
-        from merid.event_venues.kalshi.invariants import KalshiSignalSource
-
-        strategy = KalshiLiveMarketStrategy()
-
-        # Mock market state with initialized book
-        mock_state = MagicMock()
-        mock_state.book_initialized = True
-        mock_state.mid_cents = 50.0
-        mock_state.spread_cents = 2.0
-        mock_state.yes_bids = [(0.49, 100), (0.48, 50)]
-        mock_state.no_bids = [(0.51, 80), (0.52, 40)]
-        mock_state.seconds_to_expiry = 3600
-
-        with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store") as mock_store:
-            mock_store.return_value.get.return_value = mock_state
-
-            estimate = strategy.estimate(
-                agent_id="test_agent",
-                ticker="KXBTC-TEST",
-                market_prob=0.5,
-                category="crypto",
-                context={},
-            )
-
-            if estimate:  # May be None if below min_edge
-                # Verify signal sources are canonical
-                for source in estimate.signal_sources:
-                    assert KalshiSignalSource.is_valid(source) or source == "news_sentiment", \
-                        f"Non-canonical source: {source}"
 
 
 class TestAssetWiringValidation:
@@ -343,200 +278,12 @@ class TestAssetWiringValidation:
         assert results["failed"][0].errors  # Should have error messages
 
 
-class TestSentimentFusionSanity:
-    """GAP-ANALYZE-3: Sentiment fusion weight sanity checks."""
-
-    def test_sentiment_weight_constant_defined(self):
-        """Verify SENTIMENT_WEIGHT class constant exists."""
-        from merid.prediction.opinion_strategy import KalshiLiveMarketStrategy
-
-        strategy = KalshiLiveMarketStrategy()
-        assert hasattr(strategy, "SENTIMENT_WEIGHT")
-        assert 0 < strategy.SENTIMENT_WEIGHT < 0.1  # Should be small (3% cap)
-        assert strategy.SENTIMENT_WEIGHT == 0.03
-
-    def test_zero_sentiment_matches_mid_cents_baseline(self):
-        """Verify zero sentiment produces same prob as pure mid_cents baseline."""
-        from merid.prediction.opinion_strategy import KalshiLiveMarketStrategy
-
-        strategy = KalshiLiveMarketStrategy(min_edge=0.0)  # Allow zero edge
-
-        # Mock market state
-        mock_state = MagicMock()
-        mock_state.book_initialized = True
-        mock_state.mid_cents = 55.0  # 55% implied prob
-        mock_state.spread_cents = 2.0
-        mock_state.yes_bids = []
-        mock_state.no_bids = []
-        mock_state.seconds_to_expiry = 3600
-
-        with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store") as mock_store:
-            mock_store.return_value.get.return_value = mock_state
-
-            # With zero sentiment
-            estimate_zero = strategy.estimate(
-                agent_id="test",
-                ticker="KXBTC-TEST",
-                market_prob=0.5,
-                context={"sentiment_score": 0.0},
-            )
-
-            # Without sentiment context
-            estimate_none = strategy.estimate(
-                agent_id="test",
-                ticker="KXBTC-TEST",
-                market_prob=0.5,
-                context={},
-            )
-
-            # Both should use same base (mid_cents/100 = 0.55)
-            if estimate_zero and estimate_none:
-                # Agent prob should be close to mid_cents base (0.55)
-                assert abs(estimate_zero.agent_prob - 0.55) < 0.02
-                assert abs(estimate_none.agent_prob - 0.55) < 0.02
-
-    def test_sentiment_capped_at_3_percent(self):
-        """Verify sentiment contribution is capped at 3%."""
-        from merid.prediction.opinion_strategy import KalshiLiveMarketStrategy
-
-        strategy = KalshiLiveMarketStrategy()
-        max_sentiment = 1.0  # Extreme positive sentiment
-
-        # Calculate max possible bias
-        max_bias = max_sentiment * strategy.SENTIMENT_WEIGHT
-        assert max_bias <= 0.03  # 3% cap
-
-    def test_fallback_estimate_uses_sentiment_weight(self):
-        """Verify fallback estimate respects SENTIMENT_WEIGHT."""
-        from merid.prediction.opinion_strategy import KalshiLiveMarketStrategy
-
-        strategy = KalshiLiveMarketStrategy(min_edge=0.0)
-
-        # No state available, fallback uses sentiment
-        estimate = strategy._fallback_estimate(
-            agent_id="test",
-            ticker="KXBTC-TEST",
-            market_prob=0.5,
-            ctx={"sentiment_score": 1.0},  # Extreme bullish
-        )
-
-        if estimate:
-            # With max positive sentiment, prob should be 0.5 + 0.03 = 0.53 (capped)
-            expected_max = 0.5 + strategy.SENTIMENT_WEIGHT
-            assert estimate.agent_prob <= expected_max + 0.001
-            assert estimate.agent_prob >= 0.5  # Should be biased up
 
 
-class TestIntelFeedConsistency:
-    """GAP-UPSTREAM-3: Intel/news feed consistency with market data client."""
-
-    def test_market_data_client_has_base_url(self):
-        """Verify KalshiMarketDataClient exposes BASE_URL."""
-        from merid.sentiment.kalshi_market_data import BASE_URL
-
-        assert BASE_URL is not None
-        assert isinstance(BASE_URL, str)
-        assert BASE_URL.startswith("http")
-
-    def test_invariants_check_intel_consistency(self):
-        """Verify invariants module can check intel feed consistency."""
-        from merid.event_venues.kalshi import invariants
-        from merid.sentiment import kalshi_market_data
-
-        result = invariants.check_intel_feed_consistency(
-            kalshi_market_data.KalshiMarketDataClient,
-        )
-
-        assert "consistent" in result
-        assert isinstance(result["consistent"], bool)
 
 
-class TestReconRtigates:
-    """GAP-DOWNSTREAM: Recon + RTI gate behavior."""
-
-    def test_require_cfb_for_live_trading_exists(self):
-        """Verify RTI gating function exists."""
-        from merid.signals.cfb_rti_adapter import require_cfb_for_live_trading
-
-        assert callable(require_cfb_for_live_trading)
 
 
-class TestEndToEndPipeline:
-    """End-to-end pipeline tests: DISCOVER → ANALYZE → CONSENSUS → SIZE."""
-
-    def test_opinion_strategy_outputs_structured_estimate(self):
-        """Verify opinion estimate has all required fields for downstream."""
-        from merid.prediction.opinion_strategy import KalshiLiveMarketStrategy
-
-        strategy = KalshiLiveMarketStrategy(min_edge=0.0)
-
-        # Mock market state
-        mock_state = MagicMock()
-        mock_state.book_initialized = True
-        mock_state.mid_cents = 52.0
-        mock_state.spread_cents = 2.0
-        mock_state.yes_bids = [(0.51, 100)]
-        mock_state.no_bids = [(0.53, 80)]
-        mock_state.seconds_to_expiry = 3600
-
-        with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store") as mock_store:
-            mock_store.return_value.get.return_value = mock_state
-
-            estimate = strategy.estimate(
-                agent_id="test_agent",
-                ticker="KXBTC-TEST",
-                market_prob=0.5,
-                category="crypto",
-                context={"sentiment_score": 0.2},
-            )
-
-            if estimate:
-                # Required fields for downstream consensus
-                assert hasattr(estimate, "agent_prob")
-                assert hasattr(estimate, "confidence")
-                assert hasattr(estimate, "edge")
-                assert hasattr(estimate, "signal_sources")
-                assert hasattr(estimate, "explanation")
-
-                # Explanation must have required fields
-                assert hasattr(estimate.explanation, "inputs_used")
-                assert hasattr(estimate.explanation, "contributions")
-                assert hasattr(estimate.explanation, "rationale")
-
-                # Signal sources must be non-empty
-                assert len(estimate.signal_sources) > 0
-
-    def test_mid_cents_used_as_base_probability(self):
-        """Verify mid_cents/100 is used as base probability, not market_prob."""
-        from merid.prediction.opinion_strategy import KalshiLiveMarketStrategy
-
-        strategy = KalshiLiveMarketStrategy(min_edge=0.0)
-
-        mock_state = MagicMock()
-        mock_state.book_initialized = True
-        mock_state.mid_cents = 60.0  # 60% implied (different from market_prob)
-        mock_state.spread_cents = 2.0
-        mock_state.yes_bids = []
-        mock_state.no_bids = []
-        mock_state.seconds_to_expiry = 3600
-
-        with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store") as mock_store:
-            mock_store.return_value.get.return_value = mock_state
-
-            # market_prob is different from mid_cents
-            estimate = strategy.estimate(
-                agent_id="test",
-                ticker="KXBTC-TEST",
-                market_prob=0.5,  # Different from mid_cents!
-                context={},
-            )
-
-            if estimate:
-                # Agent prob should be closer to mid_cents (0.60) than market_prob (0.50)
-                assert estimate.agent_prob > 0.55  # Should be closer to 0.60
-                # Explanation should show mid_cents was used
-                assert "mid_cents" in estimate.explanation.inputs_used
-                assert estimate.explanation.inputs_used["mid_cents"] == 60.0
 
 
 class TestHardcodedUrlScan:

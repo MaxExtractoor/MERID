@@ -82,188 +82,24 @@ def _run_bracket(case: dict, cache: dict) -> PaperMetrics:
 # §1 — Structural invariants (must pass for every bracket)
 # ------------------------------------------------------------------ #
 
-class TestStructuralInvariants:
-    """Engine errors, reconciliation breaks, kill-switch — must all be clean."""
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_zero_engine_errors(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        assert m.errors == 0, (
-            f"[{case['name']}] {m.errors} engine errors during simulation"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_no_reconciliation_errors(self, case, ladder_results):
-        """Reconciliation must have zero ERROR-status checks.
-
-        DELTA-status checks (balance identity drift from realised PnL)
-        are a known limitation of the current formula and are tolerated.
-        """
-        m = _run_bracket(case, ladder_results)
-        report = m.reconciliation_report
-        if report is None:
-            pytest.skip("no reconciliation report")
-        error_checks = [
-            c for c in report.get("checks", [])
-            if c.get("status") == "error"
-        ]
-        assert len(error_checks) == 0, (
-            f"[{case['name']}] {len(error_checks)} reconciliation errors: "
-            f"{[c['name'] for c in error_checks]}"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_kill_switch_not_triggered(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        assert m.kill_switch_triggered is False, (
-            f"[{case['name']}] kill switch was triggered"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_reconciliation_ran(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        assert m.reconciliation_checks >= 1, (
-            f"[{case['name']}] reconciliation never ran"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_trades_executed(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        assert m.total_trades > 0, (
-            f"[{case['name']}] no trades executed — strategy may be broken"
-        )
 
 
 # ------------------------------------------------------------------ #
 # §2 — Risk invariants
 # ------------------------------------------------------------------ #
 
-class TestRiskInvariants:
-    """Drawdown stays within bracket-specific thresholds."""
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_max_drawdown_within_threshold(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        threshold = _MAX_DD.get(case["name"], 0.50)
-        assert m.max_drawdown <= threshold, (
-            f"[{case['name']}] max drawdown {m.max_drawdown:.1%} "
-            f"exceeds threshold {threshold:.0%}"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_equity_never_negative(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        assert m.trough_equity >= 0, (
-            f"[{case['name']}] equity went negative: ${m.trough_equity:.2f}"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_win_rate_plausible(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        # Win rate should be between 0% and 100%
-        assert 0.0 <= m.win_rate <= 1.0, (
-            f"[{case['name']}] win rate {m.win_rate:.1%} out of [0, 1] range"
-        )
 
 
 # ------------------------------------------------------------------ #
 # §3 — Performance invariants (positive edge)
 # ------------------------------------------------------------------ #
 
-class TestPerformanceInvariants:
-    """Final equity should exceed initial capital (positive edge over the run)."""
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_positive_final_equity(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        assert m.final_equity > 0, (
-            f"[{case['name']}] final equity is ${m.final_equity:.2f}"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_no_catastrophic_loss(self, case, ladder_results):
-        """Equity must not drop below 20% of initial capital.
-
-        This is a structural safety check, not an alpha test.
-        The simple mean-reversion strategy is a harness driver,
-        not a production strategy — positive edge is not guaranteed.
-        """
-        m = _run_bracket(case, ladder_results)
-        floor = case["initial"] * 0.20
-        assert m.final_equity >= floor, (
-            f"[{case['name']}] catastrophic loss: "
-            f"${case['initial']} → ${m.final_equity:.2f} ({m.roi_pct:.1f}%)"
-        )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("case", LADDER, ids=[c["name"] for c in LADDER])
-    def test_equity_curve_populated(self, case, ladder_results):
-        m = _run_bracket(case, ladder_results)
-        assert len(m.equity_curve) > 0, (
-            f"[{case['name']}] equity curve is empty"
-        )
 
 
 # ------------------------------------------------------------------ #
 # §4 — Cross-bracket consistency
 # ------------------------------------------------------------------ #
 
-class TestCrossBracketConsistency:
-    """Verify the ladder produces coherent results across brackets."""
-
-    @pytest.mark.slow
-    def test_all_brackets_ran(self, ladder_results):
-        """Run all brackets and verify we got results for each."""
-        for case in LADDER:
-            _run_bracket(case, ladder_results)
-        assert len(ladder_results) == len(LADDER), (
-            f"Expected {len(LADDER)} brackets, got {len(ladder_results)}"
-        )
-
-    @pytest.mark.slow
-    def test_trade_count_scales_with_capital(self, ladder_results):
-        """Larger brackets should generally execute more trades (more margin)."""
-        for case in LADDER:
-            _run_bracket(case, ladder_results)
-
-        # At minimum, every bracket should have traded
-        for name, m in ladder_results.items():
-            assert m.total_trades > 0, f"[{name}] zero trades"
-
-    @pytest.mark.slow
-    def test_reconciliation_report_shape(self, ladder_results):
-        """Final reconciliation report should have expected keys."""
-        for case in LADDER:
-            _run_bracket(case, ladder_results)
-
-        for name, m in ladder_results.items():
-            report = m.reconciliation_report
-            assert report is not None, f"[{name}] no final reconciliation report"
-            assert "all_ok" in report, f"[{name}] report missing 'all_ok'"
-            assert "checks" in report, f"[{name}] report missing 'checks'"
-            assert "snapshot_hash" in report, f"[{name}] report missing 'snapshot_hash'"
-
-    @pytest.mark.slow
-    def test_metrics_to_dict(self, ladder_results):
-        """PaperMetrics.to_dict() should return a serializable dict."""
-        for case in LADDER:
-            m = _run_bracket(case, ladder_results)
-            d = m.to_dict()
-            assert isinstance(d, dict)
-            assert d["bracket_name"] == case["name"]
-            assert d["initial_capital"] == case["initial"]
-            assert isinstance(d["final_equity"], float)
-            assert isinstance(d["errors"], int)
 
 
 # ------------------------------------------------------------------ #

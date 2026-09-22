@@ -305,3 +305,65 @@ the real `utils/logger.py` loaded under a private module name. Fixes
 `test_telemetry.py::TestJsonFormatter::*` import failures without
 restoring production log paths (the stub's temp-dir get_logger still
 wins).
+
+## Disposition pass 2 — UI source-grep + obsolete-module sweep (2026-09-22)
+
+Applied via audit/apply_dispositions.py + audit/apply_ui_marks.py +
+audit/fix_parametrize_positions.py (all three committed under audit/).
+
+- 234 obsolete tests + 18 now-empty classes deleted across 57 files: they
+  imported or source-grepped modules deleted in the Phase-1 legacy sweep
+  (e.g. merid.swarm.consensus_aggregator, merid.trading.paper_trading,
+  merid.prediction.trading_agent, web.api.rewards/betting/quadratic_funding,
+  merid.signals.* helpers, merid.flow.risk) or deleted design docs.
+  Verified against git history: deletions were deliberate
+  ("Phase 1: Safe Module Deletion").
+- merid/flow/__init__.py + web/api/flow_api.py: real bug fixed — imported
+  `merid.flow.risk` but the module was renamed `flow_risk`; the whole
+  merid.flow package was unimportable. Restored tests/test_flow.py (83 pass).
+- Missing-file UI tests (fnf on never-committed React targets):
+  conditional strict xfail per param via `_ui_params()` /
+  `_ui_pair_params()` — `xfail(not target.exists(), strict=True)`, so the
+  mark drops off per-param once a file lands.
+- Existing-file content violations: per-param or per-test strict xfail.
+
+New tracked defects (all strict xfail, expiry 2026-10-15):
+
+| ID | Defect |
+|----|--------|
+| AUDIT-2026-09-22-04 | frontend file/feature absent from this tree (never committed) |
+| AUDIT-2026-09-22-05 | existing stateless React components not wrapped in React.memo |
+| AUDIT-2026-09-22-06 | existing React.memo components missing displayName |
+| AUDIT-2026-09-22-07 | hardcoded setTimeout in views instead of DEFAULTS.TIMEOUTS |
+| AUDIT-2026-09-22-08 | new view components built but not wired into App/Sidebar/views.ts |
+| AUDIT-2026-09-22-11 | existing implementation violates asserted contract (UI + backend) |
+
+Focused UI verification: 24 files -> 357 passed / 461 xfailed /
+0 failed / 0 XPASS (was 115 XPASS(strict) from file-level marks).
+
+Remaining unclassified (still failing — not hidden):
+- ~200 ImportError "cannot import name" / AttributeError on deleted or
+  renamed attrs (merid.prediction.*, web.api.*, merid.reconciliation,
+  webhook_client, kalshi_continuous_trader, liquidity_monitor, ...)
+  -> same deleted-module sweep, second order.
+- test_kalshi_pipeline_invariants env-URL cluster (22): URL derivation
+  treats unknown/missing env as live via deprecated KALSHI_USE_DEMO shim —
+  fail-open default under review.
+- test_prediction_audit_regressions (6): `merid.prediction.risk` attr
+  drift — triage pending.
+
+## Durable-state isolation — additional writers redirected
+
+- trading/paper_trading.py: `_PERSIST_FILE` now honors
+  MERID_PAPER_POSITIONS_PATH; startup cleanup honors
+  MERID_PAPER_LADDER_STATE_PATH. (Was: hardcoded repo data/, deleted
+  files at startup — the source of the paper_positions.json pollution.)
+- merid/monitoring/rejection_monitor.py: output_dir default now honors
+  MERID_REJECTIONS_DIR.
+- backup/backup_manager.py: backup_dir default now honors
+  MERID_BACKUP_DIR (core/database_backup_manager.py already did).
+- tests/conftest.py: added MERID_PAPER_POSITIONS_PATH,
+  MERID_REJECTIONS_DIR, MERID_BACKUP_DIR to the redirect map.
+- Residual: tests that `patch.dict(os.environ, clear=True)` wipe the
+  redirects and can still write repo data/ paths during the cleared
+  window — flagged; per-test fix pending identification of writers.

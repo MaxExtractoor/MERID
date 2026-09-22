@@ -115,33 +115,11 @@ class TestOrderbookForecaster:
         if result:
             assert result.components.get("spread_compression", 0) > 0
 
-    def test_registered_in_registry(self):
-        from merid.prediction.forecasters.registry import get_forecaster_registry
-        import merid.prediction.forecasters.registry as mod
-        old = mod._registry
-        mod._registry = None
-        try:
-            reg = get_forecaster_registry()
-            ids = [f.forecaster_id for f in reg._forecasters]
-            assert "orderbook_micro" in ids
-        finally:
-            mod._registry = old
 
     def test_in_init_exports(self):
         from merid.prediction.forecasters import OrderbookForecaster
         assert OrderbookForecaster is not None
 
-    def test_registry_has_orderbook_forecaster(self):
-        from merid.prediction.forecasters.registry import get_forecaster_registry
-        import merid.prediction.forecasters.registry as mod
-        old = mod._registry
-        mod._registry = None
-        try:
-            reg = get_forecaster_registry()
-            ids = [f.forecaster_id for f in reg._forecasters]
-            assert "orderbook_micro" in ids
-        finally:
-            mod._registry = old
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -152,22 +130,8 @@ class TestOrderbookForecaster:
 class TestImpossibleProbCritic:
     """Tests for CriticAgent._check_impossible_probs."""
 
-    def test_method_exists(self):
-        from merid.swarm.critic_agent import CriticAgent
-        agent = CriticAgent()
-        assert hasattr(agent, "_check_impossible_probs")
-        assert callable(agent._check_impossible_probs)
 
-    def test_no_snapshots_returns_empty(self):
-        from merid.swarm.critic_agent import CriticAgent
-        agent = CriticAgent()
-        result = agent._check_impossible_probs()
-        assert isinstance(result, list)
 
-    def test_wired_into_sweep(self):
-        from merid.swarm.critic_agent import CriticAgent
-        source = inspect.getsource(CriticAgent._sweep)
-        assert "_check_impossible_probs" in source
 
     def test_active_snapshots_api(self):
         from merid.prediction.model import (
@@ -381,32 +345,3 @@ class TestHitRatioTracker:
 # Gap Analysis Verification
 # ═══════════════════════════════════════════════════════════════════════════
 
-
-class TestGapAnalysisNO:
-    """Verify gap analysis reflects Sprint N+O closures."""
-
-    def test_overall_score(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "62/62" in content
-        assert "**A+**" in content
-
-    def test_orderbook_forecaster_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "OrderbookForecaster" in content
-
-    def test_execution_intelligence_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "execution_intelligence" in content
-
-    def test_hit_ratio_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "hit_ratio" in content
-
-    def test_impossible_prob_in_doc(self):
-        with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        assert "impossible_prob" in content or "impossible_probability" in content

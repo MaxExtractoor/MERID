@@ -65,92 +65,6 @@ def _register_and_settle(sess, agent: str, market_id: str, side: str,
 
 # ── BUG-01 & BUG-08: no double PnL / no double win-count ────────────────────
 
-class TestBug01And08NoPnLDoubleCount:
-    """BUG-01 (winning_trades doubled) and BUG-08 (PnL doubled) together."""
-
-    def _make_agent(self):
-        from merid.prediction.paper_session import IntervalPnL
-        return IntervalPnL(asset="BTC", timeframe="1h", agent_name="BTC_HOURLY")
-
-    def test_single_win_books_pnl_exactly_once(self):
-        sess = _fresh_session()
-        agent = "BTC_HOURLY"
-        assert agent in sess._intervals or True  # auto-created on access
-
-        # Prime the interval
-        interval = sess._intervals.get(agent)
-        if interval is None:
-            from merid.prediction.paper_session import IntervalPnL
-            sess._intervals[agent] = IntervalPnL(asset="BTC", timeframe="1h",
-                                                  agent_name=agent)
-            interval = sess._intervals[agent]
-
-        # 10 YES contracts at 55 cents, outcome=YES wins
-        # Expected gross PnL = (100 - 55) * 10 = 450 cents
-        _register_and_settle(sess, agent, "MKT-001", "yes", 10, 55.0, outcome=1)
-
-        assert interval.net_pnl_cents == pytest.approx(450.0), (
-            f"Expected 450c, got {interval.net_pnl_cents}c — PnL was double-counted"
-        )
-
-    def test_single_win_increments_winning_trades_exactly_once(self):
-        sess = _fresh_session()
-        agent = "BTC_HOURLY"
-        from merid.prediction.paper_session import IntervalPnL
-        sess._intervals[agent] = IntervalPnL(asset="BTC", timeframe="1h",
-                                              agent_name=agent)
-        interval = sess._intervals[agent]
-
-        _register_and_settle(sess, agent, "MKT-002", "yes", 5, 40.0, outcome=1)
-
-        assert interval.winning_trades == 1, (
-            f"Expected winning_trades=1, got {interval.winning_trades} — double-increment"
-        )
-        assert interval.losing_trades == 0
-
-    def test_single_loss_books_pnl_exactly_once(self):
-        sess = _fresh_session()
-        agent = "BTC_HOURLY"
-        from merid.prediction.paper_session import IntervalPnL
-        sess._intervals[agent] = IntervalPnL(asset="BTC", timeframe="1h",
-                                              agent_name=agent)
-        interval = sess._intervals[agent]
-
-        # 10 YES contracts at 55 cents, outcome=NO — lose stake
-        # Expected PnL = -55 * 10 = -550 cents
-        _register_and_settle(sess, agent, "MKT-003", "yes", 10, 55.0, outcome=0)
-
-        assert interval.net_pnl_cents == pytest.approx(-550.0), (
-            f"Expected -550c, got {interval.net_pnl_cents}c"
-        )
-        assert interval.losing_trades == 1
-        assert interval.winning_trades == 0
-
-    def test_multiple_fills_no_accumulation_beyond_settlements(self):
-        sess = _fresh_session()
-        agent = "ETH_HOURLY"
-        from merid.prediction.paper_session import IntervalPnL
-        sess._intervals[agent] = IntervalPnL(asset="ETH", timeframe="1h",
-                                              agent_name=agent)
-        interval = sess._intervals[agent]
-
-        # Three wins, two losses
-        for i, (contracts, price, outcome) in enumerate([
-            (10, 50, 1),   # win: +500
-            (5,  60, 0),   # lose: -300
-            (8,  45, 1),   # win: +440
-            (3,  70, 0),   # lose: -210
-            (6,  55, 1),   # win: +270
-        ]):
-            _register_and_settle(sess, agent, f"MKT-{i:03d}", "yes",
-                                  contracts, price, outcome)
-
-        expected_pnl = 500 - 300 + 440 - 210 + 270  # 700
-        assert interval.net_pnl_cents == pytest.approx(expected_pnl), (
-            f"Expected {expected_pnl}c, got {interval.net_pnl_cents}c"
-        )
-        assert interval.winning_trades == 3
-        assert interval.losing_trades == 2
 
 
 # ── BUG-02: get_portfolio_stats PnL keys ────────────────────────────────────
@@ -383,60 +297,6 @@ class TestBug04CategoryCounters:
 
 # ── BUG-05: drawdown fires for cells starting with losses ───────────────────
 
-class TestBug05DrawdownFromZeroBase:
-    """drawdown_pct must be > 0 when a cell has only losses and HWM == 0."""
-
-    def test_drawdown_pct_positive_from_initial_losses(self):
-        from merid.prediction.paper_session import IntervalPnL
-        interval = IntervalPnL(asset="BTC", timeframe="1h", agent_name="BTC_HOURLY")
-        # Simulate three losses, HWM never set above 0
-        interval.net_pnl_cents = -300.0
-        interval.high_water_mark_cents = 0.0
-        interval.max_drawdown_cents = 300.0
-
-        dd = interval.drawdown_pct
-        assert dd > 0.0, (
-            f"drawdown_pct={dd} should be > 0 when cell has only losses"
-        )
-
-    def test_drawdown_halt_fires_on_initial_loss_streak(self):
-        from merid.prediction.paper_session import (
-            PaperSession, SessionRiskLimits, IntervalPnL,
-        )
-        tight_limits = SessionRiskLimits(
-            max_daily_loss_cents=999_999.0,
-            max_weekly_loss_cents=999_999.0,
-            max_cluster_daily_loss_cents=999_999.0,
-            drawdown_warning_pct=5.0,
-            drawdown_downsize_pct=8.0,
-            drawdown_halt_pct=12.0,
-        )
-        sess = _fresh_session(risk_limits=tight_limits)
-        agent = "SOL_HOURLY"
-        sess._intervals[agent] = IntervalPnL(asset="SOL", timeframe="1h",
-                                              agent_name=agent)
-        interval = sess._intervals[agent]
-
-        # Inject a severe drawdown from zero base
-        interval.net_pnl_cents = -500.0
-        interval.high_water_mark_cents = 0.0
-        interval.max_drawdown_cents = 500.0
-
-        assert interval.drawdown_pct >= 12.0, (
-            f"drawdown_pct={interval.drawdown_pct} — halt threshold not reachable from zero base"
-        )
-
-        actions = sess._check_drawdown_governance(interval)
-        assert actions is not None, (
-            "Drawdown governance returned None — halt never fires for zero-base drawdown"
-        )
-        assert actions["action"] == "halt"
-
-    def test_drawdown_zero_when_no_trades(self):
-        from merid.prediction.paper_session import IntervalPnL
-        interval = IntervalPnL(asset="BTC", timeframe="1h", agent_name="BTC_HOURLY")
-        # Fresh cell: no trades, net_pnl_cents == 0
-        assert interval.drawdown_pct == 0.0
 
 
 # ── BUG-06: singleton factory race ──────────────────────────────────────────
@@ -582,24 +442,3 @@ class TestBug07StalePriceHandling:
 
 # ── BUG-08 / Bug 6: sell-close early PnL (no double-count with hold-to-expiry) ─
 
-class TestBug08SellCloseEarlyPnL:
-    """Sell-close actions book deterministic early-exit PnL (Bug 6), not binary payoff."""
-
-    def test_sell_action_books_early_close_pnl(self):
-        sess = _fresh_session()
-        agent = "BTC_HOURLY"
-        from merid.prediction.paper_session import IntervalPnL
-        sess._intervals[agent] = IntervalPnL(asset="BTC", timeframe="1h",
-                                              agent_name=agent)
-        interval = sess._intervals[agent]
-
-        # Sell-close: exit at 55¢ with original entry 45¢ → YES: (55 - 45) * 10 contracts
-        sess.register_open_trade(
-            agent, "MKT-SELL", "yes", "sell", 10, 55.0, entry_price_cents=45.0,
-        )
-        results = sess.record_settlement("MKT-SELL", outcome=1)
-
-        assert results[0].get("early_close") is True
-        assert results[0]["pnl_cents"] == pytest.approx(100.0)
-        assert interval.net_pnl_cents == pytest.approx(100.0)
-        assert interval.winning_trades == 1

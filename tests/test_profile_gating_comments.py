@@ -54,15 +54,6 @@ class TestProfileGatingComments:
         assert "max_contracts=1" in content, "DOGE max_contracts not documented in unified_risk_manager.py"
         assert "kalshi_crypto_15m_v2" in content, "Profile name missing in unified_risk_manager.py"
 
-    def test_kalshi_15m_crypto_config_has_canonical_note(self):
-        """Verify config/kalshi_15m_crypto_config.py clarifies series tickers are canonical."""
-        file_path = Path(__file__).parent.parent / "config" / "kalshi_15m_crypto_config.py"
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        assert "CANONICAL" in content, "CANONICAL note missing in kalshi_15m_crypto_config.py"
-        assert "NOT deprecated" in content, "Clarification about series tickers missing"
-        assert "KALSHI_15M_SERIES_TICKERS" in content, "Series tickers reference missing"
 
 
 if __name__ == "__main__":

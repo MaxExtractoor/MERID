@@ -156,18 +156,6 @@ class TestKalshiClientWindowsErrorRecovery(unittest.TestCase):
         self.assertFalse(client._is_recoverable_windows_error(exc))
 
 
-class TestAgentExecutionErrorLogging(unittest.TestCase):
-    """Test agent execution error handling improvements."""
-
-    def test_pm_execution_error_structure(self):
-        """PM_EXECUTION_ERROR should include agent, market, asset, action."""
-        # This is a structural test - the actual logging happens in trading_agent.py
-        # We verify the error handler structure is correct
-
-        from merid.prediction.trading_agent import KalshiTradingAgent
-
-        # Verify the method exists and has proper signature
-        self.assertTrue(hasattr(KalshiTradingAgent, '_execute_signal'))
 
 
 class TestMetricsIntegration(unittest.TestCase):

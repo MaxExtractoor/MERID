@@ -174,29 +174,6 @@ class TestSystemEndpointsRBAC:
 # 5. Previously-unprotected routers now have auth
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestRouterAuthCoverage:
-    ROUTERS = [
-        ("web/api/swarm_routes.py", "router"),
-        ("web/api/signal_layer_api.py", "signal_layer_router"),
-        ("web/api/signals_api.py", "router"),
-        ("web/api/us_compliant_markets.py", "router"),
-        ("web/api/slo_api.py", "router"),
-    ]
-
-    @pytest.mark.parametrize("filepath,router_var", ROUTERS)
-    def test_router_has_session_dependency(self, filepath, router_var):
-        src = _src(filepath)
-        assert "get_current_session" in src, f"{filepath} missing get_current_session import"
-        assert "Depends(get_current_session)" in src, (
-            f"{filepath} router '{router_var}' missing session dependency"
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 6. auth.py — dev-bypass fail-closed
-# ══════════════════════════════════════════════════════════════════════════════
-
-class TestDevBypassFailClosed:
     FILE = "web/api/auth.py"
 
     def test_live_trading_check_present(self):
@@ -315,22 +292,3 @@ class TestBacktestingFixes:
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. AgentGrid — FeedStalenessMonitor wiring
 # ══════════════════════════════════════════════════════════════════════════════
-
-class TestAgentGridFeedStalenessWiring:
-    FILE = "merid/prediction/agent_grid.py"
-
-    def test_feed_staleness_monitor_imported(self):
-        src = _src(self.FILE)
-        assert "get_feed_staleness_monitor" in src
-
-    def test_on_stale_callback_registered(self):
-        src = _src(self.FILE)
-        assert "_fsm.on_stale(" in src
-
-    def test_stale_callback_pauses_agent(self):
-        src = _src(self.FILE)
-        assert "_agent.pause()" in src
-
-    def test_stale_callback_logs_warning(self):
-        src = _src(self.FILE)
-        assert "FeedStalenessMonitor:" in src

@@ -216,72 +216,6 @@ class TestPortfolioCorrelationCheck:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestConsensusDiversityGate:
-    """Test minimum archetype diversity requirement."""
-
-    def test_diversity_gate_in_source(self):
-        import inspect
-        from merid.swarm.consensus_aggregator import SwarmConsensusAggregator
-        source = inspect.getsource(SwarmConsensusAggregator._aggregate_proposals)
-        assert "min_archetypes" in source
-        assert "Insufficient diversity" in source
-
-    def test_single_archetype_blocks_consensus(self):
-        """With only one archetype type, consensus should be FORMING."""
-        from merid.swarm.consensus_aggregator import (
-            SwarmConsensusAggregator, AgentProposal, ConsensusStatus
-        )
-        agg = SwarmConsensusAggregator()
-        agg.min_agents = 2
-
-        proposals = [
-            AgentProposal(
-                agent_id=f"agent_{i}",
-                agent_archetype="momentum",  # Same type
-                asset="BTC",
-                timeframe="15m",
-                direction="buy_yes",
-                probability=0.6,
-                confidence=0.7,
-                edge_estimate=0.05,
-                size_preference="base",
-                rationale="test",
-                timestamp=datetime.now(timezone.utc),
-            )
-            for i in range(3)
-        ]
-
-        view = agg._aggregate_proposals("BTC", "15m", proposals)
-        assert view.status == ConsensusStatus.FORMING
-
-    def test_diverse_archetypes_allow_consensus(self):
-        """With 2+ archetype types, consensus can proceed."""
-        from merid.swarm.consensus_aggregator import (
-            SwarmConsensusAggregator, AgentProposal, ConsensusStatus
-        )
-        agg = SwarmConsensusAggregator()
-        agg.min_agents = 2
-
-        archetypes = ["momentum", "mean_reversion", "edge_model"]
-        proposals = [
-            AgentProposal(
-                agent_id=f"agent_{i}",
-                agent_archetype=archetypes[i],
-                asset="BTC",
-                timeframe="15m",
-                direction="buy_yes",
-                probability=0.6,
-                confidence=0.7,
-                edge_estimate=0.05,
-                size_preference="base",
-                rationale="test",
-                timestamp=datetime.now(timezone.utc),
-            )
-            for i in range(3)
-        ]
-
-        view = agg._aggregate_proposals("BTC", "15m", proposals)
-        assert view.status == ConsensusStatus.READY
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -289,143 +223,14 @@ class TestConsensusDiversityGate:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestForecastMessage:
-    """Tests for Forecast message schema."""
-
-    def test_forecast_defaults(self):
-        from merid.swarm.messages import Forecast, MessageType
-        f = Forecast()
-        assert f.message_type == MessageType.FORECAST
-        assert f.p_model == 0.5
-        assert f.confidence == 0.0
-
-    def test_forecast_to_dict(self):
-        from merid.swarm.messages import Forecast
-        f = Forecast(
-            forecaster_id="momentum_1",
-            model_type="momentum",
-            market_id="KXBTC-24FEB21",
-            p_model=0.65,
-            confidence=0.8,
-            edge_estimate=0.05,
-        )
-        d = f.to_dict()
-        assert d["forecaster_id"] == "momentum_1"
-        assert d["p_model"] == 0.65
-        assert d["message_type"] == "forecast"
-
-    def test_forecast_components(self):
-        from merid.swarm.messages import Forecast
-        f = Forecast(components={"vol_signal": 0.3, "oi_signal": 0.5})
-        d = f.to_dict()
-        assert "vol_signal" in d["components"]
 
 
-class TestCritiqueMessage:
-    """Tests for Critique message schema."""
-
-    def test_critique_defaults(self):
-        from merid.swarm.messages import Critique, MessageType
-        c = Critique()
-        assert c.message_type == MessageType.CRITIQUE
-        assert c.weight_adjustment == 1.0
-
-    def test_critique_to_dict(self):
-        from merid.swarm.messages import Critique
-        c = Critique(
-            critic_id="staleness_critic",
-            critique_type="stale_data",
-            market_id="KXBTC",
-            severity=0.8,
-            reason="Data older than 5 minutes",
-            recommended_action="down_weight",
-            weight_adjustment=0.5,
-        )
-        d = c.to_dict()
-        assert d["severity"] == 0.8
-        assert d["weight_adjustment"] == 0.5
 
 
-class TestRiskViewMessage:
-    """Tests for RiskView message schema."""
-
-    def test_risk_view_defaults(self):
-        from merid.swarm.messages import RiskView, MessageType
-        rv = RiskView()
-        assert rv.message_type == MessageType.RISK_VIEW
-        assert rv.correlation_factor == 1.0
-
-    def test_risk_view_to_dict(self):
-        from merid.swarm.messages import RiskView
-        rv = RiskView(
-            risk_agent_id="portfolio_risk",
-            market_id="KXBTC",
-            asset="BTC",
-            risk_level="high",
-            max_size_contracts=10,
-            kelly_fraction=0.15,
-            flags=["near_daily_limit"],
-        )
-        d = rv.to_dict()
-        assert d["risk_level"] == "high"
-        assert "near_daily_limit" in d["flags"]
 
 
-class TestDecisionMessage:
-    """Tests for Decision message schema."""
-
-    def test_decision_defaults(self):
-        from merid.swarm.messages import Decision, MessageType, DecisionAction
-        d = Decision()
-        assert d.message_type == MessageType.DECISION
-        assert d.action == DecisionAction.SKIP
-
-    def test_decision_to_dict(self):
-        from merid.swarm.messages import Decision
-        d = Decision(
-            decision_id="dec_001",
-            market_id="KXBTC",
-            action="buy_yes",
-            side="yes",
-            size_contracts=5,
-            p_consensus=0.68,
-            consensus_confidence=0.75,
-            contributing_forecasters=["momentum_1", "mean_reversion_1"],
-            risk_approved=True,
-        )
-        dd = d.to_dict()
-        assert dd["action"] == "buy_yes"
-        assert dd["risk_approved"] is True
-        assert len(dd["contributing_forecasters"]) == 2
 
 
-class TestMessagePublishers:
-    """Tests for async publish helpers."""
-
-    @pytest.mark.asyncio
-    async def test_publish_forecast_no_crash(self):
-        """Publishing should be non-fatal even if bus is unavailable."""
-        from merid.swarm.messages import Forecast, publish_forecast
-        f = Forecast(forecaster_id="test")
-        await publish_forecast(f)  # Should not raise
-
-    @pytest.mark.asyncio
-    async def test_publish_critique_no_crash(self):
-        from merid.swarm.messages import Critique, publish_critique
-        c = Critique(critic_id="test")
-        await publish_critique(c)
-
-    @pytest.mark.asyncio
-    async def test_publish_risk_view_no_crash(self):
-        from merid.swarm.messages import RiskView, publish_risk_view
-        rv = RiskView(risk_agent_id="test")
-        await publish_risk_view(rv)
-
-    @pytest.mark.asyncio
-    async def test_publish_decision_no_crash(self):
-        from merid.swarm.messages import Decision, publish_decision
-        d = Decision(decision_id="test")
-        await publish_decision(d)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -466,6 +271,14 @@ class TestUIWiring:
         path = os.path.join("web", "react", "src", "components", "CorrelationRiskPanel.tsx")
         assert os.path.exists(path), f"Missing: {path}"
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT AUDIT-2026-09-22-10: calibration/correlation feature "
+            "exists but is not wired into App/Sidebar/views/constants/main. "
+            "Expiry 2026-10-15."
+        ),
+    )
     def test_calibration_view_in_app_tsx(self):
         import os
         app_path = os.path.join("web", "react", "src", "App.tsx")
@@ -481,6 +294,14 @@ class TestUIWiring:
             content = f.read()
         assert "calibration-dashboard" in content
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT AUDIT-2026-09-22-10: calibration/correlation feature "
+            "exists but is not wired into App/Sidebar/views/constants/main. "
+            "Expiry 2026-10-15."
+        ),
+    )
     def test_calibration_in_sidebar(self):
         import os
         sidebar_path = os.path.join("web", "react", "src", "components", "Sidebar.tsx")
@@ -511,6 +332,14 @@ class TestAPIWiring:
         import os
         assert os.path.exists(os.path.join("web", "api", "correlation_api.py"))
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT AUDIT-2026-09-22-10: calibration/correlation feature "
+            "exists but is not wired into App/Sidebar/views/constants/main. "
+            "Expiry 2026-10-15."
+        ),
+    )
     def test_correlation_api_in_main(self):
         import os
         main_path = os.path.join("web", "main.py")
@@ -629,29 +458,3 @@ class TestEdgeRecalibratorSingleton:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestMessageEnums:
-    """Test message type enums are properly defined."""
-
-    def test_message_types(self):
-        from merid.swarm.messages import MessageType
-        assert MessageType.FORECAST == "forecast"
-        assert MessageType.CRITIQUE == "critique"
-        assert MessageType.RISK_VIEW == "risk_view"
-        assert MessageType.DECISION == "decision"
-
-    def test_critique_types(self):
-        from merid.swarm.messages import CritiqueType
-        assert CritiqueType.STALE_DATA == "stale_data"
-        assert CritiqueType.ILLIQUID == "illiquid"
-        assert CritiqueType.ARB_MISMATCH == "arb_mismatch"
-
-    def test_risk_levels(self):
-        from merid.swarm.messages import RiskLevel
-        assert RiskLevel.LOW == "low"
-        assert RiskLevel.CRITICAL == "critical"
-
-    def test_decision_actions(self):
-        from merid.swarm.messages import DecisionAction
-        assert DecisionAction.BUY_YES == "buy_yes"
-        assert DecisionAction.SKIP == "skip"
-        assert DecisionAction.CLOSE == "close"

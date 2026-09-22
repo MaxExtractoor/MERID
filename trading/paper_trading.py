@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import threading
 import uuid
 import time
@@ -1048,7 +1049,9 @@ def _close_enough(a: float, b: float, tol: float = 0.01) -> bool:
 
 # Default persistence path
 _PERSIST_DIR = Path(__file__).resolve().parent.parent / "data"
-_PERSIST_FILE = _PERSIST_DIR / "paper_positions.json"
+_PERSIST_FILE = Path(
+    os.environ.get("MERID_PAPER_POSITIONS_PATH", str(_PERSIST_DIR / "paper_positions.json"))
+)
 
 
 def _save_paper_state(engine: PaperTradingEngine) -> None:
@@ -1309,7 +1312,9 @@ def get_paper_engine() -> PaperTradingEngine:
                 #     kill switch → real Kalshi trading blocked
                 # A clean baseline every boot prevents all of these.
                 _paper_engine.reset_state()
-                for f in (_PERSIST_FILE, _PERSIST_DIR / "paper_ladder_state.json"):
+                for f in (_PERSIST_FILE, Path(os.environ.get(
+                        "MERID_PAPER_LADDER_STATE_PATH",
+                        str(_PERSIST_DIR / "paper_ladder_state.json")))):
                     if f.exists():
                         try:
                             f.unlink()
