@@ -1059,6 +1059,11 @@ async def maybe_submit_stop_candidate(
         time_in_force="ioc",
         source="stop_candidate",
         agent_id="stop_candidate",
+        # Stable identity per candidate: retries of the same stop candidate reuse
+        # the same intent/client_order_id so router + venue dedup prevents a
+        # second live order after an ambiguous submission outcome.
+        intent_id=f"stop_candidate:{candidate.candidate_id}",
+        client_order_id=f"stopcand_{candidate.candidate_id}"[:64],
         kalshi_side=kalshi_side,
         reduce_only=True,
         entry_or_exit="exit",

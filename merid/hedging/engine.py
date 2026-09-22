@@ -599,6 +599,11 @@ class CryptoHedgeEngine:
 
         intents: list = []
         for ho in result.orders:
+            # Hedge exits are sells of the held leg (closing a long YES or a
+            # long NO).  Mark them explicitly so the router treats them as
+            # bounded reduce-only closes with a stable retry identity, not as
+            # unmarked sells that could open/flip exposure.
+            _is_exit = (ho.action or "").lower() == "sell"
             intent = OrderIntent(
                 ticker=ho.target_ticker or "",
                 side=ho.side,
@@ -608,8 +613,13 @@ class CryptoHedgeEngine:
                 source=HEDGE_SOURCE,
                 agent_id=HEDGE_AGENT_ID,
                 client_tag=ho.client_tag,
+                client_order_id=(ho.client_tag or None) if _is_exit else None,
                 group_id=HEDGE_STRATEGY_GROUP,
                 rationale=f"hedge:{ho.hedge_reason}:{ho.asset}:{ho.timeframe}",
+                entry_or_exit="exit" if _is_exit else "entry",
+                reduce_only=True if _is_exit else None,
+                exit_reason=ho.hedge_reason if _is_exit else None,
+                exit_policy_id=ho.client_tag if _is_exit else None,
                 # CRITICAL FIX (2026-07-29): Pass alpha-hedge pairing metadata
                 # Store in metadata dict for fill tracking and PnL attribution
                 metadata={

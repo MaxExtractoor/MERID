@@ -3167,6 +3167,8 @@ async def place_order(
     take_profit_r_multiple: Optional[float] = None,  # Optional TP R-multiple
     stop_loss_price_cents: Optional[int] = None,  # Optional SL price in cents
     confidence: Optional[float] = None,  # Optional confidence for default TP computation
+    entry_or_exit: Optional[str] = None,  # Optional explicit "entry"/"exit" marker
+    reduce_only: bool = False,  # Optional venue-side reduce-only flag for exits
 ) -> Dict[str, Any]:
     """Place a Kalshi order through MERID.
 
@@ -3333,6 +3335,13 @@ async def place_order(
                     else:
                         stop_loss_price_cents = min(99, price_cents + sl_offset_cents)  # NO: SL above entry
 
+    # Validate the optional explicit exit markers before routing.  This must
+    # happen outside the router try/except below, whose broad ``except
+    # Exception`` would otherwise rewrite the 400 into a 503.
+    _entry_or_exit = (entry_or_exit or "").lower() or None
+    if _entry_or_exit not in (None, "entry", "exit"):
+        raise HTTPException(400, f"Invalid entry_or_exit: {entry_or_exit!r}, must be 'entry' or 'exit'")
+
     # Try old order router first
     try:
         from merid.prediction.venue_gate import TradingMode
@@ -3349,6 +3358,8 @@ async def place_order(
             take_profit_price_cents=take_profit_price_cents,
             take_profit_r_multiple=take_profit_r_multiple,
             stop_loss_price_cents=stop_loss_price_cents,
+            entry_or_exit=_entry_or_exit,
+            reduce_only=True if (reduce_only or _entry_or_exit == "exit") else None,
         )
         result = await route_order_async(intent)
         if result.status != "rejected" and risk:
@@ -3616,6 +3627,9 @@ async def batch_place_orders(
             if not (1 <= price_cents <= 99):
                 raise ValueError("price_cents must be 1-99")
 
+            _entry_or_exit = (spec.get("entry_or_exit") or "").lower() or None
+            if _entry_or_exit not in (None, "entry", "exit"):
+                raise ValueError(f"invalid entry_or_exit: {_entry_or_exit!r}")
             intent = OrderIntent(
                 ticker=ticker,
                 side=side,
@@ -3627,10 +3641,14 @@ async def batch_place_orders(
                 time_in_force=tif,
                 source="api_batch",
                 client_tag=spec.get("client_order_id"),
+                client_order_id=spec.get("client_order_id"),
                 post_only=bool(spec.get("post_only", False)),
                 self_trade_prevention_type=spec.get("self_trade_prevention_type"),
                 decision_trace_id=new_decision_trace_id("api_batch"),
                 sentiment_driven=False,
+                entry_or_exit=_entry_or_exit,
+                reduce_only=True if (spec.get("reduce_only") or _entry_or_exit == "exit") else None,
+                exit_reason=spec.get("exit_reason"),
             )
             result = await route_order_async(intent)
             entry = {
