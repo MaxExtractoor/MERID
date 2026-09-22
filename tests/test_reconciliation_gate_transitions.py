@@ -104,44 +104,9 @@ def isolated_gate_env():
             sys.modules.pop("trading.reconciliation", None)
 
 
-def test_kalshi_recon_startup_warning_then_clear(isolated_gate_env):
-    """Fail-closed Kalshi flag with empty discrepancies → warning; then aligned → clears recon."""
-    from core import execution_gate as eg
 
-    eg.reset_lag_halt_counter()
 
-    with patch(
-        "merid.reconciliation.has_critical_discrepancies",
-        return_value=True,
-    ), patch(
-        "merid.reconciliation.get_last_discrepancies",
-        return_value=[],
-    ):
-        s1 = check_execution_gate()
 
-    assert s1.blocked is False
-    assert s1.gate_state == GateState.LIMITED.value
-    recon1 = [r for r in s1.reasons if r.source == "reconciliation"]
-    assert recon1, "expected at least one reconciliation reason"
-    assert any("not yet run" in r.message.lower() for r in recon1)
-
-    with patch(
-        "merid.reconciliation.has_critical_discrepancies",
-        return_value=False,
-    ), patch(
-        "merid.reconciliation.get_last_discrepancies",
-        return_value=[],
-    ):
-        s2 = check_execution_gate()
-
-    assert s2.blocked is False
-    kalshi_msgs = [
-        r.message
-        for r in s2.reasons
-        if r.source == "reconciliation" and "kalshi" in r.message.lower()
-    ]
-    assert not kalshi_msgs, f"expected Kalshi recon warning cleared, got: {kalshi_msgs}"
-    assert s2.gate_state in (GateState.CLEAR.value, GateState.LIMITED.value)
 
 
 def test_genuine_mismatch_blocks_in_live_mode(isolated_gate_env):

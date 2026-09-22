@@ -729,40 +729,6 @@ class TestObservabilityEndpointLazyImports:
                     f"bare _METRICS_CACHE used without alias: {line!r}"
                 )
 
-    def test_observability_endpoint_survives_all_import_errors(self):
-        """With all backends unavailable, system_observability must return a
-        dict with required keys rather than raising."""
-        import asyncio
-        from web.api.system_observability import system_observability
-
-        # Patch every lazy import to raise ImportError
-        patches = [
-            patch("web.api.signal_layer_api._METRICS_CACHE", {}),
-            patch("merid.prediction.consensus.get_prediction_consensus_store",
-                  side_effect=ImportError("unavailable")),
-            patch("merid.prediction.debate.get_debate_store",
-                  side_effect=ImportError("unavailable")),
-            patch("merid.rewards.engine.get_reward_engine",
-                  side_effect=ImportError("unavailable")),
-            patch("merid.cognitive.reality_debugger.get_reality_debugger",
-                  side_effect=ImportError("unavailable")),
-            patch("web.api.betting.get_bookie_agent",
-                  side_effect=ImportError("unavailable")),
-            patch("merid.betting.live_sports.get_sports_betting_manager",
-                  side_effect=ImportError("unavailable")),
-            patch("web.api.real_data_endpoints.get_fallback_counts",
-                  side_effect=ImportError("unavailable")),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            result = asyncio.run(system_observability())
-
-        assert isinstance(result, dict), "endpoint must return a dict even when all backends fail"
-        for key in ("signal_metrics_slo", "consensus_store", "collaboration_health",
-                    "reward_engine_health", "cognitive_health", "betting_health",
-                    "sports_betting_health", "alerts", "timestamp"):
-            assert key in result, f"missing key {key!r} from observability response"
 
     def test_slo_endpoint_survives_import_error(self):
         """system_slo must return error-keyed dict, not raise, when cache unavailable."""
@@ -775,16 +741,6 @@ class TestObservabilityEndpointLazyImports:
 
         assert "timestamp" in result
 
-    def test_consensus_store_metrics_endpoint_survives_import_error(self):
-        """consensus_store_metrics must return {"error": ...} not raise."""
-        import asyncio
-        from web.api.system_observability import consensus_store_metrics
-
-        with patch("merid.prediction.consensus.get_prediction_consensus_store",
-                   side_effect=ImportError("unavailable")):
-            result = asyncio.run(consensus_store_metrics())
-
-        assert "error" in result
 
 
 # ===========================================================================

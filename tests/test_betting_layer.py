@@ -590,6 +590,13 @@ class TestBettingEventSchema(unittest.TestCase):
 
 
 
+class TestAlertRegistryCount(unittest.TestCase):
+    """Verify the alert registry has the expected count after adding betting alerts."""
+
+    def test_alert_count(self):
+        from web.api.system_observability import ALERT_RULES
+        # 20 base + 2 betting + 3 sports/live + 3 sports integration = 28
+        self.assertEqual(len(ALERT_RULES), 28)
 
 
 if __name__ == "__main__":

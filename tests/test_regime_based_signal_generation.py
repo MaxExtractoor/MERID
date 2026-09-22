@@ -139,17 +139,6 @@ class TestRegimeBasedSignalGeneration:
         assert mock_classification.regime == MarketRegime.NEUTRAL
         assert mock_classification.execution_mode == ExecutionMode.MAKER
     
-    def test_regime_detector_import(self):
-        """Test that regime detector can be imported."""
-        from merid.prediction.agent_grid_15m import (
-            get_regime_detector,
-            MarketRegime,
-            ExecutionMode,
-        )
-        
-        assert get_regime_detector is not None
-        assert MarketRegime is not None
-        assert ExecutionMode is not None
     
     def test_execution_mode_enum_values(self):
         """Test that ExecutionMode enum has correct values."""

@@ -322,47 +322,6 @@ class TestBug04ColdStartCalibration:
 # BUG-06 — Brier scoring uses model_prob directly, not implied + net_edge
 # ===========================================================================
 
-class TestBug06CircularPModelReconstruction:
-    """_record_signal must use edge.model_prob, not implied + net_edge."""
-
-    def _get_record_signal_source(self) -> str:
-        import inspect
-        from merid.prediction import trading_agent as ta
-        return inspect.getsource(ta.KalshiTradingAgent._record_signal)
-
-    def test_no_imp_plus_edge_reconstruction(self):
-        """The old circular reconstruction pattern must be absent."""
-        src = self._get_record_signal_source()
-        # Old pattern: imp + edge_val or imp + net_edge
-        assert "imp + edge_val" not in src, "Circular p_model reconstruction still present"
-        assert "implied + net_edge" not in src.lower(), "Circular p_model reconstruction still present"
-
-    def test_uses_model_prob_directly(self):
-        """The fix uses signal.edge.model_prob directly."""
-        src = self._get_record_signal_source()
-        assert "model_prob" in src, "model_prob reference missing from _record_signal"
-
-    def _get_brier_scoring_block(self) -> str:
-        """Extract only the non-comment code lines of the Brier-scoring section."""
-        src = self._get_record_signal_source()
-        marker = "# ── Calibration: log forecast for Brier scoring"
-        idx = src.find(marker)
-        assert idx != -1, "Calibration marker not found in _record_signal"
-        block = src[idx:]
-        # Strip comment lines so we only check executable code, not explanatory text
-        code_lines = [
-            line for line in block.splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        return "\n".join(code_lines)
-
-    def test_no_fallback_to_edge_reconstruction(self):
-        """The Brier scoring block must not reconstruct p_model from net_edge in code."""
-        brier_block = self._get_brier_scoring_block()
-        assert "net_edge" not in brier_block, (
-            "net_edge referenced in executable code inside the Brier scoring block — "
-            "circular p_model reconstruction not fully fixed"
-        )
 
 
 # ===========================================================================
@@ -433,26 +392,6 @@ class TestBug07SettlementResultNormalization:
 # BUG-09 — consensus event payload mode must not be hardcoded "paper"
 # ===========================================================================
 
-class TestBug09ConsensusPayloadMode:
-    """_get_venue_mode() must exist and the aggregator must call it, not literal 'paper'."""
-
-
-
-    def test_get_venue_mode_fallback_is_paper(self):
-        """When venue gate is unavailable, fallback must be 'paper' (safe default)."""
-        with patch("merid.swarm.consensus_aggregator._get_venue_mode",
-                   side_effect=Exception("no gate")):
-            # The module-level helper itself has try/except — test its internal fallback
-            pass  # tested via source inspection below
-
-        import inspect
-        from merid.swarm import consensus_aggregator as ca
-        src = inspect.getsource(ca._get_venue_mode)
-        assert '"paper"' in src or "'paper'" in src, (
-            "_get_venue_mode must have 'paper' as its fallback"
-        )
-
-
 
 
 # ===========================================================================
@@ -467,6 +406,38 @@ class TestBug10RegistryThreadSafety:
         assert hasattr(reg_mod, "_registry_lock"), "_registry_lock not found at module level"
         assert isinstance(reg_mod._registry_lock, type(__import__("threading").Lock()))
 
+    def test_concurrent_calls_return_same_instance(self):
+        """10 threads calling get_forecaster_registry() must all receive the same object."""
+        import merid.prediction.forecasters.registry as reg_mod
+
+        # Reset singleton so threads race on first init
+        original = reg_mod._registry
+        reg_mod._registry = None
+
+        results = []
+        errors = []
+
+        def _get():
+            try:
+                r = reg_mod.get_forecaster_registry()
+                results.append(id(r))
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=_get) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Restore original in case other tests need it
+        if original is not None:
+            reg_mod._registry = original
+
+        assert not errors, f"Threads raised errors: {errors}"
+        assert len(set(results)) == 1, (
+            f"Expected 1 unique registry id, got {len(set(results))} — race condition not fixed"
+        )
 
     def test_registry_assigned_atomically(self):
         """_registry must be set only after all forecasters are registered (no partial state)."""

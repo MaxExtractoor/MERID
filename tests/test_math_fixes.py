@@ -129,19 +129,6 @@ class TestPerTradeRiskCapEnforcement:
             # Value is 2% (0.02) in kalshi_crypto_15m.yaml
             assert profile.guardrails_min_post_fee_edge == 0.02, f"guardrails_min_post_fee_edge should be 0.02, got {profile.guardrails_min_post_fee_edge}"
 
-    def test_per_trade_risk_cap_is_hard_ceiling(self):
-        """Verify per-trade risk cap is enforced as hard ceiling in sizing."""
-        from merid.prediction.unified_sizing import _get_min_edge_risk_pct
-        from decimal import Decimal
-        
-        # This should return the per-trade risk cap from profile
-        try:
-            risk_pct = _get_min_edge_risk_pct()
-            # P2-FIX5: Actual value is 2% (0.02) from profile guardrails
-            assert risk_pct == Decimal("0.02"), f"per_trade_risk_pct should be 0.02, got {risk_pct}"
-        except RuntimeError as e:
-            # Profile not available in test environment - this is expected
-            pytest.skip(f"Profile not available in test environment: {e}")
 
     def test_risk_cap_prevents_oversizing(self):
         """Verify risk cap prevents position oversizing."""

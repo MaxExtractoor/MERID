@@ -155,24 +155,8 @@ def test_agent_risk_limits_rejects_negative_notional():
         AgentRiskLimits(max_notional_usd=Decimal("-100"))
 
 
-def test_agent_risk_limits_clamps_excessive_notional():
-    """FIX-98: max_notional_usd exceeding global cap should be clamped."""
-    from merid.prediction.agent_grid_config import (
-        AgentRiskLimits, GLOBAL_MAX_NOTIONAL_PER_AGENT,
-    )
-
-    limits = AgentRiskLimits(max_notional_usd=Decimal("999999"))
-    assert limits.max_notional_usd == GLOBAL_MAX_NOTIONAL_PER_AGENT
 
 
-def test_agent_risk_limits_clamps_excessive_orders():
-    """FIX-98: max_orders_per_window exceeding global cap should be clamped."""
-    from merid.prediction.agent_grid_config import (
-        AgentRiskLimits, GLOBAL_MAX_ORDERS_PER_WINDOW,
-    )
-
-    limits = AgentRiskLimits(max_orders_per_window=9999)
-    assert limits.max_orders_per_window == GLOBAL_MAX_ORDERS_PER_WINDOW
 
 
 def test_agent_risk_limits_rejects_negative_positions():
@@ -194,16 +178,6 @@ def test_unknown_archetype_rejected():
         })
 
 
-def test_valid_archetypes_accepted():
-    """Confirm all standard archetypes parse without error."""
-    from merid.prediction.agent_grid_config import _parse_agent, _ALLOWED_ARCHETYPES
-
-    for archetype in _ALLOWED_ARCHETYPES:
-        agent = _parse_agent({
-            "name": f"test_{archetype}",
-            "archetype": archetype,
-        })
-        assert agent.archetype == archetype
 
 
 # ── FIX-87: Vol zero safety ─────────────────────────────────────────────

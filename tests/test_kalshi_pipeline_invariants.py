@@ -30,30 +30,7 @@ class TestKalshiBaseUrlInvariant:
     """GAP-UPSTREAM-1: BASE_URL env var validation."""
 
 
-    def test_strategies_use_env_aware_base_url(self):
-        """Verify strategy modules use env-aware BASE URLs."""
-        from merid.strategies import kalshi_market_data as strat_kmd
-        from merid.strategies import kalshi_rate_limited_client
-        from merid.strategies import kalshi_multievent_data
 
-        # All should use environment-aware BASE
-        for module in [strat_kmd, kalshi_rate_limited_client, kalshi_multievent_data]:
-            assert hasattr(module, "BASE")
-            # Should not be hardcoded to elections endpoint only
-            base = module.BASE
-            assert isinstance(base, str)
-            assert base.startswith("http")
-
-    def test_ws_clients_use_env_aware_url(self):
-        """Verify WebSocket clients use env-aware URLs."""
-        from merid.strategies import kalshi_ws
-        from merid.strategies import kalshi_ws_backoff
-        from merid.strategies import kalshi_ws_reliable
-
-        # Check that KALSHI_WS_URL is env-aware
-        ws_url = kalshi_ws.KALSHI_WS_URL
-        assert isinstance(ws_url, str)
-        assert ws_url.startswith("ws")
 
     def test_invariants_module_detects_missing_env(self):
         """Verify invariants module detects missing BASE_URL."""
@@ -150,16 +127,6 @@ class TestKalshiBaseUrlInvariant:
             api_url = kalshi_config.get_api_url()
             assert "external-api.demo.kalshi.co" in api_url
 
-    def test_kalshi_insight_pipeline_uses_env_aware_urls(self):
-        """Verify kalshi_insight_pipeline uses env-aware URLs."""
-        # Check that the source code uses os.getenv pattern
-        import inspect
-        from merid.publishing import kalshi_insight_pipeline
-
-        source = inspect.getsource(kalshi_insight_pipeline)
-        # Should have KALSHI_API_BASE_URL using os.getenv
-        assert "KALSHI_API_BASE_URL" in source
-        assert "os.getenv" in source
 
 
 

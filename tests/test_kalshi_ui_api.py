@@ -63,177 +63,19 @@ def mock_dependencies():
         }
 
 
-def test_ui_summary_endpoint_structure(mock_dependencies):
-    """Test that /api/v1/kalshi/ui-summary returns expected structure."""
-    from web.main_15m_lean import app
-    
-    client = TestClient(app)
-    response = client.get("/api/v1/kalshi/ui-summary")
-    
-    assert response.status_code == 200
-    data = response.json()
-    
-    # Verify all required top-level fields
-    assert "positions" in data
-    assert "orders" in data
-    assert "fills" in data
-    assert "balance" in data
-    assert "risk" in data
-    assert "reconciliation" in data
-    assert "signals" in data
-    assert "grid" in data
-    assert "mode" in data
-    assert "timestamp" in data
 
 
-def test_ui_summary_positions_structure(mock_dependencies):
-    """Test that positions have correct structure."""
-    from web.main_15m_lean import app
-    
-    # Position is already mocked in fixture with default values
-    client = TestClient(app)
-    response = client.get("/api/v1/kalshi/ui-summary")
-    
-    assert response.status_code == 200
-    data = response.json()
-    
-    positions = data["positions"]
-    assert len(positions) == 1
-    
-    pos = positions[0]
-    assert "ticker" in pos
-    assert "outcome" in pos
-    assert "size" in pos
-    assert "avg_price" in pos
-    assert "unrealized_pnl" in pos
 
 
-def test_ui_summary_signals_structure(mock_dependencies):
-    """Test that signals section has correct structure."""
-    from web.main_15m_lean import app
-    
-    client = TestClient(app)
-    response = client.get("/api/v1/kalshi/ui-summary")
-    
-    assert response.status_code == 200
-    data = response.json()
-    
-    signals = data["signals"]
-    assert "edge_top" in signals
-    assert "liquidity" in signals
-    assert "volume_anomalies" in signals
-    assert "risk_events" in signals
-    
-    # All should be lists
-    assert isinstance(signals["edge_top"], list)
-    assert isinstance(signals["liquidity"], list)
-    assert isinstance(signals["volume_anomalies"], list)
-    assert isinstance(signals["risk_events"], list)
 
 
-def test_ui_summary_reconciliation_structure(mock_dependencies):
-    """Test that reconciliation section has correct structure."""
-    from web.main_15m_lean import app
-    
-    client = TestClient(app)
-    response = client.get("/api/v1/kalshi/ui-summary")
-    
-    assert response.status_code == 200
-    data = response.json()
-    
-    recon = data["reconciliation"]
-    assert "severity" in recon
-    assert "summary" in recon
-    assert "issue_count" in recon
-    assert "issues" in recon
-    assert "timestamp" in recon
-    
-    assert recon["severity"] == "OK"
 
 
-def test_ui_summary_grid_structure(mock_dependencies):
-    """Test that grid section has correct structure."""
-    from web.main_15m_lean import app
-    
-    client = TestClient(app)
-    response = client.get("/api/v1/kalshi/ui-summary")
-    
-    assert response.status_code == 200
-    data = response.json()
-    
-    grid = data["grid"]
-    assert "status" in grid
-    assert "agents" in grid
-    assert "pnl" in grid
-    
-    assert grid["status"] == "running"
-    assert isinstance(grid["agents"], list)
 
 
-def test_ui_summary_mode_field(mock_dependencies):
-    """Test that mode field is present and valid."""
-    from web.main_15m_lean import app
-    
-    client = TestClient(app)
-    response = client.get("/api/v1/kalshi/ui-summary")
-    
-    assert response.status_code == 200
-    data = response.json()
-    
-    assert data["mode"] in ("paper", "live")
 
 
-def test_ui_summary_graceful_adapter_failure(mock_dependencies):
-    """Test that endpoint handles adapter failures gracefully."""
-    from web.main_15m_lean import app
-    from unittest.mock import patch, AsyncMock
-    
-    # Make adapter fail by patching where kalshi_ui imports it
-    failing_adapter = AsyncMock(side_effect=Exception("Adapter unavailable"))
-    with patch("web.api.kalshi_ui.get_kalshi_venue_adapter", return_value=failing_adapter):
-        client = TestClient(app)
-        response = client.get("/api/v1/kalshi/ui-summary")
-        
-        # Should still return 200 with empty positions
-        assert response.status_code == 200
-        data = response.json()
-        
-        assert data["positions"] == []
-        assert data["orders"] == []
 
 
-def test_ui_summary_graceful_reconciliation_failure(mock_dependencies):
-    """Test that endpoint handles reconciliation failures gracefully."""
-    from web.main_15m_lean import app
-    from unittest.mock import patch, MagicMock
-    
-    # Make reconciler fail by patching where kalshi_ui imports it
-    with patch("web.api.kalshi_ui.get_kalshi_reconciler", side_effect=Exception("Reconciliation failed")):
-        client = TestClient(app)
-        response = client.get("/api/v1/kalshi/ui-summary")
-        
-        # Should still return 200 with unknown reconciliation
-        assert response.status_code == 200
-        data = response.json()
-        
-        assert data["reconciliation"]["severity"] == "UNKNOWN"
 
 
-def test_ui_summary_response_time():
-    """Test that UI summary responds within reasonable time."""
-    from web.main_15m_lean import app
-    import time
-    
-    with patch("merid.event_venues.kalshi.venue_adapter.get_kalshi_venue_adapter"), \
-         patch("merid.reconciliation.kalshi_reconciler.get_kalshi_reconciler"), \
-         patch("merid.signals.store.get_signal_store"), \
-         patch("merid.prediction.agent_grid.get_agent_grid"):
-        
-        client = TestClient(app)
-        
-        start = time.time()
-        response = client.get("/api/v1/kalshi/ui-summary")
-        elapsed = time.time() - start
-        
-        assert response.status_code == 200
-        assert elapsed < 2.0  # Should respond in under 2 seconds

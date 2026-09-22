@@ -157,3 +157,22 @@ class TestOperatorControlPlaneFeedback:
     def test_no_console_error_in_handlers(self):
         text = (VIEWS_DIR / "OperatorControlPlane.tsx").read_text(encoding="utf-8")
         assert "console.error" not in text
+
+
+class TestKeyboardA11yComponents:
+    """Components fixed in Sprint 25 now contain role=button and onKeyDown."""
+
+    @pytest.mark.parametrize("filename", _ui_params(COMPONENTS_DIR, KEYBOARD_FIXED_FILES_COMPONENTS))
+    def test_has_role_button(self, filename: str):
+        text = (COMPONENTS_DIR / filename).read_text(encoding="utf-8")
+        assert 'role="button"' in text, f"{filename} missing role=button"
+
+    @pytest.mark.parametrize("filename", _ui_params(COMPONENTS_DIR, KEYBOARD_FIXED_FILES_COMPONENTS))
+    def test_has_onkeydown(self, filename: str):
+        text = (COMPONENTS_DIR / filename).read_text(encoding="utf-8")
+        assert 'onKeyDown' in text, f"{filename} missing onKeyDown"
+
+    @pytest.mark.parametrize("filename", _ui_params(COMPONENTS_DIR, KEYBOARD_FIXED_FILES_COMPONENTS))
+    def test_has_tabindex(self, filename: str):
+        text = (COMPONENTS_DIR / filename).read_text(encoding="utf-8")
+        assert 'tabIndex' in text, f"{filename} missing tabIndex"

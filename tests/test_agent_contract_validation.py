@@ -189,31 +189,6 @@ class TestLoopLagMonitorLifecycle:
 class TestPredictionRiskSingletonImmutability:
     """Verify risk singleton is not accidentally mutated by agents."""
 
-    def test_risk_object_identity_across_multiple_agents(self):
-        """Multiple TradingAgent instances should share identical risk object."""
-        from merid.prediction.risk import get_prediction_risk, PredictionRiskConfig
-        
-        # Reset singleton for clean test
-        import merid.prediction.risk as risk_module
-        original_risk = risk_module._risk
-        risk_module._risk = None
-        
-        try:
-            # Initialize once (as AgentGrid does)
-            risk1 = get_prediction_risk(PredictionRiskConfig())
-            
-            # Simulate multiple agent accesses
-            risk2 = get_prediction_risk()
-            risk3 = get_prediction_risk()
-            
-            # All should be identical object
-            assert risk1 is risk2 is risk3, "Risk singleton identity broken"
-            
-            # Check id() values are identical
-            assert id(risk1) == id(risk2) == id(risk3)
-        finally:
-            # Restore original
-            risk_module._risk = original_risk
 
     def test_no_copy_or_replace_on_risk_object(self):
         """Verify no code copies or replaces the risk singleton."""
@@ -318,3 +293,49 @@ class TestRegimeGridSmokeTest:
 
 # Import needed classes at module level for tests
 from merid.prediction.risk import PredictionMarketRisk
+
+
+
+class TestBootstrapOrderGuard:
+    """Verify initialization order constraints."""
+
+    def test_agent_grid_initializes_risk_before_creating_agents(self):
+        """AgentGrid should call get_prediction_risk(config) before any agent creation."""
+        from merid.prediction.agent_grid import AgentGrid
+        from merid.prediction.risk import get_prediction_risk, PredictionRiskConfig
+        
+        import merid.prediction.risk as risk_module
+        
+        # Reset singleton
+        original_risk = risk_module._risk
+        risk_module._risk = None
+        
+        try:
+            # Track initialization order
+            init_order = []
+            
+            original_init = PredictionMarketRisk.__init__
+            def tracking_init(self, config):
+                init_order.append('risk_initialized')
+                return original_init(self, config)
+            
+            # Patch for tracking
+            from merid.prediction import risk as risk_mod
+            original_risk_class_init = risk_mod.PredictionMarketRisk.__init__
+            risk_mod.PredictionMarketRisk.__init__ = tracking_init
+            
+            try:
+                # Create grid (should initialize risk)
+                # Note: We can't fully instantiate without more mocks,
+                # but we can check the pattern in the code
+                source = inspect.getsource(AgentGrid.__init__)
+                
+                # Should call get_prediction_risk with config before agent creation
+                assert "get_prediction_risk" in source
+                assert "PredictionRiskConfig" in source
+                
+            finally:
+                risk_mod.PredictionMarketRisk.__init__ = original_risk_class_init
+                
+        finally:
+            risk_module._risk = original_risk

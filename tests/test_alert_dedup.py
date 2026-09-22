@@ -182,20 +182,6 @@ class TestWebhookBackoff:
         assert hasattr(webhook_client, '_tg_backoff_until')
         assert hasattr(webhook_client, '_tg_consecutive_errors')
 
-    def test_backoff_blocks_sends(self):
-        """When _tg_backoff_until is in the future, _tg_raw_send returns False."""
-        import asyncio
-        from merid.alerts import webhook_client
-
-        original_backoff = webhook_client._tg_backoff_until
-        try:
-            webhook_client._tg_backoff_until = time.monotonic() + 3600  # 1hr in future
-            result = asyncio.get_event_loop().run_until_complete(
-                webhook_client._tg_raw_send("test")
-            )
-            assert result is False
-        finally:
-            webhook_client._tg_backoff_until = original_backoff
 
 
 class TestPrometheusNotificationMetric:

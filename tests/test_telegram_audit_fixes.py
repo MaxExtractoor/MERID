@@ -27,6 +27,21 @@ ROOT = Path(__file__).resolve().parent.parent
 # ── BUG-8: TelegramAgent reads from settings ─────────────────────────
 
 
+
+# ── BUG-9: Portfolio dashboard not BTC-centric ───────────────────────
+
+class TestPortfolioDashboardTitle:
+    """BUG-9: send_portfolio_dashboard should not say 'BTC Swarm'."""
+
+    def test_no_btc_swarm_hardcode(self):
+        src = (ROOT / "merid" / "alerts" / "webhook_client.py").read_text(encoding="utf-8")
+        assert "Kalshi BTC Swarm" not in src, "Hardcoded 'Kalshi BTC Swarm' must be removed"
+
+    def test_uses_generic_title(self):
+        src = (ROOT / "merid" / "alerts" / "webhook_client.py").read_text(encoding="utf-8")
+        assert "Kalshi Portfolio" in src, "Dashboard title should be 'Kalshi Portfolio'"
+
+
 # ── BUG-10: reconciliation telegram_handler uses tg_send ─────────────
 
 class TestReconciliationTelegramHandler:

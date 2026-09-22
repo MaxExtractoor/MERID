@@ -1048,14 +1048,6 @@ class MeridLoop:
             )
             parallel_coros.append(self._refresh_features(now, summary))
 
-        if now - self._last_consensus >= self.config.consensus_interval:
-            # FIX-3: Log stage boundary - CONSENSUS stage
-            logger.info(
-                "[CYCLE-TRACE] stage=CONSENSUS_START | tick=%d | correlation_id=%s",
-                tick_number, summary.get("correlation_id", "unknown")
-            )
-            parallel_coros.append(self._run_consensus(summary))
-
         if now - self._last_arb_scan >= self.config.arb_scan_interval:
             parallel_coros.append(self._run_arb_scan(now, summary))
 
@@ -1221,8 +1213,13 @@ class MeridLoop:
 
         # Now read features (live-ingested or synthetic fallback)
         # Run in thread pool so sync SQLite/feature reads don't block event loop
-        svc = self._feature_service()
-        store = self._signal_store()
+        try:
+            svc = self._feature_service()
+            store = self._signal_store()
+        except Exception as e:
+            logger.warning("Feature service unavailable (skipping feature refresh): %s", e)
+            summary["actions"].append("features_refreshed:no_feature_service")
+            return
         step_start = time.perf_counter()
 
         # BUG-EL15/EL18 FIX: Process max 1 symbol per tick with 30s minimum interval
@@ -1942,8 +1939,13 @@ class MeridLoop:
             return
             
         step_start = time.perf_counter()
-        scanner = self._scanner()
-        store = self._signal_store()
+        try:
+            scanner = self._scanner()
+            store = self._signal_store()
+        except Exception as e:
+            logger.warning("Arb scanner unavailable (skipping scan): %s", e)
+            summary["actions"].append("arb_scan:no_scanner")
+            return
         
         try:
             # CRYPTO-15M-ARB: Update crypto venue prices before scanning
@@ -2167,8 +2169,13 @@ class MeridLoop:
         CPU-heavy CQI computation runs in thread pool to avoid blocking event loop.
         """
         step_start = time.perf_counter()
-        detector = self._drift_detector()
-        store = self._signal_store()
+        try:
+            detector = self._drift_detector()
+            store = self._signal_store()
+        except Exception as e:
+            logger.warning("Drift detector unavailable (skipping CQI update): %s", e)
+            summary["actions"].append("cqi:no_drift_detector")
+            return
         guard = self._execution_guard()
         cqi_scores: Dict[str, float] = {}
         

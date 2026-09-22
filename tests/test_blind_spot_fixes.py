@@ -174,6 +174,13 @@ class TestSystemEndpointsRBAC:
 # 5. Previously-unprotected routers now have auth
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. auth.py — dev-bypass fail-closed
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestDevBypassFailClosed:
     FILE = "web/api/auth.py"
 
     def test_live_trading_check_present(self):
@@ -292,3 +299,4 @@ class TestBacktestingFixes:
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. AgentGrid — FeedStalenessMonitor wiring
 # ══════════════════════════════════════════════════════════════════════════════
+
