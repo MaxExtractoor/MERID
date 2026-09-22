@@ -2,7 +2,7 @@
 Rejected Exit Bankroll/Slot State Tests (2026-07-21)
 
 Tests to verify that rejected exits (exit without position) do not change
-bankroll/slot state. This ensures that when position_cache.on_fill() rejects
+bankroll/slot state. This ensures that when position_cache.on_fill(canonicalization_state="TRUSTED_LIVE_V1") rejects
 an exit fill due to no existing position, it does not create phantom positions
 or affect bankroll/slot allocation state.
 """
@@ -55,7 +55,8 @@ class TestRejectedExitBankrollSlotState:
             side=side,
             client_order_id=f"exit_{asset}_{side}",
             fill_id=f"fill_{asset}_{side}",
-            action="sell"  # Exit action
+            action="sell",  # Exit action
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Verify no position was created
@@ -94,7 +95,8 @@ class TestRejectedExitBankrollSlotState:
             side=side,
             client_order_id=f"exit_{asset}_{side}",
             fill_id=f"fill_{asset}_{side}",
-            action="sell"
+            action="sell",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Verify the original position is unchanged

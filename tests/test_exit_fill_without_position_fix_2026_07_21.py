@@ -67,7 +67,8 @@ class TestExitFillWithoutPositionFix:
                 side="no",
                 action="sell",
                 client_order_id="position_monitor_exit_take_profit_123",
-                fill_id="fill_456"
+                fill_id="fill_456",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
             
             # Verify critical error was logged
@@ -125,7 +126,8 @@ class TestExitFillWithoutPositionFix:
             side="no",
             action="sell",
             client_order_id="position_monitor_exit_take_profit_123",
-            fill_id="fill_456"
+            fill_id="fill_456",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Verify position was reduced (partial close)
@@ -152,7 +154,8 @@ class TestExitFillWithoutPositionFix:
             side="no",
             action="buy",
             client_order_id="agent_grid_15m_entry_123",
-            fill_id="fill_456"
+            fill_id="fill_456",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Verify position was created
@@ -180,7 +183,8 @@ class TestExitFillWithoutPositionFix:
                 side="yes",
                 action="sell",
                 client_order_id="position_monitor_exit_stop_loss_123",
-                fill_id="fill_789"
+                fill_id="fill_789",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
             
             # Verify critical error was logged
@@ -215,7 +219,8 @@ class TestExitFillWithoutPositionFix:
                 side="no",
                 action="sell",
                 client_order_id=None,  # No client_order_id
-                fill_id="fill_456"
+                fill_id="fill_456",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
             
             # Should NOT log critical error (no exit marker without client_order_id)
@@ -239,6 +244,7 @@ class TestExitFillWithoutPositionFix:
         # Add a position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=10,
             side="no",
             avg_price_cents=4000,
@@ -270,7 +276,8 @@ class TestExitFillWithoutPositionFix:
                 side="no",
                 action="sell",
                 client_order_id="position_monitor_exit_take_profit_123",
-                fill_id="fill_456"
+                fill_id="fill_456",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
             
             # Verify critical error was logged
@@ -304,7 +311,8 @@ class TestExitFillWithoutPositionFix:
                     side="no",
                     action="sell",
                     client_order_id=f"position_monitor_exit_take_profit_{i}",
-                    fill_id=f"fill_{i}"
+                    fill_id=f"fill_{i}",
+                    canonicalization_state="TRUSTED_LIVE_V1"
                 )
             
             # Verify critical error was logged 3 times
@@ -331,7 +339,8 @@ class TestExitFillWithoutPositionFix:
                 side="no",
                 action="sell",
                 client_order_id="position_monitor_exit_take_profit_123",
-                fill_id="fill_456"
+                fill_id="fill_456",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
         
         # Verify no position created
@@ -346,7 +355,8 @@ class TestExitFillWithoutPositionFix:
             side="no",
             action="buy",
             client_order_id="agent_grid_15m_entry_789",
-            fill_id="fill_012"
+            fill_id="fill_012",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Verify position was created
@@ -363,6 +373,7 @@ class TestExitFillWithoutPositionFix:
         # Cycle 1: Open YES position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=10,
             side="yes",
             avg_price_cents=5000,
@@ -401,6 +412,7 @@ class TestExitFillWithoutPositionFix:
         # Cycle 2: Re-open YES position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=8,
             side="yes",
             avg_price_cents=5200,
@@ -440,6 +452,7 @@ class TestExitFillWithoutPositionFix:
         # Cycle 1: Open NO position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=10,
             side="no",
             avg_price_cents=4000,
@@ -478,6 +491,7 @@ class TestExitFillWithoutPositionFix:
         # Cycle 2: Re-open NO position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=8,
             side="no",
             avg_price_cents=3800,
@@ -524,7 +538,8 @@ class TestExitFillWithoutPositionFix:
                 side="no",
                 action="sell",
                 client_order_id="position_monitor_exit_take_profit",
-                fill_id="fill_exit_first"
+                fill_id="fill_exit_first",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
             
             # Should log critical error
@@ -542,7 +557,8 @@ class TestExitFillWithoutPositionFix:
             side="no",
             action="buy",
             client_order_id="agent_grid_15m_entry",
-            fill_id="fill_entry_later"
+            fill_id="fill_entry_later",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Position should be created
@@ -566,7 +582,8 @@ class TestExitFillWithoutPositionFix:
             side="no",
             action="buy",
             client_order_id="agent_grid_15m_entry_part1",
-            fill_id="fill_entry_part1"
+            fill_id="fill_entry_part1",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         assert cache._positions[market_id].contracts == 3
@@ -672,6 +689,7 @@ class TestCrossAssetExitInvariant:
         # Entry: 3 partial fills totaling 10 contracts
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=3,
             side=side,
             avg_price_cents=5000 if side == "yes" else 4000,
@@ -731,6 +749,7 @@ class TestCrossAssetExitInvariant:
         # Cycle 1: Open position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=10,
             side=side,
             avg_price_cents=5000 if side == "yes" else 4000,
@@ -762,6 +781,7 @@ class TestCrossAssetExitInvariant:
         # Cycle 2: Re-open position
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=8,
             side=side,
             avg_price_cents=5200 if side == "yes" else 3800,
@@ -800,7 +820,8 @@ class TestCrossAssetExitInvariant:
                 side=side,
                 action="sell",
                 client_order_id="position_monitor_exit_take_profit",
-                fill_id="fill_exit_first"
+                fill_id="fill_exit_first",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
             
             # Should log critical error
@@ -816,6 +837,7 @@ class TestCrossAssetExitInvariant:
         # Entry fill arrives later (should create position)
         cache._positions[market_id] = CachedPosition(
             market_id=market_id,
+            agent_id="TEST_AGENT",
             contracts=5,
             side=side,
             avg_price_cents=5000 if side == "yes" else 4000,
@@ -849,7 +871,8 @@ class TestCrossAssetExitInvariant:
                 side=side,
                 action="sell",
                 client_order_id="position_monitor_exit_take_profit_123",
-                fill_id="fill_456"
+                fill_id="fill_456",
+                canonicalization_state="TRUSTED_LIVE_V1"
             )
             
             # Verify critical error was logged with all required fields

@@ -190,10 +190,12 @@ class TestAssetWiringValidation:
             assert asset in KALSHI_CRYPTO_ASSETS
 
     def test_all_timeframes_defined(self):
-        """Verify all 4 timeframes are in canonical list."""
+        """Verify canonical timeframe list (15m-only trading per config)."""
         from merid.event_venues.kalshi.invariants import KALSHI_CRYPTOTIMEFRAMES
 
-        expected = ["15m", "1h", "daily", "weekly"]
+        # config.kalshi_crypto_config: "FOCUS: 15m timeframe only for trading.
+        # All other timeframes are signal-only."
+        expected = ["15m"]
         for tf in expected:
             assert tf in KALSHI_CRYPTOTIMEFRAMES
 
@@ -340,7 +342,7 @@ class TestHardcodedUrlScan:
         # Test classification for each environment
         assert classify_kalshi_environment("https://external-api.demo.kalshi.co/trade-api/v2") == "demo"
         assert classify_kalshi_environment("https://trading-api.kalshi.com/trade-api/v2") == "live"
-        assert classify_kalshi_environment("https://external-exakalshi.com/trade-api/v2") == "elections"
+        assert classify_kalshi_environment("https://api.elections.kalshi.com/trade-api/v2") == "elections"
         assert classify_kalshi_environment("https://unknown.kalshi.com/trade-api/v2") == "unknown"
 
     def test_base_url_validation_raises_in_dev(self):
@@ -348,7 +350,8 @@ class TestHardcodedUrlScan:
         from merid.event_venues.kalshi.invariants import get_kalshi_base_url
 
         # In test mode, invalid URL should fall back to demo
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://invalid-host.com/api"}):
+        # clear=True isolates ambient env (repo .env exports MERID_KALSHI_ENV=prod)
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://invalid-host.com/api"}, clear=True):
             # Should return demo default when URL doesn't match known patterns
             url = get_kalshi_base_url()
             assert url == "https://external-api.demo.kalshi.co/trade-api/v2"
@@ -372,8 +375,17 @@ class TestIntegrationAllBaseUrls:
     BASE_URLS = [
         ("demo", "https://external-api.demo.kalshi.co/trade-api/v2"),
         ("live", "https://trading-api.kalshi.com/trade-api/v2"),
-        ("elections", "https://external-exakalshi.com/trade-api/v2"),
+        ("elections", "https://api.elections.kalshi.com/trade-api/v2"),
     ]
+
+    @staticmethod
+    def _expected_ws(base_url: str) -> str:
+        # Mirror get_kalshi_ws_url's documented host rule: external-api.*
+        # API hosts serve WS on external-api-ws.*; all other hosts keep
+        # their hostname.
+        ws = base_url.replace("https://", "wss://")
+        ws = ws.replace("wss://external-api.", "wss://external-api-ws.", 1)
+        return ws.replace("/trade-api/v2", "/trade-api/ws/v2")
 
     @pytest.mark.parametrize("env_name,base_url", BASE_URLS)
     def test_invariants_return_correct_urls(self, env_name, base_url):
@@ -388,7 +400,7 @@ class TestIntegrationAllBaseUrls:
             assert actual_base == base_url, f"Expected {base_url}, got {actual_base}"
 
             # WS URL should be derived correctly
-            expected_ws = base_url.replace("https://", "wss://").replace("/trade-api/v2", "/trade-api/ws/v2")
+            expected_ws = self._expected_ws(base_url)
             assert actual_ws == expected_ws, f"Expected {expected_ws}, got {actual_ws}"
 
     @pytest.mark.parametrize("env_name,base_url", BASE_URLS)
@@ -413,9 +425,10 @@ class TestIntegrationAllBaseUrls:
             # Should always follow the pattern
             assert ws_url.startswith("wss://")
             assert ws_url.endswith("/trade-api/ws/v2")
-            # Host should match
-            host = base_url.replace("https://", "").replace("/trade-api/v2", "")
-            assert host in ws_url
+            # Host should match the documented external-api. -> external-api-ws.
+            # mapping for external-api hosts; other hosts keep their hostname.
+            expected_ws = self._expected_ws(base_url)
+            assert ws_url == expected_ws
 
 
 class TestProcessLifecycleAndSafety:
@@ -548,7 +561,8 @@ class TestProcessLifecycleAndSafety:
             
             # Unknown hosts fall back to demo for safety
             assert base == "https://external-api.demo.kalshi.co/trade-api/v2"
-            assert ws == "wss://external-api.demo.kalshi.co/trade-api/ws/v2"
+            # external-api.* API hosts serve WS on external-api-ws.*
+            assert ws == "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
 
 
 if __name__ == "__main__":

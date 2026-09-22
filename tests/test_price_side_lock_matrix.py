@@ -141,8 +141,8 @@ def _run_signal(
         "merid.prediction.forecasters.fvg.get_fvg_forecaster",
         return_value=fvg_forecaster,
     ), patch(
-        "merid.prediction.agent_grid_15m.get_settlement_input_price",
-        return_value=(65000.0, 0.0),
+        "merid.prediction.agent_grid_15m._get_settlement_input_price",
+        return_value=(65000.0, 0.0, "cf_rti_unavailable:test", None),
     ):
         return agent._generate_momentum_fvg_signal("BTC", 65000.0, market, 5.0)
 
@@ -182,14 +182,15 @@ class TestNoSidePriceLockMatrix:
     @pytest.mark.parametrize(
         "best_bid, expected_accepted, label",
         [
-            (91, False, "NO thesis at 9c (below 10c) rejects"),
-            (90, True, "NO thesis at 10c (inclusive) accepts"),
+            (76, False, "NO thesis at 24c (below 25c canonical min) rejects"),
+            (75, True, "NO thesis at 25c (inclusive) accepts"),
             (25, True, "NO thesis at 75c (inclusive) accepts"),
-            (24, False, "NO thesis at 76c (above 75c) rejects"),
+            (5, True, "NO thesis at 95c (inclusive max) accepts"),
+            (4, False, "NO thesis at 96c (above 95c) rejects"),
         ],
     )
     def test_no_thesis_boundary(self, agent, best_bid, expected_accepted, label):
-        """NO thesis = 100 - best_bid; must be inside 10c-75c."""
+        """NO thesis = 100 - best_bid; must be inside the canonical 25c-95c range."""
         no_price = 100 - best_bid
         # negative velocity below threshold lets confluence drive the thesis side
         signal = _run_signal(

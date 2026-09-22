@@ -114,6 +114,7 @@ class TestRatchetPositionCacheIntegration:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="TEST_AGENT",
             side="yes",
             contracts=10,
             avg_price_cents=50,
@@ -163,6 +164,7 @@ class TestRatchetPositionCacheIntegration:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="TEST_AGENT",
             side="yes",
             contracts=10,
             avg_price_cents=50,
@@ -201,6 +203,7 @@ class TestRatchetPositionCacheIntegration:
         
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="TEST_AGENT",
             side="no",
             contracts=10,
             avg_price_cents=50,
@@ -247,6 +250,7 @@ class TestRatchetPositionCacheIntegration:
         # Create position with active ratchet
         position = CachedPosition(
             market_id="BTC-USD-240329-W10",
+            agent_id="TEST_AGENT",
             side="yes",
             contracts=10,
             avg_price_cents=50,

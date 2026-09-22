@@ -3,6 +3,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _test_auth_bypass(monkeypatch):
+    monkeypatch.setenv("MERID_SKIP_AUTH_FOR_TESTS", "1")
+
+
 class TestKalshiBracketRiskEndpoint:
     """Test the /api/v1/kalshi/bracket-risk endpoint."""
 

@@ -676,7 +676,7 @@ class TestCounterpartyFormAccounting:
     def test_counterparty_entry_creates_no_position(self, ledger: KalshiFillsLedger) -> None:
         # BUY_NO reported in book form: yes/sell at YES 64c -> NO costs 36c.
         entry = self._fill(fill_id="fill-entry-1", order_id="ord-entry-1")
-        ledger.on_fill(entry)
+        ledger.on_fill(entry, canonicalization_state="TRUSTED_LIVE_V1")
 
         pos = ledger._open_positions.get("KXBTC15M-TEST")
         assert pos is not None, "counterparty-form entry must open a position"
@@ -709,8 +709,8 @@ class TestCounterpartyFormAccounting:
             entry_or_exit="exit",
             created_time=t0 + timedelta(seconds=30),
         )
-        ledger.on_fill(entry)
-        ledger.on_fill(exit_fill)
+        ledger.on_fill(entry, canonicalization_state="TRUSTED_LIVE_V1")
+        ledger.on_fill(exit_fill, canonicalization_state="TRUSTED_LIVE_V1")
 
         assert "KXBTC15M-TEST" not in ledger._open_positions, "position must close"
         # Net segment cash: -0.37 entry + -0.3045 exit + $1.00 pair lock = +0.3255
@@ -736,7 +736,7 @@ class TestCounterpartyFormAccounting:
             ingestion_source="order_router",
             created_time=t0,
         )
-        ledger.on_fill(prov)
+        ledger.on_fill(prov, canonicalization_state="TRUSTED_LIVE_V1")
         assert len([f for f in ledger._fills.values() if f.order_id == "ord-3"]) == 1
 
         # Authoritative exchange fill in book form for the same order.
@@ -754,7 +754,7 @@ class TestCounterpartyFormAccounting:
             canonical_yes_delta_cc=-100,
             created_time=t0 + timedelta(milliseconds=200),
         )
-        ledger.on_fill(auth)
+        ledger.on_fill(auth, canonicalization_state="TRUSTED_LIVE_V1")
 
         fills_for_order = [f for f in ledger._fills.values() if f.order_id == "ord-3"]
         assert len(fills_for_order) == 1, "promotion must not duplicate the fill"
@@ -798,15 +798,15 @@ class TestCounterpartyFormAccounting:
                 created_time=ts,
             )
 
-        ledger.on_fill(entry)
-        ledger.on_fill(_exit("fill-exit-4a", "ord-exit-4a", t0 + timedelta(seconds=10)))
+        ledger.on_fill(entry, canonicalization_state="TRUSTED_LIVE_V1")
+        ledger.on_fill(_exit("fill-exit-4a", "ord-exit-4a", t0 + timedelta(seconds=10)), canonicalization_state="TRUSTED_LIVE_V1")
         # After the partial: one contract remains, partial PnL credited once.
         pos = ledger._open_positions.get("KXBTC15M-TEST")
         assert pos is not None and pos["total_contracts"] == Decimal("1")
         partial_expected = Decimal("-0.3045") + Decimal("1.0") - Decimal("0.36")
         assert abs(ledger._session_realized_pnl - partial_expected) < Decimal("0.001")
 
-        ledger.on_fill(_exit("fill-exit-4b", "ord-exit-4b", t0 + timedelta(seconds=20)))
+        ledger.on_fill(_exit("fill-exit-4b", "ord-exit-4b", t0 + timedelta(seconds=20)), canonicalization_state="TRUSTED_LIVE_V1")
         assert "KXBTC15M-TEST" not in ledger._open_positions
         # Total realized = full segment net cash, credited exactly once:
         # -0.74 entry + 2 * (-0.3045 + $1 pair) = +0.651
@@ -842,7 +842,7 @@ class TestCounterpartyFormAccounting:
             ingestion_source="order_router",
             created_time=t0,
         )
-        ledger.on_fill(prov)
+        ledger.on_fill(prov, canonicalization_state="TRUSTED_LIVE_V1")
         await ledger._flush_to_db()
 
         async with aiosqlite.connect(ledger._db_path) as db:
@@ -865,7 +865,7 @@ class TestCounterpartyFormAccounting:
             canonical_yes_delta_cc=-100,
             created_time=t0 + timedelta(milliseconds=200),
         )
-        ledger.on_fill(auth)
+        ledger.on_fill(auth, canonicalization_state="TRUSTED_LIVE_V1")
         await ledger._flush_to_db()
 
         async with aiosqlite.connect(ledger._db_path) as db:
@@ -916,7 +916,7 @@ class TestCounterpartyFormAccounting:
             ingestion_source="order_router",
             created_time=t0,
         )
-        ledger.on_fill(prov)
+        ledger.on_fill(prov, canonicalization_state="TRUSTED_LIVE_V1")
         pos = ledger._open_positions.get("KXBTC15M-TEST")
         assert pos is not None and pos["total_contracts"] == Decimal("1")
 
@@ -936,7 +936,7 @@ class TestCounterpartyFormAccounting:
             canonical_yes_delta_cc=-100,
             created_time=t0 + timedelta(milliseconds=200),
         )
-        ledger.on_fill(auth)
+        ledger.on_fill(auth, canonicalization_state="TRUSTED_LIVE_V1")
 
         pos = ledger._open_positions.get("KXBTC15M-TEST")
         assert pos is not None, "authoritative fill must still open the position"

@@ -70,6 +70,7 @@ class TestAssetLevelPositionLimitFix:
         # Now simulate adding a second position on a different ticker
         pos2 = CachedPosition(
             market_id="KXBTC15M-26JUL022245-30",
+            agent_id="TEST_AGENT",
             side="yes",
             contracts=1,
             avg_price_cents=42

@@ -154,7 +154,7 @@ class TestMarketMakerIntegration:
         mm.register_ticker("KXBTC-15M-UP")
         
         # Simulate a fill (bid hit = we sold, so we go long)
-        mm.on_fill("KXBTC-15M-UP", "bid", 10, 5000)
+        mm.on_fill("KXBTC-15M-UP", "bid", 10, 5000, canonicalization_state="TRUSTED_LIVE_V1")
         
         inv = mm.get_inventory("KXBTC-15M-UP")
         assert inv is not None
@@ -163,7 +163,7 @@ class TestMarketMakerIntegration:
         assert inv.quotes_filled == 1
         
         # Another fill (ask lifted = we bought, reducing position)
-        mm.on_fill("KXBTC-15M-UP", "ask", 5, 5100)
+        mm.on_fill("KXBTC-15M-UP", "ask", 5, 5100, canonicalization_state="TRUSTED_LIVE_V1")
         
         inv = mm.get_inventory("KXBTC-15M-UP")
         assert inv.net_position == 5  # 10 - 5
@@ -242,8 +242,8 @@ class TestMarketMakerIntegration:
         mm.register_ticker("KXETH-15M-UP")
         
         # Add some fills
-        mm.on_fill("KXBTC-15M-UP", "bid", 10, 5000)
-        mm.on_fill("KXETH-15M-UP", "ask", 5, 3000)
+        mm.on_fill("KXBTC-15M-UP", "bid", 10, 5000, canonicalization_state="TRUSTED_LIVE_V1")
+        mm.on_fill("KXETH-15M-UP", "ask", 5, 3000, canonicalization_state="TRUSTED_LIVE_V1")
         
         summary = mm.get_risk_summary()
         
@@ -260,7 +260,7 @@ class TestMarketMakerIntegration:
         mm.register_ticker("KXBTC-15M-UP")
         mm.register_ticker("KXETH-15M-UP")
         
-        mm.on_fill("KXBTC-15M-UP", "bid", 5, 5000)
+        mm.on_fill("KXBTC-15M-UP", "bid", 5, 5000, canonicalization_state="TRUSTED_LIVE_V1")
         
         all_inv = mm.get_all_inventory()
         
@@ -318,7 +318,7 @@ class TestMarketMakerIntegration:
         """Test reset clears all state."""
         mm = MarketMakerIntegration()
         mm.register_ticker("KXBTC-15M-UP")
-        mm.on_fill("KXBTC-15M-UP", "bid", 10, 5000)
+        mm.on_fill("KXBTC-15M-UP", "bid", 10, 5000, canonicalization_state="TRUSTED_LIVE_V1")
         mm.compute_quotes("KXBTC-15M-UP", mid_price_cents=5000)
         
         mm.reset()

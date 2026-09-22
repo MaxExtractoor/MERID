@@ -435,27 +435,40 @@ KALSHI_WS_URL_ENV = "KALSHI_WS_URL"
 ALLOWED_KALSHI_API_HOSTS: frozenset[str] = frozenset(
     {
         "demo-api.kalshi.co",
+        "external-api.demo.kalshi.co",
         "external-api.kalshi.com",
         "api.kalshi.com",
         "trading-api.kalshi.com",
+        "api.elections.kalshi.com",
     }
 )
 
 
-def _kalshi_url_hostname_allowed(url: str) -> bool:
+# WebSocket endpoints live on their own hostnames (e.g. external-api-ws.*);
+# the API list alone would reject Kalshi's documented WS hosts.
+ALLOWED_KALSHI_WS_HOSTS: frozenset[str] = ALLOWED_KALSHI_API_HOSTS | frozenset(
+    {
+        "external-api-ws.kalshi.com",
+        "external-api-ws.demo.kalshi.co",
+    }
+)
+
+
+def _kalshi_url_hostname_allowed(url: str, *, ws: bool = False) -> bool:
     try:
         host = urlparse(url).hostname
     except Exception:
         return False
     if not host:
         return False
-    return host.lower() in ALLOWED_KALSHI_API_HOSTS
+    allowed = ALLOWED_KALSHI_WS_HOSTS if ws else ALLOWED_KALSHI_API_HOSTS
+    return host.lower() in allowed
 
 
 # Known valid Kalshi API endpoints (human-readable; use ALLOWED_KALSHI_API_HOSTS for checks)
 VALID_KALSHI_API_PATTERNS = sorted(ALLOWED_KALSHI_API_HOSTS)
 
-VALID_KALSHI_WS_PATTERNS = sorted(ALLOWED_KALSHI_API_HOSTS)
+VALID_KALSHI_WS_PATTERNS = sorted(ALLOWED_KALSHI_WS_HOSTS)
 
 
 def is_test_environment() -> bool:
@@ -533,7 +546,7 @@ def require_kalshi_ws_url(fail_in_prod: bool = True) -> Optional[str]:
         logger.warning(msg + " (allowing in test mode)")
         return None
 
-    is_valid = _kalshi_url_hostname_allowed(ws_url)
+    is_valid = _kalshi_url_hostname_allowed(ws_url, ws=True)
     if not is_valid:
         msg = (
             f"{KALSHI_WS_URL_ENV}='{ws_url}' does not appear to be "
@@ -605,9 +618,13 @@ def get_kalshi_base_url() -> str:
                 f"Kalshi patterns: {VALID_KALSHI_API_PATTERNS}. Deriving from KALSHI_ENV."
             )
 
-    # Priority 2: Derive from KALSHI_ENV using Kalshi's recommended URLs
-    kalshi_env = os.getenv("KALSHI_ENV", "").lower()
-    if kalshi_env == "live":
+    # Priority 2: Derive from venue env using Kalshi's recommended URLs.
+    # MERID_KALSHI_ENV is the canonical operator var (matches
+    # kalshi_config.get_kalshi_env); KALSHI_ENV is honored as fallback.
+    kalshi_env = (
+        os.getenv("MERID_KALSHI_ENV") or os.getenv("KALSHI_ENV") or ""
+    ).strip().lower()
+    if kalshi_env in ("live", "prod"):
         # Kalshi's recommended production URL for public data and trade API
         return "https://external-api.kalshi.com/trade-api/v2"
     elif kalshi_env == "demo":
@@ -618,25 +635,34 @@ def get_kalshi_base_url() -> str:
         return "https://external-api.kalshi.com/trade-api/v2"
     elif kalshi_env:
         logger.warning(
-            f"Unknown KALSHI_ENV={kalshi_env!r}. Valid values: demo, live, elections. "
-            f"Falling back to demo default."
+            f"Unknown venue env={kalshi_env!r}. Valid values: demo, live, "
+            f"prod, elections. Falling back to demo default."
         )
         return "https://external-api.demo.kalshi.co/trade-api/v2"
 
-    # Priority 3: Check legacy KALSHI_USE_DEMO as compatibility shim
-    use_demo = os.getenv("KALSHI_USE_DEMO", "false").lower() in ("true", "1", "yes")
-    if use_demo:
+    # Priority 3: legacy KALSHI_USE_DEMO compatibility shim.  Only an
+    # *explicitly set* value authorizes live; an unset shim is not consent.
+    use_demo_raw = os.getenv("KALSHI_USE_DEMO")
+    if use_demo_raw is not None:
+        if use_demo_raw.strip().lower() in ("true", "1", "yes"):
+            logger.warning(
+                "KALSHI_USE_DEMO is deprecated. Use MERID_KALSHI_ENV=demo instead. "
+                "Treating KALSHI_USE_DEMO=true as demo."
+            )
+            return "https://external-api.demo.kalshi.co/trade-api/v2"
         logger.warning(
-            "KALSHI_USE_DEMO is deprecated. Use KALSHI_ENV=demo instead. "
-            "Treating KALSHI_USE_DEMO=true as KALSHI_ENV=demo."
-        )
-        return "https://external-api.demo.kalshi.co/trade-api/v2"
-    else:
-        logger.warning(
-            "KALSHI_USE_DEMO is deprecated. Use KALSHI_ENV=live instead. "
-            "Treating KALSHI_USE_DEMO=false as KALSHI_ENV=live."
+            "KALSHI_USE_DEMO is deprecated. Use MERID_KALSHI_ENV=prod instead. "
+            "Treating explicit KALSHI_USE_DEMO=false as live."
         )
         return "https://external-api.kalshi.com/trade-api/v2"
+
+    # Priority 4: nothing configured — fail closed to demo.  An unconfigured
+    # deployment must never silently target live endpoints.
+    logger.warning(
+        "No Kalshi venue env configured (MERID_KALSHI_ENV/KALSHI_ENV/"
+        "KALSHI_USE_DEMO all unset); defaulting to demo endpoints."
+    )
+    return "https://external-api.demo.kalshi.co/trade-api/v2"
 
 
 def get_kalshi_ws_url() -> str:
@@ -666,7 +692,7 @@ def get_kalshi_ws_url() -> str:
     ws_url = os.getenv(KALSHI_WS_URL_ENV)
 
     if ws_url:
-        if _kalshi_url_hostname_allowed(ws_url):
+        if _kalshi_url_hostname_allowed(ws_url, ws=True):
             # Normalize WS URL
             ws_url = ws_url.rstrip("/")
             if not ws_url.endswith("/trade-api/ws/v2"):
@@ -692,10 +718,18 @@ def get_kalshi_ws_url() -> str:
         ws_url = base_url.replace("http://", "wss://", 1)
     else:
         ws_url = f"wss://{base_url}"
-    
+
+    # Kalshi serves WebSocket on a dedicated host for the external-api.*
+    # endpoints (external-api.kalshi.com -> external-api-ws.kalshi.com,
+    # external-api.demo.kalshi.co -> external-api-ws.demo.kalshi.co).
+    # Other hosts (demo-api, trading-api) serve WS on the same host.
+    ws_url = ws_url.replace(
+        "wss://external-api.", "wss://external-api-ws.", 1
+    )
+
     # Replace /trade-api/v2 with /trade-api/ws/v2
     ws_url = ws_url.replace("/trade-api/v2", "/trade-api/ws/v2")
-    
+
     return ws_url
 
 
@@ -1083,15 +1117,25 @@ def classify_kalshi_environment(base_url: Optional[str] = None) -> str:
         One of: "demo", "live", "elections", "unknown"
     """
     url = base_url or get_kalshi_base_url()
-    
-    if "demo-api" in url:
+
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        if not host and "://" not in url:
+            # Bare hostname without scheme parses as path; re-parse with one.
+            host = (urlparse(f"https://{url}").hostname or "").lower()
+    except Exception:
+        host = ""
+
+    if host in ("demo-api.kalshi.co", "external-api.demo.kalshi.co"):
         return "demo"
-    elif "trading-api.kalshi.com" in url:
+    if host in (
+        "external-api.kalshi.com",
+        "api.kalshi.com",
+        "trading-api.kalshi.com",
+    ):
         return "live"
-    elif "api.elections" in url:
+    if host.startswith("api.elections") or "api.elections" in host:
         return "elections"
-    elif "api.kalshi.com" in url:
-        return "live"
     return "unknown"
 
 

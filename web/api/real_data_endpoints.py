@@ -1260,6 +1260,7 @@ async def get_logs_real() -> List[Dict[str, Any]]:
 
         # Get price feed status
         try:
+            from data.live_price_feed import get_live_price_feed
             feed = get_live_price_feed()
             latest = feed.get_latest_prices()
             if latest:
@@ -1407,6 +1408,7 @@ async def get_blockchain_health_real() -> Dict[str, Any]:
     providers = []
 
     try:
+        from data.live_price_feed import get_live_price_feed
         feed = get_live_price_feed()
         for exchange in feed.exchanges:
             name = getattr(exchange, "name", str(exchange))

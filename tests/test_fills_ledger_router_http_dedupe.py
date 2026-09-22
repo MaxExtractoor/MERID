@@ -139,7 +139,7 @@ async def test_http_counterparty_buy_no_promotes_router_buy_no(ledger):
         yes_price_dollars="0.40",
         no_price_dollars="0.60",
     )
-    ledger.on_fill(router_fill)
+    ledger.on_fill(router_fill, canonicalization_state="TRUSTED_LIVE_V1")
 
     assert len(ledger._fills) == 1
     key = "KXBTC15M-TEST:no"
@@ -191,7 +191,7 @@ async def test_http_counterparty_buy_yes_promotes_router_buy_no(ledger):
         yes_delta=-100,
         leg_price_cents=52,
     )
-    ledger.on_fill(router_fill)
+    ledger.on_fill(router_fill, canonicalization_state="TRUSTED_LIVE_V1")
 
     assert len(ledger._fills) == 1
     assert len(ledger._open_positions) == 1

@@ -40,7 +40,7 @@ class TestFillsLedgerValidation:
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill)
+        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -62,7 +62,7 @@ class TestFillsLedgerValidation:
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill)
+        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -83,7 +83,7 @@ class TestFillsLedgerValidation:
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill)
+        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -104,7 +104,7 @@ class TestFillsLedgerValidation:
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill)
+        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -125,7 +125,7 @@ class TestFillsLedgerValidation:
         
         # Should accept and record
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill)
+        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
         
         # Should be recorded
         assert len(ledger._processed_fill_ids) == initial_count + 1

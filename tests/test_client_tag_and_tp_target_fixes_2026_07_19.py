@@ -166,7 +166,7 @@ def test_tp_target_registration_flow():
         count=1,
         source="test",
         client_tag="test_client_tag",
-        take_profit_price_cents=55,
+        take_profit_price_cents=60,
         take_profit_r_multiple=1.0,
         stop_loss_price_cents=45
     )
@@ -190,7 +190,7 @@ def test_tp_target_registration_flow():
         "TP targets should be stored in _pending_tp_targets"
     
     tp_targets = cache._pending_tp_targets[intent.client_tag]
-    assert tp_targets["tp_price"] == 55, "TP price should be 55"
+    assert tp_targets["tp_price"] == 60, "TP price should be 60"
     assert tp_targets["tp_r"] == 1.0, "TP R-multiple should be 1.0"
     assert tp_targets["sl_price"] == 45, "SL price should be 45"
     
@@ -204,14 +204,15 @@ def test_tp_target_registration_flow():
         side="yes",
         client_order_id=intent.client_tag,
         fill_id="test_fill_id",
-        action="buy"
+        action="buy",
+        canonicalization_state="TRUSTED_LIVE_V1"
     ))
     
     # Verify position was created with TP targets
     position = cache.get_position("KXBTC15M-TEST")
     assert position is not None, "Position should be created"
-    assert position.take_profit_price_cents == 55, \
-        f"Position should have TP price 55, got {position.take_profit_price_cents}"
+    assert position.take_profit_price_cents == 60, \
+        f"Position should have TP price 60, got {position.take_profit_price_cents}"
     assert position.take_profit_r_multiple == 1.0, \
         f"Position should have TP R-multiple 1.0, got {position.take_profit_r_multiple}"
     assert position.stop_loss_price_cents == 45, \

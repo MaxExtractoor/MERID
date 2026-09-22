@@ -1,7 +1,7 @@
 """
 Test for fills_ledger to PositionMonitor integration fix.
 
-This test verifies that fills_ledger.on_fill() now adds positions to PositionMonitor,
+This test verifies that fills_ledger.on_fill(, canonicalization_state="TRUSTED_LIVE_V1") now adds positions to PositionMonitor,
 ensuring exit policies execute on every trade regardless of which component tracks the position.
 """
 

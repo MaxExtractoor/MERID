@@ -39,7 +39,8 @@ class TestDuplicateFillScenarios:
             fee_cents=1,
             side="yes",
             fill_id="fill_dup_1",
-            client_order_id="order_123"
+            client_order_id="order_123",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         position = cache.get_position("KXBTC15M-26JUL211745-45")
@@ -53,7 +54,8 @@ class TestDuplicateFillScenarios:
             fee_cents=1,
             side="yes",
             fill_id="fill_dup_1",
-            client_order_id="order_123"
+            client_order_id="order_123",
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Position should still be 10 (not 20)

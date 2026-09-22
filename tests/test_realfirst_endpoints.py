@@ -122,19 +122,21 @@ class TestDataFreshnessRealFirst:
             assert "thresholdMs" in f
             assert "status" in f
 
-    def test_empty_cache_returns_stub(self, missing_endpoints_client):
-        """When price_cache is empty, _stub should be present."""
+    def test_empty_cache_returns_kalshi_freshness(self, missing_endpoints_client):
+        """Empty crypto cache in KALSHI_ONLY mode returns Kalshi feed freshness (real, not stub)."""
         feed = _mock_price_feed(prices={}, fetches={})
 
         with patch.dict("sys.modules", {"data.live_price_feed": MagicMock(get_live_price_feed=MagicMock(return_value=feed))}):
             resp = missing_endpoints_client.get("/api/v1/data/freshness")
 
+        assert resp.status_code == 200
         data = resp.json()
-        assert data.get("_stub") is True
+        assert data.get("_stub") is not True
         assert "feeds" in data
+        assert "overall_status" in data
 
-    def test_import_failure_returns_stub(self, missing_endpoints_client):
-        """When the price feed module can't be imported, stub fallback fires."""
+    def test_import_failure_returns_kalshi_freshness(self, missing_endpoints_client):
+        """Price feed import failure in KALSHI_ONLY mode still returns Kalshi freshness."""
         broken = MagicMock()
         broken.get_live_price_feed.side_effect = ImportError("no ccxt")
 
@@ -142,7 +144,10 @@ class TestDataFreshnessRealFirst:
             resp = missing_endpoints_client.get("/api/v1/data/freshness")
 
         assert resp.status_code == 200
-        assert resp.json().get("_stub") is True
+        data = resp.json()
+        assert data.get("_stub") is not True
+        assert "feeds" in data
+        assert "overall_status" in data
 
 
 # ---------------------------------------------------------------------------
@@ -210,95 +215,9 @@ class TestAnalyticsOverviewRealFirst:
         assert resp.json().get("_stub") is True
 
 
-# ---------------------------------------------------------------------------
-# /api/v1/system/health
-# ---------------------------------------------------------------------------
-
-def _mock_all_probes_online():
-    """Patch all 4 lazy imports so _probe_service succeeds for each."""
-    pf = MagicMock()
-    pf.get_all_prices.return_value = {}
-
-    pt_mod = MagicMock()
-    pt_mod.get_paper_engine = MagicMock(return_value=MagicMock())
-
-    risk_mod = MagicMock()
-    risk_mod.GlobalRiskManager = MagicMock(return_value=MagicMock())
-
-    agent_reg = MagicMock()
-    agent_reg.get_agent_registry = MagicMock(return_value=MagicMock(get_statistics=MagicMock(return_value={})))
-
-    return {
-        "data.live_price_feed": MagicMock(get_live_price_feed=MagicMock(return_value=pf)),
-        "trading.paper_trading": pt_mod,
-        "merid.pipeline.risk_manager": risk_mod,
-        "agents.agent_framework": agent_reg,
-    }
-
-
-class TestSystemHealthRealFirst:
-    """``/api/v1/system/health`` with real service probes."""
-
-    def test_all_probes_online(self, missing_endpoints_client):
-        """When all services respond, returns array with online statuses."""
-        with patch.dict("sys.modules", _mock_all_probes_online()):
-            resp = missing_endpoints_client.get("/api/v1/system/health")
-
-        assert resp.status_code == 200
-        data = resp.json()
-        # Returns a list, not wrapped in _stub
-        assert isinstance(data, list)
-        names = {c["component"] for c in data}
-        assert "API Server" in names
-        assert "Price Feed" in names
-        assert "Trading Engine" in names
-        assert "Risk Engine" in names
-        assert "Agent Swarm" in names
-        assert "Notification Store" in names
-        for c in data:
-            assert "status" in c
-            assert "latency" in c
-
-    def test_some_probes_fail_still_returns_array(self, missing_endpoints_client):
-        """When some probes fail, those components show offline and a notification is emitted."""
-        mods = _mock_all_probes_online()
-        # Break price feed
-        mods["data.live_price_feed"].get_live_price_feed.side_effect = Exception("down")
-
-        with patch.dict("sys.modules", mods):
-            resp = missing_endpoints_client.get("/api/v1/system/health")
-
-        data = resp.json()
-        assert isinstance(data, list)
-        pf = next(c for c in data if c["component"] == "Price Feed")
-        assert pf["status"] == "offline"
-        # API Server is always online
-        api = next(c for c in data if c["component"] == "API Server")
-        assert api["status"] == "online"
-
-        # Verify that an offline notification was emitted for Price Feed
-        resp = missing_endpoints_client.get("/api/v1/notifications")
-        notifs = resp.json()
-        health_notifs = [n for n in notifs["notifications"] if n["type"] == "health"]
-        assert len(health_notifs) >= 1, "Expected a health notification for offline service"
-        assert "Price Feed" in health_notifs[0]["title"]
-
-    def test_all_imports_fail_still_returns_array(self, missing_endpoints_client):
-        """Even if every probe import fails, endpoint returns valid array."""
-        broken = {
-            "data.live_price_feed": MagicMock(get_live_price_feed=MagicMock(side_effect=ImportError("x"))),
-            "trading.paper_trading": MagicMock(get_paper_engine=MagicMock(side_effect=ImportError("x"))),
-            "merid.pipeline.risk_manager": MagicMock(GlobalRiskManager=MagicMock(side_effect=ImportError("x"))),
-            "agents.agent_framework": MagicMock(get_agent_registry=MagicMock(side_effect=ImportError("x"))),
-        }
-
-        with patch.dict("sys.modules", broken):
-            resp = missing_endpoints_client.get("/api/v1/system/health")
-
-        data = resp.json()
-        assert isinstance(data, list)
-        assert len(data) >= 2  # At least API Server + WebSocket Server
-
+# NOTE: /api/v1/system/health component-probe endpoint was removed with the
+# legacy paper-trading/agent-framework stack. Production health surface is
+# /api/v1/dashboard/system/health (dashboard_data.py) and operator endpoints.
 
 # ---------------------------------------------------------------------------
 # /api/v1/risk-metrics/agents
@@ -369,68 +288,72 @@ class TestRiskMetricsAgentsRealFirst:
 # ---------------------------------------------------------------------------
 # /api/v1/blockchain/health
 # ---------------------------------------------------------------------------
+# The endpoint lives on web.api.real_data_endpoints (mounted in the lean app)
+# and derives "providers" from the live price feed's exchanges — the legacy
+# merid.blockchain.gateway RPC-provider contract was removed in the Kalshi-only
+# pivot. The new contract never emits ``_stub``; feed failure yields explicit
+# offline providers with overall_status="degraded".
 
-def _mock_provider(name, chain, status_value="healthy", latency=50.0):
-    """Build a mock RPCProvider."""
-    p = MagicMock()
-    p.name = name
-    p.chain = chain
-    p.status = MagicMock(value=status_value)
-    p.latency_ms = latency
-    return p
+@pytest.fixture
+def real_data_client():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from web.api.real_data_endpoints import router as real_router
+    app = FastAPI()
+    app.include_router(real_router)
+    return TestClient(app)
+
+
+def _mock_exchange(name, with_id=True):
+    """Build an exchange object the endpoint probes (healthy iff it has .id)."""
+    attrs = {"name": name}
+    if with_id:
+        attrs["id"] = name
+    return type("Exchange", (), attrs)()
 
 
 class TestBlockchainHealthRealFirst:
-    """``/api/v1/blockchain/health`` with real BlockchainGateway."""
+    """``/api/v1/blockchain/health`` — providers derived from the price feed."""
 
-    def test_real_providers_returns_no_stub(self, missing_endpoints_client):
-        """When gateway has providers, _stub should be absent."""
-        providers = [
-            _mock_provider("helius-sol", "solana", "healthy", 80),
-            _mock_provider("infura-eth", "ethereum", "healthy", 120),
-        ]
-        gw = MagicMock()
-        gw.list_providers.return_value = providers
-        mod = MagicMock()
-        mod.get_blockchain_gateway = MagicMock(return_value=gw)
+    def test_real_providers_returns_no_stub(self, real_data_client):
+        """When the feed has exchanges, providers are reported healthy."""
+        feed = MagicMock()
+        feed.exchanges = [_mock_exchange("kraken"), _mock_exchange("coinbase")]
 
-        with patch.dict("sys.modules", {"merid.blockchain.gateway": mod}):
-            resp = missing_endpoints_client.get("/api/v1/blockchain/health")
+        with patch.dict("sys.modules", {"data.live_price_feed": MagicMock(get_live_price_feed=MagicMock(return_value=feed))}):
+            resp = real_data_client.get("/api/v1/blockchain/health")
 
         assert resp.status_code == 200
         data = resp.json()
         assert "_stub" not in data
         assert data["overall_status"] == "healthy"
         assert len(data["providers"]) == 2
-        chains = {p["chain"] for p in data["providers"]}
-        assert "solana" in chains
-        assert "ethereum" in chains
+        names = {p["name"] for p in data["providers"]}
+        assert "kraken" in names
+        assert "coinbase" in names
 
-    def test_degraded_provider(self, missing_endpoints_client):
-        """When a provider is degraded, overall_status should reflect it."""
-        providers = [
-            _mock_provider("helius-sol", "solana", "healthy", 80),
-            _mock_provider("infura-eth", "ethereum", "degraded", 500),
-        ]
-        gw = MagicMock()
-        gw.list_providers.return_value = providers
-        mod = MagicMock()
-        mod.get_blockchain_gateway = MagicMock(return_value=gw)
+    def test_degraded_provider(self, real_data_client):
+        """An exchange without an id surfaces as a degraded provider."""
+        feed = MagicMock()
+        feed.exchanges = [_mock_exchange("kraken"), _mock_exchange("gemini", with_id=False)]
 
-        with patch.dict("sys.modules", {"merid.blockchain.gateway": mod}):
-            resp = missing_endpoints_client.get("/api/v1/blockchain/health")
+        with patch.dict("sys.modules", {"data.live_price_feed": MagicMock(get_live_price_feed=MagicMock(return_value=feed))}):
+            resp = real_data_client.get("/api/v1/blockchain/health")
 
         data = resp.json()
         assert "_stub" not in data
         assert data["overall_status"] == "degraded"
 
-    def test_import_failure_returns_stub(self, missing_endpoints_client):
-        """When gateway module can't be imported, stub fallback fires."""
+    def test_import_failure_returns_offline_providers(self, real_data_client):
+        """When the feed can't be imported, providers report offline."""
         broken = MagicMock()
-        broken.get_blockchain_gateway.side_effect = ImportError("no module")
+        broken.get_live_price_feed.side_effect = ImportError("no module")
 
-        with patch.dict("sys.modules", {"merid.blockchain.gateway": broken}):
-            resp = missing_endpoints_client.get("/api/v1/blockchain/health")
+        with patch.dict("sys.modules", {"data.live_price_feed": broken}):
+            resp = real_data_client.get("/api/v1/blockchain/health")
 
         assert resp.status_code == 200
-        assert resp.json().get("_stub") is True
+        data = resp.json()
+        assert "_stub" not in data
+        assert data["overall_status"] == "degraded"
+        assert all(p["status"] == "offline" for p in data["providers"])

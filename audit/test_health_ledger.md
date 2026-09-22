@@ -427,3 +427,51 @@ Applied via audit/apply_deletions2.py (second-order obsolete deletion).
   durable files every ~30s. Guard is only meaningful while no live
   process is running; 24 hung zombie pytest processes (2:57–4:20 AM
   leftovers) were also killed. Operator stopped the server for the audit.
+
+## URL invariant + risk-check repairs (2026-09-22, fourth batch)
+
+Production fixes (merid/event_venues/kalshi/invariants.py):
+
+- `get_kalshi_base_url` now honors `MERID_KALSHI_ENV` (the canonical var —
+  `get_kalshi_env()` already did; the URL helper ignored it), maps
+  `live|prod|elections` to prod, `demo` to demo, unknown values to demo.
+- **Fail-open closed:** a completely unconfigured deployment (no
+  MERID_KALSHI_ENV / KALSHI_ENV / KALSHI_USE_DEMO) now falls back to demo
+  endpoints instead of silently targeting live.  An *explicit*
+  `KALSHI_USE_DEMO=false` still resolves live (operator intent); the
+  production .env sets it explicitly.
+- Host allowlist repaired: `external-api.demo.kalshi.co` (Kalshi's
+  documented new demo REST host) and `api.elections.kalshi.com` were
+  missing, so valid `KALSHI_API_BASE_URL` overrides were rejected and fell
+  through to env derivation.
+- `get_kalshi_ws_url` now maps `external-api.*` API hosts to the real
+  `external-api-ws.*` WS hostnames (matches kalshi_config._ENV_CONFIGS);
+  `ALLOWED_KALSHI_WS_HOSTS` added so `KALSHI_WS_URL` overrides to the
+  documented WS hosts validate.
+- `classify_kalshi_environment` now uses exact-hostname matching and
+  recognizes `external-api.demo.kalshi.co` (was "unknown").
+
+Test repairs (tests/test_kalshi_pipeline_invariants.py, 22 -> 0 failures):
+
+- `external-exakalshi.com` fictional host -> real `api.elections.kalshi.com`.
+- WS expectations updated to the real external-api -> external-api-ws
+  host mapping (two stale assertions contradicted kalshi_config).
+- `test_base_url_validation_raises_in_dev` given clear=True — ambient
+  `MERID_KALSHI_ENV=prod` from repo .env leaked into the patch.
+- `test_all_timeframes_defined` updated to the deliberate 15m-only
+  timeframe contract.
+
+Test repairs (tests/test_prediction_audit_regressions.py, 10 -> 0 failures):
+
+- BUG-02/BUG-10: `check_order` now fail-closes without live bankroll
+  (`BANKROLL_UNAVAILABLE`) and requires `agent_max_notional_usd`; tests
+  patched to supply both so the intended paths are exercised.  BUG-10
+  edge raised 0.05 -> 0.15 — the corrected full fee/execution-cost model
+  (per AGENTS.md) genuinely rejects 5% edge at 95c NO; 0.15 still
+  discriminates the payout-denominator fix (old formula rejects any edge).
+- BUG-L2: tests asserted the pre-fix ordering (running flag set at end).
+  Code deliberately sets it early under the start lock
+  ("prevent double-start"); tests rewritten to assert the safe invariant.
+- TestBUGL4 deleted (consensus module deleted; bodies were commented out).
+- TestBUGL7 deleted (source-grep on the replaced web/main.py shutdown;
+  main_15m_lean has a sequential per-service shutdown with no stop_all).

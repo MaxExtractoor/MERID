@@ -8,6 +8,8 @@ This maps production health to the scenario categories tested in
 tests/15m_scenario_tests/.
 """
 
+import os
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
@@ -130,7 +132,7 @@ async def get_health_snapshot(request: Request):
         try:
             from pathlib import Path
             from datetime import datetime, timezone
-            diag_path = Path(__file__).parent / "health_diagnostic.txt"
+            diag_path = Path(os.getenv("MERID_HEALTH_DIAGNOSTIC_PATH") or (Path(__file__).parent / "health_diagnostic.txt"))
             with open(diag_path, "a") as f:
                 f.write(f"[{datetime.now(timezone.utc)}] [HEALTH-SNAPSHOT-API] Component availability: ws_bridge={ws_bridge is not None}, spot_service={spot_service is not None}, market_state_store={market_state_store is not None}, bankroll={bankroll is not None}\n")
                 f.flush()

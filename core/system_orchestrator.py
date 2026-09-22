@@ -39,7 +39,10 @@ from core.intersystem_api import (
     ExecutionMode,
 )
 from core.streaming_bus import get_event_bus, EventChannel, StreamEvent
-from core.consensus_engine import get_consensus_engine
+try:
+    from core.consensus_engine import get_consensus_engine
+except ImportError:
+    get_consensus_engine = None
 from utils.logger import get_logger
 
 logger = get_logger("core.system_orchestrator")
@@ -124,7 +127,7 @@ class SystemOrchestrator:
         self._state = OrchestratorState.INITIALIZING
         self._api = get_intersystem_api()
         self._bus = get_event_bus()
-        self._consensus = get_consensus_engine()
+        self._consensus = get_consensus_engine() if get_consensus_engine is not None else None
         
         # System health tracking
         self._system_health: Dict[MeridSystem, SystemHealth] = {}
@@ -172,7 +175,8 @@ class SystemOrchestrator:
         self._tasks.append(asyncio.create_task(self._intent_expiry_loop()))
         
         # Start consensus engine
-        await self._consensus.start()
+        if self._consensus is not None:
+            await self._consensus.start()
         
         self._state = OrchestratorState.RUNNING
         logger.info("MERID system orchestrator started")
@@ -192,7 +196,8 @@ class SystemOrchestrator:
                 pass
         
         # Stop consensus engine
-        await self._consensus.stop()
+        if self._consensus is not None:
+            await self._consensus.stop()
         
         # Unsubscribe from channels
         await self._bus.unsubscribe("orchestrator")

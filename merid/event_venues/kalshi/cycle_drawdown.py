@@ -260,6 +260,15 @@ class CycleDrawdownManager:
             if state.cycle_status == CycleStatus.RESET_PENDING:
                 self._initialize_cycle(equity_usd, "reset_pending_handled")
                 return self._state.cycle_status
+
+            # A cycle initialized before equity was known (start=0, e.g.
+            # bankroll not yet loaded at startup) has no real baseline.
+            # Anchor it on the first positive equity observation rather than
+            # treating the entire balance as cycle profit (which would
+            # spuriously trigger RESET_PENDING and deny the first order).
+            if state.cycle_start_equity_usd <= 0 and equity_usd > 0:
+                self._initialize_cycle(equity_usd, "first_equity_observation")
+                return self._state.cycle_status
             
             # 2. Update peak equity if we've made new highs
             # Only update peak for positive equity values

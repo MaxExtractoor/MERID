@@ -41,7 +41,6 @@ def _ensure_imports():
     })
     
     # Heavy modules (graph/orchestration) - import on demand
-    from core.consensus_graph import ConsensusEngine, get_consensus_engine
     from core.agent_orchestrator import AgentOrchestrator, get_agent_orchestrator
     from core.intersystem_api import (
         InterSystemAPI, get_intersystem_api, Intent, IntentStatus,
@@ -55,8 +54,6 @@ def _ensure_imports():
     )
     
     _exports.update({
-        "ConsensusEngine": ConsensusEngine,
-        "get_consensus_engine": get_consensus_engine,
         "AgentOrchestrator": AgentOrchestrator,
         "get_agent_orchestrator": get_agent_orchestrator,
         "InterSystemAPI": InterSystemAPI,
@@ -104,9 +101,6 @@ __all__ = [
     "EventEnvelope",
     "EventType",
     "create_audit_event",
-    # Consensus
-    "ConsensusEngine",
-    "get_consensus_engine",
     # Agent Orchestration
     "AgentOrchestrator",
     "get_agent_orchestrator",

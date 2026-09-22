@@ -2333,8 +2333,11 @@ class KalshiPositionCache:
 
             if is_exit is None:
                 from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
-                source = fill_source or client_order_id or ""
-                if is_exit_order_from_source(source):
+                # fill_source is the alpha/hedge namespace; exit markers live in
+                # client_order_id (e.g. "position_monitor_exit_*"). Check both so an
+                # "alpha" fill_source cannot shadow an exit-marker client_order_id.
+                source = client_order_id or fill_source or ""
+                if is_exit_order_from_source(source) or is_exit_order_from_source(fill_source):
                     is_exit = True
                 else:
                     existing = self._positions.get(market_id)
@@ -2621,7 +2624,7 @@ class KalshiPositionCache:
                     # CRITICAL FIX (2026-07-21): Send alert to Slack/PagerDuty/SMS for immediate operator awareness
                     try:
                         from utils.alerting import send_alert, AlertSeverity, AlertContext
-                        send_alert(
+                        await send_alert(
                             condition="exit_fill_without_position",
                             severity=AlertSeverity.CRITICAL,
                             message=f"Exit fill without existing position rejected for {market_id}. Upstream intent/position mismatch detected.",
