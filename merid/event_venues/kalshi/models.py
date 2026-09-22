@@ -570,7 +570,11 @@ class KalshiMarketState:
         If ``price_cents`` matches the best ask for that side, the cached best-ask
         size is returned; otherwise the size at the exact price level is looked up.
         """
-        side = (side or "yes").lower()
+        # CRITICAL FIX (2026-09-21): an unrecognized side reports zero executable
+        # size rather than silently answering with the YES-side depth.
+        side = (side or "").lower()
+        if side not in ("yes", "no"):
+            return 0
         if side == "yes":
             best_ask = self.best_ask_cents
             if best_ask is not None and (price_cents is None or price_cents == best_ask):

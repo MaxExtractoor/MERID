@@ -22,6 +22,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import threading
 import json
 import time
@@ -35,7 +36,9 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.archiver")
 
-_ARCHIVE_DIR = Path("data/kalshi_archive")
+_ARCHIVE_DIR = Path(
+    os.environ.get("MERID_KALSHI_ARCHIVE_DIR", "data/kalshi_archive")
+)
 
 
 class SnapshotArchiver:

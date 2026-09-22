@@ -15,6 +15,7 @@ Key safety features:
 
 import asyncio
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -95,7 +96,9 @@ class AutoPromoter:
         self._min_profit_factor = 1.1
         
         # State persistence
-        self._state_file = Path("data/promotion_states.json")
+        self._state_file = Path(
+            os.environ.get("MERID_PROMOTION_STATES_PATH", "data/promotion_states.json")
+        )
         self._state_file.parent.mkdir(parents=True, exist_ok=True)
         
         # BUG-FIX (2026-05-12): Defer state load to avoid blocking startup

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional, Dict, Any
 from uuid import uuid4
 
@@ -117,11 +118,22 @@ class FillsEventSource(KalshiEventSourceAdapter):
                 "fill_id": fill_id,
                 "order_id": fill_data.get("order_id"),
                 "ticker": fill_data.get("market_ticker") or fill_data.get("ticker"),
-                "side": fill_data.get("side"),
-                "action": fill_data.get("action", "buy"),
-                "contracts": int(fill_data.get("count_fp", fill_data.get("size", 0))),
-                "price_cents": int(fill_data.get("price_cents", 0)),
-                "fee_cents": int(float(fill_data.get("fee_cost", fill_data.get("fee", 0))) * 100),
+                # CRITICAL FIX (2026-09-21): prefer the ledger's canonical fields —
+                # raw exchange side/action can be counterparty-form for V2 ask fills
+                # and would mis-state direction.  Missing direction stays empty and
+                # is quarantined downstream; it must never default to buy/yes.
+                "side": fill_data.get("canonical_position_side") or fill_data.get("side"),
+                "action": fill_data.get("canonical_position_action") or fill_data.get("action") or "",
+                "canonical_yes_delta_cc": fill_data.get("canonical_yes_delta_cc"),
+                "yes_price_cents": fill_data.get("yes_price_cents"),
+                "no_price_cents": fill_data.get("no_price_cents"),
+                # count_fp arrives as a fixed-point string ("5.00"); route
+                # through Decimal — int("5.00") raises and float() is inexact.
+                "contracts": int(Decimal(str(fill_data.get("count_fp", fill_data.get("size", 0))))),
+                "price_cents": Decimal(str(fill_data.get("price_cents", 0))),
+                # Kalshi fees quantize to $0.0001 (0.01c); keep sub-cent cents
+                # as Decimal rather than truncating via int(float()*100).
+                "fee_cents": Decimal(str(fill_data.get("fee_cost", fill_data.get("fee", 0)))) * 100,
                 "agent_id": fill_data.get("agent_id"),
                 "ingestion_source": fill_data.get("ingestion_source", "unknown"),
             },
@@ -159,7 +171,7 @@ class OrdersEventSource(KalshiEventSourceAdapter):
                 "order_id": order_id,
                 "ticker": order_data.get("ticker"),
                 "side": order_data.get("side"),
-                "action": order_data.get("action", "buy"),
+                "action": order_data.get("action"),
                 "quantity": order_data.get("size", order_data.get("quantity", 0)),
                 "price_cents": int(order_data.get("price", 0) * 100) if order_data.get("price") else 0,
                 "client_order_id": order_data.get("client_order_id"),

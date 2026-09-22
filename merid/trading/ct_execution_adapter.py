@@ -86,10 +86,16 @@ class CTExecutionAdapter:
         from merid.event_venues.kalshi.order_router import OrderIntent
         from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
 
-        # Extract fields from CT order_data
+        # Extract fields from CT order_data.  Never fabricate direction:
+        # a missing side/action must be rejected, not defaulted to buy-yes.
         ticker = order_data.get("ticker", "")
-        side_raw = order_data.get("side", "yes")
-        action = order_data.get("action", "buy")
+        side_raw = order_data.get("side")
+        action = order_data.get("action")
+        if str(side_raw or "").lower() not in ("yes", "no") or \
+                str(action or "").lower() not in ("buy", "sell"):
+            raise ValueError(
+                f"CT order missing/invalid direction: side={side_raw!r} action={action!r}"
+            )
         count = int(order_data.get("count", 1))
         price_cents = int(order_data.get("yes_price", order_data.get("no_price", 50)))
         client_order_id = order_data.get("client_order_id")
@@ -306,7 +312,19 @@ class CTExecutionAdapter:
         from merid.event_venues.kalshi.order_router import OrderResult
 
         ticker = order_data.get("ticker", "")
-        
+
+        # Never fabricate direction: validate before any tracking so a
+        # rejected order cannot leave a stale pending entry blocking the ticker.
+        side = str(order_data.get("side") or "").lower()
+        action = str(order_data.get("action") or "").lower()
+        if side not in ("yes", "no") or action not in ("buy", "sell"):
+            return OrderResult(
+                status="rejected",
+                mode=TradingMode.LIVE,
+                reason=f"invalid_direction:side={order_data.get('side')!r},action={order_data.get('action')!r}",
+                latency_ms=0.0,
+            )
+
         # BUG-3 FIX: Check for pending orders on the same ticker
         # to prevent race conditions and duplicate submissions
         with self._pending_lock:
@@ -325,15 +343,13 @@ class CTExecutionAdapter:
                 )
             # Track this order as pending
             self._pending_orders[ticker] = {
-                "action": order_data.get("action", "buy"),
-                "side": order_data.get("side", "yes"),
+                "action": action,
+                "side": side,
                 "count": int(order_data.get("count", 1)),
                 "submitted_at": time.time(),
             }
-        
+
         try:
-            side = order_data.get("side", "yes")
-            action = order_data.get("action", "buy")
             count = int(order_data.get("count", 1))
             price_cents = int(order_data.get("yes_price", order_data.get("no_price", 50)))
 

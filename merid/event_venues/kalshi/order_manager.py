@@ -295,7 +295,7 @@ class OrderManager:
             client_order_id=getattr(order, "client_order_id", "") or "",
             ticker=placed.market_id,
             side=placed.side,
-            outcome=getattr(order, "outcome_id", "yes") or "yes",
+            outcome=getattr(order, "outcome_id", "") or "",
             requested_size=int(placed.size),
             price_cents=int(placed.price * 100) if placed.price else 0,
             status=placed.status,

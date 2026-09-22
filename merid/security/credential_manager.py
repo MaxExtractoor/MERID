@@ -210,8 +210,10 @@ def store_kalshi_credentials(api_key_id: str, private_key_path: str,
         storage_path: Path to store encrypted credentials (default: data/credentials/kalshi.json)
     """
     if storage_path is None:
-        storage_path = Path("data/credentials/kalshi.json")
-    
+        storage_path = Path(
+            os.environ.get("MERID_CREDENTIALS_PATH", "data/credentials/kalshi.json")
+        )
+
     # Read private key
     with open(private_key_path, 'r') as f:
         private_key = f.read()
@@ -236,7 +238,9 @@ def load_kalshi_credentials(storage_path: Optional[Path] = None) -> Dict[str, st
         Dict with 'api_key_id' and 'private_key'
     """
     if storage_path is None:
-        storage_path = Path("data/credentials/kalshi.json")
-    
+        storage_path = Path(
+            os.environ.get("MERID_CREDENTIALS_PATH", "data/credentials/kalshi.json")
+        )
+
     manager = get_kalshi_credential_manager()
     return manager.load_credential("kalshi", storage_path)

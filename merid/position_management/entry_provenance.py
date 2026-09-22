@@ -12,6 +12,7 @@ TP/SL/edge-decay parameters for an unresolved position.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -204,7 +205,11 @@ class EntryProvenanceStore:
         if self._initialized:
             return
         self._initialized = True
-        self._path = path or Path("data") / "entry_provenance_snapshots.json"
+        self._path = path or Path(
+            os.environ.get(
+                "MERID_ENTRY_PROVENANCE_PATH", "data/entry_provenance_snapshots.json"
+            )
+        )
         self._snapshots: Dict[str, EntryProvenanceSnapshot] = {}
         self._by_ticker: Dict[str, List[EntryProvenanceSnapshot]] = {}
         self._by_order_id: Dict[str, EntryProvenanceSnapshot] = {}

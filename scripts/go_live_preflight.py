@@ -27,7 +27,10 @@ from typing import List, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Force UTF-8 output on Windows to avoid cp1252 UnicodeEncodeError
-if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+# Skip under pytest: replacing sys.stdout discards pytest's capture wrapper,
+# and its GC closes the shared capture tempfile, breaking capture for every
+# subsequent test in the worker.
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer") and "pytest" not in sys.modules:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 PASS = "[PASS]"

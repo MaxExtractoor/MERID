@@ -469,9 +469,12 @@ def _derive_proceeds_dollars(
     """
     fee_dollars = Decimal(fee_cents) / Decimal("100")
     gross_dollars = Decimal(quantity_cc * adjusted_price_cents) / Decimal("10000")
-    if (action or "buy").lower() == "buy":
+    action_norm = (action or "").lower()
+    if action_norm == "buy":
         return -gross_dollars - fee_dollars
-    return gross_dollars - fee_dollars
+    if action_norm == "sell":
+        return gross_dollars - fee_dollars
+    raise ValueError(f"cannot derive proceeds for undetermined action={action!r}")
 
 
 @dataclass
@@ -613,46 +616,57 @@ class CachedPosition:
         # Position.__post_init__ or _to_position re-derive a fee-aware target.
         _entry_basis = self.entry_fill_price_cents or self.avg_price_cents
         if _entry_basis and 0 < _entry_basis < 100 and self.quantity_cc and self.quantity_cc > 0:
-            _outcome_side = self.outcome_side or self.thesis_side or self.side or "yes"
-            _size = Decimal(self.quantity_cc) / Decimal("100")
-            try:
-                _validation = validate_exit_policy_targets(
-                    entry_price_cents=int(_entry_basis),
-                    take_profit_price_cents=self.take_profit_price_cents,
-                    stop_loss_price_cents=self.stop_loss_price_cents,
-                    side=_outcome_side,
-                    size=_size,
-                )
-                if not _validation.valid:
-                    if self.take_profit_price_cents != _validation.take_profit_price_cents:
-                        logger.warning(
-                            "[CACHED-POSITION-TP-VALIDATE] market=%s side=%s entry=%dc "
-                            "invalid_tp=%s reasons=%s - clearing",
-                            self.market_id,
-                            _outcome_side,
-                            int(_entry_basis),
-                            self.take_profit_price_cents,
-                            _validation.reason,
-                        )
-                        self.take_profit_price_cents = _validation.take_profit_price_cents
-                        self.take_profit_r_multiple = None
-                    if self.stop_loss_price_cents != _validation.stop_loss_price_cents:
-                        logger.warning(
-                            "[CACHED-POSITION-SL-VALIDATE] market=%s side=%s entry=%dc "
-                            "invalid_sl=%s reasons=%s - clearing",
-                            self.market_id,
-                            _outcome_side,
-                            int(_entry_basis),
-                            self.stop_loss_price_cents,
-                            _validation.reason,
-                        )
-                        self.stop_loss_price_cents = _validation.stop_loss_price_cents
-            except Exception as _validate_err:
+            # CRITICAL FIX (2026-09-21): missing side must skip TP/SL validation —
+            # validating NO-side targets under a fabricated "yes" coordinate
+            # clears valid targets and keeps invalid ones.
+            _outcome_side = self.outcome_side or self.thesis_side or self.side or ""
+            if _outcome_side not in ("yes", "no"):
                 logger.warning(
-                    "[CACHED-POSITION-VALIDATE] TP/SL validation failed for market=%s: %s",
+                    "[CACHED-POSITION-SIDE-UNKNOWN] market=%s has no determinable side; "
+                    "skipping TP/SL validation (not defaulting to YES)",
                     self.market_id,
-                    _validate_err,
                 )
+                _outcome_side = None
+            _size = Decimal(self.quantity_cc) / Decimal("100")
+            if _outcome_side is not None:
+                try:
+                    _validation = validate_exit_policy_targets(
+                        entry_price_cents=int(_entry_basis),
+                        take_profit_price_cents=self.take_profit_price_cents,
+                        stop_loss_price_cents=self.stop_loss_price_cents,
+                        side=_outcome_side,
+                        size=_size,
+                    )
+                    if not _validation.valid:
+                        if self.take_profit_price_cents != _validation.take_profit_price_cents:
+                            logger.warning(
+                                "[CACHED-POSITION-TP-VALIDATE] market=%s side=%s entry=%dc "
+                                "invalid_tp=%s reasons=%s - clearing",
+                                self.market_id,
+                                _outcome_side,
+                                int(_entry_basis),
+                                self.take_profit_price_cents,
+                                _validation.reason,
+                            )
+                            self.take_profit_price_cents = _validation.take_profit_price_cents
+                            self.take_profit_r_multiple = None
+                        if self.stop_loss_price_cents != _validation.stop_loss_price_cents:
+                            logger.warning(
+                                "[CACHED-POSITION-SL-VALIDATE] market=%s side=%s entry=%dc "
+                                "invalid_sl=%s reasons=%s - clearing",
+                                self.market_id,
+                                _outcome_side,
+                                int(_entry_basis),
+                                self.stop_loss_price_cents,
+                                _validation.reason,
+                            )
+                            self.stop_loss_price_cents = _validation.stop_loss_price_cents
+                except Exception as _validate_err:
+                    logger.warning(
+                        "[CACHED-POSITION-VALIDATE] TP/SL validation failed for market=%s: %s",
+                        self.market_id,
+                        _validate_err,
+                    )
 
     @property
     def notional_usd(self) -> Decimal:
@@ -694,7 +708,7 @@ class CachedPosition:
         price_cents: int,
         fee_cents: int,
         side: str,
-        action: str = "buy",
+        action: str = "",
         expected_post_size: Optional[int] = None,
         is_exit: Optional[bool] = None,
         quantity_cc: Optional[int] = None,
@@ -721,8 +735,21 @@ class CachedPosition:
         from utils.logger import get_logger
         logger = get_logger("merid.position_cache")
 
-        action = (action or "buy").lower()
-        side = (side or "yes").lower()
+        action = (action or "").lower()
+        side = (side or "").lower()
+
+        # CRITICAL FIX (2026-09-21): missing direction must fail closed.  The old
+        # ``or "yes"`` / ``or "buy"`` defaults silently fabricated a BUY_YES fill,
+        # writing the wrong signed YES delta into inventory.  A fill whose
+        # canonical direction cannot be determined is quarantined (no mutation);
+        # the ledger still records it and reconciliation will flag the divergence.
+        if side not in ("yes", "no") or action not in ("buy", "sell"):
+            logger.critical(
+                "[POSITION-CACHE-FILL-QUARANTINED] market=%s side=%r action=%r "
+                "contracts=%s - refusing to apply fill with undetermined direction",
+                self.market_id, side, action, contracts,
+            )
+            return
         price_cents = int(price_cents)
 
         # CRITICAL (2026-08-09): Removed the 2026-08-07 direction policy guards.
@@ -1089,7 +1116,9 @@ class KalshiPositionCache:
         self._applied_fill_ids_max = 10000  # Max fill_ids to track (fills are unique and don't expire)
         # 2026-08-23: Persist applied fill ids so a process restart does not re-apply
         # durable fills and double-count exposure / PnL.
-        self._applied_fill_ids_path = Path("data") / "kalshi_applied_fill_ids.json"
+        self._applied_fill_ids_path = Path(
+            os.environ.get("MERID_APPLIED_FILL_IDS_PATH", "data/kalshi_applied_fill_ids.json")
+        )
         self._load_applied_fill_ids()
 
         # CRITICAL 2026-08-09: Fail-closed reconciliation gating. If exchange/ledger/cache
@@ -1139,7 +1168,9 @@ class KalshiPositionCache:
         # provenance survives a process restart.  Without this, rest_sync positions
         # rebuilt from the fills_ledger cannot recover AT_FILL spread-stop invariants
         # and model-invalidation exits are blocked.
-        self._pending_tp_targets_path = Path("data") / "kalshi_pending_tp_targets.json"
+        self._pending_tp_targets_path = Path(
+            os.environ.get("MERID_PENDING_TP_TARGETS_PATH", "data/kalshi_pending_tp_targets.json")
+        )
         self._load_pending_tp_targets()
         # 2026-08-25: Watermark for this process instance. Fills whose ledger
         # record was created before this cache started are durable state from a
@@ -1149,7 +1180,9 @@ class KalshiPositionCache:
         # PRODUCTION FIX: Map Kalshi order_id -> client_tag for fill-to-intent linkage
         # This is needed because HTTP fills don't include client_order_id from Kalshi API
         self._order_id_to_client_tag: Dict[str, str] = {}
-        self._order_id_to_client_tag_path = Path("data") / "kalshi_order_id_to_client_tag.json"
+        self._order_id_to_client_tag_path = Path(
+            os.environ.get("MERID_ORDER_ID_CLIENT_TAG_PATH", "data/kalshi_order_id_to_client_tag.json")
+        )
         self._load_order_id_to_client_tag()
         # Task 2: Add fills_ledger reference for authoritative fill_source lookup
         # DETOX FIX: Lazy load fills_ledger to prevent import-time initialization cascade
@@ -1453,7 +1486,18 @@ class KalshiPositionCache:
 
             side = cached_position.side
             market_id = cached_position.market_id
-            side_enum = PositionSide.YES if (side or "").lower() == "yes" else PositionSide.NO
+            # Fail closed on undetermined side: registering the position as NO
+            # when the side is unknown would attach TP/SL in the wrong
+            # direction.  The position stays in the cache; the monitor simply
+            # does not track it until a real side exists.
+            if (side or "").lower() not in ("yes", "no"):
+                logger.error(
+                    "[MONITOR-UPSERT-SIDE-UNKNOWN] market=%s side=%r - skipping "
+                    "monitor registration for undetermined position side",
+                    market_id, side,
+                )
+                return
+            side_enum = PositionSide.YES if side.lower() == "yes" else PositionSide.NO
 
             # TP/SL target resolution: client_order_id, then fill_id, then cached fields.
             tp_targets = {}
@@ -2067,7 +2111,7 @@ class KalshiPositionCache:
         side: str,
         client_order_id: Optional[str] = None,
         fill_id: Optional[str] = None,
-        action: str = "buy",
+        action: str = "",
         is_exit: Optional[bool] = None,
         quantity_cc: Optional[int] = None,
         canonicalization_state: Optional[str] = None,
@@ -2206,6 +2250,24 @@ class KalshiPositionCache:
                     "only the reported leg price is available; opposite leg is unset",
                     market_id, side, price_cents,
                 )
+
+            # Fail closed when direction cannot be determined even after the
+            # durable fill-record canonicalization attempt above.  Previously a
+            # missing direction fell through to yes_delta(), which raised
+            # ValueError that callers dead-lettered as a transient ingest error —
+            # correct outcome, wrong reason.  Quarantine explicitly so the gap is
+            # audited and reconciled via REST.
+            if (side or "").lower() not in ("yes", "no") or (action or "").lower() not in ("buy", "sell"):
+                self.require_rest_reconciliation(
+                    market_id,
+                    reason=f"undetermined_fill_direction:side={side!r},action={action!r}",
+                )
+                logger.critical(
+                    "[POSITION-CACHE-FILL-QUARANTINED] fill_id=%s market=%s side=%r action=%r "
+                    "contracts=%s - refusing to apply fill with undetermined direction",
+                    fill_id, market_id, side, action, contracts,
+                )
+                return
 
             # Preserve raw order form and pre-fill signed exposure for lifecycle audit.
             raw_side = side
@@ -4164,11 +4226,21 @@ class KalshiPositionCache:
                 continue
             fill_price_cents = fill.price_cents or 0
             # 2026-08-12: Use canonical position action/side for signed-YES replay.
-            fill_action = fill.canonical_position_action or fill.action or "buy"
-            fill_side = fill.canonical_position_side or fill.side or "yes"
+            # CRITICAL FIX (2026-09-21): no "buy"/"yes" defaults — a fill with no
+            # determinable direction must be skipped (zero signed delta) rather
+            # than fabricate a BUY_YES contribution to rebuilt inventory.
+            fill_action = fill.canonical_position_action or fill.action or ""
+            fill_side = fill.canonical_position_side or fill.side or ""
 
             # Compute signed YES exposure for this fill.
             fill_yes = 0
+            if fill_action.lower() not in ("buy", "sell") or fill_side.lower() not in ("yes", "no"):
+                logger.critical(
+                    "[POSITION-RECOMPUTE] Fill %s has undetermined direction (action=%r side=%r); "
+                    "skipping rather than fabricating signed YES delta",
+                    getattr(fill, 'fill_id', 'unknown'), fill_action, fill_side,
+                )
+                continue
             if BINARY_PRICE_SPACE_AVAILABLE:
                 fill_yes = yes_delta(fill_action, fill_side, fill_quantity_cc)
             else:
@@ -4273,9 +4345,9 @@ class KalshiPositionCache:
             agent_id=agent_id,
             contracts=contracts,
             quantity_cc=quantity_cc,
-            side=thesis_side or "yes",
-            thesis_side=thesis_side or "yes",
-            outcome_side=thesis_side or "yes",
+            side=thesis_side,
+            thesis_side=thesis_side,
+            outcome_side=thesis_side,
             book_side="ask",
             avg_price_cents=avg_price_cents,
             realized_pnl_usd=realized_pnl_usd,
@@ -5984,8 +6056,18 @@ class KalshiPositionCache:
 
                     # Canonical signed-YES exposure.  Prefer ledger canonicalization
                     # metadata; fall back to the raw exchange ``action``/``side``.
-                    can_action = getattr(fill, 'canonical_position_action', None) or getattr(fill, 'action', '') or 'buy'
-                    can_side = getattr(fill, 'canonical_position_side', None) or getattr(fill, 'side', '') or 'yes'
+                    # No fabricated direction: an undetermined fill is skipped
+                    # with a warning rather than silently treated as BUY_YES.
+                    can_action = getattr(fill, 'canonical_position_action', None) or getattr(fill, 'action', '') or ''
+                    can_side = getattr(fill, 'canonical_position_side', None) or getattr(fill, 'side', '') or ''
+                    if can_action.lower() not in ("buy", "sell") or can_side.lower() not in ("yes", "no"):
+                        logger.warning(
+                            "[POSITION-REBUILD] Skipping fill_id=%s market=%s - undetermined "
+                            "direction (side=%r action=%r); position rebuild will diverge until "
+                            "the fill is canonicalized",
+                            getattr(fill, 'fill_id', None), market_id, can_side, can_action,
+                        )
+                        continue
                     fill_yes = 0
                     if BINARY_PRICE_SPACE_AVAILABLE:
                         try:
@@ -6090,9 +6172,9 @@ class KalshiPositionCache:
                         market_id=market_id,
                         agent_id=agent_id,
                         contracts=net_contracts,
-                        side=thesis_side or "yes",  # Fallback to yes if unknown
-                        thesis_side=thesis_side or "yes",
-                        outcome_side=thesis_side or "yes",
+                        side=thesis_side,
+                        thesis_side=thesis_side,
+                        outcome_side=thesis_side,
                         book_side="ask",
                         avg_price_cents=avg_price_cents,
                         all_in_entry_basis_cents=avg_price_cents,

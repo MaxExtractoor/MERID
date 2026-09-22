@@ -76,7 +76,13 @@ class PortfolioEngine:
         self._positions_by_ticker: Dict[str, Position] = {}  # ticker -> Position
         self._orders: Dict[str, Order] = {}  # order_id -> Order
         self._open_orders: Dict[str, Order] = {}  # order_id -> Order (only open)
-        
+
+        # Idempotency: a fill is applied once by immutable fill_id, and an
+        # event once by immutable event_id (duplicate WS/REST ingest must not
+        # double-count exposure or cash).
+        self._applied_fill_ids: set = set()
+        self._applied_event_ids: set = set()
+
         # Processing state
         self._last_sequence_id: int = 0
         self._last_updated: datetime = datetime.now(timezone.utc)
@@ -104,13 +110,75 @@ class PortfolioEngine:
         price_cents = data.get("price_cents", 0)
         fee_cents = data.get("fee_cents", 0)
         
-        if not all([fill_id, ticker, side, action, quantity, price_cents]):
+        if not all([fill_id, ticker, quantity, price_cents]):
             logger.warning("Fill event missing required fields: %s", data)
             return
-        
-        # Position key (ticker + side for now, could be more granular)
-        position_key = f"{ticker}_{side}"
-        
+
+        # fill_id is the global immutable dedup key (AGENTS.md).  A second
+        # event carrying an already-applied fill_id is a duplicate — drop it.
+        # Quarantined (undetermined-direction) fills are NOT marked applied so
+        # a later corrected event can still take effect.
+        if fill_id in self._applied_fill_ids:
+            logger.warning(
+                "[PORTFOLIO-ENGINE-DUP-FILL] fill_id=%s ticker=%s - duplicate "
+                "fill event dropped (already applied)", fill_id, ticker,
+            )
+            return
+
+        # CRITICAL FIX (2026-09-21): Canonical signed-YES accounting.
+        # The previous model keyed positions by traded leg ({ticker}_{side}) with
+        # is_long=(action=="buy"), so a SELL YES while long NO created a phantom
+        # "short YES" leg instead of netting against NO exposure, and settlement
+        # inverted PnL for negative-quantity records.  On Kalshi a fill is a
+        # buy/sell of a yes/no leg; the canonical exposure is signed YES:
+        #   buy yes / sell no  -> +qty   (long YES)
+        #   sell yes / buy no  -> -qty   (long NO)
+        # Prefer the ledger's precomputed canonical signed-YES delta — it was
+        # derived from canonical outcome fields and survives counterparty-form
+        # exchange reporting.  Fall back to deriving from (action, side) only
+        # when both are explicit and valid; never fabricate a direction.
+        canonical_delta = data.get("canonical_yes_delta_cc")
+        side_l = (side or "").lower()
+        action_l = (action or "").lower()
+        qty_contracts = Decimal(str(quantity))
+        if canonical_delta is not None:
+            # canonical_yes_delta_cc is in centi-contracts; this ledger's
+            # quantity unit is contracts.  Divide exactly — ``// 100`` floors
+            # negative deltas away from zero (e.g. -550cc -> -6 instead of
+            # -5.5), overstating short exposure and corrupting basis.
+            qty_change = Decimal(str(int(canonical_delta))) / Decimal(100)
+        else:
+            if side_l not in ("yes", "no") or action_l not in ("buy", "sell"):
+                logger.critical(
+                    "[PORTFOLIO-ENGINE-QUARANTINE] fill_id=%s ticker=%s action=%r side=%r - "
+                    "undetermined direction; refusing to fabricate exposure",
+                    fill_id, ticker, action, side,
+                )
+                return
+
+            if (action_l, side_l) in (("buy", "yes"), ("sell", "no")):
+                qty_change = qty_contracts  # signed YES delta > 0
+            else:
+                qty_change = -qty_contracts  # (sell,yes) or (buy,no) -> signed YES delta < 0
+
+        # Canonical YES-space price: prefer the stored YES leg price; otherwise
+        # complement the NO-leg price.  Never mix spaces.
+        leg_price_cents = Decimal(str(price_cents))
+        _leg_px = data.get("no_price_cents") if side_l == "no" else data.get("yes_price_cents")
+        if _leg_px:
+            leg_price_cents = Decimal(str(_leg_px))
+        stored_yes = data.get("yes_price_cents")
+        if stored_yes:
+            yes_price_cents = Decimal(str(stored_yes))
+        elif side_l == "no":
+            yes_price_cents = Decimal(100) - leg_price_cents
+        else:
+            yes_price_cents = leg_price_cents
+
+        # Position key is the market only: signed-YES inventory cannot be both
+        # long YES and long NO on the same ticker.
+        position_key = ticker
+
         # Get or create position
         if position_key not in self._positions:
             # New position
@@ -118,66 +186,57 @@ class PortfolioEngine:
                 position_id=position_key,
                 account_id=event.account_id,
                 ticker=ticker,
-                side=side,
-                quantity=0,
-                avg_entry_price_cents=price_cents,
-                cost_basis_cents=0,
-                realized_pnl_cents=0,
+                side="yes" if qty_change >= 0 else "no",
+                quantity=Decimal(0),
+                avg_entry_price_cents=yes_price_cents,
+                cost_basis_cents=Decimal(0),
+                realized_pnl_cents=Decimal(0),
             )
             self._positions[position_key] = position
             self._positions_by_ticker[ticker] = position
         else:
             position = self._positions[position_key]
-        
-        # Determine direction of fill
-        # buy yes = long yes, sell yes = short yes
-        # buy no = long no, sell no = short no
-        is_long = (action == "buy")
-        qty_change = quantity if is_long else -quantity
-        
+
+        is_long = (action_l == "buy")
+
         old_quantity = position.quantity
-        old_avg_price = position.avg_entry_price_cents
+        old_avg_price = position.avg_entry_price_cents  # YES-space cents
         old_cost_basis = position.cost_basis_cents
-        
-        # Calculate new position state
+
+        # Calculate new position state (signed YES quantity, YES-space basis).
         new_quantity = old_quantity + qty_change
-        
-        if (old_quantity >= 0 and new_quantity >= 0) or (old_quantity <= 0 and new_quantity <= 0):
-            # Same direction - update average entry price
+        realized_pnl = position.realized_pnl_cents
+
+        if old_quantity == 0 or (old_quantity > 0) == (qty_change > 0):
+            # Open or add: delta shares the existing exposure sign.
             if old_quantity == 0:
-                new_avg_price = price_cents
-                new_cost_basis = abs(new_quantity) * price_cents
+                new_avg_price = yes_price_cents
             else:
-                # Weighted average
-                total_contracts = abs(old_quantity) + quantity
-                total_cost = old_cost_basis + (quantity * price_cents)
-                new_avg_price = total_cost // total_contracts if total_contracts > 0 else old_avg_price
-                new_cost_basis = abs(new_quantity) * new_avg_price
-            realized_pnl = position.realized_pnl_cents
+                total_contracts = abs(old_quantity) + abs(qty_change)
+                total_cost = old_cost_basis + (abs(qty_change) * yes_price_cents)
+                # Exact Decimal division: floor-div here silently truncates
+                # basis (e.g. (5*60 + 5*55)/10 = 57.5 -> 57), skewing PnL.
+                new_avg_price = (
+                    total_cost / total_contracts if total_contracts > 0 else old_avg_price
+                )
+            new_cost_basis = abs(new_quantity) * new_avg_price
         else:
-            # Direction change - realize PnL on closed portion
-            closed_qty = min(abs(old_quantity), abs(new_quantity))
-            if old_quantity > 0:
-                # Closing long
-                realized_pnl = closed_qty * (price_cents - old_avg_price)
+            # Reduce, close, or flip: delta opposes existing exposure.
+            closed_qty = min(abs(old_quantity), abs(qty_change))
+            realized_pnl += closed_qty * (yes_price_cents - old_avg_price) * (1 if old_quantity > 0 else -1)
+
+            if abs(qty_change) > abs(old_quantity):
+                # Flipped through zero - residual opens at the fill price
+                new_avg_price = yes_price_cents
             else:
-                # Closing short
-                realized_pnl = closed_qty * (old_avg_price - price_cents)
-            
-            realized_pnl += position.realized_pnl_cents
-            
-            if abs(new_quantity) > abs(old_quantity):
-                # Flipped direction - new entry price
-                new_avg_price = price_cents
-                new_cost_basis = abs(new_quantity) * price_cents
-            else:
-                # Fully closed or reduced
+                # Partial or full close - residual keeps prior basis
                 new_avg_price = old_avg_price
-                new_cost_basis = abs(new_quantity) * new_avg_price
-        
+            new_cost_basis = abs(new_quantity) * new_avg_price
+
         # Update position
         new_position = replace(
             position,
+            side="yes" if new_quantity > 0 else ("no" if new_quantity < 0 else position.side),
             quantity=new_quantity,
             avg_entry_price_cents=new_avg_price,
             cost_basis_cents=new_cost_basis,
@@ -186,11 +245,27 @@ class PortfolioEngine:
         )
         self._positions[position_key] = new_position
         self._positions_by_ticker[ticker] = new_position
-        
-        # Update cash ledger
-        # buy = cash out, sell = cash in
-        cash_impact = -quantity * price_cents if is_long else quantity * price_cents
-        cash_impact -= fee_cents  # Fees reduce cash
+
+        # Update cash ledger.
+        # Prefer authoritative signed cash proceeds when the event carries them
+        # (cross-leg / counterparty-form fills); otherwise derive cash in the
+        # traded leg's price space.  When only the canonical delta is known
+        # (side/action absent), approximate in YES space and flag it.
+        fee = Decimal(str(fee_cents or 0))
+        authoritative_proceeds = data.get("proceeds_cents")
+        if authoritative_proceeds is not None:
+            cash_impact = Decimal(str(authoritative_proceeds)) - fee
+        elif side_l in ("yes", "no") and action_l in ("buy", "sell"):
+            cash_impact = (-qty_contracts * leg_price_cents if is_long
+                           else qty_contracts * leg_price_cents) - fee
+        else:
+            cash_impact = -qty_change * yes_price_cents - fee
+            logger.warning(
+                "[PORTFOLIO-ENGINE-CASH-ESTIMATE] fill_id=%s ticker=%s - "
+                "no leg side/action or authoritative proceeds; cash impact "
+                "estimated in YES space",
+                fill_id, ticker,
+            )
         
         cash_entry = CashLedgerEntry(
             entry_id=f"cash_{fill_id}",
@@ -203,9 +278,10 @@ class PortfolioEngine:
             timestamp=event.timestamp,
         )
         self._cash_ledger.append(cash_entry)
-        
+        self._applied_fill_ids.add(fill_id)
+
         logger.debug(
-            "Applied fill: %s %s %d @ %dc (old_qty=%d new_qty=%d) cash_impact=%dc realized_pnl=%dc",
+            "Applied fill: %s %s %s @ %sc (old_qty=%s new_qty=%s) cash_impact=%sc realized_pnl=%sc",
             action, side, quantity, price_cents, old_quantity, new_quantity, cash_impact, realized_pnl
         )
     
@@ -225,7 +301,7 @@ class PortfolioEngine:
             return
         
         # Calculate reserved cash
-        reserved_cash = quantity * price_cents
+        reserved_cash = Decimal(str(quantity)) * Decimal(str(price_cents))
         
         order = Order(
             order_id=order_id,
@@ -325,21 +401,25 @@ class PortfolioEngine:
         if not position or not position.is_open:
             logger.debug("No open position for settlement: %s", ticker)
             return
-        
-        # Calculate final PnL
-        # If result matches side, position wins (100 cents per contract)
-        # If result doesn't match, position loses (0 cents per contract)
-        if position.side.lower() == result.lower():
-            payout_cents = 100
-        else:
-            payout_cents = 0
-        
-        final_pnl_cents = (payout_cents - position.avg_entry_price_cents) * abs(position.quantity)
+
+        # Calculate final PnL under canonical signed-YES accounting.
+        # quantity is signed YES exposure (positive=long YES, negative=long NO)
+        # and avg_entry_price_cents is in YES space, so the settlement value is
+        # simply the YES payout: 100 when result=YES else 0.
+        #   long YES 5 @ 60c, result YES -> +5*(100-60) = +200c
+        #   long NO  5 @ 40c NO (=60c YES-space), result NO -> -5*(0-60) = +300c
+        result_l = (result or "").lower()
+        if result_l not in ("yes", "no"):
+            logger.warning("Settlement event with unknown result=%r for %s", result, ticker)
+            return
+        settle_yes_cents = Decimal(100) if result_l == "yes" else Decimal(0)
+
+        final_pnl_cents = position.quantity * (settle_yes_cents - position.avg_entry_price_cents)
         
         # Update position with realized PnL and zero quantity
         new_position = replace(
             position,
-            quantity=0,
+            quantity=Decimal(0),
             realized_pnl_cents=position.realized_pnl_cents + final_pnl_cents,
             last_updated=event.timestamp,
         )
@@ -358,8 +438,8 @@ class PortfolioEngine:
         self._cash_ledger.append(cash_entry)
         
         logger.debug(
-            "Settlement: %s result=%s payout=%dc final_pnl=%dc",
-            ticker, result, payout_cents, final_pnl_cents
+            "Settlement: %s result=%s yes_settle=%dc final_pnl=%dc",
+            ticker, result, settle_yes_cents, final_pnl_cents
         )
     
     def _apply_cash_event(self, event: PortfolioEvent, cash_event_type: CashEventType) -> None:
@@ -385,9 +465,18 @@ class PortfolioEngine:
     def replay_event(self, event: PortfolioEvent) -> None:
         """Replay a single event to update state."""
         with self._local_lock:
+            # Immutable event_id dedup: the append-only log may deliver the
+            # same event twice (WS + REST double ingest, reconnect replay).
+            if event.event_id in self._applied_event_ids:
+                logger.warning(
+                    "[PORTFOLIO-ENGINE-DUP-EVENT] event_id=%s type=%s - "
+                    "duplicate event dropped", event.event_id, event.event_type,
+                )
+                return
+
             # Ensure account exists
             self._ensure_account(event.account_id)
-            
+
             # Apply event based on type
             if event.event_type == EventType.FILL:
                 self._apply_fill_event(event)
@@ -409,7 +498,9 @@ class PortfolioEngine:
                 self._apply_cash_event(event, CashEventType.ADJUSTMENT)
             else:
                 logger.warning("Unknown event type: %s", event.event_type)
-            
+
+            self._applied_event_ids.add(event.event_id)
+
             # Update processing state
             self._last_sequence_id = event.sequence_id
             self._last_updated = event.timestamp
@@ -463,14 +554,17 @@ class PortfolioEngine:
             }
             
             # Calculate realized PnL
-            realized_pnl = sum(pos.realized_pnl_cents for pos in account_positions.values())
-            
+            realized_pnl = sum(
+                (pos.realized_pnl_cents for pos in account_positions.values()),
+                Decimal(0),
+            )
+
             # Calculate unrealized PnL from positions + current marks
-            unrealized_pnl = 0
+            unrealized_pnl = Decimal(0)
             if current_marks:
                 for pos in account_positions.values():
                     if pos.is_open and pos.ticker in current_marks:
-                        current_mark = current_marks[pos.ticker]
+                        current_mark = Decimal(str(current_marks[pos.ticker]))
                         if pos.quantity > 0:
                             # Long position
                             unrealized_pnl += (current_mark - pos.avg_entry_price_cents) * pos.quantity
@@ -553,12 +647,12 @@ class PortfolioEngine:
                 f"Reserved cash exceeds available: reserved={cash_reserved}, available={cash_available}"
             )
         
-        # Invariant 5: Position quantities should be integers
+        # Invariant 5: Position quantities must be exact (int/Decimal, never float)
         for pos_id, pos in self._positions.items():
             if pos.account_id == account_id:
-                if not isinstance(pos.quantity, int):
+                if isinstance(pos.quantity, float) or not isinstance(pos.quantity, (int, Decimal)):
                     violations.append(
-                        f"Position {pos_id} has non-integer quantity: {pos.quantity}"
+                        f"Position {pos_id} has inexact quantity type: {type(pos.quantity).__name__}={pos.quantity}"
                     )
         
         # Invariant 6: All monetary values should be non-negative where expected

@@ -2350,6 +2350,10 @@ _ALLOWED_CALLER_PREFIXES = (
     # Tests are allowed for testing the router itself
     "tests.",
     "test_",
+    # pytest-asyncio drives awaited coroutines; it is the first non-router
+    # frame on async test stacks, so whitelisting it is required for the
+    # tests./test_ allowance above to actually take effect under asyncio.
+    "pytest_asyncio",
     # Self-calls (internal recursion)
     "merid.event_venues.kalshi.order_router",
     # Package init re-exports
@@ -4422,13 +4426,16 @@ def _intent_price_side(intent: OrderIntent) -> Optional[str]:
         return "yes"
     if has_no and not has_yes:
         return "no"
-    # Ambiguous or legacy form: derive from the signed-YES delta.
-    try:
-        from merid.event_venues.kalshi.binary_price_space import yes_delta
-        delta = yes_delta(intent.action or "buy", side, 1)
-        return "yes" if delta > 0 else "no"
-    except Exception:
-        return "yes"
+    # Ambiguous or legacy form: there is no honest default price space.
+    # Deriving it from action alone fabricates a direction (the previous
+    # `action or "buy"` + `except: return "yes"` path did exactly that), so
+    # return None and let the caller fail closed.
+    logger.error(
+        "[PRICE-SPACE-UNKNOWN] intent_id=%s side=%r action=%r - cannot "
+        "determine price space; caller must reject",
+        getattr(intent, "intent_id", None), intent.side, intent.action,
+    )
+    return None
 
 
 def _validate_outcome_price_placement(
@@ -4456,9 +4463,11 @@ def _validate_outcome_price_placement(
     if price_space == "no":
         bid = getattr(snapshot, 'best_no_bid_cents', None)
         ask = getattr(snapshot, 'best_no_ask_cents', None)
-    else:
+    elif price_space == "yes":
         bid = getattr(snapshot, 'best_bid_cents', None)
         ask = getattr(snapshot, 'best_ask_cents', None)
+    else:
+        return False, "unknown_price_space"
 
     if bid is None or ask is None:
         return False, "book_unavailable_or_invalid"
@@ -4519,11 +4528,13 @@ def _book_diverged(
         snap_ask = getattr(snapshot, 'best_no_ask_cents', None)
         cur_bid = getattr(state, 'best_no_bid_cents', None)
         cur_ask = getattr(state, 'best_no_ask_cents', None)
-    else:
+    elif price_space == "yes":
         snap_bid = getattr(snapshot, 'best_bid_cents', None)
         snap_ask = getattr(snapshot, 'best_ask_cents', None)
         cur_bid = getattr(state, 'best_bid_cents', None)
         cur_ask = getattr(state, 'best_ask_cents', None)
+    else:
+        return True
 
     if snap_bid is None or snap_ask is None or cur_bid is None or cur_ask is None:
         return True
@@ -11740,9 +11751,12 @@ async def _route_live(
                 if price_space == "no":
                     best_bid = getattr(_snapshot, 'best_no_bid_cents', None)
                     best_ask = getattr(_snapshot, 'best_no_ask_cents', None)
-                else:
+                elif price_space == "yes":
                     best_bid = getattr(_snapshot, 'best_bid_cents', None)
                     best_ask = getattr(_snapshot, 'best_ask_cents', None)
+                else:
+                    best_bid = None
+                    best_ask = None
 
                 is_valid, error = _validate_outcome_price_placement(
                     intent, intent.liquidity_role, intent.price_cents, _snapshot
@@ -17839,24 +17853,43 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
 
                 # Canonical side is the outcome side (yes/no), not Kalshi book side.
                 _intent_side = (getattr(intent, "side", "") or "").lower()
-                _ledger_side: str = "yes"
+                _intent_action = (getattr(intent, "action", "") or "").lower()
+                _ledger_side: Optional[str] = None
                 if "no" in _intent_side:
                     _ledger_side = "no"
-                _ledger_action = "buy" if (getattr(intent, "action", "") or "").lower() == "buy" else "sell"
-
-                fill_event = FillEvent(
-                    fill_id=str(_fill_id),
-                    fill_at=datetime.now(timezone.utc),
-                    side=_ledger_side,
-                    action=_ledger_action,
-                    qty_cc=result.executed_quantity_cc,
-                    price_cents=int(_fill_price),
-                    fee_cents=_fee_cents,
-                    order_id=result.order_id,
-                    client_order_id=getattr(intent, "client_order_id", None),
-                    latency_ms=result.latency_ms,
+                elif "yes" in _intent_side:
+                    _ledger_side = "yes"
+                _ledger_action: Optional[str] = (
+                    "buy" if _intent_action == "buy"
+                    else "sell" if _intent_action == "sell"
+                    else None
                 )
-                ledger.record_fill(_decision_id, fill_event)
+                if _ledger_side is None or _ledger_action is None:
+                    # The fill executed, but we cannot honestly label its
+                    # direction for the decision ledger.  Writing a fabricated
+                    # yes/buy record would corrupt lifecycle-parity evidence;
+                    # the authoritative record lives in fills_ledger regardless.
+                    logger.critical(
+                        "[LEDGER-DIRECTION-UNKNOWN] order_id=%s fill_id=%s side=%r action=%r - "
+                        "skipping decision-ledger fill record with undetermined direction",
+                        result.order_id, _fill_id, intent.side, intent.action,
+                    )
+                    fill_event = None
+                else:
+                    fill_event = FillEvent(
+                        fill_id=str(_fill_id),
+                        fill_at=datetime.now(timezone.utc),
+                        side=_ledger_side,
+                        action=_ledger_action,
+                        qty_cc=result.executed_quantity_cc,
+                        price_cents=int(_fill_price),
+                        fee_cents=_fee_cents,
+                        order_id=result.order_id,
+                        client_order_id=getattr(intent, "client_order_id", None),
+                        latency_ms=result.latency_ms,
+                    )
+                if fill_event is not None:
+                    ledger.record_fill(_decision_id, fill_event)
 
                 # 2026-08-29: If this was an exit order, append an exit event to
                 # the parent entry decision so the ledger shows the full round-trip.

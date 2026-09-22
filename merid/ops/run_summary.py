@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +49,9 @@ class RunSummary:
         self.loop = loop
         self.agent_grid = agent_grid
         self.bankroll_service = bankroll_service
-        self.output_dir = output_dir or Path("data/run_summaries")
+        self.output_dir = output_dir or Path(
+            os.environ.get("MERID_RUN_SUMMARIES_DIR", "data/run_summaries")
+        )
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._start_time = datetime.now(timezone.utc)
 

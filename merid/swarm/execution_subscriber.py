@@ -342,8 +342,14 @@ class ExecutionSubscriber:
         Falls back to direct order placement if no matching agent found.
         """
         market_id = data.get("market_id", "")
-        action = data.get("action", "")
-        side = data.get("side", "yes")
+        action = str(data.get("action") or "").lower()
+        side = str(data.get("side") or "").lower()
+        # Never fabricate direction: missing side/action must reject.
+        if side not in ("yes", "no") or action not in ("buy", "sell"):
+            raise RuntimeError(
+                f"ExecutionSubscriber: missing/invalid direction "
+                f"side={data.get('side')!r} action={data.get('action')!r} for {market_id}"
+            )
         size = data.get("size_contracts", 0)
         limit_price = data.get("limit_price_cents", 0)
 

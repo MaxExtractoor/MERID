@@ -1163,8 +1163,12 @@ def is_price_in_canonical_range(price_cents: int, side: str) -> bool:
         >>> is_price_in_canonical_range(97, "no")
         False
     """
-    side = (side or "yes").lower()
-    if side == "no":
+    _s = _try_parse_side(side)
+    if _s is None:
+        # Fail closed: an unknown side is never "in range" — fabricating YES
+        # here would let an unvalidated direction through order eligibility.
+        return False
+    if _s == "no":
         return CANONICAL_NO_MIN_CENTS <= price_cents <= CANONICAL_NO_MAX_CENTS
     return CANONICAL_YES_MIN_CENTS <= price_cents <= CANONICAL_YES_MAX_CENTS
 
@@ -1177,9 +1181,15 @@ def get_canonical_price_range(side: str) -> Tuple[int, int]:
 
     Returns:
         Tuple of (min_cents, max_cents)
+
+    Raises:
+        ValueError: if the side is not parseable — there is no safe default
+            range for an unknown direction.
     """
-    side = (side or "yes").lower()
-    if side == "no":
+    _s = _try_parse_side(side)
+    if _s is None:
+        raise ValueError(f"unknown outcome side for canonical price range: {side!r}")
+    if _s == "no":
         return CANONICAL_NO_MIN_CENTS, CANONICAL_NO_MAX_CENTS
     return CANONICAL_YES_MIN_CENTS, CANONICAL_YES_MAX_CENTS
 
@@ -1205,7 +1215,10 @@ def is_price_in_crisis_range(price_cents: int, side: str) -> bool:
         >>> is_price_in_crisis_range(99, "no")
         True
     """
-    if side == "yes":
+    _s = _try_parse_side(side)
+    if _s is None:
+        return False  # fail closed on unknown side
+    if _s == "yes":
         return 1 <= price_cents <= 99
     else:  # side == "no"
         return 5 <= price_cents <= 99
@@ -1237,7 +1250,10 @@ def is_price_in_flb_trading_range(price_cents: int, side: str) -> bool:
         >>> is_price_in_flb_trading_range(90, "no")  # Edge band - positive EV
         True
     """
-    if side == "yes":
+    _s = _try_parse_side(side)
+    if _s is None:
+        return False  # fail closed on unknown side
+    if _s == "yes":
         # YES: Avoid FLB capital destruction zone (<10¢) and fee drag zone (>85¢)
         return FLB_MIN_YES_CENTS <= price_cents <= FLB_MAX_YES_CENTS
     else:  # side == "no"

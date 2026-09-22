@@ -72,7 +72,7 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
             "market_id": fill.market_ticker,
             "asset": asset,
             "side": _can_side,
-            "action": (_can_action or "buy").lower(),
+            "action": (_can_action or "").lower(),
             "contracts": int(fill.count_fp),
             "price_cents": int(price_cents),
             "fee_cents": int(float(fill.fee_cost) * 100),
@@ -114,7 +114,7 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
                 side=_can_side,
                 client_order_id=fill.client_order_id,
                 fill_id=fill.fill_id,  # Task 1: Pass fill_id for ledger lookup
-                action=(_can_action or "buy").lower(),
+                action=(_can_action or "").lower(),
                 is_exit=getattr(fill, 'is_exit', None),
                 canonicalization_state=getattr(fill, 'canonicalization_state', None),
             )

@@ -74,16 +74,33 @@ class Account:
     is_active: bool = True
 
 
+def _to_decimal(value: Any) -> Decimal:
+    """Coerce an int/float/str money-or-quantity value to Decimal exactly."""
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return Decimal(value)
+
+
+def _json_num(value: Any) -> Any:
+    """Emit a Decimal as int when integral, else float, for JSON-safe dicts."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    return value
+
+
 @dataclass(frozen=True)
 class CashLedgerEntry:
     """Individual cash event in the ledger.
-    
-    All amounts in cents (integers) to match Kalshi API precision.
+
+    ``amount_cents`` is stored as an exact ``Decimal`` (sub-cent values arise
+    from fractional centi-contract fills and parabolic fees).
     """
     entry_id: str
     account_id: str
     event_type: CashEventType
-    amount_cents: int  # Positive for deposits/income, negative for withdrawals/expenses
+    amount_cents: Decimal  # Positive for deposits/income, negative for withdrawals/expenses
     related_order_id: Optional[str] = None
     related_fill_id: Optional[str] = None
     related_ticker: Optional[str] = None
@@ -91,22 +108,32 @@ class CashLedgerEntry:
     confirmed: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        object.__setattr__(self, 'amount_cents', _to_decimal(self.amount_cents))
+
 
 @dataclass(frozen=True)
 class Position:
     """Per-market position state.
-    
-    All monetary values in cents (integers).
+
+    Monetary values and quantity are exact ``Decimal`` so fractional
+    centi-contract fills and weighted-average basis never lose precision.
     """
     position_id: str
     account_id: str
     ticker: str  # Kalshi market ticker
-    side: str  # "yes" or "no"
-    quantity: int  # Signed quantity (positive for long, negative for short)
-    avg_entry_price_cents: int  # Weighted average entry price
-    cost_basis_cents: int  # quantity * avg_entry_price_cents (sign-aware)
-    realized_pnl_cents: int = 0  # Crystallized PnL from closes/settlements
+    side: str  # "yes" or "no" - outcome leg currently held (derived from quantity sign)
+    quantity: Decimal  # Signed YES exposure (positive=long YES, negative=long NO)
+    avg_entry_price_cents: Decimal  # Weighted average entry price in canonical YES space
+    cost_basis_cents: Decimal  # abs(quantity) * avg_entry_price_cents (YES space)
+    realized_pnl_cents: Decimal = Decimal(0)  # Crystallized PnL from closes/settlements
     last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self):
+        object.__setattr__(self, 'quantity', _to_decimal(self.quantity))
+        object.__setattr__(self, 'avg_entry_price_cents', _to_decimal(self.avg_entry_price_cents))
+        object.__setattr__(self, 'cost_basis_cents', _to_decimal(self.cost_basis_cents))
+        object.__setattr__(self, 'realized_pnl_cents', _to_decimal(self.realized_pnl_cents))
     
     @property
     def is_open(self) -> bool:
@@ -135,13 +162,14 @@ class Order:
     status: str  # "resting", "filled", "cancelled", "expired"
     filled_quantity: int = 0
     remaining_quantity: int = 0
-    reserved_cash_cents: int = 0  # Cash reserved for this order
+    reserved_cash_cents: Decimal = Decimal(0)  # Cash reserved for this order
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     client_order_id: Optional[str] = None
     agent_id: Optional[str] = None
     
     def __post_init__(self):
+        object.__setattr__(self, 'reserved_cash_cents', _to_decimal(self.reserved_cash_cents))
         # Derive remaining_quantity if not set
         if self.remaining_quantity == 0:
             object.__setattr__(self, 'remaining_quantity', self.quantity - self.filled_quantity)
@@ -159,21 +187,26 @@ class Fill:
     ticker: str
     side: str  # "yes" or "no"
     action: str  # "buy" or "sell"
-    quantity: int  # Contracts filled in this event
-    price_cents: int  # Fill price
-    fee_cents: int  # Trading fee
+    quantity: Decimal  # Contracts filled in this event
+    price_cents: Decimal  # Fill price
+    fee_cents: Decimal  # Trading fee
     fill_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     venue_fill_id: Optional[str] = None
     agent_id: Optional[str] = None
     ingestion_source: str = "unknown"  # "http" or "websocket"
-    
+
+    def __post_init__(self):
+        object.__setattr__(self, 'quantity', _to_decimal(self.quantity))
+        object.__setattr__(self, 'price_cents', _to_decimal(self.price_cents))
+        object.__setattr__(self, 'fee_cents', _to_decimal(self.fee_cents))
+
     @property
-    def notional_cents(self) -> int:
+    def notional_cents(self) -> Decimal:
         """Notional value = quantity * price_cents."""
         return self.quantity * self.price_cents
-    
+
     @property
-    def net_cash_impact_cents(self) -> int:
+    def net_cash_impact_cents(self) -> Decimal:
         """Net cash impact = notional + fee (sign-aware based on action)."""
         direction = 1 if self.action == "sell" else -1
         return direction * self.notional_cents - self.fee_cents
@@ -256,32 +289,39 @@ class PortfolioSnapshot:
     timestamp: datetime
     
     # Cash state
-    cash_available_cents: int
-    cash_reserved_cents: int
-    cash_total_cents: int
-    
+    cash_available_cents: Decimal
+    cash_reserved_cents: Decimal
+    cash_total_cents: Decimal
+
     # Positions
     positions: Dict[str, Position]  # ticker -> Position
-    
+
     # Orders
     open_orders: Dict[str, Order]  # order_id -> Order
-    
+
     # PnL
-    realized_pnl_cents: int  # Crystallized PnL
-    unrealized_pnl_cents: int  # Derived from positions + current marks
-    
+    realized_pnl_cents: Decimal  # Crystallized PnL
+    unrealized_pnl_cents: Decimal  # Derived from positions + current marks
+
+    def __post_init__(self):
+        object.__setattr__(self, 'cash_available_cents', _to_decimal(self.cash_available_cents))
+        object.__setattr__(self, 'cash_reserved_cents', _to_decimal(self.cash_reserved_cents))
+        object.__setattr__(self, 'cash_total_cents', _to_decimal(self.cash_total_cents))
+        object.__setattr__(self, 'realized_pnl_cents', _to_decimal(self.realized_pnl_cents))
+        object.__setattr__(self, 'unrealized_pnl_cents', _to_decimal(self.unrealized_pnl_cents))
+
     @property
-    def total_equity_cents(self) -> int:
+    def total_equity_cents(self) -> Decimal:
         """Total equity = cash_available + unrealized_pnl."""
         return self.cash_available_cents + self.unrealized_pnl_cents
-    
+
     @property
     def total_equity_usd(self) -> float:
         """Total equity in USD."""
-        return self.total_equity_cents / 100.0
-    
+        return float(self.total_equity_cents) / 100.0
+
     @property
-    def total_pnl_cents(self) -> int:
+    def total_pnl_cents(self) -> Decimal:
         """Total PnL = realized + unrealized."""
         return self.realized_pnl_cents + self.unrealized_pnl_cents
     
@@ -296,18 +336,18 @@ class PortfolioSnapshot:
             "account_id": self.account_id,
             "sequence_id": self.sequence_id,
             "timestamp": self.timestamp.isoformat(),
-            "cash_available_cents": self.cash_available_cents,
-            "cash_available_usd": self.cash_available_cents / 100.0,
-            "cash_reserved_cents": self.cash_reserved_cents,
-            "cash_total_cents": self.cash_total_cents,
+            "cash_available_cents": _json_num(self.cash_available_cents),
+            "cash_available_usd": float(self.cash_available_cents) / 100.0,
+            "cash_reserved_cents": _json_num(self.cash_reserved_cents),
+            "cash_total_cents": _json_num(self.cash_total_cents),
             "positions": {
                 ticker: {
                     "ticker": pos.ticker,
                     "side": pos.side,
-                    "quantity": pos.quantity,
-                    "avg_entry_price_cents": pos.avg_entry_price_cents,
-                    "cost_basis_cents": pos.cost_basis_cents,
-                    "realized_pnl_cents": pos.realized_pnl_cents,
+                    "quantity": _json_num(pos.quantity),
+                    "avg_entry_price_cents": _json_num(pos.avg_entry_price_cents),
+                    "cost_basis_cents": _json_num(pos.cost_basis_cents),
+                    "realized_pnl_cents": _json_num(pos.realized_pnl_cents),
                     "is_open": pos.is_open,
                     "last_updated": pos.last_updated.isoformat(),
                 }
@@ -324,18 +364,18 @@ class PortfolioSnapshot:
                     "status": order.status,
                     "filled_quantity": order.filled_quantity,
                     "remaining_quantity": order.remaining_quantity,
-                    "reserved_cash_cents": order.reserved_cash_cents,
+                    "reserved_cash_cents": _json_num(order.reserved_cash_cents),
                     "created_at": order.created_at.isoformat(),
                 }
                 for order_id, order in self.open_orders.items()
             },
-            "realized_pnl_cents": self.realized_pnl_cents,
-            "realized_pnl_usd": self.realized_pnl_cents / 100.0,
-            "unrealized_pnl_cents": self.unrealized_pnl_cents,
-            "unrealized_pnl_usd": self.unrealized_pnl_cents / 100.0,
-            "total_pnl_cents": self.total_pnl_cents,
-            "total_pnl_usd": self.total_pnl_cents / 100.0,
-            "total_equity_cents": self.total_equity_cents,
+            "realized_pnl_cents": _json_num(self.realized_pnl_cents),
+            "realized_pnl_usd": float(self.realized_pnl_cents) / 100.0,
+            "unrealized_pnl_cents": _json_num(self.unrealized_pnl_cents),
+            "unrealized_pnl_usd": float(self.unrealized_pnl_cents) / 100.0,
+            "total_pnl_cents": _json_num(self.total_pnl_cents),
+            "total_pnl_usd": float(self.total_pnl_cents) / 100.0,
+            "total_equity_cents": _json_num(self.total_equity_cents),
             "total_equity_usd": self.total_equity_usd,
             "position_count": self.position_count,
         }
@@ -386,13 +426,13 @@ class ReconciliationResult:
             "account_id": self.account_id,
             "timestamp": self.timestamp.isoformat(),
             "is_match": self.is_match,
-            "cash_diff_cents": self.cash_diff_cents,
-            "cash_diff_usd": self.cash_diff_cents / 100.0,
+            "cash_diff_cents": _json_num(self.cash_diff_cents),
+            "cash_diff_usd": float(self.cash_diff_cents) / 100.0,
             "cash_tolerance_cents": self.cash_tolerance_cents,
             "position_diff_count": self.position_diff_count,
             "position_details": self.position_details,
-            "pnl_diff_cents": self.pnl_diff_cents,
-            "pnl_diff_usd": self.pnl_diff_cents / 100.0,
+            "pnl_diff_cents": _json_num(self.pnl_diff_cents),
+            "pnl_diff_usd": float(self.pnl_diff_cents) / 100.0,
             "pnl_tolerance_cents": self.pnl_tolerance_cents,
             "internal_sequence_id": self.internal_sequence_id,
             "kalshi_api_timestamp": self.kalshi_api_timestamp.isoformat() if self.kalshi_api_timestamp else None,

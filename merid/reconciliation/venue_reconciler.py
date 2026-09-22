@@ -28,7 +28,9 @@ except ImportError:
     logger.debug("Reconciliation metrics module not available - metrics will not be emitted")
 
 # Persist last reconciliation report for debugging
-_REPORT_PATH = Path("data/reconciliation_report.json")
+_REPORT_PATH = Path(
+    os.environ.get("MERID_RECONCILIATION_REPORT_PATH", "data/reconciliation_report.json")
+)
 
 # Module-level cache of last reconciliation result — protected by _recon_lock
 _recon_lock = threading.Lock()

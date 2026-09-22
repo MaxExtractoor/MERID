@@ -15,6 +15,7 @@ Tiers:
 
 from __future__ import annotations
 
+import os
 import threading
 import json
 import time
@@ -26,7 +27,9 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_PERSIST_FILE = Path("data/paper_ladder_state.json")
+_PERSIST_FILE = Path(
+    os.environ.get("MERID_PAPER_LADDER_STATE_PATH", "data/paper_ladder_state.json")
+)
 
 
 # ════════════════════════════════════════════════════════════════════

@@ -173,17 +173,29 @@ def _load_kalshi_settings() -> None:
         if _KALSHI_SETTINGS_LOADED:
             return
         
-        # CRITICAL FIX: Use fallback defaults during startup to avoid circular import
-        # Settings will be loaded later when actually needed (not during import)
-        KALSHI_MAX_RETRIES = 3
-        KALSHI_BACKOFF_BASE = 2.0
-        KALSHI_CIRCUIT_FAILURE_THRESHOLD = 20  # was 10, now 20
-        KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 60.0  # was 30, now 60
-        KALSHI_MAX_CONCURRENT_REQUESTS = 10  # BUG-FIX (2026-05-07): Added missing fallback
-        _KALSHI_CONNECT_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
-        _KALSHI_READ_TIMEOUT = 45.0  # was 30, now 45 - BUG-FIX (2026-05-07)
-        KALSHI_WRITE_TIMEOUT = 30.0  # was 20, now 30 - BUG-FIX (2026-05-07)
-        _KALSHI_POOL_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
+        # CRITICAL FIX: Defer settings import to first use to avoid circular
+        # import during startup. Fall back to literals if settings unavailable.
+        try:
+            from merid.settings import settings as _s
+            KALSHI_MAX_RETRIES = _s.KALSHI_MAX_RETRIES
+            KALSHI_BACKOFF_BASE = _s.KALSHI_BACKOFF_BASE
+            KALSHI_CIRCUIT_FAILURE_THRESHOLD = _s.KALSHI_CIRCUIT_FAILURE_THRESHOLD
+            KALSHI_CIRCUIT_RECOVERY_TIMEOUT = _s.KALSHI_CIRCUIT_RECOVERY_TIMEOUT
+            KALSHI_MAX_CONCURRENT_REQUESTS = _s.KALSHI_MAX_CONCURRENT_REQUESTS
+            _KALSHI_CONNECT_TIMEOUT = _s.KALSHI_CONNECT_TIMEOUT
+            _KALSHI_READ_TIMEOUT = _s.KALSHI_READ_TIMEOUT
+            KALSHI_WRITE_TIMEOUT = _s.KALSHI_WRITE_TIMEOUT
+            _KALSHI_POOL_TIMEOUT = _s.KALSHI_POOL_TIMEOUT
+        except Exception:
+            KALSHI_MAX_RETRIES = 3
+            KALSHI_BACKOFF_BASE = 2.0
+            KALSHI_CIRCUIT_FAILURE_THRESHOLD = 20  # was 10, now 20
+            KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 60.0  # was 30, now 60
+            KALSHI_MAX_CONCURRENT_REQUESTS = 10  # BUG-FIX (2026-05-07): Added missing fallback
+            _KALSHI_CONNECT_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
+            _KALSHI_READ_TIMEOUT = 45.0  # was 30, now 45 - BUG-FIX (2026-05-07)
+            KALSHI_WRITE_TIMEOUT = 30.0  # was 20, now 30 - BUG-FIX (2026-05-07)
+            _KALSHI_POOL_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
         
         _KALSHI_SETTINGS_LOADED = True
 
@@ -2211,8 +2223,37 @@ class KalshiVenueClient(EventVenueClient):
                 exchange_index=exchange_index,
             )
 
-        outcome = (order.outcome_id or "yes").lower()
-        action = (order.side or "buy").lower()
+        # CRITICAL FIX (2026-09-21): Missing outcome/side must fail closed.  The
+        # previous ``or "yes"`` / ``or "buy"`` defaults silently converted an
+        # undirected order into BUY_YES — a fabricated directional exposure.
+        # An order without a canonical outcome and action is semantically
+        # undefined; it must be rejected, never defaulted.
+        _raw_outcome = (order.outcome_id or "").strip().lower()
+        _raw_action = (order.side or "").strip().lower()
+        if _raw_outcome not in ("yes", "no"):
+            logger.critical(
+                "[KALSHI_CLIENT_BLOCKED] Missing/invalid outcome_id=%r for order on %s - "
+                "refusing to fabricate a YES/NO direction",
+                getattr(order, "outcome_id", None), order.market_id,
+            )
+            return OperationResult.fail(
+                f"Missing or invalid outcome_id: {getattr(order, 'outcome_id', None)!r} (must be 'yes' or 'no')",
+                latency_ms=0.0,
+                retries=0,
+            )
+        if _raw_action not in ("buy", "sell"):
+            logger.critical(
+                "[KALSHI_CLIENT_BLOCKED] Missing/invalid action=%r for order on %s - "
+                "refusing to fabricate a buy/sell action",
+                getattr(order, "side", None), order.market_id,
+            )
+            return OperationResult.fail(
+                f"Missing or invalid action: {getattr(order, 'side', None)!r} (must be 'buy' or 'sell')",
+                latency_ms=0.0,
+                retries=0,
+            )
+        outcome = _raw_outcome
+        action = _raw_action
 
         # ── Resolve raw price in the intent's own price space ──────────────────
         # CRITICAL FIX (2026-08-04): Round dollar prices to nearest cent before
@@ -2223,14 +2264,19 @@ class KalshiVenueClient(EventVenueClient):
             raw_price_cents = int(round(float(order.price) * 100))
             price_source = "order.price"
         else:
-            # BUG-FIX: If no price provided, use midpoint (default) as fallback.
-            # Kalshi requires a price field even for market orders.
-            from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
-            raw_price_cents = DEFAULT_KALSHI_PRICE_CENTS
-            price_source = "default_fallback"
-            logger.warning(
-                "[KALSHI_ORDER_VALIDATION] No price provided for %s order on %s, using default fallback",
+            # CRITICAL FIX (2026-09-21): A missing limit price is a missing
+            # economic coordinate, not a market order.  The previous default
+            # fabricated an arbitrary price that passed the canonical range
+            # check, so a price-less intent could submit at a made-up level.
+            logger.critical(
+                "[KALSHI_CLIENT_BLOCKED] No price provided for %s order on %s - "
+                "refusing to fabricate an entry price",
                 order.order_type, ticker
+            )
+            return OperationResult.fail(
+                "Missing order price (limit price is required)",
+                latency_ms=0.0,
+                retries=0,
             )
 
         # CRITICAL: Reject zero or negative prices
@@ -2657,18 +2703,22 @@ class KalshiVenueClient(EventVenueClient):
                 retries=0,
             )
 
-        outcome = (order.outcome_id or "yes").lower()
-        action = (order.side or "buy").lower()
+        # CRITICAL FIX (2026-09-21): Validate the raw fields, not the defaulted
+        # copies — the previous ``or "yes"``/``or "buy"`` defaults made a missing
+        # outcome/action pass the membership check below and silently submit a
+        # fabricated BUY_YES.
+        outcome = (order.outcome_id or "").strip().lower()
+        action = (order.side or "").strip().lower()
 
         if outcome not in ("yes", "no"):
             return OperationResult.fail(
-                f"Invalid outcome_id: {outcome}",
+                f"Missing or invalid outcome_id: {getattr(order, 'outcome_id', None)!r}",
                 latency_ms=0.0,
                 retries=0,
             )
         if action not in ("buy", "sell"):
             return OperationResult.fail(
-                f"Invalid side (action): {action}",
+                f"Missing or invalid side (action): {getattr(order, 'side', None)!r}",
                 latency_ms=0.0,
                 retries=0,
             )
@@ -2750,18 +2800,19 @@ class KalshiVenueClient(EventVenueClient):
             else:
                 kalshi_order["no_price_dollars"] = f"{_price_dollars:.4f}"
         else:
-            # BUG-FIX: If no price provided, use midpoint (default) as fallback.
-            from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
-
-            logger.warning(
-                "[KALSHI_ORDER_VALIDATION] No price provided for %s order on %s, using default fallback",
+            # CRITICAL FIX (2026-09-21): Missing limit price must fail closed.
+            # The previous default fabricated a midpoint price for an order that
+            # carried no economic coordinate.
+            logger.critical(
+                "[KALSHI_CLIENT_BLOCKED] No price provided for %s order on %s - "
+                "refusing to fabricate a limit price",
                 order.order_type, ticker,
             )
-            _price_dollars = DEFAULT_KALSHI_PRICE_CENTS / 100.0
-            if outcome == "yes":
-                kalshi_order["yes_price_dollars"] = f"{_price_dollars:.4f}"
-            else:
-                kalshi_order["no_price_dollars"] = f"{_price_dollars:.4f}"
+            return OperationResult.fail(
+                "Missing order price (limit price is required)",
+                latency_ms=0.0,
+                retries=0,
+            )
 
         price_field = "yes_price_dollars" if outcome == "yes" else "no_price_dollars"
         logger.info(
@@ -3049,11 +3100,22 @@ class KalshiVenueClient(EventVenueClient):
         # Build order payloads
         body_orders = []
         for spec in order_specs:
+            # Never fabricate direction: a missing/invalid action or side must
+            # skip the order, not submit a default "buy".
+            _spec_action = str(spec.get("action") or "").lower()
+            _spec_side = str(spec.get("side") or "").lower()
+            if _spec_action not in ("buy", "sell") or _spec_side not in ("yes", "no"):
+                logger.error(
+                    "[KALSHI_BATCH_ORDER_VALIDATION] Missing/invalid direction: "
+                    "action=%r side=%r | ticker=%s - skipping order",
+                    spec.get("action"), spec.get("side"), spec.get("ticker"),
+                )
+                continue
             order = {
                 "client_order_id": spec.get("client_order_id", str(uuid.uuid4())),
                 "ticker": spec["ticker"],
-                "side": spec["side"],
-                "action": spec.get("action", "buy"),
+                "side": _spec_side,
+                "action": _spec_action,
                 "type": spec.get("type", "limit"),
                 "count": spec["count"],
             }

@@ -64,24 +64,31 @@ class TestYesNoSumInvariants:
         )
         assert result is False
         
-    @pytest.mark.skip(reason="_sync_invariant_violation_with_rest not called in current implementation")
     @pytest.mark.asyncio
     async def test_yes_no_sum_invariant_violation_triggers_sync(self):
-        """Test YES/NO sum violation triggers REST sync recovery."""
-        # Create a message with invalid YES/NO sum
+        """Test YES/NO sum violation triggers REST sync recovery.
+
+        Resync is debounced: a single violation is suppressed and counted;
+        the REST re-sync is scheduled once violations reach the threshold
+        (3 in 30s).  We patch _schedule_duality_resync — the scheduling seam —
+        because _sync_invariant_violation_with_rest is dispatched via
+        run_coroutine_threadsafe on the main loop, which is absent in tests.
+        """
+        # YES bid 5c + NO bid 5c = 10c: duality gap -90 exceeds the 80c
+        # tolerance without crossing the book (YES ask = 95c).
         msg = {
             "type": "orderbook_snapshot",
             "ticker": self.ticker,
-            "yes": [[60.0, 10], [61.0, 5]],  # YES levels
-            "no": [[50.0, 8], [51.0, 3]]     # NO levels (wrong - should be ~40)
+            "yes": [[0.05, 10]],
+            "no": [[0.05, 3]],
         }
-        
-        with patch.object(self.store, '_sync_invariant_violation_with_rest') as mock_sync:
-            # Apply the message - should trigger sync
-            result = self.store.apply_orderbook_message(msg)
-            
-            # Should trigger REST sync even if state is returned
-            mock_sync.assert_called_once_with(self.ticker)
+
+        with patch.object(self.store, '_schedule_duality_resync') as mock_sync:
+            self.store.apply_orderbook_message(msg)
+            assert mock_sync.call_count == 0, "single violation must be suppressed"
+            for _ in range(2):  # reach the debounce threshold
+                self.store.apply_orderbook_message(msg)
+            assert mock_sync.call_count >= 1
             
     def test_incomplete_price_data_rejected(self):
         """Test incomplete price data is rejected gracefully."""
@@ -145,15 +152,15 @@ class TestSpreadSanityChecks:
         )
         assert result is False  # YES spread = -2¢
         
-    @pytest.mark.skip(reason="Warning logging behavior may vary by implementation")
     def test_large_spread_warning_only(self):
-        """Test large spread (>50¢) generates warning but still accepted."""
-        # This should log a warning but return True (not rejected)
+        """Test large spread (>85¢ production threshold) warns but is accepted."""
         with patch('merid.event_venues.kalshi.market_state.logger') as mock_logger:
+            # Sums must satisfy YES_bid+NO_ask=100 and YES_ask+NO_bid=100 to
+            # reach the spread check; both spreads are 93¢ (> 85¢ threshold).
             result = self.store._validate_yes_no_invariants(
-                self.ticker, yes_bid=20, yes_ask=75, no_bid=25, no_ask=80
+                self.ticker, yes_bid=5, yes_ask=98, no_bid=2, no_ask=95
             )
-            assert result is True  # YES spread = 55¢ (>50¢)
+            assert result is True  # YES spread = 93¢ (>85¢)
             # Should log warning
             mock_logger.warning.assert_called()
 
@@ -235,7 +242,12 @@ class TestTimestampAgeConsistency:
         # Should not log any timestamp violations
         # (In real test, we'd capture logs, but for now just ensure no exception)
         
-    @pytest.mark.skip(reason="Critical logging behavior may vary by implementation")
+    @pytest.mark.xfail(
+        strict=True,
+        reason="DEFECT AUDIT-2026-09-22-01: backward/negative market-data "
+               "timestamps are no longer flagged (critical log dropped in "
+               "market_state refactor). Expiry 2026-10-15.",
+    )
     def test_backward_timestamp_logged(self):
         """Test backward timestamp is logged but not rejected."""
         async def run_test():
@@ -262,7 +274,12 @@ class TestTimestampAgeConsistency:
         
         asyncio.run(run_test())
                 
-    @pytest.mark.skip(reason="Critical logging behavior may vary by implementation")
+    @pytest.mark.xfail(
+        strict=True,
+        reason="DEFECT AUDIT-2026-09-22-01: backward/negative market-data "
+               "timestamps are no longer flagged (critical log dropped in "
+               "market_state refactor). Expiry 2026-10-15.",
+    )
     def test_negative_age_auto_corrected(self):
         """Test negative age is auto-corrected."""
         async def run_test():
@@ -299,7 +316,6 @@ class TestFreshnessSLAEnforcement:
         self.store = get_kalshi_market_state_store()
         self.ticker = "KXBTC15M-25JUN-T100000"
         
-    @pytest.mark.skip(reason="Startup grace period takes precedence over stale data check in test environment")
     @pytest.mark.asyncio
     async def test_order_rejected_when_age_exceeds_sla(self):
         """Test order rejected when market data age exceeds 5s SLA."""
@@ -314,13 +330,22 @@ class TestFreshnessSLAEnforcement:
             fresh_state.executable = True
             fresh_state.last_book_update_ts = time.monotonic() - 1  # 1s fresh
         
-        # Create stale market state for our test ticker
+        # Create stale market state for our test ticker — entry-ready in every
+        # respect except freshness, so the SLA gate is the one that fires.
         state = self.store._get_or_create(self.ticker)
         state.best_bid_cents = 60
         state.best_ask_cents = 62
         state.book_initialized = True
         state.executable = True
-        state.last_book_update_ts = time.monotonic() - 10  # 10s stale
+        state.data_source = "WS_LIVE"
+        state.data_quality = "GOOD"
+        state.snapshot_complete = True
+        state.live_sequence_confirmed = True
+        state.book_health = "LIVE"
+        state.floor_strike = 100000.0
+        # 70s old: fresh enough for entry-readiness (120s far-from-expiry SLA)
+        # but stale under the 5s staleness_slo gate exercised by this test.
+        state.last_book_update_ts = time.monotonic() - 70
         
         # Create order intent with take profit to avoid no_trade_without_exit rejection
         intent = OrderIntent(
@@ -334,9 +359,11 @@ class TestFreshnessSLAEnforcement:
             exit_policy_id="tp_sl_15m",
             risk_tier="conservative",
             max_hold_seconds=900,
+            time_to_expiry_seconds=600,
             source="BTC_15M",  # Use whitelisted agent source
             confidence=0.85,  # Increase confidence to pass validation
-            model_prob=0.65,  # Add valid model probability
+            model_prob=0.65,
+            p_selected=0.80,  # Add valid model probability
             edge_pct=0.05,  # Add valid edge percentage (5%)
             group_id="test_group_123"  # Add group_id to pass position lifecycle validation
         )
@@ -344,34 +371,40 @@ class TestFreshnessSLAEnforcement:
         # Route order - should be rejected due to stale data
         with patch('merid.event_venues.kalshi.order_router.logger') as mock_logger, \
              patch('merid.event_venues.kalshi.order_router._is_kalshi_15m_crypto_agent') as mock_auth, \
+             patch('merid.event_venues.kalshi.order_router.can_submit_live_entry', return_value=True), \
              patch('merid.event_venues.kalshi.order_router._run_pre_trade_gate') as mock_gate, \
              patch('merid.event_venues.kalshi.order_router._check_bankroll_risk_cap') as mock_bankroll, \
+             patch('merid.event_venues.kalshi.order_router._check_intent_risk', return_value=None), \
+             patch('merid.event_venues.kalshi.order_router._get_strategy_policy', return_value={"min_edge": 0.0, "min_confidence": 0.0, "max_md_staleness_sec": 10**6}), \
              patch('merid.event_venues.kalshi.order_router._check_sanity') as mock_sanity, \
              patch('merid.risk.unified_risk_manager.UnifiedRiskManager') as mock_global_guard, \
              patch('merid.risk.kill_switches.risk_controller') as mock_risk_controller, \
              patch('merid.event_venues.kalshi.ws_bridge.get_ws_bridge') as mock_ws_bridge:
-            
+
             # Mock authorization, gate, bankroll, sanity check, global risk, and kill switch to pass
             mock_auth.return_value = True
             mock_gate.return_value = None
             mock_bankroll.return_value = None
             mock_sanity.return_value = None
-            
+
             # Mock global risk guard to pass
             mock_guard_instance = mock_global_guard.return_value
             mock_guard_instance.check_order.return_value = (True, "passed")
-            
+
             # Mock kill switch to pass
             mock_risk_controller.can_trade.return_value = True
-            
+
             # Mock WebSocket bridge to prevent too_many_reconnects kill switch
             mock_bridge_instance = mock_ws_bridge.return_value
             mock_bridge_instance._reconnect_count = 0
-            
+
             result = await route_order_async(intent)
-            
+
             assert result.status == "rejected"
-            assert "stale_market_data" in result.reason
+            # Canonical freshness rejection is the staleness_slo gate (5s SLO in
+            # _prepare_order_for_gate); the older 60s `stale_market_data` check
+            # in _route_live is now unreachable for entries.
+            assert "staleness_slo" in result.reason or "stale_market_data" in result.reason
             
     @pytest.mark.asyncio
     async def test_order_accepted_when_fresh(self):
@@ -396,9 +429,11 @@ class TestFreshnessSLAEnforcement:
             exit_policy_id="tp_sl_15m",
             risk_tier="conservative",
             max_hold_seconds=900,
+            time_to_expiry_seconds=600,
             source="BTC_15M",  # Use whitelisted agent source
             confidence=0.85,  # Increase confidence to pass validation
-            model_prob=0.65,  # Add valid model probability
+            model_prob=0.65,
+            p_selected=0.80,  # Add valid model probability
             edge_pct=0.05,  # Add valid edge percentage (5%)
             group_id="test_group_123"  # Add group_id to pass position lifecycle validation
         )
@@ -424,7 +459,12 @@ class TestKillSwitchConditions:
         """Set up test fixtures."""
         self.store = get_kalshi_market_state_store()
         
-    @pytest.mark.skip(reason="Rate limiting interferes with kill switch test in test environment")
+    @pytest.mark.xfail(
+        strict=True,
+        reason="DEFECT AUDIT-2026-09-22-02: SEV-0 no-live-data kill switch is "
+               "disabled via `if False:` at order_router.py:11551 — stale "
+               "priority-series data cannot reject orders. Expiry 2026-10-15.",
+    )
     @pytest.mark.asyncio
     async def test_kill_switch_no_live_data_blocks_orders(self):
         """Test kill switch blocks orders when no live data."""
@@ -450,9 +490,11 @@ class TestKillSwitchConditions:
             exit_policy_id="tp_sl_15m",
             risk_tier="conservative",
             max_hold_seconds=900,
+            time_to_expiry_seconds=600,
             source="BTC_15M",  # Use whitelisted agent source
             confidence=0.85,  # Increase confidence to pass validation
-            model_prob=0.65,  # Add valid model probability
+            model_prob=0.65,
+            p_selected=0.80,  # Add valid model probability
             edge_pct=0.05,  # Add valid edge percentage (5%)
             group_id="test_group_123",  # Add group_id to pass position lifecycle validation
             client_tag=f"test_kill_switch_no_live_data_{int(time.time())}"  # Unique client tag to avoid dedup
@@ -464,20 +506,21 @@ class TestKillSwitchConditions:
              patch('merid.event_venues.kalshi.order_router._run_pre_trade_gate') as mock_gate, \
              patch('merid.event_venues.kalshi.order_router._check_bankroll_risk_cap') as mock_bankroll, \
              patch('merid.event_venues.kalshi.order_router._check_sanity') as mock_sanity, \
+             patch('merid.event_venues.kalshi.order_router.can_submit_live_entry', return_value=True), \
              patch('merid.risk.unified_risk_manager.UnifiedRiskManager') as mock_global_guard, \
              patch('merid.risk.kill_switches.risk_controller') as mock_risk_controller, \
              patch('merid.event_venues.kalshi.ws_bridge.get_ws_bridge') as mock_ws_bridge:
-            
+
             # Mock authorization, gate, bankroll, sanity check, global risk, and kill switch to pass
             mock_auth.return_value = True
             mock_gate.return_value = None
             mock_bankroll.return_value = None
             mock_sanity.return_value = None
-            
+
             # Mock global risk guard to pass
             mock_guard_instance = mock_global_guard.return_value
             mock_guard_instance.check_order.return_value = (True, "passed")
-            
+
             # Mock kill switch to pass (but kill switch should still trigger due to stale data)
             mock_risk_controller.can_trade.return_value = True
             
@@ -490,16 +533,30 @@ class TestKillSwitchConditions:
             assert result.status == "rejected"
             assert "kill_switch" in result.reason
             
-    @pytest.mark.skip(reason="Startup grace period takes precedence in test environment")
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT AUDIT-2026-09-22-03: risk_controller kill-switch gate "
+            "(order_router.py:11939) only runs inside _route_live — MOCK/PAPER "
+            "routes bypass it entirely, so an engaged kill switch does not "
+            "block non-live order flow. Expiry 2026-10-15."
+        ),
+    )
     @pytest.mark.asyncio
     async def test_kill_switch_too_many_reconnects_blocks_orders(self):
         """Test kill switch blocks orders when too many reconnects."""
-        # Set up fresh market state to prevent not_executable rejection
+        # Set up fresh entry-ready market state to prevent upstream rejections
         state = self.store._get_or_create("KXSOL15M-25JUN-T100000")  # Use different ticker
         state.best_bid_cents = 60
         state.best_ask_cents = 62
         state.book_initialized = True
         state.executable = True
+        state.data_source = "WS_LIVE"
+        state.data_quality = "GOOD"
+        state.snapshot_complete = True
+        state.live_sequence_confirmed = True
+        state.book_health = "LIVE"
+        state.floor_strike = 100000.0
         state.last_book_update_ts = time.monotonic() - 1  # 1s fresh
         
         # Mock risk controller to simulate too many reconnects
@@ -520,9 +577,11 @@ class TestKillSwitchConditions:
                 exit_policy_id="tp_sl_15m",
                 risk_tier="conservative",
                 max_hold_seconds=900,
+            time_to_expiry_seconds=600,
                 source=f"BTC_15M_{int(time.time())}",  # Use unique source to avoid dedup
                 confidence=0.85,  # Increase confidence to pass validation
-                model_prob=0.65,  # Add valid model probability
+                model_prob=0.65,
+            p_selected=0.80,  # Add valid model probability
                 edge_pct=0.05,  # Add valid edge percentage (5%)
                 group_id="test_group_123",  # Add group_id to pass position lifecycle validation
                 client_tag=f"test_kill_switch_too_many_reconnects_{int(time.time())}"  # Unique client tag to avoid dedup
@@ -531,8 +590,11 @@ class TestKillSwitchConditions:
             # Route order - should be rejected by kill switch
             with patch('merid.event_venues.kalshi.order_router.logger') as mock_logger, \
                  patch('merid.event_venues.kalshi.order_router._is_kalshi_15m_crypto_agent') as mock_auth, \
+                 patch('merid.event_venues.kalshi.order_router.can_submit_live_entry', return_value=True), \
                  patch('merid.event_venues.kalshi.order_router._run_pre_trade_gate') as mock_gate, \
                  patch('merid.event_venues.kalshi.order_router._check_bankroll_risk_cap') as mock_bankroll, \
+                 patch('merid.event_venues.kalshi.order_router._check_intent_risk', return_value=None), \
+                 patch('merid.event_venues.kalshi.order_router._get_strategy_policy', return_value={"min_edge": 0.0, "min_confidence": 0.0, "max_md_staleness_sec": 10**6}), \
                  patch('merid.event_venues.kalshi.order_router._check_sanity') as mock_sanity, \
                  patch('merid.risk.unified_risk_manager.UnifiedRiskManager') as mock_global_guard, \
                  patch('merid.event_venues.kalshi.ws_bridge.get_ws_bridge') as mock_ws_bridge:
@@ -648,27 +710,23 @@ class TestIntegrationFlows:
         assert state.book_initialized is True
         assert state.executable is True
         
-    @pytest.mark.skip(reason="_sync_invariant_violation_with_rest not called in current implementation")
     @pytest.mark.asyncio
     async def test_data_corruption_flow_triggers_recovery(self):
         """Test data corruption flow triggers recovery mechanisms."""
-        # Apply corrupted orderbook snapshot
+        # Duality-violating snapshot without a cross: YES bid 5c + NO bid 5c.
         msg = {
             "type": "orderbook_snapshot",
-            "ticker": "KXBTC15M-25JUN-T100000", 
-            "yes": [[65.0, 10], [66.0, 5]],  # YES prices too high
-            "no": [[40.0, 8], [39.0, 3]]     # NO prices don't complement
+            "ticker": "KXBTC15M-25JUN-T100000",
+            "yes": [[0.05, 10]],
+            "no": [[0.05, 3]],
         }
         
-        with patch.object(self.store, '_sync_invariant_violation_with_rest') as mock_sync:
-            result = self.store.apply_orderbook_message(msg)
-            
-            # Should trigger recovery sync even if state is returned
-            mock_sync.assert_called_once()
-            
-            # State may be returned but should trigger recovery
-            # The implementation may accept the data but log warnings
-            assert result is not None or mock_sync.called
+        with patch.object(self.store, '_schedule_duality_resync') as mock_sync:
+            # Debounce contract: resync fires at the 3rd violation in 30s.
+            for _ in range(3):
+                result = self.store.apply_orderbook_message(msg)
+
+            assert mock_sync.called
 
 
 if __name__ == "__main__":

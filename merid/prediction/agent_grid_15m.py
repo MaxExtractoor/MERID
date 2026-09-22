@@ -321,7 +321,7 @@ def _write_shadow_telemetry(
             "git_revision": os.environ.get("MERID_GIT_REVISION"),
             "config_hash": os.environ.get("MERID_CONFIG_HASH"),
         }
-        out_dir = Path("data/shadow/cfb_rti")
+        out_dir = Path(os.environ.get("MERID_SHADOW_TELEMETRY_DIR", "data/shadow/cfb_rti"))
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         out_path = out_dir / f"{run_id}_{ticker}_{ts}_{decision_id[:8]}.json"
@@ -17104,7 +17104,17 @@ class LeanAgentGrid15m:
                         )
                         quantity_cc = int(Decimal(str(pos.size)) * Decimal("100"))
 
-                        _side = (pos.outcome_id or "yes").lower().strip()
+                        # CRITICAL FIX (2026-09-21): missing outcome_id must not
+                        # default to "yes" — that would fabricate a positive
+                        # position_fp and silently invert a NO position into YES
+                        # for every downstream consumer of this snapshot.
+                        _side = (pos.outcome_id or "").lower().strip()
+                        if _side not in ("yes", "no"):
+                            logger.error(
+                                "[AGENT-GRID] Position %s has missing/invalid outcome_id=%r - SKIPPING (no fabricated direction)",
+                                getattr(pos, "market_id", "unknown"), getattr(pos, "outcome_id", None),
+                            )
+                            continue
 
                         rest_positions.append({
 
@@ -17166,7 +17176,9 @@ class LeanAgentGrid15m:
 
                                 "market_id": order.market_id,
 
-                                "side": order.side or "yes",
+                                # CRITICAL FIX (2026-09-21): missing order side stays
+                                # unknown rather than fabricating "yes".
+                                "side": order.side or "",
 
                                 "contracts": str(order.size) if order.size else "0",
 
@@ -17293,7 +17305,15 @@ class LeanAgentGrid15m:
             pending_order_open = False
             pending_contracts = 0
             pending_price_cents = pos_obj.avg_price_cents or pos_obj.current_price_cents or 0
-            order_side = (pos_obj.thesis_side or pos_obj.side or "yes").lower()
+            # CRITICAL FIX (2026-09-21): a position with no determinable side must
+            # not be allocated as fabricated YES exposure.
+            order_side = (pos_obj.thesis_side or pos_obj.side or "").lower()
+            if order_side not in ("yes", "no"):
+                logger.error(
+                    "[AGENT-GRID] Canonical position %s has undetermined side - SKIPPING (no fabricated direction)",
+                    pos_ticker,
+                )
+                continue
             if pos_ticker in open_orders_by_ticker:
                 for o in open_orders_by_ticker[pos_ticker]:
                     if (o.get("side") or "").lower() == order_side:
@@ -17336,7 +17356,15 @@ class LeanAgentGrid15m:
 
             contracts = ep.get("contracts", 0)
             price_cents = ep.get("avg_price_cents", 0) or 50
-            side = (ep.get("side") or "yes").lower()
+            # CRITICAL FIX (2026-09-21): unknown exchange side must not fabricate
+            # a YES allocation.
+            side = (ep.get("side") or "").lower()
+            if side not in ("yes", "no"):
+                logger.error(
+                    "[AGENT-GRID] Exchange position %s has undetermined side - SKIPPING (no fabricated direction)",
+                    ticker,
+                )
+                continue
             notional = (contracts * price_cents) / 100.0
 
             canonical.append(CanonicalLivePosition(
@@ -17364,7 +17392,15 @@ class LeanAgentGrid15m:
 
             contracts = o.get("contracts", 0)
             price_cents = o.get("price_cents", 0) or 50
-            side = (o.get("side") or "yes").lower()
+            # CRITICAL FIX (2026-09-21): unknown resting-order side must not
+            # fabricate a YES allocation.
+            side = (o.get("side") or "").lower()
+            if side not in ("yes", "no"):
+                logger.error(
+                    "[AGENT-GRID] Open order %s has undetermined side - SKIPPING (no fabricated direction)",
+                    ticker,
+                )
+                continue
             notional = (contracts * price_cents) / 100.0
 
             canonical.append(CanonicalLivePosition(

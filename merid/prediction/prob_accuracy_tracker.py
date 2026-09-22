@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -24,7 +25,9 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_DB_PATH = Path("data/prob_accuracy.db")
+_DB_PATH = Path(
+    os.environ.get("MERID_PROB_ACCURACY_DB", "data/prob_accuracy.db")
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS prob_predictions (

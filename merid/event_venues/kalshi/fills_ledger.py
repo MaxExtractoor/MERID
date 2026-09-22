@@ -1356,7 +1356,11 @@ class KalshiFillsLedger:
         # fills arriving via HTTP after the in-memory OrderIntent is evicted can
         # still be classified (entry/exit/side/action) and matched to an order_id.
         self._durable_intent_index: Dict[str, Dict[str, Any]] = {}
-        self._durable_index_path = Path("data") / "kalshi_fills_intent_index.json"
+        # TEST-ISOLATION: env-overridable so tests can redirect writes away
+        # from the production data/ directory (same pattern as MERID_FILLS_DB_PATH).
+        self._durable_index_path = Path(os.getenv(
+            "MERID_FILLS_INTENT_INDEX_PATH", "data/kalshi_fills_intent_index.json"
+        ))
         self._load_durable_intent_index()
 
         # Pending orders: recently submitted but not-yet-persisted intents.
@@ -3111,10 +3115,13 @@ class KalshiFillsLedger:
                 try:
                     _intent_target_side, _intent_action = parse_kalshi_side(_original_side)
                 except Exception:
-                    _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
+                    # CRITICAL FIX (2026-09-21): no "yes" default — a missing intent
+                    # side must fail the ("yes","no") membership guard below rather
+                    # than stamp a fabricated canonical_position_side.
+                    _intent_target_side = (getattr(intent, "side", "") or "").lower()
                     _intent_action = (getattr(intent, "action", "") or "").lower()
             else:
-                _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
+                _intent_target_side = (getattr(intent, "side", "") or "").lower()
                 _intent_action = (getattr(intent, "action", "") or "").lower()
 
             if fill.canonical_position_action not in ("buy", "sell") and _intent_action in ("buy", "sell"):
@@ -4552,8 +4559,11 @@ class KalshiFillsLedger:
 
             # Store in data directory
             import json
+            import os
             from pathlib import Path
-            session_file = Path("data") / "kalshi_session_metadata.json"
+            session_file = Path(
+                os.environ.get("MERID_SESSION_METADATA_PATH", "data/kalshi_session_metadata.json")
+            )
             session_file.parent.mkdir(parents=True, exist_ok=True)
 
             with open(session_file, "w") as f:
@@ -4645,8 +4655,11 @@ class KalshiFillsLedger:
                 # No event loop, safe to do blocking I/O
                 pass
 
+            import os
             from pathlib import Path
-            session_file = Path("data") / "kalshi_session_metadata.json"
+            session_file = Path(
+                os.environ.get("MERID_SESSION_METADATA_PATH", "data/kalshi_session_metadata.json")
+            )
 
             if not session_file.exists():
                 logger.debug("No session metadata file found, starting fresh")
@@ -7383,10 +7396,13 @@ class KalshiFillsLedger:
                     try:
                         _intent_target_side, _intent_action = parse_kalshi_side(_original_side)
                     except Exception:
-                        _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
+                        # CRITICAL FIX (2026-09-21): no "yes" default — a missing intent
+                        # side must resolve to None via the sanitizer below, not a
+                        # fabricated YES direction.
+                        _intent_target_side = (getattr(intent, "side", "") or "").lower()
                         _intent_action = (getattr(intent, "action", "") or "").lower()
                 else:
-                    _intent_target_side = (getattr(intent, "side", "") or "yes").lower()
+                    _intent_target_side = (getattr(intent, "side", "") or "").lower()
                     _intent_action = (getattr(intent, "original_action", None) or getattr(intent, "action", "") or "").lower()
 
                 if _intent_target_side not in ("yes", "no"):

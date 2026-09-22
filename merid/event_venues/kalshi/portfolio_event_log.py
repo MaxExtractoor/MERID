@@ -63,6 +63,45 @@ _DB_RETRY_DELAY_INITIAL: float = float(os.getenv("MERID_EVENT_LOG_DB_RETRY_DELAY
 _DB_RETRY_DELAY_MAX: float = float(os.getenv("MERID_EVENT_LOG_DB_RETRY_DELAY_MAX", "0.5"))
 
 
+def _event_json_default(o: Any) -> Any:
+    """JSON fallback for event payloads: Decimal (exact money) and datetime."""
+    from decimal import Decimal
+    if isinstance(o, Decimal):
+        return int(o) if o == o.to_integral_value() else float(o)
+    if isinstance(o, datetime):
+        return o.isoformat()
+    return str(o)
+
+
+def _event_data_to_json(data: Any) -> str:
+    """Serialize event data as JSON.  Money fields may be Decimal."""
+    if isinstance(data, str):
+        return data
+    return json.dumps(data, default=_event_json_default)
+
+
+def _event_data_from_row(raw: Any) -> Any:
+    """Parse stored event data back to a dict.
+
+    Legacy SQLite rows were written with ``str(data)`` (Python repr), so fall
+    back to ``ast.literal_eval`` when ``json.loads`` fails.
+    """
+    if not isinstance(raw, str):
+        return raw
+    s = raw.strip()
+    if not s.startswith(("{", "[")):
+        return raw
+    try:
+        return json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    import ast
+    try:
+        return ast.literal_eval(s)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return raw
+
+
 def _postgres_required() -> bool:
     """Return True when PostgreSQL persistence is mandatory (soak/audit mode)."""
     return os.getenv("MERID_POSTGRES_REQUIRED", "").strip().lower() in ("1", "true")
@@ -303,7 +342,7 @@ class PortfolioEventLog:
                     getattr(event, 'contracts', None),
                     getattr(event, 'price_cents', None),
                     event.timestamp,
-                    json.dumps(event.data) if isinstance(event.data, dict) else str(event.data)
+                    _event_data_to_json(event.data)
                 ))
                 
                 logger.debug(
@@ -363,7 +402,7 @@ class PortfolioEventLog:
                     event.event_type.value,
                     event.account_id,
                     event.timestamp.isoformat(),
-                    event.data if isinstance(event.data, str) else str(event.data),
+                    _event_data_to_json(event.data),
                     datetime.now(timezone.utc).isoformat(),
                 ))
                 conn.commit()
@@ -432,10 +471,10 @@ class PortfolioEventLog:
                         event_type=EventType(row["event_type"]),
                         account_id=row["account_id"],
                         timestamp=datetime.fromisoformat(row["timestamp"]),
-                        data=row["data"],
+                        data=_event_data_from_row(row["data"]),
                     )
                     events.append(event)
-                
+
                 logger.debug(
                     "EventLog: retrieved %d events since sequence_id=%d (account=%s)",
                     len(events),
@@ -541,10 +580,10 @@ class PortfolioEventLog:
                         event_type=EventType(row["event_type"]),
                         account_id=row["account_id"],
                         timestamp=datetime.fromisoformat(row["timestamp"]),
-                        data=row["data"],
+                        data=_event_data_from_row(row["data"]),
                     )
                     events.append(event)
-                
+
                 logger.debug(
                     "EventLog: replayed %d events from sequence_id=%d to %s (account=%s)",
                     len(events),

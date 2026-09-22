@@ -33,7 +33,9 @@ SERIES_TICKERS = {
 }
 
 # Output directory
-OUTPUT_DIR = Path("data/warmup_snapshots")
+OUTPUT_DIR = Path(
+    os.environ.get("MERID_WARMUP_SNAPSHOTS_DIR", "data/warmup_snapshots")
+)
 
 
 class WarmupDataCollector:

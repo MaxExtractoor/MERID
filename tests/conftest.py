@@ -44,6 +44,80 @@ _os.environ["MERID_MAX_SLIPPAGE_CENTS"] = "5"
 # 2026-08-31: Legacy velocity tests use seconds-granularity history; allow them
 # to be considered fresh without weakening real-time freshness gating.
 _os.environ["MERID_VELOCITY_MAX_AGE_MS"] = "60000"
+# 2026-09-22 audit: real Kalshi credentials must never be visible to the test
+# process. Emptying them makes any direct-auth path fail closed; tests that
+# exercise credential handling set their own values via monkeypatch/fixtures.
+_os.environ["KALSHI_API_KEY_ID"] = ""
+_os.environ["KALSHI_PRIVATE_KEY_PATH"] = ""
+
+# ── Durable-state isolation (2026-09-22 audit) ─────────────────────────────
+# Tests must never read or write the production-like durable state under the
+# repository ``data/`` directory.  Redirect every env-overridable write path to
+# a per-process scratch directory (each xdist worker gets its own).  Paths that
+# point at checked-in read-only config/calibration artifacts are intentionally
+# left alone.
+import tempfile as _tempfile
+_TEST_STATE_DIR = _tempfile.mkdtemp(prefix="merid_pytest_state_")
+_os.makedirs(_TEST_STATE_DIR, exist_ok=True)
+for _env_key, _fname in {
+    "MERID_RISK_KS_FILE": "risk_kill_switch.json",
+    "MERID_GAUNTLET_VERDICTS": "gauntlet_verdicts.jsonl",
+    "MERID_DEPLOYMENT_STATE": "deployment_state.json",
+    "MERID_PORTFOLIO_EVENT_LOG_DB": "portfolio_event_log.db",
+    "MERID_FILLS_DB_PATH": "kalshi_fills.db",
+    "MERID_FILLS_INTENT_INDEX_PATH": "kalshi_fills_intent_index.json",
+    "MERID_APPLIED_FILL_IDS_PATH": "kalshi_applied_fill_ids.json",
+    "MERID_PENDING_TP_TARGETS_PATH": "kalshi_pending_tp_targets.json",
+    "MERID_ORDER_ID_CLIENT_TAG_PATH": "kalshi_order_id_to_client_tag.json",
+    "MERID_EXIT_INTENT_PERSISTENCE_PATH": "exit_intents.json",
+    "MERID_LIVE_RUNTIME_STATE_PATH": "live_runtime_state.json",
+    "MERID_WINDOW_STATE_FILE": "window_state.json",
+    "MERID_SETTLEMENT_OUTCOMES_PATH": "settlement_outcomes.jsonl",
+    "MERID_LOOP_DIAG_FILE": "loop_diag.jsonl",
+    "MERID_REJECTED_CANDIDATES_LOG": "rejected_candidates.jsonl",
+    "MERID_HYBRID_SIGNAL_AUDIT_PATH": "hybrid_signal_audit.jsonl",
+    "MERID_TAIL_AB_SHADOW_LOG_PATH": "tail_ab_shadow.jsonl",
+    "MERID_SHADOW_SIDE_TELEMETRY_PATH": "shadow_side_telemetry.jsonl",
+    "MERID_DECISION_TELEMETRY_PATH": "decision_telemetry.jsonl",
+    "MERID_DECISION_AUDIT_DB_PATH": "decision_audit.db",
+    "MERID_GOLDEN_RECORDS_DB": "golden_records.db",
+    "MERID_EDGE_DB": "edge.db",
+    "MERID_BETTING_DB": "betting.db",
+    "MERID_COGNITIVE_DB": "cognitive.db",
+    "MERID_FLOW_DB": "flow.db",
+    "MERID_LLM_GOVERNANCE_DB": "llm_governance.db",
+    "MERID_TRADE_ATTRIBUTION_DB_PATH": "trade_attribution.db",
+    "MERID_CALIBRATION_DB": "calibration.db",
+    "MERID_AUDIT_DECOMPOSITION_PATH": "audit_decomposition.json",
+    "MERID_MODEL_DECOMPOSITION_PATH": "model_decomposition.json",
+    "MERID_EV_EXIT_LOG_DIR": "ev_exit_log",
+    "MERID_SHADOW_TELEMETRY_DIR": "shadow_telemetry",
+    "MERID_AUDIT_OUTPUT_DIR": "audit_output",
+    "MERID_PROBE_OUTPUT_DIR": "probe_output",
+    "MERID_REPLAY_STATE_DIFF_DIR": "replay_state_diff",
+    "MERID_INGRESS_RECORDING_DIR": "ingress_recording",
+    "MERID_HEDGE_DATA_DIR": "hedge_data",
+    "MERID_CB_HTTP_WATERMARK_PATH": "cb_http_watermark.json",
+    "MERID_CB_HALT_STATE_PATH": "cb_halt.json",
+    "MERID_RECONCILIATION_REPORT_PATH": "reconciliation_report.json",
+    "MERID_SESSION_METADATA_PATH": "kalshi_session_metadata.json",
+    "MERID_PAPER_LADDER_STATE_PATH": "paper_ladder_state.json",
+    "MERID_PROB_ACCURACY_DB": "prob_accuracy.db",
+    "MERID_ENTRY_PROVENANCE_PATH": "entry_provenance_snapshots.json",
+    "MERID_PROMOTION_STATES_PATH": "promotion_states.json",
+    "MERID_RISK_STATE_PATH": "risk_state.json",
+    "MERID_WARMUP_SNAPSHOTS_DIR": "warmup_snapshots",
+    "MERID_RUN_SUMMARIES_DIR": "run_summaries",
+    "MERID_INGRESS_DIR": "ingress",
+    "MERID_KALSHI_ARCHIVE_DIR": "kalshi_archive",
+    "MERID_CREDENTIALS_PATH": "credentials/kalshi.json",
+    "MERID_PROFILE_SNAPSHOTS_DIR": "profile_snapshots",
+    "MERID_KALSHI_ORDER_ATTEMPT_DB": "kalshi_order_attempts.db",
+    "MERID_SESSION_LOG_PATH": "session_log.jsonl",
+}.items():
+    # Force-set (not setdefault): a developer env pointing at real data/ paths
+    # must not leak production state into the test process.
+    _os.environ[_env_key] = _os.path.join(_TEST_STATE_DIR, _fname)
 
 # Orphan / optional-dep modules — would break ``pytest --collect-only`` (CI gate).
 collect_ignore = [
@@ -294,7 +368,10 @@ if "utils.logger" not in sys.modules:
         _ul.PRODUCTION_LOG_FILE, encoding="utf-8"
     )
     _ul._test_prod_handler.setFormatter(_ul._test_text_formatter)
-    _ul._test_stream_handler = _stdlib_logging.StreamHandler()
+    # Bind to the real process stderr, not the capture stream active at
+    # conftest-import time — a captured sys.stderr is closed when the phase
+    # ends and every later emit raises "I/O operation on closed file".
+    _ul._test_stream_handler = _stdlib_logging.StreamHandler(sys.__stderr__)
     _ul._test_stream_handler.setFormatter(_ul._test_text_formatter)
 
     def _ul_get_logger(name: str) -> _stdlib_logging.Logger:
@@ -311,6 +388,32 @@ if "utils.logger" not in sys.modules:
 
     _ul.get_logger = _ul_get_logger  # type: ignore[attr-defined]
     _ul.getLogger = _ul_get_logger  # type: ignore[attr-defined]
+
+    # Lazily delegate attributes the stub doesn't provide (JsonFormatter,
+    # SensitiveDataFilter, format_price, cleanup_old_logs, ...) to the real
+    # utils/logger.py loaded under a private module name — the stub keeps
+    # ownership of get_logger/log paths while source-level tests see the
+    # real implementations.
+    def _ul_real_module():
+        real = getattr(_ul, "_real_mod", None)
+        if real is None:
+            import importlib.util as _ilu
+            spec = _ilu.spec_from_file_location(
+                "_merid_utils_logger_real",
+                str(Path(__file__).resolve().parent.parent / "utils" / "logger.py"),
+            )
+            real = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(real)
+            _ul._real_mod = real  # type: ignore[attr-defined]
+        return real
+
+    def _ul_module_getattr(name: str):
+        try:
+            return getattr(_ul_real_module(), name)
+        except Exception as exc:
+            raise AttributeError(name) from exc
+
+    _ul.__getattr__ = _ul_module_getattr  # type: ignore[attr-defined]
 
     # Provide correlation-ID helpers used by web/main.py middleware
     _ul.correlation_id_var = _contextvars.ContextVar("correlation_id", default=None)  # type: ignore[attr-defined]
@@ -1119,3 +1222,121 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "kill_switch: Kill switch and safety tests")
     config.addinivalue_line("markers", "production_audit: Production audit regression tests (scope, bankroll, WS format)")
     config.addinivalue_line("markers", "integration: Integration-style vertical slice tests")
+
+
+# ---------------------------------------------------------------------------
+# Production durable-state guard (2026-09-22 audit)
+# ---------------------------------------------------------------------------
+# Snapshot the repo ``data/`` directory at session start and diff it at session
+# finish.  Any test that creates, modifies, or deletes a file under the
+# production-like state root fails the run — durable paths must be injected
+# (env override or tmp_path), never hardcoded to ``data/``.
+
+from typing import Dict as _Dict, Tuple as _Tuple
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DURABLE_STATE_ROOT = _REPO_ROOT / "data"
+_durable_snapshot: _Dict[str, _Tuple] = {}
+# Directories below this entry count get full per-entry signatures so the
+# violation report names the culprit files. Larger dirs (e.g. the ~490k-entry
+# data/shadow store) use an aggregate signature.
+_DURABLE_DETAIL_LIMIT = 20000
+
+
+def _snapshot_durable_state() -> _Dict[str, _Tuple]:
+    """Fingerprint every directory under data/.
+
+    Small dirs record {name: (size, mtime_ns)} per entry so violation reports
+    name culprit files; large dirs record only (entry_count, max_child_mtime).
+
+    os.scandir DirEntry.stat() reuses the directory-listing data on Windows,
+    so this is cheap even for ~490k-entry artifact stores — while still
+    detecting created, deleted, and content-modified entries at any depth.
+    """
+    snap: _Dict[str, _Tuple[int, int]] = {}
+    if not _DURABLE_STATE_ROOT.is_dir():
+        return snap
+    import os as _os2
+
+    def _scan(root: str) -> None:
+        try:
+            with _os2.scandir(root) as it:
+                entries = list(it)
+        except OSError:
+            return
+        newest = 0
+        subdirs = []
+        detailed = len(entries) <= _DURABLE_DETAIL_LIMIT
+        detail = {} if detailed else None
+        for e in entries:
+            try:
+                st = e.stat()
+            except OSError:
+                continue
+            if st.st_mtime_ns > newest:
+                newest = st.st_mtime_ns
+            if detailed:
+                detail[e.name] = (st.st_size, st.st_mtime_ns)
+            if e.is_dir(follow_symlinks=False):
+                subdirs.append(e.path)
+        if detailed:
+            snap[root] = (len(entries), newest, detail)
+        else:
+            snap[root] = (len(entries), newest)
+        for d in subdirs:
+            _scan(d)
+
+    _scan(str(_DURABLE_STATE_ROOT))
+    return snap
+
+
+def pytest_sessionstart(session):
+    _durable_snapshot.clear()
+    _durable_snapshot.update(_snapshot_durable_state())
+
+
+def _diff_dir_entries(before: _Tuple, after: _Tuple) -> _Tuple:
+    """Return (added, removed, changed) entry names for detailed signatures."""
+    if len(before) < 3 or len(after) < 3:
+        return (), (), ()
+    b, a = before[2], after[2]
+    added = tuple(sorted(set(a) - set(b)))
+    removed = tuple(sorted(set(b) - set(a)))
+    changed = tuple(sorted(n for n in set(a) & set(b) if a[n] != b[n]))
+    return added, removed, changed
+
+
+def pytest_sessionfinish(session, exitstatus):
+    after = _snapshot_durable_state()
+    violations = []
+    for path, sig in after.items():
+        if path not in _durable_snapshot:
+            violations.append(f"CREATED  {path}")
+        elif sig != _durable_snapshot[path]:
+            added, removed, changed = _diff_dir_entries(_durable_snapshot[path], sig)
+            detail = ""
+            if added or removed or changed:
+                detail = "  (+%s -%s ~%s)" % (
+                    ",".join(added) or "-",
+                    ",".join(removed) or "-",
+                    ",".join(changed) or "-",
+                )
+            violations.append(f"MODIFIED {path}{detail}")
+    for path in _durable_snapshot:
+        if path not in after:
+            violations.append(f"DELETED  {path}")
+    if violations:
+        report = (
+            "\n"
+            "=" * 72 + "\n"
+            "PRODUCTION STATE POLLUTION DETECTED — tests wrote to repo data/:\n"
+            + "\n".join(f"  {v}" for v in sorted(violations))
+            + "\n"
+            "Every mutable test artifact must live under tmp_path or a\n"
+            "fixture-provided temp root; durable paths must be injected via\n"
+            "their MERID_* env overrides (redirected in conftest) or fixture args.\n"
+            + "=" * 72 + "\n"
+        )
+        print(report)
+        if exitstatus == 0:
+            session.exitstatus = 1

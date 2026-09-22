@@ -9,15 +9,23 @@ class TestFillRateTracking:
     """Tests for get_fill_rate_stats method."""
     
     @pytest.fixture
-    def ledger(self):
+    def ledger(self, tmp_path):
         """Create a fresh ledger for each test."""
         # Reset singleton to avoid test pollution
         from merid.event_venues.kalshi import fills_ledger
         fills_ledger._ledger = None
         fills_ledger.KalshiFillsLedger._instance = None
         fills_ledger.KalshiFillsLedger._initialized = False
-        
+
         ledger = fills_ledger.KalshiFillsLedger()
+        # Isolate durable intent state: the default path is the real
+        # data/kalshi_fills_intent_index.json, so test intents would otherwise
+        # leak into the production index and stale records from prior runs
+        # would be merged back into fresh intents (poisoning created_at).
+        ledger._durable_intent_index.clear()
+        ledger._intents_by_order_id.clear()
+        ledger._intents_by_client_order_id.clear()
+        ledger._durable_index_path = tmp_path / "kalshi_fills_intent_index.json"
         return ledger
     
     def test_fill_rate_basic(self, ledger):

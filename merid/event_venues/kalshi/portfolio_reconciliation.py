@@ -224,7 +224,10 @@ class PortfolioReconciler:
                     )
                 else:
                     # Both exist - compare details
-                    qty_diff = abs(internal_pos.quantity - kalshi_pos.quantity)
+                    # Internal quantity is signed-YES (negative=long NO) while the
+                    # exchange reports a positive magnitude per side; compare
+                    # magnitudes (the {ticker}_{side} key already pins the side).
+                    qty_diff = abs(abs(internal_pos.quantity) - abs(kalshi_pos.quantity))
                     if qty_diff > _POSITION_TOLERANCE_CONTRACTS:
                         position_discrepancies.append(
                             f"Position quantity mismatch {key}: internal={internal_pos.quantity} kalshi={kalshi_pos.quantity}"
