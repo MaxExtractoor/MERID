@@ -526,7 +526,17 @@ class TestDeterministicReplay:
             "from kalshi.test_discretionary_exit_evidence import _run_corpus_json;"
             "sys.stdout.write(_run_corpus_json())"
         )
-        env = dict(os.environ, MERID_ENV="testing", MERID_TRADE_MODE="paper")
+        env = dict(
+            os.environ,
+            MERID_ENV="testing",
+            MERID_TRADE_MODE="paper",
+            # The driver runs outside pytest, so conftest's durable-path pins
+            # do not apply — pin them here so an import-time writer can never
+            # touch repo data/.
+            MERID_TRADE_ATTRIBUTION_DB_PATH=str(tmp_path / "attr.db"),
+            MERID_FILLS_DB_PATH=str(tmp_path / "fills.db"),
+            MERID_KALSHI_ORDER_ATTEMPT_DB=str(tmp_path / "attempts.db"),
+        )
         outs = []
         for _ in range(2):
             res = subprocess.run(
