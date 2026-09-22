@@ -165,6 +165,73 @@ class TestFlowModels(unittest.TestCase):
 
 # ── Ingestion ─────────────────────────────────────────────────────────
 
+
+
+# ── Store ─────────────────────────────────────────────────────────────
+
+class TestFlowStore(unittest.TestCase):
+    """Tests for FlowStore SQLite persistence."""
+
+    def setUp(self):
+        from merid.flow.store import FlowStore
+        self.store = FlowStore(db_path=":memory:")
+
+    def test_upsert_and_get_token(self):
+        from merid.flow.models import Token
+        tok = Token(symbol="BONK", name="Bonk", chain="solana", contract_address="abc123")
+        self.store.upsert_token(tok)
+        got = self.store.get_token(tok.id)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.symbol, "BONK")
+
+    def test_list_tokens(self):
+        from merid.flow.models import Token
+        self.store.upsert_token(Token(symbol="A", chain="solana"))
+        self.store.upsert_token(Token(symbol="B", chain="ethereum"))
+        all_tokens = self.store.list_tokens()
+        self.assertEqual(len(all_tokens), 2)
+        sol_tokens = self.store.list_tokens(chain="solana")
+        self.assertEqual(len(sol_tokens), 1)
+
+    def test_upsert_and_get_entity(self):
+        from merid.flow.models import Entity
+        ent = Entity(address="whale-1", entity_type="whale", label="Big Whale")
+        self.store.upsert_entity(ent)
+        got = self.store.get_entity(ent.id)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.label, "Big Whale")
+
+    def test_list_entities_by_type(self):
+        from merid.flow.models import Entity
+        self.store.upsert_entity(Entity(address="w1", entity_type="whale"))
+        self.store.upsert_entity(Entity(address="k1", entity_type="kol"))
+        whales = self.store.list_entities(entity_type="whale")
+        self.assertEqual(len(whales), 1)
+
+    def test_add_and_list_events(self):
+        from merid.flow.models import FlowEvent
+        ev = FlowEvent(event_type="large_buy", token_id="tok-1", size_usd=50000)
+        self.store.add_event(ev)
+        events = self.store.list_events(token_id="tok-1", since_hours=1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].size_usd, 50000)
+
+    def test_add_and_list_opinions(self):
+        from merid.flow.models import FlowOpinion
+        op = FlowOpinion(agent_id="a1", token_id="tok-1", stance="spec_long", confidence=0.8)
+        self.store.add_opinion(op)
+        opinions = self.store.list_opinions("tok-1")
+        self.assertEqual(len(opinions), 1)
+        self.assertEqual(opinions[0].stance, "spec_long")
+
+    def test_meme_plan_crud(self):
+        from merid.flow.models import MemePlan
+        plan = MemePlan(token_id="tok-1", entry_size_usd=50)
+        self.store.add_meme_plan(plan)
+        plans = self.store.list_meme_plans()
+        self.assertEqual(len(plans), 1)
+        self.store.update_plan_status(plan.id, "meme", "approved")
+        plans = self.store.list_meme_plans(status="approved")
         self.assertEqual(len(plans), 1)
 
     def test_whale_plan_crud(self):
@@ -356,32 +423,6 @@ class TestFlowSniper(unittest.TestCase):
 
 
 # ── Risk ──────────────────────────────────────────────────────────────
-
-class TestFlowRisk(unittest.TestCase):
-    """Tests for FlowDomainRisk."""
-
-    def setUp(self):
-        from merid.flow.flow_risk import FlowDomainRisk, FlowRiskConfig
-        self.risk = FlowDomainRisk(config=FlowRiskConfig(
-            max_domain_notional_usd=2500,
-            max_daily_loss_usd=500,
-            max_per_token_usd=200,
-            throttle_loss_trigger_usd=300,
-            halt_loss_trigger_usd=500,
-            min_flow_score=30,
-            min_domain_hit_rate=0.35,
-        ))
-
-
-
-
-
-
-
-
-
-
-
 
 
 

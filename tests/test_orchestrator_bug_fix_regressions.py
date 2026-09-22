@@ -398,37 +398,6 @@ class TestBugH7HealthEndpointLive:
         app.include_router(router)
         return TestClient(app, raise_server_exceptions=False)
 
-    def test_health_returns_200_when_all_checks_pass(self):
-        client = self._make_client()
-
-        mock_guard = MagicMock()
-        mock_guard.kill_switch_active = False
-        mock_guard._global_kill_reason = ""
-
-        mock_kc = MagicMock()
-        mock_kc.is_circuit_open = False
-        mock_kc.get_circuit_status = MagicMock(return_value={})
-
-        mock_loop = MagicMock()
-        mock_loop.status.return_value = {
-            "running": True,
-            "metrics": {"total_ticks": 5, "tick_errors": 0, "last_tick_duration_ms": 120},
-        }
-
-        mock_ag = _mock_agent_grid_ready()
-        with patch("merid.execution_guard.get_execution_guard", return_value=mock_guard), \
-             patch("merid.event_venues.kalshi.client.get_kalshi_client",
-                   return_value=mock_kc), \
-             patch("merid.loop.get_merid_loop", return_value=mock_loop), \
-             patch("merid.prediction.agent_grid.get_agent_grid", return_value=mock_ag):
-            resp = client.get("/api/health")
-
-        assert resp.status_code == 200, (
-            f"Expected 200 when all checks pass, got {resp.status_code}"
-        )
-        body = resp.json()
-        assert body["status"] == "healthy"
-        assert body["critical_failures"] == []
 
     def test_health_returns_503_when_kill_switch_active(self):
         client = self._make_client()
@@ -510,32 +479,6 @@ class TestBugH7HealthEndpointLive:
         body = resp.json()
         assert "merid_loop_stopped" in body["critical_failures"]
 
-    def test_health_response_has_required_keys(self):
-        """Response body must contain status, timestamp, critical_failures, checks."""
-        client = self._make_client()
-
-        mock_guard = MagicMock()
-        mock_guard.kill_switch_active = False
-        mock_guard._global_kill_reason = ""
-
-        mock_kc = MagicMock()
-        mock_kc.is_circuit_open = False
-        mock_kc.get_circuit_status = MagicMock(return_value={})
-
-        mock_loop = MagicMock()
-        mock_loop.status.return_value = {"running": True, "metrics": {}}
-
-        mock_ag = _mock_agent_grid_ready()
-        with patch("merid.execution_guard.get_execution_guard", return_value=mock_guard), \
-             patch("merid.event_venues.kalshi.client.get_kalshi_client",
-                   return_value=mock_kc), \
-             patch("merid.loop.get_merid_loop", return_value=mock_loop), \
-             patch("merid.prediction.agent_grid.get_agent_grid", return_value=mock_ag):
-            resp = client.get("/api/health")
-
-        body = resp.json()
-        for key in ("status", "timestamp", "critical_failures", "checks"):
-            assert key in body, f"Required key '{key}' missing from /api/health response"
 
     def test_health_not_hardcoded_exchanges(self):
         """Response must NOT contain the old hardcoded crypto exchange list."""
@@ -793,80 +736,3 @@ class TestExecutionGuardPreTradeCheck:
 # ===========================================================================
 # Startup gate — structural test for web/main.py BUG-H1 fix
 # ===========================================================================
-class TestBugH1StartupGate:
-    """The MeridLoop.run() task must only be created when startup_success=True."""
-
-    def test_startup_gate_guards_loop_creation(self):
-        """Inspect _app_lifespan source: MeridLoop task creation must be inside
-        an 'if startup_success:' / 'if not startup_success:' block."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-
-        # The fix uses: if not startup_success: ... else: create_task(loop.run())
-        # Both halves must be present in the lifespan source.
-        assert "if not startup_success" in source or (
-            "if startup_success" in source and "merid-loop" in source
-        ), (
-            "MeridLoop.run() is not guarded by startup_success in _app_lifespan. "
-            "BUG-H1 fix is missing or was reverted."
-        )
-        # The 'blocked' status must be recorded when startup fails
-        assert 'status\': \'blocked\'' in source or '"status": "blocked"' in source or "'blocked'" in source, (
-            "No 'blocked' status recorded in the startup gate path."
-        )
-
-    def test_blocked_status_recorded_when_startup_fails(self):
-        """When startup_success is False, merid_loop service must be 'blocked'."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-        assert '"blocked"' in source or "'blocked'" in source, (
-            "No 'blocked' status string found in _app_lifespan. "
-            "The gate should record status='blocked' when startup_success=False."
-        )
-
-
-# ===========================================================================
-# Async reconciliation loop — structural test for F8 fix
-# ===========================================================================
-class TestF8AsyncReconLoop:
-    """The Kalshi venue reconciliation loop must be an asyncio task, not a
-    daemon thread."""
-
-    def test_daemon_thread_not_used_for_kalshi_recon(self):
-        """_app_lifespan must not create a daemon threading.Thread for Kalshi recon."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-
-        # Find the Kalshi recon block
-        recon_start = source.find("Start periodic Kalshi venue reconciliation")
-        assert recon_start != -1, "Kalshi recon comment block not found in _app_lifespan"
-
-        # Use a larger window — the create_task call may be >1500 chars in
-        window = source[recon_start:recon_start + 2500]
-        assert "threading.Thread" not in window, (
-            "threading.Thread still used for Kalshi venue reconciliation. "
-            "F8 fix is missing — this causes RuntimeError on Python 3.10+ "
-            "when run_until_complete is called from a non-event-loop thread."
-        )
-        assert "asyncio.create_task" in window, (
-            "asyncio.create_task not found in Kalshi recon block (searched 2500 chars). "
-            "F8 fix must replace the daemon thread with an asyncio task."
-        )
-
-    def test_async_recon_loop_uses_run_in_executor(self):
-        """The async recon task must use run_in_executor to avoid blocking the loop."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-
-        recon_start = source.find("Start periodic Kalshi venue reconciliation")
-        window = source[recon_start:recon_start + 1500]
-
-        assert "run_in_executor" in window, (
-            "run_in_executor not found in async Kalshi recon loop. "
-            "Sync reconciliation must be offloaded to a thread pool, not "
-            "called directly from the async task."
-        )

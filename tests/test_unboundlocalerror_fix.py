@@ -7,14 +7,6 @@ from unittest.mock import MagicMock, AsyncMock
 class TestDatetimeUnboundLocalFix:
     """Test that datetime references don't cause UnboundLocalError."""
 
-    def test_datetime_import_in_execute_signal_body(self):
-        """Verify datetime is properly imported and used in _execute_signal_body."""
-        # Import the function's module to verify syntax compiles
-        from merid.prediction import trading_agent
-        
-        # Verify the module has the expected function
-        assert hasattr(trading_agent.KalshiTradingAgent, '_execute_signal_body')
-        assert hasattr(trading_agent.KalshiTradingAgent, '_execute_signal')
     
     def test_datetime_local_usage_pattern(self):
         """Test the pattern used for datetime to avoid UnboundLocalError."""

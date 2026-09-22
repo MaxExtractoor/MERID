@@ -143,3 +143,26 @@ class TestD1RouteToExecutionGates:
 
 
 # ── E2: solo_trades_this_degraded_session reset on consensus recovery ─────────
+
+
+
+# ── F1: reset_execution_subscriber stops old task ─────────────────────────────
+
+class TestF1ResetSubscriber:
+    def test_reset_function_exists(self):
+        src = SUB_SRC.read_text()
+        assert "async def reset_execution_subscriber" in src
+
+    def test_reset_clears_global(self):
+        src = SUB_SRC.read_text()
+        reset_start = src.find("async def reset_execution_subscriber")
+        reset_end = src.find("\nasync def ", reset_start + 1)
+        body = src[reset_start:reset_end] if reset_end != -1 else src[reset_start:]
+        assert "_subscriber = None" in body, (
+            "reset_execution_subscriber must set _subscriber = None"
+        )
+        assert "await old.stop()" in body, (
+            "reset_execution_subscriber must await old.stop() before dropping ref"
+        )
+
+

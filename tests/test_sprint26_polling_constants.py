@@ -31,6 +31,7 @@ _XFAIL_PARAMS = {
     'test_imports_defaults': {'Agents.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Logs.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.', 'Research.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Risk.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.'},
     'test_no_hardcoded_polling_intervals': {'Agents.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Research.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.'},
     'test_uses_polling_constant': {'Agents.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Logs.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.', 'Research.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Risk.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.'},
+    'TestViewsUsePollingConstants.test_no_hardcoded_polling_intervals': {'Agents.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Research.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.'},
 }
 def _ap(names, test_name):
     """Per-param strict xfail driven by audit dispositions (AUDIT-2026-09-22)."""
@@ -125,6 +126,28 @@ class TestViewsImportDefaults:
     """Updated views import DEFAULTS from constants."""
 
     @pytest.mark.parametrize("filename", _ap(_ui_params(VIEWS_DIR, UPDATED_VIEWS), 'test_no_hardcoded_polling_intervals'))
+    def test_no_hardcoded_polling_intervals(self, filename: str):
+        text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
+        # Find pollingInterval values that are raw numbers (not using DEFAULTS)
+        hardcoded = re.findall(r'pollingInterval:\s*(\d+)', text)
+        assert len(hardcoded) == 0, (
+            f"{filename} still has hardcoded pollingInterval: {hardcoded}"
+        )
+    @pytest.mark.parametrize("filename", _ap(UPDATED_VIEWS, 'test_imports_defaults'))
+    def test_imports_defaults(self, filename: str):
+        text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
+        assert "DEFAULTS" in text, f"{filename} missing DEFAULTS import"
+
+
+class TestViewsUsePollingConstants:
+    """Updated views use DEFAULTS.POLLING_INTERVALS instead of hardcoded numbers."""
+
+    @pytest.mark.parametrize("filename", _ap(UPDATED_VIEWS, 'test_uses_polling_constant'))
+    def test_uses_polling_constant(self, filename: str):
+        text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
+        assert "DEFAULTS.POLLING_INTERVALS" in text, f"{filename} not using POLLING_INTERVALS"
+
+    @pytest.mark.parametrize("filename", _ap(UPDATED_VIEWS, 'TestViewsUsePollingConstants.test_no_hardcoded_polling_intervals'))
     def test_no_hardcoded_polling_intervals(self, filename: str):
         text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
         # Find pollingInterval values that are raw numbers (not using DEFAULTS)

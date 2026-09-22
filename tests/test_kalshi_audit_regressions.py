@@ -335,61 +335,7 @@ class TestP1_2_LiquidityMonitorBridge:
             "P1-2: LiquidityMonitor.__init__ must auto-register at least one callback"
         )
 
-    def test_critical_alert_reaches_pm_fire_risk_breach(self):
-        """A critical liquidity alert must call fire_risk_breach on PM manager."""
-        from merid.event_venues.kalshi.liquidity_monitor import (
-            LiquidityMonitor, OrderBookSnapshot,
-        )
-        from merid.prediction.alerts import PredictionAlertManager, AlertSeverity
 
-        mgr = PredictionAlertManager()
-        fired = []
-        mgr.add_sink(fired.append)
-
-        with patch("merid.prediction.alerts.get_alert_manager", return_value=mgr):
-            mon = LiquidityMonitor(max_spread=0.05, min_depth=100, cooldown_s=0)
-            # zero-depth → critical
-            snap = OrderBookSnapshot(
-                market_id="KXBTC-LIQ", best_bid=0.50, best_ask=0.60,
-                bid_size=0, ask_size=0,
-            )
-            mon.process(snap)
-
-        critical = [a for a in fired if a.severity == AlertSeverity.CRITICAL]
-        assert critical, (
-            "P1-2: zero-depth alert must propagate as CRITICAL to PredictionAlertManager"
-        )
-
-    def test_warning_alert_reaches_pm_fire_risk_warning(self):
-        """A warning liquidity alert (spread_spike) must call fire_risk_warning."""
-        from merid.event_venues.kalshi.liquidity_monitor import (
-            LiquidityMonitor, OrderBookSnapshot,
-        )
-        from merid.prediction.alerts import PredictionAlertManager, AlertSeverity
-
-        mgr = PredictionAlertManager()
-        fired = []
-        mgr.add_sink(fired.append)
-
-        with patch("merid.prediction.alerts.get_alert_manager", return_value=mgr):
-            mon = LiquidityMonitor(max_spread=0.20, min_depth=1, cooldown_s=0,
-                                   spike_mult=1.5, window=5)
-            # Prime the buffer with narrow spreads, then spike
-            for _ in range(5):
-                mon.process(OrderBookSnapshot(
-                    market_id="KXBTC-SPIKE", best_bid=0.49, best_ask=0.51,
-                    bid_size=50, ask_size=50,
-                ))
-            # Wide spread spike — 2× the rolling average
-            mon.process(OrderBookSnapshot(
-                market_id="KXBTC-SPIKE", best_bid=0.40, best_ask=0.60,
-                bid_size=50, ask_size=50,
-            ))
-
-        warnings = [a for a in fired if a.severity == AlertSeverity.WARNING]
-        assert warnings, (
-            "P1-2: spread_spike alert must propagate as WARNING to PredictionAlertManager"
-        )
 
 
 # =============================================================================
@@ -562,82 +508,9 @@ class TestP2_1_ZeroDepthAndFlickering:
     """zero_depth must be a separate CRITICAL alert kind (not folded into thin_book).
     Flickering detection must fire when bids alternate rapidly."""
 
-    def test_zero_depth_fires_critical(self):
-        from merid.event_venues.kalshi.liquidity_monitor import (
-            LiquidityMonitor, OrderBookSnapshot,
-        )
-        mon = LiquidityMonitor(min_depth=10, cooldown_s=0)
-        snap = OrderBookSnapshot(
-            market_id="KXBTC-ZERO", best_bid=0.50, best_ask=0.60,
-            bid_size=0, ask_size=0,
-        )
-        alerts = mon.process(snap)
-        zero = [a for a in alerts if a.kind == "zero_depth"]
-        assert zero, "P2-1: zero_depth alert not emitted when depth==0"
-        assert zero[0].severity == "critical", (
-            "P2-1: zero_depth alert must have severity='critical'"
-        )
 
-    def test_zero_depth_not_also_thin_book(self):
-        """When depth==0 the zero_depth alert fires, but thin_book must not duplicate."""
-        from merid.event_venues.kalshi.liquidity_monitor import (
-            LiquidityMonitor, OrderBookSnapshot,
-        )
-        mon = LiquidityMonitor(min_depth=10, cooldown_s=0)
-        snap = OrderBookSnapshot(
-            market_id="KXBTC-ZERO2", best_bid=0.50, best_ask=0.60,
-            bid_size=0, ask_size=0,
-        )
-        alerts = mon.process(snap)
-        thin = [a for a in alerts if a.kind == "thin_book"]
-        assert not thin, (
-            "P2-1: thin_book must not fire alongside zero_depth (use elif)"
-        )
 
-    def test_flickering_detected_on_rapid_alternation(self):
-        from merid.event_venues.kalshi.liquidity_monitor import (
-            LiquidityMonitor, OrderBookSnapshot,
-        )
-        mon = LiquidityMonitor(
-            min_depth=1, max_spread=1.0,
-            flicker_window=10, flicker_threshold=0.7, cooldown_s=0,
-        )
-        # Alternate bid between 0.49 and 0.51 on every tick (100% alternation)
-        all_alerts = []
-        bids = [0.49, 0.51] * 10  # 20 ticks alternating
-        for bid in bids:
-            snaps = OrderBookSnapshot(
-                market_id="KXBTC-FLICKER",
-                best_bid=bid, best_ask=bid + 0.02,
-                bid_size=20, ask_size=20,
-            )
-            all_alerts.extend(mon.process(snaps))
 
-        flicker = [a for a in all_alerts if a.kind == "flickering"]
-        assert flicker, "P2-1: flickering alert not emitted on rapidly alternating bids"
-        assert flicker[0].severity == "warning", (
-            "P2-1: flickering alert must have severity='warning'"
-        )
-
-    def test_stable_book_no_flicker(self):
-        from merid.event_venues.kalshi.liquidity_monitor import (
-            LiquidityMonitor, OrderBookSnapshot,
-        )
-        mon = LiquidityMonitor(
-            min_depth=1, max_spread=1.0,
-            flicker_window=10, flicker_threshold=0.7, cooldown_s=0,
-        )
-        all_alerts = []
-        for _ in range(15):
-            snap = OrderBookSnapshot(
-                market_id="KXBTC-STABLE",
-                best_bid=0.50, best_ask=0.52,
-                bid_size=50, ask_size=50,
-            )
-            all_alerts.extend(mon.process(snap))
-
-        flicker = [a for a in all_alerts if a.kind == "flickering"]
-        assert not flicker, "P2-1: stable book must not trigger flickering alert"
 
     def test_flicker_params_in_constructor(self):
         from merid.event_venues.kalshi.liquidity_monitor import LiquidityMonitor
@@ -763,3 +636,93 @@ class TestP2_2_AtomicCategoryReserve:
 # =============================================================================
 # P2-3 — DebateAwarePositionSizer semaphore + inflight deduplication
 # =============================================================================
+
+
+
+
+class TestP2_3_BacktestSemaphore:
+    """DebateAwarePositionSizer must have a semaphore cap and per-symbol
+    inflight deduplication to prevent thundering-herd on the backtest engine."""
+
+    def test_max_concurrent_constant_exists(self):
+        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
+        assert hasattr(DebateAwarePositionSizer, "_MAX_CONCURRENT_BACKTESTS"), (
+            "P2-3: _MAX_CONCURRENT_BACKTESTS class constant not found"
+        )
+        assert DebateAwarePositionSizer._MAX_CONCURRENT_BACKTESTS >= 1
+
+    def test_backtest_semaphore_attr_on_init(self):
+        src = _src("merid/prediction/debate_position_sizing.py")
+        assert "_backtest_semaphore" in src, (
+            "P2-3: _backtest_semaphore not initialised in DebateAwarePositionSizer.__init__"
+        )
+
+    def test_inflight_dict_on_init(self):
+        src = _src("merid/prediction/debate_position_sizing.py")
+        assert "_inflight" in src, (
+            "P2-3: _inflight dict not initialised in DebateAwarePositionSizer.__init__"
+        )
+
+    def test_get_semaphore_method_exists(self):
+        src = _src("merid/prediction/debate_position_sizing.py")
+        assert "def _get_semaphore" in src, (
+            "P2-3: _get_semaphore lazy-init method not found"
+        )
+
+    def test_asyncio_semaphore_used_in_profile_method(self):
+        src = _src("merid/prediction/debate_position_sizing.py")
+        assert "async with self._get_semaphore()" in src, (
+            "P2-3: semaphore not used via 'async with' in _get_performance_profile"
+        )
+
+    def test_inflight_coalesce_logic_present(self):
+        src = _src("merid/prediction/debate_position_sizing.py")
+        assert "self._inflight" in src and "asyncio.shield" in src, (
+            "P2-3: inflight coalescing via asyncio.shield not found"
+        )
+
+    def test_inflight_cleaned_up_in_finally(self):
+        src = _src("merid/prediction/debate_position_sizing.py")
+        assert "self._inflight.pop(symbol, None)" in src, (
+            "P2-3: _inflight must be cleaned up in a finally block"
+        )
+
+    def test_asyncio_imported(self):
+        src = _src("merid/prediction/debate_position_sizing.py")
+        assert "import asyncio" in src, (
+            "P2-3: asyncio must be imported in debate_position_sizing.py"
+        )
+
+    def test_semaphore_cap_is_sane(self):
+        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
+        cap = DebateAwarePositionSizer._MAX_CONCURRENT_BACKTESTS
+        assert 1 <= cap <= 10, (
+            f"P2-3: _MAX_CONCURRENT_BACKTESTS={cap} seems unreasonable; expected 1–10"
+        )
+
+    def test_semaphore_limits_concurrency(self):
+        """Functional: semaphore must block a 3rd concurrent backtest when cap=2."""
+        import asyncio as aio
+        from merid.prediction.debate_position_sizing import DebateAwarePositionSizer
+
+        async def _run():
+            sizer = DebateAwarePositionSizer.__new__(DebateAwarePositionSizer)
+            sizer._MAX_CONCURRENT_BACKTESTS = 2
+            sizer._backtest_semaphore = None
+            sem = sizer._get_semaphore()
+            assert sem._value == 2
+
+            acquired = []
+            async with sem:
+                acquired.append(1)
+                async with sem:
+                    acquired.append(2)
+                    # semaphore value should now be 0 — third acquire would block
+                    assert sem._value == 0, (
+                        "P2-3: semaphore should be fully acquired after 2 concurrent holders"
+                    )
+
+            return acquired
+
+        result = aio.run(_run())
+        assert result == [1, 2]

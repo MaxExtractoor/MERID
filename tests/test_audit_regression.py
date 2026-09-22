@@ -180,81 +180,6 @@ class TestBug3DualBrierTrackerSync:
 # BUG-4: EdgeRecalibrator updates all agents, not just agents[0]
 # ---------------------------------------------------------------------------
 
-class TestBug4EdgeRecalibratorAllAgents:
-
-    def test_get_strategy_configs_returns_all_unique_configs(self):
-        """_get_strategy_configs must return one entry per unique StrategyConfig object."""
-        from merid.prediction.edge_recalibrator import EdgeRecalibrator
-
-        rec = EdgeRecalibrator()
-
-        cfg_a = MagicMock()
-        cfg_b = MagicMock()
-        # cfg_c is a duplicate of cfg_a (same object)
-        agent1 = MagicMock(); agent1._strategy._config = cfg_a; agent1.config.name = "A"
-        agent2 = MagicMock(); agent2._strategy._config = cfg_b; agent2.config.name = "B"
-        agent3 = MagicMock(); agent3._strategy._config = cfg_a; agent3.config.name = "C"  # dup
-
-        grid = MagicMock()
-        grid.agents = [agent1, agent2, agent3]
-
-        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid):
-            configs = rec._get_strategy_configs()
-
-        assert len(configs) == 2, \
-            f"Expected 2 unique configs (duplicates deduplicated), got {len(configs)}"
-        assert cfg_a in configs
-        assert cfg_b in configs
-
-    def test_recalibrate_applies_to_all_configs(self):
-        """After recalibrate(), every agent StrategyConfig must have updated thresholds."""
-        from merid.prediction.edge_recalibrator import EdgeRecalibrator
-        from decimal import Decimal
-
-        rec = EdgeRecalibrator()
-
-        # Two separate config objects with identical starting thresholds
-        class FakeConfig:
-            min_edge_early = Decimal("0.050")
-            min_edge_mid = Decimal("0.040")
-            min_edge_late = Decimal("0.030")
-            min_edge_terminal = Decimal("0.020")
-
-        cfg_a = FakeConfig()
-        cfg_b = FakeConfig()
-
-        agent1 = MagicMock(); agent1._strategy._config = cfg_a; agent1.config.name = "A"
-        agent2 = MagicMock(); agent2._strategy._config = cfg_b; agent2.config.name = "B"
-
-        grid = MagicMock()
-        grid.agents = [agent1, agent2]
-
-        # Fake edge store: 20 trades, predicted 0.06, realized 0.04 → bias = +0.02
-        # Use a simple namespace so all attribute accesses return real values, not MagicMocks
-        class _Stat:
-            resolved_count = 20       # used by recalibrate() as trade_count
-            trade_count = 20          # legacy alias kept for safety
-            sum_est_edge = Decimal("1.20")    # avg = 0.06
-            sum_realized_edge = Decimal("0.80")  # avg = 0.04
-        fake_stat = _Stat()
-
-        edge_store = MagicMock()
-        edge_store.get_all_edge_stats.return_value = [fake_stat]
-
-        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid), \
-             patch("merid.metrics.realized_edge.get_realized_edge_store",
-                   return_value=edge_store):
-            result = rec.recalibrate()
-
-        assert result.skipped is False, f"Recalibration was unexpectedly skipped: {result.skip_reason}"
-        # Both configs must have been nudged upward (over-estimated edge → raise threshold)
-        assert cfg_a.min_edge_early > Decimal("0.050"), \
-            "cfg_a early threshold must have increased"
-        assert cfg_b.min_edge_early > Decimal("0.050"), \
-            "cfg_b early threshold must have increased (was skipped before BUG-4 fix)"
-        # Both configs must have received the same adjustment
-        assert cfg_a.min_edge_early == cfg_b.min_edge_early, \
-            "Both configs must receive identical adjustments"
 
 
 # ---------------------------------------------------------------------------
@@ -444,3 +369,426 @@ class TestBug9AutoRollbackWired:
 
         await _fake_check()
         assert called, "_check_agent_auto_rollback must be invoked during portfolio check"
+
+
+
+class TestBug8StaleDecisionDiscarded:
+
+    @pytest.mark.asyncio
+    async def test_stale_decision_is_skipped_not_routed(self):
+        """A decision older than _MAX_DECISION_AGE_S must be skipped, not routed."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber, _MAX_DECISION_AGE_S
+        from merid.circuit_breaker import _breakers
+        _breakers.pop("kalshi:execution_subscriber", None)
+
+        sub = ExecutionSubscriber()
+        route_called = []
+
+        async def fake_route(data):
+            route_called.append(data)
+
+        with patch.object(sub, "_route_to_execution", side_effect=fake_route):
+            await sub._handle_decision({
+                "decision_id": "stale_d1",
+                "market_id": "KXBTCD",
+                "action": "buy",
+                "side": "yes",
+                "size_contracts": 1,
+                "risk_approved": True,
+                "_created_at": time.time() - (_MAX_DECISION_AGE_S + 5),
+            })
+
+        assert route_called == [], \
+            "_route_to_execution must NOT be called for stale decisions"
+        assert sub._decisions_skipped == 1, \
+            "Stale decision must increment _decisions_skipped"
+
+    @pytest.mark.asyncio
+    async def test_fresh_decision_is_routed(self):
+        """A fresh decision must be routed normally."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber
+        from merid.circuit_breaker import _breakers
+        _breakers.pop("kalshi:execution_subscriber", None)
+
+        sub = ExecutionSubscriber()
+        route_called = []
+
+        async def fake_route(data):
+            route_called.append(data)
+
+        with patch.object(sub, "_route_to_execution", side_effect=fake_route):
+            await sub._handle_decision({
+                "decision_id": "fresh_d1",
+                "market_id": "KXBTCD",
+                "action": "buy",
+                "side": "yes",
+                "size_contracts": 1,
+                "risk_approved": True,
+                "_created_at": time.time() - 2,  # 2 seconds old — fresh
+            })
+
+        assert len(route_called) == 1, \
+            "Fresh decision must reach _route_to_execution"
+
+    @pytest.mark.asyncio
+    async def test_stale_decision_not_in_route_reason_as_price_stale_flag(self):
+        """The old _price_stale=True forwarding pattern must not be used."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber, _MAX_DECISION_AGE_S
+        from merid.circuit_breaker import _breakers
+        _breakers.pop("kalshi:execution_subscriber", None)
+
+        sub = ExecutionSubscriber()
+        forwarded_data = []
+
+        async def capture_route(data):
+            forwarded_data.append(data)
+
+        with patch.object(sub, "_route_to_execution", side_effect=capture_route):
+            await sub._handle_decision({
+                "decision_id": "stale_d2",
+                "market_id": "KXBTCD",
+                "action": "sell",
+                "side": "no",
+                "size_contracts": 3,
+                "risk_approved": True,
+                "_created_at": time.time() - (_MAX_DECISION_AGE_S + 10),
+            })
+
+        # If the old bug were present, forwarded_data would have one entry with _price_stale=True
+        assert forwarded_data == [], \
+            "Stale decision must not be forwarded (old _price_stale flag pattern)"
+
+
+class TestBug1ExecutionSubscriberOwnerRouting:
+
+    @pytest.mark.asyncio
+    async def test_routes_to_owner_by_active_tickers(self):
+        """First-pass: agent whose active_tickers contains market_id gets the call."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber
+
+        btc_agent = _make_agent_stub("BTC_15M", ["BTC"], ["KXBTCD-26MAR-T90000"])
+        eth_agent = _make_agent_stub("ETH_1H", ["ETH"], ["KXETHD-26MAR-T3000"])
+
+        sub = ExecutionSubscriber()
+        placed = []
+
+        async def fake_place(ticker, side, action, count, agent_name):
+            placed.append({"ticker": ticker, "agent_name": agent_name})
+
+        grid = MagicMock()
+        grid.is_running = True
+        grid.agents = [btc_agent, eth_agent]
+
+        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid), \
+             patch("merid.prediction.kalshi_tools._kalshi_place_order", side_effect=fake_place):
+            await sub._route_to_execution({
+                "market_id": "KXBTCD-26MAR-T90000",
+                "action": "buy",
+                "side": "yes",
+                "size_contracts": 2,
+            })
+
+        assert len(placed) == 1
+        assert placed[0]["agent_name"] == "BTC_15M", \
+            f"Expected BTC_15M, got {placed[0]['agent_name']}"
+
+    @pytest.mark.asyncio
+    async def test_does_not_route_to_wrong_asset_agent(self):
+        """An ETH market must not be routed through the BTC agent."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber
+
+        btc_agent = _make_agent_stub("BTC_15M", ["BTC"], ["KXBTCD-26MAR-T90000"])
+        eth_agent = _make_agent_stub("ETH_1H", ["ETH"], ["KXETHD-26MAR-T3000"])
+
+        sub = ExecutionSubscriber()
+        placed = []
+
+        async def fake_place(ticker, side, action, count, agent_name):
+            placed.append({"ticker": ticker, "agent_name": agent_name})
+
+        grid = MagicMock()
+        grid.is_running = True
+        grid.agents = [btc_agent, eth_agent]
+
+        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid), \
+             patch("merid.prediction.kalshi_tools._kalshi_place_order", side_effect=fake_place):
+            await sub._route_to_execution({
+                "market_id": "KXETHD-26MAR-T3000",
+                "action": "buy",
+                "side": "yes",
+                "size_contracts": 1,
+            })
+
+        assert len(placed) == 1
+        assert placed[0]["agent_name"] == "ETH_1H", \
+            f"Expected ETH_1H, got {placed[0]['agent_name']}"
+
+    @pytest.mark.asyncio
+    async def test_asset_fallback_when_no_active_ticker_match(self):
+        """Second-pass asset-name match fires when active_tickers is empty."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber
+
+        sol_agent = _make_agent_stub("SOL_1H", ["SOL"], [])  # no active tickers yet
+        btc_agent = _make_agent_stub("BTC_15M", ["BTC"], [])
+
+        sub = ExecutionSubscriber()
+        placed = []
+
+        async def fake_place(ticker, side, action, count, agent_name):
+            placed.append(agent_name)
+
+        grid = MagicMock()
+        grid.is_running = True
+        grid.agents = [btc_agent, sol_agent]
+
+        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid), \
+             patch("merid.prediction.kalshi_tools._kalshi_place_order", side_effect=fake_place):
+            await sub._route_to_execution({
+                "market_id": "KXSOLD-26MAR-T200",
+                "action": "buy",
+                "side": "yes",
+                "size_contracts": 1,
+            })
+
+        assert placed == ["SOL_1H"], f"Expected SOL_1H, got {placed}"
+
+
+class TestBug8StaleDecisionDiscarded:
+
+    @pytest.mark.asyncio
+    async def test_stale_decision_is_skipped_not_routed(self):
+        """A decision older than _MAX_DECISION_AGE_S must be skipped, not routed."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber, _MAX_DECISION_AGE_S
+        from merid.circuit_breaker import _breakers
+        _breakers.pop("kalshi:execution_subscriber", None)
+
+        sub = ExecutionSubscriber()
+        route_called = []
+
+        async def fake_route(data):
+            route_called.append(data)
+
+        with patch.object(sub, "_route_to_execution", side_effect=fake_route):
+            await sub._handle_decision({
+                "decision_id": "stale_d1",
+                "market_id": "KXBTCD",
+                "action": "buy",
+                "side": "yes",
+                "size_contracts": 1,
+                "risk_approved": True,
+                "_created_at": time.time() - (_MAX_DECISION_AGE_S + 5),
+            })
+
+        assert route_called == [], \
+            "_route_to_execution must NOT be called for stale decisions"
+        assert sub._decisions_skipped == 1, \
+            "Stale decision must increment _decisions_skipped"
+
+    @pytest.mark.asyncio
+    async def test_fresh_decision_is_routed(self):
+        """A fresh decision must be routed normally."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber
+        from merid.circuit_breaker import _breakers
+        _breakers.pop("kalshi:execution_subscriber", None)
+
+        sub = ExecutionSubscriber()
+        route_called = []
+
+        async def fake_route(data):
+            route_called.append(data)
+
+        with patch.object(sub, "_route_to_execution", side_effect=fake_route):
+            await sub._handle_decision({
+                "decision_id": "fresh_d1",
+                "market_id": "KXBTCD",
+                "action": "buy",
+                "side": "yes",
+                "size_contracts": 1,
+                "risk_approved": True,
+                "_created_at": time.time() - 2,  # 2 seconds old — fresh
+            })
+
+        assert len(route_called) == 1, \
+            "Fresh decision must reach _route_to_execution"
+
+    @pytest.mark.asyncio
+    async def test_stale_decision_not_in_route_reason_as_price_stale_flag(self):
+        """The old _price_stale=True forwarding pattern must not be used."""
+        from merid.swarm.execution_subscriber import ExecutionSubscriber, _MAX_DECISION_AGE_S
+        from merid.circuit_breaker import _breakers
+        _breakers.pop("kalshi:execution_subscriber", None)
+
+        sub = ExecutionSubscriber()
+        forwarded_data = []
+
+        async def capture_route(data):
+            forwarded_data.append(data)
+
+        with patch.object(sub, "_route_to_execution", side_effect=capture_route):
+            await sub._handle_decision({
+                "decision_id": "stale_d2",
+                "market_id": "KXBTCD",
+                "action": "sell",
+                "side": "no",
+                "size_contracts": 3,
+                "risk_approved": True,
+                "_created_at": time.time() - (_MAX_DECISION_AGE_S + 10),
+            })
+
+        # If the old bug were present, forwarded_data would have one entry with _price_stale=True
+        assert forwarded_data == [], \
+            "Stale decision must not be forwarded (old _price_stale flag pattern)"
+
+
+class TestBug4EdgeRecalibratorAllAgents:
+
+    def test_get_strategy_configs_returns_all_unique_configs(self):
+        """_get_strategy_configs must return one entry per unique StrategyConfig object."""
+        from merid.prediction.edge_recalibrator import EdgeRecalibrator
+
+        rec = EdgeRecalibrator()
+
+        cfg_a = MagicMock()
+        cfg_b = MagicMock()
+        # cfg_c is a duplicate of cfg_a (same object)
+        agent1 = MagicMock(); agent1._strategy._config = cfg_a; agent1.config.name = "A"
+        agent2 = MagicMock(); agent2._strategy._config = cfg_b; agent2.config.name = "B"
+        agent3 = MagicMock(); agent3._strategy._config = cfg_a; agent3.config.name = "C"  # dup
+
+        grid = MagicMock()
+        grid.agents = [agent1, agent2, agent3]
+
+        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid):
+            configs = rec._get_strategy_configs()
+
+        assert len(configs) == 2, \
+            f"Expected 2 unique configs (duplicates deduplicated), got {len(configs)}"
+        assert cfg_a in configs
+        assert cfg_b in configs
+
+    def test_recalibrate_applies_to_all_configs(self):
+        """After recalibrate(), every agent StrategyConfig must have updated thresholds."""
+        from merid.prediction.edge_recalibrator import EdgeRecalibrator
+        from decimal import Decimal
+
+        rec = EdgeRecalibrator()
+
+        # Two separate config objects with identical starting thresholds
+        class FakeConfig:
+            min_edge_early = Decimal("0.050")
+            min_edge_mid = Decimal("0.040")
+            min_edge_late = Decimal("0.030")
+            min_edge_terminal = Decimal("0.020")
+
+        cfg_a = FakeConfig()
+        cfg_b = FakeConfig()
+
+        agent1 = MagicMock(); agent1._strategy._config = cfg_a; agent1.config.name = "A"
+        agent2 = MagicMock(); agent2._strategy._config = cfg_b; agent2.config.name = "B"
+
+        grid = MagicMock()
+        grid.agents = [agent1, agent2]
+
+        # Fake edge store: 20 trades, predicted 0.06, realized 0.04 → bias = +0.02
+        # Use a simple namespace so all attribute accesses return real values, not MagicMocks
+        class _Stat:
+            resolved_count = 20       # used by recalibrate() as trade_count
+            trade_count = 20          # legacy alias kept for safety
+            sum_est_edge = Decimal("1.20")    # avg = 0.06
+            sum_realized_edge = Decimal("0.80")  # avg = 0.04
+        fake_stat = _Stat()
+
+        edge_store = MagicMock()
+        edge_store.get_all_edge_stats.return_value = [fake_stat]
+
+        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid), \
+             patch("merid.metrics.realized_edge.get_realized_edge_store",
+                   return_value=edge_store):
+            result = rec.recalibrate()
+
+        assert result.skipped is False, f"Recalibration was unexpectedly skipped: {result.skip_reason}"
+        # Both configs must have been nudged upward (over-estimated edge → raise threshold)
+        assert cfg_a.min_edge_early > Decimal("0.050"), \
+            "cfg_a early threshold must have increased"
+        assert cfg_b.min_edge_early > Decimal("0.050"), \
+            "cfg_b early threshold must have increased (was skipped before BUG-4 fix)"
+        # Both configs must have received the same adjustment
+        assert cfg_a.min_edge_early == cfg_b.min_edge_early, \
+            "Both configs must receive identical adjustments"
+
+
+class TestBug4EdgeRecalibratorAllAgents:
+
+    def test_get_strategy_configs_returns_all_unique_configs(self):
+        """_get_strategy_configs must return one entry per unique StrategyConfig object."""
+        from merid.prediction.edge_recalibrator import EdgeRecalibrator
+
+        rec = EdgeRecalibrator()
+
+        cfg_a = MagicMock()
+        cfg_b = MagicMock()
+        # cfg_c is a duplicate of cfg_a (same object)
+        agent1 = MagicMock(); agent1._strategy._config = cfg_a; agent1.config.name = "A"
+        agent2 = MagicMock(); agent2._strategy._config = cfg_b; agent2.config.name = "B"
+        agent3 = MagicMock(); agent3._strategy._config = cfg_a; agent3.config.name = "C"  # dup
+
+        grid = MagicMock()
+        grid.agents = [agent1, agent2, agent3]
+
+        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid):
+            configs = rec._get_strategy_configs()
+
+        assert len(configs) == 2, \
+            f"Expected 2 unique configs (duplicates deduplicated), got {len(configs)}"
+        assert cfg_a in configs
+        assert cfg_b in configs
+
+    def test_recalibrate_applies_to_all_configs(self):
+        """After recalibrate(), every agent StrategyConfig must have updated thresholds."""
+        from merid.prediction.edge_recalibrator import EdgeRecalibrator
+        from decimal import Decimal
+
+        rec = EdgeRecalibrator()
+
+        # Two separate config objects with identical starting thresholds
+        class FakeConfig:
+            min_edge_early = Decimal("0.050")
+            min_edge_mid = Decimal("0.040")
+            min_edge_late = Decimal("0.030")
+            min_edge_terminal = Decimal("0.020")
+
+        cfg_a = FakeConfig()
+        cfg_b = FakeConfig()
+
+        agent1 = MagicMock(); agent1._strategy._config = cfg_a; agent1.config.name = "A"
+        agent2 = MagicMock(); agent2._strategy._config = cfg_b; agent2.config.name = "B"
+
+        grid = MagicMock()
+        grid.agents = [agent1, agent2]
+
+        # Fake edge store: 20 trades, predicted 0.06, realized 0.04 → bias = +0.02
+        # Use a simple namespace so all attribute accesses return real values, not MagicMocks
+        class _Stat:
+            resolved_count = 20       # used by recalibrate() as trade_count
+            trade_count = 20          # legacy alias kept for safety
+            sum_est_edge = Decimal("1.20")    # avg = 0.06
+            sum_realized_edge = Decimal("0.80")  # avg = 0.04
+        fake_stat = _Stat()
+
+        edge_store = MagicMock()
+        edge_store.get_all_edge_stats.return_value = [fake_stat]
+
+        with patch("merid.prediction.agent_grid.get_agent_grid", return_value=grid), \
+             patch("merid.metrics.realized_edge.get_realized_edge_store",
+                   return_value=edge_store):
+            result = rec.recalibrate()
+
+        assert result.skipped is False, f"Recalibration was unexpectedly skipped: {result.skip_reason}"
+        # Both configs must have been nudged upward (over-estimated edge → raise threshold)
+        assert cfg_a.min_edge_early > Decimal("0.050"), \
+            "cfg_a early threshold must have increased"
+        assert cfg_b.min_edge_early > Decimal("0.050"), \
+            "cfg_b early threshold must have increased (was skipped before BUG-4 fix)"
+        # Both configs must have received the same adjustment
+        assert cfg_a.min_edge_early == cfg_b.min_edge_early, \
+            "Both configs must receive identical adjustments"

@@ -27,6 +27,36 @@ if _root not in sys.path:
     sys.path.insert(0, _root)
 
 
+
+
+class TestFix2_TestFixtureFilter(unittest.TestCase):
+    """FIX-2: Test fixture fills filtered from DB load and ingestion."""
+
+    def test_is_test_fixture_fill(self):
+        from merid.event_venues.kalshi.fills_ledger import _is_test_fixture_fill
+        # Test fixtures
+        self.assertTrue(_is_test_fixture_fill("fill_integrity_000"))
+        self.assertTrue(_is_test_fixture_fill("fill_a_001"))
+        self.assertTrue(_is_test_fixture_fill("fill_ghost_resolved_001"))
+        self.assertTrue(_is_test_fixture_fill("fill_immutable_001"))
+        self.assertTrue(_is_test_fixture_fill("fill_legit_001"))
+        self.assertTrue(_is_test_fixture_fill("fill_test_abc"))
+        self.assertTrue(_is_test_fixture_fill("test_fill_123"))
+        self.assertTrue(_is_test_fixture_fill("fill_dup_001"))
+        self.assertTrue(_is_test_fixture_fill("fill_stale_001"))
+        # Real Kalshi fill IDs (UUID-like)
+        self.assertFalse(_is_test_fixture_fill("a1b2c3d4-e5f6-7890-abcd-ef1234567890"))
+        self.assertFalse(_is_test_fixture_fill("12345678-abcd-ef01-2345-678901234567"))
+        # Empty / None
+        self.assertTrue(_is_test_fixture_fill(""))
+        self.assertTrue(_is_test_fixture_fill(None))
+
+    def test_test_fill_prefixes_constant_exists(self):
+        from merid.event_venues.kalshi.fills_ledger import _TEST_FILL_PREFIXES
+        self.assertIsInstance(_TEST_FILL_PREFIXES, tuple)
+        self.assertGreater(len(_TEST_FILL_PREFIXES), 5)
+
+
 class TestFix4_StartingBalance(unittest.TestCase):
     """FIX-4: starting_balance no longer hardcoded to 10000."""
 

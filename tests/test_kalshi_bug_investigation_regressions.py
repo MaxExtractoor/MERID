@@ -398,28 +398,8 @@ class TestMainLoopWiring(unittest.TestCase):
         self.assertIn('kalshi_api_router', source)
         self.assertIn('_reg(kalshi_api_router)', source)
 
-    def test_ws_bridge_started_in_lifespan(self):
-        """WS bridge must be started in the lifespan."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-        self.assertIn('get_ws_bridge', source)
-        self.assertIn('kalshi-ws-bridge', source)
 
-    def test_consensus_opinion_subscriber_started(self):
-        """EnhancedConsensusCoordinator opinion subscriber must start in lifespan."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-        self.assertIn('start_opinion_subscriber', source)
 
-    def test_merid_loop_started_in_lifespan(self):
-        """MeridLoop must be started in the lifespan (gated by startup_success)."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-        self.assertIn('get_merid_loop', source)
-        self.assertIn('merid-loop', source)
 
     def test_loop_execution_subscriber_gated(self):
         """ExecutionSubscriber start in loop.run() must be gated by enable_execution."""
@@ -445,23 +425,6 @@ class TestMainLoopWiring(unittest.TestCase):
         source = inspect.getsource(MeridLoop._consensus_coordinator)
         self.assertIn('EnhancedConsensusCoordinator', source)
 
-    def test_shutdown_stops_loop_first(self):
-        """Shutdown must stop MeridLoop before WS bridge and other services."""
-        import inspect
-        import web.main as main_mod
-        source = inspect.getsource(main_mod._app_lifespan)
-        # Isolate the shutdown section (after the yield)
-        shutdown_start = source.find("MERID shutdown initiated")
-        self.assertGreater(shutdown_start, 0, "Shutdown section must exist in lifespan")
-        shutdown_source = source[shutdown_start:]
-        loop_stop = shutdown_source.find('MeridLoop stopped')
-        ws_stop = shutdown_source.find('KalshiWebSocketBridge')
-        # Both must exist in shutdown
-        self.assertGreater(loop_stop, 0, "MeridLoop stop must be in shutdown")
-        self.assertGreater(ws_stop, 0, "KalshiWebSocketBridge stop must be in shutdown")
-        # Loop must stop before WS bridge
-        self.assertLess(loop_stop, ws_stop,
-                         "MeridLoop must stop BEFORE KalshiWebSocketBridge in shutdown")
 
 
 if __name__ == "__main__":

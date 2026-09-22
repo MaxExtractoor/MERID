@@ -122,6 +122,44 @@ for _env_key, _fname in {
     # must not leak production state into the test process.
     _os.environ[_env_key] = _os.path.join(_TEST_STATE_DIR, _fname)
 
+# ── Env-clear protection (2026-09-22 audit) ────────────────────────────────
+# Tests that do ``patch.dict(os.environ, clear=True)`` wipe every redirect above
+# mid-test, so durable writers fall back to repo ``data/`` defaults and pollute
+# production-like state.  Replace os.environ with a subclass whose clear()
+# re-pins the test-isolation keys.  patch.dict patches the environ object in
+# place, so the pin survives any env-clearing block; outside the block the
+# pinned values are identical to the ones conftest already set.
+class _PinnedEnviron(type(_os.environ)):  # type: ignore[misc]
+    _pinned: dict = {}
+
+    def clear(self) -> None:  # type: ignore[override]
+        super().clear()
+        self.update(self._pinned)
+
+
+_PINNED_KEYS = [
+    "MERID_ENV", "MERID_PM_PROFILE", "MERID_EXIT_FIREWALL_OBSERVE_ONLY",
+    "MERID_REQUIRE_EXIT_PARENTAGE", "ALLOW_DIRECT_EXECUTION",
+    "MERID_ALLOW_CT_SCRIPT_BYPASS", "ALLOW_DEPRECATED_RISK_GUARDS",
+    "DEBUG_ALLOW_MANUAL_ORDERS", "MERID_CFB_RTI_SHADOW_TELEMETRY",
+    "MERID_PM_TRADING_MODE", "MERID_ALLOW_LIVE_TRADES", "MERID_TRADE_MODE",
+    "MERID_DISABLE_CRYPTO15M_GATE", "MERID_CFB_RTI_ADAPTER",
+    "MERID_DISABLE_SHARED_RISK_GUARD", "MERID_CFB_RTI_SOURCE",
+    "MERID_BANKROLL_RECONCILER_ENABLED", "MERID_MAX_SLIPPAGE_CENTS",
+    "MERID_VELOCITY_MAX_AGE_MS", "KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PATH",
+] + [k for k in _os.environ if isinstance(k, str) and (
+    k.startswith("MERID_") and _os.environ.get(k, "").startswith(_TEST_STATE_DIR))]
+
+_new_environ = _PinnedEnviron(
+    _os.environ._data,
+    _os.environ.encodekey,
+    _os.environ.decodekey,
+    _os.environ.encodevalue,
+    _os.environ.decodevalue,
+)
+_new_environ._pinned = {k: _os.environ[k] for k in _PINNED_KEYS if k in _os.environ}
+_os.environ = _new_environ
+
 # Orphan / optional-dep modules — would break ``pytest --collect-only`` (CI gate).
 collect_ignore = [
     "analytics/test_roi_integration.py",

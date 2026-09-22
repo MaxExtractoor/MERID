@@ -367,3 +367,63 @@ Remaining unclassified (still failing — not hidden):
 - Residual: tests that `patch.dict(os.environ, clear=True)` wipe the
   redirects and can still write repo data/ paths during the cleared
   window — flagged; per-test fix pending identification of writers.
+
+## Disposition pass 3 — ImportError/AttributeError obsolete sweep (2026-09-22)
+
+Applied via audit/apply_deletions2.py (second-order obsolete deletion).
+
+- 113 additional tests deleted across ~35 files: `ImportError: cannot
+  import name` / `AttributeError` failures on symbols removed by the same
+  deliberate refactors (renamed modules, replaced APIs like the old
+  `calculate_kalshi_fee_cents(prob, price)` signature, removed helpers).
+- AST-overlap bug found and fixed in both deletion passes: deleting a
+  whole class left stale child spans that consumed following classes.
+  29 damaged files restored from d87a3776 and dispositions re-applied;
+  audit/damage_check_final3.txt verifies 0 remaining damage across 98
+  changed test files. audit/restore_orphans.py + parent-class mapping
+  distinguishes true collateral from helpers nested inside intended
+  deletions.
+
+## Production-code fixes (2026-09-22, third commit batch)
+
+- merid/loop.py: removed dead `self._run_consensus(summary)` call block —
+  the method was deleted in 0c135d21 but the call site survived, so the
+  legacy loop would crash with AttributeError every consensus interval
+  (~120s). Also wrapped `_feature_service()`, `_scanner()`,
+  `_signal_store()`, `_drift_detector()` accessor use in
+  _refresh_features/_run_arb_scan/_update_cqi with the file's existing
+  graceful-degradation pattern — each lazily imports a deleted
+  merid.signals.* module and previously raised ModuleNotFoundError inside
+  _tick_body. (loop.py is legacy; production path is loop_15m.py, but the
+  file is still referenced by health/worker tooling.)
+- merid/swarm/__init__.py: removed dead `consensus_aggregator` re-export.
+  The package initializer imported a deleted module, which broke
+  `import merid.swarm.execution_subscriber` — still used by the live
+  order router (event_venues/kalshi/order_router.py). Same defect class
+  as the earlier merid.flow init bug.
+- web/main.py: wired the existing `swarm_bus_api` router into the compat
+  stub alongside the other preserved routers.
+- tests/test_sprint_m.py: updated stale consolidated view IDs
+  (`calibration-dashboard` -> `calibration`, plus `consensus-calibration`)
+  to match the actual React manifest + backend sidebar_config; deleted
+  obsolete `TestSocialBroadcasterConsensusEvent` (deleted module).
+- tests/test_loop_lag_stress.py: restored `TestLoopLagIntegration` (valid
+  loop-liveness contract, wrongly deleted as obsolete) and the lag-skip
+  tests with corrected 2000ms threshold expectations (was 500/1000).
+
+## Durable-state isolation — pinned environment + verdict
+
+- tests/conftest.py: `os.environ` replaced with `_PinnedEnviron` — a
+  subclass of the interpreter's `_Environ` that re-pins all
+  safety-critical MERID_* redirects inside `clear()`. Tests using
+  `patch.dict(os.environ, clear=True)` can no longer wipe the durable
+  path redirects mid-test; unrelated env manipulation still works.
+- Verified: audit/trace_data_writes.py (Python audit hook on
+  `open`/`sqlite3.connect`) recorded ZERO writes under repo `data/`
+  across collection + execution of focused suites.
+- Important environmental finding: the pollution guard's `data/` diff
+  was also catching writes from a concurrently-running production
+  uvicorn process (web.main_15m_lean:app, :8011) — it mutates the same
+  durable files every ~30s. Guard is only meaningful while no live
+  process is running; 24 hung zombie pytest processes (2:57–4:20 AM
+  leftovers) were also killed. Operator stopped the server for the audit.

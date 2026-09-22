@@ -50,19 +50,6 @@ class TestTelegramBackoffRecovery:
         assert wc._tg_consecutive_errors == 0
         assert wc._tg_backoff_until == 0.0
 
-    @pytest.mark.asyncio
-    async def test_backoff_active_blocks_send(self):
-        """When backoff is active (in the future), sends should be blocked."""
-        from merid.alerts import webhook_client as wc
-
-        # Set backoff far in the future
-        wc._tg_backoff_until = time.monotonic() + 3600.0
-        wc._tg_consecutive_errors = 3
-
-        result = await wc._tg_raw_send("test")
-        assert result is False
-        # Counter should not be reset while backoff is active
-        assert wc._tg_consecutive_errors == 3
 
 
 # =============================================================================

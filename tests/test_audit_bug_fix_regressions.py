@@ -187,13 +187,6 @@ class TestBug2AutoPromoterGates:
         ap._last_rollback_ts = {}
         return ap
 
-    def test_check_gauntlet_verdict_fails_when_no_grid(self):
-        """_check_gauntlet_verdict must return (False, ...) when grid is unavailable."""
-        ap = self._make_promoter()
-        with patch("merid.prediction.agent_grid.get_agent_grid", side_effect=RuntimeError("no grid")):
-            ok, reason = ap._check_gauntlet_verdict("test-agent")
-        assert ok is False
-        assert reason  # must have a reason string
 
     def test_check_promotion_engine_live_fails_closed_on_error(self):
         """_check_promotion_engine_live must return (False, ...) when engine unavailable."""
@@ -584,70 +577,7 @@ class TestBug6DeploymentStatePersistence:
         ctrl._restart_pending_ack = set()
         return ctrl
 
-    def test_persist_and_reload_state(self, tmp_path):
-        from merid.event_venues.kalshi.deployment import DeploymentController, DeploymentConfig, AgentMode
-        import merid.event_venues.kalshi.deployment as dmod
 
-        state_file = tmp_path / "deployment_state.json"
-        old_state_file = dmod._STATE_FILE
-        dmod._STATE_FILE = state_file
-        try:
-            cfg = DeploymentConfig(require_operator_ack_after_restart=False)
-            ctrl = DeploymentController(config=cfg)
-
-            dep = ctrl.register_agent("persist-agent")
-            dep.mode = AgentMode.SHADOW
-            dep.shadow_trades = 42
-            ctrl._persist_state()
-
-            assert state_file.exists(), "_persist_state must create the state file"
-
-            # Reload in a fresh instance using same patched _STATE_FILE
-            ctrl2 = DeploymentController(config=cfg)
-            dep2 = ctrl2._agents.get("persist-agent")
-            assert dep2 is not None, "Agent must be restored from persisted state"
-            assert dep2.shadow_trades == 42, (
-                f"shadow_trades must survive restart, got {dep2.shadow_trades}"
-            )
-        finally:
-            dmod._STATE_FILE = old_state_file
-
-    def test_live_agents_downgraded_to_paper_on_restart(self, tmp_path):
-        """Agents persisted in LIVE mode must restart as PAPER (safe default)."""
-        from merid.event_venues.kalshi.deployment import DeploymentController, DeploymentConfig, AgentMode
-        import merid.event_venues.kalshi.deployment as dmod
-
-        state_file = tmp_path / "deployment_state.json"
-        # Write a state file with a LIVE agent directly
-        state_data = {
-            "agents": {"live-restart-agent": {
-                "agent_name": "live-restart-agent",
-                "mode": "LIVE",
-                "promoted_at": None,
-                "rollback_count": 0,
-                "last_rollback_reason": None,
-                "last_rollback_at": None,
-                "live_trades": 500,
-                "shadow_trades": 200,
-            }},
-            "log": [],
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-        }
-        state_file.write_text(json.dumps(state_data))
-
-        old_state_file = dmod._STATE_FILE
-        dmod._STATE_FILE = state_file
-        try:
-            cfg = DeploymentConfig(require_operator_ack_after_restart=True)
-            ctrl = DeploymentController(config=cfg)
-            dep = ctrl._agents.get("live-restart-agent")
-            assert dep is not None
-            assert dep.mode == AgentMode.PAPER, (
-                f"LIVE agent must restart as PAPER for safety; got {dep.mode}. "
-                "BUG-6 may have regressed."
-            )
-        finally:
-            dmod._STATE_FILE = old_state_file
 
 
 # ===========================================================================

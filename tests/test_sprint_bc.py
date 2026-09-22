@@ -465,3 +465,8 @@ class TestPerpContext(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+# REMOVED: TestSocialBroadcasterConsensusEvent — merid.prediction.social_broadcaster
+# was deliberately deleted (legacy cleanup); tests are obsolete.

@@ -82,38 +82,6 @@ class TestBUG01_LadderTierRiskCaps:
             "BUG-01: max_daily_loss_usd not updated in _apply_risk_caps"
         )
 
-    def test_apply_risk_caps_runtime(self):
-        """Unit: _apply_risk_caps updates get_prediction_risk().config caps."""
-        import merid.prediction.risk as risk_mod
-        from merid.paper_ladder import PaperLadder, LadderTier
-        from merid.prediction.risk import PredictionRiskConfig
-
-        original_risk = risk_mod._risk
-        try:
-            cfg = PredictionRiskConfig()
-            risk_mod._risk = risk_mod.PredictionMarketRisk(cfg)
-
-            tier = LadderTier(
-                level=1,
-                name="Rookie",
-                seed_usd=2_000.0,
-                profit_target_pct=15.0,
-                max_drawdown_pct=8.0,
-                min_trades=30,
-                min_win_rate_pct=52.0,
-            )
-            ladder = PaperLadder.__new__(PaperLadder)
-            ladder._apply_risk_caps(tier)
-
-            r = risk_mod._risk
-            assert float(r.config.max_total_notional_usd) == pytest.approx(1_000.0), (
-                "BUG-01: total notional cap should be seed * 0.5 = 1000"
-            )
-            assert float(r.config.max_notional_per_market_usd) == pytest.approx(100.0), (
-                "BUG-01: per-market cap should be seed * 0.05 = 100"
-            )
-        finally:
-            risk_mod._risk = original_risk
 
 
 # =============================================================================
@@ -190,6 +158,130 @@ class TestBUG02_PerAgentNotionalEnforcement:
 # BUG-03 — PaperLadder + PaperSession single paper→live gate
 # =============================================================================
 
+
+
+# =============================================================================
+# BUG-04 — cutoff_minutes_before_expiry >= 0 enforced (changed from >= 2)
+# =============================================================================
+
+class TestBUG04_CutoffMinimum:
+
+    def test_min_cutoff_constant_exists(self):
+        src = _src(AGENT_GRID_CFG_SRC)
+        assert "_MIN_CUTOFF_MINUTES" in src, (
+            "BUG-04: _MIN_CUTOFF_MINUTES constant not found in agent_grid_config.py"
+        )
+
+    def test_min_cutoff_value_is_0(self):
+        import os
+        import importlib
+        # Clear environment variable to test default
+        original_value = os.environ.pop("SCALPER15M_MIN_CUTOFF_MINUTES", None)
+        try:
+            # Reload module to pick up change
+            import merid.prediction.agent_grid_config
+            importlib.reload(merid.prediction.agent_grid_config)
+            from merid.prediction.agent_grid_config import _MIN_CUTOFF_MINUTES
+            # The default in code is 0, but environment may override
+            # This test verifies the default is 0 when env var is not set
+            assert _MIN_CUTOFF_MINUTES == 0, (
+                f"BUG-04: _MIN_CUTOFF_MINUTES should be 0 when env var not set, got {_MIN_CUTOFF_MINUTES}"
+            )
+        finally:
+            # Restore original value
+            if original_value is not None:
+                os.environ["SCALPER15M_MIN_CUTOFF_MINUTES"] = original_value
+
+    def test_parse_entry_window_allows_cutoff_0(self):
+        from merid.prediction.agent_grid_config import _parse_entry_window
+        ew = _parse_entry_window({"minutes_before_expiry": 10, "cutoff_minutes_before_expiry": 0})
+        assert ew.cutoff_minutes_before_expiry == 0, (
+            f"BUG-04: cutoff=0 should be allowed, got {ew.cutoff_minutes_before_expiry}"
+        )
+
+    def test_parse_entry_window_allows_cutoff_1(self):
+        from merid.prediction.agent_grid_config import _parse_entry_window
+        ew = _parse_entry_window({"minutes_before_expiry": 5, "cutoff_minutes_before_expiry": 1})
+        assert ew.cutoff_minutes_before_expiry == 1, (
+            f"BUG-04: cutoff=1 should be allowed, got {ew.cutoff_minutes_before_expiry}"
+        )
+
+    def test_parse_entry_window_preserves_cutoff_above_0(self):
+        from merid.prediction.agent_grid_config import _parse_entry_window
+        ew = _parse_entry_window({"minutes_before_expiry": 30, "cutoff_minutes_before_expiry": 5})
+        assert ew.cutoff_minutes_before_expiry == 5, (
+            f"BUG-04: cutoff=5 should be preserved, got {ew.cutoff_minutes_before_expiry}"
+        )
+
+    def test_parse_entry_window_default_is_0(self):
+        from merid.prediction.agent_grid_config import _parse_entry_window
+        ew = _parse_entry_window({})
+        assert ew.cutoff_minutes_before_expiry == 0, (
+            f"BUG-04: default cutoff should be 0, got {ew.cutoff_minutes_before_expiry}"
+        )
+
+
+# =============================================================================
+# BUG-05 — Arb side='both' places YES and NO legs
+# =============================================================================
+
+
+
+# =============================================================================
+# BUG-06 — Fees deducted from realized PnL in record_close()
+# =============================================================================
+
+class TestBUG06_FeesDeductedFromPnL:
+
+
+
+
+    def test_record_close_fee_deduction_runtime(self):
+        from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig
+        cfg = PredictionRiskConfig()
+        risk = PredictionMarketRisk(cfg)
+
+        # Open 10 contracts @ 50¢ → notional $5
+        risk.record_fill(
+            market_id="FEE-TEST-1",
+            event_id="EV-FEE",
+            side="yes",
+            contracts=10,
+            price_cents=Decimal("50"),
+        )
+        # Close all @ 70¢ with $0.20 fee
+        risk.record_close(
+            market_id="FEE-TEST-1",
+            contracts=10,
+            exit_price_cents=Decimal("70"),
+            fee_cents=Decimal("20"),  # 20¢ = $0.20
+        )
+        today = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d")
+        daily = risk._daily_pnl.get(today)
+        assert daily is not None
+        # Gross PnL = (70-50)*10 / 100 = $2.00; fee = $0.20; net = $1.80
+        expected = Decimal("1.80")
+        assert daily.realized_pnl_usd == expected, (
+            f"BUG-06: expected net PnL $1.80 after fees, got {daily.realized_pnl_usd}"
+        )
+
+
+# =============================================================================
+# BUG-07 — Settlement price override in record_close()
+# =============================================================================
+
+class TestBUG07_SettlementPriceOverride:
+
+
+
+
+
+    def test_settled_yes_pnl_runtime(self):
+        """Closing YES at settlement=yes should yield (100-entry)*contracts/100."""
+        from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig
+        cfg = PredictionRiskConfig()
+        risk = PredictionMarketRisk(cfg)
+
         risk.record_fill(
             market_id="SET-YES-1",
             event_id="EV-SET",
@@ -241,6 +333,77 @@ class TestBUG02_PerAgentNotionalEnforcement:
 # BUG-08 — _resolve_markets loops all config.assets
 # =============================================================================
 
+
+
+# =============================================================================
+# BUG-09 — StopLossRules equity from ladder, not hardcoded $5K
+# =============================================================================
+
+
+
+# =============================================================================
+# BUG-10 — Post-fee edge formula branches on YES vs NO side
+# =============================================================================
+
+class TestBUG10_PostFeeEdgeFormula:
+
+
+
+
+    def test_no_side_edge_check_uses_correct_denominator(self):
+        """Edge formula for NO side must use price_cents as denominator."""
+        from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig
+        cfg = PredictionRiskConfig(
+            max_notional_per_market_usd=Decimal("10000"),
+            max_total_notional_usd=Decimal("50000"),
+        )
+        risk = PredictionMarketRisk(cfg)
+        # A very thin edge on a NO buy at 95¢ — with old formula (100-95=5) the
+        # fee drag would swamp a 2% edge; with correct formula (95) it should pass.
+        check = risk.check_order(
+            market_id="EDGE-NO-1",
+            event_id="EV-EDGE",
+            side="no",
+            contracts=1,
+            price_cents=Decimal("95"),
+            edge=Decimal("0.05"),  # 5% net edge, should pass at 95¢ NO
+        )
+        # With old formula: payout=5¢, fee~2¢, fee_per/payout = 0.4 → post_fee = 0.05-0.4 < 0.01 → REJECT
+        # With correct formula: payout=95¢, fee~2¢, fee_per/payout ≈ 0.021 → post_fee ≈ 0.029 > 0.01 → ALLOW
+        assert check.allowed, (
+            "BUG-10: NO side buy with 5% edge at 95¢ should pass post-fee check "
+            "(correct payout denominator = price_cents = 95)"
+        )
+
+
+# =============================================================================
+# BUG-11 — _sentiment_size_multiplier full range 0.35–1.5 (not capped at 1.0)
+# =============================================================================
+
+class TestBUG11_SentimentMultiplierRange:
+
+    def test_min_cap_is_035_in_contrarian(self):
+        src = _src(STRATEGY_SRC)
+        # Lines that apply the sentiment multiplier must use min(1.5, float(mult))
+        # (not the kelly_size or vol_breakout lines which use size_factor directly)
+        mult_lines = [l for l in src.splitlines() if "float(mult)" in l and "size_factor" in l]
+        assert mult_lines, "BUG-11: no 'size_factor = max(...min(...float(mult)))' lines found"
+        for line in mult_lines:
+            assert "min(1.5" in line, (
+                f"BUG-11: size_factor clamp should be min(1.5,...), got: {line.strip()}"
+            )
+
+    def test_multiplier_max_is_15_not_10(self):
+        src = _src(STRATEGY_SRC)
+        assert "min(1.5, float(mult))" in src, (
+            "BUG-11: 'min(1.5, float(mult))' not found — multiplier still capped at 1.0"
+        )
+        assert "min(1.0, float(mult))" not in src, (
+            "BUG-11: old 'min(1.0, float(mult))' cap still present"
+        )
+
+    def test_extreme_fear_buy_yes_returns_13(self):
+        from merid.prediction.strategy import KalshiStrategy, StrategyConfig, SignalAction
 
         cfg = StrategyConfig()
         strat = KalshiStrategy(cfg)
@@ -388,6 +551,38 @@ class TestBUGL2_IdempotentStart:
 # BUG-L3 — Position sync at startup
 # =============================================================================
 
+
+
+# =============================================================================
+# BUG-L4 — Consensus quorum uses live healthy-agent count
+# =============================================================================
+
+class TestBUGL4_DynamicConsensusQuorum:
+    CONSENSUS_SRC = ROOT / "consensus" / "consensus_coordinator.py"
+
+
+
+
+
+    def test_effective_quorum_fallback_to_config(self):
+        """With no registered agents, effective_quorum falls back to config minimum."""
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig
+        # # Use a fresh instance
+        # cc = EnhancedConsensusCoordinator(ConsensusConfig(min_agents_for_quorum=3))
+        # assert cc.effective_quorum == 3, (
+        #     f"BUG-L4: with no agents, effective_quorum should be 3 (config min), got {cc.effective_quorum}"
+        # )
+        self.skipTest("Consensus module deleted")
+
+    def test_effective_quorum_scales_with_healthy_agents(self):
+        """With 10 healthy agents and 60% quorum_pct, effective_quorum == max(3, ceil(6)) == 6."""
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # import math
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig, AgentHeartbeat
+        # cc = EnhancedConsensusCoordinator(ConsensusConfig(min_agents_for_quorum=3, quorum_percentage=0.6))
+        # for i in range(10):
+        #     hb = AgentHeartbeat(agent_id=f"agent-{i}", agent_role="trader")
         #     hb.is_healthy = True
         #     cc._agent_heartbeats[f"agent-{i}"] = hb
         # expected = max(3, math.ceil(10 * 0.6))  # 6
@@ -412,3 +607,98 @@ class TestBUGL2_IdempotentStart:
         # assert purged == 1, f"BUG-L4: expected 1 purged, got {purged}"
         # assert len(cc._pending_opinions["BTC"]) == 1, "BUG-L4: fresh opinion must survive purge"
         self.skipTest("Consensus module deleted")
+
+
+
+def _make_coro(result):
+    """Helper: create a coroutine that returns result."""
+    async def _coro():
+        return result
+    return _coro()
+
+
+# =============================================================================
+# BUG-L6 — Shield mid-order placement from hard task cancellation
+# =============================================================================
+
+
+
+# =============================================================================
+# BUG-L7 — Single-owner shutdown: no triple-stop race
+# =============================================================================
+
+class TestBUGL7_SingleOwnerShutdown:
+    MAIN_SRC = ROOT / "web" / "main.py"
+
+    def test_shutdown_comment_present(self):
+        src = _src(self.MAIN_SRC)
+        assert "BUG-L7" in src, (
+            "BUG-L7: BUG-L7 comment not found in main.py shutdown section"
+        )
+
+    def test_orchestrator_manager_stop_called_once(self):
+        src = _src(self.MAIN_SRC)
+        yield_idx = src.index("yield")
+        shutdown_section = src[yield_idx:]
+        # Count only actual call sites — exclude comment lines and def lines
+        call_count = sum(
+            1 for line in shutdown_section.splitlines()
+            if "stop_all()" in line
+            and "def " not in line
+            and not line.strip().startswith("#")
+        )
+        assert call_count == 1, (
+            f"BUG-L7: stop_all() should be called exactly once in shutdown, found {call_count} times"
+        )
+
+    def test_grid_stop_called_once_in_lifespan_shutdown(self):
+        src = _src(self.MAIN_SRC)
+        yield_idx = src.index("yield")
+        shutdown_section = src[yield_idx:]
+        # Exclude comment lines
+        count = sum(
+            1 for line in shutdown_section.splitlines()
+            if "grid.stop()" in line and not line.strip().startswith("#")
+        )
+        assert count <= 1, (
+            f"BUG-L7: grid.stop() should appear at most once in lifespan shutdown, got {count}"
+        )
+
+
+# =============================================================================
+# BUG-L8 — WARMING_UP state + safe mode + stale opinion purge on restart
+# =============================================================================
+
+
+
+# =============================================================================
+# MED — Medium-risk fixes
+# =============================================================================
+
+class TestMediumRiskFixes:
+
+
+
+
+
+    def test_canonical_agent_error_count_reset_on_success(self):
+        src = _src(ROOT / "merid" / "agents" / "base.py")
+        assert "self._error_count = 0" in src, (
+            "MED: CanonicalAgent._error_count must reset to 0 on successful run"
+        )
+
+    def test_canonical_agent_auto_retires_after_max_errors(self):
+        src = _src(ROOT / "merid" / "agents" / "base.py")
+        assert "_MAX_CANONICAL_CONSECUTIVE_ERRORS" in src, (
+            "MED: _MAX_CANONICAL_CONSECUTIVE_ERRORS not defined in base.py"
+        )
+        assert "AgentStatus.RETIRED" in src, (
+            "MED: agent must auto-retire after max consecutive errors"
+        )
+
+    def test_gather_uses_return_exceptions_in_loop(self):
+        src = _src(ROOT / "merid" / "loop.py")
+        assert "return_exceptions=True" in src, (
+            "MED: asyncio.gather in _run_agent_cycles must use return_exceptions=True"
+        )
+

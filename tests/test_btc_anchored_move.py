@@ -102,3 +102,88 @@ def _feed_model(model, btc_rets, alt_rets, asset="ETH", timeframe="15m"):
 # Tests — Record Prices (convenience)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+
+
+class TestThreadSafety:
+    def test_concurrent_writes_and_reads(self):
+        from merid.signals.btc_anchored_move import BtcAnchoredMoveModel
+
+        model = BtcAnchoredMoveModel(window=500, min_obs=5)
+        errors: List[str] = []
+
+        def writer(asset, seed):
+            rng = random.Random(seed)
+            try:
+                for _ in range(100):
+                    model.record_returns(
+                        {"BTC": rng.gauss(0, 0.005), asset: rng.gauss(0, 0.008)},
+                        "15m",
+                    )
+            except Exception as e:
+                errors.append(f"Writer {asset}: {e}")
+
+        def reader():
+            try:
+                for _ in range(50):
+                    model.get_beta("ETH", "15m")
+                    model.get_beta("SOL", "15m")
+                    model.snapshot("DOGE", "15m")
+            except Exception as e:
+                errors.append(f"Reader: {e}")
+
+        threads = [
+            threading.Thread(target=writer, args=("ETH", 1)),
+            threading.Thread(target=writer, args=("SOL", 2)),
+            threading.Thread(target=writer, args=("DOGE", 3)),
+            threading.Thread(target=reader),
+            threading.Thread(target=reader),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"Thread errors: {errors}"
+
+
+class TestThreadSafety:
+    def test_concurrent_writes_and_reads(self):
+        from merid.signals.btc_anchored_move import BtcAnchoredMoveModel
+
+        model = BtcAnchoredMoveModel(window=500, min_obs=5)
+        errors: List[str] = []
+
+        def writer(asset, seed):
+            rng = random.Random(seed)
+            try:
+                for _ in range(100):
+                    model.record_returns(
+                        {"BTC": rng.gauss(0, 0.005), asset: rng.gauss(0, 0.008)},
+                        "15m",
+                    )
+            except Exception as e:
+                errors.append(f"Writer {asset}: {e}")
+
+        def reader():
+            try:
+                for _ in range(50):
+                    model.get_beta("ETH", "15m")
+                    model.get_beta("SOL", "15m")
+                    model.snapshot("DOGE", "15m")
+            except Exception as e:
+                errors.append(f"Reader: {e}")
+
+        threads = [
+            threading.Thread(target=writer, args=("ETH", 1)),
+            threading.Thread(target=writer, args=("SOL", 2)),
+            threading.Thread(target=writer, args=("DOGE", 3)),
+            threading.Thread(target=reader),
+            threading.Thread(target=reader),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"Thread errors: {errors}"

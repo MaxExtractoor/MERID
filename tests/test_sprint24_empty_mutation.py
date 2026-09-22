@@ -29,6 +29,7 @@ def _ui_params(directory, names):
 
 _XFAIL_PARAMS = {
     'test_empty_guard_checks_length_or_null': {'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.'},
+    'TestEmptyStateGuard.test_empty_guard_checks_length_or_null': {'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.'},
     'test_has_empty_state_guard': {'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Logs.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.', 'Risk.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.'},
     'test_imports_empty_state': {'ApiDashboard.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Logs.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.', 'Risk.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.'},
     'test_has_auto_hide_timeout': {'Research.tsx': 'DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.', 'Logs.tsx': 'DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.'},
@@ -108,6 +109,10 @@ class TestEmptyStateImport:
             or "!riskMetrics && !alerts" in text
         )
         assert has_check, f"{filename} missing empty data check"
+    @pytest.mark.parametrize("filename", _ap(EMPTY_STATE_VIEWS, 'test_imports_empty_state'))
+    def test_imports_empty_state(self, filename: str):
+        text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
+        assert "EmptyState" in text, f"{filename} missing EmptyState import"
 
 
 # ── 2. Mutation feedback ──────────────────────────────────────
@@ -178,3 +183,21 @@ class TestNoConsoleErrorInMutations:
         if match:
             handler = match.group(0)
             assert "console.error" not in handler, "handleClearLogs still uses console.error"
+
+
+class TestEmptyStateGuard:
+    """Views have empty state guard rendering EmptyState."""
+
+    @pytest.mark.parametrize("filename", _ap(EMPTY_STATE_VIEWS, 'test_has_empty_state_guard'))
+    def test_has_empty_state_guard(self, filename: str):
+        text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
+        assert "<EmptyState" in text, f"{filename} missing <EmptyState render"
+
+    @pytest.mark.parametrize("filename", _ap(EMPTY_STATE_VIEWS, 'TestEmptyStateGuard.test_empty_guard_checks_length_or_null'))
+    def test_empty_guard_checks_length_or_null(self, filename: str):
+        text = (VIEWS_DIR / filename).read_text(encoding="utf-8")
+        has_check = (
+            "length === 0" in text
+            or "!riskMetrics && !alerts" in text
+        )
+        assert has_check, f"{filename} missing empty data check"

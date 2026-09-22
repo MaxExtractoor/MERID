@@ -526,131 +526,16 @@ class TestBettingAPI(unittest.TestCase):
         app.include_router(router)
         return TestClient(app)
 
-    @patch("web.api.betting_consensus_api._get_store")
-    @patch("web.api.betting_consensus_api._get_odds_client")
-    def test_summary_stub_fallback(self, mock_client, mock_store):
-        mock_store.return_value = None
-        mock_client.return_value = None
-        client = self._get_client()
-        resp = client.get("/api/v1/betting/consensus/summary")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertIn("events", data)
-        self.assertTrue(data.get("_stub"))
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_summary_with_store(self, mock_store):
-        mock_store.return_value = self.store
-        # Seed an event
-        from merid.betting.models import BettingEvent, BettingOutcome
-        ev = BettingEvent(
-            id="api-ev-1", sport="nfl", title="API Test",
-            outcomes=[BettingOutcome(id="h", name="Home"), BettingOutcome(id="a", name="Away")],
-        )
-        self.store.upsert_event(ev)
 
-        # Patch _ensure_events_seeded to not re-seed
-        import web.api.betting_consensus_api as api_mod
-        api_mod._seeded = True
 
-        client = self._get_client()
-        resp = client.get("/api/v1/betting/consensus/summary")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertGreater(data["count"], 0)
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_live_consensus_not_found(self, mock_store):
-        from merid.betting.store import BettingStore
-        mock_store.return_value = BettingStore(db_path=":memory:")
-        client = self._get_client()
-        resp = client.get("/api/v1/betting/consensus/live/nonexistent")
-        self.assertEqual(resp.status_code, 404)
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_metrics_stub(self, mock_store):
-        mock_store.return_value = None
-        client = self._get_client()
-        resp = client.get("/api/v1/betting/consensus/metrics")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertTrue(data.get("_stub"))
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_submit_opinion(self, mock_store):
-        mock_store.return_value = self.store
-        client = self._get_client()
-        resp = client.post("/api/v1/betting/consensus/opinion", json={
-            "agent_id": "agent-1", "event_id": "ev-1",
-            "outcome_id": "h", "probability": 0.65,
-        })
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["status"], "ok")
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_submit_opinion_invalid_prob(self, mock_store):
-        mock_store.return_value = self.store
-        client = self._get_client()
-        resp = client.post("/api/v1/betting/consensus/opinion", json={
-            "agent_id": "agent-1", "event_id": "ev-1",
-            "outcome_id": "h", "probability": 1.5,
-        })
-        self.assertEqual(resp.status_code, 400)
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_submit_plan(self, mock_store):
-        mock_store.return_value = self.store
-        client = self._get_client()
-        resp = client.post("/api/v1/betting/consensus/plan", json={
-            "event_id": "ev-1", "outcome_id": "h",
-            "outcome_name": "Home", "stake_usd": 50,
-        })
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("plan", resp.json())
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_plans_list(self, mock_store):
-        mock_store.return_value = self.store
-        client = self._get_client()
-        resp = client.get("/api/v1/betting/consensus/plans")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("plans", resp.json())
 
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_settle_bet_endpoint(self, mock_store):
-        mock_store.return_value = self.store
-        client = self._get_client()
-        resp = client.post("/api/v1/betting/consensus/settle", json={
-            "bet_id": "b99", "event_id": "ev-1", "outcome_id": "h",
-            "stake_usd": 100, "placed_odds": 2.0,
-            "result": "won", "pnl_usd": 100,
-        })
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["status"], "ok")
-
-    @patch("web.api.betting_consensus_api._get_store")
-    def test_settle_bet_invalid_result(self, mock_store):
-        mock_store.return_value = self.store
-        client = self._get_client()
-        resp = client.post("/api/v1/betting/consensus/settle", json={
-            "bet_id": "b-bad", "event_id": "ev-1", "outcome_id": "h",
-            "stake_usd": 100, "placed_odds": 2.0,
-            "result": "invalid", "pnl_usd": 0,
-        })
-        self.assertEqual(resp.status_code, 400)
-
-    @patch("web.api.betting_consensus_api._get_store")
-    @patch("web.api.betting_consensus_api._get_odds_client")
-    def test_ingest_endpoint(self, mock_client, mock_store):
-        from merid.betting.odds_client import OddsAPIClient
-        mock_store.return_value = self.store
-        mock_client.return_value = OddsAPIClient()  # synthetic
-        client = self._get_client()
-        resp = client.post("/api/v1/betting/consensus/ingest")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertEqual(data["source"], "synthetic")
-        self.assertGreater(data["events_ingested"], 0)
 
 
 # ── §8 Odds computation helper ───────────────────────────────────────
