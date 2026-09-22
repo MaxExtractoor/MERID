@@ -57,15 +57,31 @@ class AgentModeRouter:
                 from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
                 import asyncio
                 
-                # Build order intent
+                # Map the opinion side to the canonical Kalshi side/action.
+                # Agent opinions are ENTRY intents only.  Kalshi has no native
+                # short: "no"/"short" exposure is a long-NO position (BUY_NO),
+                # never a SELL (which would invert or short YES).
+                _side_map = {
+                    "yes": ("yes", "buy"), "long": ("yes", "buy"), "buy_yes": ("yes", "buy"),
+                    "no": ("no", "buy"), "short": ("no", "buy"), "buy_no": ("no", "buy"),
+                }
+                _mapped = _side_map.get((side or "").strip().lower())
+                if _mapped is None:
+                    logger.error(
+                        f"Live mode: unrecognized side {side!r} from {agent_id} — "
+                        f"order not routed (canonical map only accepts yes/no entries)"
+                    )
+                    return False
+                _order_side, _order_action = _mapped
                 intent = OrderIntent(
                     ticker=market_id,
-                    side=side,
-                    action="buy" if side.lower() in ("yes", "buy", "long") else "sell",
+                    side=_order_side,
+                    action=_order_action,
                     price_cents=0,  # Market order (price determined by venue)
                     count=adjusted_contracts,
                     order_type="market",
                     time_in_force="ioc",
+                    entry_or_exit="entry",
                     source=f"agent_mode_router:{agent_id}",
                     agent_id=agent_id,
                 )

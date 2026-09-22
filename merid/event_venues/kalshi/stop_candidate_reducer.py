@@ -520,6 +520,14 @@ class StopCandidateExecutionReducer:
             )
 
         # 6. Submit with a bounded retry loop.
+        #
+        # Safety contract: before ANY retry that could create a second live
+        # order (submit exception, ambiguous submission status, or an unfilled
+        # result), re-fetch the authoritative position and rebuild the intent.
+        # A rebuilt intent reuses the candidate's deterministic intent_id /
+        # client_order_id, so the router's client-order-id dedup + venue
+        # idempotency resolve a prior ambiguous submission instead of
+        # double-submitting.
         last_result: Optional[Any] = None
         for attempt in range(1, self.max_retry_attempts + 1):
             try:
@@ -536,68 +544,11 @@ class StopCandidateExecutionReducer:
                 )
                 if attempt < self.max_retry_attempts:
                     await asyncio.sleep(self.retry_backoff_seconds)
-                    # Re-fetch position before retry so we do not resubmit against a
-                    # stale size.
-                    try:
-                        exchange_position_cc, avg_price_cents, _ = await self.fetch_position(
-                            candidate.market_ticker, timeout=1.0, fallback_to_cache=True
-                        )
-                        if exchange_position_cc is None or exchange_position_cc == 0:
-                            self._complete_attempt(
-                                key,
-                                in_flight_id,
-                                "no_position",
-                                f"position_flat_during_retry:attempt={attempt}",
-                            )
-                            return ReducerResult(
-                                status="no_position",
-                                reason=f"position_flat_during_retry:attempt={attempt}",
-                                candidate_id=candidate.candidate_id,
-                                position_key=key,
-                                attempts=attempt,
-                            )
-                        fresh_side, fresh_qty = from_signed_yes_exposure(exchange_position_cc)
-                        if candidate_side != fresh_side or fresh_qty <= 0:
-                            self._complete_attempt(
-                                key,
-                                in_flight_id,
-                                "stale_position",
-                                f"position_sign_changed_during_retry:attempt={attempt}",
-                            )
-                            return ReducerResult(
-                                status="stale_position",
-                                reason=f"position_sign_changed_during_retry:attempt={attempt}",
-                                candidate_id=candidate.candidate_id,
-                                position_key=key,
-                                attempts=attempt,
-                            )
-                        # Rebuild intent with the new position size.
-                        intent, _, build_reason = self._build_exit_intent(
-                            candidate, exchange_position_cc, avg_price_cents, fresh_side
-                        )
-                        if intent is None:
-                            self._complete_attempt(
-                                key,
-                                in_flight_id,
-                                "rejected",
-                                f"rebuild_intent_failed_during_retry:{build_reason}",
-                            )
-                            return ReducerResult(
-                                status="rejected",
-                                reason=f"rebuild_intent_failed_during_retry:{build_reason}",
-                                candidate_id=candidate.candidate_id,
-                                position_key=key,
-                                attempts=attempt,
-                            )
-                    except Exception as refresh_exc:
-                        self._complete_attempt(key, in_flight_id, "escalated", f"retry_refresh_failed:{refresh_exc}")
-                        return ReducerResult(
-                            status="escalated",
-                            reason=f"retry_refresh_failed:{refresh_exc}",
-                            candidate_id=candidate.candidate_id,
-                            position_key=key,
-                            attempts=attempt,
-                        )
+                    intent, terminal = await self._refresh_and_rebuild(
+                        candidate, key, in_flight_id, candidate_side, attempt
+                    )
+                    if terminal is not None:
+                        return terminal
                 continue
 
             if last_result is not None:
@@ -612,6 +563,25 @@ class StopCandidateExecutionReducer:
                         position_key=key,
                         attempts=attempt,
                     )
+
+                # Ambiguous submission outcomes: the prior order may already be
+                # live at the venue.  Reconcile the position before retrying —
+                # if it filled, the refresh sees a flat position and stops; if
+                # it is resting, the rebuilt intent shares the deterministic
+                # client_order_id and the router dedups instead of stacking a
+                # second order.
+                if status in ("submission_unknown", "duplicate_unknown"):
+                    if attempt < self.max_retry_attempts:
+                        await asyncio.sleep(self.retry_backoff_seconds)
+                        intent, terminal = await self._refresh_and_rebuild(
+                            candidate, key, in_flight_id, candidate_side, attempt
+                        )
+                        if terminal is not None:
+                            return terminal
+                        last_reason = f"retry_after_ambiguous:{status}:attempt={attempt}"
+                        continue
+                    last_reason = f"max_retry_exceeded:status={status}"
+                    break
 
             if attempt < self.max_retry_attempts:
                 await asyncio.sleep(self.retry_backoff_seconds)
@@ -637,6 +607,84 @@ class StopCandidateExecutionReducer:
             position_key=key,
             attempts=self.max_retry_attempts,
         )
+
+    async def _refresh_and_rebuild(
+        self,
+        candidate: StopCandidate,
+        key: str,
+        in_flight_id: str,
+        candidate_side: str,
+        attempt: int,
+    ) -> Tuple[Optional[Any], Optional[ReducerResult]]:
+        """Reconcile position and rebuild the exit intent before a retry.
+
+        Returns ``(intent, None)`` when the retry may proceed, or
+        ``(None, ReducerResult)`` when the attempt must terminate
+        (flat/flipped position, rebuild failure, or refresh error).
+        """
+        try:
+            exchange_position_cc, avg_price_cents, _ = await self.fetch_position(
+                candidate.market_ticker, timeout=1.0, fallback_to_cache=True
+            )
+            if exchange_position_cc is None or exchange_position_cc == 0:
+                self._complete_attempt(
+                    key,
+                    in_flight_id,
+                    "no_position",
+                    f"position_flat_during_retry:attempt={attempt}",
+                )
+                return None, ReducerResult(
+                    status="no_position",
+                    reason=f"position_flat_during_retry:attempt={attempt}",
+                    candidate_id=candidate.candidate_id,
+                    position_key=key,
+                    attempts=attempt,
+                )
+            fresh_side, fresh_qty = from_signed_yes_exposure(exchange_position_cc)
+            if candidate_side != fresh_side or fresh_qty <= 0:
+                self._complete_attempt(
+                    key,
+                    in_flight_id,
+                    "stale_position",
+                    f"position_sign_changed_during_retry:attempt={attempt}",
+                )
+                return None, ReducerResult(
+                    status="stale_position",
+                    reason=f"position_sign_changed_during_retry:attempt={attempt}",
+                    candidate_id=candidate.candidate_id,
+                    position_key=key,
+                    attempts=attempt,
+                )
+            # Rebuild intent with the new position size.  The rebuilt intent
+            # keeps the deterministic per-candidate intent_id/client_order_id,
+            # so resubmission dedups against any prior ambiguous submission.
+            intent, _, build_reason = self._build_exit_intent(
+                candidate, exchange_position_cc, avg_price_cents, fresh_side
+            )
+            if intent is None:
+                self._complete_attempt(
+                    key,
+                    in_flight_id,
+                    "rejected",
+                    f"rebuild_intent_failed_during_retry:{build_reason}",
+                )
+                return None, ReducerResult(
+                    status="rejected",
+                    reason=f"rebuild_intent_failed_during_retry:{build_reason}",
+                    candidate_id=candidate.candidate_id,
+                    position_key=key,
+                    attempts=attempt,
+                )
+            return intent, None
+        except Exception as refresh_exc:
+            self._complete_attempt(key, in_flight_id, "escalated", f"retry_refresh_failed:{refresh_exc}")
+            return None, ReducerResult(
+                status="escalated",
+                reason=f"retry_refresh_failed:{refresh_exc}",
+                candidate_id=candidate.candidate_id,
+                position_key=key,
+                attempts=attempt,
+            )
 
     def _build_exit_intent(
         self,
@@ -729,6 +777,11 @@ class StopCandidateExecutionReducer:
             time_in_force="ioc",
             source="stop_candidate_reducer",
             agent_id="stop_candidate_reducer",
+            # Stable identity per candidate: retry rebuilds reuse the same
+            # intent/client_order_id so router + venue dedup prevents a second
+            # live order after an ambiguous submission outcome.
+            intent_id=f"stop_candidate:{candidate.candidate_id}",
+            client_order_id=f"stopcand_{candidate.candidate_id}"[:64],
             kalshi_side=kalshi_side,
             reduce_only=True,
             entry_or_exit="exit",

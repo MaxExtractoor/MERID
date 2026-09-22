@@ -161,6 +161,7 @@ class ExitOrderState:
     
     # Intent reconstruction for retries
     intent_id: str = ""  # Original intent ID
+    client_order_id: str = ""  # Original client_order_id for stable retry identity
     ticker: str = ""  # Market ticker
     count: int = 0  # Order size
     exit_reason: str = ""  # Exit reason (tp, sl, 99c, etc.)
@@ -1178,7 +1179,18 @@ class RestingOrderMonitor:
             # Import order router for retry
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
-            # Build new exit intent with updated price & aggressiveness
+            # Build new exit intent with updated price & aggressiveness.
+            # Identity: preserve the original intent lineage and derive a
+            # deterministic per-attempt client_order_id, so a re-driven attempt
+            # dedups against its own submission while a cancelled order does
+            # not shadow the retry at the venue.
+            retry_kwargs = {}
+            if state.intent_id:
+                retry_kwargs["intent_id"] = state.intent_id
+            if state.client_order_id:
+                retry_kwargs["client_order_id"] = (
+                    f"{state.client_order_id[:44]}_r{state.total_retries:02d}"
+                )
             new_intent = OrderIntent(
                 ticker=state.ticker,
                 side=state.side,
@@ -1191,8 +1203,10 @@ class RestingOrderMonitor:
                 agent_id="merid.position_management.position_monitor",
                 aggressiveness=state.current_aggressiveness,
                 entry_or_exit="exit",
+                reduce_only=True,
                 exit_reason=state.exit_reason,
                 exit_policy_id=state.exit_policy_id,
+                **retry_kwargs,
             )
 
             logger.info(
@@ -1218,6 +1232,19 @@ class RestingOrderMonitor:
                     f"status={result.status}"
                 )
             else:
+                result_status = getattr(result, "status", "") or ""
+                if result_status in ("submission_unknown", "duplicate_unknown"):
+                    # The prior submission may be live at the venue.  Do NOT
+                    # stack another order — mark the state for reconciliation
+                    # and let the position monitor / reconciliation loop drive
+                    # the next exit attempt with a fresh confirmed position.
+                    state.status = "pending_reconciliation"
+                    logger.critical(
+                        f"[EXIT-RETRY-AMBIGUOUS] order_id={state.order_id} status={result_status} "
+                        f"coid={state.client_order_id} - prior submission may be live; "
+                        f"halting retries pending reconciliation"
+                    )
+                    return
                 logger.error(
                     f"[EXIT-RETRY-FAILED] order_id={state.order_id} reason={result.reason}"
                 )

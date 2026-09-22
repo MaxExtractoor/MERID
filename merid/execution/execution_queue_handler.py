@@ -204,16 +204,43 @@ class ExecutionQueueHandler:
                 self._orders_submitted += 1
                 # Integrate with order router
                 from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
-                
-                # Build order intent from queue entry
+
+                # Map the signal direction to the canonical Kalshi side/action.
+                # Queue entries are ENTRY intents only.  Kalshi has no native
+                # short: "short" exposure is a long-NO position (BUY_NO), so a
+                # "short" direction maps to side="no", action="buy" — never a
+                # sell, which would invert the exposure or short YES.
+                _direction = (entry.direction or "").strip().lower()
+                _direction_map = {
+                    "long": ("yes", "buy"), "yes": ("yes", "buy"),
+                    "up": ("yes", "buy"), "buy_yes": ("yes", "buy"),
+                    "short": ("no", "buy"), "no": ("no", "buy"),
+                    "down": ("no", "buy"), "buy_no": ("no", "buy"),
+                }
+                _mapped = _direction_map.get(_direction)
+                if _mapped is None:
+                    logger.error(
+                        "[EXEC_QUEUE_HANDLER] Unmappable direction %r for %s — rejecting entry",
+                        entry.direction, ticker,
+                    )
+                    self._orders_rejected += 1
+                    self._queue.mark_executed(entry_id, ticker, success=False)
+                    return
+                _side, _action = _mapped
+                _limit_price = (
+                    getattr(entry, "limit_price_cents", None)
+                    or (entry.metadata or {}).get("limit_price_cents")
+                    or 0
+                )
                 intent = OrderIntent(
                     ticker=ticker,
-                    side=entry.side,
-                    action="buy" if entry.side.lower() in ("yes", "buy", "long") else "sell",
-                    price_cents=entry.limit_price_cents if hasattr(entry, 'limit_price_cents') else 0,
+                    side=_side,
+                    action=_action,
+                    price_cents=int(_limit_price),
                     count=entry.size_contracts,
-                    order_type="limit" if hasattr(entry, 'limit_price_cents') and entry.limit_price_cents > 0 else "market",
+                    order_type="limit" if _limit_price else "market",
                     time_in_force="gtc",
+                    entry_or_exit="entry",
                     source=f"execution_queue_handler:{entry.agent_id}",
                     agent_id=entry.agent_id,
                 )

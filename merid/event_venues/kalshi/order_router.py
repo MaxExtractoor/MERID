@@ -2877,6 +2877,34 @@ class OrderIntent:
             self.expected_post_position_size = int(round(self.expected_post_position_size))
 
 
+def _resolve_kalshi_side(intent: OrderIntent) -> Optional[str]:
+    """Resolve the canonical Kalshi-form side (``BUY_YES``/``SELL_YES``/
+    ``BUY_NO``/``SELL_NO``) for an intent.
+
+    Accepts, in order of precedence — matching ``_build_create_order_request``,
+    which parses ``intent.side`` before the side/action pair and never reads
+    ``intent.kalshi_side``:
+    1. a Kalshi-form ``intent.side`` (any case),
+    2. the legacy ``intent.side`` ("yes"/"no") + ``intent.action``
+       ("buy"/"sell") pair, mapped through the canonical ``to_kalshi_side``.
+
+    Returns ``None`` when no unambiguous mapping exists — callers must treat
+    that as a rejection, never guess.  ``intent.kalshi_side`` alone is
+    deliberately not accepted: the wire builder does not read it, so
+    validating it would approve a side that serialization cannot express.
+    """
+    side = (getattr(intent, "side", None) or "")
+    if side.upper() in ("BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"):
+        return side.upper()
+    action = (getattr(intent, "action", None) or "")
+    if side.lower() in ("yes", "no") and action.lower() in ("buy", "sell"):
+        try:
+            return to_kalshi_side(side.lower(), action.lower())
+        except (ValueError, AttributeError):
+            return None
+    return None
+
+
 def _is_exit_order(intent: OrderIntent) -> bool:
     """Check if this is an exit order (sell/close) that should bypass non-critical checks.
     
@@ -4998,6 +5026,13 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
         expected_post_position_size = getattr(intent, 'expected_post_position_fp', None)
 
         if pre_position_size is None:
+            # Canonical validation runs earlier in the pipeline and resolves the
+            # exact fresh exchange position; reuse it (signed YES -> magnitude).
+            canonical = getattr(intent, "_canonical_order_intent", None)
+            if canonical is not None:
+                pre_position_size = abs(int(canonical.expected_position_before))
+
+        if pre_position_size is None:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             position_cache = get_position_cache()
             if position_cache:
@@ -5006,12 +5041,28 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
                     pre_position_size = position.quantity_cc
 
         if pre_position_size is None:
-            # No position and no intent field; fail open so exits are not trapped.
-            logger.warning(
-                "[EXIT-INVARIANT-CHECK] No pre_position_fp or cache position for %s; skipping exit-delta check",
-                intent.ticker,
+            # Last resort: legacy whole-contract field (loses fractional
+            # precision; the over-close bound below stays conservative because
+            # the floor is never larger than the true position).
+            legacy_pre = getattr(intent, 'pre_position_size', None)
+            if legacy_pre is not None:
+                pre_position_size = int(legacy_pre) * 100
+
+        if pre_position_size is None:
+            # Fail closed: an exit order with no resolvable position context is
+            # an unknown-position exit and must never reach the venue.
+            logger.critical(
+                "[EXIT-INVARIANT-VIOLATION] ticker=%s side=%s - "
+                "EXIT order has no pre_position_fp/pre_position_size and no cache position. "
+                "Unknown position state; rejecting exit-delta check.",
+                intent.ticker, intent.side,
             )
-            return None
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="exit_invariant_violation:unknown_position",
+                latency_ms=0.0,
+            )
 
         pre_position_size = int(pre_position_size)
         exit_count_fp = intent.count_fp if intent.count_fp is not None else Decimal(str(intent.count or 0))
@@ -5100,8 +5151,15 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
         )
 
     except Exception as check_err:
-        logger.warning("[EXIT-INVARIANT-CHECK] Failed to check exit invariant: %s", check_err)
-        # Fail open on error to not block exits due to cache issues
+        logger.critical("[EXIT-INVARIANT-CHECK] Failed to check exit invariant: %s", check_err)
+        # Fail closed: an exception while evaluating the exit invariant means the
+        # position state is unknown, and unknown-position exits must not submit.
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"exit_invariant_violation:check_error:{check_err}",
+            latency_ms=0.0,
+        )
 
     return None
 
@@ -12030,8 +12088,10 @@ async def _route_live(
     # Convert "yes"/"no" + "buy"/"sell" to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
     # CRITICAL FIX (2026-07-24): Do NOT mutate intent.side - preserve original side for immutability
     # Use local variable kalshi_side for Kalshi-formatted side instead
-    kalshi_side = intent.side  # Default to original side if no conversion needed
-    
+    # Prefer the explicit canonical Kalshi-form field when the producer set it;
+    # otherwise derive from the legacy side/action pair below.
+    kalshi_side = _resolve_kalshi_side(intent) or intent.side
+
     if intent.side in ("yes", "no") and intent.action in ("buy", "sell"):
         try:
             kalshi_side = to_kalshi_side(intent.side, intent.action)
@@ -12212,20 +12272,24 @@ async def _route_live(
                     f"side={intent.side} action={intent.action} error={e}"
                 )
     
-    # Validate side is one of the allowed Kalshi sides
+    # Validate side is one of the allowed Kalshi sides.  The check runs on the
+    # NORMALIZED Kalshi-form side (``kalshi_side``), not the raw intent field:
+    # producers may express the same order as ("yes","no") + ("buy","sell") and
+    # are converted above, so validating the raw field would reject valid
+    # canonical orders before the wire builder ever sees them.
     valid_sides = {"BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"}
-    if intent.side not in valid_sides:
+    if (kalshi_side or "").upper() not in valid_sides:
         latency = (_time.monotonic() - t0) * 1000
         logger.critical(
-            "[SEV-0-SIDE-INVARIANT] INVALID ORDER SIDE: ticker=%s side=%s action=%s "
+            "[SEV-0-SIDE-INVARIANT] INVALID ORDER SIDE: ticker=%s side=%s action=%s kalshi_side=%s "
             "Kalshi orders must use one of: %s",
-            intent.ticker, intent.side, intent.action, ", ".join(valid_sides)
+            intent.ticker, intent.side, intent.action, kalshi_side, ", ".join(valid_sides)
         )
-        _release_gate_record(intent, f"invalid_side:{intent.side}")
+        _release_gate_record(intent, f"invalid_side:{kalshi_side or intent.side}")
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"invalid_side:{intent.side}:must_be_one_of_{','.join(valid_sides)}",
+            reason=f"invalid_side:{kalshi_side or intent.side}:must_be_one_of_{','.join(valid_sides)}",
             latency_ms=round(latency, 2),
         )
     
@@ -15249,6 +15313,7 @@ async def _route_live(
                                     status="pending",
                                     # Intent reconstruction for retries
                                     intent_id=intent.intent_id,
+                                    client_order_id=intent.client_order_id or intent.client_tag or intent.intent_id,
                                     ticker=intent.ticker,
                                     count=remaining_count,
                                     exit_reason=getattr(intent, 'exit_reason', 'unknown'),
@@ -17475,7 +17540,14 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     # ── ORDER SCALING: Check if order should be scaled ─────────────────────
     # Apply institutional scaling strategies (TWAP, iceberg, adaptive)
     # Only scale if enabled and order meets criteria (size >= 3, edge >= 2%)
-    if getattr(intent, 'scaling_enabled', False) and intent.count >= 3:
+    # Exit orders are never scaled: scaled children route through _route_live
+    # directly, bypassing canonical validation, the execution firewall, and the
+    # exit-delta invariants — and they share the parent's client_order_id.
+    if (
+        getattr(intent, 'scaling_enabled', False)
+        and intent.count >= 3
+        and not _is_exit_order(intent)
+    ):
         scaling_result = await _execute_scaled_order(intent, mode, t0)
         if scaling_result is not None:
             # Scaling was applied, return the result

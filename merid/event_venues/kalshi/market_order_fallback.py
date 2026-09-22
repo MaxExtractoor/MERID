@@ -279,20 +279,115 @@ class MarketOrderFallbackEngine:
                 cancel_result
             )
             
-            # Place market order
+            # Place market order.  The canonical order-intent contract rejects
+            # price_cents=0, so resolve a marketable limit price: sells hit the
+            # held-side bid, buys lift the bought-side ask.
+            orig = decision.original_order
+            orig_side = getattr(orig, "side", "") or ""
+            orig_action = getattr(orig, "action", "") or ""
+
+            def _executable_price_cents() -> int:
+                try:
+                    from merid.event_venues.kalshi.stop_candidate import (
+                        _get_executable_exit_cents,
+                        _get_market_state,
+                    )
+                    kalshi_state, unified_state = _get_market_state(orig.ticker)
+                    state = unified_state or kalshi_state
+                    if state is None:
+                        return 0
+                    # Resolve the traded outcome (yes/no) from Kalshi-form or
+                    # plain side strings.
+                    side_l = orig_side.lower()
+                    outcome = "no" if "no" in side_l else "yes"
+                    if orig_action.lower() == "sell":
+                        bid = _get_executable_exit_cents(state, outcome)
+                        return int(bid) if bid else 0
+                    # Buy: lift the ask on the traded outcome.  NO ask =
+                    # 100 - YES bid.
+                    if outcome == "yes":
+                        ask = getattr(state, "best_ask_cents", None)
+                        return int(ask) if ask else 0
+                    yes_bid = getattr(state, "best_bid_cents", None)
+                    return int(100 - int(yes_bid)) if yes_bid else 0
+                except Exception:
+                    return 0
+
+            fallback_price = _executable_price_cents()
+            if not (1 <= fallback_price <= 99):
+                fallback_price = int(getattr(orig, "price_cents", 0) or 0)
+            if not (1 <= fallback_price <= 99):
+                logger.warning(
+                    "[MARKET-ORDER-FALLBACK] No executable price for %s; aborting fallback",
+                    orig.ticker,
+                )
+                return {"status": "failed", "error": "no_executable_price"}
+
+            # Stable idempotency: the fallback is one logical order per original
+            # resting order, so its client_order_id is derived deterministically
+            # from the original identity (bounded to the venue's 64-char limit).
+            import hashlib
+            base_id = (
+                getattr(orig, "client_order_id", None)
+                or getattr(orig, "intent_id", None)
+                or getattr(orig, "kalshi_order_id", "")
+            )
+            _fb_tag = hashlib.sha256(str(base_id).encode()).hexdigest()[:8]
+            fallback_coid = f"{str(base_id)[:40]}_fb_{_fb_tag}"
+
             intent = OrderIntent(
-                ticker=decision.original_order.ticker,
-                side=decision.original_order.side,
-                action=decision.original_order.action,
-                price_cents=0,  # Market order
-                count=decision.original_order.remaining_size,
-                order_type="market",
+                ticker=orig.ticker,
+                side=orig_side,
+                action=orig_action,
+                price_cents=fallback_price,
+                count=orig.remaining_size,
+                order_type="limit",
                 time_in_force="ioc",
                 source="market_order_fallback",
-                intent_id=f"fallback_{decision.original_order.intent_id}",
-                agent_id=decision.original_order.intent_id,
+                intent_id=f"fallback_{orig.intent_id}",
+                client_order_id=fallback_coid,
+                agent_id=orig.intent_id,
                 rationale=f"Fallback from limit order: {decision.reason}"
             )
+
+            # Preserve exit semantics: if the original resting order was an
+            # exit (exit markers in its identity, or a position-reducing sell),
+            # the fallback must remain a bounded reduce-only close rather than
+            # becoming an unmarked order that could open or flip exposure.
+            from merid.event_venues.kalshi.exit_order_utils import (
+                is_exit_order_from_intent,
+                is_exit_order_from_source,
+            )
+
+            is_exit = any(
+                is_exit_order_from_source(s)
+                for s in (
+                    getattr(orig, "client_order_id", None),
+                    getattr(orig, "intent_id", None),
+                    getattr(orig, "exit_policy_id", None),
+                )
+            )
+            if not is_exit:
+                try:
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+
+                    pos = get_position_cache().get_position(orig.ticker)
+                    if pos is not None:
+                        is_exit = is_exit_order_from_intent(
+                            intent, pre_position_yes_cc=pos._yes_exposure()
+                        )
+                except Exception:
+                    is_exit = False
+
+            if is_exit:
+                intent.entry_or_exit = "exit"
+                intent.reduce_only = True
+                intent.is_exit_order = True
+                intent.exit_reason = (
+                    getattr(orig, "exit_reason", "") or "market_order_fallback_exit"
+                )
+                intent.exit_policy_id = getattr(orig, "exit_policy_id", "") or None
+                intent.reason = intent.exit_reason
             
             logger.info(
                 "[MARKET-ORDER-FALLBACK] Placing market order: ticker=%s side=%s action=%s count=%d",
