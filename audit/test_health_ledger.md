@@ -475,3 +475,59 @@ Test repairs (tests/test_prediction_audit_regressions.py, 10 -> 0 failures):
 - TestBUGL4 deleted (consensus module deleted; bodies were commented out).
 - TestBUGL7 deleted (source-grep on the replaced web/main.py shutdown;
   main_15m_lean has a sequential per-service shutdown with no stop_all).
+
+## Session continuation — 2026-09-22 (post-cd5905b9)
+
+Production fixes:
+
+- `web/api/real_data_endpoints.py`: `get_live_price_feed` was called at two
+  handlers without a module-scope binding — `/api/v1/blockchain/health`
+  permanently fell into its degraded fallback. Fixed via the file's lazy-import
+  convention.
+- `position_cache.py`: exit-marker detection was shadowed by
+  `_lookup_fill_source()` returning "alpha" — exit fills with no ledger record
+  were misclassified as entries (phantom positions). Marker canonicalization
+  now precedes the namespace lookup; un-awaited `send_alert` coroutine awaited.
+- `cycle_drawdown.py`: a cycle initialized at equity=0 (bankroll unavailable
+  at cold start) treated the first real equity observation as pure profit →
+  spurious RESET_PENDING denying first orders. Now anchors on first positive
+  equity.
+- `agent_grid_15m.py`: three price-selection gates used the stale symmetric
+  10-75c band instead of the canonical side-aware range — valid 88-95c NO
+  entries were dropped. Fixed to `get_canonical_price_range` with safe
+  fallback.
+- `core/__init__.py`/`system_orchestrator.py`: dangling imports of deleted
+  `consensus_graph`/`consensus_engine` removed/guarded.
+- `operator_endpoints.py`: missing `_MERID_ENV` module-level definition
+  (NameError on token path).
+- Test-state isolation: `MERID_RISK_AUDIT_LOG`, `MERID_HEALTH_DIAGNOSTIC_PATH`
+  pinned into test tmp dirs; `health_snapshot_api`/`client_public`/`loop_15m`
+  diagnostic writers honor the override; `test_shadow_report` passes
+  `--output` into tmp (was writing data/shadow/reports/); per-test event-loop
+  fixture fixes `asyncio.run` loop poisoning; position-cache singleton
+  `_applied_fill_ids` reset per test.
+- Deleted obsolete test files targeting deliberately removed architecture:
+  `test_executor_wiring.py` (execute_trade API gone), 
+  `test_kalshi_crypto_multi_asset.py` (multi-asset machinery gone),
+  `TestP2_3_BacktestSemaphore` (debate_position_sizing gone).
+- Archive env-guard tests strict-xfailed (redundant with passing source-scan
+  guard; env-based import hook would break legitimate archive imports under
+  the pinned paper test env).
+
+New evidence (tests/kalshi/test_discretionary_exit_evidence.py, 11 tests):
+
+- Phase 4 deterministic replay: 20-eval corpus replays byte-identical across
+  fresh evaluators AND across independent subprocesses; covers SELL_SIGNALLED,
+  both HOLD variants, near-expiry deferral, BLOCK_UNKNOWN_REASON,
+  BYPASS_OPERATIONAL/EMERGENCY; gate-off yields would_submit=False.
+- Phase 5 shadow recomputation: independent reimplementation (restated
+  constants + documented 0.07*P*(1-P) fee, no shared code) agrees with the
+  production evaluator on every decision, streak count, and economic field.
+- Phase 6 lifecycle parity: exit-attempt durable FSM replays identical
+  trajectories across independent store+monitor pairs for canceled, filled,
+  still-resting (nonterminal, reservation retained), and flat-position
+  terminalization.
+
+Discretionary exits remain observe-only: ev_exit_gate_enabled() defaults
+False, MERID_DISCRETIONARY_EXIT_MODE defaults observe_only, loop_15m vetoes
+with discretionary_exit_observe_only. Nothing enables the gate.
