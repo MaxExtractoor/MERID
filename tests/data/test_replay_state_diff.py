@@ -6,6 +6,7 @@ tape and the same logical events, the checksum sequence is byte-for-byte stable.
 
 import json
 import os
+import tempfile
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from merid.utils.state_checksum import state_checksum
 _GOLDEN_DIR = Path(__file__).parent / "golden"
 _TAPE_DIR = _GOLDEN_DIR / "replay_tape"
 _GOLDEN_FILE = _GOLDEN_DIR / "replay_state_diff_golden.jsonl"
-_DIFF_FILE = Path("data/replay_state_diff/state_diff_replay.jsonl")
+_DIFF_FILE = Path(tempfile.mkdtemp(prefix="merid_state_diff_")) / "state_diff_replay.jsonl"
 
 
 def _load_jsonl(path: Path) -> list:

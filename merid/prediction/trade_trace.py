@@ -12,6 +12,7 @@ This enables empirical calibration of latency buffers from actual execution hist
 from __future__ import annotations
 
 import json
+import os
 import time
 import threading
 from dataclasses import dataclass, asdict
@@ -237,8 +238,8 @@ class TradeTraceLogger:
             log_path: Path to JSONL log file. If None, uses default.
         """
         if log_path is None:
-            # Default: data/kalshi_trade_trace.jsonl
-            log_path = "data/kalshi_trade_trace.jsonl"
+            # Default: data/kalshi_trade_trace.jsonl (env-overridable for tests)
+            log_path = os.getenv("MERID_TRADE_TRACE_PATH") or "data/kalshi_trade_trace.jsonl"
         
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

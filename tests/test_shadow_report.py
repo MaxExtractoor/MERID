@@ -184,7 +184,13 @@ def _write_jsonl(path: Path, records: list) -> None:
 
 
 def _run_report(input_path: Path, extra_args: list | None = None) -> tuple:
-    cmd = [str(PYTHON), str(SHADOW_REPORT), "--input", str(input_path), "--format", "both"]
+    out_dir = input_path.parent / "reports"
+    cmd = [
+        str(PYTHON), str(SHADOW_REPORT),
+        "--input", str(input_path),
+        "--format", "both",
+        "--output", str(out_dir),
+    ]
     if extra_args:
         cmd.extend(extra_args)
     result = subprocess.run(cmd, capture_output=True, text=True)

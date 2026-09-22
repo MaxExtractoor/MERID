@@ -22,7 +22,7 @@ from unittest.mock import patch, MagicMock, PropertyMock
 def _clear_persisted_kill_switch():
     """Clear any persisted kill switch to ensure clean test state."""
     try:
-        kill_file = os.path.join("data", "risk_kill_switch.json")
+        kill_file = os.environ.get("MERID_RISK_KS_FILE", os.path.join("data", "risk_kill_switch.json"))
         if os.path.exists(kill_file):
             os.remove(kill_file)
     except Exception:
