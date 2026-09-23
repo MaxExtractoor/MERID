@@ -1050,6 +1050,35 @@ def _settlement_max_missing_samples() -> int:
         return 5
 
 
+def _resolve_market_expiry_ts(market: Any, market_state: Any = None) -> Any:
+    """Resolve the market's expiry timestamp from whatever carrier is present.
+
+    The live signal path wraps markets in ``MinimalMarket`` whose ``.market``
+    self-reference exposes ``close_time`` (epoch seconds); ``CatalogMarket``
+    carries ``expires_at``; ``EventMarket`` carries ``end_date``; and the
+    market-state object may expose ``expected_expiration_time`` (ISO string or
+    epoch).  Returns a timezone-aware ``datetime`` or ``None``.
+    """
+    expiry_ts = getattr(market, "expires_at", None)
+    _inner = getattr(market, "market", None)
+    if expiry_ts is None and _inner is not None:
+        expiry_ts = getattr(_inner, "end_date", None)
+    if expiry_ts is None:
+        expiry_ts = getattr(market, "close_time", None) or getattr(
+            _inner, "close_time", None
+        )
+    if expiry_ts is None and market_state is not None:
+        expiry_ts = getattr(market_state, "expected_expiration_time", None)
+    if isinstance(expiry_ts, str):
+        try:
+            expiry_ts = dt.fromisoformat(expiry_ts.replace("Z", "+00:00"))
+        except Exception:
+            expiry_ts = None
+    if isinstance(expiry_ts, (int, float)) and expiry_ts > 0:
+        expiry_ts = dt.fromtimestamp(expiry_ts, tz=timezone.utc)
+    return expiry_ts
+
+
 def _effective_min_entry_tte_seconds(signal_mode: str) -> float:
     """Upstream collection floor for candidate evaluation.
 
@@ -7948,9 +7977,7 @@ class LeanAgent15m:
             try:
                 from merid.data.cf_rti_adapter import get_rti_history
 
-                expiry_ts = getattr(market, "expires_at", None)
-                if expiry_ts is None and hasattr(market, "market"):
-                    expiry_ts = getattr(market.market, "end_date", None)
+                expiry_ts = _resolve_market_expiry_ts(market, market_state)
                 now_ts = dt.now(timezone.utc)
                 rti_history = []
                 if get_rti_history is not None:

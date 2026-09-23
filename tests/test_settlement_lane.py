@@ -302,6 +302,56 @@ def test_anchor_released_proportional_to_unrealized_fraction(monkeypatch):
     assert float(d.indicators["market_anchor_weight"]) == pytest.approx(expected)
 
 
+# ---------------------------------------------------------------------------
+# Expiry resolution across market object shapes (production regression: the
+# live signal path passes MinimalMarket, whose only expiry carrier is the
+# epoch-seconds ``close_time`` on its self-referencing ``.market``)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_market_expiry_minimal_market():
+    import merid.prediction.agent_grid_15m as ag
+
+    class _MinimalMarket:
+        def __init__(self, close_time):
+            self.close_time = close_time
+
+        @property
+        def market(self):
+            return self
+
+    expiry = ag._resolve_market_expiry_ts(_MinimalMarket(1790210700.0))
+    assert expiry is not None
+    assert expiry.year == 2026
+    assert expiry.microsecond == 0
+
+
+def test_resolve_market_expiry_catalog_market():
+    import merid.prediction.agent_grid_15m as ag
+
+    class _CatalogLike:
+        expires_at = datetime(2026, 9, 23, 21, 45, 0, tzinfo=timezone.utc)
+
+    expiry = ag._resolve_market_expiry_ts(_CatalogLike())
+    assert expiry == datetime(2026, 9, 23, 21, 45, 0, tzinfo=timezone.utc)
+
+
+def test_resolve_market_expiry_market_state_iso_string():
+    import merid.prediction.agent_grid_15m as ag
+
+    class _MS:
+        expected_expiration_time = "2026-09-23T21:45:00Z"
+
+    expiry = ag._resolve_market_expiry_ts(object(), _MS())
+    assert expiry == datetime(2026, 9, 23, 21, 45, 0, tzinfo=timezone.utc)
+
+
+def test_resolve_market_expiry_none_when_absent():
+    import merid.prediction.agent_grid_15m as ag
+
+    assert ag._resolve_market_expiry_ts(object()) is None
+
+
 def test_anchor_not_released_pre_window(monkeypatch):
     monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MIN_W", 0.5)
     monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MAX_W", 0.9)
