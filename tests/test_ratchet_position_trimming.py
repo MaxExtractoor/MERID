@@ -46,6 +46,7 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.ratchet_mandatory_exit_at_99c = True
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_activation_threshold_cents = 85
             mock_adapter.profile.ratchet_floor_offset_cents = 5
             mock_adapter.profile.ratchet_force_exit_on_floor_breach = True
@@ -97,6 +98,7 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.ratchet_mandatory_exit_at_99c = True
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_activation_threshold_cents = 85
             mock_adapter.profile.ratchet_floor_offset_cents = 5
             mock_adapter.profile.ratchet_force_exit_on_floor_breach = True
@@ -147,6 +149,7 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_threshold_cents = 80
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_activation_threshold_cents = 85
             mock_adapter.profile.ratchet_floor_offset_cents = 5
             mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
@@ -189,6 +192,7 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_threshold_cents = 80
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_activation_threshold_cents = 85
             mock_adapter.profile.ratchet_floor_offset_cents = 5
             mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
@@ -232,6 +236,7 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_trim_threshold_cents = 80
             mock_adapter.profile.ratchet_trim_to_contracts = 1
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_activation_threshold_cents = 85
             mock_adapter.profile.ratchet_floor_offset_cents = 5
             mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
@@ -272,6 +277,7 @@ class TestRatchetPositionTrimming:
             mock_adapter.profile.ratchet_profit_floor_enabled = True
             mock_adapter.profile.ratchet_trim_position_enabled = False  # Disabled
             mock_adapter.profile.trailing_stop_min_profit_cents = 12  # Add missing attribute
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.staged_time_exit = {"enabled": False, "stages": []}
             
             # Simulate price crossing 80c threshold
