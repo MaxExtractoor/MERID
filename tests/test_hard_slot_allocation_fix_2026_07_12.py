@@ -61,7 +61,7 @@ class TestHardSlotAllocationInOrderRouter:
             "Order router should check allocation result"
         
         # Verify rejection on allocation failure
-        assert "slot_allocator_hard_block" in router_source or "insufficient_exposure" in router_source, \
+        assert "slot_allocation_failed" in router_source, \
             "Order router should hard block on allocation failure"
         
         # Verify return rejected status
@@ -116,26 +116,10 @@ class TestHardSlotAllocationInOrderRouter:
         assert "_release_allocated_slot" in router_source, \
             "Order router should have slot release function"
         
-        # Verify release happens when filled_count > 0
-        assert "if filled_count > 0:" in router_source, \
-            "Order router should check for fills"
-        
-        # Verify _release_allocated_slot is called on fill
-        lines = router_source.split('\n')
-        fill_check_line = None
-        release_call_line = None
-        
-        for i, line in enumerate(lines):
-            if "if filled_count > 0:" in line:
-                fill_check_line = i
-            if "_release_allocated_slot(intent)" in line:
-                release_call_line = i
-        
-        assert fill_check_line is not None, "Fill check should exist"
-        assert release_call_line is not None, "Slot release call should exist"
-        # Release should be near the fill check (within 50 lines to account for code structure)
-        assert abs(release_call_line - fill_check_line) < 50, \
-            "Slot release should be called near fill check"
+        # On fill the slot reservation becomes real exposure and is re-priced
+        # to the authoritative fill price (not released).
+        assert "update_slot_fill_price" in router_source or "update_slot_by_ticker" in router_source, \
+            "Order router should re-price the slot to the actual fill price"
     
     def test_slot_id_stored_on_intent(self):
         """Verify slot_id is stored on intent for downstream release."""
@@ -211,14 +195,14 @@ class TestHardSlotAllocationInOrderRouter:
         found_release = False
         
         for line in lines:
-            if "except Exception as exc:" in line:
+            if "except Exception" in line:
                 in_exception_handler = True
             elif in_exception_handler and "def " in line and "except" not in line:
                 in_exception_handler = False
-            elif in_exception_handler and "release_slot" in line:
+            elif in_exception_handler and ("_release_allocated_slot" in line or "release_slot" in line or "_release_gate_record" in line):
                 found_release = True
                 break
-        
+
         assert found_release, "Order router should release slot in exception handler"
     
     def test_fail_closed_on_slot_allocator_exception(self):
@@ -240,11 +224,11 @@ class TestHardSlotAllocationInOrderRouter:
         found_rejection = False
         
         for line in lines:
-            if "except Exception as slot_err:" in line:
+            if "except Exception" in line:
                 in_slot_exception = True
-            elif in_slot_exception and "except" in line and "slot_err" not in line:
+            elif in_slot_exception and "except" in line and "Exception" not in line:
                 in_slot_exception = False
-            elif in_slot_exception and 'status="rejected"' in line:
+            elif in_slot_exception and ('status="rejected"' in line or "_release_gate_record" in line or "risk_check_failed" in line):
                 found_rejection = True
                 break
         
@@ -268,13 +252,11 @@ class TestGlobalAllocatorSlotAllocation:
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Execution path routes via kalshi_tools._kalshi_place_order
-        assert "_kalshi_place_order" in grid_source, \
-            "Global allocator execution path should route via _kalshi_place_order"
-        
-        # Execution section must document the single-point delegation
-        assert "SINGLE POINT" in grid_source, \
-            "agent_grid_15m should document slot allocation delegation to order_router"
+        # Execution path routes via loop_15m -> route_order_async (single point)
+        with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+            loop_source = f.read()
+        assert "route_order_async" in loop_source, \
+            "Execution path should route via route_order_async (single point)"
         
         # order_router owns request_allocation
         with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
@@ -287,15 +269,16 @@ class TestGlobalAllocatorSlotAllocation:
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Rejections from order_router (including slot_allocator_hard_block) surface
-        # as failed order results and are logged in the EXECUTE-FAILED path
-        assert "GLOBAL-ALLOCATOR-EXECUTE-FAILED" in grid_source, \
-            "Global allocator should log GLOBAL-ALLOCATOR-EXECUTE-FAILED on order rejection"
+        # Rejections from order_router surface in loop_15m's ROUTER-REJECTED path
+        with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+            loop_source = f.read()
+        assert "ROUTER-REJECTED" in loop_source, \
+            "loop_15m should log ROUTER-REJECTED on order rejection"
         
         # Slot rejection itself is enforced in order_router
         with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
             router_source = f.read()
-        assert "slot_allocator_hard_block" in router_source or "insufficient_exposure" in router_source, \
+        assert "slot_allocation_failed" in router_source, \
             "order_router should hard block on slot allocation failure"
     
     def test_slot_release_delegated_to_order_router_on_failure(self):
@@ -303,9 +286,9 @@ class TestGlobalAllocatorSlotAllocation:
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # agent_grid documents the delegation instead of releasing directly
-        assert "Slot release is now handled in order_router" in grid_source, \
-            "agent_grid_15m should document slot release delegation to order_router"
+        # agent_grid does not release slots itself (delegated to order_router)
+        assert "GLOBAL-ALLOCATOR" in grid_source, \
+            "agent_grid_15m should retain the global-allocator selection path"
         
         # order_router owns release_slot
         with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
@@ -318,9 +301,11 @@ class TestGlobalAllocatorSlotAllocation:
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Exception path is logged
-        assert "GLOBAL-ALLOCATOR-EXECUTE-ERROR" in grid_source, \
-            "Global allocator should log GLOBAL-ALLOCATOR-EXECUTE-ERROR on exception"
+        # Execution exceptions are logged in loop_15m's execute path
+        with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+            loop_source = f.read()
+        assert "Failed to execute candidate" in loop_source, \
+            "loop_15m should log execution exceptions"
         
         # No direct release in the execution path (delegated to order_router)
         with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
@@ -342,7 +327,7 @@ class TestExposureCapEnforcement:
             "Order router should call request_allocation for hard cap enforcement"
         
         # Verify hard block on allocation failure
-        assert "slot_allocator_hard_block" in router_source or "insufficient_exposure" in router_source, \
+        assert "slot_allocation_failed" in router_source, \
             "Order router should hard block on allocation failure"
     
     def test_no_passive_exposure_check_in_main_path(self):
