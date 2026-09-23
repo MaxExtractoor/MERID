@@ -508,6 +508,24 @@ class PositionMonitor:
             position.confidence,
         )
 
+        # 2026-09-23: entry markout tracking — post-fill drift at +10s/+30s/+60s.
+        try:
+            from merid.observability.entry_markout import get_entry_markout_tracker
+            from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
+            _side = getattr(position, "outcome_side", None) or getattr(
+                getattr(position, "side", None), "value", position.side
+            )
+            get_entry_markout_tracker().record_entry_fill(
+                ticker=position.market_id,
+                position_id=position.position_id,
+                asset=extract_asset_from_ticker(position.market_id) or "",
+                side=str(_side or ""),
+                fill_price_cents=float(position.avg_entry_price_cents or 0),
+                count=float(position.size or 0),
+            )
+        except Exception as _mk_err:
+            logger.debug("[ENTRY-MARKOUT] record failed for %s: %s", position.market_id, _mk_err)
+
         # HIGH-SEVERITY ALERT (2026-08-13): UNKNOWN or non-executable FALLBACK
         # positions have no trusted price-based exit path.  The monitor will still
         # manage settlement/time exits, but a live position without a working TP/SL
@@ -621,6 +639,24 @@ class PositionMonitor:
                     f"{position.stop_loss_price_cents}c" if position.stop_loss_price_cents is not None else "none",
                     caller,
                 )
+                # 2026-09-23: entry markout tracking — measure post-fill drift
+                # at +10s/+30s/+60s to quantify adverse selection per fill.
+                try:
+                    from merid.observability.entry_markout import get_entry_markout_tracker
+                    from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
+                    _side = getattr(position, "outcome_side", None) or getattr(
+                        getattr(position, "side", None), "value", position.side
+                    )
+                    get_entry_markout_tracker().record_entry_fill(
+                        ticker=position.market_id,
+                        position_id=position.position_id,
+                        asset=extract_asset_from_ticker(position.market_id) or "",
+                        side=str(_side or ""),
+                        fill_price_cents=float(position.avg_entry_price_cents or 0),
+                        count=float(position.size or 0),
+                    )
+                except Exception as _mk_err:
+                    logger.debug("[ENTRY-MARKOUT] record failed for %s: %s", position.market_id, _mk_err)
                 return
 
             old_rank = self._trust_rank(existing)
@@ -5324,6 +5360,15 @@ class PositionMonitor:
                         actual_interval,
                         interval_drift_s
                     )
+
+                # 2026-09-23: emit due entry-fill markouts even when no
+                # positions are open (fills that already exited still owe
+                # their +10s/+30s/+60s measurements).
+                try:
+                    from merid.observability.entry_markout import get_entry_markout_tracker
+                    get_entry_markout_tracker().poll()
+                except Exception as _mk_err:
+                    logger.debug("[ENTRY-MARKOUT] poll failed: %s", _mk_err)
 
                 if not self._open_positions:
                     await asyncio.sleep(self._poll_interval)

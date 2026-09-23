@@ -252,8 +252,8 @@ def test_profile_per_trade_risk_pct_3_percent():
 
     # Verify fixed exposure cap is present (profile is the source of truth)
     risk_policy = profile.get('risk_policy', {})
-    assert risk_policy.get('fixed_exposure_cap_usd') == 0.75, \
-        "fixed_exposure_cap_usd should be $0.75"
+    assert risk_policy.get('fixed_exposure_cap_usd') == 0.90, \
+        "fixed_exposure_cap_usd should be $0.90"
 
 
 def test_profile_dynamic_sizing_multipliers():

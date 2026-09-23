@@ -5169,6 +5169,64 @@ async def _run_loop(self) -> None:
                                 if prior_timestamp > 0:
                                     time_since_prior = time.time() - prior_timestamp
                                     if time_since_prior >= pending_order_timeout:
+                                        # 2026-09-23: a stale candidate is NOT authorization to re-enter
+                                        # while its order may still be resting on the book.  Resting
+                                        # entry orders are adversely selected — they fill only when the
+                                        # market trades through the limit — so any still-live order for
+                                        # this ticker must be cancelled before a new entry is allowed.
+                                        stale_orders_cancelled = True
+                                        try:
+                                            from merid.event_venues.kalshi.resting_order_monitor import (
+                                                get_resting_order_monitor,
+                                                TERMINAL_STATUSES as _ROM_TERMINAL,
+                                            )
+                                            _rom = get_resting_order_monitor()
+                                            live_prior_orders = [
+                                                rec for rec in _rom.get_orders_by_ticker(window_id)
+                                                if rec.status not in _ROM_TERMINAL
+                                                and getattr(rec, "remaining_size", 0) and rec.remaining_size > 0
+                                            ]
+                                            if live_prior_orders:
+                                                from merid.event_venues.kalshi.order_manager import get_order_manager
+                                                _om = get_order_manager()
+                                                for _rec in live_prior_orders:
+                                                    try:
+                                                        _om.track_order(_rec.kalshi_order_id)
+                                                        _ok = await _om.cancel_order(_rec.kalshi_order_id)
+                                                    except Exception as _cancel_err:
+                                                        _ok = False
+                                                        logger.warning(
+                                                            "[15m-LOOP] Stale-candidate cancel raised for order=%s ticker=%s: %s",
+                                                            _rec.kalshi_order_id, window_id, _cancel_err,
+                                                        )
+                                                    if _ok:
+                                                        logger.info(
+                                                            "[15m-LOOP] Stale-candidate: cancelled still-resting prior order %s ticker=%s",
+                                                            _rec.kalshi_order_id, window_id,
+                                                        )
+                                                    else:
+                                                        stale_orders_cancelled = False
+                                        except Exception as _stale_check_err:
+                                            # If we cannot confirm resting-order state, fail closed on
+                                            # the re-entry: a hidden resting order is worse than a
+                                            # missed re-entry.
+                                            stale_orders_cancelled = False
+                                            logger.warning(
+                                                "[15m-LOOP] Stale-candidate resting-order check failed for %s: %s - BLOCKING re-entry",
+                                                window_id, _stale_check_err,
+                                            )
+
+                                        if not stale_orders_cancelled:
+                                            self._rejection_counters["stale_prior_cancel_failed"] += 1
+                                            self._log_candidate_lifecycle_event(
+                                                candidate_id=candidate_id,
+                                                from_state="RECEIVED",
+                                                to_state="BLOCKED_DUPLICATE",
+                                                reason="Stale prior candidate still has a live resting order; cancel failed",
+                                                context={"asset": asset, "ticker": ticker, "prior_age_s": time_since_prior},
+                                            )
+                                            continue
+
                                         logger.info(
                                             "[15m-LOOP] Stale prior candidate cleared: asset=%s ticker=%s age=%.1fs - ALLOWING re-entry",
                                             asset, ticker, time_since_prior
@@ -9053,6 +9111,24 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             resolved_execution_mode = candidate.get("execution_mode") or "staged_ioc"
             resolved_liquidity_role = "taker"
         resolved_post_only = bool(candidate.get("post_only", False)) and aggressiveness == 0.0
+
+        # 2026-09-23: maker entries disabled by default — resting entry orders
+        # are adversely selected (they fill only when the market trades through
+        # the limit).  If an upstream path still produced a resting posture,
+        # coerce to a marketable IOC here so the intent record is consistent
+        # with what the router will send.
+        if resolved_liquidity_role == "maker" and os.environ.get(
+            "MERID_ENTRY_MAKER_ENABLED", ""
+        ).strip().lower() not in ("1", "true", "yes"):
+            logger.warning(
+                "[15M-LOOP] ENTRY-MAKER-DISABLED: coercing maker intent to taker/IOC for %s",
+                ticker,
+            )
+            resolved_time_in_force = "ioc"
+            resolved_execution_mode = "taker"
+            resolved_liquidity_role = "taker"
+            resolved_post_only = False
+            aggressiveness = 1.0
 
         intent = OrderIntent(
             ticker=ticker,

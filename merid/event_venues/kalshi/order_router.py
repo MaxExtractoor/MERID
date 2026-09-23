@@ -1236,6 +1236,26 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
     execution_mode = _resolve_execution_mode(intent)
     intent.execution_mode = execution_mode
 
+    # 2026-09-23: Maker entries disabled by default (MERID_ENTRY_MAKER_ENABLED).
+    # Resting entry orders are adversely selected — they fill only when the
+    # market trades through the limit, i.e. when the signal is already stale.
+    # Any entry intent that resolved to a resting posture is coerced to a
+    # marketable IOC here, so no upstream path can put a resting entry on the
+    # book.  Exits are untouched (they have their own reduce-only semantics).
+    if (
+        execution_mode in ("maker", "passive_quote")
+        and not _is_exit_order(intent)
+        and os.environ.get("MERID_ENTRY_MAKER_ENABLED", "").strip().lower()
+        not in ("1", "true", "yes")
+    ):
+        logger.warning(
+            "[ENTRY-MAKER-DISABLED] coercing %s entry to taker/IOC: ticker=%s side=%s "
+            "(resting entry orders are adversely selected; enable MERID_ENTRY_MAKER_ENABLED=1 to restore)",
+            execution_mode, intent.ticker, intent.side,
+        )
+        execution_mode = "taker"
+        intent.execution_mode = "taker"
+
     if execution_mode == "maker":
         post_only, aggressiveness = True, 0.0
         intent.time_in_force = "gtc"

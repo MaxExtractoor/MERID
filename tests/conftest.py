@@ -49,6 +49,17 @@ _os.environ["MERID_VELOCITY_MAX_AGE_MS"] = "60000"
 # exercise credential handling set their own values via monkeypatch/fixtures.
 _os.environ["KALSHI_API_KEY_ID"] = ""
 _os.environ["KALSHI_PRIVATE_KEY_PATH"] = ""
+# 2026-09-23: Pin the entry-execution hardening knobs so repo `.env` production
+# values do not leak into unit tests (merid/settings.py loads .env with
+# override=False, and trade_decision reads these at import).  Each feature is
+# exercised explicitly in tests/test_entry_execution_hardening.py.
+_os.environ["MERID_ANCHOR_VOL_TO_MARKET"] = "0"
+_os.environ["MERID_USE_REALIZED_VOL"] = "0"
+_os.environ["MERID_MARKET_ANCHOR_MIN_W"] = "0"
+_os.environ["MERID_MARKET_ANCHOR_MAX_W"] = "0"
+_os.environ["MERID_ENTRY_MIN_SECONDS_TO_EXPIRY"] = "0"
+_os.environ["MERID_FLB_LONGSHOT_SLOPE"] = "0"
+_os.environ["MERID_ENTRY_MAKER_ENABLED"] = "0"
 
 # ── Durable-state isolation (2026-09-22 audit) ─────────────────────────────
 # Tests must never read or write the production-like durable state under the

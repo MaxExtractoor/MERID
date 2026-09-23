@@ -59,6 +59,12 @@ def env_for_shadow(monkeypatch):
         "merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync",
         lambda *a, **k: 100.0,
     )
+    # The shadow harness exercises the paper ledger lifecycle, not the live
+    # runtime state machine (added 2026-09-08); authorize entries for the test.
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router.can_submit_live_entry",
+        lambda: True,
+    )
 
 
 @pytest.fixture
