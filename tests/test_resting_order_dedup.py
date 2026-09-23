@@ -30,6 +30,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             target_count=1,
+            target_qty_cc=100,
             price_cents=97,
             status=OrderStatus.LIVE,
         )
@@ -41,6 +42,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             price_cents=97,
+            target_qty_cc=100,
             exclude_coid="merid-different456",
         )
         
@@ -61,6 +63,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             target_count=1,
+            target_qty_cc=100,
             price_cents=97,
             status=OrderStatus.LIVE,
         )
@@ -72,6 +75,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             price_cents=97,
+            target_qty_cc=100,
             exclude_coid="merid-abc123",  # Same coid
         )
         
@@ -90,6 +94,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             target_count=1,
+            target_qty_cc=100,
             price_cents=97,
             status=OrderStatus.LIVE,
         )
@@ -101,6 +106,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             price_cents=98,  # Different price
+            target_qty_cc=100,
             exclude_coid="merid-different456",
         )
         
@@ -119,6 +125,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             target_count=1,
+            target_qty_cc=100,
             price_cents=97,
             status=OrderStatus.LIVE,
         )
@@ -130,6 +137,7 @@ class TestRestingOrderDeduplication:
             side="no",  # Different side
             action="buy",
             price_cents=97,
+            target_qty_cc=100,
             exclude_coid="merid-different456",
         )
         
@@ -148,6 +156,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             target_count=1,
+            target_qty_cc=100,
             price_cents=97,
             status=OrderStatus.FILLED,  # Terminal state
         )
@@ -159,6 +168,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             price_cents=97,
+            target_qty_cc=100,
             exclude_coid="merid-different456",
         )
         
@@ -177,6 +187,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             target_count=1,
+            target_qty_cc=100,
             price_cents=97,
             status=OrderStatus.LIVE,
         )
@@ -190,6 +201,7 @@ class TestRestingOrderDeduplication:
             side="yes",
             action="buy",
             target_count=1,
+            target_qty_cc=100,
             price_cents=97,
             decision_ts=9999999999.0,  # Different time bucket
         )

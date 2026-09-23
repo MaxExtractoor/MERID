@@ -35,12 +35,13 @@ class TestFillsLedgerValidation:
             count_fp=0,  # Invalid
             side="yes",
             action="buy",
-            raw_payload={}
+            raw_payload={},
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
+        ledger.on_fill(fill)
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -57,12 +58,13 @@ class TestFillsLedgerValidation:
             count_fp=-1,  # Invalid
             side="yes",
             action="buy",
-            raw_payload={}
+            raw_payload={},
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
+        ledger.on_fill(fill)
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -78,12 +80,13 @@ class TestFillsLedgerValidation:
             count_fp=10,
             side="yes",
             action="buy",
-            raw_payload={}
+            raw_payload={},
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
+        ledger.on_fill(fill)
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -99,12 +102,13 @@ class TestFillsLedgerValidation:
             count_fp=10,
             side="invalid",  # Invalid
             action="buy",
-            raw_payload={}
+            raw_payload={},
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Should reject without recording
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
+        ledger.on_fill(fill)
         
         # Should not be recorded
         assert len(ledger._processed_fill_ids) == initial_count
@@ -120,12 +124,13 @@ class TestFillsLedgerValidation:
             count_fp=10,
             side="yes",
             action="buy",
-            raw_payload={}
+            raw_payload={},
+            canonicalization_state="TRUSTED_LIVE_V1"
         )
         
         # Should accept and record
         initial_count = len(ledger._processed_fill_ids)
-        ledger.on_fill(fill, canonicalization_state="TRUSTED_LIVE_V1")
+        ledger.on_fill(fill)
         
         # Should be recorded
         assert len(ledger._processed_fill_ids) == initial_count + 1
