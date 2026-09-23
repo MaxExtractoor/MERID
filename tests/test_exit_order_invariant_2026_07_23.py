@@ -47,7 +47,7 @@ class TestMultiAssetExitCoverage:
             # Create a position for this asset
             position = Position(
                 position_id=f"test-{asset}-position",
-                market_id=f"KX{asset}15M-26JUL200000-00",
+                market_id=f"KX{asset}15M-27DEC310000-00",
                 series_ticker=f"KX{asset}15M",
                 side=PositionSide.YES,
                 size=1,
@@ -74,7 +74,7 @@ class TestMultiAssetExitCoverage:
         for asset in ["BTC", "ETH"]:
             position = Position(
                 position_id=f"test-{asset}-position",
-                market_id=f"KX{asset}15M-26JUL200000-00",
+                market_id=f"KX{asset}15M-27DEC310000-00",
                 series_ticker=f"KX{asset}15M",
                 side=PositionSide.YES,
                 size=1,
@@ -107,7 +107,7 @@ class TestMultiTriggerScenarios:
         """Test that exit_triggered flag prevents duplicate exit callbacks."""
         position = Position(
             position_id="test-position",
-            market_id="KXBTC15M-26JUL200000-00",
+            market_id="KXBTC15M-27DEC310000-00",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=1,
@@ -136,7 +136,7 @@ class TestMultiTriggerScenarios:
         """Test that multi-trigger logging distinguishes between states."""
         position = Position(
             position_id="test-position",
-            market_id="KXBTC15M-26JUL200000-00",
+            market_id="KXBTC15M-27DEC310000-00",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=1,
@@ -177,7 +177,7 @@ class TestRestartRecoveryScenarios:
         # Create a position without exit order (simulating restart state)
         position = Position(
             position_id="test-position",
-            market_id="KXBTC15M-26JUL200000-00",
+            market_id="KXBTC15M-27DEC310000-00",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=1,
@@ -202,7 +202,7 @@ class TestRestartRecoveryScenarios:
         for asset in ["BTC", "ETH", "SOL"]:
             position = Position(
                 position_id=f"test-{asset}-position",
-                market_id=f"KX{asset}15M-26JUL200000-00",
+                market_id=f"KX{asset}15M-27DEC310000-00",
                 series_ticker=f"KX{asset}15M",
                 side=PositionSide.YES,
                 size=1,
@@ -238,7 +238,7 @@ class TestPartialExitScenarios:
         # Create a position with 2 contracts
         position = Position(
             position_id="test-position",
-            market_id="KXBTC15M-26JUL200000-00",
+            market_id="KXBTC15M-27DEC310000-00",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=2,
@@ -280,7 +280,7 @@ class TestDuplicateExitOrderPrevention:
             kalshi_order_id="btc-order",
             intent_id="btc-intent",
             client_order_id="btc-client",
-            ticker="KXBTC15M-26JUL200000-00",
+            ticker="KXBTC15M-27DEC310000-00",
             side="yes",
             action="sell",
             original_size=1,
@@ -294,7 +294,7 @@ class TestDuplicateExitOrderPrevention:
             kalshi_order_id="eth-order",
             intent_id="eth-intent",
             client_order_id="eth-client",
-            ticker="KXETH15M-26JUL200000-00",
+            ticker="KXETH15M-27DEC310000-00",
             side="yes",
             action="sell",
             original_size=1,
@@ -308,7 +308,7 @@ class TestDuplicateExitOrderPrevention:
         resting_order_monitor.register_order(eth_order)
         
         # Query for BTC orders
-        btc_orders = resting_order_monitor.get_orders_by_ticker("KXBTC15M-26JUL200000-00")
+        btc_orders = resting_order_monitor.get_orders_by_ticker("KXBTC15M-27DEC310000-00")
         
         # Should return only BTC order
         assert len(btc_orders) == 1
@@ -318,7 +318,7 @@ class TestDuplicateExitOrderPrevention:
         """Test that duplicate exit orders are detected."""
         position = Position(
             position_id="test-position",
-            market_id="KXBTC15M-26JUL200000-00",
+            market_id="KXBTC15M-27DEC310000-00",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=1,
