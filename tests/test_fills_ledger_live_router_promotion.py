@@ -14,7 +14,11 @@ import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger, KalshiFill
+from merid.event_venues.kalshi.fills_ledger import (
+    KalshiFillsLedger,
+    KalshiFill,
+    CANONICALIZATION_VERSION,
+)
 
 
 @pytest.fixture
@@ -204,7 +208,7 @@ class TestCanonicalBackfill:
         assert fixed.canonical_yes_delta_cc == 4
         # Signed cash proceeds for a 0.04 BUY_YES at 98.5c with 0.01c fee.
         assert fixed.proceeds_dollars == pytest.approx(Decimal("-0.0395"))
-        assert fixed.canonicalization_version == 2
+        assert fixed.canonicalization_version == CANONICALIZATION_VERSION
 
     @pytest.mark.asyncio
     async def test_backfill_skips_up_to_date_rows(self, ledger):
@@ -224,7 +228,7 @@ class TestCanonicalBackfill:
             canonical_leg_price_cents=50,
             canonical_yes_delta_cc=10,
             canonicalization_state="TRUSTED_LIVE_V1",
-            canonicalization_version=2,
+            canonicalization_version=CANONICALIZATION_VERSION,
             ledger_schema_version=3,
             raw_payload={"fill_id": "up_to_date"},
             ingestion_source="http_poller",

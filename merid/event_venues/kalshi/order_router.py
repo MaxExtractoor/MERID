@@ -10375,22 +10375,55 @@ async def _apply_order_result_to_canonical_state(
             yes_price_dollars = Decimal("1") - fill_price_dollars
 
         # Signed cash flow for this fill, net of the exact fee.  Kalshi's
-        # YES-normalized book decides the cash the exchange moves:
-        #   buy intents pay the intent-side price;
-        #   sell-YES intents credit the YES price (direct ask-side sale);
-        #   sell-NO intents execute as a complement YES bid — the exchange
-        #   debits (100 - price), so proceeds are negative even though the
-        #   intent was a "sell".
+        # YES-normalized book decides the cash the exchange moves, and the
+        # split depends on what the account already holds.
         # The exchange fill that follows carries the same signed convention;
         # matching it here keeps promotion economics identical.
         fee_dollars = Decimal(str(fill.get("fee_cents", 0))) / Decimal("100")
-        gross_dollars = fill_price_dollars * filled_count_fp
+        # Covered/minted split in intent-side terms: the portion of the order
+        # that nets against a held position CREDITS the traded leg (sell: own
+        # price; buy: complement price), while the uncovered portion mints a
+        # pair and PAYS the opposite leg (sell: complement; buy: own price).
+        # Treating every sell-NO as minted inverted exit cash by $1/contract
+        # (2026-09-23 audit, verified against exchange balance deltas).
+        _prior_signed_cc = 0
+        try:
+            _pos = get_position_cache().get_position(intent.ticker)
+            if _pos is not None:
+                _prior_signed_cc = _pos._yes_exposure()
+        except Exception:
+            _prior_signed_cc = 0
+        _held_side = (
+            "yes" if _prior_signed_cc > 0
+            else ("no" if _prior_signed_cc < 0 else None)
+        )
+        _qty_cc_local = int(filled_count_fp * Decimal("100"))
         if canonical_action == "buy":
-            proceeds_dollars = -gross_dollars - fee_dollars
-        elif canonical_side == "no":
-            proceeds_dollars = -((Decimal("1") - fill_price_dollars) * filled_count_fp) - fee_dollars
+            _covered_cc = (
+                min(abs(_prior_signed_cc), _qty_cc_local)
+                if _held_side is not None and _held_side != canonical_side
+                else 0
+            )
+            _covered_fp = Decimal(_covered_cc) / Decimal("100")
+            _minted_fp = filled_count_fp - _covered_fp
+            proceeds_dollars = (
+                (Decimal("1") - fill_price_dollars) * _covered_fp
+                - fill_price_dollars * _minted_fp
+                - fee_dollars
+            )
         else:
-            proceeds_dollars = gross_dollars - fee_dollars
+            _covered_cc = (
+                min(abs(_prior_signed_cc), _qty_cc_local)
+                if _held_side == canonical_side
+                else 0
+            )
+            _covered_fp = Decimal(_covered_cc) / Decimal("100")
+            _minted_fp = filled_count_fp - _covered_fp
+            proceeds_dollars = (
+                fill_price_dollars * _covered_fp
+                - (Decimal("1") - fill_price_dollars) * _minted_fp
+                - fee_dollars
+            )
 
         kalshi_fill = KalshiFill(
             fill_id=str(fill_id),
