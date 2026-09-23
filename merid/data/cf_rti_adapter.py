@@ -294,6 +294,23 @@ def _ensure_kalshi_stream() -> Optional[Any]:
             _state.consecutive_failures_by_asset[asset] = 0
             _state.last_failure_reason_by_asset[asset] = ""
             _record_rti_history(asset, validated)
+            # 2026-09-23: feed the EWMA realized-volatility estimator from the
+            # canonical accepted-tick stream.  source_ts_ms is the upstream
+            # CF Benchmarks publish time — the right clock for vol.
+            try:
+                from merid.prediction.realized_vol import get_realized_vol_tracker
+
+                _rv_ts = getattr(validated, "source_ts_ms", None) or getattr(
+                    validated, "observed_ts_ms", None
+                )
+                if _rv_ts:
+                    get_realized_vol_tracker().record(
+                        asset,
+                        float(validated.value_decimal),
+                        float(_rv_ts) / 1000.0,
+                    )
+            except Exception:
+                pass
             logger.info(
                 "[CF-RTI-ADAPTER] stream_observation_accepted "
                 "asset=%s cfb_symbol=%s value=%s retained_digits=%s market_digits=%s "
