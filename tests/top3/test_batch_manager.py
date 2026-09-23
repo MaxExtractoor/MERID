@@ -27,19 +27,24 @@ def fresh_batch_manager():
     """Provide a fresh batch manager singleton for each test."""
     import os
     os.environ["MERID_TEST_MODE"] = "1"
+    os.environ["TOP3_CYCLE_RISK_CAP_USD"] = "5.00"
     reset_top3_batch_manager()
-    return get_top3_batch_manager()
+    yield get_top3_batch_manager()
+    reset_top3_batch_manager()
+    os.environ.pop("TOP3_CYCLE_RISK_CAP_USD", None)
 
 
 @pytest.fixture
 def sample_candidates():
     """Provide sample edge candidates."""
     return [
-        EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-        EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-        EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
-        EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
-        EdgeCandidate("DOGE", edge=0.02, max_notional_cap=1000),
+        # Per-asset caps below the $5 cycle budget so sequential
+        # priority-fill allocates all top-3 edges (150c each).
+        EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+        EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+        EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
+        EdgeCandidate("XRP", edge=0.04, max_notional_cap=150),
+        EdgeCandidate("DOGE", edge=0.02, max_notional_cap=150),
     ]
 
 

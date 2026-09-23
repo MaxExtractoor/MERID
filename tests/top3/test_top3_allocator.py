@@ -28,11 +28,10 @@ class TestTop3SelectionSpec:
         spec = Top3SelectionSpec()
         assert spec.VALID_ASSETS == ("BTC", "ETH", "SOL", "XRP", "DOGE")
     
-    def test_default_risk_cap_in_1_to_2_percent_range(self):
-        """Default risk cap must be in [1%, 2%] range."""
+    def test_default_risk_cap_is_fixed_usd(self):
+        """Default cycle risk cap is the fixed $1.00 USD cap (percentage model removed)."""
         spec = Top3SelectionSpec()
-        assert 0.01 <= spec.DEFAULT_CYCLE_RISK_CAP_PCT_MAX <= 0.02
-        assert 0.01 <= spec.DEFAULT_CYCLE_RISK_CAP_PCT_MIN <= 0.02
+        assert spec.DEFAULT_CYCLE_RISK_CAP_USD == 1.00
 
 
 class TestSelectTop3Basic:
@@ -40,74 +39,69 @@ class TestSelectTop3Basic:
     
     def test_selects_top_3_by_edge(self):
         """Should select assets with highest edges using sequential fill (Edge #1 priority)."""
+        # Per-asset caps below the cycle budget so all top-3 edges get funded.
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
-            EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
-            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=1000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
+            EdgeCandidate("XRP", edge=0.04, max_notional_cap=150),
+            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=150),
         ]
-        
-        bankroll = 100_000  # $1,000 in cents
-        cap_pct = 0.02  # 2%
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
-        # With sequential fill: Edge #1 gets 1% min ($10), Edge #2 gets remaining ($10), Edge #3 skipped
-        # Total budget = $20 (2% of $1000)
-        # Edge #1 (BTC): $10 budget
-        # Edge #2 (ETH): $10 budget
-        # Edge #3 (SOL): $0 remaining - skipped
-        assert len(allocations) == 2
-        
-        # Should be BTC, ETH (top 2 edges that fit budget)
+
+        bankroll = 100_000  # cents (unused in fixed-USD model)
+        cap_usd = 5.00  # 500c cycle budget
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
+        # Sequential priority-fill: each edge takes min(per-asset cap, remaining
+        # budget); the $5 budget funds all three 150c caps.
+        assert len(allocations) == 3
+
+        # Should be BTC, ETH, SOL (top 3 edges), never XRP/DOGE
         assets = [a.asset for a in allocations]
-        assert "BTC" in assets
-        assert "ETH" in assets
-        assert "SOL" not in assets
+        assert assets == ["BTC", "ETH", "SOL"]
         assert "XRP" not in assets
         assert "DOGE" not in assets
     
     def test_weighted_sizing_by_edge(self):
         """Sizes follow sequential fill: Edge #1 gets 1% minimum, then remaining budget."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
-        
+
         bankroll = 100_000
-        cap_pct = 0.02  # $2,000 total
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
-        # Sequential fill: Edge #1 gets 1% min ($1000), Edge #2 gets remaining ($1000), Edge #3 skipped
+        cap_usd = 5.00  # 500c budget
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
+        # Priority fill: Edge #1 funded first to its full cap.
         total = sum(a.target_notional for a in allocations)
-        assert total <= 2000  # Within cap
-        
-        # Check Edge #1 gets minimum 1% budget
-        btc_alloc = next(a for a in allocations if a.asset == "BTC")
-        assert btc_alloc.target_notional >= 1000  # Minimum 1% of $100k = $1000
-        
-        # Check at least 2 edges allocated if budget allows
-        assert len(allocations) >= 2
+        assert total <= 500
+
+        btc_alloc = allocations[0]
+        assert btc_alloc.asset == "BTC"
+        assert btc_alloc.target_notional == 150
+
+        assert len(allocations) == 3
     
     def test_respects_per_asset_cap(self):
         """Should not exceed per-asset max_notional_cap."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=500),  # Low cap
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),  # Low cap
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
-        
-        bankroll = 1_000_000  # $10,000
-        cap_pct = 0.02  # Would be $200 without caps
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
-        # BTC should be capped at 500
+
+        bankroll = 1_000_000
+        cap_usd = 5.00
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
+        # BTC should be capped at 150 (its per-asset cap)
         btc_alloc = next(a for a in allocations if a.asset == "BTC")
-        assert btc_alloc.target_notional <= 500
+        assert btc_alloc.target_notional <= 150
 
 
 class TestSelectTop3Ties:
@@ -116,46 +110,41 @@ class TestSelectTop3Ties:
     def test_equal_edges_get_even_split(self):
         """Equal edges use sequential fill: Edge #1 gets 1% minimum, Edge #2 gets remaining."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("SOL", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.10, max_notional_cap=150),
         ]
-        
-        bankroll = 90_000  # $900 -> 2% = $18 = 1800 cents
-        cap_pct = 0.02
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
-        # Sequential fill: Edge #1 gets 1% min ($900), Edge #2 gets remaining ($900), Edge #3 skipped
-        assert len(allocations) == 2
-        
-        # Both get equal allocation due to equal edges and sequential fill
-        btc_alloc = next(a for a in allocations if a.asset == "BTC")
-        eth_alloc = next(a for a in allocations if a.asset == "ETH")
-        assert btc_alloc.target_notional == 900  # 1% of $900
-        assert eth_alloc.target_notional == 900  # Remaining budget
+
+        bankroll = 90_000
+        cap_usd = 5.00
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
+        # Equal edges + equal caps: all three funded equally at their cap.
+        assert len(allocations) == 3
+        for alloc in allocations:
+            assert alloc.target_notional == 150
     
     def test_two_equal_one_different(self):
         """Two equal edges and one different with sequential fill."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.10, max_notional_cap=5000),  # Equal to BTC
-            EdgeCandidate("SOL", edge=0.05, max_notional_cap=5000),  # Different
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.10, max_notional_cap=150),  # Equal to BTC
+            EdgeCandidate("SOL", edge=0.05, max_notional_cap=150),  # Different
         ]
-        
+
         bankroll = 100_000
-        cap_pct = 0.02  # $2,000
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
-        # Sequential fill: Edge #1 gets 1% min ($1000), Edge #2 gets remaining ($1000), Edge #3 skipped
-        assert len(allocations) == 2
-        
-        # BTC and ETH should be equal (both got $1000)
+        cap_usd = 5.00
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
+        assert len(allocations) == 3
+
+        # BTC and ETH (equal top edges) funded first, equally at their cap.
         btc_alloc = next(a for a in allocations if a.asset == "BTC")
         eth_alloc = next(a for a in allocations if a.asset == "ETH")
-        assert btc_alloc.target_notional == eth_alloc.target_notional
-        assert btc_alloc.target_notional == 1000  # 1% of $100k
+        assert btc_alloc.target_notional == eth_alloc.target_notional == 150
+        assert allocations.index(btc_alloc) < allocations.index(eth_alloc)
 
 
 class TestSelectTop3EdgeCases:
@@ -164,33 +153,33 @@ class TestSelectTop3EdgeCases:
     def test_fewer_than_3_valid_candidates(self):
         """Should handle only 2 valid candidates."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
         ]
-        
+
         bankroll = 100_000
-        cap_pct = 0.02
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
+        cap_usd = 5.00
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
         assert len(allocations) == 2
         assert {a.asset for a in allocations} == {"BTC", "ETH"}
     
     def test_only_1_valid_candidate(self):
         """Should handle single valid candidate with sequential fill."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
         ]
-        
+
         bankroll = 100_000
-        cap_pct = 0.02
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
+        cap_usd = 5.00
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
         assert len(allocations) == 1
         assert allocations[0].asset == "BTC"
-        # Sequential fill: Edge #1 gets minimum 1% ($1000) since it's the only edge
-        assert allocations[0].target_notional == 1000  # Minimum 1% of $100k
+        # Edge #1 takes min(per-asset cap, full budget)
+        assert allocations[0].target_notional == 150
     
     def test_zero_edge_candidates_return_empty(self):
         """Zero or negative edges should result in no allocations."""
@@ -226,15 +215,15 @@ class TestSelectTop3EdgeCases:
     def test_invalid_asset_filtered(self):
         """Assets not in valid list should be filtered out."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("INVALID", edge=0.09, max_notional_cap=4000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("INVALID", edge=0.09, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
         ]
-        
+
         bankroll = 100_000
-        cap_pct = 0.02
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
+        cap_usd = 5.00
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
         
         # INVALID should be excluded
         assets = [a.asset for a in allocations]
@@ -242,37 +231,35 @@ class TestSelectTop3EdgeCases:
         assert "BTC" in assets
         assert "ETH" in assets
     
-    def test_zero_bankroll_returns_empty(self):
-        """Zero or negative bankroll should return empty list."""
+    def test_zero_cycle_cap_returns_empty(self):
+        """Zero cycle risk cap (no budget) should return empty list."""
         candidates = [
             EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
             EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
         ]
-        
-        allocations = select_top3_allocations(0, 0.02, candidates)
-        assert len(allocations) == 0
-        
-        allocations = select_top3_allocations(-1000, 0.02, candidates)
+
+        # Bankroll is unused in the fixed-USD model; the cap is the budget.
+        allocations = select_top3_allocations(100_000, 0.0, candidates)
         assert len(allocations) == 0
     
     def test_sum_of_allocations_within_cap(self):
         """Invariant 2: Total notional must be <= cap * bankroll."""
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
-            EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
-            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=1000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
+            EdgeCandidate("XRP", edge=0.04, max_notional_cap=150),
+            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=150),
         ]
-        
+
         bankroll = 100_000
-        cap_pct = 0.02
-        
-        allocations = select_top3_allocations(bankroll, cap_pct, candidates)
-        
+        cap_usd = 5.00
+
+        allocations = select_top3_allocations(bankroll, cap_usd, candidates)
+
         total = sum(a.target_notional for a in allocations)
-        max_allowed = int(cap_pct * bankroll)
-        
+        max_allowed = int(cap_usd * 100)
+
         assert total <= max_allowed, f"Total {total} exceeds cap {max_allowed}"
 
 
@@ -330,41 +317,41 @@ class TestTop3EdgeAllocator:
         
         assert allocator.validate_invariants(invalid_allocations, 100_000) is False
     
-    def test_get_cycle_risk_cap_pct_returns_valid_value(self):
-        """get_cycle_risk_cap_pct should return value in [0.01, 0.02]."""
+    def test_get_cycle_risk_cap_usd_returns_valid_value(self):
+        """get_cycle_risk_cap_usd should return the USD cap within its clamp range."""
         allocator = Top3EdgeAllocator()
-        pct = allocator.get_cycle_risk_cap_pct()
-        
-        assert 0.01 <= pct <= 0.02
+        usd = allocator.get_cycle_risk_cap_usd()
+
+        assert 0.50 <= usd <= 5.00
 
 
 class TestTop3EnvironmentConfig:
     """Tests for environment variable configuration."""
     
     def test_respects_top3_cycle_risk_cap_env(self, monkeypatch):
-        """Should read TOP3_CYCLE_RISK_CAP_PCT from environment."""
-        monkeypatch.setenv("TOP3_CYCLE_RISK_CAP_PCT", "0.015")
-        
+        """Should read TOP3_CYCLE_RISK_CAP_USD from environment."""
+        monkeypatch.setenv("TOP3_CYCLE_RISK_CAP_USD", "1.50")
+
         # Need fresh instance since env is read at init
         from merid.trading.top3_edge_allocator import Top3EdgeAllocator
         allocator = Top3EdgeAllocator()
-        
-        assert allocator.get_cycle_risk_cap_pct() == 0.015
-    
+
+        assert allocator.get_cycle_risk_cap_usd() == 1.50
+
     def test_clamps_env_value_to_valid_range_high(self, monkeypatch):
-        """Should clamp env value > 0.02 down to 0.02."""
-        monkeypatch.setenv("TOP3_CYCLE_RISK_CAP_PCT", "0.05")
-        
+        """Should clamp env value > $5.00 down to $5.00."""
+        monkeypatch.setenv("TOP3_CYCLE_RISK_CAP_USD", "10.00")
+
         from merid.trading.top3_edge_allocator import Top3EdgeAllocator
         allocator = Top3EdgeAllocator()
-        
-        assert allocator.get_cycle_risk_cap_pct() == 0.02
-    
+
+        assert allocator.get_cycle_risk_cap_usd() == 5.00
+
     def test_clamps_env_value_to_valid_range_low(self, monkeypatch):
-        """Should clamp env value < 0.01 up to 0.01."""
-        monkeypatch.setenv("TOP3_CYCLE_RISK_CAP_PCT", "0.005")
-        
+        """Should clamp env value < $0.50 up to $0.50."""
+        monkeypatch.setenv("TOP3_CYCLE_RISK_CAP_USD", "0.10")
+
         from merid.trading.top3_edge_allocator import Top3EdgeAllocator
         allocator = Top3EdgeAllocator()
-        
-        assert allocator.get_cycle_risk_cap_pct() == 0.01
+
+        assert allocator.get_cycle_risk_cap_usd() == 0.50

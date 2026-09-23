@@ -134,6 +134,7 @@ class Top3BatchManager:
             REJECT_NO_ACTIVE_BATCH: 0,
             REJECT_ASSET_NOT_IN_TOP3: 0,
             REJECT_NOTIONAL_LIMIT_REACHED: 0,
+            "WINDOW_LIMIT_EXCEEDED": 0,
         }
         
         # Load persisted state on init
@@ -907,6 +908,7 @@ class Top3BatchManager:
                 REJECT_NO_ACTIVE_BATCH: 0,
                 REJECT_ASSET_NOT_IN_TOP3: 0,
                 REJECT_NOTIONAL_LIMIT_REACHED: 0,
+                "WINDOW_LIMIT_EXCEEDED": 0,
             }
     
     def force_clear_phantom_batch(self, reason: str = "emergency") -> bool:
