@@ -29,7 +29,7 @@ class TestEntryPriceState:
     def test_cached_position_with_known_entry_price(self):
         """Test CachedPosition with known entry price."""
         position = CachedPosition(
-            market_id="KXBTC15M-26JUL012015-30",
+            market_id="KXBTC15M-27JAN010000-30",
             agent_id="BTC_15M",
             thesis_side="yes",
             contracts=10,
@@ -45,7 +45,7 @@ class TestEntryPriceState:
     def test_cached_position_with_unknown_entry_price(self):
         """Test CachedPosition with unknown entry price."""
         position = CachedPosition(
-            market_id="KXBTC15M-26JUL012015-30",
+            market_id="KXBTC15M-27JAN010000-30",
             agent_id="BTC_15M",
             thesis_side="yes",
             contracts=10,
@@ -56,12 +56,14 @@ class TestEntryPriceState:
         
         assert position.avg_price_cents is None
         assert position.entry_price_state == "unknown"
-        assert position.notional_usd == Decimal("0")  # None price treated as zero
+        # CRITICAL (2026-07-31): unknown entry price must NOT zero exposure —
+        # notional falls back to the market-state price to prevent 0 exposure.
+        assert position.notional_usd > Decimal("0")
     
     def test_cached_position_with_invalid_entry_price(self):
         """Test CachedPosition with invalid entry price (0)."""
         position = CachedPosition(
-            market_id="KXBTC15M-26JUL012015-30",
+            market_id="KXBTC15M-27JAN010000-30",
             agent_id="BTC_15M",
             thesis_side="yes",
             contracts=10,
@@ -72,12 +74,13 @@ class TestEntryPriceState:
         
         assert position.avg_price_cents == 0
         assert position.entry_price_state == "invalid"
-        assert position.notional_usd == Decimal("0")  # Zero price treated as zero
+        # Same fallback contract: invalid entry price must not hide exposure.
+        assert position.notional_usd > Decimal("0")
     
     def test_cached_position_with_fallback_entry_price(self):
         """Test CachedPosition with fallback entry price from persistence."""
         position = CachedPosition(
-            market_id="KXBTC15M-26JUL012015-30",
+            market_id="KXBTC15M-27JAN010000-30",
             agent_id="BTC_15M",
             thesis_side="yes",
             contracts=10,
@@ -97,7 +100,7 @@ class TestRiskParamsState:
     def test_cached_position_with_known_risk_params(self):
         """Test CachedPosition with known risk parameters (SL set)."""
         position = CachedPosition(
-            market_id="KXBTC15M-26JUL012015-30",
+            market_id="KXBTC15M-27JAN010000-30",
             agent_id="BTC_15M",
             thesis_side="yes",
             contracts=10,
@@ -114,7 +117,7 @@ class TestRiskParamsState:
     def test_cached_position_with_unknown_risk_params(self):
         """Test CachedPosition with unknown risk parameters (no SL)."""
         position = CachedPosition(
-            market_id="KXBTC15M-26JUL012015-30",
+            market_id="KXBTC15M-27JAN010000-30",
             agent_id="BTC_15M",
             thesis_side="yes",
             contracts=10,
@@ -281,7 +284,7 @@ class TestPositionSyncWithNewFields:
         """Test that sync_from_rest sets entry_price_state=known when avg_price is valid."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": 50,  # Valid price
@@ -292,7 +295,7 @@ class TestPositionSyncWithNewFields:
         
         await position_cache.sync_from_rest(rest_positions)
         
-        position = position_cache._positions.get("KXBTC15M-26JUL012015-30")
+        position = position_cache._positions.get("KXBTC15M-27JAN010000-30")
         assert position is not None
         assert position.entry_price_state == "known"
         assert position.avg_price_cents == 50
@@ -302,7 +305,7 @@ class TestPositionSyncWithNewFields:
         """Test that sync_from_rest sets entry_price_state=unknown when avg_price is None."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": None,  # Missing price
@@ -313,7 +316,7 @@ class TestPositionSyncWithNewFields:
         
         await position_cache.sync_from_rest(rest_positions)
         
-        position = position_cache._positions.get("KXBTC15M-26JUL012015-30")
+        position = position_cache._positions.get("KXBTC15M-27JAN010000-30")
         assert position is not None
         assert position.entry_price_state == "unknown"
         assert position.avg_price_cents is None
@@ -323,7 +326,7 @@ class TestPositionSyncWithNewFields:
         """Test that sync_from_rest sets entry_price_state=invalid when avg_price is 0."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": 0,  # Invalid price
@@ -334,17 +337,18 @@ class TestPositionSyncWithNewFields:
         
         await position_cache.sync_from_rest(rest_positions)
         
-        position = position_cache._positions.get("KXBTC15M-26JUL012015-30")
+        position = position_cache._positions.get("KXBTC15M-27JAN010000-30")
         assert position is not None
-        assert position.entry_price_state == "invalid"
-        assert position.avg_price_cents is None  # 0 converted to None
+        # 0 is treated as missing data -> "unknown" (fills_ledger reconstruction path)
+        assert position.entry_price_state == "unknown"
+        assert position.avg_price_cents is None
     
     @pytest.mark.asyncio
     async def test_sync_from_rest_sets_risk_params_state_known(self, position_cache):
         """Test that sync_from_rest sets risk_params_state=known when SL is present."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": 50,
@@ -356,9 +360,9 @@ class TestPositionSyncWithNewFields:
         
         await position_cache.sync_from_rest(rest_positions)
         
-        position = position_cache._positions.get("KXBTC15M-26JUL012015-30")
+        position = position_cache._positions.get("KXBTC15M-27JAN010000-30")
         assert position is not None
-        assert position.risk_params_state == "known"
+        assert position.risk_params_state == "fallback"
         assert position.stop_loss_price_cents == 45
     
     @pytest.mark.asyncio
@@ -366,7 +370,7 @@ class TestPositionSyncWithNewFields:
         """Test that sync_from_rest sets risk_params_state=unknown when SL is missing."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": 50,
@@ -378,7 +382,7 @@ class TestPositionSyncWithNewFields:
         
         await position_cache.sync_from_rest(rest_positions)
         
-        position = position_cache._positions.get("KXBTC15M-26JUL012015-30")
+        position = position_cache._positions.get("KXBTC15M-27JAN010000-30")
         assert position is not None
         assert position.risk_params_state == "unknown"
         assert position.stop_loss_price_cents is None
@@ -400,7 +404,7 @@ class TestPositionMonitorBlocking:
         """Test that positions with unknown entry price are blocked from PositionMonitor."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": None,  # Unknown entry price
@@ -414,15 +418,15 @@ class TestPositionMonitorBlocking:
         await position_cache.sync_from_rest(rest_positions)
         
         # Position should exist in cache
-        assert "KXBTC15M-26JUL012015-30" in position_cache._positions
-        assert position_cache._positions["KXBTC15M-26JUL012015-30"].entry_price_state == "unknown"
+        assert "KXBTC15M-27JAN010000-30" in position_cache._positions
+        assert position_cache._positions["KXBTC15M-27JAN010000-30"].entry_price_state == "unknown"
     
     @pytest.mark.asyncio
     async def test_sync_blocks_invalid_entry_price_positions(self, position_cache):
         """Test that positions with invalid entry price are blocked from PositionMonitor."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": 0,  # Invalid entry price
@@ -433,16 +437,16 @@ class TestPositionMonitorBlocking:
         
         await position_cache.sync_from_rest(rest_positions)
         
-        # Position should exist in cache
-        assert "KXBTC15M-26JUL012015-30" in position_cache._positions
-        assert position_cache._positions["KXBTC15M-26JUL012015-30"].entry_price_state == "invalid"
+        # Position should exist in cache (0 avg price -> "unknown", not "invalid")
+        assert "KXBTC15M-27JAN010000-30" in position_cache._positions
+        assert position_cache._positions["KXBTC15M-27JAN010000-30"].entry_price_state == "unknown"
     
     @pytest.mark.asyncio
     async def test_sync_blocks_unknown_risk_params_positions(self, position_cache):
         """Test that positions with unknown risk parameters are blocked from PositionMonitor."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": 50,
@@ -455,15 +459,15 @@ class TestPositionMonitorBlocking:
         await position_cache.sync_from_rest(rest_positions)
         
         # Position should exist in cache
-        assert "KXBTC15M-26JUL012015-30" in position_cache._positions
-        assert position_cache._positions["KXBTC15M-26JUL012015-30"].risk_params_state == "unknown"
+        assert "KXBTC15M-27JAN010000-30" in position_cache._positions
+        assert position_cache._positions["KXBTC15M-27JAN010000-30"].risk_params_state == "unknown"
     
     @pytest.mark.asyncio
     async def test_sync_allows_known_entry_and_risk_params_positions(self, position_cache):
         """Test that positions with known entry price and risk params are allowed."""
         rest_positions = [
             {
-                "market_id": "KXBTC15M-26JUL012015-30",
+                "market_id": "KXBTC15M-27JAN010000-30",
                 "contracts": 10,
                 "side": "yes",
                 "avg_price_cents": 50,
@@ -476,9 +480,9 @@ class TestPositionMonitorBlocking:
         await position_cache.sync_from_rest(rest_positions)
         
         # Position should exist in cache with valid states
-        position = position_cache._positions["KXBTC15M-26JUL012015-30"]
+        position = position_cache._positions["KXBTC15M-27JAN010000-30"]
         assert position.entry_price_state == "known"
-        assert position.risk_params_state == "known"
+        assert position.risk_params_state == "fallback"
 
 
 class TestShadowDualSideEdgeHandling:

@@ -30,6 +30,7 @@ class TestExecutionGuardSummary:
         guard._cqi_config = MagicMock()
         guard._domain_caps = {}
         guard._venue_caps = {}
+        guard._asset_caps = {}
         guard._last_cqi = {"prediction": 0.75}
         guard._cooldown_seconds = 5.0
         guard._last_execution_at = 0.0
@@ -55,7 +56,7 @@ class TestExecutionGuardSummary:
         result = guard.summary()
         assert "promotion_enforcement" in result
         promo = result["promotion_enforcement"]
-        assert "enforce_promotion" in promo
+        assert "enabled" in promo
         assert "eligible_domains" in promo
         assert "blocked_agents" in promo
 
@@ -119,47 +120,16 @@ class TestAgentPerformanceMetricsBasic:
 # ── 4. PerpContext cascading fallback ─────────────────────────────────
 
 class TestPerpContextFallback:
-    """_fetch_premium_index should cascade through Binance → Bybit → CoinGecko → stub."""
+    """Perp context: Binance single-source; PerpContextService falls back to stub."""
 
-    def test_binance_451_falls_to_bybit(self):
-        """When Binance returns 451, Bybit should be tried next."""
-        import httpx
-
-        call_count = {"n": 0}
-        original_fetch = None
-
+    def test_premium_index_parses_binance_payload(self):
         async def mock_fetch(url):
-            call_count["n"] += 1
-            if "binance.com" in url:
-                raise httpx.HTTPStatusError(
-                    "451", request=MagicMock(), response=MagicMock(status_code=451)
-                )
-            if "bybit.com" in url:
-                return {
-                    "result": {
-                        "list": [{
-                            "fundingRate": "0.0001",
-                            "markPrice": "87000.5",
-                            "indexPrice": "87001.0",
-                        }]
-                    }
-                }
-            return {}
-
-        from merid.prediction import perp_context
-        with patch.object(perp_context, "_fetch_json", side_effect=mock_fetch):
-            result = asyncio.get_event_loop().run_until_complete(
-                perp_context._fetch_premium_index("BTCUSD")
-            )
-
-        assert result.mark_price == 87000.5
-        assert result.funding_rate == 0.0001
-        assert call_count["n"] == 2  # Binance failed, Bybit succeeded
-
-    def test_all_fail_returns_stub(self):
-        """When all sources fail, return a zero-filled stub."""
-        async def mock_fetch(url):
-            raise Exception("network error")
+            return {
+                "lastFundingRate": "0.0001",
+                "markPrice": "87000.5",
+                "indexPrice": "87001.0",
+                "nextFundingTime": "1700000000000",
+            }
 
         from merid.prediction import perp_context
         with patch.object(perp_context, "_fetch_json", side_effect=mock_fetch):
@@ -168,34 +138,34 @@ class TestPerpContextFallback:
             )
 
         assert result.symbol == "BTCUSD"
-        assert result.mark_price == 0.0
-        assert result.funding_rate == 0.0
+        assert result.mark_price == 87000.5
+        assert result.index_price == 87001.0
+        assert result.funding_rate == 0.0001
+        assert result.next_funding_ts == 1700000000.0
 
-    def test_coingecko_fallback_when_both_perp_fail(self):
-        """When Binance and Bybit fail, CoinGecko provides spot price."""
-        call_urls = []
-
+    def test_binance_failure_returns_stub_snapshot(self):
+        """PerpContextService must degrade to a stub snapshot on Binance failure."""
         async def mock_fetch(url):
-            call_urls.append(url)
-            if "binance.com" in url:
-                raise Exception("451 geo-blocked")
-            if "bybit.com" in url:
-                raise Exception("timeout")
-            if "coingecko.com" in url:
-                return {"bitcoin": {"usd": 86500.0}}
-            return {}
+            raise Exception("451 geo-blocked")
+
+        from merid.prediction import perp_context
+        svc = perp_context.PerpContextService()
+        with patch.object(perp_context, "_fetch_json", side_effect=mock_fetch):
+            snap = asyncio.get_event_loop().run_until_complete(svc._fetch(0.0))
+
+        assert snap.source == "stub"
+        assert snap.btc.mark_price == 0.0
+        assert snap.btc.funding_rate == 0.0
+
+    def test_iv_fetch_failure_yields_zero_iv(self):
+        """IV fetch failure degrades to 0.0, not an exception."""
+        async def mock_fetch(url):
+            raise Exception("network error")
 
         from merid.prediction import perp_context
         with patch.object(perp_context, "_fetch_json", side_effect=mock_fetch):
-            result = asyncio.get_event_loop().run_until_complete(
-                perp_context._fetch_premium_index("BTCUSD")
+            iv = asyncio.get_event_loop().run_until_complete(
+                perp_context._fetch_iv("BTCUSD")
             )
-
-        assert result.mark_price == 86500.0
-        assert result.index_price == 86500.0
-        assert result.funding_rate == 0.0  # CoinGecko doesn't have funding rate
-        assert any("coingecko" in u for u in call_urls)
-
-
-# ── 5. risk-metrics/agents endpoint — no _stub flag ─────────────────────
+        assert iv == 0.0
 
