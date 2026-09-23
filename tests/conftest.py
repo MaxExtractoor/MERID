@@ -60,6 +60,13 @@ _os.environ["MERID_MARKET_ANCHOR_MAX_W"] = "0"
 _os.environ["MERID_ENTRY_MIN_SECONDS_TO_EXPIRY"] = "0"
 _os.environ["MERID_FLB_LONGSHOT_SLOPE"] = "0"
 _os.environ["MERID_ENTRY_MAKER_ENABLED"] = "0"
+# Settlement-distribution V2 and the settlement-convergence lane: exercised
+# explicitly in tests/test_settlement_lane.py; production .env must not enable
+# them inside unrelated decision tests.
+_os.environ["MERID_SETTLEMENT_DISTRIBUTION_V2"] = "0"
+_os.environ["MERID_SETTLEMENT_LANE_ENABLED"] = "0"
+_os.environ["MERID_SETTLEMENT_ANCHOR_RELEASE"] = "0"
+_os.environ["MERID_SETTLEMENT_MAX_MISSING_SAMPLES"] = "0"
 # Markout telemetry must not write into production logs during tests.
 _os.environ["MERID_ENTRY_MARKOUT_LOG"] = str(
     __import__("pathlib").Path(

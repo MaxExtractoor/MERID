@@ -155,6 +155,32 @@ MERID_MARKET_ANCHOR_MIN_W = float(os.environ.get("MERID_MARKET_ANCHOR_MIN_W", "0
 MERID_MARKET_ANCHOR_MAX_W = float(os.environ.get("MERID_MARKET_ANCHOR_MAX_W", "0.85"))
 MERID_MARKET_ANCHOR_WINDOW_S = float(os.environ.get("MERID_MARKET_ANCHOR_WINDOW_S", "900"))
 
+# 2026-09-23: Settlement-convergence lane.  Kalshi crypto 15m binaries settle
+# on the mean of 60 one-second CF RTI samples in the final minute.  Once most
+# of those samples are banked the outcome is near-determined while the order
+# book still quotes the terminal price as live — that divergence is the
+# structural edge (research: TWAP-settled binaries keep pricing ~0.50 while
+# ~45/60 samples are already realized).  When a settlement-aware distribution
+# is supplied and its favored side clears MERID_SETTLEMENT_LANE_MIN_P, entries
+# are allowed inside the min-TTE/final-minute cutoffs down to
+# MERID_SETTLEMENT_LANE_MIN_TTE_S.  Requires a minimum count of banked samples
+# so the confidence claim is grounded in realized settlement data.
+MERID_SETTLEMENT_LANE_ENABLED = os.environ.get(
+    "MERID_SETTLEMENT_LANE_ENABLED", ""
+).strip().lower() in ("1", "true", "yes")
+MERID_SETTLEMENT_LANE_MIN_P = float(os.environ.get("MERID_SETTLEMENT_LANE_MIN_P", "0.84"))
+MERID_SETTLEMENT_LANE_MIN_OBSERVED = int(os.environ.get("MERID_SETTLEMENT_LANE_MIN_OBSERVED", "10"))
+MERID_SETTLEMENT_LANE_MIN_TTE_S = float(os.environ.get("MERID_SETTLEMENT_LANE_MIN_TTE_S", "30"))
+MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS = float(os.environ.get("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "97"))
+
+# In the settlement window the book prices the *terminal tick* while the
+# settlement distribution prices the *banked average* — the model is strictly
+# better informed there, so the market anchor is released in proportion to the
+# share of settlement samples still unrealized (n_rem / 60).
+MERID_SETTLEMENT_ANCHOR_RELEASE = os.environ.get(
+    "MERID_SETTLEMENT_ANCHOR_RELEASE", "1"
+).strip().lower() in ("1", "true", "yes")
+
 # 2026-08-29: Executable-cost EV gate becomes the final entry authority.
 # When enabled, the gate is evaluated after the existing edge/π* computation
 # and can overrule a selected side if the net dollar EV or EV/tail-risk ratio
@@ -1441,12 +1467,17 @@ def _compute_model_risk_reserve(
     data_quality: str,
     regime: str,
     seconds_to_expiry: float,
+    settlement_lane: bool = False,
 ) -> float:
     """Observable uncertainty reserve used in the edge calculation."""
     reserve = max(0.0, min(1.0, model_uncertainty))
     if data_quality in ("stale", "bad", "unknown"):
         reserve = min(1.0, reserve + 0.15)
-    if seconds_to_expiry < 60.0:
+    # The flat +0.20 near-expiry bump prices the contract as if the terminal
+    # tick settles it.  In the settlement-convergence lane the distribution's
+    # own std already encodes the unrealized fraction, so the bump would
+    # double-count the same uncertainty.
+    if seconds_to_expiry < 60.0 and not settlement_lane:
         reserve = min(1.0, reserve + 0.20)
     if regime in ("unknown", "insufficient_data"):
         reserve = min(1.0, reserve + 0.05)
@@ -1475,6 +1506,7 @@ def _compute_confidence(
     rti_execution_max_age_ms: int = 2000,
     book_execution_max_age_ms: int = 1000,
     rti_book_skew_max_ms: int = 1500,
+    settlement_lane: bool = False,
 ) -> ConfidenceResult:
     """Derive confidence from observable uncertainty sources.
 
@@ -1490,7 +1522,10 @@ def _compute_confidence(
         reasons.append(f"regime={regime}")
     if settlement_reference != "cfb_rti_live":
         reasons.append(f"settlement_reference={settlement_reference}")
-    if seconds_to_expiry < 60.0:
+    # ``near_expiry`` treats the contract as a terminal-tick bet; in the
+    # settlement-convergence lane the probability claim comes from banked
+    # settlement samples, so proximity to expiry is the feature, not a risk.
+    if seconds_to_expiry < 60.0 and not settlement_lane:
         reasons.append("near_expiry")
 
     # 2026-09-08: P0 freshness/skew/sequence gates become confidence blockers.
@@ -1537,7 +1572,7 @@ def _compute_confidence(
     min_depth = max(1.0, min(yes_depth_cc, no_depth_cc, 1.0))
     depth_penalty = max(0.0, 0.05 - (min_depth / 5000.0))
 
-    time_penalty = 0.05 if seconds_to_expiry < 120.0 else 0.0
+    time_penalty = 0.05 if (seconds_to_expiry < 120.0 and not settlement_lane) else 0.0
 
     # Decompose uncertainty into four explicit additive terms.
     # Data: data-quality + near-expiry time penalty.
@@ -1717,6 +1752,31 @@ def compute_trade_decision(
     if seconds_to_expiry is None or not math.isfinite(seconds_to_expiry) or seconds_to_expiry <= 0:
         return _no_trade("expired_or_no_time")
 
+    # 2026-09-23: settlement-convergence lane eligibility.  Inside the final
+    # settlement minute, a settlement-aware distribution with enough banked
+    # samples and a high-confidence side may bypass the generic TTE cutoffs:
+    # the contract's outcome is largely realized arithmetic at that point, not
+    # a live price guess.  The lane still fails closed when the distribution
+    # is absent, has too few banked samples, is not clearly resolved, or the
+    # remaining time is below the lane's own execution floor.
+    settlement_lane = False
+    if (
+        MERID_SETTLEMENT_LANE_ENABLED
+        and settlement_distribution is not None
+        and float(seconds_to_expiry) >= MERID_SETTLEMENT_LANE_MIN_TTE_S
+        and getattr(settlement_distribution, "phase", None) == "in_window"
+        and int(getattr(settlement_distribution, "observed_count", 0) or 0) >= MERID_SETTLEMENT_LANE_MIN_OBSERVED
+    ):
+        _sd_p = getattr(settlement_distribution, "p_yes_raw", None)
+        if _sd_p is not None and math.isfinite(_sd_p):
+            _sd_p_side = max(float(_sd_p), 1.0 - float(_sd_p))
+            if _sd_p_side >= MERID_SETTLEMENT_LANE_MIN_P:
+                settlement_lane = True
+                indicators["entry_lane"] = "settlement_convergence"
+                indicators["settlement_lane_p_side"] = _sd_p_side
+                indicators["settlement_lane_observed"] = int(settlement_distribution.observed_count)
+                indicators["settlement_lane_filled"] = int(getattr(settlement_distribution, "filled_count", 0) or 0)
+
     # EXIT_ONLY window: no new entries inside the pre-close cutoff.
     # Exits (take-profit, stop, manual close) remain enabled.
     exit_only_cutoff = float(
@@ -1725,15 +1785,17 @@ def compute_trade_decision(
             os.environ.get("MERID_FINAL_MINUTE_CUTOFF_S", "30"),
         )
     )
-    if seconds_to_expiry <= exit_only_cutoff:
+    if seconds_to_expiry <= exit_only_cutoff and not settlement_lane:
         return _no_trade("final_minute_entry_disabled")
 
     # 2026-09-23: minimum time-to-expiry for new entries.  Post-restart audit
     # showed entries landing in the final 2-7 minutes were the most adversely
     # selected cohort (momentum dominates and the market is most efficient
     # there); MERID_ENTRY_MIN_SECONDS_TO_EXPIRY (default 180s) keeps entries
-    # out of that tail.  Exits are unaffected.
-    if seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY:
+    # out of that tail.  Exits are unaffected.  The settlement-convergence
+    # lane is exempt because its probability claim rests on banked settlement
+    # samples rather than on a live-price forecast.
+    if seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY and not settlement_lane:
         return _no_trade("min_tte_entry_disabled")
 
     # Layer-2: data and regime gates.
@@ -1856,6 +1918,18 @@ def compute_trade_decision(
             MERID_MARKET_ANCHOR_MAX_W - MERID_MARKET_ANCHOR_MIN_W
         ) * frac_elapsed
         market_anchor_weight = max(0.0, min(0.98, market_anchor_weight))
+        # 2026-09-23: anchor release in the settlement window.  The book quotes
+        # the terminal price while the settlement distribution prices the
+        # banked 60-sample average — with k of 60 samples realized, the model
+        # is strictly better informed, so the market's authority scales with
+        # the unrealized fraction rather than the wall-clock ramp.
+        if (
+            MERID_SETTLEMENT_ANCHOR_RELEASE
+            and settlement_distribution is not None
+            and getattr(settlement_distribution, "phase", None) == "in_window"
+        ):
+            _n_rem = float(getattr(settlement_distribution, "remaining_count", 60) or 0)
+            market_anchor_weight *= max(0.0, min(1.0, _n_rem / 60.0))
         if market_anchor_weight > 0.0:
             def _logit(x: float) -> float:
                 x = max(1e-6, min(1.0 - 1e-6, x))
@@ -2004,11 +2078,17 @@ def compute_trade_decision(
     })
 
     fee = fee_per_contract_cents / 100.0
-    expected_exit_cost_yes = fee
-    expected_exit_cost_no = fee
+    # 2026-09-23: settlement-convergence entries hold to settlement — there is
+    # no exit order and no exit fee inside the final minute, so the reserve is
+    # zero rather than a phantom taker exit.  (Dataset: hold-to-settlement
+    # beats any timed exit on this product; charging an exit that cannot
+    # happen suppresses real edge.)
+    expected_exit_cost_yes = 0.0 if settlement_lane else fee
+    expected_exit_cost_no = 0.0 if settlement_lane else fee
 
     model_risk_reserve = _compute_model_risk_reserve(
-        model_uncertainty, data_quality, regime, seconds_to_expiry
+        model_uncertainty, data_quality, regime, seconds_to_expiry,
+        settlement_lane=settlement_lane,
     )
 
     yes_breakdown = compute_edge(
@@ -2081,6 +2161,7 @@ def compute_trade_decision(
         book_sequence_confirmed=book_sequence_confirmed,
         book_initialized=book_initialized,
         cfb_execution_eligible=cfb_execution_eligible,
+        settlement_lane=settlement_lane,
     )
 
     # Selection: prefer the side with the higher *qualifying* net edge.
@@ -2376,6 +2457,26 @@ def compute_trade_decision(
         net_edge = None
         edge_breakdown = None
         no_trade_reason = "invalid_confidence"
+
+    # 2026-09-23: settlement-lane price cap.  Buying a near-certain outcome at
+    # > MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS leaves no room for the entry fee,
+    # let alone edge — the fee curve collapses to zero only below ~97c.
+    if (
+        settlement_lane
+        and selected_outcome is not None
+        and selected_outcome_price is not None
+        and float(selected_outcome_price) * 100.0 > MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS
+    ):
+        selected_outcome = None
+        selected_action = None
+        approved_size_cc = Decimal("0")
+        p_selected = None
+        p_opposite = None
+        selected_outcome_price = None
+        gross_edge = None
+        net_edge = None
+        edge_breakdown = None
+        no_trade_reason = "settlement_lane_price_cap"
 
     # 2026-08-29: Executable-cost EV gate.  This is the final entry authority.
     # It is evaluated with the executable price, not the midpoint, and it

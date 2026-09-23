@@ -58,6 +58,7 @@ class SettlementDistribution:
     phase: str
     forecast_method: str
     model_version: str = _MODEL_VERSION
+    filled_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -301,6 +302,8 @@ def build_settlement_state(
 def compute_settlement_distribution(
     state: SettlementState,
     annualized_vol: float,
+    *,
+    max_missing_samples: int = 0,
 ) -> SettlementDistribution:
     """Return a zero-drift Bachelier distribution on 60 right-endpoint samples.
 
@@ -338,12 +341,39 @@ def compute_settlement_distribution(
     schedule = [state.expiry_ts - timedelta(seconds=i) for i in range(59, -1, -1)]
     expected_samples = {ts for ts in schedule if ts <= state.now_ts}
     actual_samples = dict(state.observed_samples)
-    if (set(actual_samples) != expected_samples
-            or len(actual_samples) != state.observed_count
+    if (len(actual_samples) != state.observed_count
             or len(state.observed_samples) != state.observed_count
             or any(not v.is_finite() or v <= 0 for v in actual_samples.values())
-            or sum(actual_samples.values(), Decimal("0")) != state.observed_sum):
+            or sum(actual_samples.values(), Decimal("0")) != state.observed_sum
+            or not set(actual_samples).issubset(expected_samples)):
         raise ValueError("Incomplete or inconsistent elapsed settlement samples")
+    # Bounded forward-fill for dropped feed frames: a missing elapsed slot is
+    # filled with the nearest already-realized value (previous observed second,
+    # else the next observed second).  All values are historical, so this is
+    # causal; exceeding the bound fails closed.
+    missing_slots = sorted(expected_samples - set(actual_samples))
+    filled_count = 0
+    if missing_slots:
+        if len(missing_slots) > max_missing_samples:
+            raise ValueError("Incomplete or inconsistent elapsed settlement samples")
+        ordered = sorted(actual_samples.items())
+        for slot in missing_slots:
+            fill_val = None
+            for ts, v in reversed(ordered):
+                if ts < slot:
+                    fill_val = v
+                    break
+            if fill_val is None:
+                for ts, v in ordered:
+                    if ts > slot:
+                        fill_val = v
+                        break
+            if fill_val is None:
+                raise ValueError("Incomplete or inconsistent elapsed settlement samples")
+            actual_samples[slot] = fill_val
+            filled_count += 1
+    observed_sum = sum(actual_samples.values(), Decimal("0")) if actual_samples else state.observed_sum
+    observed_count = len(actual_samples)
     offsets = [(ts - state.now_ts).total_seconds() for ts in schedule if ts > state.now_ts]
     variance_seconds = math.fsum(
         (2 * (len(offsets) - i) - 1) * u for i, u in enumerate(offsets)
@@ -351,8 +381,8 @@ def compute_settlement_distribution(
 
     if state.phase == "expired":
         # Degenerate: all settlement samples are fixed.  Use the observed average.
-        if state.observed_count > 0:
-            mean = float(state.observed_sum / state.observed_count)
+        if observed_count > 0:
+            mean = float(observed_sum / observed_count)
         else:
             mean = latest
         std = 0.0
@@ -368,6 +398,7 @@ def compute_settlement_distribution(
             seconds_to_expiry=0.0,
             phase="expired",
             forecast_method="observed_average",
+            filled_count=filled_count,
         )
 
     if state.phase == "pre_window":
@@ -390,14 +421,17 @@ def compute_settlement_distribution(
         )
 
     # Phase: in_window.  Some samples are realized, the rest are forecast from latest.
-    n_obs = state.observed_count
+    # ``observed_count``/``observed_sum`` include bounded forward-fills of dropped
+    # feed frames; the returned ``observed_count`` field reports only real
+    # observations while ``filled_count`` reports the fills.
+    n_obs = observed_count
     n_rem = max(0, int(window_s) - n_obs)
     r_seconds = min(window_s, tte)
     r_years = r_seconds / _SECONDS_PER_YEAR
 
     observed_avg = 0.0
     if n_obs > 0:
-        observed_avg = float(state.observed_sum / n_obs)
+        observed_avg = float(observed_sum / n_obs)
 
     # Conditional mean: (n_o * A_o + n_r * S_t) / 60
     if n_obs + n_rem > 0:
@@ -422,11 +456,12 @@ def compute_settlement_distribution(
         std=std,
         z_score=z,
         p_yes_raw=p_yes,
-        observed_count=n_obs,
+        observed_count=state.observed_count,
         remaining_count=n_rem,
         seconds_to_expiry=tte,
         phase="in_window",
         forecast_method="partial_realization_forward_average",
+        filled_count=filled_count,
     )
 
 
