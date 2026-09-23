@@ -63,6 +63,7 @@ while ($true) {
                 $fails = 0
             }
         }
+        }
     }
     Start-Sleep -Seconds $PollSeconds
 }
