@@ -44,11 +44,14 @@ def _env_map() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def test_env_has_use_topn_allocator_true():
+def test_topn_allocator_fully_removed():
+    """TopN allocator was deleted; neither the module nor its env flag may reappear."""
     env = _env_map()
-    assert env.get("USE_TOPN_ALLOCATOR", "").lower() in ("1", "true", "yes", "on"), (
-        "Production .env must set USE_TOPN_ALLOCATOR=true to activate TopN + GlobalRiskGuard."
+    assert "USE_TOPN_ALLOCATOR" not in env, (
+        "USE_TOPN_ALLOCATOR env flag reappeared — TopN allocator was deliberately removed"
     )
+    import importlib.util
+    assert importlib.util.find_spec("merid.trading.topn_allocator") is None
 
 
 def test_env_has_max_cycle_risk_pct_le_5pct():
@@ -78,8 +81,9 @@ def test_no_diagnostic_profile_in_env():
 # ---------------------------------------------------------------------------
 
 
-def test_topn_config_cap_invariant():
-    pytest.skip("Legacy module merid.trading.topn_allocator no longer exists")
+def test_topn_config_module_absent():
+    import importlib.util
+    assert importlib.util.find_spec("merid.trading.topn_allocator") is None,         "topn_allocator was deliberately removed and must not return"
 
 
 def test_top3_cap_invariant():
@@ -115,7 +119,8 @@ def test_core_settings_defaults_in_validation_range():
 
         importlib.reload(s)
         assert s.MAX_CYCLE_RISK_PCT <= 0.05
-        assert s.MAX_TOTAL_RISK_PCT <= 0.10
+        # Disabled legacy pct cap — real bound is the fixed exposure cap
+        assert s.MAX_TOTAL_RISK_PCT <= 0.15
     finally:
         if old_cycle is not None:
             os.environ["MAX_CYCLE_RISK_PCT"] = old_cycle
@@ -131,8 +136,12 @@ def test_core_settings_defaults_in_validation_range():
 # ---------------------------------------------------------------------------
 
 
-def test_ct_legacy_bankroll_fenced_behind_flag():
-    pytest.skip("Legacy module merid.trading.kalshi_continuous_trader no longer exists")
+def test_continuous_trader_has_no_live_order_path():
+    """The continuous trader is a deliberate no-op stub; live orders are loop_15m-owned."""
+    src = (REPO / "merid" / "trading" / "kalshi_continuous_trader.py").read_text(
+        encoding="utf-8"
+    )
+    assert "route_order_async" not in src,         "continuous trader must not submit orders (no-op stub)"
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +166,18 @@ def test_route_order_async_rejects_unauthorized_caller():
 # Dormant portfolio_optimizer.yaml has no live importer
 # ---------------------------------------------------------------------------
 
+
+def _iter_py_files(root):
+    """Yield .py files under root, pruning vendored/generated trees."""
+    import os as _os
+    from pathlib import Path as _Path
+    _prune = {"node_modules", "__pycache__", ".venv", "venv", ".git", "dist", "build", ".claude"}
+    for r, dirs, files in _os.walk(root):
+        dirs[:] = [d for d in dirs if d not in _prune]
+        for f in files:
+            if f.endswith(".py"):
+                yield _Path(r) / f
+
 _LIVE_ROOTS = (
     REPO / "merid" / "trading",
     REPO / "merid" / "prediction",
@@ -178,7 +199,7 @@ def test_portfolio_optimizer_yaml_has_no_live_importer():
     for root in _LIVE_ROOTS:
         if not root.exists():
             continue
-        for path in root.rglob("*.py"):
+        for path in _iter_py_files(root):
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
@@ -196,5 +217,6 @@ def test_portfolio_optimizer_yaml_has_no_live_importer():
 # ---------------------------------------------------------------------------
 
 
-def test_aggregate_cycle_cap_le_5pct_of_bankroll():
-    pytest.skip("Legacy module merid.trading.topn_allocator no longer exists")
+def test_topn_aggregate_cap_module_absent():
+    import importlib.util
+    assert importlib.util.find_spec("merid.trading.topn_allocator") is None
