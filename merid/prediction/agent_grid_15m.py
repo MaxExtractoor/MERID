@@ -8110,11 +8110,21 @@ class LeanAgent15m:
             )
             return decision
 
-        # Role-aware fee selection.  Start with the conservative taker fee,
-        # then prefer maker unless the trade justifies paying the spread (very
-        # close to expiry or gross edge above the taker threshold).  If the
-        # taker decision fails we still try maker, because the lower fee can
-        # rescue a trade that is only economic when resting.
+        # Role-aware fee selection.  Start with the conservative taker fee.
+        #
+        # 2026-09-23: maker entries are DISABLED by default.  Post-restart
+        # audit showed resting entry orders are adversely selected — fills
+        # arrive only when the market trades through the limit, i.e. when the
+        # signal is already decaying (filled orders settled 41% vs 67% for
+        # orders that never filled).  The ~1.75c max taker fee is cheap
+        # insurance against that conditioning, so entries execute IOC at the
+        # decision-time price or not at all.  A signal that only clears EV
+        # with maker economics is too marginal to trade.
+        # Re-enable with MERID_ENTRY_MAKER_ENABLED=1.
+        maker_entries_enabled = os.environ.get(
+            "MERID_ENTRY_MAKER_ENABLED", ""
+        ).strip().lower() in ("1", "true", "yes")
+
         decision_taker = _call_trade_decision(taker_fee_cents, p_yes_model)
 
         taker_edge_threshold = _numeric_pref(
@@ -8128,10 +8138,16 @@ class LeanAgent15m:
             and float(decision_taker.gross_edge) >= taker_edge_threshold
         )
 
-        use_taker = (
-            decision_taker.selected_outcome is not None
-            and (is_late or is_high_edge)
-        )
+        if maker_entries_enabled:
+            use_taker = (
+                decision_taker.selected_outcome is not None
+                and (is_late or is_high_edge)
+            )
+        else:
+            # Maker lane disabled: the taker EV gate is the sole arbiter — if
+            # the trade does not clear executable-cost economics at taker fees
+            # it does not trade at all.
+            use_taker = decision_taker.selected_outcome is not None
 
         if use_taker:
             decision = decision_taker
@@ -8141,7 +8157,7 @@ class LeanAgent15m:
             time_in_force = "ioc"
             execution_mode = "taker"
             fee_cents = taker_fee_cents
-        else:
+        elif maker_entries_enabled:
             decision_maker = _call_trade_decision(maker_fee_cents, p_yes_model)
             if decision_maker.selected_outcome is not None:
                 decision = decision_maker
@@ -8169,6 +8185,14 @@ class LeanAgent15m:
                 time_in_force = "ioc"
                 execution_mode = "taker"
                 fee_cents = taker_fee_cents
+        else:
+            decision = decision_taker
+            liquidity_role = "taker"
+            aggressiveness = 1.0
+            post_only = False
+            time_in_force = "ioc"
+            execution_mode = "taker"
+            fee_cents = taker_fee_cents
 
         # Cheap-tail canary lane must be post-only/maker, one contract, short TTL.
         # This is enforced regardless of the ordinary taker/maker selection because
@@ -15148,6 +15172,19 @@ class LeanAgent15m:
             logger.warning("[SIGNAL-AGGRESSIVENESS-ERROR] asset=%s failed to compute aggressiveness: %s, using default 0.5",
                          asset, agg_err)
             aggressiveness = 0.5  # Default to marketable
+
+        # 2026-09-23: maker entries disabled — a resting (aggressiveness=0.0)
+        # entry is adversely selected; fills only arrive when the market trades
+        # through the limit.  Clamp to a marketable IOC so the order executes
+        # at decision-time price or not at all.
+        if aggressiveness <= 0.0 and os.environ.get(
+            "MERID_ENTRY_MAKER_ENABLED", ""
+        ).strip().lower() not in ("1", "true", "yes"):
+            aggressiveness = 1.0
+            logger.info(
+                "[SIGNAL-AGGRESSIVENESS] asset=%s resting aggressiveness clamped to 1.0 (maker entries disabled)",
+                asset,
+            )
 
         # Construct signal dictionary
 

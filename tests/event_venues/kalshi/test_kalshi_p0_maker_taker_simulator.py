@@ -293,6 +293,9 @@ async def test_maker_post_only_creates_expiring_gtc_order(
 ) -> None:
     """A passive (post_only) order must rest as GTC/GTT with an explicit
     expiration timestamp â€” never IOC and never without an expiry."""
+    # 2026-09-23: maker entries are disabled by default (adverse selection);
+    # this test exercises the opt-in maker path.
+    monkeypatch.setenv("MERID_ENTRY_MAKER_ENABLED", "1")
     client.set_orderbook(TICKER_MAKER, best_bid_cents=45, best_ask_cents=55,
                          bid_size=Decimal("10"), ask_size=Decimal("10"))
     _set_market(client, TICKER_MAKER)

@@ -19,12 +19,25 @@ from decimal import Decimal
 import pytest
 
 from merid.prediction.trade_decision import compute_edge, compute_trade_decision
+import merid.prediction.trade_decision as _td
 from merid.risk.probability.calibration_diagnostics import (
     brier_score,
     expected_calibration_error,
     reliability_curve,
     calibration_summary,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_market_anchor(monkeypatch):
+    """These tests exercise decision mechanics (invariants, gates, tail caps);
+
+    the market-anchor shrinkage is covered separately in
+    tests/test_entry_execution_hardening.py.  Disabling it keeps each test
+    focused on the mechanism it names.
+    """
+    monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MIN_W", 0.0)
+    monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MAX_W", 0.0)
 
 
 def _make_decision(
@@ -151,9 +164,11 @@ def test_rejects_cost_basis_override_no(monkeypatch):
         Decimal("0.50"),
     )
     # Use a NO ask above the tail-calibration floor so the test isolates the
-    # cost-basis gate.  At p_no == 0.5 the model does not believe NO, so a
-    # positive net edge must still be rejected.
-    d = _make_decision(spot=100.0, strike=100.0, yes_ask=65.0, no_ask=35.0)
+    # cost-basis gate.  With the drift-corrected d2, ATM gives p_no slightly
+    # above 0.5; spot just above strike keeps p_no <= 0.5 (model does not
+    # believe NO) while the 36c ask still yields positive net edge, so the
+    # cost-basis gate is the rejection reason.
+    d = _make_decision(spot=100.009, strike=100.0, yes_ask=65.0, no_ask=36.0)
     assert d.selected_outcome is None
     assert d.no_trade_reason == "cost_basis_override_no"
 

@@ -126,6 +126,35 @@ MERID_PI_STAR_TIERED = os.environ.get("MERID_PI_STAR_TIERED", "1").lower() in ("
 MERID_PI_STAR_FLAT_PREMIUM_CENTS = int(os.environ.get("MERID_PI_STAR_FLAT_PREMIUM_CENTS", "0"))
 MERID_PI_STAR_TIERS_CENTS = os.environ.get("MERID_PI_STAR_TIERS_CENTS", "0:40,20:25,40:10,60:0")
 
+# 2026-09-23: Favorite-longshot-bias reserve.  Kalshi microstructure research
+# (Burgi et al. 2025 / CEPR DP20631, 300k+ contracts) shows contracts priced
+# below ~50c win less often than break-even while >50c contracts earn a small
+# positive return.  The slope scales an additional required net edge that grows
+# linearly as the held price falls below 0.50: slope * (0.5 - price).
+MERID_FLB_LONGSHOT_SLOPE = float(os.environ.get("MERID_FLB_LONGSHOT_SLOPE", "0.15"))
+
+# 2026-09-23: Minimum time-to-expiry for new entries.  Late-window fills were
+# empirically the most adversely selected (momentum dominates the last minutes
+# of a 15m window and the market is most efficient there).  New entries must
+# have at least this many seconds remaining; exits are unaffected.
+MERID_ENTRY_MIN_SECONDS_TO_EXPIRY = float(
+    os.environ.get("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180")
+)
+
+# 2026-09-23: Market-anchor shrinkage.  Kalshi short-dated crypto binaries are
+# arbitraged tick-for-tick against spot and are essentially perfectly
+# calibrated inside the last minutes (prediction-market-efficiency audits show
+# every price band's implied probability inside the CI of realized frequency).
+# The raw model probability is therefore shrunk toward the market-implied
+# probability in logit space, with weight ramping from
+# MERID_MARKET_ANCHOR_MIN_W at window open to MERID_MARKET_ANCHOR_MAX_W at
+# expiry over MERID_MARKET_ANCHOR_WINDOW_S seconds.  A model that still shows
+# edge after shrinkage has a defensible disagreement with the market; a model
+# whose edge only exists pre-shrinkage does not.
+MERID_MARKET_ANCHOR_MIN_W = float(os.environ.get("MERID_MARKET_ANCHOR_MIN_W", "0.25"))
+MERID_MARKET_ANCHOR_MAX_W = float(os.environ.get("MERID_MARKET_ANCHOR_MAX_W", "0.85"))
+MERID_MARKET_ANCHOR_WINDOW_S = float(os.environ.get("MERID_MARKET_ANCHOR_WINDOW_S", "900"))
+
 # 2026-08-29: Executable-cost EV gate becomes the final entry authority.
 # When enabled, the gate is evaluated after the existing edge/π* computation
 # and can overrule a selected side if the net dollar EV or EV/tail-risk ratio
@@ -287,7 +316,12 @@ def _compute_bachelier_components(
     t_years = seconds_to_expiry / (365.0 * 24.0 * 60.0 * 60.0)
     log_moneyness = math.log(spot_price / strike_price) if strike_price > 0 else 0.0
     sigma = max(annualized_vol, 1e-6)
-    z = log_moneyness / (sigma * math.sqrt(t_years))
+    # Black-model digital call: P(S_T > K) = N(d2) with
+    # d2 = (ln(S/K) - sigma^2 T / 2) / (sigma * sqrt(T)).
+    # The -sigma^2 T/2 Ito correction was previously omitted; at 15-minute
+    # horizons it is small (~1e-5) but including it keeps the z-score
+    # consistent with the standard risk-neutral digital used by the market.
+    z = (log_moneyness - 0.5 * sigma * sigma * t_years) / (sigma * math.sqrt(t_years))
     p_yes_raw = max(0.0, min(1.0, 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))))
     return {
         "log_moneyness": log_moneyness,
@@ -384,28 +418,25 @@ def _clamp_annualized_vol(asset: str, vol: float, source: str = "default") -> fl
 
 
 def _fetch_realized_vol(asset: str) -> Optional[float]:
-    """Return the canonical realized vol if it is fresh and confident."""
+    """Return the canonical realized vol if it is fresh and confident.
+
+    Sources an EWMA realized-volatility estimate built from the live RTI/spot
+    tick stream (see ``merid.prediction.realized_vol``).  Returns ``None`` when
+    the estimator has insufficient samples or the last tick is stale — callers
+    then fall back to the next vol source in ``_resolve_annualized_vol``.
+    """
     if not MERID_USE_REALIZED_VOL:
         return None
-    # SENTIMENT MODULE REMOVED (Phase 1 legacy removal): sentiment vol service disabled
-    # try:
-    #     from merid.prediction.risk.sentiment_vol_service import get_current_volatility
-    #     scalar = get_current_volatility(asset)
-    #     if scalar is None:
-    #         return None
-    #     if scalar.value <= 0 or scalar.confidence < MERID_REALIZED_VOL_MIN_CONFIDENCE:
-    #         return None
-    #     age_s = (datetime.now(timezone.utc) - scalar.timestamp).total_seconds()
-    #     if age_s > MERID_REALIZED_VOL_MAX_AGE_S:
-    #         logger.warning(
-    #             "[VOL-REALIZED] asset=%s realized vol stale (age=%.0fs > %.0fs); ignoring",
-    #             asset, age_s, MERID_REALIZED_VOL_MAX_AGE_S,
-    #         )
-    #         return None
-    #     return float(scalar.value)
-    # except Exception as exc:
-    #     logger.warning("[VOL-REALIZED] asset=%s failed to fetch realized vol: %s", asset, exc)
-    return None
+    try:
+        from merid.prediction.realized_vol import get_realized_vol_tracker
+
+        estimate = get_realized_vol_tracker().annualized_vol(asset)
+        if estimate is None:
+            return None
+        return float(estimate.value)
+    except Exception as exc:
+        logger.warning("[VOL-REALIZED] asset=%s failed to fetch realized vol: %s", asset, exc)
+        return None
 
 
 def _resolve_annualized_vol(
@@ -570,7 +601,14 @@ def _compute_dynamic_min_required_edge(
         }.get(asset.upper(), 2.0)
     spread_adj = 0.5 * spread_cents / 100.0
 
-    dynamic = base + price_adj + spread_adj
+    # Favorite-longshot bias reserve.  Kalshi transaction-level studies (Burgi
+    # et al. 2025, CEPR DP20631) show sub-50c contracts systematically win less
+    # than their price implies (contracts <10c lose >60%).  A linear premium
+    # that grows as the held price falls below 50c compensates for that bias:
+    # at 35c it adds ~2.25c of required net edge, at 10c ~6c, at 50c+ zero.
+    flb_adj = MERID_FLB_LONGSHOT_SLOPE * max(0.0, 0.5 - p)
+
+    dynamic = base + price_adj + spread_adj + flb_adj
     return max(0.02, min(dynamic, 0.15))
 
 
@@ -1690,6 +1728,14 @@ def compute_trade_decision(
     if seconds_to_expiry <= exit_only_cutoff:
         return _no_trade("final_minute_entry_disabled")
 
+    # 2026-09-23: minimum time-to-expiry for new entries.  Post-restart audit
+    # showed entries landing in the final 2-7 minutes were the most adversely
+    # selected cohort (momentum dominates and the market is most efficient
+    # there); MERID_ENTRY_MIN_SECONDS_TO_EXPIRY (default 180s) keeps entries
+    # out of that tail.  Exits are unaffected.
+    if seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY:
+        return _no_trade("min_tte_entry_disabled")
+
     # Layer-2: data and regime gates.
     if _data_state != "healthy":
         return _no_trade("data_state_not_healthy")
@@ -1793,6 +1839,39 @@ def compute_trade_decision(
     if MERID_TRADE_DECISION_ALLOW_HYBRID_P and p_yes_model is not None and math.isfinite(p_yes_model):
         p_yes_for_yes = max(0.0, min(1.0, p_yes_model))
         p_no_for_no = 1.0 - p_yes_for_yes
+
+    # 2026-09-23: Market-anchor shrinkage.  The Kalshi 15m book is arbitraged
+    # against live spot and is near-perfectly calibrated at the horizons we
+    # trade, so the market mid is the strongest available prior.  Shrink the
+    # model probability toward the market-implied probability in logit space
+    # with a weight that ramps from MERID_MARKET_ANCHOR_MIN_W (window open) to
+    # MERID_MARKET_ANCHOR_MAX_W (expiry).  Only a two-sided book qualifies as
+    # an anchor; without one the model keeps full authority.
+    p_yes_pre_anchor = p_yes_for_yes
+    market_anchor_weight = 0.0
+    if yes_bid_cents > 0 and yes_ask_cents > yes_bid_cents:
+        anchor_window = max(MERID_MARKET_ANCHOR_WINDOW_S, 1.0)
+        frac_elapsed = max(0.0, min(1.0, 1.0 - float(seconds_to_expiry) / anchor_window))
+        market_anchor_weight = MERID_MARKET_ANCHOR_MIN_W + (
+            MERID_MARKET_ANCHOR_MAX_W - MERID_MARKET_ANCHOR_MIN_W
+        ) * frac_elapsed
+        market_anchor_weight = max(0.0, min(0.98, market_anchor_weight))
+        if market_anchor_weight > 0.0:
+            def _logit(x: float) -> float:
+                x = max(1e-6, min(1.0 - 1e-6, x))
+                return math.log(x / (1.0 - x))
+
+            blended = (1.0 - market_anchor_weight) * _logit(p_yes_for_yes) + (
+                market_anchor_weight * _logit(market_prob)
+            )
+            p_yes_for_yes = max(0.0, min(1.0, 1.0 / (1.0 + math.exp(-blended))))
+            p_no_for_no = 1.0 - p_yes_for_yes
+    indicators.update({
+        "market_anchor_weight": market_anchor_weight,
+        "market_anchor_prob": market_prob,
+        "p_yes_pre_anchor": p_yes_pre_anchor,
+        "p_yes_post_anchor": p_yes_for_yes,
+    })
 
     # YES-held curve: calibrate p_yes if YES is in the cheap tail.
     p_yes_for_yes_pre_cap = p_yes_for_yes

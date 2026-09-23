@@ -131,10 +131,21 @@ class RTIFeedService:
                             )
                     _mon = get_global_crypto_rti_monitor()
                     _settlement_reg = get_settlement_buffer_registry()
+                    try:
+                        from merid.prediction.realized_vol import get_realized_vol_tracker
+
+                        _rv_tracker = get_realized_vol_tracker()
+                    except Exception:
+                        _rv_tracker = None
                     for tick in ticks:
                         await _mon.on_rti_tick(tick.asset, tick.price, tick.ts_utc)
                         get_rti_reconciler().record_internal(tick.asset, tick.price, tick.ts_utc)
                         _settlement_reg.ingest_tick(tick.asset, tick.ts_utc, tick.price)
+                        if _rv_tracker is not None:
+                            try:
+                                _rv_tracker.record(tick.asset, tick.price, tick.ts_utc)
+                            except Exception:
+                                pass
                         self.metrics.ticks_ingested += 1
                         self.metrics.last_tick_ts = time.time()
 
