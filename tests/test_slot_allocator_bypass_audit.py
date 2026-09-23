@@ -26,13 +26,13 @@ class TestSlotAllocatorBypassAudit:
         assert "get_global_slot_allocator" in router_source, \
             "order_router.py should import get_global_slot_allocator"
         
-        # CRITICAL FIX (2026-07-12): Verify hard slot allocation BEFORE order processing
-        assert "request_allocation" in router_source, \
-            "order_router.py should call request_allocation for hard slot allocation"
-        
-        # Verify slot allocation is a hard block (rejects if fails)
-        assert "slot_allocator_hard_block" in router_source or "slot_allocator:insufficient_exposure" in router_source, \
-            "order_router.py should hard block orders if slot allocation fails"
+        # Verify slot allocation is a hard block (rejects if can_allocate fails)
+        assert "can_allocate" in router_source, \
+            "order_router.py should call slot_allocator.can_allocate before order processing"
+        assert "slot_allocation_failed" in router_source, \
+            "order_router.py should reject with slot_allocation_failed on allocation failure"
+        assert "hard_exposure_cap_exceeded" in router_source, \
+            "order_router.py should reject with hard_exposure_cap_exceeded over the cap"
         
         # Verify exit order bypass exists
         assert "_is_exit_order" in router_source, \
@@ -81,32 +81,13 @@ class TestSlotAllocatorBypassAudit:
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             grid_source = f.read()
         
-        # Verify slot allocator integration
-        assert "get_global_slot_allocator" in grid_source, \
-            "agent_grid_15m.py should import get_global_slot_allocator"
-        
-        # Verify request_allocation is called
-        assert "request_allocation" in grid_source, \
-            "agent_grid_15m.py should call request_allocation"
-        
-        # Verify is_exit_order=False for entry orders
-        assert "is_exit_order=False" in grid_source, \
-            "agent_grid_15m.py should set is_exit_order=False for entry orders"
-        
-        # UPDATED (single execution point): Execution-path slot allocation was moved
-        # to order_router.route_order_async to prevent double allocation.
-        # agent_grid keeps the signal-generation reservation (request_allocation above)
-        # and delegates execution-time allocation/release to order_router.
-        assert "SINGLE POINT" in grid_source, \
-            "agent_grid_15m.py should document slot allocation delegation to order_router"
-        
-        # Verify the execution path routes via _kalshi_place_order → order_router
-        assert "_kalshi_place_order" in grid_source and "GLOBAL-ALLOCATOR-EXECUTE" in grid_source, \
-            "agent_grid_15m.py execution path should route via _kalshi_place_order"
-        
-        # Verify slot release is delegated to order_router
-        assert "Slot release is now handled in order_router" in grid_source, \
-            "agent_grid_15m.py should document slot release delegation to order_router"
+        # Single execution point: slot allocation lives ONLY in order_router.
+        # agent_grid_15m is signal-generation only — it must NOT submit orders or
+        # reserve slots, or allocations would be double-counted.
+        assert "route_order_async" not in grid_source, \
+            "agent_grid_15m.py must not submit orders (single execution point is order_router)"
+        assert "request_allocation" not in grid_source, \
+            "agent_grid_15m.py must not reserve slots (allocation is router-owned)"
 
     def test_loop_15m_exit_order_bypass(self):
         """Verify loop_15m.py exit orders bypass slot allocation."""
@@ -187,18 +168,19 @@ class TestSlotAllocatorBypassAudit:
         assert found_safety_check, \
             "KalshiVenueClient.place_order_result should have DEBUG_ALLOW_MANUAL_ORDERS safety check"
 
-    def test_order_gate_uses_slot_allocator(self):
-        """Verify order_gate.py uses slot allocator for sequential trading."""
+    def test_order_gate_enforces_dedup_and_fill_awareness(self):
+        """Verify order_gate.py is the idempotent pre-trade gate (dedup + fill awareness).
+
+        Slot allocation deliberately lives only in order_router (single execution
+        point); order_gate owns client_order_id dedup and already-satisfied checks.
+        """
         with open("merid/event_venues/kalshi/order_gate.py", "r", encoding="utf-8") as f:
             gate_source = f.read()
-        
-        # Verify slot allocator integration
-        assert "get_global_slot_allocator" in gate_source, \
-            "order_gate.py should import get_global_slot_allocator"
-        
-        # Verify slot allocator is used for sequential trading check
-        assert "get_available_exposure" in gate_source, \
-            "order_gate.py should use slot allocator for exposure checks"
+
+        assert "client_order_id" in gate_source, \
+            "order_gate.py should enforce idempotent client_order_id dedup"
+        assert "already_satisfied" in gate_source, \
+            "order_gate.py should reject orders already satisfied by the position"
 
     def test_unified_sizing_uses_slot_allocator(self):
         """Verify unified_sizing.py uses slot allocator for exposure calculation."""
@@ -222,9 +204,9 @@ class TestSlotAllocatorBypassAudit:
         assert "get_global_slot_allocator" in cache_source, \
             "position_cache.py should import get_global_slot_allocator"
         
-        # Verify slot release on fill
-        assert "release_by_asset" in cache_source, \
-            "position_cache.py should release slots by asset on fill"
+        # Verify slot release on position close
+        assert "release_slot_by_ticker" in cache_source, \
+            "position_cache.py should release the ticker slot when a position closes"
 
     def test_no_bypass_in_legacy_code(self):
         """Verify legacy code paths are disabled or properly gated."""
@@ -328,31 +310,42 @@ class TestSlotAllocatorBypassAudit:
         # All paths are either properly wired or correctly disabled
         assert True, "All order execution paths accounted for"
 
-    def test_agent_grid_rejects_on_slot_allocator_exception(self):
-        """Verify agent_grid_15m.py rejects signals when slot allocator fails."""
-        with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
-            grid_source = f.read()
-        
-        # Verify exception handler exists
-        assert "except Exception as e:" in grid_source, \
-            "agent_grid_15m.py should have exception handler for slot allocator"
-        
-        # Verify exception handler rejects signal (not allows it)
-        # Check that the exception handler has return None after SLOT-ALLOCATOR-ERROR
-        assert "SLOT-ALLOCATOR-ERROR" in grid_source, \
-            "agent_grid_15m.py should log SLOT-ALLOCATOR-ERROR on exception"
-        
-        # Check that the exception handler returns None (rejects signal)
-        assert "return None  # Reject signal - slot allocator is required for $1 exposure cap" in grid_source, \
-            "agent_grid_15m.py exception handler should reject signal with return None"
-        
-        # Verify the old allow logic is NOT present
-        assert "signal[\"slot_id\"] = None" not in grid_source, \
-            "agent_grid_15m.py should NOT allow signal without slot allocation (signal[\"slot_id\"] = None)"
-        
-        # Verify proper error logging
-        assert "SLOT-ALLOCATOR-REJECT" in grid_source, \
-            "agent_grid_15m.py should log SLOT-ALLOCATOR-REJECT on exception"
+    def test_router_allocator_call_is_not_swallowed(self):
+        """The router's can_allocate call must not sit inside a swallowing except.
+
+        If the slot allocator raises, the exception must propagate (fail-closed)
+        rather than being caught and converted to an allow.
+        """
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+
+        tree = ast.parse(router_source)
+
+        def _inside_try_body(node, ancestors):
+            for parent in ancestors:
+                if isinstance(parent, ast.Try) and node in parent.body:
+                    return True
+            return False
+
+        def _walk(node, ancestors):
+            for child in ast.iter_child_nodes(node):
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "can_allocate"
+                ):
+                    yield child, ancestors
+                yield from _walk(child, ancestors + (node,))
+
+        calls = list(_walk(tree, ()))
+        assert calls, "order_router.py should call slot_allocator.can_allocate"
+        # The primary allocation gate must call can_allocate outside a try body
+        # so an allocator exception propagates (fail-closed) instead of being
+        # swallowed into an allow. Retry calls inside the phantom-slot handler
+        # are safe: its except leaves can_allocate=False -> still blocked.
+        assert any(
+            not _inside_try_body(call, ancestors) for call, ancestors in calls
+        ), "no can_allocate call exists outside a try body — allocator failure could be swallowed"
 
 
 if __name__ == "__main__":

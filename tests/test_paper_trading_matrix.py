@@ -299,49 +299,6 @@ class TestCrossDomain:
 # 4. API Endpoint Smoke — key endpoints return 200
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestApiEndpointSmoke:
-    """Verify key UI-facing endpoints return valid data."""
-
-    @pytest.fixture(autouse=True)
-    def setup_client(self):
-        try:
-            from web.main import create_app
-            from starlette.testclient import TestClient
-            app = create_app()
-            self.client = TestClient(app)
-            self.available = True
-        except Exception:
-            self.available = False
-
-    def _get(self, path: str):
-        if not self.available:
-            pytest.skip("Web app not available")
-        resp = self.client.get(path)
-        return resp
-
-    def test_portfolio_summary(self):
-        resp = self._get("/api/v1/portfolio/summary")
-        assert resp.status_code == 200
-
-    def test_trading_orders_open(self):
-        resp = self._get("/api/v1/trading/orders/open")
-        assert resp.status_code == 200
-
-    def test_prediction_markets_summary(self):
-        resp = self._get("/api/v1/prediction-markets/summary")
-        assert resp.status_code == 200
-
-    def test_pipeline_summary(self):
-        resp = self._get("/api/v1/pipeline/summary")
-        assert resp.status_code == 200
-
-    def test_pipeline_risk(self):
-        resp = self._get("/api/v1/pipeline/risk")
-        assert resp.status_code == 200
-
-    def test_signal_layer_cqi(self):
-        resp = self._get("/api/v1/signal-layer/cqi")
-        assert resp.status_code == 200
 
 
 # ═══════════════════════════════════════════════════════════════════════

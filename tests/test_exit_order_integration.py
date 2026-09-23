@@ -51,22 +51,21 @@ class TestExitOrderIntegration:
         allocator.reset_all()  # Ensure clean state
         
         # 2026-07-13: Correlation discount disabled - no patch needed
-        # Fill to full capacity
+        # Fill to full capacity ($2.00 cap)
         requests = [
-            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 25, 2.0, 5, 0.5, False),
-            AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 25, 2.0, 5, 0.5, False),
-            AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, 0.5, False),
-            AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 25, 2.0, 5, 0.5, False),
+            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 75, 2.0, 5, 0.5, False),
+            AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 75, 2.0, 5, 0.5, False),
+            AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 50, 2.0, 5, 0.5, False),
         ]
         
         for req in requests:
             allocated, _, _ = allocator.request_allocation(req)
             assert allocated
         
-        assert abs(allocator.get_total_exposure() - 1.00) < 0.01
+        assert abs(allocator.get_total_exposure() - 2.00) < 0.01
         
         # Entry order should be rejected
-        entry_req = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 10, 2.0, 5, 0.5, False)
+        entry_req = AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 10, 2.0, 5, 0.5, False)
         allocated_entry, reason_entry, _ = allocator.request_allocation(entry_req)
         assert not allocated_entry
         assert "Insufficient exposure" in reason_entry
@@ -118,15 +117,30 @@ class TestExitOrderIntegration:
         
         # 2026-07-13: Correlation discount disabled - no patch needed
         # Allocate to near capacity using valid entry prices (10-75c)
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, 0.5, False)
-        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 40, 2.0, 5, 0.5, False)
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 75, 2.0, 5, 0.5, False)
+        req2 = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 75, 2.0, 5, 0.5, False)
+        req3 = AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 40, 2.0, 5, 0.5, False)
         
         allocated1, _, _ = allocator.request_allocation(req1)
         allocated2, _, _ = allocator.request_allocation(req2)
-        assert allocated1 and allocated2
+        allocated3, _, _ = allocator.request_allocation(req3)
+        assert allocated1 and allocated2 and allocated3
         
-        # Total should be 90c, leaving 10c available
-        assert abs(allocator.get_total_exposure() - 0.90) < 0.01
+        # Total should be 190c, leaving 10c of the $2 cap available
+        assert abs(allocator.get_total_exposure() - 1.90) < 0.01
+        
+        # Seed matching positions so sync_with_position_cache does not
+        # correctly drop the allocator slots as orphans (slots are
+        # provisional until backed by a cache position).
+        from merid.event_venues.kalshi.position_cache import (
+            get_position_cache, CachedPosition,
+        )
+        cache = get_position_cache()
+        for ticker, cents in (("KXBTC15M-1", 75), ("KXSOL15M-1", 75), ("KXXRP15M-1", 40)):
+            cache._positions[ticker] = CachedPosition(
+                market_id=ticker, agent_id="T", side="yes", thesis_side="yes",
+                contracts=1, avg_price_cents=cents,
+            )
         
         # Try to size a 30c order (should fail due to insufficient exposure)
         count, notional, metadata = compute_order_size(
@@ -136,9 +150,10 @@ class TestExitOrderIntegration:
             model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
-        # Should return 0 due to insufficient exposure
-        assert count == 0
-        assert metadata.get("reason") == "insufficient_exposure_slot"
+        # Sizing must clip to the 10c of remaining cap exposure (the
+        # centi-contract grid allows fractional fills instead of rejecting).
+        assert count < 1.0
+        assert notional <= Decimal("0.10") + Decimal("0.001")
         
         print("✓ Unified sizing uses slot allocator test passed")
     
@@ -153,15 +168,17 @@ class TestExitOrderIntegration:
         
         # 2026-07-13: Correlation discount disabled - no patch needed
         # Fill to near capacity with valid entry prices (10-75c)
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, 0.5, False)
-        req2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 35, 2.0, 5, 0.5, False)
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 75, 2.0, 5, 0.5, False)
+        req2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 75, 2.0, 5, 0.5, False)
+        req3 = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 35, 2.0, 5, 0.5, False)
         
         allocated1, _, _ = allocator.request_allocation(req1)
         allocated2, _, _ = allocator.request_allocation(req2)
-        assert allocated1 and allocated2
+        allocated3, _, _ = allocator.request_allocation(req3)
+        assert allocated1 and allocated2 and allocated3
         
-        # Total should be 85c (50c + 35c), leaving 15c available
-        assert abs(allocator.get_total_exposure() - 0.85) < 0.01
+        # Total should be 185c, leaving 15c of the $2 cap available
+        assert abs(allocator.get_total_exposure() - 1.85) < 0.01
         
         # Available should be 15c
         available = allocator.get_available_exposure()
@@ -205,19 +222,19 @@ class TestExitOrderIntegration:
         allocator.reset_all()  # Ensure clean state
         
         # 2026-07-13: Correlation discount disabled - no patch needed
-        # Initial: BTC 10c + ETH 30c + SOL 20c = 60c used, 40c available
-        req_btc = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 10, 2.0, 5, 0.5, False)
-        req_eth = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 30, 2.0, 5, 0.5, False)
-        req_sol = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 20, 2.0, 5, 0.5, False)
+        # Initial: BTC 75c + ETH 75c + SOL 45c = 195c used, 5c of $2 available
+        req_btc = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 75, 2.0, 5, 0.5, False)
+        req_eth = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 75, 2.0, 5, 0.5, False)
+        req_sol = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 45, 2.0, 5, 0.5, False)
         
         allocated_btc, _, slot_btc = allocator.request_allocation(req_btc)
         allocated_eth, _, slot_eth = allocator.request_allocation(req_eth)
         allocated_sol, _, slot_sol = allocator.request_allocation(req_sol)
         
         assert allocated_btc and allocated_eth and allocated_sol
-        assert abs(allocator.get_total_exposure() - 0.60) < 0.01
+        assert abs(allocator.get_total_exposure() - 1.95) < 0.01
         
-        # DOGE 50c should be rejected (would exceed $1)
+        # DOGE 50c should be rejected (would exceed $2)
         req_doge = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 50, 2.0, 5, 0.5, False)
         allocated_doge, reason_doge, _ = allocator.request_allocation(req_doge)
         assert not allocated_doge
@@ -230,13 +247,13 @@ class TestExitOrderIntegration:
         
         # Release BTC slot
         allocator.release_slot(slot_btc, exit_price_cents=50)
-        assert abs(allocator.get_total_exposure() - 0.50) < 0.01
+        assert abs(allocator.get_total_exposure() - 1.20) < 0.01
         
-        # Now DOGE 40c should be allowed
-        req_doge2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 40, 2.0, 5, 0.5, False)
+        # Now DOGE 50c should be allowed
+        req_doge2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 50, 2.0, 5, 0.5, False)
         allocated_doge2, _, slot_doge = allocator.request_allocation(req_doge2)
         assert allocated_doge2
-        assert abs(allocator.get_total_exposure() - 0.90) < 0.01
+        assert abs(allocator.get_total_exposure() - 1.70) < 0.01
         
         print("✓ Sequential trading scenario test passed")
     
@@ -251,17 +268,17 @@ class TestExitOrderIntegration:
         
         # 2026-07-13: Correlation discount disabled - no patch needed
         # Fill to near capacity
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 40, 2.0, 5, 0.5, False)
-        req2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 40, 2.0, 5, 0.5, False)
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 75, 2.0, 5, 0.5, False)
+        req2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 75, 2.0, 5, 0.5, False)
         
         allocated1, _, slot1 = allocator.request_allocation(req1)
         allocated2, _, slot2 = allocator.request_allocation(req2)
         
         assert allocated1 and allocated2
-        assert abs(allocator.get_total_exposure() - 0.80) < 0.01
+        assert abs(allocator.get_total_exposure() - 1.50) < 0.01
         
-        # Entry order should be rejected (80c + 25c = 105c > $1.00)
-        entry_req = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, 0.5, False)
+        # Entry order should be rejected (150c + 60c = 210c > $2.00)
+        entry_req = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 60, 2.0, 5, 0.5, False)
         allocated_entry, _, _ = allocator.request_allocation(entry_req)
         assert not allocated_entry
         
@@ -272,12 +289,12 @@ class TestExitOrderIntegration:
         
         # Release slot
         allocator.release_slot(slot1, exit_price_cents=50)
-        assert abs(allocator.get_total_exposure() - 0.40) < 0.01  # Was 80c, released 40c, now 40c
+        assert abs(allocator.get_total_exposure() - 0.75) < 0.01  # Was 150c, released 75c
         
         # Entry order should now be allowed
         allocated_entry2, _, _ = allocator.request_allocation(entry_req)
         assert allocated_entry2
-        assert abs(allocator.get_total_exposure() - 0.65) < 0.01  # 40c (DOGE) + 25c (SOL) = 65c
+        assert abs(allocator.get_total_exposure() - 1.35) < 0.01  # 75c (DOGE) + 60c (SOL)
         
         print("✓ Concurrent exit and entry orders test passed")
     
