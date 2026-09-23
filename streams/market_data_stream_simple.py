@@ -247,18 +247,28 @@ class MarketDataStream(BaseStream):
             )
             
             # Create EventEnvelope
+            from core.events import EventMetadata
             event = EventEnvelope(
                 event_id=f"market_{tick.symbol}_{int(timestamp.timestamp())}_{hash(str(tick)) % 10000}",
                 event_type=EventType.MARKET_DATA,
-                timestamp=timestamp,
+                timestamp=timestamp.timestamp(),
                 source=self.stream_type(),
-                data=tick,
-                priority=EventPriority.NORMAL,
-                metadata={
+                payload={
+                    "symbol": tick.symbol,
+                    "price": tick.price,
+                    "volume": tick.volume,
                     "exchange": tick.exchange,
                     "venue": tick.venue,
-                    "side": tick.side
-                }
+                    "side": tick.side,
+                    "size": tick.size,
+                    "tick_id": tick.tick_id,
+                },
+                priority=EventPriority.NORMAL,
+                metadata=EventMetadata(
+                    producer_id=self._stream_id,
+                    producer_type="market_data_stream",
+                    tags={"exchange": tick.exchange, "venue": tick.venue, "side": tick.side},
+                ),
             )
             
             return event
