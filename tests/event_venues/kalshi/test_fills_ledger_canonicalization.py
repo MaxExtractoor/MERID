@@ -21,6 +21,7 @@ import aiosqlite
 import pytest
 
 from merid.event_venues.kalshi.fills_ledger import (
+    CANONICALIZATION_VERSION,
     KalshiFill,
     KalshiFillsLedger,
     OrderIntent,
@@ -151,9 +152,9 @@ class TestKalshiFillProvenance:
         }
         fill = fresh_ledger._parse_fill(raw, "http_poller")
         assert fill.ledger_schema_version == 3
-        # canonicalization_version 2 -> 3 with the position-aware proceeds
-        # recompute and signed-YES replay accounting (2026-09-21 audit fix).
-        assert fill.canonicalization_version == 3
+        # canonicalization_version tracks the current canonicalizer; v4 added
+        # the buy-form netting fix for signed proceeds (2026-09-23 audit).
+        assert fill.canonicalization_version == CANONICALIZATION_VERSION
         assert fill.canonicalization_state == "TRUSTED_LIVE_V1"
         assert fill.canonical_position_side == "no"
         assert fill.canonical_position_action == "buy"

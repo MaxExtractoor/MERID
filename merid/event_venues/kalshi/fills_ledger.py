@@ -423,8 +423,12 @@ def validate_fee_vs_estimate(
 # 2026-08-13: Schema version for durable fill records.  Version 1 = raw only;
 # Version 2 = canonical fields backfilled from raw; Version 3 = execution-derived
 # canonical fields with explicit canonicalization_state and strict legacy rules.
+# CANONICALIZATION_VERSION 4 = signed-proceeds fix: buy-form fills that net a
+# held complement position now CREDIT the opposite leg price instead of always
+# debiting the execution leg price (2026-09-23 audit — sell-NO exits reported
+# by Kalshi in buy-YES complement form were booked as ~-$1/contract debits).
 LEDGER_SCHEMA_VERSION: int = 3
-CANONICALIZATION_VERSION: int = 3
+CANONICALIZATION_VERSION: int = 4
 TRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1", "TRUSTED_PAPER_V1"})
 UNTRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"UNTRUSTED_LEGACY", "UNTRUSTED_RAW", "UNTRUSTED_SIDE_CONFLICT"})
 
@@ -4890,6 +4894,77 @@ class KalshiFillsLedger:
                 total += delta
         return total
 
+    def _compute_signed_fill_proceeds(
+        self,
+        market_ticker: str,
+        *,
+        execution_action: str,
+        proceeds_side: Optional[str],
+        proceeds_price: Decimal,
+        opposite_price: Optional[Decimal],
+        count_fp: Decimal,
+        quantity_cc: Optional[int],
+        before_time: Optional[datetime] = None,
+        exclude_fill_id: Optional[str] = None,
+        exclude_order_id: Optional[str] = None,
+        fee: Decimal = Decimal("0"),
+    ) -> Decimal:
+        """Signed cash the exchange booked for a fill, net of fee.
+
+        Kalshi's book is YES-normalized, so the cash a fill moves depends on
+        what the account held before the fill:
+
+        - sell-form fills CREDIT the execution leg price only for the portion
+          covered by a held contract of that side; the uncovered remainder
+          acquires the complement via pair-mint and PAYS the opposite leg
+          price;
+        - buy-form fills are the mirror image: the portion that nets against a
+          held complement position CREDITS the opposite leg price (Kalshi nets
+          complement holdings at fill time — ``buy yes`` while holding NO
+          credits ``no_price``); only the uncovered remainder PAYS the
+          execution leg price.
+
+        Verified against live balance snapshots 2026-09-23: ``sell no`` exit
+        fills reported by Kalshi in complement ``buy yes`` form moved exchange
+        cash by ``+no_price * count`` while the previous unconditional
+        ``-exec_price * count`` treatment inverted each such fill's cash by
+        exactly $1.00 per contract.
+        """
+        qty_cc = int(quantity_cc or (count_fp * 100))
+        prior_cc = self._prior_signed_yes_cc(
+            market_ticker,
+            before_time=before_time,
+            exclude_fill_id=exclude_fill_id,
+            exclude_order_id=exclude_order_id,
+        )
+        held_side = "yes" if prior_cc > 0 else ("no" if prior_cc < 0 else None)
+        opposite_side = "no" if proceeds_side == "yes" else "yes"
+
+        if execution_action == "buy":
+            covered_cc = (
+                min(abs(prior_cc), qty_cc)
+                if held_side == opposite_side
+                else 0
+            )
+            covered_fp = Decimal(covered_cc) / Decimal(100)
+            minted_fp = count_fp - covered_fp
+            return (
+                (opposite_price or Decimal("0")) * covered_fp
+                - proceeds_price * minted_fp
+                - fee
+            )
+
+        covered_cc = (
+            min(abs(prior_cc), qty_cc) if held_side == proceeds_side else 0
+        )
+        covered_fp = Decimal(covered_cc) / Decimal(100)
+        minted_fp = count_fp - covered_fp
+        return (
+            proceeds_price * covered_fp
+            - (opposite_price or Decimal("0")) * minted_fp
+            - fee
+        )
+
     def _replay_market_position(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Rebuild the open-position record for a market by replaying its fills.
 
@@ -5605,31 +5680,21 @@ class KalshiFillsLedger:
             if exec_price is None and existing.canonical_leg_price_cents is not None:
                 exec_price = Decimal(str(existing.canonical_leg_price_cents)) / Decimal("100")
             if exec_price is not None and existing.count_fp is not None:
-                gross = exec_price * existing.count_fp
                 fee = existing.fee_cost or Decimal("0")
                 exec_action = (existing.execution_action or existing.canonical_position_action or "").lower()
-                if exec_action == "buy":
-                    existing.proceeds_dollars = -gross - fee
-                else:
-                    prior_signed_cc = self._prior_signed_yes_cc(
-                        existing.market_ticker,
-                        before_time=existing.created_time,
-                        exclude_fill_id=existing.fill_id,
-                        exclude_order_id=existing.order_id,
-                    )
-                    held_side = "yes" if prior_signed_cc > 0 else ("no" if prior_signed_cc < 0 else None)
-                    qty_cc_local = int(existing.quantity_cc or (existing.count_fp * 100))
-                    covered_cc = (
-                        min(abs(prior_signed_cc), qty_cc_local)
-                        if held_side == exec_side else 0
-                    )
-                    covered_fp = Decimal(covered_cc) / Decimal(100)
-                    minted_fp = existing.count_fp - covered_fp
-                    existing.proceeds_dollars = (
-                        exec_price * covered_fp
-                        - (opposite_price or Decimal("0")) * minted_fp
-                        - fee
-                    )
+                existing.proceeds_dollars = self._compute_signed_fill_proceeds(
+                    existing.market_ticker,
+                    execution_action=exec_action,
+                    proceeds_side=exec_side,
+                    proceeds_price=exec_price,
+                    opposite_price=opposite_price,
+                    count_fp=existing.count_fp,
+                    quantity_cc=existing.quantity_cc,
+                    before_time=existing.created_time,
+                    exclude_fill_id=existing.fill_id,
+                    exclude_order_id=existing.order_id,
+                    fee=fee,
+                )
         except Exception as e:
             logger.warning(
                 "[FILLS-LEDGER-LIVE-PROMOTE] could not recompute proceeds for %s: %s",
@@ -7660,12 +7725,16 @@ class KalshiFillsLedger:
         # 2026-08-30: Calculate and assert proceeds_dollars (net cash flow after
         # fees).  Kalshi's book is YES-normalized, so the cash a fill moves
         # depends on what the account held, not just the wire-form action:
-        #   buy-form fills always PAY the execution leg price;
         #   sell-form fills CREDIT the leg price only for the portion covered
         #   by a held contract of that side — the uncovered remainder acquires
-        #   the complement via pair-mint and PAYS the opposite leg price.
+        #   the complement via pair-mint and PAYS the opposite leg price;
+        #   buy-form fills are the mirror image — the portion that nets a held
+        #   complement position CREDITS the opposite leg price, and only the
+        #   uncovered remainder PAYS the execution leg price.
         # Treating every sell-form fill as +price inverted cash by exactly $1
-        # per contract on complement-form entries (2026-09-21 audit).
+        # per contract on complement-form entries (2026-09-21 audit); treating
+        # every buy-form fill as -price inverted cash by $1 per contract on
+        # complement-form exits (2026-09-23 audit, verified vs balance deltas).
         proceeds: Optional[Decimal] = None
         _proceeds_side = _execution_outcome_side or _raw_traded_side
         _proceeds_price = (
@@ -7680,31 +7749,19 @@ class KalshiFillsLedger:
             and _proceeds_price is not None
             and _execution_action in ("buy", "sell")
         ):
-            if _execution_action == "buy":
-                _expected_proceeds = -(_proceeds_price * _count_fp) - fee_decimal
-            else:
-                _qty_cc_local = int(_quantity_cc or (_count_fp * 100))
-                _prior_signed_cc = self._prior_signed_yes_cc(
-                    _ticker_for_identity,
-                    before_time=created_time,
-                    exclude_fill_id=str(fill_id),
-                    exclude_order_id=order_id,
-                )
-                _held_side = (
-                    "yes" if _prior_signed_cc > 0
-                    else ("no" if _prior_signed_cc < 0 else None)
-                )
-                _covered_cc = (
-                    min(abs(_prior_signed_cc), _qty_cc_local)
-                    if _held_side == _proceeds_side else 0
-                )
-                _covered_fp = Decimal(_covered_cc) / Decimal(100)
-                _minted_fp = _count_fp - _covered_fp
-                _expected_proceeds = (
-                    _proceeds_price * _covered_fp
-                    - (_opposite_price or Decimal("0")) * _minted_fp
-                    - fee_decimal
-                )
+            _expected_proceeds = self._compute_signed_fill_proceeds(
+                _ticker_for_identity,
+                execution_action=_execution_action,
+                proceeds_side=_proceeds_side,
+                proceeds_price=_proceeds_price,
+                opposite_price=_opposite_price,
+                count_fp=_count_fp,
+                quantity_cc=_quantity_cc,
+                before_time=created_time,
+                exclude_fill_id=str(fill_id),
+                exclude_order_id=order_id,
+                fee=fee_decimal,
+            )
 
             _raw_proceeds = raw.get("proceeds") or raw.get("proceeds_dollars")
             if _raw_proceeds is not None:
