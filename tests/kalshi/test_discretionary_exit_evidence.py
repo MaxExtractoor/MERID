@@ -302,13 +302,14 @@ def _run_corpus_json(policy_mode: str = "base") -> str:
 _UNTRUSTED_VOL = frozenset({"", "default", "requested", "fallback", "unknown",
                             "n/a", "none"})
 _DISCRETIONARY_REASONS = frozenset({
-    "stop_loss", "trailing_stop", "take_profit", "signal_reversal",
-    "model_invalidation", "time_exit", "edge_decay", "loss_cut",
-    "scale_out", "ratchet_trim", "value_switch_exit",
+    "stop_loss", "loss_cut", "value_switch_exit",
 })
 _OPERATIONAL_REASONS = frozenset({
     "reconciliation", "manual", "market_expired", "market_closed",
     "mechanical_time_exit", "scheduled_closeout",
+    "trailing_stop", "take_profit", "signal_reversal",
+    "model_invalidation", "time_exit", "edge_decay",
+    "scale_out", "ratchet_trim",
 })
 _EMERGENCY_REASONS = frozenset({"expiry_liquidation", "emergency", "hard_risk"})
 _TRUSTED_RISK_STATES = frozenset({"original_persisted", "fallback"})

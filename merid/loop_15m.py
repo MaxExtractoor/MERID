@@ -84,7 +84,7 @@ _MERID_EXIT_EMERGENCY_REASONS = frozenset({"expiry_liquidation"})
 
 # Reasons that are allowed to take a bounded loss (they are loss-seeking by
 # construction) but are not unrestricted emergency exits.
-_MERID_EXIT_STOP_REASONS = frozenset({"stop_loss", "trailing_stop", "loss_cut_40pct"})
+_MERID_EXIT_STOP_REASONS = frozenset({"stop_loss", "trailing_stop", "loss_cut_40pct", "loss_cut"})
 
 # Hard-risk / model-invalidation exits may realize the full position premium
 # if the thesis has broken.  They bypass the discretionary profit floor and
