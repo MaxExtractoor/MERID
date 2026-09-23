@@ -60,6 +60,12 @@ _os.environ["MERID_MARKET_ANCHOR_MAX_W"] = "0"
 _os.environ["MERID_ENTRY_MIN_SECONDS_TO_EXPIRY"] = "0"
 _os.environ["MERID_FLB_LONGSHOT_SLOPE"] = "0"
 _os.environ["MERID_ENTRY_MAKER_ENABLED"] = "0"
+# Markout telemetry must not write into production logs during tests.
+_os.environ["MERID_ENTRY_MARKOUT_LOG"] = str(
+    __import__("pathlib").Path(
+        __import__("tempfile").gettempdir()
+    ) / "merid_test_entry_markouts.jsonl"
+)
 
 # ── Durable-state isolation (2026-09-22 audit) ─────────────────────────────
 # Tests must never read or write the production-like durable state under the
