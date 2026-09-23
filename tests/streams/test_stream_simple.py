@@ -92,7 +92,7 @@ async def test_event_subscription():
         event_count = 0
         async for event in stream.subscribe():
             event_count += 1
-            print(f"📡 Event {event_count}: {event.event_type} for {event.data.symbol} at ${event.data.price}")
+            print(f"📡 Event {event_count}: {event.event_type} for {event.payload['symbol']} at ${event.payload['price']}")
             
             if event_count >= 5:  # Test 5 events
                 break

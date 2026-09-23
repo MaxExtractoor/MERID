@@ -15,7 +15,7 @@ from datetime import datetime
 from collections import deque
 
 from streams.base_stream import BaseStream, StreamState
-from core.events import EventEnvelope, EventType, EventPriority
+from core.events import EventEnvelope, EventType, EventPriority, EventMetadata
 from utils.logger import get_logger
 
 logger = get_logger("market_data_stream")
@@ -54,7 +54,8 @@ class MarketDataStream(BaseStream):
     """
     
     def __init__(self, config: Dict[str, Any]):
-        super().__init__()
+        stream_id = config.get("stream_id", "market_data_default")
+        super().__init__(stream_id=stream_id)
         self.config = config
         self.source_type = config.get("source_type", "mock")  # "websocket", "http", "mock"
         self.source_url = config.get("source_url", "")
@@ -358,17 +359,26 @@ class MarketDataStream(BaseStream):
             lag_ms = (wall_time - provider_ts).total_seconds() * 1000
             event = EventEnvelope(
                 event_id=f"market_{tick.symbol}_{int(provider_ts.timestamp())}_{hash(str(tick)) % 10000}",
-                event_type="market_tick",
-                timestamp=provider_ts,
+                event_type=EventType.MARKET_DATA,
+                timestamp=provider_ts.timestamp(),
                 source=self.stream_type(),
-                data=tick,
-                metadata={
+                payload={
+                    "symbol": tick.symbol,
+                    "price": tick.price,
+                    "volume": tick.volume,
                     "exchange": tick.exchange,
                     "venue": tick.venue,
                     "side": tick.side,
+                    "size": tick.size,
+                    "tick_id": tick.tick_id,
                     "lag_ms": round(lag_ms, 1),
                     "wall_time": wall_time.isoformat(),
-                }
+                },
+                metadata=EventMetadata(
+                    producer_id=self._stream_id,
+                    producer_type="market_data_stream",
+                    tags={"exchange": tick.exchange, "venue": tick.venue, "side": tick.side},
+                ),
             )
 
             return event
