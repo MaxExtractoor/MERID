@@ -22,25 +22,25 @@ class TestParseKalshiTicker:
     """Test parsing of valid Kalshi tickers."""
 
     def test_valid_btc_ticker(self):
-        """Parse a valid BTC 15m ticker."""
+        """Parse a valid BTC 15m ticker (YYMONDDHHMM layout)."""
         result = parse_kalshi_ticker("KXBTC15M-26MAR251500")
         assert result is not None
         assert result.asset == "BTC"
-        assert result.day == 26
+        assert result.day == 25
         assert result.month == "MAR"
-        assert result.year == 2025
+        assert result.year == 2026
         assert result.hour == 15
         assert result.minute == 0
         assert result.is_valid is True
 
     def test_valid_doge_ticker(self):
-        """Parse a valid DOGE 15m ticker."""
+        """Parse a valid DOGE 15m ticker (YYMONDDHHMM layout)."""
         result = parse_kalshi_ticker("KXDOGE15M-26APR251915")
         assert result is not None
         assert result.asset == "DOGE"
-        assert result.day == 26
+        assert result.day == 25
         assert result.month == "APR"
-        assert result.year == 2025
+        assert result.year == 2026
         assert result.hour == 19
         assert result.minute == 15
         assert result.is_valid is True
@@ -86,7 +86,9 @@ class TestInvalidTickerParsing:
     def test_invalid_month(self):
         """Reject ticker with invalid month."""
         result = parse_kalshi_ticker("KXBTC15M-26XYZ251500")
-        assert result is None  # Should not match regex
+        assert result is not None  # Parses but invalid
+        assert result.is_valid is False
+        assert "month" in result.error_message.lower()
 
     def test_empty_ticker(self):
         """Reject empty ticker."""
@@ -127,36 +129,34 @@ class TestTimeNormalization:
         assert normalized == ticker
 
     def test_normalize_ticker_time_invalid_minute(self):
-        """Invalid minute should be floored."""
-        # This would be caught by regex first, but test normalization
+        """Non-boundary minute should be floored to the 15m boundary."""
         ticker = "KXDOGE15M-26APR251916"
         normalized = normalize_ticker_time(ticker)
-        # Since 1916 doesn't match regex, should return original
-        # (In real implementation, we'd need to handle this differently)
-        assert normalized == ticker  # Returns as-is if can't parse
+        # Minute 16 floors to 15 under the canonical YYMONDDHHMM layout
+        assert normalized == "KXDOGE15M-26APR251915"
 
 
 class TestFormatTickerFor15mWindow:
     """Test correct ticker formatting."""
 
     def test_format_btc_ticker(self):
-        """Format a BTC ticker for 15m window."""
+        """Format a BTC ticker for 15m window (YYMONDDHHMM layout)."""
         window = datetime(2025, 3, 26, 15, 0, 0)
         ticker = format_ticker_for_15m_window("BTC", window)
-        assert ticker == "KXBTC15M-26MAR251500"
+        assert ticker == "KXBTC15M-25MAR261500"
 
     def test_format_doge_ticker(self):
-        """Format a DOGE ticker for 15m window."""
+        """Format a DOGE ticker for 15m window (YYMONDDHHMM layout)."""
         window = datetime(2025, 4, 26, 19, 15, 0)
         ticker = format_ticker_for_15m_window("DOGE", window)
-        assert ticker == "KXDOGE15M-26APR251915"
+        assert ticker == "KXDOGE15M-25APR261915"
 
     def test_format_with_flooring(self):
         """Time should be floored to 15m boundary when formatting."""
         window = datetime(2025, 4, 26, 19, 16, 45)  # 19:16:45
         ticker = format_ticker_for_15m_window("DOGE", window)
         # Should be floored to 19:15
-        assert ticker == "KXDOGE15M-26APR251915"
+        assert ticker == "KXDOGE15M-25APR261915"
 
     def test_format_all_months(self):
         """Test formatting across all months."""
@@ -168,7 +168,7 @@ class TestFormatTickerFor15mWindow:
         for month_num, month_abbr in test_cases:
             window = datetime(2025, month_num, 15, 12, 30, 0)
             ticker = format_ticker_for_15m_window("BTC", window)
-            expected = f"KXBTC15M-15{month_abbr}251230"
+            expected = f"KXBTC15M-25{month_abbr}151230"
             assert ticker == expected
 
 

@@ -15,6 +15,18 @@ from merid.event_venues.kalshi.order_router import (
 )
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter, reset_rate_limiter
 
+
+@pytest.fixture(autouse=True)
+def _pass_live_entry_gate():
+    """Pass the P0 startup state-machine gate so tests exercise their
+    intended downstream gates (pricing validation, rate limits)."""
+    with patch(
+        'merid.event_venues.kalshi.order_router.can_submit_live_entry',
+        return_value=True,
+    ):
+        yield
+
+
 class TestOrderRouterPricingValidation:
     """Test order router pricing validation."""
     

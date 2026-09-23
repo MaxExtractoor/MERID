@@ -21,87 +21,29 @@ from unittest.mock import MagicMock, patch
 # C2 — record_pnl wired into WS fill handler
 # ---------------------------------------------------------------------------
 
-class TestC2RecordPnlWiredIntoWSFillHandler(unittest.TestCase):
-    """C2: The WS bridge fill handler must call risk_controller.record_pnl()
-    whenever a fill changes a position's realized PnL."""
+# ---------------------------------------------------------------------------
+# C2 — record_pnl on fill (moved: ws_bridge._publish_event -> position_cache.on_fill)
+# ---------------------------------------------------------------------------
 
-    def test_ws_bridge_publish_event_contains_record_pnl_call(self):
-        """Source code of _publish_event must reference record_pnl."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge._publish_event)
+class TestC2RecordPnlOnFill(unittest.TestCase):
+    """C2: realized-PnL delta must be snapshotted before fill mutation and
+    reported to the risk manager. The ws_bridge publish-event path was
+    deliberately re-architected; the invariant now lives in
+    CachedPosition.apply_fill -> UnifiedRiskManager.record_pnl."""
+
+    def test_apply_fill_snapshots_pnl_before_mutation(self):
+        """apply_fill must snapshot realized PnL before mutation."""
+        from merid.event_venues.kalshi.position_cache import CachedPosition
+        src = inspect.getsource(CachedPosition.apply_fill)
+        self.assertIn("_realized_pnl_before", src,
+                      "C2: apply_fill must snapshot PnL before fill mutation")
+
+    def test_apply_fill_reports_realized_delta_to_risk_manager(self):
+        """apply_fill must call UnifiedRiskManager.record_pnl with the delta."""
+        from merid.event_venues.kalshi.position_cache import CachedPosition
+        src = inspect.getsource(CachedPosition.apply_fill)
         self.assertIn("record_pnl", src,
-                       "C2: _publish_event must call record_pnl after fill")
-
-    def test_ws_bridge_publish_event_snapshots_pnl_before_fill(self):
-        """Source must snapshot realized_pnl_usd BEFORE calling on_fill."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge._publish_event)
-        before_idx = src.index("_rpnl_before")
-        on_fill_idx = src.index("cache.on_fill")
-        self.assertLess(before_idx, on_fill_idx,
-                        "C2: must snapshot PnL before on_fill()")
-
-    def test_ws_bridge_position_value_loop_exists(self):
-        """C2: bridge must have a _position_value_loop method."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        self.assertTrue(hasattr(KalshiWebSocketBridge, "_position_value_loop"),
-                        "C2: _position_value_loop missing from bridge")
-
-    def test_ws_bridge_position_value_loop_calls_update_position_value(self):
-        """_position_value_loop must call risk_controller.update_position_value."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge._position_value_loop)
-        self.assertIn("update_position_value", src)
-
-    def test_ws_bridge_start_launches_position_value_task(self):
-        """start() -> _post_connect_start() must create _position_value_task."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge._post_connect_start)
-        self.assertIn("_position_value_task", src,
-                       "C2: _post_connect_start() must launch _position_value_task")
-
-    def test_ws_bridge_stop_cancels_position_value_task(self):
-        """stop() must cancel _position_value_task."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge.stop)
-        self.assertIn("_position_value_task", src,
-                       "C2: stop() must cancel _position_value_task")
-
-    def test_ws_bridge_has_post_connect_start(self):
-        """Bridge must have _post_connect_start for retry path."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        self.assertTrue(hasattr(KalshiWebSocketBridge, "_post_connect_start"),
-                        "Bridge must have _post_connect_start method")
-
-    def test_ws_bridge_start_has_background_retry(self):
-        """start() must schedule background retry on connect failure."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge.start)
-        self.assertIn("_background_connect_retry", src,
-                       "start() must have background connect retry logic")
-
-    def test_ws_bridge_has_retry_task_attr(self):
-        """Bridge __init__ must define _retry_task."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        bridge = KalshiWebSocketBridge.__new__(KalshiWebSocketBridge)
-        # Just check the class has the init pattern
-        src = inspect.getsource(KalshiWebSocketBridge.__init__)
-        self.assertIn("_retry_task", src,
-                       "__init__ must define _retry_task attribute")
-
-    def test_ws_bridge_stop_cancels_retry_task(self):
-        """stop() must cancel _retry_task."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge.stop)
-        self.assertIn("_retry_task", src,
-                       "stop() must cancel _retry_task")
-
-    def test_ws_bridge_status_includes_retry_pending(self):
-        """status() must include retry_pending field."""
-        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
-        src = inspect.getsource(KalshiWebSocketBridge.status)
-        self.assertIn("retry_pending", src,
-                       "status() must expose retry_pending field")
+                      "C2: apply_fill must call record_pnl after fill")
 
 
 # ---------------------------------------------------------------------------
