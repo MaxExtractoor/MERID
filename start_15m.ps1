@@ -379,3 +379,8 @@ $ErrorActionPreference = "Continue"
 # Prefer the project virtualenv so the exact package set is used.
 $python = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.exe" } else { "py" }
 & $python -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level info
+# 2026-09-23: capture the exit path — the server has died silently twice with
+# no traceback.  If uvicorn exits cleanly we get its code here; if this line
+# never appears in the console log, the process was terminated externally.
+$exitCode = $LASTEXITCODE
+Write-Host "[start_15m] uvicorn process exited: LASTEXITCODE=$exitCode at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Red
