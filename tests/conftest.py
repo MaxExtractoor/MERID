@@ -110,6 +110,8 @@ for _env_key, _fname in {
     "MERID_RISK_AUDIT_LOG": "risk_audit_chain.jsonl",
     "MERID_HEALTH_DIAGNOSTIC_PATH": "health_diagnostic.txt",
     "MERID_TRADE_TRACE_PATH": "kalshi_trade_trace.jsonl",
+    "MERID_WINDOW_STATE_FILE": "window_exposure_state.json",
+    "MERID_REWARD_ENGINE_DB": "reward_engine.db",
     "MERID_WARMUP_SNAPSHOTS_DIR": "warmup_snapshots",
     "MERID_RUN_SUMMARIES_DIR": "run_summaries",
     "MERID_INGRESS_DIR": "ingress",

@@ -14730,6 +14730,12 @@ async def _route_live(
                 record_order_reject()
             except Exception as e:
                 logger.debug(f"Order reject metric failed: {e}")
+            # C3: feed the consecutive-rejection kill switch on exchange rejection.
+            try:
+                from merid.risk.kill_switches import risk_controller
+                risk_controller.record_order_rejection(reason or "exchange_reject")
+            except Exception as e:
+                logger.debug(f"Order rejection kill-switch record failed: {e}")
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -14743,6 +14749,12 @@ async def _route_live(
 
         # Order successfully submitted to exchange - record in rate limiter
         _record_successful_order()
+        # C3: reset the consecutive-rejection kill switch counter on exchange accept.
+        try:
+            from merid.risk.kill_switches import risk_controller
+            risk_controller.record_order_success()
+        except Exception as e:
+            logger.debug(f"Order success kill-switch record failed: {e}")
 
         # Note: _record_order_placed(intent) already called BEFORE submission to prevent race condition
 

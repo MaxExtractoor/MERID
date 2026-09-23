@@ -57,6 +57,30 @@ response = requests.post("https://api.kalshi.com/trade-api/v2/orders",
 # Test Cases
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _resolve_bash() -> str:
+    """Return a working bash executable, or skip if none exists.
+
+    On Windows, bare ``bash`` can resolve to WSL's bash.exe which fails when
+    Hyper-V is unavailable. Probe candidates and return the first that runs.
+    """
+    candidates = []
+    # usr/bin/bash.exe is the real MSYS bash; bin/bash.exe is a small launcher.
+    for rel in (r"C:\Program Files\Git\usr\bin\bash.exe", r"C:\Program Files\Git\bin\bash.exe"):
+        if Path(rel).exists():
+            candidates.append(rel)
+    candidates.append("bash")
+    for cand in candidates:
+        try:
+            probe = subprocess.run(
+                [cand, "-c", "exit 0"], capture_output=True, timeout=15
+            )
+            if probe.returncode == 0:
+                return cand
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    pytest.skip("No working bash available (WSL bash unusable; Git Bash not found)")
+
+
 class TestShadowPathGuard:
     """Verify shadow_path_guard.sh detects banned patterns."""
     
@@ -75,13 +99,24 @@ class TestShadowPathGuard:
         repo_root = Path(__file__).parent.parent
         return repo_root / ".ci" / "shadow_path_whitelist.txt"
     
-    def test_guard_passes_clean_repo(self, guard_script: Path):
-        """Guard should pass on current repo (no poison)."""
+    def test_guard_passes_clean_repo(self, guard_script: Path, tmp_path: Path):
+        """Guard should pass on a clean tree (no poison)."""
+        clean_dir = tmp_path / "merid"
+        clean_dir.mkdir()
+        (clean_dir / "clean_module.py").write_text(
+            "# clean module — routes via order_router\n"
+            "from merid.event_venues.kalshi.order_router import KalshiOrderRouter\n"
+        )
         result = subprocess.run(
-            ["bash", str(guard_script)],
+            [_resolve_bash(), guard_script.as_posix()],
             capture_output=True,
-            text=True,
-            cwd=guard_script.parent.parent.parent,
+            encoding="utf-8",
+            errors="replace",
+            cwd=tmp_path,
+            timeout=120,
+        )
+        assert result.returncode == 0, (
+            f"Guard should pass on clean tree\nOutput: {result.stdout}\nStderr: {result.stderr}"
         )
         # Note: This may fail if there are actual violations
         # The test is informational - it documents the current state
@@ -91,13 +126,17 @@ class TestShadowPathGuard:
             print(f"Guard stderr:\n{result.stderr}")
     
     @pytest.mark.parametrize("poison_idx", range(len(POISON_PILLS)))
-    def test_guard_detects_poison_pill(self, guard_script: Path, poison_idx: int):
+    def test_guard_detects_poison_pill(self, guard_script: Path, poison_idx: int, tmp_path: Path):
         """Guard must fail when poison pill is injected."""
-        repo_root = guard_script.parent.parent.parent
         poison_content = POISON_PILLS[poison_idx]
         
-        # Create a temp file with poison content
-        temp_file = repo_root / f"tests_fixtures_ci_poison_{poison_idx}.py"
+        # Create a temp file with poison content inside a scanned dir.
+        # The script scans relative SCAN_DIRS from cwd, so run it against a
+        # minimal fixture tree — scanning the real merid/ tree takes minutes
+        # under Git Bash on Windows.
+        scan_dir = tmp_path / "merid"
+        scan_dir.mkdir()
+        temp_file = scan_dir / f"ci_poison_fixture_{poison_idx}.py"
         
         try:
             # Write poison pill
@@ -105,10 +144,12 @@ class TestShadowPathGuard:
             
             # Run guard
             result = subprocess.run(
-                ["bash", str(guard_script)],
+                [_resolve_bash(), guard_script.as_posix()],
                 capture_output=True,
-                text=True,
-                cwd=repo_root,
+                encoding="utf-8",
+                errors="replace",
+                cwd=tmp_path,
+                timeout=120,
             )
             
             # Guard MUST fail (exit code != 0)

@@ -101,10 +101,10 @@ for dir in $SCAN_DIRS; do
             fi
         fi
         
-        # Check for shadow patterns
+        # Check for shadow patterns (ERE: patterns use (...) groups and | alternation)
         for pattern in "${SHADOW_PATTERNS[@]}"; do
-            if grep -n "$pattern" "$file" 2>/dev/null | head -1 >/dev/null; then
-                line=$(grep -n "$pattern" "$file" | head -1)
+            if grep -nE "$pattern" "$file" 2>/dev/null | head -1 >/dev/null; then
+                line=$(grep -nE "$pattern" "$file" | head -1)
                 echo -e "${RED}VIOLATION${NC}: $file"
                 echo "  Pattern: $pattern"
                 echo "  Line: $line"
