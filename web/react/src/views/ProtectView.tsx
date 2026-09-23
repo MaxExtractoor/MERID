@@ -77,7 +77,7 @@ interface RiskAlert {
   acknowledged?: boolean;
 }
 
-interface SizingMetrics {
+interface ProtectSizingMetrics {
   drawdown_tier: 'normal' | 'warning' | 'downsize' | 'halt';
   drawdown_pct: number;
   drawdown_thresholds: {
@@ -173,7 +173,7 @@ const ProtectView: React.FC = () => {
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST }
   );
 
-  const sizingRes = useApiQuery<SizingMetrics>(
+  const sizingRes = useApiQuery<ProtectSizingMetrics>(
     API_ENDPOINTS.KALSHI_SIZING_METRICS,
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );

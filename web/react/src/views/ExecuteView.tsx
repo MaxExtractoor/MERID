@@ -51,7 +51,7 @@ interface Order {
   client_tag?: string;
 }
 
-interface Market {
+interface ExecuteMarket {
   ticker: string;
   question: string;
   yes_price: number;
@@ -127,7 +127,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const marketsRes = useApiQuery<{ markets: Market[] }>(
+  const marketsRes = useApiQuery<{ markets: ExecuteMarket[] }>(
     `${API_ENDPOINTS.KALSHI_MARKETS}?limit=100`,
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
@@ -158,7 +158,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
   const markets = marketsRes.data?.markets || [];
   
   const selectedMarket = useMemo(() => 
-    markets.find((m: Market) => m.ticker === selectedTicker),
+    markets.find((m: ExecuteMarket) => m.ticker === selectedTicker),
     [markets, selectedTicker]
   );
   
@@ -278,12 +278,12 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
         {/* Terminal Tab */}
         {activeTab === 'terminal' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Market Selector & Orderbook */}
+            {/* ExecuteMarket Selector & Orderbook */}
             <div className="space-y-4">
-              {/* Market Selector */}
+              {/* ExecuteMarket Selector */}
               <Card>
                 <CardHeader>
-                  <CardTitle size="sm">Select Market</CardTitle>
+                  <CardTitle size="sm">Select ExecuteMarket</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <select
@@ -292,7 +292,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                     className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
                   >
                     <option value="">Choose a market...</option>
-                    {markets.map((m: Market) => (
+                    {markets.map((m: ExecuteMarket) => (
                       <option key={m.ticker} value={m.ticker}>
                         {m.ticker} — {m.question.slice(0, 50)}...
                       </option>
@@ -383,7 +383,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-500 text-xs uppercase">
-                      <th className="text-left p-3">Market</th>
+                      <th className="text-left p-3">ExecuteMarket</th>
                       <th className="text-left p-3">Side</th>
                       <th className="text-right p-3">Price</th>
                       <th className="text-right p-3">Size</th>
@@ -506,7 +506,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-500 text-xs uppercase">
-                      <th className="text-left p-3">Market</th>
+                      <th className="text-left p-3">ExecuteMarket</th>
                       <th className="text-left p-3">Side</th>
                       <th className="text-right p-3">Contracts</th>
                       <th className="text-right p-3">Avg Price</th>

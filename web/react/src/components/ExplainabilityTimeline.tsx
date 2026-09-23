@@ -7,7 +7,7 @@ import { useApiQuery } from '../hooks/useTanStackQuery';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
-interface DecisionEvent {
+interface TimelineDecisionEvent {
   id: string;
   timestamp: string;
   agent: string;
@@ -40,7 +40,7 @@ export default function ExplainabilityTimeline() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [phaseFilter, setPhaseFilter] = useState<string>('all');
 
-  const { data: rawData, isLoading, error: fetchError, refetch } = useApiQuery<{ decisions: DecisionEvent[] }>(
+  const { data: rawData, isLoading, error: fetchError, refetch } = useApiQuery<{ decisions: TimelineDecisionEvent[] }>(
     API_ENDPOINTS.EXPLAINABILITY_DECISIONS,
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
@@ -52,7 +52,7 @@ export default function ExplainabilityTimeline() {
 
   const filtered = phaseFilter === 'all'
     ? events
-    : events.filter((e: DecisionEvent) => e.phase === phaseFilter);
+    : events.filter((e: TimelineDecisionEvent) => e.phase === phaseFilter);
 
   const formatTime = (ts: string) => {
     const d = new Date(ts);
@@ -115,7 +115,7 @@ export default function ExplainabilityTimeline() {
         <div className="absolute left-4 top-0 bottom-0 w-px bg-slate-700" />
 
         <div className="space-y-3">
-          {filtered.map((event: DecisionEvent) => {
+          {filtered.map((event: TimelineDecisionEvent) => {
             const isExpanded = expandedId === event.id;
             const phaseCfg = PHASE_COLORS[event.phase] || PHASE_COLORS.REVIEW;
             const outcomeCfg = OUTCOME_CONFIG[event.outcome] || OUTCOME_CONFIG.pending;

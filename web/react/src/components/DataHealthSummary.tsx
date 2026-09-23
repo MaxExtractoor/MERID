@@ -4,7 +4,7 @@ import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { DataFreshnessIndicator } from './DataFreshnessIndicator';
 
-interface DataFeed {
+interface HealthDataFeed {
   name: string;
   source: string;
   lastUpdate: string;
@@ -19,7 +19,7 @@ export default function DataHealthSummary() {
     loading,
     error,
     refetch,
-  } = useApiData<{ feeds: DataFeed[] }>(API_ENDPOINTS.DATA_FRESHNESS, {
+  } = useApiData<{ feeds: HealthDataFeed[] }>(API_ENDPOINTS.DATA_FRESHNESS, {
     pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH,
   });
 

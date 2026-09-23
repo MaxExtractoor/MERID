@@ -68,7 +68,7 @@ interface AgentSummary {
   series_tickers?: string[];
 }
 
-interface GridStatus {
+interface PromoteGridStatus {
   running: boolean;
   agent_count: number;
   agents: AgentSummary[];
@@ -168,7 +168,7 @@ const PromoteView: React.FC = () => {
   const [gridLoading, setGridLoading] = useState(false);
   
   // Data fetching
-  const gridRes = useApiQuery<GridStatus>(
+  const gridRes = useApiQuery<PromoteGridStatus>(
     API_ENDPOINTS.KALSHI_GRID_STATUS,
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );

@@ -39,19 +39,21 @@ class TestProfileBalanceIndependence:
         adapter = Crypto15mProfileAdapter()
         profile = adapter.profile
         
-        # Verify basic profile structure
+        # Verify basic profile structure.
+        # capital_usd=0 is deliberate: USD caps are placeholders derived from
+        # live bankroll at runtime (see PROFILE_WIRING comment in loader).
         assert profile.profile_name == "kalshi_crypto_15m_v2"
-        assert profile.capital_usd == 10000.0
-        assert profile.max_cycle_risk_pct == 0.02
-        
-        # Verify venue caps
-        assert profile.venue_max_single_order_usd == 2500.0
-        assert profile.venue_max_total_notional_usd == 7500.0
-        assert profile.venue_max_category_notional_usd == 5000.0
-        
+        assert profile.capital_usd == 0.0
+        assert profile.max_cycle_risk_pct == 0.0  # disabled: fixed exposure model
+
+        # Verify venue caps are zero placeholders (computed dynamically)
+        assert profile.venue_max_single_order_usd == 0.0
+        assert profile.venue_max_total_notional_usd == 0.0
+        assert profile.venue_max_category_notional_usd == 0.0
+
         # Verify agent defaults
-        assert profile.agent_max_notional_usd == 1000.0
-        assert profile.agent_max_orders_per_window == 3
+        assert profile.agent_max_notional_usd == 0.0
+        assert profile.agent_max_orders_per_window == 24
         
         # Verify per-asset configs exist
         assert "BTC" in profile.asset_configs
@@ -65,16 +67,18 @@ class TestProfileBalanceIndependence:
         adapter = Crypto15mProfileAdapter()
         config = adapter.to_kalshi_risk_config()
         
-        # Verify config-only values (not balance-derived)
-        assert config['max_single_order_notional_usd'] == 2500.0
-        assert config['max_total_notional_usd'] == 7500.0
-        assert config['max_daily_loss_usd'] == 200.0
-        assert config['drawdown_halt_pct'] == 0.10
-        assert config['drawdown_unwind_pct'] == 0.15
-        
-        # Verify category limits are config-only
+        # Envelope-derived values: assert structure and types, not literals
+        # (the risk envelope service is the SSOT for notional/drawdown caps).
+        assert isinstance(config['max_single_order_notional_usd'], float)
+        assert isinstance(config['max_total_notional_usd'], float)
+        assert isinstance(config['max_daily_loss_usd'], float)
+        assert 0 < config['drawdown_halt_pct'] < 1.0
+        assert 0 < config['drawdown_unwind_pct'] < 1.0
+
+        # Category limits: crypto enabled; notional is a 0 placeholder
+        # derived from live bankroll at runtime (capital_usd=0).
         assert 'crypto' in config['category_limits']
-        assert config['category_limits']['crypto']['max_notional_usd'] == 5000.0
+        assert config['category_limits']['crypto']['max_notional_usd'] == 0.0
         assert config['category_limits']['crypto']['enabled'] is True
 
     def test_adapter_to_category_limits(self):
@@ -82,9 +86,10 @@ class TestProfileBalanceIndependence:
         adapter = Crypto15mProfileAdapter()
         limits = adapter.to_category_limits()
         
-        # Verify crypto category limit is config-only
+        # Crypto category limit: enabled, bounded contracts; notional is a
+        # 0 placeholder derived from live bankroll at runtime.
         assert 'crypto' in limits
-        assert limits['crypto']['max_notional_usd'] == 5000.0
+        assert limits['crypto']['max_notional_usd'] == 0.0
         assert limits['crypto']['max_contracts'] == 500
         assert limits['crypto']['enabled'] is True
 
@@ -93,30 +98,34 @@ class TestProfileBalanceIndependence:
         adapter = Crypto15mProfileAdapter()
         cap = adapter.to_cycle_sizing_cap()
         
-        # Verify cycle sizing is based on profile capital (not live bankroll)
-        assert cap['capital_usd'] == 10000.0
-        assert cap['max_cycle_risk_pct'] == 0.02
-        assert cap['max_total_notional_usd'] == 200.0  # 2% of 10000
-        assert cap['max_notional_per_winner_usd'] == pytest.approx(66.67, rel=0.01)  # 200 / 3
+        # Cycle sizing: capital_usd=0 (derive from live bankroll) and
+        # max_cycle_risk_pct=0.0 (disabled under the fixed exposure model)
+        # produce a zero cap dict; the slot allocator's fixed cap binds.
+        assert cap['capital_usd'] == 0.0
+        assert cap['max_cycle_risk_pct'] == 0.0
+        assert cap['max_total_notional_usd'] == 0.0
+        assert cap['max_notional_per_winner_usd'] == 0.0
 
     def test_adapter_to_agent_overrides(self):
         """Test that adapter maps profile to agent overrides correctly."""
         adapter = Crypto15mProfileAdapter()
         
-        # Test BTC agent
+        # Test BTC agent. Per-asset min_edge fields were removed from
+        # overrides (edge_bands section is canonical); max_notional_usd is
+        # min(agent cap, bankroll-derived asset cap) and is non-negative.
         btc_overrides = adapter.to_agent_overrides("BTC_15M")
-        assert btc_overrides['max_notional_usd'] == 1000.0  # min(agent, asset)
-        assert btc_overrides['max_orders_per_window'] == 3
-        assert btc_overrides['max_yes_position'] == 3
-        assert btc_overrides['max_no_position'] == 3
-        assert btc_overrides['min_edge_early'] == 0.0125  # BTC: 1.25% base edge
-        assert btc_overrides['min_edge_mid'] == 0.0125
-        
-        # Test DOGE agent (different edge thresholds)
+        assert btc_overrides['max_notional_usd'] >= 0.0
+        assert btc_overrides['max_orders_per_window'] == 24
+        assert btc_overrides['max_yes_position'] == 2
+        assert btc_overrides['max_no_position'] == 2
+        assert 'min_edge_early' not in btc_overrides
+        assert 'min_edge_mid' not in btc_overrides
+
+        # Test DOGE agent — same override shape, no edge fields.
         doge_overrides = adapter.to_agent_overrides("DOGE_15M")
-        assert doge_overrides['max_notional_usd'] == 1000.0  # min(agent, asset)
-        assert doge_overrides['min_edge_early'] == 0.0275  # DOGE: 2.75% base edge (highest)
-        assert doge_overrides['min_edge_terminal'] == 0.035  # DOGE: 3.5% terminal
+        assert doge_overrides['max_notional_usd'] >= 0.0
+        assert 'min_edge_early' not in doge_overrides
+        assert 'min_edge_terminal' not in doge_overrides
 
     def test_profile_detection_env_var(self):
         """Test that profile detection works via environment variable."""
@@ -225,8 +234,10 @@ class TestProfileBalanceIndependence:
         adapter = Crypto15mProfileAdapter()
         profile = adapter.profile
         
-        # All legacy disable flags should be True for config-only behavior
-        assert profile.legacy_disable_balance_calibration is True
+        # disable_balance_calibration is deliberately False (calibrate_from_balance
+        # enabled for percentage-based caps — fixes the hardcoded $50 stack cap bug);
+        # the other bankroll-derived paths stay disabled.
+        assert profile.legacy_disable_balance_calibration is False
         assert profile.legacy_disable_dynamic_contract_caps is True
         assert profile.legacy_disable_bankroll_category_limits is True
         assert profile.legacy_disable_bankroll_prediction_risk is True
@@ -236,7 +247,7 @@ class TestProfileBalanceIndependence:
         """Test that adapter methods return correct legacy flag values."""
         adapter = Crypto15mProfileAdapter()
         
-        assert adapter.should_disable_balance_calibration() is True
+        assert adapter.should_disable_balance_calibration() is False
         assert adapter.should_disable_dynamic_contract_caps() is True
         assert adapter.should_disable_bankroll_category_limits() is True
         assert adapter.should_disable_bankroll_prediction_risk() is True

@@ -278,17 +278,12 @@ class TestBug09PaperFillFailsOnOBError:
         from merid.prediction.kalshi_tools import ToolErrorCode
 
         with patch("merid.prediction.kalshi_tools.get_venue_gate") as mock_gate, \
-             patch("merid.prediction.kalshi_tools.get_session_guard") as mock_guard, \
              patch("merid.prediction.kalshi_tools._get_client") as mock_client_fn:
 
             gate = MagicMock()
             gate.should_simulate_fill.return_value = True
             gate.check_order = MagicMock()
             mock_gate.return_value = gate
-
-            guard = MagicMock()
-            guard.is_trading_allowed.return_value = True
-            mock_guard.return_value = guard
 
             client = MagicMock()
             client.is_circuit_open = False
@@ -297,7 +292,7 @@ class TestBug09PaperFillFailsOnOBError:
 
             from merid.prediction.kalshi_tools import _kalshi_place_order
             result = await _kalshi_place_order(
-                ticker="BTC-15m-T1",
+                ticker="KXBTC15M-26SEP22-T1",
                 side="yes",
                 action="buy",
                 price_cents=55,
@@ -315,17 +310,12 @@ class TestBug09PaperFillFailsOnOBError:
         from merid.prediction.kalshi_tools import ToolValidity
 
         with patch("merid.prediction.kalshi_tools.get_venue_gate") as mock_gate, \
-             patch("merid.prediction.kalshi_tools.get_session_guard") as mock_guard, \
              patch("merid.prediction.kalshi_tools._get_client") as mock_client_fn:
 
             gate = MagicMock()
             gate.should_simulate_fill.return_value = True
             gate.check_order = MagicMock()
             mock_gate.return_value = gate
-
-            guard = MagicMock()
-            guard.is_trading_allowed.return_value = True
-            mock_guard.return_value = guard
 
             ob = MagicMock()
             ob.asks = [(Decimal("0.56"), 100)]
@@ -336,7 +326,7 @@ class TestBug09PaperFillFailsOnOBError:
             mock_client_fn.return_value = client
 
             result = await _kalshi_place_order(
-                ticker="BTC-15m-T1",
+                ticker="KXBTC15M-26SEP22-T1",
                 side="yes",
                 action="buy",
                 price_cents=56,
@@ -354,9 +344,16 @@ class TestBug09PaperFillFailsOnOBError:
 class TestBug10NotionalDecrement:
     """BUG-10 — total_notional_usd must decrease when positions are closed."""
 
-    def _fresh_risk(self):
+    def _fresh_risk(self, **overrides):
         from merid.event_venues.kalshi.kalshi_risk import KalshiRiskManager, KalshiRiskConfig
-        return KalshiRiskManager(KalshiRiskConfig())
+        defaults = dict(max_stop_loss_usd_per_cluster=1000.0)
+        defaults.update(overrides)
+        mgr = KalshiRiskManager(KalshiRiskConfig(**defaults))
+        # Seed cached equity so the bankroll cap does not fire before the
+        # notional check these tests target (order path reads cached state).
+        mgr._state.current_equity_usd = 10_000.0
+        mgr._state.peak_equity_usd = 10_000.0
+        return mgr
 
     def test_record_close_decrements_total_notional(self):
         risk = self._fresh_risk()
@@ -397,12 +394,10 @@ class TestBug10NotionalDecrement:
 
     def test_notional_blocks_orders_after_cap_hit(self):
         """Global notional cap must correctly block orders and unblock after close."""
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskManager, KalshiRiskConfig
-        cfg = KalshiRiskConfig(
+        risk = self._fresh_risk(
             max_total_notional_usd=100.0,
             max_daily_loss_usd=9999.0,
         )
-        risk = KalshiRiskManager(cfg)
         risk.record_order(category="crypto", contracts=100, price_cents=100)
         # Now at cap — next order should be blocked
         ok, reason = risk.check_order("BTC-T1", "crypto", 1, 50, edge=0.1)

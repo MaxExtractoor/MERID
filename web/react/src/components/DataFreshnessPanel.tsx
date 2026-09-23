@@ -4,7 +4,7 @@ import { useApiQuery } from '../hooks/useTanStackQuery';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
-interface DataFeed {
+interface FreshnessDataFeed {
   name: string;
   source: string;
   lastUpdate: string;
@@ -20,7 +20,7 @@ const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: string; b
 };
 
 function DataFreshnessPanel() {
-  const { data: rawData, isLoading, error: fetchError, refetch } = useApiQuery<{ feeds: DataFeed[] }>(
+  const { data: rawData, isLoading, error: fetchError, refetch } = useApiQuery<{ feeds: FreshnessDataFeed[] }>(
     API_ENDPOINTS.DATA_FRESHNESS,
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
@@ -30,7 +30,7 @@ function DataFreshnessPanel() {
   }
   const feeds = rawData?.feeds ?? [];
 
-  const sortedFeeds = [...feeds].sort((a: DataFeed, b: DataFeed) => {
+  const sortedFeeds = [...feeds].sort((a: FreshnessDataFeed, b: FreshnessDataFeed) => {
     const order: Record<string, number> = { dead: 0, stale: 1, fresh: 2 };
     return order[a.status] - order[b.status];
   });
@@ -41,8 +41,8 @@ function DataFreshnessPanel() {
     return `${(ms / 60000).toFixed(1)}m`;
   };
 
-  const staleCount = feeds.filter((f: DataFeed) => f.status === 'stale').length;
-  const deadCount = feeds.filter((f: DataFeed) => f.status === 'dead').length;
+  const staleCount = feeds.filter((f: FreshnessDataFeed) => f.status === 'stale').length;
+  const deadCount = feeds.filter((f: FreshnessDataFeed) => f.status === 'dead').length;
 
   if (isLoading) {
     return (
