@@ -1028,7 +1028,44 @@ def _resolve_trade_decision_strike(asset: str, market_state: Any, market: Any, s
 
 # Hard production floor: new entries are not allowed inside 90 seconds to expiry.
 # This is independent of any profile min_decision_minute / max_time_to_expiry.
-MERID_HARD_MIN_ENTRY_TTE_SECONDS = 90
+MERID_HARD_MIN_ENTRY_TTE_SECONDS = int(os.environ.get("MERID_HARD_MIN_ENTRY_TTE_S", "90"))
+
+
+def _settlement_lane_enabled() -> bool:
+    """Read the lane flag at call time so tests/operators can flip it live."""
+    return os.environ.get("MERID_SETTLEMENT_LANE_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+
+def _settlement_lane_min_tte() -> float:
+    try:
+        return float(os.environ.get("MERID_SETTLEMENT_LANE_MIN_TTE_S", "30"))
+    except Exception:
+        return 30.0
+
+
+def _settlement_max_missing_samples() -> int:
+    try:
+        return max(0, int(os.environ.get("MERID_SETTLEMENT_MAX_MISSING_SAMPLES", "5")))
+    except Exception:
+        return 5
+
+
+def _effective_min_entry_tte_seconds(signal_mode: str) -> float:
+    """Upstream collection floor for candidate evaluation.
+
+    When the settlement-convergence lane is enabled on the Bachelier/hybrid
+    trade-decision path, candidates inside the hard 90s floor are allowed to
+    reach ``compute_trade_decision``, which alone decides whether the lane's
+    confidence gates are met — non-eligible candidates are still rejected by
+    the min-TTE gate downstream.  Other signal modes keep the hard floor.
+    """
+    if (
+        MERID_SETTLEMENT_DISTRIBUTION_V2
+        and _settlement_lane_enabled()
+        and signal_mode in ("bachelier", "hybrid")
+    ):
+        return float(min(MERID_HARD_MIN_ENTRY_TTE_SECONDS, _settlement_lane_min_tte()))
+    return float(MERID_HARD_MIN_ENTRY_TTE_SECONDS)
 
 # Model-probability epsilon guard: p must stay inside (0, 1) at signal creation.
 MERID_MODEL_PROBABILITY_EPSILON = 0.0001
@@ -7959,7 +7996,11 @@ class LeanAgent15m:
                     market_prob=dist_market_prob,
                 )
                 annualized_vol = resolved_dist_vol
-                settlement_distribution = compute_settlement_distribution(sd_state, annualized_vol=resolved_dist_vol)
+                settlement_distribution = compute_settlement_distribution(
+                    sd_state,
+                    annualized_vol=resolved_dist_vol,
+                    max_missing_samples=_settlement_max_missing_samples(),
+                )
             except Exception as sd_exc:
                 logger.warning(
                     "[SETTLEMENT-DISTRIBUTION] asset=%s V2 enabled but distribution build failed; refusing entry: %s",
@@ -11727,22 +11768,26 @@ class LeanAgent15m:
 
         time_edge_multiplier = 1.0
 
-        # Hard production floor: no new entries inside 90 seconds to expiry.
+        # Hard production floor: no new entries inside the entry-TTE cutoff.
+        # When the settlement-convergence lane is enabled on the trade-decision
+        # path the floor relaxes to the lane floor; compute_trade_decision still
+        # rejects any candidate that fails the lane's confidence gates.
         seconds_to_expiry = minutes_to_expiry * 60.0
-        if seconds_to_expiry < MERID_HARD_MIN_ENTRY_TTE_SECONDS:
+        _hard_min_tte = _effective_min_entry_tte_seconds(self._resolve_runtime_signal_mode())
+        if seconds_to_expiry < _hard_min_tte:
             logger.info(
                 "[HARD-TTE-CUTOFF] asset=%s seconds_to_expiry=%.1f < %ds -> SKIP (too close to expiry for new entry)",
-                asset, seconds_to_expiry, MERID_HARD_MIN_ENTRY_TTE_SECONDS
+                asset, seconds_to_expiry, _hard_min_tte
             )
             if REJECTION_MONITOR_ENABLED:
                 log_time_window_rejection(
                     asset=asset,
                     minutes_to_expiry=minutes_to_expiry,
-                    reason=f"hard_tte_cutoff: <{MERID_HARD_MIN_ENTRY_TTE_SECONDS}s to expiry",
+                    reason=f"hard_tte_cutoff: <{_hard_min_tte:.0f}s to expiry",
                     market_id=getattr(market, 'market_id', None),
                 )
             self._record_signal_rejection(
-                f"hard_tte_cutoff:<{MERID_HARD_MIN_ENTRY_TTE_SECONDS}s",
+                f"hard_tte_cutoff:<{_hard_min_tte:.0f}s",
                 market_id=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
@@ -15998,8 +16043,13 @@ class LeanAgent15m:
 
 
                             min_time_to_expiry = min_decision_minute * 60  # convert to seconds
-                            # Hard production floor: profile/YAML cannot disable the 90s entry cutoff.
-                            min_time_to_expiry = max(min_time_to_expiry, MERID_HARD_MIN_ENTRY_TTE_SECONDS)
+                            # Hard production floor: profile/YAML cannot disable the entry cutoff.
+                            # Settlement-convergence lane (when enabled) relaxes the floor to the
+                            # lane's own minimum; non-eligible candidates are rejected downstream.
+                            min_time_to_expiry = max(
+                                min_time_to_expiry,
+                                _effective_min_entry_tte_seconds(self._resolve_runtime_signal_mode()),
+                            )
 
 
 
