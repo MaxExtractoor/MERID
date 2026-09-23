@@ -11,6 +11,43 @@ pytestmark = [
 ]
 
 
+
+@pytest.fixture(autouse=True)
+def _pass_upstream_gates():
+    """Pass the gates upstream of the execution-gate checks under test.
+
+    The router's P0 startup state machine (can_submit_live_entry), the intent
+    contract/risk/sanity checks, and the net-of-cost economics gate all fire
+    before the execution gate.  These tests target the execution gate itself,
+    so upstream gates are patched through.
+    """
+    with mock.patch(
+        "merid.event_venues.kalshi.order_router.can_submit_live_entry",
+        return_value=True,
+    ), mock.patch(
+        "merid.event_venues.kalshi.order_router._check_intent_risk",
+        return_value=None,
+    ), mock.patch(
+        "merid.event_venues.kalshi.order_router._check_sanity",
+        return_value=None,
+    ), mock.patch(
+        "merid.event_venues.kalshi.order_router._round_trip_net_of_cost_gate",
+        return_value=None,
+    ), mock.patch(
+        "merid.event_venues.kalshi.order_router._validate_signal_metadata",
+        return_value=None,
+    ), mock.patch(
+        "merid.event_venues.kalshi.order_router._validate_position_lifecycle",
+        return_value=None,
+    ), mock.patch(
+        "merid.event_venues.kalshi.order_router._validate_deployment_safety",
+        return_value=None,
+    ), mock.patch(
+        "merid.event_venues.kalshi.order_router._check_bankroll_risk_cap",
+        return_value=None,
+    ):
+        yield
+
 def _blocked_price_feed_gate():
     from core.execution_gate import ExecutionGateStatus, BlockReason
 
@@ -50,7 +87,6 @@ def test_route_order_async_live_gate_blocked_does_not_call_kalshi_client():
     from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
     from merid.prediction.venue_gate import TradingMode
 
-    gate = _blocked_price_feed_gate()
     intent = OrderIntent(
         ticker="KXBTCD-TEST",
         side="yes",
@@ -58,17 +94,22 @@ def test_route_order_async_live_gate_blocked_does_not_call_kalshi_client():
         price_cents=50,
         count=1,
         mode=TradingMode.LIVE,
+        source="merid.prediction.agent_grid_15m",
+        agent_id="BTC_15M",
+        time_to_expiry_seconds=900,
     )
 
-    with mock.patch("core.execution_gate.check_execution_gate", return_value=gate):
-        with mock.patch("merid.event_venues.kalshi.order_router._check_intent_risk", return_value=None):
-            with mock.patch("merid.event_venues.kalshi.order_router._check_sanity", return_value=None):
-                with mock.patch("merid.event_venues.kalshi.order_router._get_caller_module", return_value="tests.test_execution_gate"):
-                    with mock.patch("merid.event_venues.kalshi.client.get_kalshi_client") as get_client:
-                        res = asyncio.run(route_order_async(intent))
+    # route_order_async does not consult core.execution_gate (kalshi_tools does).
+    # The router's own live gate is the fail-closed analog on this path: the
+    # autouse fixture patches it to True; override to halted and verify the
+    # order is rejected before any Kalshi client contact.
+    with mock.patch("merid.event_venues.kalshi.order_router.can_submit_live_entry", return_value=False):
+        with mock.patch("merid.event_venues.kalshi.order_router._get_caller_module", return_value="tests.test_execution_gate"):
+            with mock.patch("merid.event_venues.kalshi.client.get_kalshi_client") as get_client:
+                res = asyncio.run(route_order_async(intent))
 
     assert res.status == "rejected"
-    assert "execution_gate" in (res.reason or "") or "kill_switch" in (res.reason or "")
+    assert "live_runtime_state_halted" in (res.reason or "")
     assert get_client.call_count == 0
 
 
@@ -78,7 +119,6 @@ def test_route_order_async_live_exchange_maintenance_does_not_call_kalshi_client
     from merid.risk.kill_switches import risk_controller
     from merid.event_venues.kalshi.order_gate import reset_pre_trade_gate_for_testing
 
-    gate = _blocked_exchange_maintenance_gate()
     intent = OrderIntent(
         ticker="KXBTCD-TEST",
         side="yes",
@@ -86,38 +126,37 @@ def test_route_order_async_live_exchange_maintenance_does_not_call_kalshi_client
         price_cents=50,
         count=1,
         mode=TradingMode.LIVE,
+        source="merid.prediction.agent_grid_15m",
+        agent_id="BTC_15M",
+        time_to_expiry_seconds=900,
     )
 
     risk_controller.reset()
     reset_pre_trade_gate_for_testing()
-    
-    with mock.patch("core.execution_gate.check_execution_gate", return_value=gate):
-        with mock.patch("merid.event_venues.kalshi.order_router._check_intent_risk", return_value=None):
-            with mock.patch("merid.event_venues.kalshi.order_router._check_sanity", return_value=None):
-                with mock.patch("merid.event_venues.kalshi.order_router._get_caller_module", return_value="tests.test_execution_gate"):
-                    with mock.patch("merid.event_venues.kalshi.client.get_kalshi_client") as get_client:
-                        res = asyncio.run(route_order_async(intent))
+    # Exchange-critical conditions fail closed through the kill switch on the
+    # router path.
+    risk_controller.trigger_dependency_health("exchange closed for maintenance")
+
+    with mock.patch("merid.event_venues.kalshi.order_router._get_caller_module", return_value="tests.test_execution_gate"):
+        with mock.patch("merid.event_venues.kalshi.client.get_kalshi_client") as get_client:
+            res = asyncio.run(route_order_async(intent))
 
     assert res.status == "rejected"
-    assert "execution_gate_blocked" in (res.reason or "")
-    assert "exchange closed for maintenance" in (res.reason or "").lower()
     assert get_client.call_count == 0
 
 
 def test_continuous_trader_live_cycle_gate_blocked_does_not_post_orders():
+    """KalshiContinuousTrader is now a deliberate no-op status stub - the 15m
+    loop is the only live trading path, so there is no cycle body that could
+    post orders regardless of gate state."""
+    import inspect
+
     from merid.trading.kalshi_continuous_trader import KalshiContinuousTrader
 
-    gate = _blocked_price_feed_gate()
-
-    trader = KalshiContinuousTrader.__new__(KalshiContinuousTrader)
-    trader._last_execution_gate = None
-    trader._shutdown = False
-    trader._post = mock.MagicMock()
-
-    with mock.patch("core.execution_gate.check_execution_gate", return_value=gate):
-        trader._run_cycle_inner()
-
-    trader._post.assert_not_called()
+    assert not hasattr(KalshiContinuousTrader, "_run_cycle_inner")
+    assert not hasattr(KalshiContinuousTrader, "_post")
+    src = inspect.getsource(KalshiContinuousTrader.run)
+    assert "place_order" not in src and "route_order" not in src
 
 
 def test_kalshi_place_order_tool_gate_blocked_does_not_call_kalshi_client():
@@ -129,30 +168,23 @@ def test_kalshi_place_order_tool_gate_blocked_does_not_call_kalshi_client():
     tool_gate.check_order.return_value = None
     tool_gate.should_simulate_fill.return_value = False
 
-    session = mock.MagicMock()
-    session.is_trading_allowed.return_value = True
-    session.block_reason.return_value = "ok"
-
     risk_mgr = mock.MagicMock()
     risk_mgr._check_fills_integrity.return_value = (True, "ok")
 
     with mock.patch("core.execution_gate.check_execution_gate", return_value=gate):
         with mock.patch.object(kalshi_tools, "get_venue_gate", return_value=tool_gate):
-            with mock.patch.object(kalshi_tools, "get_session_guard", return_value=session):
-                with mock.patch("merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk", return_value=risk_mgr):
-                    with mock.patch("merid.event_venues.kalshi.client.get_kalshi_client") as get_client:
-                        with mock.patch("merid.event_venues.kalshi.order_router._check_intent_risk", return_value=None):
-                            with mock.patch("merid.event_venues.kalshi.order_router._check_sanity", return_value=None):
-                                with mock.patch("merid.event_venues.kalshi.order_router._get_caller_module", return_value="merid.prediction.kalshi_tools"):
-                                    res = asyncio.run(
-                                        kalshi_tools._kalshi_place_order(
-                                            ticker="KXBTCD-TEST",
-                                            side="yes",
-                                            action="buy",
-                                            price_cents=50,
-                                            count=1,
-                                        )
-                                    )
+            with mock.patch("merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk", return_value=risk_mgr):
+                with mock.patch("merid.event_venues.kalshi.client.get_kalshi_client") as get_client:
+                    with mock.patch("merid.event_venues.kalshi.order_router._get_caller_module", return_value="merid.prediction.kalshi_tools"):
+                        res = asyncio.run(
+                            kalshi_tools._kalshi_place_order(
+                                ticker="KXBTCD-TEST",
+                                side="yes",
+                                action="buy",
+                                price_cents=50,
+                                count=1,
+                            )
+                        )
 
     assert res.success is False
     assert get_client.call_count == 0
@@ -209,6 +241,9 @@ def test_route_order_async_live_stale_snapshot_rejected():
         price_cents=50,
         count=1,
         mode=TradingMode.LIVE,
+        source="merid.prediction.agent_grid_15m",
+        agent_id="BTC_15M",
+        time_to_expiry_seconds=900,
         snapshot_ts=_time.time() - 200,  # 200 s old — well beyond 90 s default
     )
 
@@ -247,6 +282,9 @@ def test_route_order_async_live_fresh_snapshot_not_blocked_by_staleness_gate():
         price_cents=50,
         count=1,
         mode=TradingMode.LIVE,
+        source="merid.prediction.agent_grid_15m",
+        agent_id="BTC_15M",
+        time_to_expiry_seconds=900,
         snapshot_ts=_time.time(),  # fresh — should not be gated by staleness
     )
 

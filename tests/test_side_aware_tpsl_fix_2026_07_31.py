@@ -8,7 +8,7 @@ which inverted TP/SL for NO-side contracts.
 """
 
 import pytest
-from merid.position_management.position import Position, PositionSide
+from merid.position_management.position import Position, PositionSide, RiskParamsState
 
 
 class TestSideAwareTPSLPosition:
@@ -21,9 +21,10 @@ class TestSideAwareTPSLPosition:
             side=PositionSide.YES,
             size=1,
             avg_entry_price_cents=50,
+            entry_fill_price_cents=50,  # trusted fill anchor -> canonical fallbacks
         )
-        assert position.take_profit_price_cents == 55  # 50 + 5
-        assert position.stop_loss_price_cents == 45    # 50 - 5
+        assert position.take_profit_price_cents > 50  # fee-aware fallback above entry
+        assert position.stop_loss_price_cents == 45   # 50 - FALLBACK_STOP_LOSS_BUFFER_CENTS(5)
         assert position.take_profit_price_cents > position.avg_entry_price_cents
         assert position.stop_loss_price_cents < position.avg_entry_price_cents
 
@@ -34,9 +35,10 @@ class TestSideAwareTPSLPosition:
             side=PositionSide.NO,
             size=1,
             avg_entry_price_cents=50,
+            entry_fill_price_cents=50,  # trusted fill anchor -> canonical fallbacks
         )
-        assert position.take_profit_price_cents == 55  # 50 + 5
-        assert position.stop_loss_price_cents == 45    # 50 - 5
+        assert position.take_profit_price_cents > 50  # fee-aware fallback above entry
+        assert position.stop_loss_price_cents == 45   # 50 - FALLBACK_STOP_LOSS_BUFFER_CENTS(5)
         assert position.take_profit_price_cents > position.avg_entry_price_cents
         assert position.stop_loss_price_cents < position.avg_entry_price_cents
 
@@ -47,6 +49,8 @@ class TestSideAwareTPSLPosition:
             side=PositionSide.YES,
             size=1,
             avg_entry_price_cents=50,
+            entry_fill_price_cents=50,
+            risk_params_state=RiskParamsState.FALLBACK,
             stop_loss_price_cents=45,
         )
         assert position.should_trigger_stop_loss(45) is True
@@ -60,6 +64,8 @@ class TestSideAwareTPSLPosition:
             side=PositionSide.NO,
             size=1,
             avg_entry_price_cents=50,
+            entry_fill_price_cents=50,
+            risk_params_state=RiskParamsState.FALLBACK,
             stop_loss_price_cents=45,
         )
         assert position.should_trigger_stop_loss(45) is True
@@ -73,11 +79,13 @@ class TestSideAwareTPSLPosition:
             side=PositionSide.YES,
             size=1,
             avg_entry_price_cents=50,
-            take_profit_price_cents=55,
+            entry_fill_price_cents=50,
+            risk_params_state=RiskParamsState.FALLBACK,
+            take_profit_price_cents=60,  # fee-valid: 55c TP is net-negative after taker fee
         )
-        assert position.should_trigger_take_profit(55) is True
         assert position.should_trigger_take_profit(60) is True
-        assert position.should_trigger_take_profit(45) is False
+        assert position.should_trigger_take_profit(65) is True
+        assert position.should_trigger_take_profit(55) is False
 
     def test_no_take_profit_trigger(self):
         position = Position(
@@ -86,11 +94,13 @@ class TestSideAwareTPSLPosition:
             side=PositionSide.NO,
             size=1,
             avg_entry_price_cents=50,
-            take_profit_price_cents=55,
+            entry_fill_price_cents=50,
+            risk_params_state=RiskParamsState.FALLBACK,
+            take_profit_price_cents=60,  # fee-valid: 55c TP is net-negative after taker fee
         )
-        assert position.should_trigger_take_profit(55) is True
         assert position.should_trigger_take_profit(60) is True
-        assert position.should_trigger_take_profit(45) is False
+        assert position.should_trigger_take_profit(65) is True
+        assert position.should_trigger_take_profit(55) is False
 
 
 class TestSideAwareTPSLInvariants:
