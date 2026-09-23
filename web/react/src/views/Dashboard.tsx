@@ -295,14 +295,14 @@ const Dashboard = () => {
 };
 
 // Sub-component: MetricCard
-interface MetricCardProps {
+interface DashboardMetricCardProps {
   label: string;
   value: string | number;
   icon?: React.ReactNode;
   color?: string;
 }
 
-const MetricCard: React.FC<MetricCardProps> = ({ label, value, icon, color = 'text-white' }) => (
+const MetricCard: React.FC<DashboardMetricCardProps> = ({ label, value, icon, color = 'text-white' }) => (
   <Card>
     <CardContent className="p-4">
       <div className="flex items-center justify-between mb-2">

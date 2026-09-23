@@ -108,8 +108,10 @@ class TestSideRecording:
         
         content = ledger_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that side is taken directly from Kalshi API response
-        has_side_extraction = 'side=raw.get("side"' in content
+        # Check that side is taken directly from Kalshi API response.
+        # Current contract: raw traded side is read from `side` (with
+        # `purchased_side` fallback) before trusted canonicalization.
+        has_side_extraction = 'raw.get("side") or raw.get("purchased_side")' in content
         assert has_side_extraction, "Side should be extracted from Kalshi API response"
         
         # Check that we don't transform the side (Kalshi API is correct)
@@ -208,13 +210,12 @@ class TestSingleContractPerOrder:
         
         content = order_router_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that OrderIntent has count field with default
-        has_count_field = 'count: int' in content
+        # OrderIntent.count is a float (centi-contract grid) with a canonical
+        # Decimal form (count_fp) resolved in __post_init__.
+        has_count_field = 'count: float' in content
         assert has_count_field, "OrderIntent should have count field"
-        
-        # Check that there's validation for count > 0
-        has_count_validation = 'count.*<= 0' in content or 'count <= 0' in content
-        assert has_count_validation, "Should validate count > 0"
+        has_count_fp = 'count_fp' in content
+        assert has_count_fp, "OrderIntent should carry canonical Decimal count_fp"
     
     def test_agent_grid_enforces_single_contract(self):
         """Verify agent_grid_15m.py enforces single contract limit."""

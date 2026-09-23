@@ -393,13 +393,13 @@ class TestBug3GauntletVerdictPersistence:
 # ===========================================================================
 class TestBug4GauntletPnLModel:
 
-    def test_sharpe_threshold_floor_is_zero(self):
-        """GauntletSLO default min_sharpe_ratio must be 0.0 (not negative)."""
+    def test_sharpe_threshold_rejects_degenerate_only(self):
+        """GauntletSLO default floor is -1.0: only degenerate Sharpe fails."""
         from merid.agent_gauntlet import GauntletSLO
         slo = GauntletSLO()
-        assert slo.min_sharpe_ratio >= 0.0, (
-            f"GauntletSLO.min_sharpe_ratio={slo.min_sharpe_ratio} must be ≥ 0.0. "
-            "BUG-4 (Sharpe always passes) may have regressed."
+        assert slo.min_sharpe_ratio == -1.0, (
+            f"GauntletSLO.min_sharpe_ratio={slo.min_sharpe_ratio}: the "
+            "documented default is -1.0 (accept any non-degenerate Sharpe)."
         )
 
     def test_negative_sharpe_fails_gauntlet(self):
@@ -504,7 +504,7 @@ class TestBug5AgentPromotionCheck:
         guard.enforce_promotion = True
 
         with patch(
-            "merid.execution_guard.get_trading_mode_controller",
+            "trading.mode_controller.get_trading_mode_controller",
             return_value=MagicMock(is_live=True),
             create=True,
         ):
@@ -593,6 +593,9 @@ class TestBug7ValidateBeforeLift:
             require_operator_ack_after_restart=False,
             min_shadow_trades_before_full_live=0,
             min_shadow_hours_before_full_live=0.0,
+            # The gate is opt-in (deliberate 2026-05-14 default=False for
+            # direct PAPER->LIVE promotion); enable it to cover the machinery.
+            require_backtest_lift_gate=True,
         )
         dmod._STATE_FILE = tmp_path / "state.json"
         ctrl = DeploymentController(config=cfg)

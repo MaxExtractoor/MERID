@@ -71,7 +71,7 @@ interface PnlHistory {
 
 // ── Sub-Components ─────────────────────────────────────────────────────────
 
-interface MetricCardProps {
+interface MonitorViewMetricCardProps {
   label: string;
   value: string | number;
   subtext?: string;
@@ -79,7 +79,7 @@ interface MetricCardProps {
   icon?: React.ReactNode;
 }
 
-const MetricCard: React.FC<MetricCardProps> = ({ label, value, subtext, color = 'text-white', icon }) => (
+const MetricCard: React.FC<MonitorViewMetricCardProps> = ({ label, value, subtext, color = 'text-white', icon }) => (
   <div className="bg-slate-800 rounded-lg p-4">
     <div className="flex items-center justify-between mb-1">
       <span className="text-xs text-slate-500">{label}</span>

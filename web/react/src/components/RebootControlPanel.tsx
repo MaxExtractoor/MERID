@@ -7,7 +7,7 @@
 
 import { RefreshCw, Play, Square, Database, ShieldAlert, ShieldCheck } from '../ui/icons';
 
-interface OperatorKillSwitchState {
+interface RebootKillSwitchState {
   global_kill?: boolean;
   active?: boolean;
   can_trade?: boolean;
@@ -15,15 +15,15 @@ interface OperatorKillSwitchState {
   reason?: string | null;
 }
 
-interface GridStatusLite {
+interface RebootGridStatusLite {
   running?: boolean;
   agent_count?: number;
   session?: { trading_allowed?: boolean; block_reason?: string | null };
 }
 
 export interface RebootControlPanelProps {
-  killSwitch: OperatorKillSwitchState | null;
-  gridStatus: GridStatusLite | null;
+  killSwitch: RebootKillSwitchState | null;
+  gridStatus: RebootGridStatusLite | null;
   catalogCount: number | null;
   busyAction: string | null;
   message: string | null;

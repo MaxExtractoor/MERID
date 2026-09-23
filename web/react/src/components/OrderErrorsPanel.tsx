@@ -14,13 +14,13 @@ import { useOrderErrors, getSeverityColor, getCategoryColor, formatErrorCode } f
 import { formatDateTime } from '../utils/formatters';
 import type { ErrorBreakdownItem } from '../hooks/useOrderErrors';
 
-interface ErrorBarProps {
+interface OrderErrorBarProps {
   count: number;
   total: number;
   color: string;
 }
 
-function ErrorBar({ count, total, color }: ErrorBarProps) {
+function ErrorBar({ count, total, color }: OrderErrorBarProps) {
   const percentage = total > 0 ? (count / total) * 100 : 0;
   
   return (

@@ -3,7 +3,7 @@ import { Icon } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
-interface DecisionEvent {
+interface AnalyticsDecisionEvent {
   id: string;
   timestamp: string;
   agent: string;
@@ -48,7 +48,7 @@ const ExplainabilityAnalytics: React.FC = () => {
 
   // Fetch decision data
   const { data: decisions, loading: decisionsLoading, error: decisionsError, refetch: refetchDecisions } = useApiData<{
-    decisions: DecisionEvent[];
+    decisions: AnalyticsDecisionEvent[];
     analytics: DecisionAnalytics;
   }>(
     API_ENDPOINTS.EXPLAINABILITY_DECISIONS,

@@ -206,9 +206,10 @@ class TestAssetLevelPositionLimitFix:
         
         assert existing_yes == 1, "Should have 1 existing YES contract"
         
-        # Check per-side limit
+        # Check per-side limit (contracts/count are Decimal under the
+        # centi-contract contract — normalize to float for this arithmetic)
         max_yes = mock_profile_adapter.profile.agent_max_yes_position
-        new_yes_total = existing_yes + intent.count
+        new_yes_total = float(existing_yes) + float(intent.count)
         
         assert new_yes_total == 2, "New total would be 2"
         assert new_yes_total > max_yes, "New total should exceed limit"

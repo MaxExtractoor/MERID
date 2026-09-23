@@ -1,5 +1,5 @@
 /**
- * DiscoverView — Kalshi-Style Prediction Market Discovery (Stage 1)
+ * DiscoverView — Kalshi-Style Prediction DiscoverMarket Discovery (Stage 1)
  * 
  * Core UX Principles:
  *   - Clear market questions and resolution criteria
@@ -8,7 +8,7 @@
  *   - Fast, low-friction trade discovery
  *   - Mobile-first responsive design
  * 
- * Layout: Discovery → Market Card → Quick Trade Flow
+ * Layout: Discovery → DiscoverMarket Card → Quick Trade Flow
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
@@ -32,7 +32,7 @@ import { KALSHI_CATEGORY_COLORS } from '../ui/constants';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-interface Market {
+interface DiscoverMarket {
   ticker: string;
   question: string;
   category: string;
@@ -56,7 +56,7 @@ interface Market {
 
 interface PoolResponse {
   count: number;
-  markets: Market[];
+  markets: DiscoverMarket[];
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -204,8 +204,8 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [page, setPage] = useState(1);
   
-  // Market selection
-  const [selectedMarket, setSelectedMarket] = useState<Market | null>(null);
+  // DiscoverMarket selection
+  const [selectedMarket, setSelectedMarket] = useState<DiscoverMarket | null>(null);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   
   // Data fetching
@@ -254,15 +254,15 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
     
     // Apply quick filters
     if (quickFilter === 'favorites') {
-      markets = markets.filter((m: Market) => favorites.has(m.ticker));
+      markets = markets.filter((m: DiscoverMarket) => favorites.has(m.ticker));
     } else if (quickFilter !== 'all') {
-      markets = markets.filter((m: Market) => m.category?.toLowerCase() === quickFilter.toLowerCase());
+      markets = markets.filter((m: DiscoverMarket) => m.category?.toLowerCase() === quickFilter.toLowerCase());
     }
     
     // Apply search
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      markets = markets.filter((m: Market) => 
+      markets = markets.filter((m: DiscoverMarket) => 
         m.ticker.toLowerCase().includes(q) ||
         m.question.toLowerCase().includes(q)
       );
@@ -360,9 +360,9 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
         </div>
       </div>
 
-      {/* Market Grid: Responsive */}
+      {/* DiscoverMarket Grid: Responsive */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        {/* Market List */}
+        {/* DiscoverMarket List */}
         <div className="xl:col-span-2 bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
           {/* Mobile-first card view, table on larger screens */}
           <div className="sm:hidden">
@@ -375,7 +375,7 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
               <div className="p-8 text-center text-slate-500">No markets found</div>
             ) : (
               <div className="divide-y divide-slate-800">
-                {paginatedMarkets.map((market: Market) => (
+                {paginatedMarkets.map((market: DiscoverMarket) => (
                   <div
                     key={market.ticker}
                     onClick={() => setSelectedMarket(market)}
@@ -417,7 +417,7 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-500 text-xs uppercase">
-                  <th className="text-left p-3 pl-4">Market</th>
+                  <th className="text-left p-3 pl-4">DiscoverMarket</th>
                   <th className="text-right p-3">Prob.</th>
                   <th className="text-right p-3">Spread</th>
                   <th className="text-right p-3">Volume</th>
@@ -442,7 +442,7 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  paginatedMarkets.map((market: Market) => (
+                  paginatedMarkets.map((market: DiscoverMarket) => (
                     <tr
                       key={market.ticker}
                       onClick={() => setSelectedMarket(market)}
@@ -520,11 +520,11 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
           )}
         </div>
 
-        {/* Side Panel: Market Detail & Trade */}
+        {/* Side Panel: DiscoverMarket Detail & Trade */}
         <div className="space-y-4">
           {selectedMarket ? (
             <div className="space-y-4">
-              {/* Market Header Card */}
+              {/* DiscoverMarket Header Card */}
               <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
                 <div className="p-4 border-b border-slate-800">
                   <div className="flex items-start justify-between gap-2 mb-3">

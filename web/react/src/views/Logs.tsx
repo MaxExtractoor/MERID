@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { API_BASE_URL } from '../config/constants';
 
-interface LogEntry {
+interface LogsViewLogEntry {
   timestamp: string;
   level: 'info' | 'warning' | 'error';
   component: string;
@@ -16,7 +16,7 @@ interface LogEntry {
 }
 
 const Logs = () => {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logs, setLogs] = useState<LogsViewLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [levelFilter, setLevelFilter] = useState<'all' | 'info' | 'warning' | 'error'>('all');
   const [searchQuery, setSearchQuery] = useState('');

@@ -10,7 +10,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useBackendHealth } from '../context/BackendHealthContext';
 import { Activity, X, ChevronDown, ChevronUp } from '../ui/icons';
 
-interface LogEntry {
+interface BackendHealthLogEntry {
   ts: number;
   message: string;
   type: 'success' | 'failure' | 'offline' | 'recovery';
@@ -29,7 +29,7 @@ function DebugPanel() {
   const health = useBackendHealth();
   const [visible, setVisible] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [log, setLog] = useState<LogEntry[]>([]);
+  const [log, setLog] = useState<BackendHealthLogEntry[]>([]);
   const [countdownSec, setCountdownSec] = useState<number | null>(null);
   const prevOfflineRef = useRef(health.backendOffline);
   const prevFailuresRef = useRef(health.consecutiveFailures);
@@ -86,7 +86,7 @@ function DebugPanel() {
     return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
-  const typeColor: Record<LogEntry['type'], string> = {
+  const typeColor: Record<BackendHealthLogEntry['type'], string> = {
     success: 'text-emerald-400',
     failure: 'text-red-400',
     offline: 'text-amber-400',

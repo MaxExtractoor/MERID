@@ -97,7 +97,7 @@ interface AutoPromoterStatus {
   next_eval_in_seconds: number;
 }
 
-interface SizingMetrics {
+interface SizeViewSizingMetrics {
   drawdown_tier: 'normal' | 'warning' | 'downsize' | 'halt';
   drawdown_pct: number;
   drawdown_thresholds: {
@@ -125,7 +125,7 @@ type SizeTab = 'bankroll' | 'lanes' | 'sizing';
 
 // ── Sub-Components ───────────────────────────────────────────────────────────
 
-interface MetricCardProps {
+interface SizeViewMetricCardProps {
   label: string;
   value: string | number;
   subtext?: string;
@@ -133,7 +133,7 @@ interface MetricCardProps {
   color?: string;
 }
 
-const MetricCard: React.FC<MetricCardProps> = ({ label, value, subtext, color = 'text-white' }) => (
+const MetricCard: React.FC<SizeViewMetricCardProps> = ({ label, value, subtext, color = 'text-white' }) => (
   <div className="bg-slate-800 rounded-lg p-4">
     <div className="text-xs text-slate-500 mb-1">{label}</div>
     <div className={`text-2xl font-bold ${color}`}>{value}</div>
@@ -163,7 +163,7 @@ const SizeView: React.FC = () => {
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
   
-  const sizingRes = useApiQuery<SizingMetrics>(
+  const sizingRes = useApiQuery<SizeViewSizingMetrics>(
     API_ENDPOINTS.KALSHI_SIZING_METRICS,
     { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );

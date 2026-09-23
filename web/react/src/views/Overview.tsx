@@ -31,14 +31,14 @@ import { useKalshiMode } from '../context/KalshiModeContext';
 
 /* ── Types ─────────────────────────────────────────── */
 interface KalshiPnL { daily_pnl_usd: number; total_notional_usd: number; peak_equity_usd: number; current_equity_usd: number; drawdown_pct: number; category_pnl: Record<string, number> }
-interface OperatorKillSwitchState {
+interface OverviewKillSwitchState {
   global_kill?: boolean;
   active?: boolean;
   can_trade?: boolean;
   kill_reason?: string | null;
   reason?: string | null;
 }
-interface GridStatusLite {
+interface OverviewGridStatusLite {
   running?: boolean;
   agent_count?: number;
   session?: { trading_allowed?: boolean; block_reason?: string | null };
@@ -72,8 +72,8 @@ function RebootControlPanel({
   onStopGrid,
   onRefreshSignals,
 }: {
-  killSwitch: OperatorKillSwitchState | null;
-  gridStatus: GridStatusLite | null;
+  killSwitch: OverviewKillSwitchState | null;
+  gridStatus: OverviewGridStatusLite | null;
   catalogCount: number | null;
   busyAction: string | null;
   message: string | null;
@@ -395,10 +395,10 @@ export default function Overview() {
     pollIntervalMs: 2000, // 2s polling to reduce server load
     enabled: true,
   });
-  const { data: killSwitch, refetch: refetchKillSwitch } = useApiQuery<OperatorKillSwitchState>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, {
+  const { data: killSwitch, refetch: refetchKillSwitch } = useApiQuery<OverviewKillSwitchState>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, {
     refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH,
   });
-  const { data: gridStatus, refetch: refetchGridStatus } = useApiQuery<GridStatusLite>(API_ENDPOINTS.KALSHI_GRID_STATUS, {
+  const { data: gridStatus, refetch: refetchGridStatus } = useApiQuery<OverviewGridStatusLite>(API_ENDPOINTS.KALSHI_GRID_STATUS, {
     refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
   });
   const { data: catalog, refetch: refetchCatalog } = useApiQuery<CatalogResponseLite>(API_ENDPOINTS.KALSHI_CATALOG, {

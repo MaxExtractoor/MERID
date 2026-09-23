@@ -266,14 +266,14 @@ const Monitor = () => {
 };
 
 // Sub-component: MetricCard
-interface MetricCardProps {
+interface MonitorMetricCardProps {
   label: string;
   value: string | number;
   color?: string;
   icon?: React.ReactNode;
 }
 
-const MetricCard: React.FC<MetricCardProps> = ({ label, value, color = 'text-white', icon }) => (
+const MetricCard: React.FC<MonitorMetricCardProps> = ({ label, value, color = 'text-white', icon }) => (
   <div className="bg-slate-800 rounded-lg p-4">
     <div className="flex items-center justify-between mb-1">
       <span className="text-xs text-slate-500">{label}</span>

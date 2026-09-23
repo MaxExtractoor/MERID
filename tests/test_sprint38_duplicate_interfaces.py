@@ -10,17 +10,11 @@ WEB_REACT = ROOT / "web" / "react" / "src"
 VIEWS_DIR = WEB_REACT / "views"
 COMPONENTS_DIR = WEB_REACT / "components"
 
-# Renamed interfaces
+# Renamed interfaces (entries pruned to files that still exist; the other
+# target files were removed in the frontend cleanup)
 RENAMES = {
     "ExplainabilityDecision": "ExplainabilityPanel.tsx",
-    "ConsensusPanelStatus": "ConsensusPanel.tsx",
-    "PredictionDriftSignal": "Predictions.tsx",
     "LiveNotification": "LiveNotifications.tsx",
-    "ActivityOrder": "OperatorActivityStream.tsx",
-    "TradingOrder": "Trading.tsx",
-    "CrossAssetPosition": "CrossAssetView.tsx",
-    "TradingPosition": "Trading.tsx",
-    "FundingProposal": "QuadraticFundingPanel.tsx",
     "TradeTableRow": "TradesTable.tsx",
 }
 

@@ -268,38 +268,23 @@ class ForecasterRegistry:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _registry: Optional[ForecasterRegistry] = None
-_registry_lock = None
+_registry_lock = threading.Lock()
 
 
 def get_forecaster_registry() -> ForecasterRegistry:
     """Get or create the singleton ForecasterRegistry."""
     global _registry
     if _registry is None:
-        if _registry_lock is not None:
-            with _registry_lock:
-                if _registry is None:
-                    from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
-                    from merid.prediction.forecasters.orderbook import OrderbookForecaster
-                    from merid.prediction.forecasters.volatility import VolatilityForecaster
-                    from merid.prediction.forecasters.momentum import MomentumForecaster
-                    from merid.prediction.forecasters.fvg import FVGForecaster
-                    _registry = ForecasterRegistry()
-                    _registry.register(MacroRegimeForecaster())
-                    _registry.register(OrderbookForecaster())
-                    _registry.register(VolatilityForecaster())
-                    _registry.register(MomentumForecaster())
-                    _registry.register(FVGForecaster())
-        else:
-            # Lock disabled - direct initialization (startup workaround)
-            from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
-            from merid.prediction.forecasters.orderbook import OrderbookForecaster
-            from merid.prediction.forecasters.volatility import VolatilityForecaster
-            from merid.prediction.forecasters.momentum import MomentumForecaster
-            from merid.prediction.forecasters.fvg import FVGForecaster
-            _registry = ForecasterRegistry()
-            _registry.register(MacroRegimeForecaster())
-            _registry.register(OrderbookForecaster())
-            _registry.register(VolatilityForecaster())
-            _registry.register(MomentumForecaster())
-            _registry.register(FVGForecaster())
+        with _registry_lock:
+            if _registry is None:
+                from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
+                from merid.prediction.forecasters.orderbook import OrderbookForecaster
+                from merid.prediction.forecasters.momentum import MomentumForecaster
+                from merid.prediction.forecasters.fvg import FVGForecaster
+                reg = ForecasterRegistry()
+                reg.register(MacroRegimeForecaster())
+                reg.register(OrderbookForecaster())
+                reg.register(MomentumForecaster())
+                reg.register(FVGForecaster())
+                _registry = reg
     return _registry

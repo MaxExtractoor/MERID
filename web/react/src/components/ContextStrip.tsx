@@ -15,7 +15,7 @@ interface LaneStatus {
   trade_mode?: string;
 }
 
-interface GridStatus {
+interface ContextStripGridStatus {
   agent_count?: number;
   running?: boolean;
   use_demo?: boolean;
@@ -33,7 +33,7 @@ export default function ContextStrip() {
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH }
   );
 
-  const { data: gridStatus, lastUpdated: gridLastUpdated } = useApiData<GridStatus>(
+  const { data: gridStatus, lastUpdated: gridLastUpdated } = useApiData<ContextStripGridStatus>(
     API_ENDPOINTS.KALSHI_GRID_STATUS,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
