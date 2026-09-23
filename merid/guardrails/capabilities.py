@@ -50,6 +50,7 @@ def _compute_kalshi_max_notional_from_config() -> float:
         # is the single source of truth for maximum exposure.
         per_trade_max_notional = envelope.max_single_order_notional_usd
         max_notional = envelope.max_total_notional_usd
+        max_concurrent_trades = None
 
         # P1-5: Cross-check assert to ensure envelope computation is correct
         expected_max_notional = max_notional
@@ -73,22 +74,22 @@ def _compute_kalshi_max_notional_from_config() -> float:
     
     logger.info(
         "[KALSHI_CAPABILITY] Derived max_notional from canonical envelope: $%.2f "
-        "(per_trade_cap=$%.2f × max_concurrent=%d)",
+        "(per_trade_cap=$%.2f × max_concurrent=%s)",
         max_notional,
         per_trade_max_notional,
-        max_concurrent_trades
+        "n/a" if max_concurrent_trades is None else max_concurrent_trades
     )
-    
+
     # Optional guardrail: check if config cap exceeds available cash
     try:
         from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
         available_cash_usd = get_equity_for_risk_calc_sync()
-        if max_notional > available_cash_usd:
+        if available_cash_usd is not None and max_notional > available_cash_usd:
             logger.warning(
                 f"[KALSHI_CAPABILITY] Config cap ${max_notional:.2f} exceeds available cash ${available_cash_usd:.2f} - "
                 f"using config cap anyway (policy: config sizing, not balance-based)"
             )
-    except ImportError:
+    except Exception:
         pass
     
     return max_notional
