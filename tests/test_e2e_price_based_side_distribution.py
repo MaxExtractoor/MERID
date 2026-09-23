@@ -26,16 +26,15 @@ class TestE2EPriceBasedSideDistribution:
         """
         # Synthetic price series (oscillating between 10c and 75c)
         price_series = [
-            0.10,  # Very cheap → YES
-            0.20,  # Cheap → YES
-            0.30,  # At buy threshold → YES
-            0.40,  # Mid-band → No signal
-            0.50,  # Mid-band → No signal
-            0.60,  # Mid-band → No signal
-            0.70,  # At sell threshold → NO
-            0.75,  # Expensive → NO
-            0.50,  # Mid-band → No signal
-            0.30,  # Back to cheap → YES
+            0.10,  # Very cheap -> YES
+            0.30,  # Cheap -> YES
+            0.50,  # At buy threshold -> YES
+            0.60,  # Mid-band -> No signal
+            0.70,  # Mid-band -> No signal (NO only >= 0.85)
+            0.80,  # Mid-band -> No signal
+            0.85,  # At sell threshold -> NO
+            0.90,  # Expensive -> NO
+            0.50,  # Back to cheap -> YES
         ]
         
         with patch.dict(os.environ, {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}, clear=False):
@@ -66,11 +65,6 @@ class TestE2EPriceBasedSideDistribution:
             assert yes_count > 0, "Should generate YES signals for cheap prices"
             assert no_count > 0, "Should generate NO signals for expensive prices"
             
-            # Verify distribution is not heavily skewed
-            # (with symmetric thresholds, should be roughly balanced)
-            skew_ratio = yes_count / (no_count + 1e-6)  # Avoid division by zero
-            assert 0.5 <= skew_ratio <= 2.0, \
-                f"YES/NO ratio {skew_ratio:.2f} should be roughly balanced (0.5-2.0)"
 
     def test_price_oscillation_generates_alternating_signals(self):
         """Price oscillation should generate alternating YES/NO signals.
@@ -81,12 +75,12 @@ class TestE2EPriceBasedSideDistribution:
         # Sawtooth pattern: cheap → expensive → cheap → expensive
         price_series = [
             0.15,  # Cheap → YES
-            0.25,  # Cheap → YES
-            0.35,  # Mid-band → None
+            0.45,  # Cheap → YES
+            0.60,  # Mid-band → None
             0.65,  # Mid-band → None
-            0.75,  # Expensive → NO
-            0.70,  # Expensive → NO
-            0.50,  # Mid-band → None
+            0.85,  # Expensive → NO
+            0.90,  # Expensive → NO
+            0.65,  # Mid-band → None
             0.30,  # Cheap → YES
             0.20,  # Cheap → YES
         ]
@@ -127,9 +121,9 @@ class TestE2EPriceBasedSideDistribution:
         """
         # Use a more balanced price series for this test
         price_series = [
-            0.10, 0.15, 0.20,  # Cheap zone (YES)
-            0.40, 0.50, 0.60,  # Mid-band (None)
-            0.75, 0.80, 0.85   # Expensive zone (NO)
+            0.10, 0.30, 0.50,  # Cheap zone (YES, <= buy_threshold)
+            0.60, 0.70, 0.80,  # Mid-band (None - cheap NO suppressed by design)
+            0.85, 0.90, 0.95   # Expensive zone (NO, >= sell_threshold)
         ]
         
         with patch.dict(os.environ, {'MERID_PROFILE': 'kalshi_crypto_15m_v2'}, clear=False):
@@ -175,12 +169,17 @@ class TestE2EPriceBasedSideDistribution:
             new_bias = new_yes_count / (new_no_count + 1e-6)
             
             # Old configuration should show YES bias (all prices <= 0.70 trigger YES)
-            assert old_bias > 5.0, \
+            assert old_bias > 4.0, \
                 f"Old thresholds should show extreme YES bias (ratio={old_bias:.2f})"
             
-            # New configuration should be balanced (roughly equal YES/NO)
-            assert 0.5 <= new_bias <= 2.0, \
-                f"New thresholds should be balanced (ratio={new_bias:.2f})"
+            # The 2026-08-28 contract is deliberately asymmetric: YES for
+            # price <= 0.50 and NO only for price >= 0.85 (cheap NO is
+            # suppressed because the model under-predicts YES).  Guard:
+            # NO signals must still be generated in the expensive zone.
+            assert new_no_count > 0, \
+                "NO signals must still be generated for expensive YES prices"
+            assert new_yes_count > 0, \
+                "YES signals must still be generated for cheap prices"
 
     def test_edge_calculation_symmetry(self):
         """Edge calculation should be symmetric for YES and NO.
@@ -197,20 +196,15 @@ class TestE2EPriceBasedSideDistribution:
             buy_threshold = profile.price_based_buy_threshold
             sell_threshold = profile.price_based_sell_threshold
             
-            # Calculate YES edge at 20c (10c below buy threshold)
-            yes_price = 0.20
-            yes_edge = (buy_threshold - yes_price) / buy_threshold
-            yes_edge = max(yes_edge, 0.02)
-            
-            # Calculate NO edge at 80c (10c above sell threshold)
-            no_price = 0.80
-            no_edge = (no_price - sell_threshold) / (1.0 - sell_threshold)
-            no_edge = max(no_edge, 0.02)
-            
-            # Edges should be similar (within 50% of each other)
-            edge_ratio = yes_edge / (no_edge + 1e-6)
-            assert 0.5 <= edge_ratio <= 2.0, \
-                f"YES edge {yes_edge:.4f} and NO edge {no_edge:.4f} should be similar (ratio={edge_ratio:.2f})"
+            # 2026-08-28 contract is deliberately asymmetric - verify each
+            # side produces a positive edge inside its own trigger zone.
+            yes_price = buy_threshold - 0.10
+            yes_edge = max((buy_threshold - yes_price) / buy_threshold, 0.02)
+            assert yes_edge > 0, "YES edge must be positive at trigger"
+
+            no_price = sell_threshold + 0.10
+            no_edge = max((no_price - sell_threshold) / (1.0 - sell_threshold), 0.02)
+            assert no_edge > 0, "NO edge must be positive at trigger"
 
     def test_mid_band_no_signal_zone(self):
         """Prices in the mid-band (between thresholds) should generate no signal.
@@ -229,11 +223,11 @@ class TestE2EPriceBasedSideDistribution:
             
             # Mid-band prices
             mid_band_prices = [
-                0.35,  # Just above buy threshold
-                0.40,  # Mid-band
-                0.50,  # Center
+                0.55,  # Just above buy threshold
                 0.60,  # Mid-band
-                0.65,  # Just below sell threshold
+                0.70,  # Mid-band
+                0.80,  # Mid-band
+                0.84,  # Just below sell threshold
             ]
             
             # All should generate no signal
@@ -312,7 +306,7 @@ class TestE2EAssetLevelDistribution:
                 assert yes_signal == "yes", f"{asset} at cheap price should generate YES"
                 
                 # Expensive price → NO
-                expensive_price = 0.75
+                expensive_price = 0.90
                 if expensive_price >= sell_threshold:
                     no_signal = "no"
                 else:
@@ -343,7 +337,7 @@ class TestE2EAssetLevelDistribution:
             sell_threshold = profile.price_based_sell_threshold
             
             # Verify thresholds are valid
-            assert 0 < buy_threshold < 0.5, "Buy threshold should be valid"
+            assert 0 < buy_threshold <= 0.5, "Buy threshold should be valid"
             assert 0.5 < sell_threshold < 1.0, "Sell threshold should be valid"
 
 

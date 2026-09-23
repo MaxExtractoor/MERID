@@ -29,8 +29,9 @@ class TestAssetCapUnit:
         """AssetCap initializes with correct defaults."""
         cap = AssetCap(asset="BTC")
         assert cap.asset == "BTC"
-        assert cap.max_daily_notional_usd == 4000.0
-        assert cap.max_single_trade_usd == 1000.0
+        # Defaults are 0 = fail-closed until configured from bankroll.
+        assert cap.max_daily_notional_usd == 0.0
+        assert cap.max_single_trade_usd == 0.0
         assert cap.daily_notional_usd == 0.0
         assert cap.last_reset_date == ""
 
@@ -171,6 +172,10 @@ class TestPreTradeCheckAssetCap:
         # Disable cooldown between trades for tests
         guard._cooldown_seconds = 0.0
         guard._last_execution_at = 0.0
+        # Domain caps resolve to 0 under test env settings (fail-closed);
+        # inject generous caps so the asset-cap checks under test are reached.
+        guard._domain_caps["crypto"].max_daily_notional_usd = 1_000_000.0
+        guard._domain_caps["crypto"].max_single_trade_usd = 500_000.0
         return guard
 
     def test_no_asset_skips_check(self):
@@ -322,6 +327,10 @@ class TestIntegration:
         # Disable cooldown between trades for tests
         guard._cooldown_seconds = 0.0
         guard._last_execution_at = 0.0
+        # Domain caps resolve to 0 under test env settings (fail-closed);
+        # inject generous caps so the asset-cap checks under test are reached.
+        guard._domain_caps["crypto"].max_daily_notional_usd = 1_000_000.0
+        guard._domain_caps["crypto"].max_single_trade_usd = 500_000.0
         return guard
 
     def test_full_trade_flow_tracks_usage(self):
@@ -541,11 +550,16 @@ class TestConfigConsistency:
         assert not missing, f"Core assets missing from settings.get_dynamic_asset_caps(): {missing}"
 
     def test_settings_asset_caps_have_valid_limits(self):
-        """Assert all configured asset caps have positive limits."""
+        """Assert all configured asset caps have valid (non-negative) limits.
+
+        Caps derive from live bankroll; a 0 cap is the valid fail-closed
+        state when bankroll is unavailable. The invariant is non-negativity
+        plus single-trade <= daily consistency.
+        """
         from merid.settings import settings
-        
+
         for asset, cap in settings.get_dynamic_asset_caps().items():
-            assert cap.max_daily_notional_usd > 0, f"{asset} has invalid daily limit"
-            assert cap.max_single_trade_usd > 0, f"{asset} has invalid single-trade limit"
+            assert cap.max_daily_notional_usd >= 0, f"{asset} has invalid daily limit"
+            assert cap.max_single_trade_usd >= 0, f"{asset} has invalid single-trade limit"
             assert cap.max_single_trade_usd <= cap.max_daily_notional_usd, \
                 f"{asset} single-trade limit exceeds daily limit"
