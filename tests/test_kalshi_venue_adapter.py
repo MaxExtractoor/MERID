@@ -13,13 +13,14 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from merid.event_venues.kalshi.venue_adapter import (
+    DomainMode,
+    InstrumentConfig,
     KalshiVenueAdapter,
     get_kalshi_venue_adapter,
     reset_kalshi_venue_adapter,
 )
 from merid.event_venues.base import EventMarket, VenueOrder, VenuePosition, EventOutcome
 from merid.matching_engine import Order, Fill, OrderSide, OrderStatus, MatchingEngine
-from merid.paper_config import InstrumentConfig, DomainMode
 
 
 @pytest.fixture
@@ -343,8 +344,10 @@ async def test_live_mode_calls_client(adapter):
     adapter._client = mock_client
     
     positions = await adapter.get_positions()
-    
+
     mock_client.connect.assert_called_once()
     mock_client.get_positions.assert_called_once()
-    mock_client.close.assert_called_once()
+    # close() is deliberately NOT called: the singleton adapter keeps the
+    # connection alive (see "Do NOT close client here" in _get_live_positions).
+    mock_client.close.assert_not_called()
     assert positions == []
