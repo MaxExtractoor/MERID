@@ -1093,11 +1093,43 @@ def compute_order_size(
     # tracks realized PnL and throttles or blocks new size when the daily or
     # weekly loss cap is approached.  This is a fail-closed companion to the
     # half-Kelly fraction used above.
+    # FAIL CLOSED: if the risk manager itself is unavailable, current risk state
+    # cannot be established — new entries must size to zero rather than assume
+    # the full (unthrottled) scale.
+    risk_manager_failed = False
     try:
         from merid.risk.unified_risk_manager import get_unified_risk_manager
         loss_size_scale = get_unified_risk_manager().get_loss_adjusted_size_scale()
-    except Exception:
-        loss_size_scale = 1.0
+    except Exception as _rm_exc:
+        logger.critical(
+            "[UNIFIED-SIZING] RISK_MANAGER_UNAVAILABLE: cannot establish loss-throttle "
+            "state for asset=%s (%s) — fail-closed: new entry size forced to zero",
+            asset, _rm_exc, exc_info=True,
+        )
+        risk_manager_failed = True
+        loss_size_scale = 0.0
+        # Operator-visible alert + tamper-evident audit record (same convention
+        # as strategy.py bankroll-unavailable handling).
+        try:
+            from core.event_bus import get_event_bus
+            get_event_bus().emit("risk.risk_manager_unavailable", {
+                "asset": asset,
+                "reason": "risk_manager_exception",
+                "error": str(_rm_exc),
+                "action": "reject_sizing",
+            })
+        except Exception:
+            pass
+        try:
+            from core.risk_audit_chain import get_risk_audit_chain
+            get_risk_audit_chain().log_event("risk.risk_manager_unavailable", {
+                "asset": asset,
+                "reason": "risk_manager_exception",
+                "error": str(_rm_exc)[:200],
+                "action": "reject_sizing",
+            })
+        except Exception as _audit_exc:
+            logger.debug("Audit log failed (non-critical): %s", _audit_exc)
     if loss_size_scale <= 0.0:
         logger.warning(
             "[UNIFIED-SIZING] Daily/weekly loss cap hit; rejecting size for asset=%s",
@@ -1107,7 +1139,7 @@ def compute_order_size(
             "bankroll_usd": float(bankroll_usd),
             "price_cents": price_cents,
             "asset": asset,
-            "reason": "daily_weekly_loss_cap",
+            "reason": "risk_manager_unavailable" if risk_manager_failed else "daily_weekly_loss_cap",
         }
 
     # Scale by the loss/heat multiplier and quantize to the Kalshi-supported

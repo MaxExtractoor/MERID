@@ -1167,13 +1167,14 @@ class KalshiMarketCatalog:
                             series
                         )
                         try:
-                            # CRITICAL FIX: Add max_expiration_time filter to prevent fetching markets expired hours ago
-                            # This prevents old markets from being logged and processed
-                            # Aligned with snapshot MAX_MINUTES_TO_EXPIRY (17 min) for consistency
+                            # max_expiration_time is a Kalshi REST query param, not a
+                            # MarketFilter field — the public discovery path does not
+                            # accept it, so apply the 17-minute expiry bound as a
+                            # post-filter on EventMarket.end_date instead.
                             max_expiry = now_utc + timedelta(minutes=17)
                             debug_result = await asyncio.wait_for(
                                 self._client.list_markets_result(
-                                    MarketFilter(active_only=False, limit=200, search=series, max_expiration_time=max_expiry)
+                                    MarketFilter(active_only=False, limit=200, search=series)
                                 ),
                                 timeout=15.0
                             )
@@ -1184,17 +1185,34 @@ class KalshiMarketCatalog:
                                 debug_count,
                                 [m.market_id for m in (debug_result.data or [])]
                             )
-                            
+
                             # If fallback found markets, use those instead
                             if debug_result.success and debug_result.data:
-                                logger.info(
-                                    "[CATALOG-ROBUST] series=%s recovered %d markets from fallback, using those",
-                                    series,
-                                    len(debug_result.data)
-                                )
                                 # Handle REST API response format for fallback
                                 fallback_markets = debug_result.data if isinstance(debug_result.data, list) else debug_result.data.get('markets', []) if isinstance(debug_result.data, dict) else []
-                                markets_list = fallback_markets
+                                bounded_markets = []
+                                for m in fallback_markets:
+                                    end_date = getattr(m, "end_date", None)
+                                    if end_date is None:
+                                        bounded_markets.append(m)
+                                        continue
+                                    if end_date.tzinfo is None:
+                                        end_date = end_date.replace(tzinfo=timezone.utc)
+                                    if end_date <= max_expiry:
+                                        bounded_markets.append(m)
+                                    else:
+                                        logger.debug(
+                                            "[CATALOG-ROBUST] dropping far-future market: ticker=%s end_date=%s max_expiry=%s",
+                                            getattr(m, "market_id", "?"), end_date, max_expiry
+                                        )
+                                if bounded_markets:
+                                    logger.info(
+                                        "[CATALOG-ROBUST] series=%s recovered %d markets from fallback (%d dropped by expiry bound), using those",
+                                        series,
+                                        len(bounded_markets),
+                                        len(fallback_markets) - len(bounded_markets),
+                                    )
+                                    markets_list = bounded_markets
                         except Exception as debug_exc:
                             logger.error(
                                 "[CATALOG-ROBUST] series=%s fallback fetch failed: %s",
