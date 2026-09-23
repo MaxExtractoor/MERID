@@ -14572,14 +14572,19 @@ async def _route_live(
         if is_duplicate_error:
             # Idempotent success: our order was already accepted by Kalshi on a prior attempt.
             # Look up the order by client_order_id to confirm it's resting.
+            # The lookup key must be the id actually sent on the wire: exit
+            # intents submit with ``client_order_id`` (exit_*) while
+            # ``client_tag`` stays merid-*.  Looking up by client_tag always
+            # misses for exits -> DUPLICATE_UNKNOWN -> resubmit -> 409 churn.
+            _wire_coid = intent.client_order_id or intent.client_tag
             logger.info(
-                "[KALSHI_DUPLICATE_SUCCESS] ticker=%s client_tag=%s — order already accepted, treating as success",
+                "[KALSHI_DUPLICATE_SUCCESS] ticker=%s client_order_id=%s — order already accepted, treating as success",
                 intent.ticker,
-                intent.client_tag,
+                _wire_coid,
             )
             try:
                 # Query Kalshi (via the port) to reconcile actual exchange state
-                order_data = await port.get_order(client_order_id=intent.client_tag)
+                order_data = await port.get_order(client_order_id=_wire_coid)
                 if order_data is not None:
                     logger.info(
                         "[KALSHI_DUPLICATE_LOOKUP] ticker=%s order_id=%s status=%s — confirmed resting",
@@ -14593,11 +14598,11 @@ async def _route_live(
                     try:
                         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
                         _ptg = get_pre_trade_gate()
-                        _ptg.mark_submitted(intent.client_tag, order_data.order_id)
+                        _ptg.mark_submitted(_wire_coid, order_data.order_id)
                         _mark_canonical_entry_submitted(intent, order_id=order_data.order_id)
                         _filled = int(order_data.filled_size or 0)
                         if _filled:
-                            _ptg.mark_filled(intent.client_tag, _filled, fill_id=f"{order_data.order_id}-dup", filled_qty_cc=_filled * 100)
+                            _ptg.mark_filled(_wire_coid, _filled, fill_id=f"{order_data.order_id}-dup", filled_qty_cc=_filled * 100)
                             _mark_canonical_entry_executed(intent, fill_id=f"{order_data.order_id}-dup")
                             # CRITICAL: Record price execution to prevent repeat price execution
                             _record_price_execution(intent)
@@ -14610,10 +14615,10 @@ async def _route_live(
                         cache = _dedup_cache()
                         _dup_order_id = order_data.order_id
                         if _dup_order_id:
-                            cache.mark_completed(intent.client_tag, _dup_order_id)
+                            cache.mark_completed(_wire_coid, _dup_order_id)
                             logger.debug(
                                 "[DEDUP-CACHE-DUPLICATE-UPDATED] client_order_id=%s kalshi_order_id=%s",
-                                intent.client_tag, _dup_order_id
+                                _wire_coid, _dup_order_id
                             )
                     except Exception as dedup_dup_err:
                         logger.warning("[DEDUP-CACHE-ERROR] Failed to update cache on duplicate (non-fatal): %s", dedup_dup_err)
@@ -14627,7 +14632,7 @@ async def _route_live(
                             "filled_count": int(order_data.filled_size or 0),
                             "remaining_count": int(order_data.remaining_size or 0),
                             "price_cents": order_data.price_cents or 0,
-                            "client_tag": intent.client_tag,
+                            "client_tag": _wire_coid,
                         },
                         latency_ms=round(latency, 2),
                     )
@@ -14648,11 +14653,11 @@ async def _route_live(
             except Exception as e:
                 logger.debug(f"Metric increment failed: {e}")
             logger.warning(
-                "[KALSHI_DUPLICATE_UNKNOWN] ticker=%s client_tag=%s — "
+                "[KALSHI_DUPLICATE_UNKNOWN] ticker=%s client_order_id=%s — "
                 "lookup failed, status unknown. Exposure NOT released. "
                 "Background reconciliation required.",
                 intent.ticker,
-                intent.client_tag,
+                _wire_coid,
             )
             return OrderResult(
                 status="duplicate_unknown",  # Ambiguous — upstream must handle conservatively

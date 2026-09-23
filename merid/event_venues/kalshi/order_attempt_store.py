@@ -226,6 +226,10 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.FILLED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        # The route path can still be in flight when reconciliation starts —
+        # a late route timeout re-marks the attempt SUBMISSION_UNKNOWN; that
+        # signal must not be dropped just because the resolver moved first.
+        ExitOrderAttemptState.SUBMISSION_UNKNOWN,
     },
     ExitOrderAttemptState.ACKNOWLEDGED: {
         ExitOrderAttemptState.RESTING,
@@ -269,6 +273,20 @@ for _terminal_state in EXIT_TERMINAL_STATES:
             ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL
         )
 EXIT_VALID_TRANSITIONS[ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL] = set()
+
+# An authoritative fill can race a terminal exchange outcome — Kalshi can fill
+# the order moments before our local reject/cancel/expiry observation lands
+# (late ack, cancel-after-fill, post-reject liquidity sweep).  The fill is
+# ground truth; refusing to record it leaves the durable attempt contradicting
+# the fills ledger (observed 2026-09-23: REJECTED_EXCHANGE -> FILLED).
+for _late_fill_state in (
+    ExitOrderAttemptState.REJECTED_EXCHANGE,
+    ExitOrderAttemptState.EXPIRED_EXCHANGE,
+    ExitOrderAttemptState.CANCELED,
+):
+    EXIT_VALID_TRANSITIONS.setdefault(_late_fill_state, set()).add(
+        ExitOrderAttemptState.FILLED
+    )
 
 
 class OrderAttemptStore:

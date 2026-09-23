@@ -3645,6 +3645,11 @@ async def _execute_exit_order(
             if getattr(result, "requires_recovery", False) or _result_status in (
                 "submission_unknown",
                 "duplicate_unknown",
+                # "duplicate": another route for this client_order_id is still
+                # in flight (concurrent-dedup).  That route owns the outcome —
+                # re-arming here would resubmit against an unresolved attempt
+                # and burn the exit retry budget.
+                "duplicate",
             ):
                 logger.warning(
                     "[EXIT-ORDER] Exit in %s state; keeping in-flight for reconcile: "
@@ -4041,9 +4046,26 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
         # keep failing (e.g., during market outage or API issues). Limit to 3 retries.
         MAX_EXIT_RETRIES = 3
         if retry_count > MAX_EXIT_RETRIES:
+            # 2026-09-23: emergency liquidation exits (settlement_guard ->
+            # expiry_liquidation, emergency, hard_risk) must never be capped
+            # out — they are the last-resort reduce-only path.  Earlier churn
+            # (route timeouts, duplicate resubmits) counts against the same
+            # budget, which once stranded a live position into settlement with
+            # no exit attempt.  Fall through to the re-arm path instead.
+            _raw_reason = exit_reason.value if hasattr(exit_reason, "value") else exit_reason
+            _canon_reason = _EXIT_REASON_CANONICAL_MAP.get(str(_raw_reason).lower(), str(_raw_reason).lower())
+            _is_emergency_exit = _canon_reason in ("expiry_liquidation", "emergency", "hard_risk")
+            if _is_emergency_exit:
+                logger.critical(
+                    "[EXIT-ORDER-RETRY] Emergency exit bypasses retry cap (%d): position=%s market=%s "
+                    "reason=%s retry_count=%s - re-arming last-resort exit",
+                    MAX_EXIT_RETRIES, position.position_id[:8], position.market_id,
+                    _raw_reason, retry_count,
+                )
+                position.exit_retry_count = retry_count
             # CRITICAL FIX (2026-08-08): If the market is already expired/closed,
             # stop retrying and route the position to settlement reconciliation.
-            if (
+            elif (
                 self._position_monitor
                 and self._position_monitor._is_expired_market(position.market_id)
             ):
@@ -4065,30 +4087,31 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
                     logger.debug("[EXIT-ORDER-RETRY] Failed to remove expired position from cache: %s", cache_err)
                 return
 
-            logger.error(
-                "[EXIT-ORDER-RETRY] Position exceeded max exit retries (%d): position=%s market=%s reason=%s - "
-                "ABANDONING position to settlement (manual intervention required)",
-                MAX_EXIT_RETRIES,
-                position.position_id[:8],
-                position.market_id,
-                exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
-            )
-            # 2026-08-11 CRITICAL FIX: Do not remove the position when max retries are
-            # exceeded while the market is still tradeable. The exchange is still
-            # authoritative and holds the position; the monitor must retain it and the
-            # allocator must retain capacity. Alert and stop further retries but leave
-            # the position in the monitor for manual/rested settlement.
-            if self._position_monitor:
-                self._position_monitor._clear_exit_intent_in_flight(position.position_id)
-            logger.critical(
-                "[EXIT-ORDER-BLOCKED] Position exceeded max exit retries (%d): position=%s market=%s reason=%s - "
-                "EXCHANGE POSITION STILL OPEN; monitor and capacity retained; manual intervention required",
-                MAX_EXIT_RETRIES,
-                position.position_id[:8],
-                position.market_id,
-                exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
-            )
-            return
+            elif not _is_emergency_exit:
+                logger.error(
+                    "[EXIT-ORDER-RETRY] Position exceeded max exit retries (%d): position=%s market=%s reason=%s - "
+                    "ABANDONING position to settlement (manual intervention required)",
+                    MAX_EXIT_RETRIES,
+                    position.position_id[:8],
+                    position.market_id,
+                    exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
+                )
+                # 2026-08-11 CRITICAL FIX: Do not remove the position when max retries are
+                # exceeded while the market is still tradeable. The exchange is still
+                # authoritative and holds the position; the monitor must retain it and the
+                # allocator must retain capacity. Alert and stop further retries but leave
+                # the position in the monitor for manual/rested settlement.
+                if self._position_monitor:
+                    self._position_monitor._clear_exit_intent_in_flight(position.position_id)
+                logger.critical(
+                    "[EXIT-ORDER-BLOCKED] Position exceeded max exit retries (%d): position=%s market=%s reason=%s - "
+                    "EXCHANGE POSITION STILL OPEN; monitor and capacity retained; manual intervention required",
+                    MAX_EXIT_RETRIES,
+                    position.position_id[:8],
+                    position.market_id,
+                    exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
+                )
+                return
         
         position.exit_retry_count = retry_count
 
