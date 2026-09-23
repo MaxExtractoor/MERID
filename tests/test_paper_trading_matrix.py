@@ -463,20 +463,28 @@ class TestManifestIntegrity:
         assert report["total_components"] >= 50
         assert report["total_unique_apis"] >= 50
 
-    def test_ts_manifest_exists(self):
+    def test_ts_manifest_generator_output(self):
+        """The TS manifest generator must emit a valid manifest from the Python SSOT.
+
+        The generated file is not committed (build artifact); the invariant is
+        that the generator produces a parseable manifest in parity with
+        merid.ui_views_manifest.
+        """
+        import importlib.util
         import os
-        import pytest
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        # Canonical path first; fall back to _legacy/ location
-        ts_path = os.path.join(root, "web", "react", "src", "config", "uiViewsManifest.ts")
-        if not os.path.exists(ts_path):
-            ts_path = os.path.join(root, "web", "react", "src", "config", "_legacy", "uiViewsManifest.ts")
-        
-        # Skip if TS manifest doesn't exist (frontend may not be built)
-        if not os.path.exists(ts_path):
-            pytest.skip("TS manifest not found (frontend not built)")
-        
-        with open(ts_path, "r") as f:
-            content = f.read()
+        spec = importlib.util.spec_from_file_location(
+            "generate_ts_manifest",
+            os.path.join(root, "scripts", "generate_ts_manifest.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        content = mod.generate()
         assert "AUTO-GENERATED" in content
         assert "ViewConfig" in content
+
+        # Parity: every Python-manifest view id must appear in the TS output.
+        from merid.ui_views_manifest import VIEWS
+        for v in VIEWS:
+            assert f'id: "{v.id}"' in content, f"view {v.id} missing from TS manifest"
