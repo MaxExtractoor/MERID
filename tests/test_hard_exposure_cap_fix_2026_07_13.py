@@ -36,6 +36,7 @@ class TestHardExposureCapEnforcement:
         # Mock slot allocator to return $1.00 current exposure
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 1.00
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache and risk envelope
@@ -74,6 +75,7 @@ class TestHardExposureCapEnforcement:
         # Mock slot allocator to return $0.40 current exposure
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 0.40
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache and risk envelope
@@ -110,12 +112,13 @@ class TestHardExposureCapEnforcement:
         # Mock slot allocator to return $1.00 current exposure (full capacity)
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 1.00
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache and risk envelope
         mock_position_cache = Mock()
-        mock_position_cache.get_position.return_value = Mock(contracts=1, current_price_cents=50)
-        mock_position_cache.get_all_positions.return_value = {"KXBTC15M-TEST": Mock(contracts=1, current_price_cents=50)}
+        mock_position_cache.get_position.return_value = Mock(contracts=1, current_price_cents=50, quantity_cc=100, avg_price_cents=50)
+        mock_position_cache.get_all_positions.return_value = {"KXBTC15M-TEST": Mock(contracts=1, current_price_cents=50, quantity_cc=100, avg_price_cents=50)}
         
         mock_risk_envelope = Mock()
         mock_risk_envelope.max_total_notional_usd = 1.00
@@ -146,6 +149,7 @@ class TestHardExposureCapEnforcement:
         # Mock slot allocator to return $0.50 current exposure
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 0.50
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache and risk envelope
@@ -169,8 +173,8 @@ class TestHardExposureCapEnforcement:
             assert rejection is not None, "Should reject with custom $0.75 cap"
             assert "hard_exposure_cap_exceeded" in rejection
     
-    def test_hard_exposure_cap_default_to_1_dollar(self):
-        """Test that hard exposure cap defaults to $1.00 when environment variable is not set."""
+    def test_hard_exposure_cap_default_to_2_dollars(self):
+        """Test that hard exposure cap defaults to $2.00 when environment variable is not set."""
         # Create entry order intent
         intent = OrderIntent(
             ticker="KXBTC15M-TEST",
@@ -184,6 +188,7 @@ class TestHardExposureCapEnforcement:
         # Mock slot allocator to return $0.50 current exposure
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 0.50
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache and risk envelope
@@ -194,7 +199,7 @@ class TestHardExposureCapEnforcement:
         mock_risk_envelope = Mock()
         mock_risk_envelope.max_total_notional_usd = 1.00
         
-        # Test without environment variable (should default to $1.00)
+        # Test without environment variable (should default to $2.00)
         with patch('merid.event_venues.kalshi.order_router._check_global_rate_limit', return_value=None), \
              patch('merid.event_venues.kalshi.position_cache.get_position_cache', return_value=mock_position_cache), \
              patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope', return_value=mock_risk_envelope), \
@@ -203,8 +208,8 @@ class TestHardExposureCapEnforcement:
             
             rejection = _check_intent_risk(intent)
             
-            # Should allow because $0.50 + $0.50 = $1.00 <= $1.00 default cap
-            assert rejection is None, "Should allow with default $1.00 cap"
+            # Should allow because $0.50 + $0.50 = $1.00 <= $2.00 default cap
+            assert rejection is None, "Should allow with default $2.00 cap"
 
 
 class TestPerAssetPositionLimitEnforcement:
@@ -225,13 +230,14 @@ class TestPerAssetPositionLimitEnforcement:
         # Mock slot allocator to reject allocation (simulating per-asset limit)
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 0.50
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (False, "asset BTC already has position")  # Reject allocation
         
         # Mock position cache with existing BTC position
         mock_position_cache = Mock()
         mock_position_cache.get_position.return_value = None
         mock_position_cache.get_all_positions.return_value = {
-            "KXBTC15M-OTHER": Mock(contracts=1, current_price_cents=50)  # Existing BTC position
+            "KXBTC15M-OTHER": Mock(contracts=1, current_price_cents=50, quantity_cc=100, avg_price_cents=50)  # Existing BTC position
         }
         
         mock_risk_envelope = Mock()
@@ -265,13 +271,14 @@ class TestPerAssetPositionLimitEnforcement:
         # Mock slot allocator
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 0.50
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache with existing BTC position (different asset)
         mock_position_cache = Mock()
         mock_position_cache.get_position.return_value = None
         mock_position_cache.get_all_positions.return_value = {
-            "KXBTC15M-OTHER": Mock(contracts=1, current_price_cents=50)  # Existing BTC position
+            "KXBTC15M-OTHER": Mock(contracts=1, current_price_cents=50, quantity_cc=100, avg_price_cents=50)  # Existing BTC position
         }
         
         mock_risk_envelope = Mock()
@@ -303,13 +310,14 @@ class TestPerAssetPositionLimitEnforcement:
         # Mock slot allocator
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 0.50
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache with existing BTC position
         mock_position_cache = Mock()
-        mock_position_cache.get_position.return_value = Mock(contracts=1, current_price_cents=50)
+        mock_position_cache.get_position.return_value = Mock(contracts=1, current_price_cents=50, quantity_cc=100, avg_price_cents=50)
         mock_position_cache.get_all_positions.return_value = {
-            "KXBTC15M-TEST": Mock(contracts=1, current_price_cents=50)  # Existing BTC position
+            "KXBTC15M-TEST": Mock(contracts=1, current_price_cents=50, quantity_cc=100, avg_price_cents=50)  # Existing BTC position
         }
         
         mock_risk_envelope = Mock()
@@ -341,6 +349,7 @@ class TestPerAssetPositionLimitEnforcement:
         # Mock slot allocator
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 0.00
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
         
         # Mock position cache with no positions
@@ -532,7 +541,7 @@ class TestLoop15mDeduplicationFix:
         assert key not in loop._executed_candidates_this_window
         
         # Add to set (simulating execution)
-        loop._executed_candidates_this_window.add(key)
+        loop._executed_candidates_this_window[key] = candidate
         
         # Now key should be in set
         assert key in loop._executed_candidates_this_window
@@ -550,8 +559,8 @@ class TestLoop15mDeduplicationFix:
         )
         
         # Add some candidates
-        loop._executed_candidates_this_window.add("KXBTC15M-TEST:yes:50")
-        loop._executed_candidates_this_window.add("KXETH15M-TEST:no:60")
+        loop._executed_candidates_this_window["KXBTC15M-TEST_yes_50c"] = {}
+        loop._executed_candidates_this_window["KXETH15M-TEST_no_60c"] = {}
         
         assert len(loop._executed_candidates_this_window) == 2
         
@@ -596,7 +605,7 @@ class TestEndToEndExecutionFlow:
         
         # Simulate first execution
         key1 = loop._get_candidate_key(candidate)
-        loop._executed_candidates_this_window.add(key1)
+        loop._executed_candidates_this_window[key1] = candidate
         
         # Simulate second attempt at same price (should be blocked by deduplication)
         key2 = loop._get_candidate_key(candidate)
@@ -615,20 +624,22 @@ class TestEndToEndExecutionFlow:
         # Mock slot allocator at full capacity
         mock_slot_allocator = Mock()
         mock_slot_allocator.get_total_exposure.return_value = 1.00
+        mock_slot_allocator.get_available_exposure.return_value = 1.00
         mock_slot_allocator.can_allocate.return_value = (True, "allocation allowed")  # Return tuple
-        
+
         mock_position_cache = Mock()
+        mock_position_cache.get_position.return_value = None
         mock_position_cache.get_all_positions.return_value = {}
-        
+
         mock_risk_envelope = Mock()
         mock_risk_envelope.max_total_notional_usd = 1.00
-        
+
         with patch('merid.event_venues.kalshi.order_router._check_global_rate_limit', return_value=None), \
              patch('merid.event_venues.kalshi.position_cache.get_position_cache', return_value=mock_position_cache), \
              patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope', return_value=mock_risk_envelope), \
              patch('merid.risk.global_slot_allocator.get_global_slot_allocator', return_value=mock_slot_allocator), \
              patch.dict(os.environ, {'MERID_FIXED_EXPOSURE_CAP_USD': '1.00'}):
-            
+
             rejection = _check_intent_risk(intent)
             # Should reject due to hard exposure cap (backup protection)
             assert rejection is not None, "Should reject at full capacity"
@@ -658,7 +669,7 @@ class TestEndToEndExecutionFlow:
         
         # Simulate execution at 50c
         key1 = loop._get_candidate_key(candidate1)
-        loop._executed_candidates_this_window.add(key1)
+        loop._executed_candidates_this_window[key1] = candidate1
         
         # Create candidate at 60c (different price)
         candidate2 = {
@@ -713,12 +724,15 @@ class TestEndToEndExecutionFlow:
         # Cleanup
         allocator.release_slot(slot_id1)
     
-    def test_full_flow_enforces_1dollar_exposure_cap(self):
-        """Test that the full flow enforces $1 exposure cap across all assets."""
+    def test_full_flow_enforces_exposure_cap(self):
+        """Test that the full flow enforces the exposure cap across all assets.
+
+        The canonical cap moved from $1.00 to $2.00
+        (MERID_FIXED_EXPOSURE_CAP_USD default)."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
-        
+
         allocator = GlobalSlotAllocator()
-        
+
         # Allocate BTC at 50c ($0.50)
         request1 = AllocationRequest(
             agent_id="BTC_15M",
@@ -729,12 +743,12 @@ class TestEndToEndExecutionFlow:
             spread_cents=2,
             confidence=0.5
         )
-        
+
         success1, reason1, slot_id1 = allocator.request_allocation(request1)
         assert success1, f"First allocation should succeed: {reason1}"
         assert allocator.get_total_exposure() == 0.50
-        
-        # Try to allocate ETH at 60c ($0.60) - should fail (total would be $1.10 > $1.00)
+
+        # Allocate ETH at 60c ($0.60) - allowed (total $1.10 <= $2.00)
         request2 = AllocationRequest(
             agent_id="ETH_15M",
             ticker="KXETH15M-TEST",
@@ -744,28 +758,43 @@ class TestEndToEndExecutionFlow:
             spread_cents=2,
             confidence=0.5
         )
-        
+
         success2, reason2, slot_id2 = allocator.request_allocation(request2)
-        assert not success2, f"ETH allocation should fail (exceeds $1 cap): {reason2}"
-        assert "insufficient exposure" in reason2.lower(), f"Should mention exposure cap: {reason2}"
-        
-        # Try to allocate ETH at 40c ($0.40) - should succeed (total would be $0.90 <= $1.00)
+        assert success2, f"ETH allocation should succeed: {reason2}"
+
+        # Allocate SOL at 60c ($0.60) - allowed (total $1.70 <= $2.00)
         request3 = AllocationRequest(
-            agent_id="ETH_15M",
-            ticker="KXETH15M-TEST2",
-            asset="ETH",
-            entry_price_cents=40,
+            agent_id="SOL_15M",
+            ticker="KXSOL15M-TEST",
+            asset="SOL",
+            entry_price_cents=60,
             edge_pct=0.03,
             spread_cents=2,
             confidence=0.5
         )
-        
+
         success3, reason3, slot_id3 = allocator.request_allocation(request3)
-        assert success3, f"ETH allocation at 40c should succeed: {reason3}"
-        assert allocator.get_total_exposure() == 0.90
-        
+        assert success3, f"SOL allocation should succeed: {reason3}"
+        assert allocator.get_total_exposure() == pytest.approx(1.70)
+
+        # Try to allocate XRP at 60c ($0.60) - should fail (total $2.30 > $2.00)
+        request4 = AllocationRequest(
+            agent_id="XRP_15M",
+            ticker="KXXRP15M-TEST",
+            asset="XRP",
+            entry_price_cents=60,
+            edge_pct=0.03,
+            spread_cents=2,
+            confidence=0.5
+        )
+
+        success4, reason4, slot_id4 = allocator.request_allocation(request4)
+        assert not success4, f"XRP allocation should fail (exceeds $2 cap): {reason4}"
+        assert "exposure" in reason4.lower(), f"Should mention exposure cap: {reason4}"
+
         # Cleanup
         allocator.release_slot(slot_id1)
+        allocator.release_slot(slot_id2)
         allocator.release_slot(slot_id3)
 
 
@@ -793,8 +822,8 @@ class TestAgentGridDeduplicationFix:
         assert key1 != key3, "Different side should generate different key"
         assert key1 != key4, "Different price should generate different key"
         
-        # Key format should be ticker:side:price
-        assert key1 == "KXSOL15M-TEST:yes:25", f"Expected 'KXSOL15M-TEST:yes:25', got '{key1}'"
+        # Key format should be ticker_side_pricec
+        assert key1 == "KXSOL15M-TEST_yes_25c", f"Expected 'KXSOL15M-TEST:yes:25', got '{key1}'"
     
     def test_executed_candidates_set_initialized(self):
         """Test that executed candidates set is initialized on agent grid creation."""
@@ -816,7 +845,7 @@ class TestAgentGridDeduplicationFix:
         grid = LeanAgentGrid15m(agents=mock_agents)
         
         # Add a candidate to the set
-        grid._executed_candidates.add("KXSOL15M-TEST:yes:25")
+        grid._executed_candidates.add("KXSOL15M-TEST_yes_25c")
         assert len(grid._executed_candidates) == 1, "Should have one executed candidate"
         
         # Simulate startup (this is async, but we can call the logic directly)
@@ -836,7 +865,7 @@ class TestAgentGridDeduplicationFix:
         grid = LeanAgentGrid15m(agents=mock_agents)
         
         # Add candidates to the set
-        grid._executed_candidates.add("KXSOL15M-TEST:yes:25")
+        grid._executed_candidates.add("KXSOL15M-TEST_yes_25c")
         grid._executed_candidates.add("KXETH15M-TEST:no:30")
         assert len(grid._executed_candidates) == 2, "Should have two executed candidates"
         
@@ -854,7 +883,7 @@ class TestAgentGridDeduplicationFix:
         grid = LeanAgentGrid15m(agents=mock_agents)
         
         # Add a candidate to the set
-        candidate_key = "KXSOL15M-TEST:yes:25"
+        candidate_key = "KXSOL15M-TEST_yes_25c"
         grid._executed_candidates.add(candidate_key)
         
         # Check if it's in the set
