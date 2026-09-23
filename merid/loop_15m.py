@@ -2095,6 +2095,20 @@ def _canonicalize_exit_reason(exit_reason: Any) -> Tuple[str, str]:
     return original, canonical
 
 
+def _resolve_exit_policy_snapshot(position: Any) -> Tuple[Dict[str, Any], bool]:
+    """Return (policy_snapshot, policy_missing) for a position's exit policy.
+
+    ``position.exit_policy`` may be absent, ``None``, or a non-dict value; a
+    missing or malformed policy must never prevent a durable exit-attempt
+    record from being created.  The boolean marks whether a usable policy was
+    present so the attempt record carries an explicit absence marker.
+    """
+    raw = getattr(position, "exit_policy", None)
+    if not isinstance(raw, dict):
+        return {}, True
+    return raw, False
+
+
 def _run_exit_price_guard(
     position: Any,
     exit_reason: Any,
@@ -3398,6 +3412,10 @@ async def _execute_exit_order(
                 if superseded:
                     durable_exit_attempt = None
             if durable_exit_attempt is None:
+                # exit_policy may be None or malformed; a missing policy must
+                # never prevent the durable attempt record from being created —
+                # record an absence marker so reconciliation can explain it.
+                _exit_policy, _policy_missing = _resolve_exit_policy_snapshot(position)
                 durable_exit_attempt = store.create_exit_attempt(
                     exit_intent_id=intent.intent_id,
                     position_key=position.position_id,
@@ -3407,12 +3425,14 @@ async def _execute_exit_order(
                     requested_quantity=requested_exit_cc,
                     requested_limit_cents=int(round(exit_price_cents)),
                     exchange_order_id=None,
-                    policy_version=int(getattr(position, "exit_policy", {}).get("version", 0) or 0),
+                    policy_version=int(_exit_policy.get("version", 0) or 0),
                     basis_version=int(getattr(position, "basis_version", 0) or 0),
                     payload={
                         "order_attempt_id": intent.order_attempt_id,
                         "parent_entry_fill_id": intent.parent_entry_fill_id,
                         "parentage_status": _parentage_status,
+                        "policy_missing": _policy_missing,
+                        "policy_snapshot": _exit_policy,
                     },
                 )
         except ExitOrderAttemptConflict:
@@ -5846,8 +5866,8 @@ async def _run_one_cycle(self, tick: int) -> None:
     logger.info("[LOOP-STARTUP-ONE-CYCLE] _run_one_cycle ENTRY tick=%d", tick)
     logger.debug("[TRACE] _run_one_cycle ENTRY tick=%d", tick)
     
-    # NOTE: Cycle resets are now handled in _run_agent_grid_with_timeout with window-based logic
-    # This path is no longer used for cycle reset management
+    # NOTE: Window-change resets are owned by _run_loop (single canonical
+    # handler).  This path performs no cycle-reset management.
     
     # Import profiler for cycle monitoring
     from merid.performance.loop_profiler import get_loop_profiler
@@ -7776,116 +7796,12 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                     {mid: (p.contracts, p.avg_price_cents) for mid, p in all_positions.items() if p.contracts > 0}
                 )
             
-            # CRITICAL: Check if 15-minute ET window has changed
-            # Only reset cycle guards when window changes, not every 5 seconds
-            from merid.event_venues.kalshi.kalshi_15m_time import get_kalshi_15m_window
-            current_window = get_kalshi_15m_window()
-            window_changed = (self._current_window_suffix != current_window.suffix)
-            
-            if window_changed:
-                logger.info(
-                    "[15m-LOOP] 15-minute window changed: old=%s new=%s - resetting cycle guards and executed candidates",
-                    self._current_window_suffix, current_window.suffix
-                )
-                self._current_window_suffix = current_window.suffix
-                self._executed_candidates_this_window.clear()
-                
-                # CRITICAL FIX (2026-07-16): Trigger catalog refresh on 15m window boundary
-                # This ensures the catalog is updated immediately when markets roll over
-                # preventing trading on expired markets during the brief window after rollover
-                logger.info("[15m-LOOP] WINDOW-CHANGE: Triggering catalog refresh for new 15m window")
-                try:
-                    from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
-                    catalog = get_kalshi_market_catalog()
-                    # Force a refresh to get new markets for the new window
-                    # Add timeout to prevent indefinite blocking if catalog refresh hangs
-                    await asyncio.wait_for(catalog.refresh(force=True), timeout=30.0)
-                    logger.info("[15m-LOOP] WINDOW-CHANGE: Catalog refresh completed for new window")
-                except asyncio.TimeoutError:
-                    logger.error("[15m-LOOP] WINDOW-CHANGE: Catalog refresh timed out after 30s - will retry on next periodic refresh")
-                except Exception as e:
-                    logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
-                
-                # Reset best-edge tracking for new window
-                for asset in self._allowed_assets:
-                    self._best_edge_per_asset[asset] = None
-                logger.info("[15m-LOOP] Reset best-edge tracking for new window")
-                
-                # Reset swing mode for new window (swing mode only valid within same 15m window)
-                for asset in self._allowed_assets:
-                    self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
-                logger.info("[15m-LOOP] Reset swing mode for new window")
-                
-                # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator on timeframe transition
-                # This prevents false "Insufficient exposure" rejections when old slots from previous timeframe persist
-                logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing phantom slots from global slot allocator")
-                try:
-                    from merid.event_venues.kalshi.position_cache import get_position_cache
-                    from merid.risk.global_slot_allocator import get_global_slot_allocator
-                    
-                    position_cache = get_position_cache()
-                    slot_allocator = get_global_slot_allocator()
-                    
-                    # Get current position count from cache
-                    all_positions = position_cache.get_all_positions(validate_freshness=False)
-                    open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
-                    position_count = len(open_positions)
-                    
-                    logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Current position_count={position_count}")
-                    
-                    # Clear slots on timeframe transition regardless of position count
-                    # New timeframe = fresh start for slot allocation
-                    slot_allocator.clear_slots_on_empty_positions(position_count=0)
-                    logger.info("[15m-LOOP] TIMEFRAME-RESET: Cleared all slots for new timeframe")
-                    
-                    # CRITICAL FIX (2026-07-13): Reset window exposure on timeframe transition
-                    # New timeframe should start with fresh window exposure tracking
-                    logger.info("[15m-LOOP] TIMEFRAME-RESET: Resetting window exposure tracking")
-                    try:
-                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
-                        force_reset_window_exposure(reason="timeframe_transition")
-                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Window exposure reset complete")
-                    except Exception as e:
-                        logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to reset window exposure: %s", e, exc_info=True)
-                except Exception as e:
-                    logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear slots: %s", e, exc_info=True)
-                
-                # CRITICAL FIX (2026-07-13): Clear position cache on timeframe transition ONLY if no actual positions
-                # This prevents losing track of positions held across timeframe boundaries
-                # Position cache is only cleared if position_count=0 (no actual open positions)
-                if position_count == 0:
-                    logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing position cache for new timeframe (position_count=0)")
-                    try:
-                        from merid.event_venues.kalshi.position_cache import get_position_cache
-                        position_cache = get_position_cache()
-                        await position_cache.clear()  # Use async clear() for mutex protection
-                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Position cache cleared")
-                    except Exception as e:
-                        logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear position cache: %s", e, exc_info=True)
-                else:
-                    logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Skipping position cache clear (position_count={position_count} > 0)")
-                
-                # CRITICAL FIX (2026-07-13): Clear fills ledger open positions on timeframe transition ONLY if no actual positions
-                # This prevents losing track of positions held across timeframe boundaries
-                if position_count == 0:
-                    logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing fills ledger open positions for new timeframe (position_count=0)")
-                    try:
-                        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
-                        ledger = get_fills_ledger()
-                        await ledger.clear_open_positions_on_empty_cache()
-                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Fills ledger open positions cleared")
-                    except Exception as e:
-                        logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear fills ledger: %s", e, exc_info=True)
-                else:
-                    logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Skipping fills ledger clear (position_count={position_count} > 0)")
-                
-                # Reset UnifiedRiskManager cycle tracking
-                from merid.risk.unified_risk_manager import get_unified_risk_manager
-                risk_mgr = get_unified_risk_manager()
-                risk_mgr.reset_cycle()
-                logger.info("[15m-LOOP] Reset UnifiedRiskManager cycle for window=%s", current_window.suffix)
-            else:
-                logger.debug("[15m-LOOP] Window unchanged: %s - skipping cycle reset", current_window.suffix)
+            # Window-change detection, catalog refresh, and cycle-guard resets are
+            # owned exclusively by _run_loop (single canonical handler).  This
+            # function must not update _current_window_suffix: a second copy here
+            # raced the canonical handler — when it won, its stale catalog import
+            # failed and _run_loop then saw no window change, skipping the real
+            # rollover refresh.
             
             # Balance calibration is the responsibility of the caller (_run_loop / _run_cycle_wrapper)
             # so that one logical tick consumes exactly one bankroll snapshot.
