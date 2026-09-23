@@ -24,78 +24,78 @@ class TestTimeScaledSpreadCap:
         """Test BTC cap at full 15-minute window (900s)."""
         cap = get_time_scaled_spread_cap("BTC", 900)
 
-        # Base cap is 20c, at full time should be 20c (100%)
-        assert cap == 20
+        # Base cap is 65c (2026-08-03 fix), at full time should be 65c (100%)
+        assert cap == 65
 
     def test_btc_cap_at_expiry(self):
         """Test BTC cap at expiry (0s)."""
         cap = get_time_scaled_spread_cap("BTC", 0)
 
-        # Base cap is 20c, at expiry should be 16c (80%)
-        assert cap == 16
+        # Base cap is 65c, at expiry should be 52c (80%)
+        assert cap == 52
 
     def test_eth_cap_at_full_time(self):
         """Test ETH cap at full 15-minute window (900s)."""
         cap = get_time_scaled_spread_cap("ETH", 900)
 
-        # Base cap is 24c, at full time should be 24c (100%)
-        assert cap == 24
+        # Base cap is 65c, at full time should be 65c (100%)
+        assert cap == 65
 
     def test_eth_cap_at_expiry(self):
         """Test ETH cap at expiry (0s)."""
         cap = get_time_scaled_spread_cap("ETH", 0)
 
-        # Base cap is 24c, at expiry should be 19c (80%)
-        assert cap == 19
+        # Base cap is 65c, at expiry should be 52c (80%)
+        assert cap == 52
 
     def test_sol_cap_at_full_time(self):
         """Test SOL cap at full 15-minute window (900s)."""
         cap = get_time_scaled_spread_cap("SOL", 900)
 
-        # Base cap is 40c, at full time should be 40c (100%)
-        assert cap == 40
+        # Base cap is 65c, at full time should be 65c (100%)
+        assert cap == 65
 
     def test_sol_cap_at_expiry(self):
         """Test SOL cap at expiry (0s)."""
         cap = get_time_scaled_spread_cap("SOL", 0)
 
-        # Base cap is 40c, at expiry should be 32c (80%)
-        assert cap == 32
+        # Base cap is 65c, at expiry should be 52c (80%)
+        assert cap == 52
 
     def test_xrp_cap_at_full_time(self):
         """Test XRP cap at full 15-minute window (900s)."""
         cap = get_time_scaled_spread_cap("XRP", 900)
 
-        # Base cap is 40c, at full time should be 40c (100%)
-        assert cap == 40
+        # Base cap is 65c, at full time should be 65c (100%)
+        assert cap == 65
 
     def test_doge_cap_at_full_time(self):
         """Test DOGE cap at full 15-minute window (900s)."""
         cap = get_time_scaled_spread_cap("DOGE", 900)
 
-        # Base cap is 60c, at full time should be 60c (100%)
-        assert cap == 60
+        # Base cap is 70c, at full time should be 70c (100%)
+        assert cap == 70
 
     def test_doge_cap_at_expiry(self):
         """Test DOGE cap at expiry (0s)."""
         cap = get_time_scaled_spread_cap("DOGE", 0)
 
-        # Base cap is 60c, at expiry should be 48c (80%)
-        assert cap == 48
+        # Base cap is 70c, at expiry should be 56c (80%)
+        assert cap == 56
 
     def test_linear_decay_intermediate_time(self):
         """Test linear decay at intermediate time (450s = 7.5 min)."""
         cap = get_time_scaled_spread_cap("BTC", 450)
 
-        # At 50% time, should be 90% of base cap (18c for BTC)
-        assert cap == 18
+        # At 50% time, should be 90% of base cap (58c for BTC)
+        assert cap == 58
 
     def test_unknown_asset_defaults_to_btc(self):
         """Test that unknown asset defaults to BTC cap."""
         cap = get_time_scaled_spread_cap("UNKNOWN", 900)
 
-        # Should default to BTC cap (20c)
-        assert cap == 20
+        # Should default to BTC cap (65c)
+        assert cap == 65
 
     def test_all_asset_caps_defined(self):
         """Test that all 5 crypto assets have defined caps."""
@@ -105,13 +105,13 @@ class TestTimeScaledSpreadCap:
 
     def test_cap_values_match_documentation(self):
         """Test that cap values match the documented bridge caps."""
-        # From SPREAD_CAP_ADJUSTMENT_2026_08_02.md:
-        # BTC: 20c, ETH: 24c, SOL: 40c, XRP: 40c, DOGE: 60c
-        assert ASSET_SPREAD_CAPS["BTC"] == 20
-        assert ASSET_SPREAD_CAPS["ETH"] == 24
-        assert ASSET_SPREAD_CAPS["SOL"] == 40
-        assert ASSET_SPREAD_CAPS["XRP"] == 40
-        assert ASSET_SPREAD_CAPS["DOGE"] == 60
+        # 2026-08-03 CRITICAL FIX: caps raised to match observed market
+        # spreads (~58-62c) after the 2026-08-02 per-asset table.
+        assert ASSET_SPREAD_CAPS["BTC"] == 65
+        assert ASSET_SPREAD_CAPS["ETH"] == 65
+        assert ASSET_SPREAD_CAPS["SOL"] == 65
+        assert ASSET_SPREAD_CAPS["XRP"] == 65
+        assert ASSET_SPREAD_CAPS["DOGE"] == 70
 
 
 class TestCapWiringInOrderRouter:
