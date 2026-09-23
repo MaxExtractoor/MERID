@@ -713,12 +713,23 @@ class DisasterRecoveryManager:
         for comp_id, comp in self.partial_boot._component_status.items():
             components[comp_id] = comp.status.value
         
-        # List data files
+        # List data files — bounded scan: cap both files collected and
+        # directory entries visited, so a large data tree cannot stall
+        # recovery-point creation.
         data_files = []
-        data_dir = Path("data")
+        data_dir = getattr(self, "data_dir", self.state_reconstructor.data_dir)
         if data_dir.exists():
-            for f in data_dir.rglob("*.json"):
-                data_files.append(str(f))
+            import os as _os
+            seen = 0
+            for root, dirs, files in _os.walk(data_dir):
+                seen += len(dirs) + len(files)
+                for fname in files:
+                    if fname.endswith(".json"):
+                        data_files.append(str(Path(root) / fname))
+                        if len(data_files) >= 100:
+                            break
+                if len(data_files) >= 100 or seen >= 2000:
+                    break
         
         # Compute state hash
         state_str = json.dumps({
