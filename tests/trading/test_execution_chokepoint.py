@@ -126,13 +126,6 @@ _PATTERNS: List[Tuple[str, re.Pattern, str]] = [
 # ─────────────────────────────────────────────────────────────────────
 
 _ALLOWED_BYPASSES: Dict[Tuple[str, str], int] = {
-    # CT has two direct ``_post("/portfolio/orders", ...)`` call sites:
-    #   1. ``_submit_sell_yes_limit`` — exit/close path that *reduces* exposure.
-    #   2. Break-glass legacy entry path reached only when
-    #      ``CT_USE_ROUTER_PERCENT=0`` (emits WARNING on every use); router is
-    #      the default (=100) so this path is unreachable in normal ops.
-    ("merid/trading/kalshi_continuous_trader.py", "post_portfolio_orders"): 2,
-
     # FIX gateway transport — the only legitimate site of ``fix.submit_order``
     # is the FIX endpoint itself, which pre-gates with shared GlobalRiskGuard
     # + OrderDedupRegistry explicitly (see web/api/kalshi_api.py::fix_submit_order).
@@ -156,12 +149,24 @@ _ALLOWED_BYPASSES: Dict[Tuple[str, str], int] = {
 # Scanner
 # ─────────────────────────────────────────────────────────────────────
 
+
+def _iter_py_files(root):
+    """Yield .py files under root, pruning vendored/generated trees."""
+    import os as _os
+    from pathlib import Path as _Path
+    _prune = {"node_modules", "__pycache__", ".venv", "venv", ".git", "dist", "build", ".claude"}
+    for r, dirs, files in _os.walk(root):
+        dirs[:] = [d for d in dirs if d not in _prune]
+        for f in files:
+            if f.endswith(".py"):
+                yield _Path(r) / f
+
 def _iter_production_py_files():
     for root_name in _PROD_ROOTS:
         root = REPO_ROOT / root_name
         if not root.exists():
             continue
-        for path in root.rglob("*.py"):
+        for path in _iter_py_files(root):
             p = str(path)
             if any(s in p for s in _SKIP_DIR_SUBSTRS):
                 continue
@@ -330,18 +335,17 @@ def test_ct_execution_adapter_goes_through_router():
     )
 
 
-def test_crypto15m_lane_uses_router_for_live_orders():
-    """Regression guard for the crypto15m_lane bypass fix (§1 of master spec)."""
+def test_crypto15m_lane_removed_loop_owns_live_orders():
+    """crypto15m_lane was removed (b9bbe209); loop_15m owns the live order path."""
     p = REPO_ROOT / "merid/lanes/crypto15m_lane.py"
-    assert p.exists(), "crypto15m_lane.py missing"
-    text = p.read_text(encoding="utf-8", errors="ignore")
-    assert "route_order_async" in text, (
-        "crypto15m_lane must route live orders through route_order_async"
+    assert not p.exists(), (
+        "crypto15m_lane.py reappeared — the lane was deliberately removed; "
+        "loop_15m is the single live order path"
     )
-    # Sanity: the old direct pattern is gone.
-    assert "self.kalshi.place_order" not in text, (
-        "crypto15m_lane still contains direct self.kalshi.place_order — "
-        "must route via route_order_async."
+    # The live loop must route orders through the canonical router.
+    loop_text = (REPO_ROOT / "merid/loop_15m.py").read_text(encoding="utf-8", errors="ignore")
+    assert "route_order_async" in loop_text, (
+        "loop_15m must route live orders through route_order_async"
     )
 
 

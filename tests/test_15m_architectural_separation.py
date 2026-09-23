@@ -91,8 +91,14 @@ class Test15mArchitecturalSeparation:
         }
 
     def _get_python_files(self, directory: Path) -> List[Path]:
-        """Get all Python files in a directory."""
-        return list(directory.rglob("*.py"))
+        """Get all Python files in a directory (pruning vendored trees)."""
+        import os
+        prune = {"node_modules", "__pycache__", ".venv", "venv", ".git", "dist", "build"}
+        found: List[Path] = []
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in prune]
+            found.extend(Path(root) / f for f in files if f.endswith(".py"))
+        return found
 
     def _extract_imports(self, file_path: Path) -> List[str]:
         """Extract all import statements from a Python file."""
