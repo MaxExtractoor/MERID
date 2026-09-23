@@ -214,7 +214,7 @@ def test_true_invalidation_signals_exit_after_persistence():
     first = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=20,
         seconds_to_expiry=600.0,
@@ -227,7 +227,7 @@ def test_true_invalidation_signals_exit_after_persistence():
     second = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=20,
         seconds_to_expiry=600.0,
@@ -494,9 +494,17 @@ def test_conflicting_market_identifiers_raise():
 # ── Taxonomy (fail-closed classification) ─────────────────────────────────────
 
 def test_exit_reason_taxonomy_fails_closed():
-    """Every discretionary reason classifies; unknown reasons fail closed."""
+    """Flat stop losses stay discretionary; policy exits are operational;
+    unknown reasons fail closed."""
     for reason in (
         "stop_loss",
+        "loss_cut_40pct",
+        "value_switch_exit",
+    ):
+        _, canonical, cls = classify_exit_reason(reason)
+        assert cls == ExitClass.DISCRETIONARY, f"{reason} -> {canonical} -> {cls}"
+
+    for reason in (
         "trailing_stop",
         "trail",
         "take_profit",
@@ -506,10 +514,9 @@ def test_exit_reason_taxonomy_fails_closed():
         "current_edge_reversal",
         "model_invalidation",
         "time_stop",
-        "loss_cut_40pct",
     ):
         _, canonical, cls = classify_exit_reason(reason)
-        assert cls == ExitClass.DISCRETIONARY, f"{reason} -> {canonical} -> {cls}"
+        assert cls == ExitClass.OPERATIONAL, f"{reason} -> {canonical} -> {cls}"
 
     _, _, cls = classify_exit_reason("expiry_liquidation")
     assert cls == ExitClass.EMERGENCY
@@ -521,7 +528,11 @@ def test_exit_reason_taxonomy_fails_closed():
     assert cls == ExitClass.UNKNOWN
 
     assert classify_trigger_reason("POSITION_MONITOR_STOP") == ExitClass.DISCRETIONARY
-    assert classify_trigger_reason("EDGE_STOP") == ExitClass.DISCRETIONARY
+    assert classify_trigger_reason("STOP_LOSS") == ExitClass.DISCRETIONARY
+    assert classify_trigger_reason("VALUE_SWITCH_EXIT") == ExitClass.DISCRETIONARY
+    assert classify_trigger_reason("EDGE_STOP") == ExitClass.OPERATIONAL
+    assert classify_trigger_reason("TRAILING_STOP") == ExitClass.OPERATIONAL
+    assert classify_trigger_reason("TAKE_PROFIT") == ExitClass.OPERATIONAL
     assert classify_trigger_reason("RECONCILIATION") == ExitClass.OPERATIONAL
     assert classify_trigger_reason("SOME_NEW_TRIGGER") == ExitClass.UNKNOWN
 
@@ -604,7 +615,7 @@ def test_fee_boundary_blocks_marginal_sell():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="take_profit",
+        canonical_reason="value_switch_exit",
         kalshi_state=_make_state(yes_bid=53, yes_ask=55),
         fair_value_cents=50,
         seconds_to_expiry=600.0,
@@ -618,7 +629,7 @@ def test_fee_boundary_blocks_marginal_sell():
     ev2 = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="take_profit",
+        canonical_reason="value_switch_exit",
         kalshi_state=_make_state(yes_bid=60, yes_ask=62),
         fair_value_cents=50,
         seconds_to_expiry=600.0,
@@ -643,7 +654,7 @@ def test_insufficient_bid_depth_is_not_fully_executable():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="take_profit",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=50,
         seconds_to_expiry=600.0,
@@ -663,7 +674,7 @@ def test_stale_observation_resets_persistence_streak():
         return evaluator.evaluate(
             position,
             market_key=MARKET,
-            canonical_reason="model_invalidation",
+            canonical_reason="value_switch_exit",
             kalshi_state=state,
             fair_value_cents=20,
             seconds_to_expiry=600.0,
@@ -699,7 +710,7 @@ def test_new_window_ticker_does_not_inherit_persistence():
         ev = evaluator.evaluate(
             position,
             market_key=MARKET,
-            canonical_reason="model_invalidation",
+            canonical_reason="value_switch_exit",
             kalshi_state=state,
             fair_value_cents=20,
             seconds_to_expiry=600.0,
@@ -715,7 +726,7 @@ def test_new_window_ticker_does_not_inherit_persistence():
     ev = evaluator.evaluate(
         rolled,
         market_key="KXBTC15M-26AUG101500-00",
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=20,
         seconds_to_expiry=600.0,
@@ -747,7 +758,7 @@ def test_kill_switch_returns_gate_to_observe_only(monkeypatch):
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=_make_state(yes_bid=50, yes_ask=52, seconds_to_expiry=600.0),
         fair_value_cents=20,
         seconds_to_expiry=600.0,
@@ -808,7 +819,7 @@ def test_uncalibrated_model_blocks_gated_exit_but_records_economics():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=20,  # strong sell economics
         seconds_to_expiry=600.0,
@@ -827,7 +838,7 @@ def test_uncalibrated_model_blocks_gated_exit_but_records_economics():
     ev2 = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state2,
         fair_value_cents=20,
         seconds_to_expiry=600.0,
@@ -899,8 +910,8 @@ def test_canary_scope_blocks_wrong_asset_side_reason():
     assert ev_no.decision == EvDecision.HOLD_OUTSIDE_CANARY_SCOPE
     assert "side_not_in_canary" in ev_no.detail
 
-    # Wrong reason: a take-profit trigger is not in the canary allowlist.
-    ev_reason = _strong_sell(evaluator, position, state, reason="take_profit")
+    # Wrong reason: a gated stop-loss trigger is not in the canary allowlist.
+    ev_reason = _strong_sell(evaluator, position, state, reason="stop_loss")
     assert ev_reason.decision == EvDecision.HOLD_OUTSIDE_CANARY_SCOPE
     assert "reason_not_in_canary" in ev_reason.detail
 
@@ -964,7 +975,7 @@ def test_observe_only_mode_does_not_apply_canary_scope():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="take_profit",  # not in the canary allowlist
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=20,
         seconds_to_expiry=600.0,
@@ -986,7 +997,7 @@ def test_eval_record_carries_fee_depth_asset_fields():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="take_profit",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=70,
         seconds_to_expiry=600.0,
@@ -1115,7 +1126,7 @@ def test_tail_calibration_caps_hold_value_at_eval():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=50,  # raw model says 50; calibration caps at 10
         seconds_to_expiry=600.0,
@@ -1142,7 +1153,7 @@ def test_above_floor_price_is_calibration_identity():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=20,
         seconds_to_expiry=600.0,
@@ -1168,7 +1179,7 @@ def test_no_held_tail_with_dual_curve_is_provisional():
     ev = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state,
         fair_value_cents=50,
         seconds_to_expiry=600.0,
@@ -1185,7 +1196,7 @@ def test_no_held_tail_with_dual_curve_is_provisional():
     ev2 = evaluator.evaluate(
         position,
         market_key=MARKET,
-        canonical_reason="model_invalidation",
+        canonical_reason="value_switch_exit",
         kalshi_state=state_ok,
         fair_value_cents=20,
         seconds_to_expiry=600.0,

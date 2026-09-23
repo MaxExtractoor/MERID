@@ -163,25 +163,33 @@ class ExitClass(str, Enum):
 # Discretionary exits: any exit whose economic justification is "the model or
 # price says sell" — including profit exits.  All of these are observe-only
 # until the EV gate is enabled and validated.
+#
+# 2026-09-23: Mostly reverted to operational.  The discretionary
+# classification was a temporary hold while the stack was being stabilized; in
+# production it dead-locked every exit path because the only live blockers
+# that can never clear (uncalibrated_model_inputs — no calibrated vol source
+# is wired) vetoed even trailing-stop and take-profit exits.  Profit-taking
+# and risk exits are once again operational: they submit mechanically through
+# the exit guard's canonical position/reduce-only/invariant checks, and the EV
+# evaluator still records a BYPASS shadow decision for every one of them.
+#
+# Flat-price stop losses remain discretionary on purpose: they trigger before
+# a trade has room to evolve, so they stay EV-gated while the operator
+# observes take-profit/trailing-stop behavior live.
 _DISCRETIONARY_CANONICAL_REASONS = frozenset({
     "stop_loss",
-    "trailing_stop",
-    "take_profit",
-    "signal_reversal",
-    "model_invalidation",
-    "time_exit",       # non-mechanical time exits (time_stop, adaptive_timing)
-    "edge_decay",
     "loss_cut",
-    "scale_out",
-    "ratchet_trim",
     # The gate's own sell decision reason — a discretionary exit by
     # construction; it can never bypass the EV comparison.
     "value_switch_exit",
 })
 
 # Mechanically necessary operational exits: reconciliation corrections, manual
-# operator actions, market-closure handling, and documented predeclared
-# mechanical closeouts.
+# operator actions, market-closure handling, documented predeclared mechanical
+# closeouts, and — since 2026-09-23 — position-monitor policy exits other than
+# flat stop losses (trailing stop, take profit, signal reversal, edge decay,
+# model invalidation, time/scale/ratchet exits).  They are governed by the
+# exit guard's mechanical checks, not the EV evaluator.
 _OPERATIONAL_CANONICAL_REASONS = frozenset({
     "reconciliation",
     "manual",
@@ -189,6 +197,14 @@ _OPERATIONAL_CANONICAL_REASONS = frozenset({
     "market_closed",
     "mechanical_time_exit",
     "scheduled_closeout",
+    "trailing_stop",
+    "take_profit",
+    "signal_reversal",
+    "model_invalidation",
+    "time_exit",
+    "edge_decay",
+    "scale_out",
+    "ratchet_trim",
 })
 
 # Genuine emergency / hard-risk liquidation.
@@ -213,12 +229,8 @@ _OPERATIONAL_TRIGGER_REASONS = frozenset({
     "MARKET_EXPIRED",
     "EMERGENCY",
     "HARD_RISK",
-})
-_DISCRETIONARY_TRIGGER_REASONS = frozenset({
-    "POSITION_MONITOR_STOP",
-    "STOP_LOSS",
-    "HARD_STOP",
-    "SOFT_STOP",
+    # 2026-09-23: position-monitor policy triggers restored to operational —
+    # they execute mechanically through the exit guard, not the EV gate.
     "TRAILING_STOP",
     "EDGE_STOP",
     "EDGE_DECAY",
@@ -232,6 +244,13 @@ _DISCRETIONARY_TRIGGER_REASONS = frozenset({
     "TIME_STOP",
     "MODEL_INVALIDATION",
     "SIGNAL_REVERSAL",
+})
+_DISCRETIONARY_TRIGGER_REASONS = frozenset({
+    # Flat stop losses stay gated while the operator observes the other exits.
+    "POSITION_MONITOR_STOP",
+    "STOP_LOSS",
+    "HARD_STOP",
+    "SOFT_STOP",
     "LOSS_CUT",
     "LOSS_CUT_40PCT",
     "VALUE_SWITCH_EXIT",

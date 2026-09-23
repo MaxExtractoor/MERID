@@ -207,8 +207,9 @@ def test_stop_loss_rejected_when_market_gapped_through_slippage():
     assert record["reject_reason"] == "stop_beyond_slippage"
 
 
-def test_take_profit_vetoed_observe_only_when_gate_disabled():
-    """Take-profit is discretionary: observe-only until the EV gate is enabled."""
+def test_take_profit_approved_when_gate_disabled():
+    """Take-profit is operational again (2026-09-23): it submits through the
+    mechanical guard even while the EV gate is disabled."""
     position = _make_position()
     state = _make_state(no_bid=84, no_ask=86)
 
@@ -216,12 +217,11 @@ def test_take_profit_vetoed_observe_only_when_gate_disabled():
         position, "take_profit", exit_price_cents=84, state=state
     )
 
-    assert approved is False
+    assert approved is True
     assert record["exit_reason_canonical"] == "take_profit"
-    assert record["exit_class"] == "discretionary"
-    assert record["reject_reason"] == "discretionary_exit_observe_only"
-    assert record["legacy_would_approve"] is True
-    assert record["limit_cents"] == 84  # recorded for replay
+    assert record["exit_class"] == "operational"
+    assert record["status"] == "approved"
+    assert record["limit_cents"] == 84
 
 
 def test_take_profit_rejected_when_not_profitable():
@@ -250,8 +250,9 @@ def test_unknown_exit_reason_rejected():
     assert record["reject_reason"] == "exit_reason_not_allowed"
 
 
-def test_time_exit_with_small_loss_vetoed_observe_only():
-    """Non-mechanical time exits are discretionary: observe-only by default."""
+def test_time_exit_with_small_loss_approved():
+    """Time exits are operational and forced (2026-09-23): a bounded loss is
+    approved so a stale position cannot ride to settlement."""
     position = _make_position()
     # 1c gross loss -> net -7 with mocked 4c round-trip fee; forced exit still approves.
     state = _make_state(no_bid=73, no_ask=75)
@@ -260,15 +261,16 @@ def test_time_exit_with_small_loss_vetoed_observe_only():
         position, "time_stop", exit_price_cents=73, state=state
     )
 
-    assert approved is False
+    assert approved is True
     assert record["exit_reason_canonical"] == "time_exit"
-    assert record["exit_class"] == "discretionary"
-    assert record["reject_reason"] == "discretionary_exit_observe_only"
+    assert record["exit_class"] == "operational"
+    assert record["is_forced"] is True
+    assert record["status"] == "approved"
     assert record["projected_net_pnl_cents"] < 0
 
 
-def test_time_exit_break_even_vetoed_observe_only():
-    """Break-even time exit is discretionary too; recorded but not submitted."""
+def test_time_exit_break_even_approved():
+    """Break-even time exit is operational too; approved through the guard."""
     position = _make_position()
     state = _make_state(no_bid=74, no_ask=76)
 
@@ -276,9 +278,9 @@ def test_time_exit_break_even_vetoed_observe_only():
         position, "time_stop", exit_price_cents=74, state=state
     )
 
-    assert approved is False
+    assert approved is True
     assert record["exit_reason_canonical"] == "time_exit"
-    assert record["reject_reason"] == "discretionary_exit_observe_only"
+    assert record["status"] == "approved"
     assert record["projected_net_pnl_cents"] < 0  # gross -2 minus round-trip fees
 
 
@@ -287,14 +289,14 @@ def test_quote_freshness_uses_age_threshold():
     position = _make_position()
     from merid.loop_15m import MERID_EXIT_MAX_QUOTE_AGE_MS
 
-    # Just under the 10,000 ms default: the quote passes freshness but the
-    # discretionary exit is still vetoed observe-only (gate disabled).
+    # Just under the 10,000 ms default: the quote passes freshness and the
+    # operational take-profit is approved (policy exits are no longer EV-gated).
     state = _make_state(no_bid=84, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS - 1)
     approved, _price, record, _did = _run_guard(
         position, "take_profit", exit_price_cents=84, state=state
     )
-    assert approved is False
-    assert record["reject_reason"] == "discretionary_exit_observe_only"
+    assert approved is True
+    assert record["status"] == "approved"
 
     # Just over the threshold: a profitable exit is rejected for stale quote.
     state = _make_state(no_bid=84, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS + 100)
@@ -305,8 +307,8 @@ def test_quote_freshness_uses_age_threshold():
     assert record["reject_reason"] == "stale_quote"
 
 
-def test_current_edge_reversal_vetoed_observe_only():
-    """current_edge_reversal canonicalizes to signal_reversal (discretionary, vetoed)."""
+def test_current_edge_reversal_approved():
+    """current_edge_reversal canonicalizes to signal_reversal (operational)."""
     position = _make_position()
     state = _make_state(no_bid=84, no_ask=86)
     state.book_updated_ts = time.monotonic()  # avoid stale quote after slow module import
@@ -315,12 +317,12 @@ def test_current_edge_reversal_vetoed_observe_only():
         position, "current_edge_reversal", exit_price_cents=84, state=state
     )
 
-    assert approved is False
+    assert approved is True
     assert record["exit_reason_canonical"] == "signal_reversal"
     assert record["exit_reason_original"] == "current_edge_reversal"
-    assert record["exit_class"] == "discretionary"
-    assert record["reject_reason"] == "discretionary_exit_observe_only"
-    assert record["limit_cents"] == 82  # recorded for replay
+    assert record["exit_class"] == "operational"
+    assert record["status"] == "approved"
+    assert record["limit_cents"] == 82
     assert record["projected_net_pnl_cents"] > 0  # worst-case (82-74) minus fees
 
 
@@ -346,8 +348,9 @@ def test_discretionary_exit_fails_closed_on_cache_error(monkeypatch):
         position = _make_position()
         state = _make_state(no_bid=84, no_ask=86)
 
+        # stop_loss remains discretionary (EV-gated): cache error fails closed.
         approved, _price, record, _did = _run_guard(
-            position, "take_profit", exit_price_cents=84, state=state
+            position, "stop_loss", exit_price_cents=84, state=state
         )
 
     assert approved is False
