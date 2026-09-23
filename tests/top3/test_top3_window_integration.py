@@ -27,11 +27,14 @@ class TestTop3WindowIntegration:
                 batch_id="test_batch",
                 cycle_ts=time.time(),
                 allocations=[
-                    Top3Allocation(asset="BTC", target_notional=3000, weight=0.5),
-                    Top3Allocation(asset="ETH", target_notional=2000, weight=0.3),
-                    Top3Allocation(asset="SOL", target_notional=1000, weight=0.2),
+                    Top3Allocation(asset="BTC", edge=0.10, target_notional=3000, weight=0.5),
+                    Top3Allocation(asset="ETH", edge=0.08, target_notional=2000, weight=0.3),
+                    Top3Allocation(asset="SOL", edge=0.06, target_notional=1000, weight=0.2),
                 ],
                 status=BatchStatus.ACTIVE,
+                total_target_notional=6000,
+                cycle_risk_cap_pct=0.01,
+                bankroll_at_creation=100_000,
             )
             
             # Mock the batch manager to return our test batch
@@ -64,11 +67,14 @@ class TestTop3WindowIntegration:
                 batch_id="test_batch",
                 cycle_ts=time.time(),
                 allocations=[
-                    Top3Allocation(asset="BTC", target_notional=3000, weight=0.5),
-                    Top3Allocation(asset="ETH", target_notional=2000, weight=0.3),
-                    Top3Allocation(asset="SOL", target_notional=1000, weight=0.2),
+                    Top3Allocation(asset="BTC", edge=0.10, target_notional=3000, weight=0.5),
+                    Top3Allocation(asset="ETH", edge=0.08, target_notional=2000, weight=0.3),
+                    Top3Allocation(asset="SOL", edge=0.06, target_notional=1000, weight=0.2),
                 ],
                 status=BatchStatus.ACTIVE,
+                total_target_notional=6000,
+                cycle_risk_cap_pct=0.01,
+                bankroll_at_creation=100_000,
             )
             
             # Mock the batch manager to return our test batch
@@ -90,8 +96,7 @@ class TestTop3WindowIntegration:
     def test_top3_gate_fail_open_on_window_check_failure(self):
         """Test that top 3 gate fails-open if window check infrastructure fails."""
         with patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_get_envelope:
-            mock_envelope.side_effect = Exception("Infrastructure failure")
-            mock_get_envelope.return_value = mock_envelope
+            mock_get_envelope.side_effect = Exception("Infrastructure failure")
             
             from merid.trading.top3_batch_manager import get_top3_batch_manager
             from merid.trading.top3_edge_allocator import Top3Batch, Top3Allocation, BatchStatus
@@ -101,9 +106,12 @@ class TestTop3WindowIntegration:
                 batch_id="test_batch",
                 cycle_ts=time.time(),
                 allocations=[
-                    Top3Allocation(asset="BTC", target_notional=3000, weight=0.5),
+                    Top3Allocation(asset="BTC", edge=0.10, target_notional=3000, weight=0.5),
                 ],
                 status=BatchStatus.ACTIVE,
+                total_target_notional=6000,
+                cycle_risk_cap_pct=0.01,
+                bankroll_at_creation=100_000,
             )
             
             # Mock the batch manager to return our test batch

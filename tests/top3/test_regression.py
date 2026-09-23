@@ -25,9 +25,11 @@ def reset_state():
     """Reset and provide batch manager singleton before each test."""
     import os
     os.environ["MERID_TEST_MODE"] = "1"
+    os.environ["TOP3_CYCLE_RISK_CAP_USD"] = "5.00"
     reset_top3_batch_manager()
     yield get_top3_batch_manager()
     reset_top3_batch_manager()
+    os.environ.pop("TOP3_CYCLE_RISK_CAP_USD", None)
 
 
 class TestNoSprayingRegression:
@@ -49,11 +51,11 @@ class TestNoSprayingRegression:
         
         # All 5 assets have positive edges
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
-            EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
-            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=1000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
+            EdgeCandidate("XRP", edge=0.04, max_notional_cap=150),
+            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -85,10 +87,10 @@ class TestNoSprayingRegression:
         
         # Create batch with only top 3
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
-            EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
+            EdgeCandidate("XRP", edge=0.04, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -116,9 +118,9 @@ class TestNoSprayingRegression:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         # Create batch
@@ -146,9 +148,9 @@ class TestNoSprayingRegression:
         
         # Create fresh candidates (old ones may be stale)
         fresh_candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         # Now can create new batch (cycle lock released)
@@ -170,11 +172,11 @@ class TestNoSprayingRegression:
         
         # Simulate 5 agents each with positive edge
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
-            EdgeCandidate("XRP", edge=0.05, max_notional_cap=2000),
-            EdgeCandidate("DOGE", edge=0.04, max_notional_cap=1000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
+            EdgeCandidate("XRP", edge=0.05, max_notional_cap=150),
+            EdgeCandidate("DOGE", edge=0.04, max_notional_cap=150),
         ]
         
         # Central selector creates batch
@@ -210,9 +212,9 @@ class TestBankrollCapEnforcement:
         bankroll = 50_000  # $500
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=50000),
-            EdgeCandidate("ETH", edge=0.09, max_notional_cap=40000),
-            EdgeCandidate("SOL", edge=0.08, max_notional_cap=30000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=1500),
+            EdgeCandidate("ETH", edge=0.09, max_notional_cap=1500),
+            EdgeCandidate("SOL", edge=0.08, max_notional_cap=1500),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -237,9 +239,9 @@ class TestBankrollCapEnforcement:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -267,9 +269,9 @@ class TestEdgeRankingIntegrity:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.15, max_notional_cap=5000),  # Highest
-            EdgeCandidate("ETH", edge=0.10, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.05, max_notional_cap=3000),  # Lowest
+            EdgeCandidate("BTC", edge=0.15, max_notional_cap=150),  # Highest
+            EdgeCandidate("ETH", edge=0.10, max_notional_cap=100),
+            EdgeCandidate("SOL", edge=0.05, max_notional_cap=50),  # Lowest
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -293,20 +295,23 @@ class TestEdgeRankingIntegrity:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.10, max_notional_cap=5000),  # Equal to BTC
-            EdgeCandidate("SOL", edge=0.10, max_notional_cap=5000),  # Equal to BTC
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.10, max_notional_cap=150),  # Equal to BTC
+            EdgeCandidate("SOL", edge=0.10, max_notional_cap=150),  # Equal to BTC
         ]
         
         batch = mgr.maybe_create_new_batch(
-            bankroll_notional=90_000,  # 2% = 1800 cents
+            bankroll_notional=90_000,
             candidates=candidates,
         )
-        
-        # All should be equal (600 cents each)
+
+        # Priority-fill with equal caps: all get their full 150c cap;
+        # weight encodes rank (1.0, 0.5, 0.333) rather than an even split.
+        assert len(batch.allocations) == 3
         for alloc in batch.allocations:
-            assert alloc.target_notional == 600
-            assert alloc.weight == pytest.approx(1/3, rel=0.01)
+            assert alloc.target_notional == 150
+        weights = [a.weight for a in batch.allocations]
+        assert weights == [pytest.approx(1.0), pytest.approx(0.5), pytest.approx(1/3)]
 
 
 class TestNoBypassPaths:
@@ -341,7 +346,7 @@ class TestNoBypassPaths:
         batch = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
             candidates=[
-                EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+                EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
             ],
         )
         
@@ -373,8 +378,8 @@ class TestStaleSignalPrevention:
         
         # Create fresh candidates (just computed)
         fresh_candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -392,8 +397,8 @@ class TestStaleSignalPrevention:
         # Create stale candidates (2 minutes old)
         stale_time = datetime.now(timezone.utc) - timedelta(seconds=120)
         stale_candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000, timestamp=stale_time),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000, timestamp=stale_time),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150, timestamp=stale_time),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150, timestamp=stale_time),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -410,8 +415,8 @@ class TestStaleSignalPrevention:
         
         stale_time = datetime.now(timezone.utc) - timedelta(seconds=120)
         mixed_candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),  # Fresh
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000, timestamp=stale_time),  # Stale
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),  # Fresh
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150, timestamp=stale_time),  # Stale
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -426,22 +431,22 @@ class TestStaleSignalPrevention:
         from datetime import datetime, timezone, timedelta
         
         # Fresh signal (just now)
-        fresh = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)
+        fresh = EdgeCandidate("BTC", edge=0.10, max_notional_cap=150)
         assert fresh.is_fresh(max_age_seconds=60.0) is True
         assert fresh.age_seconds() < 1.0
         
         # Stale signal (2 minutes old)
         stale_time = datetime.now(timezone.utc) - timedelta(seconds=120)
-        stale = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000, timestamp=stale_time)
+        stale = EdgeCandidate("BTC", edge=0.10, max_notional_cap=150, timestamp=stale_time)
         assert stale.is_fresh(max_age_seconds=60.0) is False
         assert stale.age_seconds() >= 119.0  # Should be at least ~120s old
     
     def test_unique_signal_ids(self):
         """Each EdgeCandidate should have unique signal_id."""
         import time
-        c1 = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)
+        c1 = EdgeCandidate("BTC", edge=0.10, max_notional_cap=150)
         time.sleep(0.01)  # Small delay to ensure different timestamps
-        c2 = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)
+        c2 = EdgeCandidate("BTC", edge=0.10, max_notional_cap=150)
         
         assert c1.signal_id != c2.signal_id, "Each signal should have unique ID"
 
@@ -462,8 +467,8 @@ class TestBypassPrevention:
         batch = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
             candidates=[
-                EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-                EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+                EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+                EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
             ],
         )
         assert batch is not None
@@ -485,7 +490,7 @@ class TestBypassPrevention:
         batch = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
             candidates=[
-                EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+                EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
             ],
         )
         
@@ -500,7 +505,7 @@ class TestBypassPrevention:
         
         batch = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
-            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)],
+            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=150)],
         )
         
         # Try to reconcile while still ACTIVE - should fail
@@ -519,7 +524,7 @@ class TestBypassPrevention:
         
         batch = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
-            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)],
+            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=150)],
         )
         
         # Multiple checks should all report locked
@@ -539,7 +544,7 @@ class TestBypassPrevention:
         # Create first batch
         batch1 = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
-            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)],
+            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=150)],
         )
         assert batch1 is not None
         

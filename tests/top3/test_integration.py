@@ -25,12 +25,14 @@ from merid.trading.top3_batch_manager import (
 def top3_enabled_env(monkeypatch):
     """Enable top-3 system via environment."""
     monkeypatch.setenv("TOP3_ENABLED", "true")
+    monkeypatch.setenv("TOP3_CYCLE_RISK_CAP_USD", "5.00")
     yield
 
 
 @pytest.fixture
-def reset_batch_manager():
+def reset_batch_manager(monkeypatch):
     """Reset and provide batch manager singleton before each test."""
+    monkeypatch.setenv("MERID_TEST_MODE", "1")
     reset_top3_batch_manager()
     yield get_top3_batch_manager()
     reset_top3_batch_manager()
@@ -63,11 +65,11 @@ class TestAgentIntegration:
         
         # Create batch with BTC, ETH, SOL
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
-            EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
-            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=1000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
+            EdgeCandidate("XRP", edge=0.04, max_notional_cap=150),
+            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -98,9 +100,9 @@ class TestAgentIntegration:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -111,13 +113,9 @@ class TestAgentIntegration:
         btc_alloc = batch.get_allocation_for_asset("BTC")
         assert btc_alloc is not None
         
-        # Target notional should be reasonable (proportional to edge)
-        assert btc_alloc.target_notional > 0
-        
-        # The allocation should be roughly proportional to edge
-        # BTC edge=0.10, total edge=0.24, cap=2000
-        # Expected: ~833 cents
-        assert 600 < btc_alloc.target_notional <= 2000
+        # Edge#1-priority fill: BTC (highest edge) receives its full
+        # per-asset cap from the cycle budget.
+        assert btc_alloc.target_notional == 150
 
 
 class TestRouterEnforcement:
@@ -148,9 +146,9 @@ class TestRouterEnforcement:
         
         # Create batch (top 3 only)
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         mgr.maybe_create_new_batch(
@@ -177,9 +175,9 @@ class TestRouterEnforcement:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         mgr.maybe_create_new_batch(
@@ -210,9 +208,9 @@ class TestBatchRegime:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         # Create first batch
@@ -236,9 +234,9 @@ class TestBatchRegime:
         mgr = get_top3_batch_manager()
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         # Create first batch
@@ -279,9 +277,9 @@ class TestBankrollCapEnforcement:
         bankroll = 100_000  # $1,000
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -304,9 +302,9 @@ class TestBankrollCapEnforcement:
         bankroll = 100_000
         
         candidates = [
-            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
         ]
         
         batch = mgr.maybe_create_new_batch(
@@ -335,9 +333,9 @@ class TestMetricsAndObservability:
         mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
             candidates=[
-                EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
-                EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
-                EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+                EdgeCandidate("BTC", edge=0.10, max_notional_cap=150),
+                EdgeCandidate("ETH", edge=0.08, max_notional_cap=150),
+                EdgeCandidate("SOL", edge=0.06, max_notional_cap=150),
             ],
         )
         
