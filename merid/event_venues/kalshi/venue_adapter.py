@@ -56,7 +56,8 @@ class InstrumentConfig:
     quote_currency: str = "USD"
     max_stake_usd: float = 1000.0
     settlement_source: str = "kalshi"
-    
+    odds_format: str = ""           # decimal, american
+
     def __post_init__(self):
         if self.venues is None:
             self.venues = ["kalshi"]
@@ -118,7 +119,6 @@ class KalshiVenueAdapter:
     def catalog(self):
         """Lazy-load catalog singleton when needed."""
         if self._catalog is None:
-            from merid.event_venues.kalshi.market_catalog import get_market_catalog
             self._catalog = get_market_catalog()
         return self._catalog
 
@@ -157,7 +157,7 @@ class KalshiVenueAdapter:
             instruments = self._instruments_cache
         else:
             # Fetch from catalog
-            markets = self._catalog.get_all_markets()
+            markets = self.catalog.get_all_markets()
             instruments = []
             for cm in markets:
                 # CRITICAL FIX: active is on nested EventMarket

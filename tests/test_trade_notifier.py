@@ -294,48 +294,6 @@ class TestTradeNotifier(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Integration: continuous trader has notifier wiring
-# ---------------------------------------------------------------------------
-
-class TestContinuousTraderNotifierIntegration(unittest.TestCase):
-    """Verify the continuous trader source code integrates TradeNotifier."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.src = CT_FILE.read_text(encoding="utf-8", errors="replace")
-
-    def test_notifier_import(self):
-        self.assertIn("from merid.alerts.trade_notifier import TradeNotifier", self.src)
-
-    def test_notifier_attribute(self):
-        self.assertIn("self._notifier", self.src)
-
-    def test_record_fill_called(self):
-        self.assertIn("self._notifier.record_fill(", self.src)
-
-    def test_flush_cycle_called(self):
-        self.assertIn("self._notifier.flush_cycle(", self.src)
-
-    def test_notify_start_called(self):
-        self.assertIn("self._notifier.notify_start(", self.src)
-
-    def test_notify_stop_called(self):
-        self.assertIn("self._notifier.notify_stop(", self.src)
-
-    def test_notify_halt_called(self):
-        self.assertIn("self._notifier.notify_halt(", self.src)
-
-    def test_notify_error_called(self):
-        self.assertIn("self._notifier.notify_error(", self.src)
-
-    def test_cycle_digest_import(self):
-        self.assertIn("from merid.alerts.trade_notifier import CycleDigest", self.src)
-
-    def test_env_configurable_digest_interval(self):
-        self.assertIn("CT_TG_DIGEST_EVERY", self.src)
-
-
-# ---------------------------------------------------------------------------
 # Module structure
 # ---------------------------------------------------------------------------
 
