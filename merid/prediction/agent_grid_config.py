@@ -223,6 +223,18 @@ class AgentRiskLimits:
     # Price-aware sizing: replace blunt caps with graduated limits by contract price
     price_bands: List[PriceBand] = field(default_factory=list)
 
+    def __post_init__(self):
+        if self.max_notional_usd < 0:
+            raise ValueError("max_notional_usd must be >= 0")
+        if self.max_yes_position < 0:
+            raise ValueError("max_yes_position must be >= 0")
+        if self.max_no_position < 0:
+            raise ValueError("max_no_position must be >= 0")
+        if self.max_orders_per_window < 0:
+            raise ValueError("max_orders_per_window must be >= 0")
+        if self.max_contracts_per_order < 0:
+            raise ValueError("max_contracts_per_order must be >= 0")
+
     def get_effective_max_orders(self, bankroll_cents: int, top_n_edges: int = 3) -> int:
         """Compute dynamic max_orders based on bankroll and available edges.
 
@@ -596,6 +608,12 @@ def _parse_strike_selection(raw: Optional[Dict[str, Any]]) -> Optional[Any]:
 
 def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
     name = raw["name"]
+    archetype = raw.get("archetype", "directional")
+    if archetype not in _KNOWN_ARCHETYPES:
+        raise ValueError(
+            f"unknown archetype '{archetype}' for agent '{name}' "
+            f"(known: {sorted(_KNOWN_ARCHETYPES)})"
+        )
     # Resolve series_tickers: YAML explicit -> AGENT_SERIES_MAP lookup -> empty list
     series_tickers: List[str] = raw.get("series_tickers", [])
     logger.debug("[PARSE-AGENT] %s: YAML series_tickers=%s", name, series_tickers)

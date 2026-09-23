@@ -41,12 +41,23 @@ def _fresh_manager(**overrides) -> KalshiRiskManager:
         min_post_fee_edge=0.01,
         max_orders_per_minute=3,
         max_orders_per_hour=10,
+        max_stop_loss_usd_per_cluster=1000.0,
         category_limits={
             "crypto": CategoryLimit("crypto", max_notional_usd=200, max_contracts=15),
         },
     )
     defaults.update(overrides)
-    return KalshiRiskManager(config=KalshiRiskConfig(**defaults))
+    mgr = KalshiRiskManager(config=KalshiRiskConfig(**defaults))
+    # Seed cached equity so the 5b global-bankroll cap (bankroll × cap_pct)
+    # does not fire before the specific check each test targets. The order
+    # path deliberately reads cached state, not a live bankroll refresh.
+    mgr._state.current_equity_usd = 10_000.0
+    mgr._state.peak_equity_usd = 10_000.0
+    # KalshiRiskConfig.__post_init__ overwrites category_limits with profile
+    # (or legacy fallback) limits; re-apply the test-injected limits.
+    if "category_limits" in defaults:
+        mgr._config.category_limits = defaults["category_limits"]
+    return mgr
 
 
 # ── Breach log tests ─────────────────────────────────────────────────────
@@ -232,25 +243,40 @@ class TestRLockSafety:
         assert isinstance(mgr._lock, type(threading.RLock()))
 
     def test_daily_loss_activates_kill_switch_without_deadlock(self):
+        """Daily-loss breach rejects risk-increasing orders under the lock.
+
+        NOTE (deliberate change): the kill switch is no longer auto-activated
+        on daily-loss/drawdown breaches — per operator directive, agents must
+        remain able to place risk-reducing/closing trades, and the switch
+        auto-resets when drawdown recovers. The invariant now is: reject the
+        order, log the breach, and do NOT permanently halt.
+        """
         mgr = _fresh_manager()
-        mgr._state.daily_pnl_usd = -999.0  # way past limit
-        # Must also set _last_reset_day to today so _maybe_reset_daily doesn't clear it
-        from datetime import datetime, timezone
+        # Daily loss is computed from start_of_day vs current equity, not daily_pnl.
+        mgr._state.start_of_day_equity_usd = 20_000.0
+        mgr._state.current_equity_usd = 19_000.0  # $1000 daily loss > $100 limit
+        mgr._state.peak_equity_usd = 19_000.0  # no drawdown interference
+        # Prevent _maybe_reset_daily from clearing the start-of-day anchor
         mgr._last_reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # Mock _sync_pnl_from_ledger to prevent it from overwriting our test value
+        mgr._state.current_day_utc = mgr._last_reset_day
         mgr._sync_pnl_from_ledger = lambda: None
         ok, reason = mgr.check_order("TICKER-A", None, contracts=1, price_cents=50)
         assert not ok
-        assert mgr.state.kill_switch_active
         assert "Daily loss" in reason
+        assert not mgr.state.kill_switch_active
 
     def test_drawdown_unwind_activates_kill_switch_without_deadlock(self):
+        """Drawdown-unwind breach rejects risk-increasing orders under the lock.
+
+        Kill switch stays OFF by design (auto-reset when drawdown recovers);
+        see kalshi_risk.py:1763-1765 operator directive.
+        """
         mgr = _fresh_manager()
         mgr._state.peak_equity_usd = 1000.0
         mgr._state.current_equity_usd = 850.0  # 15% drawdown > 10% unwind
         ok, reason = mgr.check_order("TICKER-A", None, contracts=1, price_cents=50)
         assert not ok
-        assert mgr.state.kill_switch_active
+        assert not mgr.state.kill_switch_active
         assert "unwind" in reason.lower()
 
 

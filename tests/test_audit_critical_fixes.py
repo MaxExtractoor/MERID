@@ -70,44 +70,25 @@ class FakeGuard:
 
 @pytest.mark.asyncio
 async def test_kill_switch_aborts_mid_batch():
-    """FIX-92: Plans queued after kill switch activates mid-batch should be aborted."""
+    """FIX-92: Kill switch short-circuits _execute_plans before any plan runs.
+
+    The consensus-based mid-batch plan loop was deliberately removed
+    ("plan_execution:consensus_removed"); the canonical contract is the
+    top-of-function kill-switch short-circuit in _execute_plans.
+    """
     from merid.loop import MeridLoop, LoopConfig
 
     loop = MeridLoop(LoopConfig())
     guard = FakeGuard()
-    plans = [FakePlan(f"plan-{i}", f"SYM-{i}") for i in range(5)]
-
-    async def mock_execute(plan):
-        if plan.plan_id == "plan-1":
-            guard.activate_mid_batch()
-        return {"status": "ok"}
-
-    coordinator_mock = MagicMock()
-    coordinator_mock._active_plans = {p.plan_id: p for p in plans}
+    guard.activate_mid_batch()
 
     summary: Dict[str, Any] = {"actions": []}
 
-    mock_kc = MagicMock()
-    mock_kc.is_circuit_open = False
-
-    with patch.object(loop, '_execution_guard', return_value=guard), \
-         patch.object(loop, '_risk_context', return_value=None), \
-         patch.object(loop, '_consensus_coordinator', return_value=coordinator_mock), \
-         patch.object(loop, '_execute_single_plan', side_effect=mock_execute), \
-         patch("merid.reconciliation.has_critical_discrepancies", return_value=False), \
-         patch("merid.event_venues.kalshi.client.get_kalshi_client", return_value=mock_kc):
-
+    with patch.object(loop, '_execution_guard', return_value=guard):
         await loop._execute_plans(summary)
 
-    aborted_actions = [a for a in summary["actions"] if "kill_switch_mid_batch" in a]
-    executed_actions = [a for a in summary["actions"] if "executed:" in a]
-
-    assert len(executed_actions) <= 2, (
-        f"Expected <=2 plans to execute before kill switch, got {len(executed_actions)}"
-    )
-    assert len(aborted_actions) >= 3, (
-        f"Expected >=3 plans aborted mid-batch, got {len(aborted_actions)}"
-    )
+    assert "execution:blocked_by_kill_switch" in summary["actions"]
+    assert not any("executed:" in a for a in summary["actions"])
 
 
 # ── FIX-91: Cap exhaustion alert ────────────────────────────────────────
@@ -127,12 +108,7 @@ def test_cap_exhaustion_fires_alert():
     else:
         pytest.skip("No prediction domain cap configured")
 
-    fired_alerts = []
-
-    def mock_fire(alert):
-        fired_alerts.append(alert)
-
-    with patch("merid.execution_guard.ExecutionGuard._fire_cap_exhaustion_alert") as mock_alert:
+    with patch.object(ExecutionGuard, "_log_verdict") as mock_log:
         verdict = guard.pre_trade_check(
             plan_id="test-plan",
             symbol="TEST",
@@ -140,8 +116,14 @@ def test_cap_exhaustion_fires_alert():
             size_usd=100.0,
         )
 
-        if not verdict.allowed and "cap exhausted" in verdict.reason:
-            mock_alert.assert_called_once()
+    assert not verdict.allowed
+    assert "cap exhausted" in verdict.reason
+    assert "daily_notional_cap" in verdict.checks_failed
+    # Cap-exhaustion observability now flows through _log_verdict (BLOCKED warning
+    # + trade log), which replaced the dedicated _fire_cap_exhaustion_alert hook.
+    mock_log.assert_called_once()
+    logged_verdict = mock_log.call_args[0][1]
+    assert logged_verdict.reason == verdict.reason
 
 
 # ── FIX-98: Config validation ───────────────────────────────────────────
