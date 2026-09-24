@@ -608,15 +608,23 @@ class Position:
                         self.size,
                         gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
                     )
-                    fallback_tp = int(
-                        min(
-                            99,
-                            max_executable_tp_cents,
-                            target_cents,
-                            fee_aware_floor or 99,
-                        )
-                    )
-                    if fallback_tp > entry_ref and max_executable_tp_cents > entry_ref:
+                    # 2026-09-24: The fee-aware value is a FLOOR, not another
+                    # cap.  Keeping it inside min() let the fair cap push the
+                    # target below round-trip breakeven (observed live: NO@71
+                    # got TP=76c, +5c gross ~= +2c net).  If the floor exceeds
+                    # the fair-capped maximum, no profitable TP exists — hold
+                    # to settlement rather than lock a near-scratch exit.
+                    fallback_tp = int(min(99, max_executable_tp_cents, target_cents))
+                    if fee_aware_floor is not None and fallback_tp < fee_aware_floor:
+                        if fee_aware_floor <= max_executable_tp_cents and fee_aware_floor < 100:
+                            fallback_tp = int(fee_aware_floor)
+                        else:
+                            fallback_tp = None
+                    if (
+                        fallback_tp is not None
+                        and fallback_tp > entry_ref
+                        and max_executable_tp_cents > entry_ref
+                    ):
                         self.take_profit_price_cents = fallback_tp
                         max_gain = SIDE_SPACE_TOTAL_CENTS - entry_ref
                         self.take_profit_r_multiple = (fallback_tp - entry_ref) / max_gain if max_gain > 0 else 0.0
