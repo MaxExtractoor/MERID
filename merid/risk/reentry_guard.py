@@ -87,23 +87,31 @@ class ReentryGuard:
         if not ticker:
             return
         asset = self._asset_from_ticker(ticker)
+        _now = time.time()
+        # A caller-supplied close time (e.g. settlement_ts) that lands in the
+        # future — clock skew or a bad parse — must not zero out the cooldown;
+        # clamp to now.
+        if closed_ts is not None and closed_ts > _now:
+            closed_ts = _now
         record = _CloseRecord(
             ticker=ticker,
             asset=asset,
             side=(side or "").lower() or None,
             realized_pnl_cents=realized_pnl_cents,
-            closed_ts=closed_ts if closed_ts is not None else time.time(),
+            closed_ts=closed_ts if closed_ts is not None else _now,
         )
         with self._lock:
             prior = self._closed_by_ticker.get(ticker)
             if prior is not None:
                 # Idempotent re-records (settlement re-sweep, monitor remove,
-                # reconciliation): keep the ORIGINAL close timestamp — the
+                # reconciliation): keep the EARLIEST close timestamp — the
                 # cooldown must age from when the position actually closed, not
                 # reset on every duplicate close event (2026-09-24: perpetual
                 # cooldown bug — every re-record refreshed closed_ts and
-                # post_loss_cooldown never expired).
-                record.closed_ts = prior.closed_ts
+                # post_loss_cooldown never expired). min() so an authoritative
+                # settlement_ts that arrives after a cleanup-remove record
+                # (stamped now) still back-dates the close to the real time.
+                record.closed_ts = min(prior.closed_ts, record.closed_ts)
                 # A close event with unknown PnL (e.g. settlement cleanup in
                 # the monitor) must not clobber a record that already carries
                 # the authoritative realized PnL for the same ticker.

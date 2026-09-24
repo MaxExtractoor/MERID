@@ -300,6 +300,36 @@ class TestReentryGuard:
         assert not allowed
         assert "pnl=-55" in reason
 
+    def test_authoritative_settlement_ts_backdates_cleanup_record(self, monkeypatch):
+        """If monitor cleanup records a settled ticker first (closed_ts=now),
+        the settlement sweep's authoritative settlement_ts (minutes older) must
+        still apply — min() merge — so the cooldown ages from the true close,
+        not from discovery time."""
+        monkeypatch.setenv("MERID_POST_LOSS_COOLDOWN_S", "120")
+        guard = ReentryGuard()
+        # Cleanup path stamps now() with no pnl.
+        guard.record_close("KXSOL15M-26SEP241600-00", "yes", None)
+        # Settlement sweep arrives later carrying the true (old) settlement time.
+        guard.record_close(
+            "KXSOL15M-26SEP241600-00", "yes", -36.0,
+            closed_ts=time.time() - 300.0,
+        )
+        allowed, reason = guard.check_entry("KXSOL15M-26SEP241615-15")
+        assert allowed, reason  # true close was 300s ago — cooldown long expired
+
+    def test_future_closed_ts_clamped_to_now(self, monkeypatch):
+        """Clock skew / bad parse producing a future closed_ts must not zero
+        the cooldown — clamp to now."""
+        monkeypatch.setenv("MERID_POST_LOSS_COOLDOWN_S", "120")
+        guard = ReentryGuard()
+        guard.record_close(
+            "KXBTC15M-26SEP241600-00", "yes", -44.0,
+            closed_ts=time.time() + 600.0,
+        )
+        allowed, reason = guard.check_entry("KXBTC15M-26SEP241615-15")
+        assert not allowed
+        assert "post_loss_cooldown" in reason
+
 
 # --------------------------------------------------------------------------
 # Stop-loss POST_FILL provenance

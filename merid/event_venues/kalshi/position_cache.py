@@ -6542,12 +6542,23 @@ class KalshiPositionCache:
             _side = None
             if position is not None:
                 _side = getattr(getattr(position, "side", None), "value", getattr(position, "side", None))
+            _closed_ts = None
+            if settlement_ts:
+                try:
+                    from datetime import datetime as _dt
+
+                    _closed_ts = _dt.fromisoformat(
+                        str(settlement_ts).replace("Z", "+00:00")
+                    ).timestamp()
+                except Exception:
+                    _closed_ts = None
             get_reentry_guard().record_close(
                 ticker=market_ticker,
                 side=str(_side) if _side else None,
                 realized_pnl_cents=(
                     float(realized_pnl_cents) if realized_pnl_cents is not None else None
                 ),
+                closed_ts=_closed_ts,
             )
         except Exception as _rg_err:
             logger.debug("[REENTRY-GUARD] settlement record_close failed for %s: %s", market_ticker, _rg_err)
