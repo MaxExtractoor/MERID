@@ -114,15 +114,184 @@ class TestLiveRouterPromotion:
         assert ledger._promote_live_router_fill(auth) is None
 
     @pytest.mark.asyncio
-    async def test_promotion_economic_mismatch_is_noop(self, ledger):
+    async def test_promotion_direction_conflict_is_noop(self, ledger):
+        """An authoritative fill with opposite signed exposure cannot belong to
+        the order — a single Kalshi order fills in one direction only."""
         order_id = "order-doge-02"
         prov = _make_provisional(order_id)
-        prov.quantity_cc = 99  # quantity differs
         ledger._fills[prov.fill_id] = prov
         ledger._live_router_fill_ids[order_id] = prov.fill_id
 
         auth = _make_authoritative(order_id)
+        auth.canonical_yes_delta_cc = -54  # opposite signed exposure
         assert ledger._promote_live_router_fill(auth) is None
+
+    @pytest.mark.asyncio
+    async def test_promotion_overfill_is_noop(self, ledger):
+        """An authoritative fill larger than the provisional total is not a
+        partial — it cannot be reconciled with the order."""
+        order_id = "order-doge-03"
+        prov = _make_provisional(order_id)  # delta +54
+        ledger._fills[prov.fill_id] = prov
+        ledger._live_router_fill_ids[order_id] = prov.fill_id
+
+        auth = _make_authoritative(order_id)
+        auth.quantity_cc = 99
+        auth.count_fp = Decimal("0.99")
+        auth.canonical_yes_delta_cc = 99  # same direction but exceeds provisional
+        assert ledger._promote_live_router_fill(auth) is None
+
+
+class TestPartialFillPromotion:
+    """The 2026-09-24 phantom-position fix.
+
+    Kalshi reports one order's execution as multiple trade records.  A 100cc
+    provisional followed by 90cc + 10cc counterparty-form authoritative fills
+    must collapse to the same single position mutation: the first partial
+    promotes the provisional row; every further partial is a ledger-only
+    sibling whose signed delta never reaches the position cache.
+    """
+
+    def _make_provisional_buy_no(self, order_id: str) -> KalshiFill:
+        """Provisional BUY NO 100cc (canonical no/buy, delta -100)."""
+        return KalshiFill(
+            fill_id=f"live_router_{order_id}_0",
+            order_id=order_id,
+            market_ticker="KXXRP15M-TEST",
+            side="no",
+            action="buy",
+            count_fp=Decimal("1.0"),
+            quantity_cc=100,
+            yes_price_dollars=Decimal("0.30"),
+            no_price_dollars=Decimal("0.70"),
+            fee_cost=Decimal("0.02"),
+            proceeds_dollars=Decimal("-0.72"),
+            canonical_position_side="no",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=70,
+            canonical_yes_delta_cc=-100,
+            canonicalization_state="TRUSTED_LIVE_V1",
+            is_live=True,
+            created_time=datetime.now(timezone.utc),
+        )
+
+    def _make_auth_sell_yes_partial(
+        self, order_id: str, fill_id: str, qty_cc: int, yes_cents: int
+    ) -> KalshiFill:
+        """Authoritative partial in counterparty SELL YES form.
+
+        The user's BUY NO fill arrives from the exchange as SELL YES; trusted
+        canonicalization resolves the intent side (no/buy) while the wire legs
+        carry the YES execution price.
+        """
+        return KalshiFill(
+            fill_id=fill_id,
+            trade_id=fill_id,
+            order_id=order_id,
+            market_ticker="KXXRP15M-TEST",
+            side="yes",
+            action="sell",
+            count_fp=Decimal(qty_cc) / Decimal("100"),
+            quantity_cc=qty_cc,
+            yes_price_dollars=Decimal(yes_cents) / Decimal("100"),
+            no_price_dollars=Decimal(100 - yes_cents) / Decimal("100"),
+            fee_cost=Decimal("0.005"),
+            proceeds_dollars=Decimal(qty_cc) * Decimal(yes_cents) / Decimal("10000"),
+            execution_outcome_side="yes",
+            execution_action="sell",
+            execution_price_cents=yes_cents,
+            canonical_position_side="no",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=100 - yes_cents,
+            canonical_yes_delta_cc=-qty_cc,
+            canonicalization_state="TRUSTED_LIVE_V1",
+            is_live=True,
+            created_time=datetime.now(timezone.utc),
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_partial_promotes_and_updates_quantity(self, ledger):
+        order_id = "order-xrp-01"
+        prov = self._make_provisional_buy_no(order_id)
+        ledger._fills[prov.fill_id] = prov
+        ledger._live_router_fill_ids[order_id] = prov.fill_id
+
+        p1 = self._make_auth_sell_yes_partial(order_id, "auth_p1", 90, 30)
+        promoted = ledger._promote_live_router_fill(p1)
+        assert promoted == "auth_p1"
+
+        row = ledger._fills["auth_p1"]
+        # Authoritative quantity replaces the provisional total.
+        assert row.quantity_cc == 90
+        assert row.count_fp == Decimal("0.90")
+        # Canonical delta recomputed from the preserved user side/action.
+        assert row.canonical_position_side == "no"
+        assert row.canonical_position_action == "buy"
+        assert row.canonical_yes_delta_cc == -90
+        # Canonical leg stays in the user's NO space (100 - 30 = 70).
+        assert row.canonical_leg_price_cents == 70
+        # Coverage metadata records the provisional total for reconciliation.
+        assert row.raw_payload["provisional_quantity_cc"] == 100
+        assert row.raw_payload["authoritative_coverage_cc"] == 90
+
+    @pytest.mark.asyncio
+    async def test_second_partial_is_ledger_only_sibling(self, ledger):
+        order_id = "order-xrp-02"
+        prov = self._make_provisional_buy_no(order_id)
+        ledger._fills[prov.fill_id] = prov
+        ledger._live_router_fill_ids[order_id] = prov.fill_id
+
+        p1 = self._make_auth_sell_yes_partial(order_id, "auth_p1", 90, 30)
+        assert ledger._promote_live_router_fill(p1) == "auth_p1"
+
+        p2 = self._make_auth_sell_yes_partial(order_id, "auth_p2", 10, 31)
+        consumed = ledger._promote_live_router_fill(p2)
+        # The canonical row id is returned — the sibling is consumed.
+        assert consumed == "auth_p1"
+        # The sibling is a durable ledger row (audit + replay), marked consumed.
+        assert "auth_p2" in ledger._fills
+        assert "auth_p2" in ledger._processed_fill_ids
+        assert getattr(p2, "_consumed_by_provisional", False) is True
+        # Aggregate coverage now matches the provisional total.
+        row = ledger._fills["auth_p1"]
+        assert row.raw_payload["authoritative_coverage_cc"] == 100
+        assert "auth_p2" in row.raw_payload["sibling_fill_ids"]
+
+    @pytest.mark.asyncio
+    async def test_redelivery_is_idempotent(self, ledger):
+        order_id = "order-xrp-03"
+        prov = self._make_provisional_buy_no(order_id)
+        ledger._fills[prov.fill_id] = prov
+        ledger._live_router_fill_ids[order_id] = prov.fill_id
+
+        p1 = self._make_auth_sell_yes_partial(order_id, "auth_p1", 90, 30)
+        assert ledger._promote_live_router_fill(p1) == "auth_p1"
+        # Re-delivery of the same fill id must not re-merge or re-apply.
+        p1b = self._make_auth_sell_yes_partial(order_id, "auth_p1", 90, 30)
+        assert ledger._promote_live_router_fill(p1b) == "auth_p1"
+        row = ledger._fills["auth_p1"]
+        assert row.quantity_cc == 90
+        assert row.raw_payload["authoritative_coverage_cc"] == 90
+
+    @pytest.mark.asyncio
+    async def test_conflicting_direction_sibling_is_quarantined(self, ledger):
+        order_id = "order-xrp-04"
+        prov = self._make_provisional_buy_no(order_id)  # delta -100
+        ledger._fills[prov.fill_id] = prov
+        ledger._live_router_fill_ids[order_id] = prov.fill_id
+
+        p1 = self._make_auth_sell_yes_partial(order_id, "auth_p1", 90, 30)
+        assert ledger._promote_live_router_fill(p1) == "auth_p1"
+
+        # A "sibling" reporting +delta on the same order is impossible on a
+        # single-sided order — quarantine rather than apply.
+        bad = self._make_auth_sell_yes_partial(order_id, "auth_bad", 10, 31)
+        bad.canonical_yes_delta_cc = 10  # opposite sign
+        consumed = ledger._promote_live_router_fill(bad)
+        assert consumed == "auth_p1"
+        assert bad.unmatched is True
+        assert bad.unmatched_reason == "provisional_sibling_direction_conflict"
+        assert getattr(bad, "_consumed_by_provisional", False) is True
 
 
 class TestCanonicalBackfill:

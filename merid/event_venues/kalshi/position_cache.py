@@ -2905,7 +2905,16 @@ class KalshiPositionCache:
                         try:
                             eps = get_entry_provenance_store().get(client_order_id)
                             if eps:
-                                eps.entry_fill_price_cents = price_cents
+                                # 2026-09-24: Persist the position-side (held
+                                # outcome) price, not the raw execution-side
+                                # price.  For counterparty-form fills (e.g. a
+                                # BUY_NO reported as SELL_YES@31) `price_cents`
+                                # is the YES leg while the position's basis
+                                # lives in NO space (~69c).  Writing the raw
+                                # leg poisoned monitor reconstruction with a
+                                # wrong-space basis -> phantom PnL -> bogus
+                                # exits.
+                                eps.entry_fill_price_cents = position_side_price if position_side_price else price_cents
                                 eps.entry_fill_timestamp = datetime.now(timezone.utc)
                                 eps.entry_executable_bid_cents = entry_executable_bid_cents
                                 eps.entry_executable_ask_cents = entry_executable_ask_cents

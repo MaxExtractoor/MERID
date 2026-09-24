@@ -2747,17 +2747,38 @@ class PositionMonitor:
 
         if _fair_value_cents is not None and 1 <= _fair_value_cents <= 99:
             if current_price_cents >= _fair_value_cents:
-                logger.info(
-                    "[POSITION-MONITOR] EDGE-REALIZATION triggered: position=%s side=%s price=%dc fair=%dc "
-                    "entry=%dc age=%.1fs - exiting at market",
-                    position.position_id[:8],
-                    position.side.value,
-                    current_price_cents,
-                    _fair_value_cents,
-                    position.avg_entry_price_cents,
-                    position.time_since_entry_seconds,
-                )
-                _add_candidate(ExitReason.CURRENT_EDGE_REVERSAL, current_price_cents)
+                # 2026-09-24: Edge-realization is a PROFIT capture — it may only
+                # fire while the own-side bid sits above the all-in entry basis
+                # so the exit realizes a gain.  The same condition (bid >= fair)
+                # also holds when the model's fair value FELL to a falling bid —
+                # an invalidation signal, not a realized edge.  Firing there
+                # locked in losses <1s after entry (BUY_NO@70 -> SELL_NO@60).
+                # Underwater invalidation belongs to EDGE_DECAY, which requires
+                # hold-time and consecutive confirmations precisely because
+                # single-tick reprices are noisy.
+                if position.unrealized_pnl_cents <= 0:
+                    logger.info(
+                        "[POSITION-MONITOR] EDGE-REALIZATION suppressed (underwater): position=%s side=%s "
+                        "price=%dc fair=%dc entry=%dc pnl=%dc - deferring to EDGE_DECAY path",
+                        position.position_id[:8],
+                        position.side.value,
+                        current_price_cents,
+                        _fair_value_cents,
+                        position.avg_entry_price_cents,
+                        position.unrealized_pnl_cents,
+                    )
+                else:
+                    logger.info(
+                        "[POSITION-MONITOR] EDGE-REALIZATION triggered: position=%s side=%s price=%dc fair=%dc "
+                        "entry=%dc age=%.1fs - exiting at market",
+                        position.position_id[:8],
+                        position.side.value,
+                        current_price_cents,
+                        _fair_value_cents,
+                        position.avg_entry_price_cents,
+                        position.time_since_entry_seconds,
+                    )
+                    _add_candidate(ExitReason.CURRENT_EDGE_REVERSAL, current_price_cents)
                 # Continue evaluating candidates; the central resolver will choose the final exit.
 
         _contract_life_seconds = 900.0

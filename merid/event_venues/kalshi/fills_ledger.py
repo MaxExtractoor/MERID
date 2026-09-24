@@ -2663,6 +2663,13 @@ class KalshiFillsLedger:
                     validation_errors
                 )
 
+        # A fill consumed by provisional promotion/sibling merge is ledger-only:
+        # its signed delta already reached the position cache through the
+        # provisional.  Returning False keeps the ws_bridge from publishing it
+        # to the fill bus and calling position_cache.on_fill again.
+        if getattr(fill, "_consumed_by_provisional", False):
+            return False
+
         return True
 
     def record_intent(self, intent: OrderIntent) -> None:
@@ -5553,23 +5560,62 @@ class KalshiFillsLedger:
         if not existing_id or existing_id not in self._fills:
             return None
         existing = self._fills[existing_id]
+
+        # Idempotent re-delivery: a fill id that was already promoted or merged
+        # as a sibling is consumed; a transport-level re-delivery must not
+        # re-apply or re-merge it.
+        if fill.fill_id and fill.fill_id in self._processed_fill_ids:
+            return existing_id
+
+        if not str(existing.fill_id or "").startswith("live_router_"):
+            # The order's provisional row was already promoted.  Any further
+            # authoritative fill for the same order is a sibling partial of the
+            # same economic execution — the provisional's signed delta already
+            # mutated positions once, so the sibling is ledger-only (audit +
+            # replay-derived projection) and must not reach the position cache.
+            return self._record_provisional_sibling(existing, fill)
+
         if not self._is_same_economic_fill(existing, fill):
-            # Fallback identity match: same order, same market, same signed quantity.
-            # This protects promotion when the exchange reports counterparty-form
-            # prices that the pairwise dedupe comparison rejects.
+            # Relaxed identity match for counterparty-form and PARTIAL
+            # authoritative fills: same order, same market, same signed
+            # exposure direction, and the partial must not exceed the
+            # provisional total.  The exchange reports one order's execution as
+            # multiple trade records (e.g. 90cc + 10cc against a 100cc
+            # provisional), so exact-quantity equality cannot be required —
+            # the 2026-09-24 phantom positions came from rejecting these.
             same_market = existing.market_ticker == fill.market_ticker
-            same_qty = (existing.quantity_cc or 0) == (fill.quantity_cc or 0)
-            same_delta = (existing.canonical_yes_delta_cc or 0) == (fill.canonical_yes_delta_cc or 0)
-            if not (same_market and same_qty and same_delta):
+            prov_delta = self._fill_signed_yes_delta_cc(existing) or 0
+            fill_delta = self._fill_signed_yes_delta_cc(fill) or 0
+            same_direction = (
+                prov_delta != 0
+                and fill_delta != 0
+                and (prov_delta > 0) == (fill_delta > 0)
+            )
+            bounded_partial = same_direction and abs(fill_delta) <= abs(prov_delta)
+            if not (same_market and bounded_partial):
                 logger.warning(
-                    "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s economic mismatch between provisional %s and authoritative %s; not promoting",
-                    fill.order_id, existing_id, fill.fill_id,
+                    "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s economic mismatch between provisional %s "
+                    "(delta=%s qty_cc=%s market=%s) and authoritative %s (delta=%s qty_cc=%s market=%s); not promoting",
+                    fill.order_id, existing_id, prov_delta, existing.quantity_cc, existing.market_ticker,
+                    fill.fill_id, fill_delta, fill.quantity_cc, fill.market_ticker,
                 )
                 return None
             logger.info(
-                "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoting by order/market/qty/delta match (provisional %s -> authoritative %s)",
-                fill.order_id, existing_id, fill.fill_id,
+                "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoting partial/counterparty-form fill "
+                "(provisional %s delta=%s qty_cc=%s -> authoritative %s delta=%s qty_cc=%s)",
+                fill.order_id, existing_id, prov_delta, existing.quantity_cc,
+                fill.fill_id, fill_delta, fill.quantity_cc,
             )
+
+        # The provisional row recorded the order's expected total; this
+        # authoritative fill carries what the exchange actually executed for
+        # THIS trade.  Overlay quantity BEFORE the canonical delta/proceeds
+        # recomputes below so partial fills cannot leave stale totals behind.
+        _prov_qty_cc = existing.quantity_cc
+        if fill.quantity_cc is not None:
+            existing.quantity_cc = fill.quantity_cc
+        if fill.count_fp is not None:
+            existing.count_fp = fill.count_fp
 
         new_id = fill.fill_id
 
@@ -5584,6 +5630,22 @@ class KalshiFillsLedger:
         existing.confirmed_by_rest = True
         if fill.raw_payload:
             existing.raw_payload = fill.raw_payload
+
+        # Track aggregate authoritative coverage vs the provisional total on
+        # the canonical row so under-filled orders stay visible to
+        # reconciliation (provisional qty may exceed what actually filled).
+        try:
+            _payload = existing.raw_payload
+            if isinstance(_payload, str):
+                import json as _json
+                _payload = _json.loads(_payload)
+            if not isinstance(_payload, dict):
+                _payload = {}
+            _payload["provisional_quantity_cc"] = _prov_qty_cc
+            _payload["authoritative_coverage_cc"] = int(existing.quantity_cc or 0)
+            existing.raw_payload = _payload
+        except Exception:
+            pass
 
         # Authoritative canonical side/action wins when the fill has a trusted
         # canonicalization.  The live-router provisional may have been written in
@@ -5755,6 +5817,22 @@ class KalshiFillsLedger:
                 cache_err,
             )
 
+        # Rebuild the ledger's derived position for this market now that the
+        # authoritative economics (and possibly a partial quantity) have
+        # replaced the provisional values.  The WS on_fill path already does
+        # this after promotion; the HTTP ingest path `continue`s before
+        # on_fill runs, so it must happen here for parity.
+        try:
+            if fill.market_ticker:
+                self._replay_market_position(fill.market_ticker)
+                self._session_realized_pnl = self._recompute_session_realized_pnl()
+                self._session_unrealized_pnl = self._recompute_unrealized_pnl()
+        except Exception as _promote_replay_err:
+            logger.debug(
+                "[FILLS-LEDGER] post-promotion replay rebuild failed (non-critical): %s",
+                _promote_replay_err,
+            )
+
         logger.info(
             "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s promoted provisional %s to authoritative fill=%s trade=%s side=%s action=%s leg=%s proceeds=%s",
             fill.order_id, old_id, new_id, existing.trade_id,
@@ -5773,6 +5851,129 @@ class KalshiFillsLedger:
         fill.canonicalization_state = existing.canonicalization_state
         fill.confirmed_by_rest = True
         return new_id
+
+    def _suppress_fill_from_position_cache(self, fill: KalshiFill) -> None:
+        """Mark a fill id as already applied in the position cache.
+
+        Used for ledger-only rows (promotion siblings, suppressed
+        provisionals) whose signed delta must never reach the position cache —
+        the order's provisional delta already mutated exposure once.
+        """
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            from merid.replay import replay_time
+
+            cache = get_position_cache()
+            if cache and fill.fill_id and fill.fill_id not in getattr(cache, "_applied_fill_ids", {}):
+                cache._applied_fill_ids[fill.fill_id] = replay_time()
+                cache._save_applied_fill_ids()
+        except Exception:
+            pass
+
+    def _record_provisional_sibling(self, existing: KalshiFill, fill: KalshiFill) -> Optional[str]:
+        """Record an authoritative partial fill whose order already has a
+        promoted provisional row.
+
+        One Kalshi order can execute as multiple trade records (e.g. 90cc +
+        10cc against a 100cc provisional).  The provisional's signed delta
+        already mutated the position cache once, so every additional
+        authoritative partial for the same order is ledger-only: it stays in
+        ``self._fills`` for audit and for ``_replay_market_position`` (which
+        derives exposure from the full fill set), but it is marked
+        ``_consumed_by_provisional`` so no downstream path re-applies it —
+        that double-application created the phantom positions seen on
+        2026-09-24.
+
+        Returns the canonical (promoted) row's fill_id so callers treat the
+        fill as consumed.
+        """
+        same_market = existing.market_ticker == fill.market_ticker
+        existing_delta = self._fill_signed_yes_delta_cc(existing) or 0
+        fill_delta = self._fill_signed_yes_delta_cc(fill) or 0
+        same_direction = (
+            existing_delta != 0
+            and fill_delta != 0
+            and (existing_delta > 0) == (fill_delta > 0)
+        )
+        if not (same_market and same_direction):
+            # A single Kalshi order cannot fill in both directions; a
+            # conflicting sibling means corrupted canonicalization upstream.
+            # Quarantine it (unmatched -> never position-effective) so the row
+            # survives for audit but cannot mutate positions or the replay
+            # projection, and leave the discrepancy to reconciliation.
+            logger.critical(
+                "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s sibling fill %s has conflicting "
+                "direction/market (row delta=%s market=%s vs fill delta=%s market=%s) - "
+                "quarantined, not applied",
+                fill.order_id, fill.fill_id, existing_delta, existing.market_ticker,
+                fill_delta, fill.market_ticker,
+            )
+            fill.unmatched = True
+            fill.unmatched_reason = "provisional_sibling_direction_conflict"
+            if fill.fill_id and fill.fill_id not in self._fills:
+                self._fills[fill.fill_id] = fill
+                self._index_fill(fill)
+            if fill.fill_id:
+                self._processed_fill_ids.add(fill.fill_id)
+            setattr(fill, "_consumed_by_provisional", True)
+            self._suppress_fill_from_position_cache(fill)
+            return existing.fill_id
+
+        # Keep the exchange fact as its own durable row (per-trade audit +
+        # restart-safe fill_id dedupe), then consume it for position purposes.
+        if fill.fill_id and fill.fill_id not in self._fills:
+            self._fills[fill.fill_id] = fill
+            self._index_fill(fill)
+        if fill.fill_id:
+            self._processed_fill_ids.add(fill.fill_id)
+        setattr(fill, "_consumed_by_provisional", True)
+        self._suppress_fill_from_position_cache(fill)
+
+        # The sibling is position-effective in the ledger's derived projection
+        # (each authoritative partial contributes its real signed delta), so
+        # rebuild it now — the HTTP ingest path `continue`s before on_fill
+        # would otherwise run the replay.
+        try:
+            if fill.market_ticker:
+                self._replay_market_position(fill.market_ticker)
+                self._session_realized_pnl = self._recompute_session_realized_pnl()
+                self._session_unrealized_pnl = self._recompute_unrealized_pnl()
+        except Exception as _sibling_replay_err:
+            logger.debug(
+                "[FILLS-LEDGER] sibling replay rebuild failed (non-critical): %s",
+                _sibling_replay_err,
+            )
+
+        # Track aggregate authoritative coverage vs the provisional total on
+        # the canonical row so under-filled orders stay visible.
+        try:
+            _payload = existing.raw_payload
+            if isinstance(_payload, str):
+                import json as _json
+                _payload = _json.loads(_payload)
+            if not isinstance(_payload, dict):
+                _payload = {}
+            _coverage = int(_payload.get("authoritative_coverage_cc") or 0) + int(fill.quantity_cc or 0)
+            _payload["authoritative_coverage_cc"] = _coverage
+            _siblings = _payload.setdefault("sibling_fill_ids", [])
+            if fill.fill_id and fill.fill_id not in _siblings:
+                _siblings.append(fill.fill_id)
+            existing.raw_payload = _payload
+            _prov_qty = int(_payload.get("provisional_quantity_cc") or 0)
+            if _prov_qty and _coverage != _prov_qty:
+                logger.info(
+                    "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s authoritative coverage %dcc vs provisional %dcc",
+                    fill.order_id, _coverage, _prov_qty,
+                )
+        except Exception:
+            pass
+
+        logger.info(
+            "[FILLS-LEDGER-LIVE-PROMOTE] order_id=%s recorded sibling authoritative fill %s "
+            "(ledger-only; provisional exposure already applied)",
+            fill.order_id, fill.fill_id,
+        )
+        return existing.fill_id
 
     def _emit_fill_fee_audit(self, fill: KalshiFill) -> None:
         """Emit a durable, structured per-fill fee audit record.
