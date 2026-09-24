@@ -265,6 +265,41 @@ class TestReentryGuard:
         allowed, _ = guard.check_entry("KXBTC15M-26SEP241600-00")
         assert allowed
 
+    def test_rerecorded_close_does_not_reset_cooldown(self, monkeypatch):
+        """2026-09-24 bug: settlement re-sweeps re-recorded the same ticker's
+        close with a fresh timestamp, so the 120s cooldown never expired and
+        the asset was permanently blocked.  Re-records must preserve the
+        original closed_ts."""
+        monkeypatch.setenv("MERID_POST_LOSS_COOLDOWN_S", "120")
+        guard = ReentryGuard()
+        close_ts = time.time() - 119.0
+        guard.record_close(
+            "KXETH15M-26SEP241600-00", "yes", -58.0, closed_ts=close_ts
+        )
+        # Settlement cleanup re-records the same close 119s later.
+        guard.record_close("KXETH15M-26SEP241600-00", "yes", -58.0)
+        guard.record_close("KXETH15M-26SEP241600-00", "yes", None)
+        # 1s later the cooldown lapses — the re-record must not have
+        # refreshed the clock.
+        allowed, reason = guard.check_entry(
+            "KXETH15M-26SEP241615-15", now=close_ts + 121.0
+        )
+        assert allowed, reason
+
+    def test_rerecorded_close_does_not_regress_asset_marker(self, monkeypatch):
+        """An old ticker's re-record must not overwrite a fresher close's
+        timestamp/PnL at the asset level."""
+        monkeypatch.setenv("MERID_POST_LOSS_COOLDOWN_S", "120")
+        guard = ReentryGuard()
+        old_ts = time.time() - 200.0
+        guard.record_close("KXETH15M-26SEP241600-00", "yes", -10.0, closed_ts=old_ts)
+        guard.record_close("KXETH15M-26SEP241615-15", "yes", -55.0)
+        # Re-record the OLD ticker now — asset marker must stay on the new close.
+        guard.record_close("KXETH15M-26SEP241600-00", "yes", -10.0)
+        allowed, reason = guard.check_entry("KXETH15M-26SEP241630-30")
+        assert not allowed
+        assert "pnl=-55" in reason
+
 
 # --------------------------------------------------------------------------
 # Stop-loss POST_FILL provenance
