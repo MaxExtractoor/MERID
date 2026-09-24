@@ -7819,6 +7819,37 @@ class KalshiFillsLedger:
             except Exception:
                 _execution_yes_delta_cc = None
 
+        # 7a-pre. Counterparty/book-form fill detection.
+        #   A single Kalshi order fills in one direction only.  The exchange
+        #   may report the same trade in different forms on different
+        #   endpoints — e.g. WS reports "sell yes@30" while REST reports
+        #   "sell no@70" (book-side encoding: ask->no) for what was an
+        #   ask-side BUY_NO entry.  When the execution form's signed-YES
+        #   delta disagrees with the recorded intent's, the report is in
+        #   counterparty/book form: the canonical position effect and the
+        #   signed proceeds must follow the user's intent, not the reported
+        #   action.  This check fires on ACTION mismatch even when the
+        #   outcome-side labels agree (the 2026-09-24 phantom-position case:
+        #   "sell no" on a "buy no" intent canonicalized to +qty instead of
+        #   -qty and opened a phantom position on restart).
+        _counterparty_form = False
+        if (
+            _intent_action in ("buy", "sell")
+            and _intent_target_side in ("yes", "no")
+            and _intent_yes_delta_cc is not None
+            and _execution_yes_delta_cc is not None
+            and _execution_yes_delta_cc != _intent_yes_delta_cc
+        ):
+            _counterparty_form = True
+            logger.warning(
+                "[FILL-COUNTERPARTY-FORM] fill_id=%s order_id=%s ticker=%s | "
+                "execution=%s/%s delta=%s != intent=%s/%s delta=%s - "
+                "canonicalizing through recorded intent (book/maker-form report)",
+                fill_id, order_id, _ticker_for_identity,
+                _execution_action, _execution_outcome_side, _execution_yes_delta_cc,
+                _intent_action, _intent_target_side, _intent_yes_delta_cc,
+            )
+
         # 7a. Side-conflict detection.
         #     A side *label* conflict is when the exchange's outcome_side does
         #     not match the user's recorded intent target side.  The economic
@@ -7878,10 +7909,20 @@ class KalshiFillsLedger:
         else:
             _execution_price_cents = None
 
+        # For counterparty-form reports, the user's canonical side/action comes
+        # from the recorded intent; the held-side leg price follows it.
+        _effect_side = _execution_outcome_side
+        _effect_action = _execution_action
+        _effect_price_cents = _execution_price_cents
+        if _counterparty_form:
+            _effect_side = _intent_target_side
+            _effect_action = _intent_action
+            _effect_price_cents = _yes_cents if _intent_target_side == "yes" else _no_cents
+
         _effect = derive_position_effect(
-            execution_outcome_side=_execution_outcome_side,
-            execution_action=_execution_action,
-            execution_price_cents=_execution_price_cents,
+            execution_outcome_side=_effect_side,
+            execution_action=_effect_action,
+            execution_price_cents=_effect_price_cents,
             yes_price_cents=_yes_cents,
             no_price_cents=_no_cents,
             quantity_cc=_quantity_cc,
@@ -7938,6 +7979,14 @@ class KalshiFillsLedger:
         # complement-form exits (2026-09-23 audit, verified vs balance deltas).
         proceeds: Optional[Decimal] = None
         _proceeds_side = _execution_outcome_side or _raw_traded_side
+        _proceeds_action = _execution_action
+        if _counterparty_form:
+            # The signed cash belongs to the user's action, not the
+            # counterparty/book form the exchange reported.  A "sell no"
+            # report on a BUY_NO intent is the user's NO purchase — priced
+            # on the NO leg — not a mint-keep-YES sale.
+            _proceeds_side = _intent_target_side
+            _proceeds_action = _intent_action
         _proceeds_price = (
             yes_price_dollars if _proceeds_side == "yes" else no_price_dollars
         )
@@ -7948,11 +7997,11 @@ class KalshiFillsLedger:
             _count_fp > 0
             and _canonicalization_state in TRUSTED_CANONICALIZATION_STATES
             and _proceeds_price is not None
-            and _execution_action in ("buy", "sell")
+            and _proceeds_action in ("buy", "sell")
         ):
             _expected_proceeds = self._compute_signed_fill_proceeds(
                 _ticker_for_identity,
-                execution_action=_execution_action,
+                execution_action=_proceeds_action,
                 proceeds_side=_proceeds_side,
                 proceeds_price=_proceeds_price,
                 opposite_price=_opposite_price,
