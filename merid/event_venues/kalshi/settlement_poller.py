@@ -1033,11 +1033,26 @@ class KalshiSettlementPoller:
             # (e.g. "KXBTC15M-26SEP210045-45"), which is settlement.market_id.
             # settlement.ticker is the normalized series root (e.g. "KXBTC-15M")
             # and can never match; try it only as a fallback for legacy rows.
-            pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.market_id, outcome)
+            # Signed fill proceeds + residual settlement payout is the
+            # authoritative realized PnL: it covers full exits before
+            # settlement, partial exits with settled residuals, and
+            # held-to-settlement positions uniformly.  This prevents an
+            # early-exited winner (e.g. XRP NO 73c→91c = +16c) from being
+            # reported as a full-stake loss (-74c) — which wrongly fed the
+            # post-loss re-entry cooldown on 2026-09-24.
+            pnl_dollars = ledger.get_market_round_trip_pnl_dollars(
+                settlement.market_id, outcome
+            )
             if pnl_dollars is None and settlement.ticker != settlement.market_id:
-                pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.ticker, outcome)
+                pnl_dollars = ledger.get_market_round_trip_pnl_dollars(
+                    settlement.ticker, outcome
+                )
             if pnl_dollars is None:
-                # No local open position; keep the API-derived value.
+                pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.market_id, outcome)
+                if pnl_dollars is None and settlement.ticker != settlement.market_id:
+                    pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.ticker, outcome)
+            if pnl_dollars is None:
+                # No local fills at all; keep the API-derived value.
                 return settlement
 
             pnl_cents = (pnl_dollars * Decimal("100")).quantize(
