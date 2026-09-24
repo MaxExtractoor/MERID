@@ -95,18 +95,27 @@ class ReentryGuard:
             closed_ts=closed_ts if closed_ts is not None else time.time(),
         )
         with self._lock:
-            # A close event with unknown PnL (e.g. settlement cleanup in the
-            # monitor) must not clobber a record that already carries the
-            # authoritative realized PnL for the same ticker.
             prior = self._closed_by_ticker.get(ticker)
-            if (
-                prior is not None
-                and record.realized_pnl_cents is None
-                and prior.realized_pnl_cents is not None
-            ):
-                record.realized_pnl_cents = prior.realized_pnl_cents
+            if prior is not None:
+                # Idempotent re-records (settlement re-sweep, monitor remove,
+                # reconciliation): keep the ORIGINAL close timestamp — the
+                # cooldown must age from when the position actually closed, not
+                # reset on every duplicate close event (2026-09-24: perpetual
+                # cooldown bug — every re-record refreshed closed_ts and
+                # post_loss_cooldown never expired).
+                record.closed_ts = prior.closed_ts
+                # A close event with unknown PnL (e.g. settlement cleanup in
+                # the monitor) must not clobber a record that already carries
+                # the authoritative realized PnL for the same ticker.
+                if record.realized_pnl_cents is None:
+                    record.realized_pnl_cents = prior.realized_pnl_cents
             self._closed_by_ticker[ticker] = record
-            self._last_close_by_asset[asset] = record
+            # Only advance the asset's last-close marker when this record is a
+            # genuinely newer close — a re-recorded old ticker must not
+            # overwrite a fresher close's timestamp or PnL.
+            prev_asset = self._last_close_by_asset.get(asset)
+            if prev_asset is None or record.closed_ts >= prev_asset.closed_ts:
+                self._last_close_by_asset[asset] = record
 
     def check_entry(
         self,
