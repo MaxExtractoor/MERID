@@ -1101,19 +1101,25 @@ def book_side_from_outcome_action(held_side: str, action: str) -> str:
 # ── Canonical Price Range Checking ─────────────────────────────────────────────
 
 # Canonical price ranges (NON-NEGOTIABLE invariants)
-# CRITICAL FIX (2026-09-03): Side-aware canonical range.  YES contracts are
-# bounded at the high end because buying YES above 75c offers little upside,
-# while NO contracts can trade up to 95c before hitting the short-shot/noise
-# tail.  The 88c-95c NO band showed systematic positive EV in the 2026 FLB
-# study, so the canonical NO ceiling is 95c, not the old symmetric 75c.
+# CRITICAL FIX (2026-09-03): Side-aware canonical range.  YES contracts were
+# bounded at 75c because buying YES above 75c offered little upside, while NO
+# contracts traded up to 95c under the FLB study's positive-EV 88c-95c band.
+# 2026-09-24: The 75c YES ceiling proved to be the dominant live entry blocker
+# (it banned every favorite-side buy, including the settlement-convergence
+# lane's high-probability entries).  The executable EV gate and the
+# edge-preserving budget cap already bound entry prices by model fair value;
+# the blunt 75c collar added nothing except rejections.  Ceilings are now
+# symmetric at 95c on both sides — above ~93c the corrected-fee EV gate cannot
+# pass anyway (p_yes is calibration-capped at 0.95), so the gate remains the
+# real arbiter.
 CANONICAL_MIN_CENTS = 10  # Legacy symmetric minimum (kept for backward compat)
-CANONICAL_MAX_CENTS = 75  # Legacy symmetric maximum (kept for backward compat)
+CANONICAL_MAX_CENTS = 95  # Legacy symmetric maximum (kept for backward compat)
 CANONICAL_YES_MIN_CENTS = 10
-CANONICAL_YES_MAX_CENTS = 75
+CANONICAL_YES_MAX_CENTS = 95
 CANONICAL_NO_MIN_CENTS = 25
 CANONICAL_NO_MAX_CENTS = 95
 SIDE_AWARE_YES_MIN_CENTS = 1
-SIDE_AWARE_YES_MAX_CENTS = 75
+SIDE_AWARE_YES_MAX_CENTS = 95
 SIDE_AWARE_NO_MIN_CENTS = 25
 SIDE_AWARE_NO_MAX_CENTS = 99
 CRISIS_MIN_CENTS = 5

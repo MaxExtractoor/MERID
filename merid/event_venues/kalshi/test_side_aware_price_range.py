@@ -16,7 +16,10 @@ from merid.event_venues.kalshi.binary_price_space import (
 
 
 def test_side_aware_yes_range():
-    """Test that YES prices use expanded range (1c-75c)."""
+    """Test that YES prices use expanded range (1c-95c).
+
+    2026-09-24: ceiling raised 75c->95c; the EV gate bounds the top end.
+    """
     # Valid YES prices (including late-expiry low prices)
     assert is_price_in_side_aware_range(1, "yes") == True
     assert is_price_in_side_aware_range(6, "yes") == True
@@ -24,14 +27,14 @@ def test_side_aware_yes_range():
     assert is_price_in_side_aware_range(25, "yes") == True
     assert is_price_in_side_aware_range(50, "yes") == True
     assert is_price_in_side_aware_range(75, "yes") == True
-    
+    assert is_price_in_side_aware_range(90, "yes") == True
+    assert is_price_in_side_aware_range(95, "yes") == True
+
     # Invalid YES prices (too low)
     assert is_price_in_side_aware_range(0, "yes") == False
-    
+
     # Invalid YES prices (too high)
-    assert is_price_in_side_aware_range(76, "yes") == False
-    assert is_price_in_side_aware_range(80, "yes") == False
-    assert is_price_in_side_aware_range(94, "yes") == False
+    assert is_price_in_side_aware_range(96, "yes") == False
     assert is_price_in_side_aware_range(99, "yes") == False
 
 
@@ -92,17 +95,20 @@ def test_early_expiry_scenario():
 def test_canonical_range_still_works():
     """Test the side-aware canonical entry range.
 
-    2026-09-03: canonical range is side-aware:
-      - YES: 10c-75c (low-profit / longshot protection)
+    2026-09-03: canonical range is side-aware.
+    2026-09-24: YES ceiling raised 75c->95c — the 75c collar banned every
+    favorite-side buy; the corrected-fee EV gate is the real arbiter.
+      - YES: 10c-95c
       - NO: 25c-95c (88c-95c NO inverse-FLB band is systematically +EV)
     """
 
-    # YES canonical range (10c-75c)
+    # YES canonical range (10c-95c)
     assert is_price_in_canonical_range(10, "yes") == True   # Min YES
     assert is_price_in_canonical_range(25, "yes") == True
-    assert is_price_in_canonical_range(75, "yes") == True  # Max YES
+    assert is_price_in_canonical_range(75, "yes") == True
+    assert is_price_in_canonical_range(95, "yes") == True  # Max YES
     assert is_price_in_canonical_range(9, "yes") == False  # Too low
-    assert is_price_in_canonical_range(76, "yes") == False  # Too high
+    assert is_price_in_canonical_range(96, "yes") == False  # Too high
 
     # NO canonical range (25c-95c)
     assert is_price_in_canonical_range(25, "no") == True  # Min NO
@@ -167,9 +173,9 @@ def test_all_assets_late_expiry():
         assert is_price_in_side_aware_range(no_price, "no") is True, \
             f"{asset}: NO {no_price}c should be in range (FIX)"
 
-        # Canonical YES range (10c-75c) always rejects these low YES prices.
+        # Canonical YES range (10c-95c) always rejects these low YES prices.
         assert is_price_in_canonical_range(yes_price, "yes") is False, \
-            f"{asset}: YES {yes_price}c should be outside canonical 10c-75c"
+            f"{asset}: YES {yes_price}c should be outside canonical 10c-95c"
 
         # Canonical NO range (25c-95c) accepts 94c but still rejects 97c/99c.
         expected_no_canonical = 25 <= no_price <= 95
@@ -185,9 +191,9 @@ def test_edge_cases():
     """Test edge cases for side-aware range."""
     # Boundary values for YES
     assert is_price_in_side_aware_range(1, "yes") == True   # Min YES
-    assert is_price_in_side_aware_range(75, "yes") == True  # Max YES
+    assert is_price_in_side_aware_range(95, "yes") == True  # Max YES
     assert is_price_in_side_aware_range(0, "yes") == False   # Just below min
-    assert is_price_in_side_aware_range(76, "yes") == False  # Just above max
+    assert is_price_in_side_aware_range(96, "yes") == False  # Just above max
     
     # Boundary values for NO
     assert is_price_in_side_aware_range(25, "no") == True  # Min NO

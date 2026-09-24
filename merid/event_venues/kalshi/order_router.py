@@ -4310,6 +4310,39 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
 
         # ---- coherent: within tolerance ---------------------------------------
         if max_divergence_cents <= tolerance_cents:
+            # 2026-09-24: feeds agree, but they may have moved together past
+            # the order's limit since the decision snapshot.  A taker buy
+            # priced below the fresh ask can never fill — instead of letting
+            # it die at the exchange, lift the limit to the signal's
+            # edge-preserving budget when the fresh ask still fits inside it.
+            _buy_taker = (
+                (getattr(intent, "action", "") or "").lower() == "buy"
+                and _resolve_execution_mode(intent) not in ("maker", "passive_quote")
+                and not _is_exit_order(intent)
+            )
+            if _buy_taker and not (ws_marketable and rest_marketable):
+                _fresh_ask = max(ws_book["ask_cents"], rest_book_side["ask_cents"])
+                _epc = _max_edge_preserving_buy_price(intent)
+                if _epc is not None and _fresh_ask <= _epc:
+                    old_px = getattr(intent, "price_cents", None)
+                    intent.price_cents = min(99, _epc)
+                    logger.info(
+                        "EXECUTION-QUOTE-MODE ticker=%s mode=REPRICED_WITHIN_EDGE decision=ALLOW "
+                        "reason=bounded_reprice_coherent price=%dc->%dc fresh_ask=%dc edge_budget=%dc",
+                        intent.ticker, old_px, intent.price_cents, _fresh_ask, _epc,
+                    )
+                    return None
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_COHERENT decision=BLOCKED "
+                    "reason=coherent_not_marketable price=%s fresh_ask=%dc edge_budget=%s",
+                    intent.ticker, getattr(intent, "price_cents", None), _fresh_ask, _epc,
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"ws_rest_divergence:not_marketable:{max_divergence_cents}c",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
             logger.info(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_COHERENT decision=ALLOW "
                 "reason=coherent max_divergence=%dc tolerance=%dc "
@@ -4384,7 +4417,30 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             return None
 
         # 5) Cannot ignore divergence: the order is not marketable against the
-        #    best fresh source or there is no live WS.
+        #    best fresh source or there is no live WS.  Before rejecting, a
+        #    taker buy gets one bounded reprice: if the freshest ask still fits
+        #    inside the signal's edge-preserving budget, lift the limit to the
+        #    budget — the budget already enforces net edge >= min_required at
+        #    the fill price, so this never pays beyond the model's risk bounds.
+        _buy_taker = (
+            (getattr(intent, "action", "") or "").lower() == "buy"
+            and _resolve_execution_mode(intent) not in ("maker", "passive_quote")
+            and not _is_exit_order(intent)
+        )
+        if _buy_taker:
+            _fresh_ask = max(ws_book["ask_cents"], rest_book_side["ask_cents"])
+            _epc = _max_edge_preserving_buy_price(intent)
+            if _epc is not None and _fresh_ask <= _epc:
+                old_px = getattr(intent, "price_cents", None)
+                intent.price_cents = min(99, _epc)
+                logger.info(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=REPRICED_WITHIN_EDGE decision=ALLOW "
+                    "reason=bounded_reprice_divergent price=%dc->%dc fresh_ask=%dc edge_budget=%dc "
+                    "max_divergence=%dc",
+                    intent.ticker, old_px, intent.price_cents, _fresh_ask, _epc,
+                    max_divergence_cents,
+                )
+                return None
         logger.error(
             "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_DIVERGENT decision=BLOCKED "
             "reason=not_marketable max_divergence=%dc tolerance=%dc "
@@ -8300,7 +8356,13 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         side_ask=side_ask,
                         reason="taker buy: displayed ask unavailable",
                     )
-                if side_ask > fair_cap:
+                # 2026-09-24: when the signal carries an edge-preserving budget it
+                # is the binding economic cap — it already enforces net edge ≥
+                # min_required at the fill price.  The mid-anchored slippage cap
+                # only protects orders *without* edge provenance; applied to
+                # edge-backed orders it rejects every wide-book converging entry
+                # (e.g. a 70c/95c book where the favorite side is the trade).
+                if side_ask > fair_cap and edge_preserve_cap is None:
                     raise RepriceWouldCross(
                         ticker=intent.ticker,
                         side=outcome_side,
@@ -8325,7 +8387,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                             side_ask=side_ask,
                             reason=f"taker buy: side_ask {side_ask}c exceeds edge budget {edge_preserve_cap}c",
                         )
-                    taker_cap = min(fair_cap, edge_preserve_cap)
+                    taker_cap = min(99, edge_preserve_cap)
                 else:
                     p_selected = getattr(intent, "p_selected", None)
                     if p_selected is not None:
@@ -8546,13 +8608,17 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     # The legacy hard [10, 75] boundary blocked NO-side taker orders from crossing
     # legitimate asks above 75c (e.g. 80c NO) while the canonical NO range is 15c-99c.
     # Use the same side-aware ranges as canonical price space.
+    # 2026-09-24: resolve bounds from binary_price_space so the repricer cannot
+    # silently undo a legitimate repricing (the stale 75c YES constant here
+    # clamped favorite-side taker prices back to 75c before final validation,
+    # which then rejected them as unmarketable).
     if not _is_exit_order(intent):  # Only clamp entry orders, not exits
-        if outcome_side == "no":
-            ALLOCATOR_MIN_PRICE = 25
-            ALLOCATOR_MAX_PRICE = 99
-        else:
-            ALLOCATOR_MIN_PRICE = 10
-            ALLOCATOR_MAX_PRICE = 75
+        from merid.event_venues.kalshi.binary_price_space import (
+            get_canonical_price_range,
+        )
+        ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = get_canonical_price_range(
+            outcome_side
+        )
 
         if adjusted_price < ALLOCATOR_MIN_PRICE:
             logger.warning(
@@ -9007,11 +9073,22 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any],
                 return f"taker_buy_below_ask:price={order_price}c,ask={validation_ask_cents}c"
             fair_cap = validation_mid_cents + max_slippage_cents
             if order_price > fair_cap:
-                logger.warning(
-                    "[PRICE-VALIDATION] ticker=%s taker BUY price=%dc above fair cap=%dc (slippage > %dc)",
-                    intent.ticker, order_price, fair_cap, max_slippage_cents,
-                )
-                return f"taker_buy_above_slippage_cap:price={order_price}c,cap={fair_cap}c"
+                # 2026-09-24: a signal-provided edge budget is the binding
+                # economic cap; the mid-anchored slippage cap only binds
+                # orders without edge provenance (wide-book converging
+                # entries were being rejected despite positive EV).
+                _epc = _max_edge_preserving_buy_price(intent)
+                if _epc is not None and order_price <= _epc:
+                    logger.info(
+                        "[PRICE-VALIDATION] ticker=%s taker BUY price=%dc above fair cap=%dc but within edge budget=%dc - ALLOW",
+                        intent.ticker, order_price, fair_cap, _epc,
+                    )
+                else:
+                    logger.warning(
+                        "[PRICE-VALIDATION] ticker=%s taker BUY price=%dc above fair cap=%dc (slippage > %dc)",
+                        intent.ticker, order_price, fair_cap, max_slippage_cents,
+                    )
+                    return f"taker_buy_above_slippage_cap:price={order_price}c,cap={fair_cap}c"
         else:
             if validation_bid_cents is not None and order_price > validation_bid_cents:
                 logger.warning(
