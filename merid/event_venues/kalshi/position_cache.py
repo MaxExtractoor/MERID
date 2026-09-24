@@ -6552,6 +6552,22 @@ class KalshiPositionCache:
                     ).timestamp()
                 except Exception:
                     _closed_ts = None
+            if _closed_ts is None:
+                # Fallback: the ticker embeds the window end (ET). A settlement
+                # can only occur at/after window end, so this is a tight lower
+                # bound on the true close time — far better than stamping now()
+                # when the poller replays a stale backlog after restart (the
+                # cooldown must age from the real close, not discovery time).
+                try:
+                    from merid.event_venues.kalshi.expiry_fallback import (
+                        parse_kalshi_15m_window_end_utc,
+                    )
+
+                    _end = parse_kalshi_15m_window_end_utc(market_ticker)
+                    if _end is not None:
+                        _closed_ts = _end.timestamp()
+                except Exception:
+                    _closed_ts = None
             get_reentry_guard().record_close(
                 ticker=market_ticker,
                 side=str(_side) if _side else None,
