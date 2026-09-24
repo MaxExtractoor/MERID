@@ -6737,6 +6737,45 @@ class KalshiFillsLedger:
             )
         return total if found else None
 
+    def get_market_round_trip_pnl_dollars(
+        self, market_ticker: str, outcome: str
+    ) -> Optional[Decimal]:
+        """Authoritative realized PnL for a market from signed fill proceeds.
+
+        Unlike ``get_settlement_pnl_dollars`` (open-position records only), this
+        covers positions that were EXITED before settlement: realized PnL is
+        the sum of signed ``proceeds_dollars`` across every fill (entries are
+        negative cost, exits/settlement legs are positive proceeds, all net of
+        fees), plus the settlement payout on any residual signed YES exposure::
+
+            residual > 0 (long YES)  pays residual/100 if outcome == yes
+            residual < 0 (long NO)   pays |residual|/100 if outcome == no
+
+        Returns ``None`` when the ledger holds no fills for the market so the
+        caller can fall back to the API-derived value.  This fixes the
+        2026-09-24 misattribution where an early-exited winner (e.g. XRP NO
+        bought 73c, sold ~91c → +16c) was reported as a -74c settlement loss,
+        wrongly triggering the post-loss re-entry cooldown.
+        """
+        total = Decimal("0")
+        residual_yes_cc = 0
+        found = False
+        for fill in list(self._fills.values()):
+            if fill.market_ticker != market_ticker:
+                continue
+            found = True
+            if fill.proceeds_dollars is not None:
+                total += fill.proceeds_dollars
+            if fill.canonical_yes_delta_cc is not None:
+                residual_yes_cc += fill.canonical_yes_delta_cc
+        if not found:
+            return None
+        if residual_yes_cc > 0 and outcome == "yes":
+            total += Decimal(residual_yes_cc) / Decimal("100")
+        elif residual_yes_cc < 0 and outcome == "no":
+            total += Decimal(-residual_yes_cc) / Decimal("100")
+        return total
+
     def on_market_price_update(self, market_ticker: str, last_price_cents: int) -> None:
         """Handle market price update for unrealized PnL recompute.
 

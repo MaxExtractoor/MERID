@@ -16,6 +16,7 @@ Live failure chain that these tests lock out:
 
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import Mock
 
 import pytest
@@ -370,6 +371,95 @@ class TestReentryGuard:
         allowed, reason = guard.check_entry("KXBTC15M-27JAN011215-15")
         assert not allowed
         assert "post_loss_cooldown" in reason
+
+
+# --------------------------------------------------------------------------
+# Settlement PnL: round-trip proceeds for positions exited before settlement
+# --------------------------------------------------------------------------
+
+
+class TestRoundTripSettlementPnl:
+    """2026-09-24: XRP NO 73c→91c exit was a +16c win, but the settlement path
+    reported -74c (cost basis only) because the open-position lookup missed the
+    closed position.  Signed proceeds + residual payout is authoritative."""
+
+    def _ledger_with(self, fills):
+        from merid.event_venues.kalshi.fills_ledger import (
+            KalshiFillsLedger,
+            KalshiFill,
+        )
+
+        ledger = KalshiFillsLedger.__new__(KalshiFillsLedger)
+        ledger._fills = {f.fill_id: f for f in fills}
+        return ledger, KalshiFill
+
+    def test_exited_winner_is_profit_not_full_loss(self):
+        """The exact live case: BUY NO 1.00 @73c (-74.38c), exits +90.64c."""
+        ledger, KalshiFill = self._ledger_with([])
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill as KF
+
+        t = "KXXRP15M-26SEP241830-30"
+        ledger._fills = {
+            "e": KF(fill_id="e", market_ticker=t,
+                    proceeds_dollars=Decimal("-0.7438"),
+                    canonical_yes_delta_cc=-100),
+            "x1": KF(fill_id="x1", market_ticker=t,
+                     proceeds_dollars=Decimal("0.0916"),
+                     canonical_yes_delta_cc=10),
+            "x2": KF(fill_id="x2", market_ticker=t,
+                     proceeds_dollars=Decimal("0.8148"),
+                     canonical_yes_delta_cc=90),
+        }
+        pnl = ledger.get_market_round_trip_pnl_dollars(t, "yes")
+        assert pnl == Decimal("0.1626")  # +16.26c — a WIN
+
+    def test_held_loser_reports_full_loss(self):
+        ledger, KalshiFill = self._ledger_with([])
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill as KF
+
+        t = "KXXRP15M-26SEP241600-00"
+        ledger._fills = {
+            "e": KF(fill_id="e", market_ticker=t,
+                    proceeds_dollars=Decimal("-0.6912"),
+                    canonical_yes_delta_cc=-100),
+        }
+        # YES settled 1: the long-NO residual pays 0 → loss = cost basis.
+        assert ledger.get_market_round_trip_pnl_dollars(t, "yes") == Decimal("-0.6912")
+
+    def test_held_winner_collects_settlement_payout(self):
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill as KF
+
+        ledger, _ = self._ledger_with([])
+        t = "KXBTC15M-T"
+        ledger._fills = {
+            "e": KF(fill_id="e", market_ticker=t,
+                    proceeds_dollars=Decimal("-0.7438"),
+                    canonical_yes_delta_cc=-100),
+        }
+        # NO wins → long-NO residual pays $1 → +25.62c.
+        assert ledger.get_market_round_trip_pnl_dollars(t, "no") == Decimal("0.2562")
+
+    def test_partial_exit_plus_residual(self):
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill as KF
+
+        ledger, _ = self._ledger_with([])
+        t = "KXETH15M-T"
+        ledger._fills = {
+            "e": KF(fill_id="e", market_ticker=t,
+                    proceeds_dollars=Decimal("-0.50"),
+                    canonical_yes_delta_cc=100),
+            "x": KF(fill_id="x", market_ticker=t,
+                    proceeds_dollars=Decimal("0.40"),
+                    canonical_yes_delta_cc=-90),
+        }
+        # Residual long 0.10 YES, YES wins → +0.10 payout → net 0.
+        assert ledger.get_market_round_trip_pnl_dollars(t, "yes") == Decimal("0.00")
+        # NO wins → residual pays 0 → -0.10.
+        assert ledger.get_market_round_trip_pnl_dollars(t, "no") == Decimal("-0.10")
+
+    def test_no_fills_returns_none(self):
+        ledger, _ = self._ledger_with([])
+        assert ledger.get_market_round_trip_pnl_dollars("KXBTC15M-Z", "yes") is None
 
 
 # --------------------------------------------------------------------------
