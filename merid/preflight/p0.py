@@ -153,13 +153,58 @@ async def run_p0_preflight_checks(
                 )
 
         # Load the position cache from the exchange so internal state is fresh.
-        if hasattr(cache, "load_from_exchange"):
+        # sync_from_rest is the canonical exchange->cache path; with force and
+        # cleanup_stale the REST snapshot is authoritative (a cached position
+        # is removed only when the exchange reports none, no live open order
+        # exists, and the fills ledger nets to zero).  It consumes plain dicts,
+        # so the VenuePosition/PlacedOrder dataclasses are converted here.
+        if hasattr(cache, "sync_from_rest"):
             try:
-                await cache.load_from_exchange(client)
+                _pos_dicts: List[Dict[str, Any]] = []
+                for _vp in positions:
+                    _qty_fp = Decimal(str(getattr(_vp, "size", 0) or 0))
+                    _side = getattr(_vp, "outcome_id", None) or ""
+                    _pos_dicts.append({
+                        "market_id": getattr(_vp, "market_id", ""),
+                        "outcome_id": _side,
+                        "side": _side,
+                        "thesis_side": _side,
+                        "outcome_side": _side,
+                        "contracts": int(_qty_fp),
+                        "quantity_fp": _qty_fp,
+                        "quantity_cc": int(_qty_fp * Decimal("100")),
+                        "avg_price_cents": int(
+                            Decimal(str(getattr(_vp, "average_entry_price", 0) or 0)) * 100
+                        ),
+                        "source": "p0_preflight",
+                    })
+                _order_dicts: Optional[List[Dict[str, Any]]] = None
+                if open_orders:
+                    _order_dicts = [
+                        {
+                            "market_id": getattr(_o, "market_id", None),
+                            "side": getattr(_o, "side", None),
+                            "contracts": int(getattr(_o, "size", 0) or 0),
+                        }
+                        for _o in open_orders
+                    ]
+                await cache.sync_from_rest(
+                    _pos_dicts,
+                    rest_timestamp=time.time(),
+                    force=True,
+                    open_orders=_order_dicts,
+                    cleanup_stale=True,
+                )
             except Exception as load_err:
-                logger.warning("[P0-PREFLIGHT] position_cache load_from_exchange failed: %s", load_err)
+                logger.warning("[P0-PREFLIGHT] position_cache sync_from_rest failed: %s", load_err)
 
-        internal_positions = list(cache.positions.values()) if hasattr(cache, "positions") else []
+        # KalshiPositionCache exposes positions via get_all_positions(), not a
+        # ``positions`` attribute — the old hasattr check always read [] and
+        # the count comparison only passed on flat accounts.
+        if hasattr(cache, "get_all_positions"):
+            internal_positions = list(cache.get_all_positions(validate_freshness=False).values())
+        else:
+            internal_positions = []
         # Get all durable fills; we compare by identity, not by simple count.
         internal_fills = ledger.get_fills() if hasattr(ledger, "get_fills") else []
 
