@@ -1888,6 +1888,10 @@ class Kalshi15mLoop:
                         
                         # CRITICAL: Enable swing mode after trailing exit in profit
                         # This allows YES/NO reversal to capture profits from price swings in both directions
+                        # 2026-09-24: only arm swing mode on a PROFITABLE trail exit.
+                        # Arming it after a loss directly produced the live XRP
+                        # incident (trail-exit -3c -> opposite-side re-entry -61c
+                        # in the same market window).
                         if exit_reason == ExitReason.TRAIL:
                             # Extract asset from market_id (e.g., KXBTC15M-TEST -> BTC)
                             asset = None
@@ -1897,7 +1901,12 @@ class Kalshi15mLoop:
                                     asset = a
                                     break
                             
-                            if asset:
+                            _trail_profitable = (
+                                exit_price_cents is not None
+                                and getattr(position, "avg_entry_price_cents", None) is not None
+                                and exit_price_cents > position.avg_entry_price_cents
+                            )
+                            if asset and _trail_profitable:
                                 # Enable swing mode for this asset
                                 self._swing_mode[asset] = {
                                     "enabled": True,
@@ -1907,6 +1916,14 @@ class Kalshi15mLoop:
                                 logger.info(
                                     "[SWING-MODE] Enabled for asset=%s after trailing exit: exited_side=%s exit_price=%dc",
                                     asset, self._swing_mode[asset]["exited_side"], exit_price_cents
+                                )
+                            elif asset:
+                                logger.info(
+                                    "[SWING-MODE] Not armed for asset=%s: trail exit not profitable "
+                                    "(entry=%sc exit=%sc) - same-market re-entry also locked by ReentryGuard",
+                                    asset,
+                                    getattr(position, "avg_entry_price_cents", None),
+                                    exit_price_cents,
                                 )
                         
                         # Route exit order through order router
@@ -2696,14 +2713,38 @@ async def _execute_exit_order(
     try:
         # CRITICAL FIX (2026-07-23): Check exit registry first (source of truth)
         # This is more reliable than querying RestingOrderMonitor which may have websocket lag
-        if self._position_monitor._has_exit_order(position.position_id):
-            existing_exits = self._position_monitor._get_exit_orders_for_position(position.position_id)
+        #
+        # 2026-09-24: reconcile before suppressing.  Registered orders that died
+        # (IOC expired unfilled, rejected, canceled) must not suppress retries —
+        # a stale registration swallowed 14 settlement-guard exits live and let
+        # a -61c position ride to settlement.
+        _live_resting_exit_ids = None
+        _resting_exit_orders = []
+        try:
+            from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+            from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
+            _resting_monitor = get_resting_order_monitor()
+            _resting_exit_orders = [
+                o for o in _resting_monitor.get_orders_by_ticker(position.market_id)
+                if is_exit_order_from_source(o.exit_policy_id)
+            ]
+            _live_resting_exit_ids = {o.kalshi_order_id for o in _resting_exit_orders}
+        except Exception as _rest_probe_err:
+            logger.warning(
+                "[EXIT-ORDER-DUPLICATE] Resting-order probe failed (registry-only reconcile): %s",
+                _rest_probe_err,
+            )
+
+        _surviving_exits = self._position_monitor._reconcile_exit_registry(
+            position.position_id, _live_resting_exit_ids
+        )
+        if _surviving_exits:
             logger.warning(
                 "[EXIT-ORDER-DUPLICATE] Exit order already registered for position=%s - "
                 "skipping new exit order to prevent duplicate fills. "
                 "Registered exits: %s | New reason: %s | New price: %dc | Partial exit: %s",
                 position.position_id[:8],
-                existing_exits,
+                _surviving_exits,
                 exit_reason.value if hasattr(exit_reason, 'value') else exit_reason,
                 exit_price_cents,
                 contracts_to_close is not None
@@ -2717,16 +2758,7 @@ async def _execute_exit_order(
         # double-fills, flat-then-reversed states, and inconsistent exposure.
         # CRITICAL: This applies to BOTH full exits and partial exits - only one active exit order per position.
         try:
-            from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
-            resting_monitor = get_resting_order_monitor()
-            
-            # Check if there's a resting exit order for this market_id
-            existing_exit_orders = resting_monitor.get_orders_by_ticker(position.market_id)
-            
-            # Filter for exit orders (check source markers)
-            from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
-            exit_orders = [order for order in existing_exit_orders if is_exit_order_from_source(order.exit_policy_id)]
-            
+            exit_orders = _resting_exit_orders
             if exit_orders:
                 logger.warning(
                     "[EXIT-ORDER-DUPLICATE] Resting exit order already exists for market=%s - "
@@ -5074,12 +5106,15 @@ async def _run_loop(self) -> None:
                                 continue  # Skip if edge below 2.5%
                             
                             # CRITICAL FIX (2026-07-16): Since agent_grid_15m already filtered to best edge per asset,
-                            # we only need to skip if swing mode is disabled and we have a position (no re-entry)
-                            # Swing mode allows opposite-side entry after trailing exit
-                            if has_position and not is_swing_reversal:
+                            # we only need to skip if we have a position (no re-entry).
+                            # 2026-09-24: a swing-mode reversal must NEVER bypass the
+                            # open-position gate — while the prior exit is still
+                            # in-flight (observed 26-33s to fill) an opposite-side
+                            # entry would stack YES+NO exposure on the same market.
+                            if has_position:
                                 logger.debug(
-                                    "[15m-LOOP] Asset has position and swing mode not enabled: asset=%s - skipping",
-                                    asset
+                                    "[15m-LOOP] Asset has position: asset=%s swing_reversal=%s - skipping",
+                                    asset, is_swing_reversal
                                 )
                                 self._rejection_counters["position_exists"] += 1
                                 self._log_candidate_lifecycle_event(

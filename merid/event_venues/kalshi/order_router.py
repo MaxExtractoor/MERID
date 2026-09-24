@@ -4208,6 +4208,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     rest_age_ms = max(0.0, (replay_time() - float(rest_ts)) * 1000.0)
 
         rest_usable = rest_book is not None and rest_age_ms <= max_rest_age_ms
+        _is_exit = _is_exit_order(intent)
 
         # If REST is unusable, WS is primary by default.  Allow only when the
         # WS book is fresh enough and the order is marketable.
@@ -4221,6 +4222,20 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     ws_book["bid_cents"], ws_book["ask_cents"],
                     getattr(intent, "price_cents", None),
                     getattr(intent, "action", ""),
+                )
+                return None
+            # CRITICAL FIX (2026-09-24): reduce-only exits are limit-price bounded
+            # and can only shrink exposure — never block them on feed freshness.
+            # The observed failure: a settlement-guard exit was vetoed by
+            # no_fresh_feed at T-48s and the position expired unclosed.
+            if _is_exit:
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                    "reason=reduce_only_exit_bypass ws_age_ms=%.0f rest_age_ms=%.0f "
+                    "order_price=%dc — limit-bounded reduce-only exit must not be "
+                    "vetoed by feed freshness",
+                    intent.ticker, ws_age_ms, rest_age_ms,
+                    getattr(intent, "price_cents", None) or 0,
                 )
                 return None
             if ws_authoritative and ws_age_ms <= max_ws_age_ms:
@@ -4288,6 +4303,14 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             if market_state_store is not None:
                 market_state_store._set_snapshot_complete(intent.ticker, False, "ws_book_inconsistent")
                 market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "ws_book_inconsistent")
+            if _is_exit:
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                    "reason=reduce_only_exit_bypass ws_book_inconsistent — limit-bounded "
+                    "reduce-only exit proceeds despite corrupted WS book",
+                    intent.ticker,
+                )
+                return None
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -4301,6 +4324,14 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 "reason=rest_book_inconsistent rest_bid=%d rest_ask=%d",
                 intent.ticker, rest_book_side["bid_cents"], rest_book_side["ask_cents"],
             )
+            if _is_exit:
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                    "reason=reduce_only_exit_bypass rest_book_inconsistent — limit-bounded "
+                    "reduce-only exit proceeds despite corrupted REST book",
+                    intent.ticker,
+                )
+                return None
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -4367,6 +4398,14 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             if market_state_store is not None:
                 market_state_store._set_snapshot_complete(intent.ticker, False, "divergence_hard_limit")
                 market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_hard_limit")
+            if _is_exit:
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                    "reason=reduce_only_exit_bypass integrity_failure max_divergence=%dc — "
+                    "limit-bounded reduce-only exit proceeds despite feed divergence",
+                    intent.ticker, max_divergence_cents,
+                )
+                return None
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -4395,6 +4434,14 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             if market_state_store is not None:
                 market_state_store._set_snapshot_complete(intent.ticker, False, "ws_stale_at_order")
                 market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "ws_stale_at_order")
+            if _is_exit:
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                    "reason=reduce_only_exit_bypass stale_ws ws_age_ms=%.0f — "
+                    "limit-bounded reduce-only exit proceeds despite stale WS",
+                    intent.ticker, ws_age_ms,
+                )
+                return None
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -4441,6 +4488,14 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     max_divergence_cents,
                 )
                 return None
+        if _is_exit:
+            logger.warning(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                "reason=reduce_only_exit_bypass not_marketable max_divergence=%dc — "
+                "limit-bounded reduce-only exit proceeds despite divergence",
+                intent.ticker, max_divergence_cents,
+            )
+            return None
         logger.error(
             "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_DIVERGENT decision=BLOCKED "
             "reason=not_marketable max_divergence=%dc tolerance=%dc "
@@ -13203,7 +13258,49 @@ async def _route_live(
                             
                             original_price = intent.price_cents
                             adjusted_price = original_price
-                            
+
+                            # CRITICAL FIX (2026-09-24): chase cap.  The marketable
+                            # limit reprices to the LIVE ask; between decision and
+                            # submission the book can move far past the price the
+                            # edge was computed at.  Live incident: decision priced
+                            # NO@38, the ask ran to 61 during a 5s delay, and the
+                            # order chased +23c into a fill whose edge was gone.
+                            # Cap the limit at the decision's selected price +
+                            # MERID_ENTRY_MAX_CHASE_CENTS; beyond that the entry is
+                            # stale — reject instead of paying the completed move.
+                            _sel_price = getattr(intent, "selected_outcome_price_cents", None)
+                            _chase_cap = int(os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5"))
+                            if (
+                                _sel_price is not None
+                                and 0 < _sel_price < 100
+                                and effective_action in ("buy", "sell")
+                                and not _is_exit_order(intent)
+                            ):
+                                if effective_action == "buy":
+                                    _chase_bound = _sel_price + _chase_cap
+                                    _breached = best_ask_cents > _chase_bound
+                                else:
+                                    _chase_bound = _sel_price - _chase_cap
+                                    _breached = best_bid_cents < _chase_bound
+                                if _breached:
+                                    logger.warning(
+                                        "[ENTRY-CHASE-BLOCKED] ticker=%s side=%s action=%s "
+                                        "decision_price=%dc live_bid=%dc live_ask=%dc "
+                                        "chase_cap=%dc — market moved beyond cap since "
+                                        "decision; rejecting stale entry instead of chasing",
+                                        intent.ticker, side_upper, effective_action,
+                                        _sel_price, best_bid_cents, best_ask_cents, _chase_cap,
+                                    )
+                                    return OrderResult(
+                                        status="rejected",
+                                        mode=mode,
+                                        reason=(
+                                            f"entry_chase_exceeded:decision={_sel_price}c:"
+                                            f"live_bid={best_bid_cents}c:live_ask={best_ask_cents}c"
+                                        ),
+                                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                                    )
+
                             # For buy orders: cross spread by setting price >= best_ask
                             if effective_action == "buy":
                                 # Calculate how many ticks to cross based on aggressiveness
@@ -13249,6 +13346,20 @@ async def _route_live(
                                     best_bid_cents, best_ask_cents, intent.aggressiveness, cross_ticks
                                 )
                             
+                            # Chase-cap clamp: keep the marketable limit inside the
+                            # decision-price bound computed above (rejection already
+                            # handled the beyond-cap case; this covers the edge case
+                            # where adjusted_price overshoots via cross_ticks).
+                            if (
+                                _sel_price is not None
+                                and 0 < _sel_price < 100
+                                and not _is_exit_order(intent)
+                            ):
+                                if effective_action == "buy":
+                                    adjusted_price = min(adjusted_price, _sel_price + _chase_cap)
+                                elif effective_action == "sell":
+                                    adjusted_price = max(adjusted_price, _sel_price - _chase_cap)
+
                             # Clamp to valid Kalshi price range (5-95 cents).
                             # This matches the CRASH-007 hard range used downstream
                             # and avoids degenerate 1-4 cent prices that the venue
