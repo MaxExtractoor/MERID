@@ -805,10 +805,26 @@ class PositionMonitor:
                 # Both YES-long and NO-long profit when their own-side price
                 # rises — realized pnl is (exit - entry) in own-side cents.
                 _realized = (_exit_px - _entry_px) * float(position.size or 0)
+            # A position cannot close after its market's window end. For
+            # startup/cleanup removal of an already-expired ticker, window-end
+            # is the tightest available bound on the true close time — stamping
+            # now() would restart the asset cooldown on every restart.
+            _closed_ts = None
+            try:
+                from merid.event_venues.kalshi.expiry_fallback import (
+                    parse_kalshi_15m_window_end_utc,
+                )
+
+                _end = parse_kalshi_15m_window_end_utc(position.market_id)
+                if _end is not None:
+                    _closed_ts = min(time.time(), _end.timestamp())
+            except Exception:
+                _closed_ts = None
             get_reentry_guard().record_close(
                 ticker=position.market_id,
                 side=str(getattr(getattr(position, "side", None), "value", "") or ""),
                 realized_pnl_cents=_realized,
+                closed_ts=_closed_ts,
             )
         except Exception as _rg_err:
             logger.debug("[REENTRY-GUARD] record_close failed for %s: %s", position.market_id, _rg_err)

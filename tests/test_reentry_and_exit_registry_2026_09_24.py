@@ -330,6 +330,47 @@ class TestReentryGuard:
         assert not allowed
         assert "post_loss_cooldown" in reason
 
+    def test_expired_position_removal_ages_from_window_end(self, monkeypatch):
+        """Startup cleanup removing an hours-expired position must stamp the
+        close at window end, not now() — otherwise every restart replays a
+        fresh 120s cooldown for losses that happened hours ago."""
+        monkeypatch.setenv("MERID_POST_LOSS_COOLDOWN_S", "120")
+        guard = ReentryGuard()
+        monkeypatch.setattr(
+            "merid.risk.reentry_guard.get_reentry_guard", lambda: guard
+        )
+        monitor = PositionMonitor()
+        # KXXRP15M-26SEP241600-00 → window ended 16:00 ET — long expired.
+        monitor.add_position(
+            _position(avg_entry_price_cents=58, exit_price_cents=10)
+        )
+        monitor.remove_position("KXXRP15M-26SEP241600-00")
+        # Loss recorded, but its true age is hours — cooldown already lapsed.
+        allowed, reason = guard.check_entry("KXXRP15M-26SEP241615-15")
+        assert allowed, reason
+
+    def test_live_position_removal_uses_now(self, monkeypatch):
+        """A live exit on a still-open window stamps now() — the cooldown
+        genuinely applies."""
+        monkeypatch.setenv("MERID_POST_LOSS_COOLDOWN_S", "120")
+        guard = ReentryGuard()
+        monkeypatch.setattr(
+            "merid.risk.reentry_guard.get_reentry_guard", lambda: guard
+        )
+        monitor = PositionMonitor()
+        monitor.add_position(
+            _position(
+                position_id="KXBTC15M",
+                market_id="KXBTC15M-27JAN011200-00",  # far-future window
+                avg_entry_price_cents=58,
+                exit_price_cents=10,
+            )
+        )
+        monitor.remove_position("KXBTC15M-27JAN011200-00")
+        allowed, reason = guard.check_entry("KXBTC15M-27JAN011215-15")
+        assert not allowed
+        assert "post_loss_cooldown" in reason
+
 
 # --------------------------------------------------------------------------
 # Stop-loss POST_FILL provenance
