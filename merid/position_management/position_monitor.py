@@ -14,7 +14,7 @@ import threading
 import time
 import traceback
 import uuid
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, ROUND_CEILING
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union, Tuple
@@ -2745,8 +2745,31 @@ class PositionMonitor:
         except Exception as _fair_err:
             logger.debug("[POSITION-MONITOR] Could not fetch fair value for edge-realization: %s", _fair_err)
 
+        # 2026-09-24: Estimated cost of an early exit (taker fee + buffer) —
+        # computed unconditionally so the TP gate below can use it even when
+        # live fair is unavailable.  Settlement is free, so a discretionary
+        # exit is only +EV when the market overpays by more than this cost.
+        _exit_cost_cents = 0
+        try:
+            from merid.event_venues.kalshi.fees import compute_taker_fee_per_contract_cents
+            _fee = compute_taker_fee_per_contract_cents(
+                current_price_cents, position.size or 1
+            )
+            _exit_cost_cents = int(_fee.to_integral_value(rounding=ROUND_CEILING))
+        except Exception:
+            _exit_cost_cents = 0
+        _exit_cost_cents += int(os.getenv("MERID_EDGE_EXIT_BUFFER_CENTS", "1"))
+
         if _fair_value_cents is not None and 1 <= _fair_value_cents <= 99:
-            if current_price_cents >= _fair_value_cents:
+            # 2026-09-24: Exit-cost-aware edge realization ("overpay exit").
+            #   Settlement is free: the expected value of holding is the live
+            #   model fair, while selling pays a second taker fee plus spread.
+            #   Exiting the instant bid reaches fair (old rule) sold at
+            #   fair-minus-costs — systematically worse than holding — and on a
+            #   noisy fair estimate it fired at +1-3c.  The profitable trigger
+            #   is bid >= fair + exit_cost: the market overpays net of costs.
+            _overpay_threshold = _fair_value_cents + _exit_cost_cents
+            if current_price_cents >= _overpay_threshold:
                 # 2026-09-24: Edge-realization is a PROFIT capture — it may only
                 # fire while the own-side bid sits above the all-in entry basis
                 # so the exit realizes a gain.  The same condition (bid >= fair)
@@ -2769,12 +2792,13 @@ class PositionMonitor:
                     )
                 else:
                     logger.info(
-                        "[POSITION-MONITOR] EDGE-REALIZATION triggered: position=%s side=%s price=%dc fair=%dc "
-                        "entry=%dc age=%.1fs - exiting at market",
+                        "[POSITION-MONITOR] EDGE-REALIZATION triggered (overpay): position=%s side=%s "
+                        "price=%dc fair=%dc cost=%dc entry=%dc age=%.1fs - exiting at market",
                         position.position_id[:8],
                         position.side.value,
                         current_price_cents,
                         _fair_value_cents,
+                        _exit_cost_cents,
                         position.avg_entry_price_cents,
                         position.time_since_entry_seconds,
                     )
@@ -3214,27 +3238,69 @@ class PositionMonitor:
             # Continue evaluating candidates; the central resolver will choose the final exit.
 
         if position.should_trigger_take_profit(current_price_cents):
-            # AUDIT: Idempotency - generate dedupe key for this trigger
-            dedupe_key = f"{position.position_id[:8]}:take_profit:{poll_count}"
-            # AUDIT: Log trigger evaluation
-            logger.info(
-                "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=take_profit price=%dc tp=%dc side=%s size=%s trigger=true dedupe_key=%s",
-                position.position_id[:8],
-                position.market_id,
-                current_price_cents,
-                position.take_profit_price_cents,
-                position.side.value,
-                position.size,
-                dedupe_key
+            # 2026-09-24: Remaining-edge gate on the take-profit.  The TP level
+            # is frozen at entry-time and can lag the thesis (or be a partial
+            # edge-capture target).  Selling while the entry thesis still
+            # prices the contract above bid + exit costs donates the remaining
+            # edge — settlement is free, so the correct comparison is
+            # thesis_fair - bid vs exit_cost.  Prefer the frozen entry-model
+            # probability (the plan) as the fair anchor; fall back to the live
+            # book/model fair when entry provenance is missing, and to the
+            # static TP when neither is available.  A separate overpay exit
+            # still fires when the market bids above live fair + costs, so
+            # suppressing the TP here cannot strand an overpriced position.
+            _tp_suppressed = False
+            _thesis_fair_cents = None
+            _entry_prob = getattr(position, 'entry_model_probability', None)
+            if _entry_prob is not None and 0.0 < float(_entry_prob) < 1.0:
+                _thesis_fair_cents = int(round(float(_entry_prob) * 100))
+            _gate_fair_cents = (
+                _thesis_fair_cents
+                if _thesis_fair_cents is not None
+                else _fair_value_cents
             )
-            logger.info(
-                "[POSITION-MONITOR] TAKE-PROFIT triggered: position=%s price=%dc tp=%dc R=%.2f",
-                position.position_id[:8],
-                current_price_cents,
-                position.take_profit_price_cents,
-                position.r_multiple,
-            )
-            _add_candidate(ExitReason.TAKE_PROFIT, current_price_cents)
+            if _gate_fair_cents is not None and 1 <= _gate_fair_cents <= 99:
+                # Strict overpay floor: selling is only +EV vs free settlement
+                # when bid - exit_cost >= fair, i.e. bid >= fair + exit_cost.
+                _overpay_floor = _gate_fair_cents + _exit_cost_cents
+                if current_price_cents < _overpay_floor:
+                    _tp_suppressed = True
+                    logger.info(
+                        "[POSITION-MONITOR] TAKE-PROFIT suppressed (below overpay floor): position=%s "
+                        "side=%s price=%dc tp=%dc fair=%dc anchor=%s floor=%dc cost=%dc - holding",
+                        position.position_id[:8],
+                        position.side.value,
+                        current_price_cents,
+                        position.take_profit_price_cents,
+                        _gate_fair_cents,
+                        "thesis" if _thesis_fair_cents is not None else "live",
+                        _overpay_floor,
+                        _exit_cost_cents,
+                    )
+            if _tp_suppressed:
+                pass
+            else:
+                # AUDIT: Idempotency - generate dedupe key for this trigger
+                dedupe_key = f"{position.position_id[:8]}:take_profit:{poll_count}"
+                # AUDIT: Log trigger evaluation
+                logger.info(
+                    "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=take_profit price=%dc tp=%dc side=%s size=%s trigger=true dedupe_key=%s",
+                    position.position_id[:8],
+                    position.market_id,
+                    current_price_cents,
+                    position.take_profit_price_cents,
+                    position.side.value,
+                    position.size,
+                    dedupe_key
+                )
+                logger.info(
+                    "[POSITION-MONITOR] TAKE-PROFIT triggered: position=%s price=%dc tp=%dc R=%.2f",
+                    position.position_id[:8],
+                    current_price_cents,
+                    position.take_profit_price_cents,
+                    position.r_multiple,
+                )
+                _add_candidate(ExitReason.TAKE_PROFIT, current_price_cents)
             # Continue evaluating candidates; the central resolver will choose the final exit.
         if position.should_trigger_break_even(current_price_cents):
             position.trigger_break_even()

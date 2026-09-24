@@ -488,6 +488,7 @@ class ExitPolicy:
 
         # Compute estimated net executable PnL (gross PnL minus estimated exit fee)
         net_executable_pnl_cents = self.unrealized_pnl_cents
+        estimated_exit_fee = 0
         try:
             from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
             estimated_exit_fee = calculate_kalshi_fee_cents(
@@ -498,8 +499,48 @@ class ExitPolicy:
         except Exception as fee_err:
             logger.debug("[EXIT-POLICY] Could not estimate exit fee for edge decay: %s", fee_err)
 
-        # If the position is still net profitable, allow a normal edge-decay profit take.
+        # If the position is still net profitable, an edge-decay profit exit is
+        # only +EV versus holding when the market overpays: settlement is free,
+        # so selling below fair + exit cost donates the remaining edge.  Require
+        # edge <= -exit_cost (bid >= fair + fee + buffer) so profitable
+        # positions ride toward their fair anchor unless the market pays extra.
         if net_executable_pnl_cents > 0:
+            # 2026-09-24: The profit branch must satisfy the same entry
+            # provenance requirements as the loss path.  When the signal/model
+            # provenance is missing the current_edge input can be a fallback
+            # value that does not reflect the real thesis — firing a
+            # discretionary exit on it is how the XRP winner got scratched.
+            if not self._can_act_on_model_exit():
+                logger.warning(
+                    "[EXIT-POLICY-PROVENANCE] Edge-decay profit exit blocked for %s: "
+                    "risk_params_state=%s entry_signal_id=%s entry_model_probability=%s "
+                    "entry_edge=%s fill_source=%s",
+                    self.position.market_id,
+                    self.position.risk_params_state,
+                    self.position.entry_signal_id,
+                    self.position.entry_model_probability,
+                    self.position.entry_edge,
+                    self.position.fill_source,
+                )
+                return None
+            # Per-contract exit cost: current_edge_pct is a per-contract
+            # quantity, so the comparison must divide the position-level fee
+            # by size (otherwise multi-contract positions demand impossible
+            # overpay amounts).
+            _size = max(1.0, float(self.position.size or 1))
+            _exit_cost_cents = float(estimated_exit_fee) / _size
+            try:
+                import os as _os
+                _exit_cost_cents += float(_os.getenv("MERID_EDGE_EXIT_BUFFER_CENTS", "1"))
+            except Exception:
+                _exit_cost_cents += 1.0
+            if current_edge_pct * 100.0 > -_exit_cost_cents:
+                logger.debug(
+                    "[EXIT-POLICY] Edge decayed below threshold but remaining edge %.2fc "
+                    "exceeds exit cost %.2fc - holding (no overpay)",
+                    current_edge_pct * 100.0, _exit_cost_cents,
+                )
+                return None
             return ExitReason.EDGE_DECAY
 
         # Loss case: require a minimum position age and at least two consecutive

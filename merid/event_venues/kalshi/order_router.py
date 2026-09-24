@@ -13539,15 +13539,23 @@ async def _route_live(
                     vol_regime=vol_regime_str,  # CRITICAL FIX (2026-08-01): Persist volatility regime
                     confidence=confidence_str,  # CRITICAL FIX (2026-08-01): Persist signal confidence
                     # CRITICAL FIX (2026-08-10): Durable entry-model provenance
-                    entry_edge_pct=intent.edgepct or None,
+                    # 2026-09-24: Prefer canonical edge_pct over legacy edgepct; the
+                    # legacy field is not populated by loop_15m and always read as
+                    # 0.0/None, which forced positions onto the 0.03 default edge
+                    # and the noisy live-model fallback path.
+                    entry_edge_pct=intent.edge_pct or intent.edgepct or None,
                     entry_signal_id=intent.entry_signal_id or intent.client_tag,
                     entry_model=intent.entry_model or intent.source,
                     entry_model_version=intent.entry_model_version or intent.data_version,
                     entry_model_probability=intent.entry_model_probability or intent.model_prob,
                     entry_market_probability=intent.entry_market_probability or (intent.price_cents / 100.0 if intent.price_cents else None),
-                    entry_edge=intent.entry_edge or (intent.edgepct if intent.edgepct else None),
+                    entry_edge=intent.entry_edge or intent.edge_pct or intent.edgepct or None,
                     entry_book_snapshot_id=intent.entry_book_snapshot_id,
-                    entry_execution_mode=intent.entry_execution_mode or intent.execution_mode,
+                    # CRITICAL FIX (2026-09-24): entry_execution_mode is not an
+                    # OrderIntent field; the bare attribute access raised
+                    # AttributeError and silently skipped TP/provenance
+                    # registration for every order. Use getattr fallback.
+                    entry_execution_mode=getattr(intent, 'entry_execution_mode', None) or intent.execution_mode,
                     # CRITICAL FIX (2026-08-23): Durable edge-decay policy provenance.
                     exit_policy_id=intent.exit_policy_id,
                     window_resolution_id=intent.window_resolution_id,
@@ -13564,7 +13572,7 @@ async def _route_live(
                     exit_policy=intent.exit_policy,
                 )
             except Exception as _tp_reg_err:
-                logger.debug("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
+                logger.warning("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
 
         # PRODUCTION FIX: Pre-register order_id -> client_tag mapping BEFORE order submission
         # This ensures HTTP fills can recover client_order_id even if order submission fails
@@ -14568,7 +14576,10 @@ async def _route_live(
                 entry_market_probability=intent.entry_market_probability,
                 entry_edge=intent.entry_edge or intent.edge_pct or intent.edgepct,
                 entry_book_snapshot_id=intent.entry_book_snapshot_id,
-                entry_execution_mode=intent.entry_execution_mode or intent.execution_mode,
+                # 2026-09-24: getattr fallback — entry_execution_mode is not an
+                # OrderIntent field; bare access raised AttributeError and the
+                # post-submit enriched intent record was silently dropped.
+                entry_execution_mode=getattr(intent, 'entry_execution_mode', None) or intent.execution_mode,
                 # 2026-08-11: Signal economics and settlement telemetry for immutable ledger.
                 all_in_cost_cents=intent.all_in_cost_cents,
                 ev_net_cents=intent.ev_net_cents,
@@ -14616,7 +14627,7 @@ async def _route_live(
                 except Exception as bind_err:
                     logger.debug("[order-router] Failed to bind order_id to ledger intent (non-fatal): %s", bind_err)
         except Exception as record_err:
-            logger.debug("[order-router] Failed to record intent in fills_ledger (non-fatal): %s", record_err)
+            logger.warning("[order-router] Failed to record intent in fills_ledger (non-fatal): %s", record_err)
 
         # Track order submission for lifecycle monitoring
         try:

@@ -198,13 +198,24 @@ class TestExitPolicy:
         assert policy.reason == ExitReason.TIME_STOP
     
     def test_evaluate_edge_decay(self):
-        """Test edge decay triggers exit."""
+        """Edge-decay profit exits fire only on strict overpay (edge <= -exit
+        cost) and require trusted entry provenance — a decayed-but-still-
+        profitable edge is not a reason to donate the remainder to fees."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=10,
             avg_entry_price_cents=50,
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            client_order_id="test-client",
+            entry_fill_id="test-fill",
+            fill_source="test",
+            entry_book_capture_quality="AT_FILL",
+            entry_signal_id="sig-1",
+            entry_model_probability=0.55,
+            entry_edge=0.05,
         )
 
         policy = ExitPolicy(
@@ -217,8 +228,10 @@ class TestExitPolicy:
             min_edge_threshold=0.03,  # 3% minimum edge
         )
 
-        exit_decision = policy.evaluate(current_edge_pct=0.02)  # Below threshold
-        
+        # edge=-0.05 -> bid 60 vs fair 55: the market overpays by ~5c, well
+        # beyond the ~3c exit cost -> EDGE_DECAY profit exit.
+        exit_decision = policy.evaluate(current_edge_pct=-0.05)
+
         assert exit_decision is not None
         assert exit_decision.reason == ExitReason.EDGE_DECAY
         assert exit_decision.source_layer == ExitSourceLayer.POLICY_LAYER
@@ -802,13 +815,23 @@ class TestExitPolicyEdgeDecay:
     """Test EDGE_DECAY exit reason (edge threshold logic)."""
     
     def test_edge_decay_below_threshold(self):
-        """Test edge decay triggers when edge below threshold."""
+        """Edge decay fires when the market overpays: edge <= -exit cost.
+        A decayed-but-positive edge is held (remaining edge beats fees)."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=10,
             avg_entry_price_cents=50,
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            client_order_id="test-client",
+            entry_fill_id="test-fill",
+            fill_source="test",
+            entry_book_capture_quality="AT_FILL",
+            entry_signal_id="sig-1",
+            entry_model_probability=0.55,
+            entry_edge=0.05,
         )
 
         policy = ExitPolicy(
@@ -822,8 +845,8 @@ class TestExitPolicyEdgeDecay:
             risk_kill_switch=False,
         )
 
-        exit_decision = policy.evaluate(current_edge_pct=0.02)  # Below threshold
-        
+        exit_decision = policy.evaluate(current_edge_pct=-0.05)  # Overpay vs fair
+
         assert exit_decision is not None
         assert exit_decision.reason == ExitReason.EDGE_DECAY
         assert exit_decision.source_layer == ExitSourceLayer.POLICY_LAYER
@@ -1084,13 +1107,22 @@ class TestExitPolicyPrecedence:
         assert policy.reason == ExitReason.TIME_STOP
     
     def test_only_edge_decay_active(self):
-        """Test EDGE_DECAY fires when only signal active."""
+        """EDGE_DECAY fires on strict overpay with trusted provenance."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
             side=PositionSide.YES,
             size=10,
             avg_entry_price_cents=50,
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            client_order_id="test-client",
+            entry_fill_id="test-fill",
+            fill_source="test",
+            entry_book_capture_quality="AT_FILL",
+            entry_signal_id="sig-1",
+            entry_model_probability=0.55,
+            entry_edge=0.05,
         )
 
         policy = ExitPolicy(
@@ -1104,8 +1136,8 @@ class TestExitPolicyPrecedence:
             risk_kill_switch=False,
         )
 
-        policy.evaluate(current_edge_pct=0.01)
-        
+        policy.evaluate(current_edge_pct=-0.05)  # Overpay: bid above fair + cost
+
         assert policy.action == ExitAction.EXIT_MARKET
         assert policy.reason == ExitReason.EDGE_DECAY
 
