@@ -4354,6 +4354,18 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             if _buy_taker and not (ws_marketable and rest_marketable):
                 _fresh_ask = max(ws_book["ask_cents"], rest_book_side["ask_cents"])
                 _epc = _max_edge_preserving_buy_price(intent)
+                # Chase bound (2026-09-24): the edge budget alone let a stale
+                # decision chase the ask ~23c past its selected price.  The
+                # reprice may never exceed the decision's selected price plus
+                # MERID_ENTRY_MAX_CHASE_CENTS — beyond that the signal is stale
+                # and the entry is rejected rather than paying the top of the
+                # model's tolerance range.
+                _sel_px = getattr(intent, "selected_outcome_price_cents", None)
+                if _sel_px is not None and int(_sel_px) > 0:
+                    _chase = int(_sel_px) + int(
+                        os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+                    )
+                    _epc = min(_epc, _chase) if _epc is not None else _chase
                 if _epc is not None and _fresh_ask <= _epc:
                     old_px = getattr(intent, "price_cents", None)
                     intent.price_cents = min(99, _epc)
@@ -4477,6 +4489,16 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         if _buy_taker:
             _fresh_ask = max(ws_book["ask_cents"], rest_book_side["ask_cents"])
             _epc = _max_edge_preserving_buy_price(intent)
+            # Chase bound (2026-09-24): same rule as the coherent path — the
+            # reprice is capped at the decision's selected price plus
+            # MERID_ENTRY_MAX_CHASE_CENTS so a stale signal cannot chase the
+            # ask beyond the model's tolerance for chase.
+            _sel_px = getattr(intent, "selected_outcome_price_cents", None)
+            if _sel_px is not None and int(_sel_px) > 0:
+                _chase = int(_sel_px) + int(
+                    os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+                )
+                _epc = min(_epc, _chase) if _epc is not None else _chase
             if _epc is not None and _fresh_ask <= _epc:
                 old_px = getattr(intent, "price_cents", None)
                 intent.price_cents = min(99, _epc)
@@ -13314,6 +13336,18 @@ async def _route_live(
                                 
                                 # Cap at original price + 10 ticks to allow crossing wide spreads
                                 max_acceptable = original_price + 10
+                                # 2026-09-24: the decision's selected price +
+                                # chase cap is the binding bound — a lifted
+                                # intent price must not become the new base for
+                                # another +10c of chase on a stale signal.
+                                _sel_px = getattr(intent, "selected_outcome_price_cents", None)
+                                if _sel_px is not None and int(_sel_px) > 0:
+                                    max_acceptable = min(
+                                        max_acceptable,
+                                        int(_sel_px) + int(os.environ.get(
+                                            "MERID_ENTRY_MAX_CHASE_CENTS", "5"
+                                        )),
+                                    )
                                 if adjusted_price > max_acceptable:
                                     adjusted_price = max_acceptable
                                 
