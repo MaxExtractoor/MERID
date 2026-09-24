@@ -357,6 +357,7 @@ class PositionMonitor:
         # Reduces reliance on exchange data heuristics
         self._exit_registry: Dict[str, List[str]] = {}  # position_id -> list of kalshi_order_ids
         self._exit_quantities: Dict[str, Dict[str, int]] = {}  # position_id -> {kalshi_order_id: quantity}
+        self._exit_registry_ts: Dict[str, Dict[str, float]] = {}  # position_id -> {kalshi_order_id: registered monotonic ts}
 
         # CRITICAL FIX (2026-07-23): Position-level execution locks
         # Prevents TOCTOU races during exit order creation
@@ -494,6 +495,7 @@ class PositionMonitor:
 
             self._open_positions[position.position_id] = position
             self._market_to_position[position.market_id] = position.position_id
+            self._sweep_orphan_exit_registry(position.position_id)
 
         logger.info(
             "[POSITION-MONITOR] Added position: %s market=%s side=%s size=%s entry=%dc TP=%s SL=%s vol_regime=%s confidence=%s",
@@ -631,6 +633,7 @@ class PositionMonitor:
 
                 self._open_positions[position.position_id] = position
                 self._market_to_position[position.market_id] = position.position_id
+                self._sweep_orphan_exit_registry(position.position_id)
                 logger.info(
                     "[POSITION-MONITOR] Added position: %s market=%s side=%s size=%s entry=%dc TP=%s SL=%s caller=%s",
                     position.position_id[:8], position.market_id, position.side,
@@ -777,6 +780,7 @@ class PositionMonitor:
             self._market_to_position.pop(position.market_id, None)
             self._exit_registry.pop(resolved_id, None)
             self._exit_quantities.pop(resolved_id, None)
+            self._exit_registry_ts.pop(resolved_id, None)
             self._position_exit_locks.pop(resolved_id, None)
             self._exit_intent_in_flight.pop(resolved_id, None)
             self._position_to_client_order.pop(resolved_id, None)
@@ -788,6 +792,26 @@ class PositionMonitor:
             position.exit_reason or "none",
             position.exit_price_cents if position.exit_price_cents is not None else "N/A",
         )
+
+        # 2026-09-24: feed the re-entry guard so a closed market cannot be
+        # re-entered in the same window and a realized loss cools the asset.
+        try:
+            from merid.risk.reentry_guard import get_reentry_guard
+
+            _exit_px = position.exit_price_cents
+            _entry_px = position.avg_entry_price_cents
+            _realized = None
+            if _exit_px is not None and _entry_px is not None:
+                # Both YES-long and NO-long profit when their own-side price
+                # rises — realized pnl is (exit - entry) in own-side cents.
+                _realized = (_exit_px - _entry_px) * float(position.size or 0)
+            get_reentry_guard().record_close(
+                ticker=position.market_id,
+                side=str(getattr(getattr(position, "side", None), "value", "") or ""),
+                realized_pnl_cents=_realized,
+            )
+        except Exception as _rg_err:
+            logger.debug("[REENTRY-GUARD] record_close failed for %s: %s", position.market_id, _rg_err)
 
         # Drop EV-gate persistence state for the removed position so a stale
         # breach streak cannot carry into a future position on the same key.
@@ -1347,6 +1371,25 @@ class PositionMonitor:
                     len(expired)
                 )
 
+    def _sweep_orphan_exit_registry(self, position_id: str) -> None:
+        """Drop exit-registry entries left behind by a previous position instance.
+
+        position_id is asset-keyed (e.g. ``KXXRP15M``) and is recycled across
+        windows/positions.  If a late registration outlived remove_position, the
+        stale order ids would make _has_exit_order permanently suppress exits for
+        the NEW position.  Called whenever a fresh position instance is added.
+        """
+        with self._lock_registry_lock:
+            orphans = self._exit_registry.pop(position_id, None)
+            self._exit_quantities.pop(position_id, None)
+            self._exit_registry_ts.pop(position_id, None)
+        if orphans:
+            logger.warning(
+                "[EXIT-REGISTRY] Swept %d orphan exit order(s) on new position add: "
+                "position_id=%s orders=%s",
+                len(orphans), position_id[:8], orphans,
+            )
+
     def _register_exit_order(self, position_id: str, kalshi_order_id: str, quantity: int = 1) -> None:
         """
         Register an exit order in the first-class exit registry.
@@ -1359,14 +1402,35 @@ class PositionMonitor:
             kalshi_order_id: Kalshi order ID
             quantity: Exit order quantity (number of contracts)
         """
+        # CRITICAL FIX (2026-09-24): Never register an exit order for a position
+        # that is no longer monitored.  Registration can lag position removal by
+        # tens of seconds (the flat-confirmation reconciler runs after the WS fill
+        # handler has already removed the position).  An entry inserted here would
+        # be orphaned — no future remove_position can clear it — and _has_exit_order
+        # would then drop every exit for the NEXT position reusing this position_id
+        # (asset-keyed ids are recycled across windows).  Observed live: a stale
+        # registry entry silently swallowed 14 consecutive settlement-guard exits.
+        with self._lock:
+            position_still_open = position_id in self._open_positions
+        if not position_still_open:
+            logger.warning(
+                "[EXIT-REGISTRY] Refusing to register exit order for removed/unknown position: "
+                "position_id=%s kalshi_order_id=%s — skipping to avoid orphaning the registry",
+                position_id[:8],
+                kalshi_order_id,
+            )
+            return
+
         with self._lock_registry_lock:
             if position_id not in self._exit_registry:
                 self._exit_registry[position_id] = []
                 self._exit_quantities[position_id] = {}
+                self._exit_registry_ts[position_id] = {}
 
             if kalshi_order_id not in self._exit_registry[position_id]:
                 self._exit_registry[position_id].append(kalshi_order_id)
                 self._exit_quantities[position_id][kalshi_order_id] = quantity
+                self._exit_registry_ts.setdefault(position_id, {})[kalshi_order_id] = time.monotonic()
                 logger.info(
                     "[EXIT-REGISTRY] Registered exit order: position_id=%s kalshi_order_id=%s quantity=%d total_exits=%d",
                     position_id[:8],
@@ -1389,6 +1453,7 @@ class PositionMonitor:
                     self._exit_registry[position_id].remove(kalshi_order_id)
                     if kalshi_order_id in self._exit_quantities.get(position_id, {}):
                         del self._exit_quantities[position_id][kalshi_order_id]
+                    self._exit_registry_ts.get(position_id, {}).pop(kalshi_order_id, None)
                     logger.info(
                         "[EXIT-REGISTRY] Unregistered exit order: position_id=%s kalshi_order_id=%s remaining_exits=%d",
                         position_id[:8],
@@ -1400,6 +1465,68 @@ class PositionMonitor:
                     del self._exit_registry[position_id]
                     if position_id in self._exit_quantities:
                         del self._exit_quantities[position_id]
+                    self._exit_registry_ts.pop(position_id, None)
+
+    def _reconcile_exit_registry(
+        self,
+        position_id: str,
+        live_order_ids: Optional[set] = None,
+        grace_seconds: float = 8.0,
+    ) -> List[str]:
+        """Prune dead exit-order registrations; return still-plausible ids.
+
+        CRITICAL FIX (2026-09-24): a registered exit order that is no longer
+        resting on the exchange and was registered longer than ``grace_seconds``
+        ago is dead — IOC expired unfilled, rejected, or canceled.  Registration
+        happens after the router returns, so an IOC-miss is already dead at
+        registration time; the grace only covers resting-monitor feed lag.
+        Without pruning, one dead order permanently suppresses every later exit
+        for the position via the ``_has_exit_order`` duplicate check — observed
+        live when a stale registration swallowed 14 settlement-guard exits.
+
+        ``live_order_ids`` is the set of kalshi_order_ids currently resting for
+        the position's market (from the resting-order monitor); ``None`` means
+        the live set is unknown — in that case nothing is pruned, because a
+        genuinely-resting order and a dead one cannot be distinguished without
+        the exchange view, and wrongly pruning a live order risks a double exit.
+        """
+        if live_order_ids is None:
+            return list(self._exit_registry.get(position_id) or [])
+        now = time.monotonic()
+        pruned: List[str] = []
+        with self._lock_registry_lock:
+            ids = list(self._exit_registry.get(position_id) or [])
+            ts_map = self._exit_registry_ts.get(position_id) or {}
+            survivors: List[str] = []
+            for oid in ids:
+                if oid in live_order_ids:
+                    survivors.append(oid)
+                    continue
+                reg_ts = ts_map.get(oid)
+                if reg_ts is not None and (now - reg_ts) >= grace_seconds:
+                    pruned.append(oid)
+                    continue
+                # Within grace — the resting monitor may not have caught up
+                # yet; keep suppressing duplicates conservatively.
+                survivors.append(oid)
+            if pruned:
+                for oid in pruned:
+                    if oid in self._exit_registry.get(position_id, []):
+                        self._exit_registry[position_id].remove(oid)
+                    self._exit_quantities.get(position_id, {}).pop(oid, None)
+                    self._exit_registry_ts.get(position_id, {}).pop(oid, None)
+                if not self._exit_registry.get(position_id):
+                    self._exit_registry.pop(position_id, None)
+                    self._exit_quantities.pop(position_id, None)
+                    self._exit_registry_ts.pop(position_id, None)
+        if pruned:
+            logger.warning(
+                "[EXIT-REGISTRY] Pruned %d dead exit order registration(s): position_id=%s "
+                "orders=%s — they were not resting on the exchange and would have "
+                "suppressed all future exits for this position",
+                len(pruned), position_id[:8], pruned,
+            )
+        return survivors
 
     def _get_exit_orders_for_position(self, position_id: str) -> List[str]:
         """
@@ -1674,14 +1801,23 @@ class PositionMonitor:
         Returns the client_order_id only when the intent is in a non-terminal
         state (EXECUTION_PENDING, SUBMITTED, SUBMISSION_UNKNOWN, RETRYABLE_FAILURE)
         so the loop can resubmit with the same idempotency key.
+
+        CRITICAL FIX (2026-09-24): never fall back to ``_position_to_client_order``
+        when no in-flight record exists.  That map retains the last used id even
+        after the attempt terminalized on the exchange (IOC expired unfilled,
+        canceled, rejected).  Reusing a dead client_order_id makes Kalshi reject
+        the resubmission with HTTP 409 — observed live blocking a settlement-guard
+        exit retry.  No in-flight record means no unresolved outcome, so the
+        caller must mint a fresh id.
         """
         with self._lock:
             flight = self._exit_intent_in_flight.get(position_id)
-            if flight is not None:
-                state = flight.get("state")
-                if state not in ("RECONCILED",):
-                    return flight.get("client_order_id") or self._position_to_client_order.get(position_id)
-            return self._position_to_client_order.get(position_id)
+            if flight is None:
+                return None
+            state = flight.get("state")
+            if state in ("RECONCILED", "FILLED", "CANCELED", "REJECTED", "EXPIRED"):
+                return None
+            return flight.get("client_order_id") or self._position_to_client_order.get(position_id)
 
     def _mark_exit_intent_submission_unknown(
         self, position_id: str, reason: str
@@ -4066,10 +4202,15 @@ class PositionMonitor:
         # reported entry price can still use the catastrophic hard-stop path;
         # the adverse-move guard is skipped when the captured book is unavailable.
         # A trusted fallback/original stop may use the hard-stop path even when
-        # the entry book was not captured (UNKNOWN quality).  It must NOT use a
-        # known-bad capture such as POST_FILL or UNAVAILABLE, because those carry
-        # a stale or misleading book that would make the spread-only guard unsafe.
-        unknown_or_missing_quality = position.entry_book_capture_quality in (None, "", "UNKNOWN")
+        # the entry book was not captured (UNKNOWN quality) or was captured late
+        # (POST_FILL): the entry PRICE still comes from a trusted fill, so a
+        # plain price-level stop remains valid; only the spread/adverse-move
+        # invariants that need the entry book are skipped.  Observed live
+        # (2026-09-24): a YES@60 position with sl=31c had every stop blocked by
+        # quality=POST_FILL and expired worthless instead of cutting at -29c.
+        unknown_or_missing_quality = position.entry_book_capture_quality in (
+            None, "", "UNKNOWN", "POST_FILL"
+        )
         can_stop_without_at_fill = (
             position.risk_params_state in (
                 RiskParamsState.ORIGINAL_PERSISTED,
@@ -4883,15 +5024,30 @@ class PositionMonitor:
                 )
                 return
             if position.entry_book_capture_quality not in _TRUSTED_ENTRY_BOOK_QUALITIES:
-                _bump_stop_counter(
-                    "stop_disabled_unknown_provenance",
-                    f"position={position.position_id[:8]} emit_book_quality={position.entry_book_capture_quality}",
+                # 2026-09-24: POST_FILL is a late-but-real book capture — the entry
+                # price is still fill-derived and trusted, and a plain price-level
+                # stop does not need the entry book (it only feeds the
+                # spread/adverse-move invariants, which the eval path already
+                # skips for this quality).  Blocking here stranded a position to
+                # settlement.  UNAVAILABLE/None remain blocked.
+                _emit_has_trusted_entry = (
+                    position.entry_fill_price_cents is not None
+                    or position.avg_entry_price_cents is not None
                 )
-                logger.error(
-                    "[STOP-EXIT-INVARIANT] position=%s book_quality=%s - stop exit submitted without AT_FILL book, blocking",
-                    position.position_id[:8], position.entry_book_capture_quality,
+                _post_fill_ok = (
+                    position.entry_book_capture_quality == "POST_FILL"
+                    and _emit_has_trusted_entry
                 )
-                return
+                if not _post_fill_ok:
+                    _bump_stop_counter(
+                        "stop_disabled_unknown_provenance",
+                        f"position={position.position_id[:8]} emit_book_quality={position.entry_book_capture_quality}",
+                    )
+                    logger.error(
+                        "[STOP-EXIT-INVARIANT] position=%s book_quality=%s - stop exit submitted without AT_FILL book, blocking",
+                        position.position_id[:8], position.entry_book_capture_quality,
+                    )
+                    return
             if position.time_since_entry_seconds < MIN_STOP_ARM_SECONDS:
                 _bump_stop_counter(
                     "stop_disabled_unknown_provenance",

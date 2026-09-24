@@ -15654,6 +15654,42 @@ class LeanAgent15m:
 
 
 
+            # 2026-09-24: Post-close re-entry guard.  A ticker that already
+            # produced a closed position this window is locked out, and a
+            # realized loss cools the whole asset — observed live: XRP entered
+            # YES, trail-exited at a loss, then re-entered the SAME market on
+            # the opposite side 2.4min later and lost again.
+            try:
+                from merid.risk.reentry_guard import get_reentry_guard
+
+                _reentry_ticker = locals().get("current_window_ticker")
+                if not _reentry_ticker:
+                    try:
+                        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+
+                        _rg_asset = (
+                            self.config.name.split('_')[0].upper()
+                            if '_' in self.config.name
+                            else self.config.name.upper()
+                        )
+                        _cat = get_market_catalog()
+                        _cur = _cat.get_current_15m_market(_rg_asset) if _cat else None
+                        _reentry_ticker = _cur.market.market_id if _cur else None
+                    except Exception:
+                        _reentry_ticker = None
+                if _reentry_ticker:
+                    _allowed, _reason = get_reentry_guard().check_entry(_reentry_ticker)
+                    if not _allowed:
+                        logger.info(
+                            "[REENTRY-GUARD] agent=%s ticker=%s BLOCKED reason=%s",
+                            self.config.name, _reentry_ticker, _reason,
+                        )
+                        self._record_waterfall("reentry_guard", False, _reason)
+                        self._set_final_reason(f"reentry_guard:{_reason}")
+                        return None
+            except Exception as _rg_err:
+                logger.warning("[REENTRY-GUARD] check failed for agent=%s: %s", self.config.name, _rg_err)
+
             spot_price, spot_data = self._get_spot_cached(asset)
 
             if not spot_price:

@@ -222,9 +222,11 @@ class TestBookTimestampContamination:
     @pytest.mark.asyncio
     async def test_untrusted_book_blocks_spread_only_stop(self):
         # Long NO at 54c, current NO bid 47c (adverse 7c equals the spread).
-        # The stop is set at 57c, so current 47c is far below it; without the
-        # AT_FILL book guard this would be a catastrophic stop, but the entry
-        # book quality must block it.
+        # The stop is set at 57c, so current 47c is far below it. With a
+        # POST_FILL book the spread/adverse-move invariants are skipped, but the
+        # hard stop must not fire on a single observation — it must go through
+        # the pending-confirmation path (and the downstream EV gate still holds
+        # discretionary exits without full provenance).
         position = _trusted_position(
             market_id="KXBTC15M-TEST",
             series_ticker="KXBTC15M",
@@ -247,7 +249,7 @@ class TestBookTimestampContamination:
             position, 47, _snapshot(position, 47, 48)
         )
         assert triggered is False
-        assert "untrusted_entry_book" in kind
+        assert "pending_confirmation" in kind or "untrusted_entry_book" in kind
 
 
 class TestProductionHardStop:

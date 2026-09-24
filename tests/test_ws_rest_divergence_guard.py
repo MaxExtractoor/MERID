@@ -288,3 +288,114 @@ async def test_ws_snapshot_isolates_concurrent_state_mutation():
         )
 
     assert result is None
+
+
+def _make_exit_intent(side="yes", action="sell", price_cents=40):
+    intent = _make_intent(side=side, action=action, price_cents=price_cents)
+    intent.entry_or_exit = "exit"
+    intent.reduce_only = True
+    return intent
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_exit_bypasses_no_fresh_feed():
+    """2026-09-24 incident: a settlement-guard exit was vetoed by
+    ``no_fresh_feed`` at T-48s and the position expired unclosed (-60c).
+    A limit-bounded reduce-only exit must never be freshness-vetoed."""
+    state = _make_ws_state(last_ws_update_ts=time.monotonic() - 60.0)
+    store = _make_market_state_store(state)
+    port = _make_port(success=False)  # REST unavailable too
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_exit_intent(),
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_entry_still_blocked_on_no_fresh_feed():
+    """The exit carve-out must not leak to entries: same stale-feed
+    conditions still reject an entry order."""
+    state = _make_ws_state(last_ws_update_ts=time.monotonic() - 60.0)
+    store = _make_market_state_store(state)
+    port = _make_port(success=False)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(),
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "no_fresh_feed" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_exit_bypasses_hard_divergence():
+    """Hard-limit feed divergence is an integrity failure for entries, but a
+    reduce-only exit is limit-bounded and only shrinks exposure — it proceeds."""
+    state = _make_ws_state()
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=40, rest_yes_ask=41)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_exit_intent(),
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_exit_bypasses_stale_ws():
+    """Stale WS + non-marketable REST rejects entries but must not trap an exit."""
+    state = _make_ws_state(last_ws_update_ts=time.monotonic() - 60.0)
+    store = _make_market_state_store(state)
+    # REST YES 74/75 -> 5c divergence (above tolerance, below hard limit), and
+    # a SELL_YES at 80c is above the REST bid (74) -> not marketable -> the
+    # stale-WS block branch is reached, where the exit bypass must apply.
+    port = _make_port(rest_yes_bid=74, rest_yes_ask=75)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_exit_intent(price_cents=80),
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_exit_bypasses_inconsistent_ws_book():
+    """A crossed/corrupted WS book blocks entries but not a reduce-only exit."""
+    state = _make_ws_state(best_bid_cents=85, best_ask_cents=80)
+    store = _make_market_state_store(state)
+    port = _make_port()
+
+    def _validate_invariant(ticker, yb, ya, nb, na):
+        return not (yb is not None and ya is not None and yb > ya)
+
+    store._validate_yes_no_invariants.side_effect = _validate_invariant
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_exit_intent(),
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is None

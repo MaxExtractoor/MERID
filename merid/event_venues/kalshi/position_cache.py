@@ -6534,6 +6534,24 @@ class KalshiPositionCache:
         position = self._positions.get(market_ticker)
         await self.mark_settled(market_ticker)
 
+        # 2026-09-24: feed the re-entry guard — a settled market must never be
+        # re-entered, and a known settlement loss starts the asset cooldown.
+        try:
+            from merid.risk.reentry_guard import get_reentry_guard
+
+            _side = None
+            if position is not None:
+                _side = getattr(getattr(position, "side", None), "value", getattr(position, "side", None))
+            get_reentry_guard().record_close(
+                ticker=market_ticker,
+                side=str(_side) if _side else None,
+                realized_pnl_cents=(
+                    float(realized_pnl_cents) if realized_pnl_cents is not None else None
+                ),
+            )
+        except Exception as _rg_err:
+            logger.debug("[REENTRY-GUARD] settlement record_close failed for %s: %s", market_ticker, _rg_err)
+
         # Record settlement in the unified trade attribution fact table.
         try:
             from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
