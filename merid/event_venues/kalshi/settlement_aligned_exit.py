@@ -1085,6 +1085,38 @@ class SettlementAlignedExitEvaluator:
             ts=time.time(),
         )
 
+        # Economics are computed whenever bid + model value exist — for every
+        # exit class, including operational/emergency bypasses — so the caller
+        # can still veto a mechanical exit that would sell clearly below the
+        # model's conservative hold value (the "winning side" test: a trail or
+        # take-profit that fires while the settlement model still favors the
+        # held outcome is selling into noise, not protecting profit).  The
+        # bypass decision below is unchanged; only the audit fields are added.
+        net_sell: Optional[Decimal] = None
+        cons_hold: Optional[Decimal] = None
+        breach = False
+        if quote.bid_cents is not None and fair is not None:
+            bid = Decimal(quote.bid_cents)
+            fee_pc, fee_model = _taker_fee_cents_per_contract(quote.bid_cents)
+            net_sell = bid - fee_pc - Decimal(policy.slippage_cents)
+            uncertainty = Decimal(policy.uncertainty_reserve_cents)
+            hold_risk = Decimal(policy.hold_risk_reserve_cents)
+            if s2e is not None and s2e <= policy.near_expiry_reserve_below_seconds:
+                hold_risk += Decimal(policy.near_expiry_reserve_cents)
+            # Conservative hold is measured on the calibrated held-side
+            # settlement probability, falling back to the raw model value only
+            # when no calibration exists (that case is blocked anyway).
+            cons_prob = p_held_cal if p_held_cal is not None else fair
+            cons_hold = Decimal(cons_prob) - uncertainty - hold_risk
+            margin = Decimal(policy.switch_margin_cents)
+            breach = net_sell > cons_hold + margin
+            ev.exit_fee_cents = str(fee_pc)
+            ev.fee_model_version = fee_model
+            ev.net_sell_value_cents = str(net_sell)
+            ev.uncertainty_reserve_cents = str(uncertainty)
+            ev.hold_risk_reserve_cents = str(hold_risk)
+            ev.conservative_hold_cents = str(cons_hold)
+
         # Reason classification is authoritative even inside the evaluator: an
         # unknown reason can never sell, and operational/emergency exits bypass
         # the EV comparison entirely (their own mechanical checks govern).
@@ -1157,34 +1189,6 @@ class SettlementAlignedExitEvaluator:
         near_expiry = (
             s2e is not None and s2e <= policy.no_discretionary_below_seconds
         )
-
-        # Economics are computed whenever bid + model value exist — including
-        # when data blockers veto the exit — so the shadow record carries the
-        # comparison the gate would have made.
-        net_sell: Optional[Decimal] = None
-        cons_hold: Optional[Decimal] = None
-        breach = False
-        if quote.bid_cents is not None and fair is not None:
-            bid = Decimal(quote.bid_cents)
-            fee_pc, fee_model = _taker_fee_cents_per_contract(quote.bid_cents)
-            net_sell = bid - fee_pc - Decimal(policy.slippage_cents)
-            uncertainty = Decimal(policy.uncertainty_reserve_cents)
-            hold_risk = Decimal(policy.hold_risk_reserve_cents)
-            if s2e is not None and s2e <= policy.near_expiry_reserve_below_seconds:
-                hold_risk += Decimal(policy.near_expiry_reserve_cents)
-            # Conservative hold is measured on the calibrated held-side
-            # settlement probability, falling back to the raw model value only
-            # when no calibration exists (that case is blocked anyway).
-            cons_prob = p_held_cal if p_held_cal is not None else fair
-            cons_hold = Decimal(cons_prob) - uncertainty - hold_risk
-            margin = Decimal(policy.switch_margin_cents)
-            breach = net_sell > cons_hold + margin
-            ev.exit_fee_cents = str(fee_pc)
-            ev.fee_model_version = fee_model
-            ev.net_sell_value_cents = str(net_sell)
-            ev.uncertainty_reserve_cents = str(uncertainty)
-            ev.hold_risk_reserve_cents = str(hold_risk)
-            ev.conservative_hold_cents = str(cons_hold)
 
         # Persistence is keyed by the full evaluation context — position,
         # canonical market identity, held side, policy version, exit direction

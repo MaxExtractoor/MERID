@@ -2309,8 +2309,13 @@ def _run_exit_price_guard(
     # Discretionary exits run through the EV evaluator here so the decision is
     # recorded even when a legacy check below rejects first; the veto at the
     # approval point is what keeps observe-only exits off the exchange.
+    # 2026-09-24: operational and emergency exits are also evaluated — their
+    # decision remains a bypass, but the populated economics (net_sell vs
+    # conservative hold) power the winning-side hold veto below: a mechanical
+    # exit must not sell a contract the calibrated settlement model still
+    # values materially above the executable bid.
     ev_eval = None
-    if exit_class == ExitClass.DISCRETIONARY:
+    if exit_class != ExitClass.UNKNOWN:
         try:
             ev_eval = get_exit_evaluator().evaluate(
                 position,
@@ -2387,14 +2392,45 @@ def _run_exit_price_guard(
         )
         return False, exit_price_cents, record, decision_id
 
+    entry_price = int(getattr(position, "avg_entry_price_cents", 0) or 0)
+
     # Determine slippage and whether this is a profit exit.
     is_profit_exit = canonical in ("take_profit",)
     slippage = 0 if is_profit_exit else MERID_EXIT_MAX_SLIPPAGE_CENTS
 
-    # Determine the limit price.  For stop exits the limit is anchored to the
-    # stop level minus slippage so the order cannot be swept past the stop.
+    # Determine the limit price.  For hard-stop exits the limit is anchored to
+    # the stop level minus slippage so the order cannot be swept past the stop.
+    # Trailing stops anchor to their own trail level, never the hard stop:
+    # inheriting stop_loss_price let an armed trail carry a 25c floor while the
+    # trail itself was at 64c and the bid at 62c, so a profit-protecting exit
+    # filled ~33c below trigger — below entry — on a contract that settled 100c
+    # (KXXRP15M-26SEP241600-00 incident, 2026-09-24).
     stop_price = None
-    if canonical in _MERID_EXIT_STOP_REASONS:
+    if canonical == "trailing_stop":
+        trail_level = None
+        try:
+            trail_level = position.get_trail_level()
+        except Exception:
+            trail_level = None
+        if trail_level is None:
+            _hwm = int(getattr(position, "max_favorable_price_cents", 0) or 0)
+            _tp = int(getattr(position, "trailing_param", 0) or 0)
+            trail_level = _hwm - _tp if _hwm > 0 else None
+        floor_cents = max(1, int(trail_level) - slippage) if trail_level is not None else 1
+        # Breakeven ratchet: a trail that armed in profit (level at/above entry)
+        # never realizes a loss while the book still offers at least entry.
+        if trail_level is not None and int(trail_level) >= entry_price > 0:
+            floor_cents = max(floor_cents, entry_price)
+        if best_bid >= floor_cents:
+            limit_cents = max(best_bid - slippage, floor_cents)
+        else:
+            # The book gapped below the trail floor: the profit-lock window is
+            # gone.  Sell at the market bounded by slippage — whether the held
+            # side is still a winner is the EV hold-veto's call below.
+            limit_cents = max(1, best_bid - slippage)
+        record["trail_level_cents"] = trail_level
+        record["trail_floor_cents"] = floor_cents
+    elif canonical in _MERID_EXIT_STOP_REASONS:
         stop_price = (
             getattr(position, "stop_loss_price_cents", None)
             or getattr(position, "hard_stop_price_cents", None)
@@ -2431,7 +2467,6 @@ def _run_exit_price_guard(
     limit_cents = max(1, min(99, int(round(limit_cents))))
 
     # Projected PnL: own-side price, own-side entry, round-trip taker fees.
-    entry_price = int(getattr(position, "avg_entry_price_cents", 0) or 0)
     closed_count = min(int(count), int(getattr(position, "size", 0) or 0))
     gross_expected = (best_bid - entry_price) * closed_count
     gross_worst = (limit_cents - entry_price) * closed_count
@@ -2531,6 +2566,69 @@ def _run_exit_price_guard(
             fees,
         )
         return False, exit_price_cents, record, decision_id
+
+    # ── Winning-side hold veto (2026-09-24) ─────────────────────────────────
+    # Mechanical exits (trail, take-profit, signal-reversal, time/forced) only
+    # say WHEN to consider selling; the settlement model decides WHETHER the
+    # held side is still worth more than the bid.  When a trustworthy,
+    # calibrated model values the contract above net sale proceeds by at least
+    # the veto margin, the exit is selling the winning side into noise — veto
+    # it and let the position ride (the trail/exit re-proposes next eval).
+    # Data-insufficient evals never veto (exits fail open), and emergency
+    # expiry-liquidation inside the cutoff always proceeds (deadline trumps).
+    if (
+        exit_class != ExitClass.DISCRETIONARY
+        and not is_emergency
+        and ev_eval is not None
+        and ev_eval.decision != EvDecision.BLOCK_UNKNOWN_REASON
+    ):
+        try:
+            _hold = (
+                Decimal(str(ev_eval.conservative_hold_cents))
+                if ev_eval.conservative_hold_cents is not None else None
+            )
+            _sell = (
+                Decimal(str(ev_eval.net_sell_value_cents))
+                if ev_eval.net_sell_value_cents is not None else None
+            )
+            _policy = get_exit_evaluator().policy
+            _model_trusted = (
+                bool(ev_eval.model_inputs_satisfactory)
+                and ev_eval.p_held_calibrated_cents is not None
+                and bool(ev_eval.quote_sequence_confirmed)
+                and bool(ev_eval.quote_coherent)
+            )
+            if _policy.require_rti and not ev_eval.rti_execution_eligible:
+                _model_trusted = False
+            _advantage = (_hold - _sell) if (_hold is not None and _sell is not None) else None
+            record["ev_hold_advantage_cents"] = str(_advantage) if _advantage is not None else None
+            record["ev_hold_veto_model_trusted"] = _model_trusted
+            _veto_margin = Decimal(os.getenv("MERID_EXIT_HOLD_VETO_MARGIN_CENTS", "4"))
+            if _model_trusted and _advantage is not None and _advantage >= _veto_margin:
+                record.update({
+                    "status": "rejected",
+                    "reject_reason": "ev_hold_advantage",
+                    "cons_hold_cents": str(_hold),
+                    "net_sell_cents": str(_sell),
+                    "p_held_calibrated": ev_eval.p_held_calibrated_cents,
+                })
+                persist_order_decision(record)
+                logger.warning(
+                    "[EXIT-GUARD-HOLD-VETO] position=%s market=%s reason=%s - "
+                    "Model favors holding: cons_hold=%sc net_sell=%sc advantage=%sc>=%sc "
+                    "p_held_cal=%sc bid=%dc entry=%dc — not selling the winning side",
+                    (getattr(position, "position_id", "") or "")[:8],
+                    getattr(position, "market_id", None),
+                    canonical,
+                    _hold, _sell, _advantage, _veto_margin,
+                    ev_eval.p_held_calibrated_cents,
+                    best_bid, entry_price,
+                )
+                return False, exit_price_cents, record, decision_id
+        except Exception as _veto_exc:
+            logger.warning(
+                "[EXIT-GUARD] hold-veto evaluation failed (fail-open): %s", _veto_exc
+            )
 
     # ── Discretionary-exit veto (2026-09) ────────────────────────────────────
     # The checks above established that the order is mechanically safe.  For
