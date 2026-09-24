@@ -18,10 +18,15 @@ Root causes fixed:
 
 import asyncio
 import pytest
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from merid.event_venues.kalshi.fills_ledger import (
+    KalshiFillsLedger,
+    OrderIntent,
+)
 from merid.event_venues.kalshi.position_cache import (
     KalshiPositionCache,
     ENTRY_PROVENANCE_AVAILABLE,
@@ -201,3 +206,123 @@ class TestEdgeRealizationProfitGate:
         assert result is not None
         assert result.reason == ExitReason.CURRENT_EDGE_REVERSAL
         assert emitted and emitted[0][0] == ExitReason.CURRENT_EDGE_REVERSAL
+
+
+class TestCounterpartyFormCanonicalization:
+    """The REST /fills payload reports fills in book/counterparty form.
+
+    For the 2026-09-24 incident the BUY_NO entry's fills arrived over REST as
+    ``action=sell side=no`` (book-side encoding, ask->no).  Adopting the
+    reported action verbatim produced ``no/sell`` (+YES delta) — the opposite
+    of the user's BUY_NO intent — and opened a phantom position on restart.
+    When the execution form's signed delta disagrees with the recorded
+    intent's, the canonical effect must follow the intent.
+    """
+
+    @pytest.fixture
+    async def ledger(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "kalshi_fills.db"
+        monkeypatch.setenv("MERID_FILLS_DB_PATH", str(db_path))
+        monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+        KalshiFillsLedger._initialized = False
+        KalshiFillsLedger._instance = None
+        l = KalshiFillsLedger()
+        l._fills = {}
+        l._intents = {}
+        l._fills_by_order = {}
+        l._fills_by_market = {}
+        yield l
+        await l.shutdown()
+        KalshiFillsLedger._initialized = False
+        KalshiFillsLedger._instance = None
+
+    def _intent(self, ledger, side="no", action="buy", entry_or_exit="entry"):
+        intent = OrderIntent(
+            intent_id="intent_cp_001",
+            ticker="KXXRP15M-TEST",
+            side=side,
+            action=action,
+            count=100,
+            price_cents=70,
+            client_order_id="co_cp_001",
+            order_id="ord_cp_001",
+            entry_or_exit=entry_or_exit,
+            reduce_only=(entry_or_exit == "exit"),
+        )
+        ledger.record_intent(intent)
+        return intent
+
+    def _rest_form_raw(self, fill_id="fill_cp_001"):
+        # The exact REST form from production: action=sell side=no for a
+        # taker BUY_NO fill (book-side encoding, is_taker=True).
+        return {
+            "fill_id": fill_id,
+            "trade_id": fill_id,
+            "order_id": "ord_cp_001",
+            "client_order_id": "co_cp_001",
+            "market_ticker": "KXXRP15M-TEST",
+            "ticker": "KXXRP15M-TEST",
+            "action": "sell",
+            "side": "no",
+            "outcome_side": "no",
+            "book_side": "ask",
+            "count_fp": "0.90",
+            "yes_price_dollars": "0.30",
+            "no_price_dollars": "0.70",
+            "fee_cost": "0.0133",
+            "is_taker": True,
+            "created_time": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_sell_no_form_on_buy_no_intent_canonicalizes_to_intent(self, ledger):
+        """REST 'sell no@70' on a buy-no intent -> canonical no/buy, delta -90,
+        proceeds paid at the NO leg (-0.63 - fee), never a phantom +delta."""
+        self._intent(ledger, side="no", action="buy")
+        fill = ledger._parse_fill(self._rest_form_raw(), "http_poller")
+
+        assert fill.canonical_position_side == "no"
+        assert fill.canonical_position_action == "buy"
+        assert fill.canonical_yes_delta_cc == -90
+        assert fill.canonical_leg_price_cents == 70
+        assert fill.canonicalization_state == "TRUSTED_LIVE_V1"
+        assert fill.unmatched is not True
+        # User paid for NO@70 on 0.9 contracts + fee.
+        assert fill.proceeds_dollars == pytest.approx(Decimal("-0.6433"), abs=Decimal("0.001"))
+
+    @pytest.mark.asyncio
+    async def test_sell_yes_form_on_buy_no_intent_unaffected(self, ledger):
+        """WS-form 'sell yes@30' already yields the intent's delta (-90); the
+        counterparty override must not disturb it."""
+        self._intent(ledger, side="no", action="buy")
+        raw = self._rest_form_raw("fill_cp_ws")
+        raw["side"] = "yes"
+        raw["outcome_side"] = "yes"
+        raw["book_side"] = "bid"
+        fill = ledger._parse_fill(raw, "ws")
+
+        # Deltas agree (-90 == -90): no override, execution form preserved.
+        assert fill.canonical_position_side == "yes"
+        assert fill.canonical_position_action == "sell"
+        assert fill.canonical_yes_delta_cc == -90
+
+    @pytest.mark.asyncio
+    async def test_counterparty_form_exit_fill(self, ledger):
+        """Maker-form 'buy no@60' on a sell-no exit intent -> canonical
+        no/sell, +delta (closes the long NO position)."""
+        self._intent(ledger, side="no", action="sell", entry_or_exit="exit")
+        raw = self._rest_form_raw("fill_cp_exit")
+        raw["action"] = "buy"
+        raw["side"] = "no"
+        raw["outcome_side"] = "no"
+        raw["book_side"] = "ask"
+        raw["yes_price_dollars"] = "0.40"
+        raw["no_price_dollars"] = "0.60"
+        fill = ledger._parse_fill(raw, "http_poller")
+
+        assert fill.canonical_position_side == "no"
+        assert fill.canonical_position_action == "sell"
+        assert fill.canonical_yes_delta_cc == 90
+        # No prior NO holding in this fixture: the sell is modeled as a
+        # pair-mint — user pays the complement YES leg (0.9 * 0.40 - fee).
+        assert fill.proceeds_dollars == pytest.approx(Decimal("-0.3733"), abs=Decimal("0.001"))

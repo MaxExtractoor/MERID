@@ -255,6 +255,9 @@ class TestStopCandidateSubmission:
         """POSITION_MONITOR_STOP is a discretionary price stop: under the
         exit freeze it must record the candidate but never route an order."""
         monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "1")
+        # The production .env enables the EV exit gate; this test asserts the
+        # freeze path, so pin the gate off for determinism.
+        monkeypatch.setenv("MERID_ENABLE_EV_EXIT_GATE", "0")
         route_mock = AsyncMock()
         monkeypatch.setattr(
             "merid.event_venues.kalshi.order_router.route_order_async", route_mock
