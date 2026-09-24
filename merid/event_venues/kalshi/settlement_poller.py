@@ -739,12 +739,21 @@ class KalshiSettlementPoller:
             new_count += 1
             new_settlements.append(settlement)  # Collect for event bus
 
-            # Log settlement with key information
+            # Log settlement with key information.  ``outcome`` is the held
+            # side's settlement result; for positions exited before settlement
+            # it can contradict realized PnL (e.g. sold at a profit, residual
+            # settled 0), so report ``realized`` from the signed PnL too.
             outcome = "WIN" if settlement.settlement_price_cents == 100 else "LOSE" if settlement.settlement_price_cents == 0 else "UNKNOWN"
+            _pnl_c = settlement.realized_pnl_cents
+            realized = (
+                "profit" if _pnl_c is not None and _pnl_c > 0
+                else "loss" if _pnl_c is not None and _pnl_c < 0
+                else "flat" if _pnl_c is not None else "unknown"
+            )
             logger.info(
-                "[SETTLEMENT] contract=%s ticker=%s outcome=%s pnl_cents=%d bankroll_update=N/A",
-                settlement.market_id, settlement.ticker, outcome,
-                int(settlement.realized_pnl_cents) if settlement.realized_pnl_cents else 0
+                "[SETTLEMENT] contract=%s ticker=%s outcome=%s realized=%s pnl_cents=%d bankroll_update=N/A",
+                settlement.market_id, settlement.ticker, outcome, realized,
+                int(_pnl_c) if _pnl_c else 0
             )
 
             # Check for settled-but-ungraded backlog
