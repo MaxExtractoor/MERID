@@ -337,9 +337,14 @@ def test_no_veto_when_economics_unavailable(monkeypatch):
     assert approved is True
 
 
-def test_emergency_expiry_bypasses_hold_veto(monkeypatch):
-    """Inside the emergency cutoff the deadline trumps the model's hold."""
-    _stub_evaluator(monkeypatch, _trusted_hold_eval())
+def test_emergency_expiry_settles_without_premium(monkeypatch):
+    """Inside the emergency cutoff an expiry sell now needs a market premium:
+    settlement needs no book, so a trusted model valuing the contract above
+    the bid means the position rides to settlement (auto_exit_99c ->
+    expiry_liquidation)."""
+    _stub_evaluator(
+        monkeypatch, _trusted_hold_eval(net_sell="55.0", cons_hold="66.0", p_cal=70)
+    )
     position = _make_trail_position()
     state = _make_state(yes_bid=55, yes_ask=57, seconds_to_expiry=30.0)
 
@@ -347,8 +352,9 @@ def test_emergency_expiry_bypasses_hold_veto(monkeypatch):
         position, "auto_exit_99c", exit_price_cents=55, state=state
     )
 
-    assert approved is True
+    assert approved is False
     assert record["is_emergency"] is True
+    assert record["reject_reason"] == "expiry_settle_default"
 
 
 def test_forced_exit_vetoed_outside_emergency(monkeypatch):
@@ -363,7 +369,195 @@ def test_forced_exit_vetoed_outside_emergency(monkeypatch):
     )
 
     assert approved is False
-    assert record["reject_reason"] == "ev_hold_advantage"
+    assert record["reject_reason"] == "expiry_settle_default"
+
+
+# ---------------------------------------------------------------------------
+# Expiry settle-default gate (2026-09-24, KXXRP15M-26SEP241900-00)
+# ---------------------------------------------------------------------------
+# Live incident: long YES@68 was force-sold at 48c at T-104s on an UNTRUSTED
+# eval (vol_source=none, book_incoherent) — YES settled at 100, a -23c exit
+# that forfeited +32c.  At expiry the alternative to selling is free
+# settlement, so a sell is only justified when a trusted eval shows the market
+# paying a premium over the calibrated settlement value.
+
+
+def _expiry_eval(**overrides):
+    return _fake_eval(
+        canonical_reason="expiry_liquidation",
+        exit_class="emergency",
+        **overrides,
+    )
+
+
+def test_expiry_untrusted_eval_rides_to_settlement(monkeypatch):
+    """Incident replay: eval untrusted -> settle, don't donate spread+fee."""
+    _stub_evaluator(monkeypatch, _expiry_eval())  # everything untrusted/None
+    position = _make_trail_position()
+    state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=104.0)
+
+    approved, _price, record, _did = _run_guard(
+        position, "settlement_guard", exit_price_cents=48, state=state
+    )
+
+    assert approved is False
+    assert record["reject_reason"] == "expiry_settle_default"
+    assert record["expiry_settle_model_trusted"] is False
+
+
+def test_expiry_premium_sell_proceeds(monkeypatch):
+    """Trusted eval + net_sell above calibrated value -> sell is justified."""
+    _stub_evaluator(
+        monkeypatch,
+        _expiry_eval(
+            net_sell_value_cents="58.0",
+            p_held_calibrated_cents=30,
+            model_inputs_satisfactory=True,
+            quote_sequence_confirmed=True,
+            quote_coherent=True,
+            rti_execution_eligible=True,
+        ),
+    )
+    position = _make_trail_position()
+    state = _make_state(yes_bid=60, yes_ask=62, seconds_to_expiry=90.0)
+
+    approved, _price, record, _did = _run_guard(
+        position, "settlement_guard", exit_price_cents=60, state=state
+    )
+
+    assert approved is True
+    assert record["expiry_settle_premium"] is True
+
+
+def test_expiry_no_premium_settles(monkeypatch):
+    """Trusted eval but market pays no premium over settle value -> settle."""
+    _stub_evaluator(
+        monkeypatch,
+        _expiry_eval(
+            net_sell_value_cents="44.0",
+            p_held_calibrated_cents=48,
+            model_inputs_satisfactory=True,
+            quote_sequence_confirmed=True,
+            quote_coherent=True,
+            rti_execution_eligible=True,
+        ),
+    )
+    position = _make_trail_position()
+    state = _make_state(yes_bid=46, yes_ask=48, seconds_to_expiry=90.0)
+
+    approved, _price, record, _did = _run_guard(
+        position, "settlement_guard", exit_price_cents=46, state=state
+    )
+
+    assert approved is False
+    assert record["reject_reason"] == "expiry_settle_default"
+
+
+def test_expiry_gate_applies_inside_emergency_cutoff(monkeypatch):
+    """T-30s is 'emergency' for quote checks but settlement still needs no
+    book — an untrusted eval must not force-sell at the bid."""
+    _stub_evaluator(monkeypatch, _expiry_eval())
+    position = _make_trail_position()
+    state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=30.0)
+
+    approved, _price, record, _did = _run_guard(
+        position, "settlement_guard", exit_price_cents=48, state=state
+    )
+
+    assert approved is False
+    assert record["reject_reason"] == "expiry_settle_default"
+
+
+def test_expiry_gate_env_off_restores_legacy_sell(monkeypatch):
+    """MERID_SETTLEMENT_GUARD_EV_GATE=0 restores the unconditional sell."""
+    monkeypatch.setenv("MERID_SETTLEMENT_GUARD_EV_GATE", "0")
+    _stub_evaluator(monkeypatch, _expiry_eval())
+    position = _make_trail_position()
+    state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=90.0)
+
+    approved, _price, record, _did = _run_guard(
+        position, "settlement_guard", exit_price_cents=48, state=state
+    )
+
+    assert approved is True
+
+
+# ---------------------------------------------------------------------------
+# Monitor-side settlement-guard gate (_settlement_guard_sell_justified)
+# ---------------------------------------------------------------------------
+
+
+def _monitor_position(**kwargs):
+    defaults = dict(
+        position_id="pos-xrp1900",
+        market_id="KXXRP15M-26SEP241900-00",
+        size=1,
+        avg_entry_price_cents=68,
+        outcome_side="yes",
+        thesis_side="yes",
+    )
+    defaults.update(kwargs)
+    ns = SimpleNamespace(**defaults)
+    ns.side = SimpleNamespace(value="yes")
+    return ns
+
+
+def _snapshot(bid=48, age_ms=120):
+    return SimpleNamespace(own_side_bid_cents=bid, book_age_ms=age_ms)
+
+
+def test_monitor_gate_untrusted_defaults_to_settle(monkeypatch):
+    """The monitor emits no SETTLEMENT_GUARD candidate when the eval is
+    untrusted — the position rides to settlement instead."""
+    from merid.position_management.position_monitor import (
+        _settlement_guard_sell_justified,
+    )
+
+    _stub_evaluator(monkeypatch, _expiry_eval())
+    assert (
+        _settlement_guard_sell_justified(_monitor_position(), _snapshot(), 104.0)
+        is False
+    )
+
+
+def test_monitor_gate_premium_sells(monkeypatch):
+    from merid.position_management.position_monitor import (
+        _settlement_guard_sell_justified,
+    )
+
+    _stub_evaluator(
+        monkeypatch,
+        _expiry_eval(
+            net_sell_value_cents="58.0",
+            p_held_calibrated_cents=30,
+            model_inputs_satisfactory=True,
+            quote_sequence_confirmed=True,
+            quote_coherent=True,
+            rti_execution_eligible=True,
+        ),
+    )
+    assert (
+        _settlement_guard_sell_justified(_monitor_position(), _snapshot(), 104.0)
+        is True
+    )
+
+
+def test_monitor_gate_eval_error_defaults_to_settle(monkeypatch):
+    """Eval infra failure must not manufacture a sell justification."""
+    import merid.event_venues.kalshi.settlement_aligned_exit as sae
+    from merid.position_management.position_monitor import (
+        _settlement_guard_sell_justified,
+    )
+
+    stub = Mock()
+    stub.evaluate.side_effect = RuntimeError("eval down")
+    stub.policy = sae.EvGatePolicy()
+    monkeypatch.setattr(sae, "get_exit_evaluator", lambda: stub)
+
+    assert (
+        _settlement_guard_sell_justified(_monitor_position(), _snapshot(), 104.0)
+        is False
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -27,11 +27,14 @@ All state is process-local; a restart rebuilds it from fills/settlement
 reconciliation before entries are enabled.
 """
 
+import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -93,6 +96,11 @@ class ReentryGuard:
         # clamp to now.
         if closed_ts is not None and closed_ts > _now:
             closed_ts = _now
+        logger.info(
+            "[REENTRY-GUARD-RECORD] ticker=%s asset=%s pnl=%s closed_ts=%s age_now=%.0fs",
+            ticker, asset, realized_pnl_cents,
+            closed_ts, (_now - closed_ts) if closed_ts else -1.0,
+        )
         record = _CloseRecord(
             ticker=ticker,
             asset=asset,

@@ -2567,6 +2567,77 @@ def _run_exit_price_guard(
         )
         return False, exit_price_cents, record, decision_id
 
+    # ── Expiry settle-default gate (2026-09-24) ─────────────────────────────
+    # For expiry_liquidation (settlement_guard / auto_exit_99c) the alternative
+    # to selling is automatic settlement — no taker fee, no spread, guaranteed
+    # resolution.  Selling at the bid is therefore justified ONLY when a
+    # trusted eval shows the market paying a premium over the calibrated
+    # settlement value.  Untrusted evals and non-premium quotes ride to
+    # settlement instead of donating spread+fee (live incident: XRP YES@68
+    # force-sold at 48c on an untrusted eval at T-104s; settle paid 100c).
+    # Applies inside the emergency cutoff too — settlement needs no book.
+    if (
+        canonical == "expiry_liquidation"
+        and os.environ.get("MERID_SETTLEMENT_GUARD_EV_GATE", "1") == "1"
+        and ev_eval is not None
+        and ev_eval.decision != EvDecision.BLOCK_UNKNOWN_REASON
+    ):
+        try:
+            _exp_trusted = (
+                bool(ev_eval.model_inputs_satisfactory)
+                and ev_eval.p_held_calibrated_cents is not None
+                and ev_eval.net_sell_value_cents is not None
+                and bool(ev_eval.quote_coherent)
+                and bool(ev_eval.quote_sequence_confirmed)
+            )
+            if get_exit_evaluator().policy.require_rti:
+                _exp_trusted = _exp_trusted and bool(ev_eval.rti_execution_eligible)
+            _exp_p_cal = (
+                Decimal(str(ev_eval.p_held_calibrated_cents))
+                if ev_eval.p_held_calibrated_cents is not None else None
+            )
+            _exp_sell = (
+                Decimal(str(ev_eval.net_sell_value_cents))
+                if ev_eval.net_sell_value_cents is not None else None
+            )
+            _exp_margin = Decimal(
+                os.getenv("MERID_SETTLEMENT_GUARD_SELL_MARGIN_CENTS", "0")
+            )
+            _exp_premium = (
+                _exp_trusted
+                and _exp_p_cal is not None
+                and _exp_sell is not None
+                and _exp_sell > _exp_p_cal + _exp_margin
+            )
+            record["expiry_settle_model_trusted"] = _exp_trusted
+            record["expiry_settle_premium"] = bool(_exp_premium)
+            if not _exp_premium:
+                record.update({
+                    "status": "rejected",
+                    "reject_reason": "expiry_settle_default",
+                    "net_sell_cents": str(_exp_sell) if _exp_sell is not None else None,
+                    "p_held_calibrated": ev_eval.p_held_calibrated_cents,
+                })
+                persist_order_decision(record)
+                logger.warning(
+                    "[EXIT-GUARD-SETTLE] position=%s market=%s reason=%s tte=%ss - "
+                    "no market premium (trusted=%s net_sell=%sc p_cal=%sc margin=%sc): "
+                    "riding to settlement instead of selling at bid",
+                    (getattr(position, "position_id", "") or "")[:8],
+                    getattr(position, "market_id", None),
+                    canonical,
+                    seconds_to_expiry,
+                    _exp_trusted,
+                    _exp_sell,
+                    _exp_p_cal,
+                    _exp_margin,
+                )
+                return False, exit_price_cents, record, decision_id
+        except Exception as _exp_exc:
+            logger.warning(
+                "[EXIT-GUARD] expiry settle-gate failed (fail-open): %s", _exp_exc
+            )
+
     # ── Winning-side hold veto (2026-09-24) ─────────────────────────────────
     # Mechanical exits (trail, take-profit, signal-reversal, time/forced) only
     # say WHEN to consider selling; the settlement model decides WHETHER the
