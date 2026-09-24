@@ -657,8 +657,8 @@ toxicity_detection:
 # - CRITICAL FIX (2026-08-01): Canonical 10c-75c execution range (prevents low-profit traps and late-window extremes)
 price_range:
   min_price_cents: 10  # CRITICAL FIX (2026-08-01): Low-profit trap prevention (10c minimum)
-  max_price_cents: 75  # CRITICAL FIX (2026-08-01): Upper bound for 15m crypto volatility (75c)
-  description: "Valid price range in cents for order execution (10-75c - aligned with dynamic_take_profit zones and actual market conditions)"
+  max_price_cents: 95  # 2026-09-24: Raised 75→95 - the 75c collar banned every favorite-side buy; the corrected-fee EV gate is the real arbiter above ~93c
+  description: "Valid price range in cents for order execution (10-95c - EV gate bounds the top end; collar no longer blocks favorite-side entries)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -1063,7 +1063,7 @@ canonical:
   # Normal regime thresholds (87% of market time)
   price_range:
     min_cents: 10  # Lower bound (low-profit trap prevention)
-    max_cents: 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
+    max_cents: 95  # 2026-09-24: Expanded 75→95 - YES prices consistently 60-97c; EV gate is the real arbiter
   spread:
     max_cents: 30  # Canonical spread threshold (harmonized with 10-50c entry price sweet spot)
     min_gate_cents: 30  # Edge-dependent threshold (optimized for entry price sweet spot)
@@ -1166,7 +1166,7 @@ guardrails:
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
   min_contract_price_cents: 5  # CRITICAL FIX (2026-08-01): Lowered from 10c to 5c for 15m crypto volatility
-  max_contract_price_cents: 75  # ALIGNED with canonical 10-75c entry range
+  max_contract_price_cents: 95  # 2026-09-24: ALIGNED with canonical 10-95c entry range (raised from 75c - was the dominant live entry blocker)
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
   # CRITICAL FIX (2026-07-17): Removed max_orders_per_cycle - $2 exposure cap is the single source of truth
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)
@@ -1209,21 +1209,25 @@ guardrails:
 
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
-  # CRITICAL FIX (2026-08-01): Enable daily loss limit per industry best practices
-  # Research: Daily loss limit prevents correlated bad trades in bad market regimes
-  # Reference: Predict & Profit - "Daily loss kill switch: Bot keeps entering correlated bad trades"
-  daily_loss_enabled: true  # ENABLED: Critical safety mechanism for correlated bad trades
+  # 2026-09-24 OPERATOR DIRECTIVE: loss-limit halts DISABLED for the
+  # data-collection phase.  The system must keep trading through losses so
+  # decision/fill telemetry accrues consistently.  Drawdown and daily-loss
+  # metrics are still tracked and logged; they simply never halt entries.
+  # Exposure caps, shard-collateral checks, EV gates, and exit protection are
+  # unaffected.  Re-enable both flags before scaling size.
+  daily_loss_enabled: false  # DISABLED (operator directive 2026-09-24): was the 5%-of-capital entry blocker
   max_daily_loss_pct:
     test: 0.10  # Test mode: 10% daily loss limit for realistic live testing
     prod: 0.05  # Prod mode: 5% daily loss limit (industry standard for binary options)
+  drawdown_halt_enabled: false  # DISABLED (operator directive 2026-09-24): drawdown tracked but never halts entries
   drawdown_halt_pct:
     value: 0.20  # RELAXED: Halt at 20% drawdown (increased from 15% to align with industry 25% standard)
     static: profile
-    description: "Drawdown halt percentage (static for this profile)"
+    description: "Drawdown halt percentage (static for this profile; inert while drawdown_halt_enabled is false)"
   drawdown_unwind_pct:
     value: 0.25  # RELAXED: Unwind at 25% drawdown (increased from 20% to align with industry 25% standard)
     static: profile
-    description: "Drawdown unwind percentage (static for this profile)"
+    description: "Drawdown unwind percentage (static for this profile; inert while drawdown_halt_enabled is false)"
 
   # Position limit (total position value across all assets)
   # This is a derived kill switch that auto-resets when position drops below limit
@@ -1353,9 +1357,9 @@ risk_policy:
   group_notional_cap_pct: 0.05  # 5% of bankroll per group (DISABLED - using fixed $2 instead)
   group_notional_cap_min_usd: 5.00  # Minimum $5 cap (DISABLED - using fixed $2 instead)
   group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap (DISABLED - using fixed $2 instead)
-  # ALIGNED with 10-75c canonical range (guardrails.max_contract_price_cents
+  # ALIGNED with 10-95c canonical range (guardrails.max_contract_price_cents
   # and GlobalSlotAllocator.MAX_ENTRY_CENTS are the enforced limits; this key is informational)
-  max_entry_price_cents: 75  # Max entry price for new orders (canonical 10-75c band)
+  max_entry_price_cents: 95  # Max entry price for new orders (canonical 10-95c band)
   max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
   # 2026 STANDARD: Per-asset cluster stop-loss limits instead of aggregate
   # Each asset (BTC/ETH/SOL/XRP/DOGE) has calibrated limits based on volatility and liquidity

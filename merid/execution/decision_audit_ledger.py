@@ -225,12 +225,13 @@ CREATE TABLE IF NOT EXISTS decision_audit_heartbeats (
 CREATE INDEX IF NOT EXISTS idx_heartbeats_tick ON decision_audit_heartbeats(tick, created_at);
 """
 
-# Canonical 10c-75c entry range used by the live strategy.  The floor may be
+# Canonical entry range used by the live strategy (10c-95c since 2026-09-24;
+# the old 75c ceiling banned every favorite-side buy).  The floor may be
 # raised further by MERID_TAIL_CALIBRATION_PRICE_FLOOR, but the snapshot table
 # only records the raw executable price; the side-EV table records the policy
 # eligibility for this canonical band.
 _CANONICAL_MIN_CENTS = 10
-_CANONICAL_MAX_CENTS = 75
+_CANONICAL_MAX_CENTS = 95
 
 
 @dataclass(frozen=True)
@@ -1403,7 +1404,7 @@ def _build_side_ev_row(
         and math.isfinite(net_edge or 0.0)
     )
 
-    # Policy eligibility: executable price inside the canonical 10c-75c band.
+    # Policy eligibility: executable price inside the canonical 10c-95c band.
     in_canonical = (
         entry_price_cents is not None
         and _CANONICAL_MIN_CENTS <= entry_price_cents <= _CANONICAL_MAX_CENTS

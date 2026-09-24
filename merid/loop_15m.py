@@ -7320,7 +7320,11 @@ async def _run_one_cycle(self, tick: int) -> None:
                     # BYPASS: Legacy risk_guard for kalshi_crypto_15m_v2 - use risk envelope only
                     from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
                     risk_envelope = get_kalshi_crypto_15m_risk_envelope()
-                    ks_active = risk_envelope.current_drawdown_pct >= risk_envelope.drawdown_halt_pct
+                    # 2026-09-24: respect drawdown_halt_enabled — when the operator
+                    # disables drawdown halts (data-collection mode), the kill
+                    # switch must not latch on drawdown either.
+                    _dd_halt_enabled = getattr(risk_envelope, "drawdown_halt_enabled", True)
+                    ks_active = _dd_halt_enabled and risk_envelope.current_drawdown_pct >= risk_envelope.drawdown_halt_pct
                     ks_reason = f"drawdown_halt: {risk_envelope.current_drawdown_pct:.1%} >= {risk_envelope.drawdown_halt_pct:.1%}"
                     await self._monitor.update_kill_switch_state(ks_active, ks_reason)
                 except Exception as ks_err:

@@ -452,6 +452,7 @@ class KalshiCrypto15mRiskEnvelope:
     # ── Guardrails ───────────────────────────────────────────────────────────
     daily_loss_enabled: bool
     max_daily_loss_usd: float
+    drawdown_halt_enabled: bool
     drawdown_halt_pct: float
     drawdown_unwind_pct: float
 
@@ -553,15 +554,28 @@ class KalshiCrypto15mRiskEnvelope:
                 f"halt cleared (resume_if_drawdown_improves=True)"
             )
         
-        # Set halt state based on drawdown threshold
-        self.is_halted = self.current_drawdown_pct >= self.drawdown_halt_pct
+        # Set halt state based on drawdown threshold.  When the operator has
+        # disabled drawdown halts (data-collection mode), drawdown is still
+        # tracked and logged but never latches the halt.
+        self.is_halted = (
+            self.drawdown_halt_enabled
+            and self.current_drawdown_pct >= self.drawdown_halt_pct
+        )
     
     def _update_adaptive_risk(self):
         """Update per-trade risk multiplier based on drawdown bands."""
         old_multiplier = self.per_trade_risk_multiplier
         old_band = self.current_risk_band
-        
-        for band in self.adaptive_risk_bands:
+
+        # When drawdown halts are disabled (data-collection mode), zero-multiplier
+        # halt bands are skipped so sizing never collapses to zero; the deepest
+        # non-halt band still applies as a soft de-risking signal.
+        if self.drawdown_halt_enabled:
+            effective_bands = self.adaptive_risk_bands
+        else:
+            effective_bands = [b for b in self.adaptive_risk_bands if b['multiplier'] > 0]
+
+        for band in effective_bands:
             if self.current_drawdown_pct <= band['max_drawdown_pct']:
                 self.per_trade_risk_multiplier = band['multiplier']
                 # Map multiplier to explicit RiskBand
@@ -586,13 +600,25 @@ class KalshiCrypto15mRiskEnvelope:
                     )
                 return
         
-        # Default to halt if no band matches
-        self.per_trade_risk_multiplier = 0.0
-        self.current_risk_band = RiskBand.HALT
-        if old_multiplier != 0.0 or old_band != RiskBand.HALT:
-            logger.warning(
-                f"[RISK-ENVELOPE] Halt triggered: drawdown={self.current_drawdown_pct:.2%} >= halt={self.drawdown_halt_pct:.2%}"
-            )
+        # No band matched.  With halts enabled this means drawdown exceeded the
+        # last band's range → halt.  With halts disabled, hold the deepest
+        # non-halt band instead of collapsing to zero.
+        if self.drawdown_halt_enabled or not effective_bands:
+            self.per_trade_risk_multiplier = 0.0
+            self.current_risk_band = RiskBand.HALT
+            if old_multiplier != 0.0 or old_band != RiskBand.HALT:
+                logger.warning(
+                    f"[RISK-ENVELOPE] Halt triggered: drawdown={self.current_drawdown_pct:.2%} >= halt={self.drawdown_halt_pct:.2%}"
+                )
+        else:
+            deepest = min(effective_bands, key=lambda b: b['multiplier'])
+            self.per_trade_risk_multiplier = deepest['multiplier']
+            self.current_risk_band = RiskBand.DOWNSIZE
+            if old_multiplier != self.per_trade_risk_multiplier or old_band != self.current_risk_band:
+                logger.info(
+                    f"[RISK-ENVELOPE] Drawdown halt disabled: drawdown={self.current_drawdown_pct:.2%} "
+                    f"beyond deepest band, holding multiplier={self.per_trade_risk_multiplier:.2f} (no halt)"
+                )
     
     def get_per_trade_risk_pct(self) -> float:
         """Get per-trade risk percentage.
@@ -1306,7 +1332,18 @@ def compute_kalshi_crypto_15m_risk_envelope(
         drawdown_unwind_pct = drawdown_unwind_pct_raw.get('value', 0.20)
     else:
         drawdown_unwind_pct = drawdown_unwind_pct_raw
-    
+
+    # 2026-09-24: Drawdown halts are an explicit opt-out control.  Default True
+    # (fail-closed semantics preserved when the key is absent); the production
+    # profile sets it False for the data-collection phase so drawdown is
+    # tracked but never latches the envelope halt.
+    drawdown_halt_enabled = bool(guardrails.get('drawdown_halt_enabled', True))
+    if not drawdown_halt_enabled:
+        logger.warning(
+            "[RISK-ENVELOPE] drawdown_halt_enabled=False: drawdown is tracked "
+            "and logged but will NOT halt entries (operator data-collection mode)"
+        )
+
     # Extract kelly fraction (CRITICAL FIX: 0.02 - aligned with profile (was 0.05))
     kelly_fraction = kelly_config.get('kelly_fraction', kelly_config.get('kelly_hard_cap', 0.02))
     
@@ -1496,6 +1533,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         total_resting_exposure_usd=total_resting_exposure_usd,
         daily_loss_enabled=daily_loss_enabled,
         max_daily_loss_usd=max_daily_loss_usd,
+        drawdown_halt_enabled=drawdown_halt_enabled,
         drawdown_halt_pct=drawdown_halt_pct,
         drawdown_unwind_pct=drawdown_unwind_pct,
         peak_equity_usd=peak_equity_usd,
